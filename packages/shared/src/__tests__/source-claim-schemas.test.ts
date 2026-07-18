@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-F.1.2a / WS-F.2.1a / WS-F.2.4 / WS-F.3.1b / WS-F.1.4f —
-// claim, source, syndication, search, and takedown contracts. The
+// claim vocabulary, source, syndication, search, and takedown contracts. The
 // source suite includes the §14.3 doctrine assertion: NO truth/credibility/
-// reliability scalar exists anywhere in the source shape.
+// reliability scalar exists anywhere in the source shape. (The public claim
+// PROJECTION schema was removed with the independent-sources drawer; the
+// record-vocabulary enums remain.)
 import { describe, expect, it } from 'vitest';
 import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '../constants/topics.js';
-import { claimPublicSchema } from '../schemas/claim.js';
+import { claimExtractionSourceSchema, claimRecordStatusSchema } from '../schemas/claim.js';
 import { searchRequestSchema, searchResultSchema } from '../schemas/search.js';
 import {
   sourceEditRequestSchema,
@@ -27,31 +29,21 @@ const randomUUID = (): string => {
 
 const now = () => new Date().toISOString();
 
-describe('claim schemas (WS-F.1.2a)', () => {
-  const claim = {
-    claim_id: randomUUID(),
-    story_id: randomUUID(),
-    canonical_text: 'The bill passed with 62 votes.',
-    claim_status: 'candidate' as const,
-    first_seen_story_id: null,
-    independence_group_id: null,
-    extraction_source: 'system' as const,
-    created_at: now(),
-    updated_at: now(),
-  };
-
-  it('accepts a valid claim, including story-less (cross-story) claims', () => {
-    expect(claimPublicSchema.parse(claim)).toEqual(claim);
-    expect(claimPublicSchema.safeParse({ ...claim, story_id: null }).success).toBe(true);
+describe('claim record vocabulary (WS-F.1.2a)', () => {
+  it('accepts the ratified record statuses and rejects a truth verdict', () => {
+    for (const status of ['candidate', 'accepted', 'contested', 'retracted']) {
+      expect(claimRecordStatusSchema.safeParse(status).success).toBe(true);
+    }
+    // A claim status is a lifecycle state, never a truth judgment.
+    expect(claimRecordStatusSchema.safeParse('true').success).toBe(false);
+    expect(claimRecordStatusSchema.safeParse('false').success).toBe(false);
   });
 
-  it('rejects empty text and invalid statuses', () => {
-    expect(claimPublicSchema.safeParse({ ...claim, canonical_text: '' }).success).toBe(false);
-    expect(claimPublicSchema.safeParse({ ...claim, claim_status: 'true' }).success).toBe(false);
-  });
-
-  it('omits created_by from the public projection (minimization)', () => {
-    expect(claimPublicSchema.safeParse({ ...claim, created_by: randomUUID() }).success).toBe(false);
+  it('accepts the ratified extraction provenances only', () => {
+    for (const source of ['system', 'user', 'steward']) {
+      expect(claimExtractionSourceSchema.safeParse(source).success).toBe(true);
+    }
+    expect(claimExtractionSourceSchema.safeParse('llm').success).toBe(false);
   });
 });
 

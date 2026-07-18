@@ -47,12 +47,13 @@ export function FrontPage(): React.ReactElement {
   // renders, never what the server ranks, and it recovers when the reader moves
   // on. Recomputed each render so it tracks the latest in-session circling.
   //
-  // Dampening is PERSONALIZATION — skip it in the modes where the reader has
-  // explicitly asked for none: `chronological` (the server already serves the
-  // `user_mode` chronological fallback, a COMPLETE timeline) and
-  // `low-personalization`. Dropping items locally there would also silently skip
-  // them from the server-decision cursor chain on the next page.
-  const personalized = mode !== 'chronological' && mode !== 'low-personalization';
+  // Dampening is PERSONALIZATION — it applies only to `best` (the default
+  // attention-ranked feed, where the anti-rabbit-hole nudge belongs). Every
+  // other mode is an explicit COMPLETE sort the reader chose (`new`, `sources`,
+  // `debates`, `rising` — the server serves the whole ordering): thinning it
+  // locally would corrupt the requested order and silently skip items from the
+  // server-decision cursor chain on the next page.
+  const personalized = mode === 'best';
   const displayItems = personalized
     ? dampenFeed(items, getTopicLoopTracker().topicMultipliers())
     : items;

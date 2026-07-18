@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Feed-mode switcher (WS-B.2.9). Lets the reader choose how the feed is ordered
-// without any popularity/applause signal. Built on the `Select` primitive: the
-// current mode is shown on the trigger and the chosen option carries
-// aria-selected, so no separate live region is needed. The "Feed order" field
-// label is VISUALLY HIDDEN (`hideLabel`) — the trigger already names the control
-// for sighted users, keeping the surface (front-page header / settings) clean —
-// but it stays in the DOM as the select's accessible name for assistive tech.
-// Presentation only — the controlled `value`/`onValueChange` are owned by the
-// caller; persistence is WS-C.
+// Feed-mode switcher (WS-B.2.9; SPEC §11.6). Lets the reader choose how the
+// feed is SORTED — five objective, content-derived orders, none of them a
+// popularity/applause signal: Best (highest participation-weighted attention
+// right now), Rising (fastest-increasing attention), Sources (most sourced
+// comments), Debates (most WS-T debates), New (most recent). Built on the
+// `Select` primitive: the current mode is shown on the trigger and the chosen
+// option carries aria-selected, so no separate live region is needed. The
+// "Sort by" field label is VISUALLY HIDDEN (`hideLabel`) — the trigger already
+// names the control for sighted users, keeping the surface (front-page header
+// / settings) clean — but it stays in the DOM as the select's accessible name
+// for assistive tech. Presentation only — the controlled
+// `value`/`onValueChange` are owned by the caller; persistence is WS-C.
+import { DEFAULT_FEED_MODE, FEED_MODES, type FeedMode } from '@licio/shared';
 import { useT } from '../../../i18n/index.js';
 import { Select, type SelectOption } from '../../ui/Select/index.js';
 
-export type FeedMode =
-  | 'balanced'
-  | 'chronological'
-  | 'source-diverse'
-  | 'local'
-  | 'low-personalization';
-
-/** Default mode when the reader has expressed no preference. */
-export const DEFAULT_FEED_MODE: FeedMode = 'balanced';
+// The canonical mode set + default live in @licio/shared (the schema the
+// server validates against); re-exported here for existing importers.
+export { DEFAULT_FEED_MODE, FEED_MODES, type FeedMode };
 
 export interface FeedModeSwitcherProps {
   /** Controlled, currently-selected feed mode. */
@@ -32,17 +30,13 @@ export interface FeedModeSwitcherProps {
   className?: string;
 }
 
-// Order: default first, then the alternative ordering strategies.
+// Order: default first, then the alternative sort orders.
 const MODE_COPY: ReadonlyArray<{ value: FeedMode; key: string; text: string }> = [
-  { value: 'balanced', key: 'feed.mode.balanced', text: 'Balanced' },
-  { value: 'chronological', key: 'feed.mode.chronological', text: 'Chronological' },
-  { value: 'source-diverse', key: 'feed.mode.sourceDiverse', text: 'Source-diverse' },
-  { value: 'local', key: 'feed.mode.local', text: 'Local' },
-  {
-    value: 'low-personalization',
-    key: 'feed.mode.lowPersonalization',
-    text: 'Low personalization',
-  },
+  { value: 'best', key: 'feed.mode.best', text: 'Best' },
+  { value: 'rising', key: 'feed.mode.rising', text: 'Rising' },
+  { value: 'sources', key: 'feed.mode.sources', text: 'Sources' },
+  { value: 'debates', key: 'feed.mode.debates', text: 'Debates' },
+  { value: 'new', key: 'feed.mode.new', text: 'New' },
 ];
 
 export function FeedModeSwitcher({
@@ -62,7 +56,7 @@ export function FeedModeSwitcher({
   return (
     <Select
       {...(id !== undefined ? { id } : {})}
-      label={t('feed.mode.label', 'Feed order')}
+      label={t('feed.mode.label', 'Sort by')}
       hideLabel
       value={value}
       onValueChange={(next) => onValueChange(next as FeedMode)}

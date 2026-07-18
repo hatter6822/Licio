@@ -9,7 +9,7 @@ import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
-import { resolveRoomCreateAxes } from '../forum/rooms.js';
+import { resolveRoomCreateAxes, roomContentVisibleToUser } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -80,6 +80,251 @@ describe('WS-Q.2.1 submission guards', () => {
       post('/v1/stories', briefSubmission({ room_id: randomUUID() }), cookie),
     );
     expect(res.status).toBe(404);
+  });
+
+  it('a platform ADMIN reads/posts in a private SERVER room without membership; a platform steward does not (2026-07 final-line-of-defense decision)', async () => {
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin', admin: true });
+    // The submission guard runs the same read-bar chokepoint every direct
+    // read uses (`roomContentVisibleToUser`) — a 201 proves the admin arm.
+    const posted = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), admin.cookie),
+    );
+    expect(posted.status).toBe(201);
+    // The platform `steward` role deliberately has NO private-room arm (its
+    // oversight path is the moderation console) — unchanged 404-over-403.
+    const steward = await seedUserWithSession(fixture.identity, {
+      handle: 'psteward',
+      steward: true,
+    });
+    const denied = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), steward.cookie),
+    );
+    expect(denied.status).toBe(404);
+    // The story's COMMENTS surface follows the SAME bar (`threadVisibleToUser`
+    // composes the chokepoint — codex on PR #146: the inline copy it replaced
+    // missed the admin arm, so admin could read the story yet 404 on its own
+    // comments): 200 for admin, 404 for the grant-less platform steward.
+    const { story_id } = (await posted.json()) as { story_id: string };
+    expect(
+      (
+        await app().request(
+          new Request(`http://localhost/v1/stories/${story_id}/comments`, {
+            headers: { cookie: admin.cookie },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app().request(
+          new Request(`http://localhost/v1/stories/${story_id}/comments`, {
+            headers: { cookie: steward.cookie },
+          }),
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it('the platform-STEWARD action arm is VISIBILITY-COUPLED: no administering a private room it cannot read; public rooms and its own memberships stay administrable', async () => {
+    const patchJson = (path: string, body: unknown, cookie: string) =>
+      new Request(`http://localhost${path}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+    const priv = await makeRoom('private');
+    const pub = await makeRoom('public');
+    const psteward = await seedUserWithSession(fixture.identity, {
+      handle: 'psvis',
+      steward: true,
+    });
+    // Private, non-member: the settings write is refused — you cannot govern
+    // what you cannot read (the private-room oversight path is the console).
+    const denied = await app().request(
+      patchJson(
+        `/v1/rooms/${priv}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(denied.status).toBe(403);
+    // Public room: the platform-steward arm applies as before.
+    const ok = await app().request(
+      patchJson(
+        `/v1/rooms/${pub}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(ok.status).toBe(200);
+    // Membership restores visibility, and with it the arm.
+    await joinAsMember(priv, psteward.userId);
+    const asMember = await app().request(
+      patchJson(
+        `/v1/rooms/${priv}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(asMember.status).toBe(200);
+  });
+
+  it('p2p stubs expose NO server steward-action surface — lens create, settings, and visibility 404 even for admin (WS-S §8)', async () => {
+    const patchJson = (path: string, body: unknown, cookie: string) =>
+      new Request(`http://localhost${path}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+    const roomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId,
+      name: 'P2P stub actions',
+      slug: `p2pa-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'invite',
+      postingPolicy: 'all_members',
+      storageMode: 'p2p',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin3', admin: true });
+    const lens = await app().request(
+      post(`/v1/rooms/${roomId}/lenses`, { name: 'Leak', lens_type: 'expert' }, admin.cookie),
+    );
+    expect(lens.status).toBe(404);
+    const settings = await app().request(
+      patchJson(`/v1/rooms/${roomId}/settings`, { posting_policy: 'all_members' }, admin.cookie),
+    );
+    expect(settings.status).toBe(404);
+    const visibility = await app().request(
+      post(`/v1/rooms/${roomId}/visibility`, { visibility: 'public' }, admin.cookie),
+    );
+    expect(visibility.status).toBe(404);
+    // Nothing leaked into the server lens store.
+    expect(await fixture.forum.lenses.listByRoom(roomId)).toEqual([]);
+  });
+
+  it('a SUSPENDED admin session loses the read arm — the soft read paths must not outrank authMiddleware (codex: require an active account)', async () => {
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin4', admin: true });
+    const record = await fixture.forum.rooms.getById(room);
+    if (!record) throw new Error('setup');
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(true);
+    await fixture.identity.store.updateUser(admin.userId, { accountState: 'suspended' });
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(false);
+  });
+
+  it('the debate-override platform-admin arm carries the per-session MFA bar (codex: require MFA before admin overrides)', async () => {
+    // A judged arena over a real public-room story, planted directly at the
+    // store (the full correction→arena lifecycle is the forum-debate suite's
+    // job; this test pins the ROUTE gate).
+    const author = await seedUserWithSession(fixture.identity, { handle: 'dauthor' });
+    const created = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: COMMONS_ROOM_ID }), author.cookie),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    const thread = await fixture.ingestion.stories.getThreadByStoryId(story_id);
+    if (!thread) throw new Error('setup');
+    const nowIso = new Date().toISOString();
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const arena = await fixture.forum.debates.open({
+      debateId: randomUUID(),
+      storyId: story_id,
+      threadId: thread.threadId,
+      roomId: COMMONS_ROOM_ID,
+      targetType: 'story',
+      targetContributionId: null,
+      challengerContributionId: randomUUID(),
+      incumbentUserId: author.userId,
+      challengerUserId: author.userId,
+      state: 'judged',
+      positions: {
+        incumbent: { summary: 'held', citations: [], updatedAt: null },
+        challenger: { summary: 'challenged', citations: [], updatedAt: null },
+      },
+      editDeadlineAt: future,
+      resolveDueAt: future,
+      lockedAt: nowIso,
+      lockedContent: null,
+      incumbentLastActiveAt: nowIso,
+      challengerLastActiveAt: nowIso,
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'ai',
+      rationale: null,
+      confidence: null,
+      aiOutputId: null,
+      verdictAt: nowIso,
+      overrideDeadlineAt: future,
+      overriddenByUserId: null,
+      overrideReason: null,
+      resolvedAt: null,
+    });
+    if (!arena) throw new Error('setup');
+    const overrideBody = { winner: 'incumbent', reason: 'Platform review of the record.' };
+
+    // An admin WITHOUT per-session MFA: the platform arm refuses with
+    // mfa_required — an active verified session alone must not flip verdicts.
+    const bareAdmin = await seedUserWithSession(fixture.identity, { handle: 'noMfaAdmin' });
+    await fixture.identity.store.updateUser(bareAdmin.userId, { roles: ['user', 'admin'] });
+    const denied = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, bareAdmin.cookie),
+    );
+    expect(denied.status).toBe(403);
+    expect(((await denied.json()) as { error: { code: string } }).error.code).toBe('mfa_required');
+
+    // A plain member still gets the service's own not_steward (the gate only
+    // intercepts the ADMIN arm).
+    const member = await seedUserWithSession(fixture.identity, { handle: 'plainm' });
+    const notSteward = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, member.cookie),
+    );
+    expect(notSteward.status).toBe(403);
+    expect(((await notSteward.json()) as { error: { code: string } }).error.code).toBe(
+      'not_steward',
+    );
+
+    // An MFA-cleared admin passes the gate AND the service's steward check.
+    const mfaAdmin = await seedUserWithSession(fixture.identity, {
+      handle: 'mfaAdmin',
+      admin: true,
+    });
+    const allowed = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, mfaAdmin.cookie),
+    );
+    expect(allowed.status).toBe(200);
+  });
+
+  it("the admin arm is structurally scoped to SERVER storage: a member-hosted (p2p) room's content bar stays closed to admin", async () => {
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin2', admin: true });
+    const roomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId,
+      name: 'P2P stub',
+      slug: `p2p-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'invite',
+      postingPolicy: 'all_members',
+      storageMode: 'p2p',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const room = await fixture.forum.rooms.getById(roomId);
+    if (!room) throw new Error('setup');
+    expect(await roomContentVisibleToUser(fixture.forum, room, admin.userId)).toBe(false);
   });
 
   it('a private-room outsider gets 404; an active member can post', async () => {

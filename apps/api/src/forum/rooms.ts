@@ -232,7 +232,8 @@ export async function roomVisibleToUser(
 }
 
 /** CONTENT visibility (threads, lenses, detail): public rooms are readable by
- *  all; a PRIVATE room requires ACTIVE membership or a steward role. A pending
+ *  all; a PRIVATE room requires ACTIVE membership, a room steward role, or —
+ *  the 2026-07 maintainer decision — the platform ADMIN role.  A pending
  *  applicant may know the room exists (tier one) but reads none of its content
  *  until a steward approves the request (§16.2 — the bar `storyReadableByUser`
  *  and `threadVisibleToUser` compose). */
@@ -246,7 +247,19 @@ export async function roomContentVisibleToUser(
   const subscription = await forum.rooms.getSubscription(room.roomId, userId);
   if (subscription?.status === 'active') return true;
   const roles = await forum.rooms.stewardRolesFor(room.roomId, userId);
-  return roles.length > 0;
+  if (roles.length > 0) return true;
+  // Platform-ADMIN arm (2026-07 maintainer decision): admin is the final line
+  // of defense and reads every SERVER-hosted area, private rooms included —
+  // the platform already holds this data, and admin already carries all five
+  // doctrine roles on the moderation console.  STRUCTURALLY scoped to
+  // `storageMode === 'server'`: a WS-S member-hosted (p2p) room has no
+  // server-side content to read and stays excluded by construction.  The
+  // platform `steward` role deliberately does NOT get this arm (its private-
+  // room oversight path is the console), and an unwired reader (null seam)
+  // fails closed.
+  if (room.storageMode !== 'server') return false;
+  const platformRoles = (await forum.platformRolesReader?.(userId)) ?? [];
+  return platformRoles.includes('admin');
 }
 
 /**
@@ -406,7 +419,13 @@ export async function setMembershipLens(
 }
 
 /** Steward gate for room-scoped actions: any of the five WS-A.2.2 roles in
- *  THIS room, or a platform steward/admin. */
+ *  THIS room, a platform ADMIN (the 2026-07 final-line-of-defense decision:
+ *  admin reaches everything server-hosted, and the read bar grants it the
+ *  matching visibility), or a platform steward who can SEE the room.  The
+ *  platform-steward arm is VISIBILITY-COUPLED: you cannot govern what you
+ *  cannot read, and a platform steward's private-room oversight path is the
+ *  moderation console — so its blanket arm covers public rooms and rooms it
+ *  is a member of, while per-room grants stay unconditional. */
 export async function isRoomSteward(
   forum: ForumServices,
   roomId: string,
@@ -414,7 +433,11 @@ export async function isRoomSteward(
   platformRoles: readonly Role[],
   requiredRoles?: readonly RoomStewardRole[],
 ): Promise<boolean> {
-  if (platformRoles.includes('steward') || platformRoles.includes('admin')) return true;
+  if (platformRoles.includes('admin')) return true;
+  if (platformRoles.includes('steward')) {
+    const room = await forum.rooms.getById(roomId);
+    if (room !== null && (await roomContentVisibleToUser(forum, room, userId))) return true;
+  }
   const roles = await forum.rooms.stewardRolesFor(roomId, userId);
   if (roles.length === 0) return false;
   if (!requiredRoles) return true;

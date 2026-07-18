@@ -17,9 +17,8 @@ import {
   mfciCases,
   mfciMargins,
   mfciRiskStates,
-  scoiContextActions,
 } from '@licio/db';
-import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type {
   BridgeAttemptRecord,
   BridgeAttemptStatus,
@@ -37,8 +36,6 @@ import type {
   PromotionStore,
   RunMetadataRow,
   RunMetadataStore,
-  ScoiContextActionRecord,
-  ScoiContextActionStore,
 } from './stores.js';
 
 type Db = ReturnType<typeof createDbClient>;
@@ -308,63 +305,6 @@ export class DrizzleMfciMarginsStore implements MfciMarginsStore {
   }
 }
 
-export class DrizzleScoiContextActionStore implements ScoiContextActionStore {
-  readonly #db: Db;
-
-  constructor(db: Db) {
-    this.#db = db;
-  }
-
-  async insert(record: ScoiContextActionRecord): Promise<void> {
-    await this.#db.insert(scoiContextActions).values({
-      actionId: record.actionId || randomUUID(),
-      action: record.action,
-      threadId: record.threadId,
-      relatedThreadId: record.relatedThreadId,
-      storyId: record.storyId,
-      roomId: record.roomId,
-      reasonCode: record.reasonCode,
-      annotation: record.annotation,
-      actorRef: record.actorRef,
-      scoiBefore: record.scoiBefore,
-      scoiAfter: record.scoiAfter,
-      createdAt: new Date(record.createdAt),
-    });
-  }
-
-  async listForThread(threadId: string, limit: number): Promise<ScoiContextActionRecord[]> {
-    const rows = await this.#db
-      .select()
-      .from(scoiContextActions)
-      .where(
-        or(
-          eq(scoiContextActions.threadId, threadId),
-          eq(scoiContextActions.relatedThreadId, threadId),
-        ),
-      )
-      .orderBy(desc(scoiContextActions.createdAt))
-      .limit(limit);
-    return rows.map((row) => ({
-      actionId: row.actionId,
-      action: row.action as ScoiContextActionRecord['action'],
-      threadId: row.threadId,
-      relatedThreadId: row.relatedThreadId,
-      storyId: row.storyId,
-      roomId: row.roomId,
-      reasonCode: row.reasonCode,
-      annotation: row.annotation,
-      actorRef: row.actorRef,
-      scoiBefore: row.scoiBefore,
-      scoiAfter: row.scoiAfter,
-      createdAt: iso(row.createdAt),
-    }));
-  }
-
-  async clear(): Promise<void> {
-    await this.#db.delete(scoiContextActions);
-  }
-}
-
 export class DrizzleBridgeAttemptStore implements BridgeAttemptStore {
   readonly #db: Db;
 
@@ -484,6 +424,25 @@ export class DrizzleMfciRiskStateStore implements MfciRiskStateStore {
       reason: row.reason,
       updatedAt: iso(row.updatedAt),
     };
+  }
+
+  async getMany(targetIds: readonly string[]): Promise<Map<string, MfciRiskStateRecord>> {
+    const out = new Map<string, MfciRiskStateRecord>();
+    if (targetIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(mfciRiskStates)
+      .where(inArray(mfciRiskStates.targetId, [...targetIds]));
+    for (const row of rows) {
+      out.set(row.targetId, {
+        targetId: row.targetId,
+        state: row.state as MfciRiskStateRecord['state'],
+        score: row.score,
+        reason: row.reason,
+        updatedAt: iso(row.updatedAt),
+      });
+    }
+    return out;
   }
 
   async set(record: MfciRiskStateRecord): Promise<void> {

@@ -16,7 +16,6 @@
 //   MERI feed row          → exposure_independence (marginal gain),
 //                            meri_rank (rank among gains)
 //   WS-E redundancy hook   → redundancy_penalty
-//   SCOI story row         → context_coherence_gain (1 − scoi), scoi_level
 //   MFCI risk-state store + story row → mfci_score, mfci_risk_state
 //   Hodge thread row       → hodge_harmonic_tension, harmful_tension_risk
 //   Tropical topic rows    → tropical_cascade_rank (max synchronized share)
@@ -34,7 +33,6 @@ import {
   type FeatureVector,
   type InvariantVersionEntry,
   type MfciRiskStateFeature,
-  type ScoiLevel,
   sourceReliabilityFromHistory,
 } from '@licio/ranking';
 import { isSentinelTopicId } from '@licio/shared';
@@ -48,15 +46,6 @@ import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
 import { deterministicEventId } from '../pwatt/scoring.js';
 import { pwattRowForRanking, usable } from '../pwatt/shadow.js';
 import type { FeatureStore } from './stores.js';
-
-/** SCOI context states → the WS-I.2.4c gating ladder (SPEC §10.4 → §10.6). */
-const SCOI_STATE_TO_LEVEL: Readonly<Record<string, ScoiLevel>> = {
-  coherent: 'low',
-  ambiguous: 'medium',
-  split: 'medium',
-  obstructed: 'high',
-  weaponized: 'very_high',
-};
 
 const clamp01 = (value: number): number =>
   Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
@@ -144,6 +133,13 @@ export async function assembleFeatureVector(
     if (attention !== undefined) vector.active_attention = clamp01(attention);
     if (participation !== undefined) vector.constructive_participation = clamp01(participation);
     invariantVersions[pwatt.invariantType] = versionEntry(pwatt);
+    // attention_velocity — the `rising` sort metric: the signed delta of the
+    // served active-attention component between this row's window and the
+    // most recent EARLIER same-size window of the same invariant type. Every
+    // contributing row passes the identical §30.5 serving gate; absent with
+    // fewer than two usable windows (honest absence, WS-H.1.2c).
+    const velocity = await attentionVelocity(events.invariantStore, pwatt);
+    if (velocity !== null) vector.attention_velocity = velocity;
   }
 
   // --- MERI: exposure independence + rank (the global feed-target row) -----
@@ -179,20 +175,6 @@ export async function assembleFeatureVector(
     vector.dispute_penalty = 1;
   } else if (storyDispute === 'validated') {
     vector.dispute_validation = 1;
-  }
-
-  // --- SCOI: context coherence + gating level ------------------------------
-  const scoiRow = usable(await events.invariantStore.latest('SCOI', storyId));
-  if (scoiRow !== null) {
-    const scoi = num(scoiRow.scoreVector['scoi']);
-    const state = scoiRow.scoreVector['context_state'];
-    if (scoi !== undefined) {
-      vector.context_coherence_gain = clamp01(1 - scoi);
-      const level =
-        typeof state === 'string' ? (SCOI_STATE_TO_LEVEL[state] ?? undefined) : undefined;
-      if (level !== undefined) vector.scoi_level = level;
-      invariantVersions['SCOI'] = versionEntry(scoiRow);
-    }
   }
 
   // --- MFCI: the durable risk-state store is canonical; the latest output
@@ -294,6 +276,56 @@ export async function assembleFeatureVector(
   if (clusterId !== null) vector.duplicate_cluster_id = clusterId;
 
   return vector;
+}
+
+/**
+ * The `rising`-mode ordering metric (WS-E PWAtt provenance): the signed
+ * window-over-window delta of the SERVED active-attention component. The
+ * previous window is the most recent row of the SAME invariant type whose
+ * same-size window starts strictly before `current`'s (same-version ties
+ * break on `createdAt`), gated by the identical `pwattRowForRanking` rule as
+ * the current row — a shadow, pre-lift, or degraded row can no more feed a
+ * velocity than it can feed a score. Null (feature ABSENT) with fewer than
+ * two usable same-size windows or a missing component value.
+ */
+async function attentionVelocity(
+  store: { listForTarget(targetId: string): Promise<InvariantOutputRecord[]> },
+  current: InvariantOutputRecord,
+): Promise<number | null> {
+  const currentAttention = num(current.scoreVector['active_attention']);
+  if (currentAttention === undefined) return null;
+  const currentStart = Date.parse(current.timeWindow.start);
+  const spanMs = Date.parse(current.timeWindow.end) - currentStart;
+  let previous: InvariantOutputRecord | null = null;
+  for (const raw of await store.listForTarget(current.targetId)) {
+    if (raw.invariantType !== current.invariantType) continue;
+    const row = pwattRowForRanking(raw);
+    if (row === null) continue;
+    const start = Date.parse(row.timeWindow.start);
+    if (Date.parse(row.timeWindow.end) - start !== spanMs) continue;
+    if (start >= currentStart) continue;
+    // Pick the latest same-size window strictly before `current`, by window
+    // start, then creation time, then — for two revisions written in the same
+    // instant — the lexicographically greatest `version`. The last tie-break
+    // makes the choice REPLAY-STABLE independent of the store's row order
+    // (`listForTarget` carries no inherent ordering); `version` is part of the
+    // record's natural key, so it is distinct within a (target, type, window).
+    if (previous !== null) {
+      const prevStart = Date.parse(previous.timeWindow.start);
+      if (start < prevStart) continue;
+      if (start === prevStart) {
+        const created = Date.parse(row.createdAt);
+        const prevCreated = Date.parse(previous.createdAt);
+        if (created < prevCreated) continue;
+        if (created === prevCreated && row.version <= previous.version) continue;
+      }
+    }
+    previous = row;
+  }
+  if (previous === null) return null;
+  const previousAttention = num(previous.scoreVector['active_attention']);
+  if (previousAttention === undefined) return null;
+  return Math.max(-1, Math.min(1, clamp01(currentAttention) - clamp01(previousAttention)));
 }
 
 /** Bounded component exploration limits (cost ceiling per assembly). */

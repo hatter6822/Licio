@@ -13,13 +13,13 @@
 // `pwatt_score` (which already embeds exposure_independence, evidence
 // completeness, and relevance through the §5.5 convex weights and the
 // baseline), with deterministic tie-breaks on (freshness desc, item id).
-// The constraint set `[cohort_parity, context_requirements, holonomy_limits]`
-// is enforced by `gweiDeploymentGate` (profile-level), SCOI gating, and PHI
-// diversification respectively — hard limits, never traded against score.
+// The constraint set `[cohort_parity, holonomy_limits]` is enforced by
+// `gweiDeploymentGate` (profile-level) and PHI diversification respectively —
+// hard limits, never traded against score.
 
 import { applyBalancing, type BalancingInput } from './diversify/balancing.js';
 import { applyMatroidDedup, type DedupInput } from './diversify/dedup.js';
-import { type Candidate, mergeCandidates } from './schemas/candidate.js';
+import { type Candidate, mergeCandidates, parseTimestampOrZero } from './schemas/candidate.js';
 import type { ConstraintApplication } from './schemas/decision-log.js';
 import { FEATURE_SCHEMA_VERSION, type FeatureVector } from './schemas/feature-vector.js';
 import type { RankingProfileConfig } from './schemas/profile.js';
@@ -50,7 +50,6 @@ export const SHADOW_RANKING_ENFORCEMENT: RankingEnforcement = {
   hodge: false,
   meri: false,
   tropical: false,
-  scoi: false,
   gwei: false,
 };
 
@@ -115,7 +114,6 @@ export function scoreItem(
   enforcement: RankingEnforcement,
   context: RankingRequestContext,
   constraintFlags: readonly ConstraintFlag[],
-  distributionMultiplier: number,
 ): ScoredItem {
   // Topic/freshness inputs come from the FEATURE VECTOR (the revision the
   // decision log pins), never the live candidate — serving and replay see
@@ -141,15 +139,13 @@ export function scoreItem(
   const positive = computePositiveScore(features, profile, baseline);
   const penalties = computePenalties(features, profile, enforcement, { sensitiveTopic });
   // WS-T — a `corrected` story sinks BELOW every non-disputed story: the sink is
-  // subtracted OUTSIDE the distribution multiplier (which is in (0, 1] and would
-  // otherwise shrink an in-multiplier penalty toward 0), so strong baseline /
+  // subtracted AFTER the penalty subtraction, so strong baseline /
   // participation can never rescue it (SPEC §5.4; the comment-section analogue).
-  const rawScore =
-    (positive.components.positive - penalties.total_applied) * distributionMultiplier;
+  const rawScore = positive.components.positive - penalties.total_applied;
   // WS-T — the `validated` boost: a modest lift for content challenged and proven
   // accurate, recorded as a term so the decision log reconciles the score and the
-  // audit surfaces the signal. Applied OUTSIDE the multiplier (symmetric with the
-  // sink); a story is never both `corrected` and `validated`.
+  // audit surfaces the signal. Applied symmetric with the sink; a story is
+  // never both `corrected` and `validated`.
   const validation = validationBoostTerm(features, profile);
   return scoredItemSchema.parse({
     item_id: candidate.item_id,
@@ -170,7 +166,7 @@ function orderScored(
   return [...scored].sort(
     (a, b) =>
       b.item.pwatt_score - a.item.pwatt_score ||
-      Date.parse(b.features.created_at) - Date.parse(a.features.created_at) ||
+      parseTimestampOrZero(b.features.created_at) - parseTimestampOrZero(a.features.created_at) ||
       a.item.item_id.localeCompare(b.item.item_id),
   );
 }
@@ -208,15 +204,7 @@ export function rankFeasibleSet(
       ? [...evaluation.flags, 'phi_diversify']
       : evaluation.flags;
     scored.push({
-      item: scoreItem(
-        candidate,
-        features,
-        profile,
-        enforcement,
-        context,
-        flags,
-        evaluation.distributionMultiplier,
-      ),
+      item: scoreItem(candidate, features, profile, enforcement, context, flags),
       candidate,
       features,
     });
@@ -299,11 +287,40 @@ export function emptyFeatureVector(candidate: Candidate, nowMs: number): Feature
  * WS-I.4.1b — the safe fallback ordering: strictly chronological (newest
  * first; deterministic id tie-break), the same semantics as the WS-E
  * freshness ranking. No score, no personalization, no financial anything.
+ * ALSO the `new` user sort mode (SPEC §11.6): most recent first.
  */
 export function chronologicalOrder(candidates: readonly Candidate[]): Candidate[] {
   return [...candidates].sort(
     (a, b) =>
-      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
+      a.item_id.localeCompare(b.item_id),
+  );
+}
+
+/**
+ * The user-selected metric sort orders (SPEC §11.6 feed modes `rising` /
+ * `sources` / `debates`): a COMPLETE deterministic ordering of the feasible
+ * set by a per-item content-derived metric — PWAtt window-over-window
+ * velocity, sourced-comment count, or the WS-T debates tally — descending,
+ * with the chronological tie-break (freshness desc, then item id). An item
+ * the metric map does not cover sorts as 0 (honest absence: no history / no
+ * signal ties with flat, ahead of falling for a signed metric). Like
+ * `chronologicalOrder` this is an explicit reader choice, never a
+ * popularity/applause count — the metrics are attention-, citation-, and
+ * adjudication-derived by construction.
+ */
+export function metricOrder(
+  candidates: readonly Candidate[],
+  metricByItem: ReadonlyMap<string, number>,
+): Candidate[] {
+  const metric = (candidate: Candidate): number => {
+    const value = metricByItem.get(candidate.item_id);
+    return value !== undefined && Number.isFinite(value) ? value : 0;
+  };
+  return [...candidates].sort(
+    (a, b) =>
+      metric(b) - metric(a) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );
 }

@@ -22,7 +22,14 @@
 // Reference check (tested): the figure-eight braid σ₁σ₂⁻¹ in B₃ has
 // ρ = (3+√5)/2 = φ², log ρ ≈ 0.9624 — its true entropy.
 
-import { identity, type Matrix, matMul, spectralRadius } from '../math/linalg.js';
+import {
+  frobeniusNorm,
+  identity,
+  type Matrix,
+  matMul,
+  matScale,
+  spectralRadius,
+} from '../math/linalg.js';
 
 export interface RankSnapshot {
   atMs: number;
@@ -65,7 +72,12 @@ export function braidWordFromSnapshots(snapshots: readonly RankSnapshot[]): Brai
     if (!prev || !next) continue;
     if (
       next.topicIdsByRank.length !== prev.topicIdsByRank.length ||
-      next.topicIdsByRank.some((id) => !strandSet.has(id))
+      next.topicIdsByRank.some((id) => !strandSet.has(id)) ||
+      // Uniqueness must hold on EVERY snapshot, not just the first: a later
+      // snapshot with a repeated topic (`['A','A']`) still matches the length +
+      // membership checks but collapses the rank→topic map, corrupting the
+      // selection-sort decomposition (and thus crossingRate/entropy).
+      new Set(next.topicIdsByRank).size !== next.topicIdsByRank.length
     ) {
       throw new Error('rank snapshots must track a constant topic set');
     }
@@ -132,7 +144,11 @@ export function burauGeneratorAtMinusOne(strands: number, position: number, sign
   );
 }
 
-/** Burau image of a braid word at t = −1 (exact integer product). */
+/** Burau image of a braid word at t = −1 (exact integer product). Entries grow
+ *  ≈ ρ^L, so the EXACT product loses integer precision past ~2⁵³ (a few dozen
+ *  crossings); use it only for short words / known-answer checks. The entropy
+ *  bound goes through {@link braidEntropyEstimate}, which never materializes the
+ *  exact product and so never overflows. */
 export function burauWordMatrix(strands: number, word: readonly BraidGenerator[]): Matrix {
   let m = identity(Math.max(1, strands - 1));
   for (const generator of word) {
@@ -142,15 +158,39 @@ export function burauWordMatrix(strands: number, word: readonly BraidGenerator[]
 }
 
 /**
+ * log ρ of the Burau image, computed with PER-STEP Frobenius renormalization so
+ * the ≈ρ^L entry growth never overflows (the exact product would exceed 2⁵³ and
+ * then go non-finite, throwing in `spectralRadius`). Since ρ(cA) = |c|·ρ(A),
+ * factoring the running norm sᵢ out at each step gives
+ * log ρ(∏Gᵢ) = Σ log sᵢ + log ρ(M̂), where M̂ is the unit-Frobenius residual.
+ * Returns −∞ for a singular residual (ρ = 0 ⇒ entropy 0).
+ */
+function burauWordLogSpectralRadius(strands: number, word: readonly BraidGenerator[]): number {
+  let m = identity(Math.max(1, strands - 1));
+  let logScale = 0;
+  for (const generator of word) {
+    m = matMul(burauGeneratorAtMinusOne(strands, generator.position, generator.sign), m);
+    const norm = frobeniusNorm(m);
+    if (!Number.isFinite(norm)) return Number.POSITIVE_INFINITY; // unreachable once normalized
+    if (norm < 1e-280) return Number.NEGATIVE_INFINITY; // singular residual ⇒ ρ = 0
+    logScale += Math.log(norm);
+    m = matScale(m, 1 / norm); // keep ‖M̂‖_F = 1 ⇒ entries bounded, no overflow
+  }
+  const rhoResidual = spectralRadius(m);
+  return rhoResidual <= 0 ? Number.NEGATIVE_INFINITY : logScale + Math.log(rhoResidual);
+}
+
+/**
  * Braid-entropy estimate: the homological lower bound
  * max(0, log ρ(Burau₋₁(word))). 0 for periodic/reducible-style words
  * (stable rankings, simple oscillation); positive for genuinely mixing
- * agenda dynamics.
+ * agenda dynamics. Computed via the renormalized log-spectral-radius so a long
+ * word (realistic under `detectGaming`) yields the bound instead of overflowing.
  */
 export function braidEntropyEstimate(strands: number, word: readonly BraidGenerator[]): number {
   if (strands < 3 || word.length === 0) return 0;
-  const rho = spectralRadius(burauWordMatrix(strands, word));
-  return Math.max(0, Math.log(Math.max(1, rho)));
+  const logRho = burauWordLogSpectralRadius(strands, word);
+  return Number.isFinite(logRho) ? Math.max(0, logRho) : 0;
 }
 
 export interface GamingDetectionConfig {

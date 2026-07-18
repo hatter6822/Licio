@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createFileRoute } from '@tanstack/react-router';
 import { requireAuth } from '../routing/route-guard.js';
+import { moderationConsoleSearchSchema } from '../routing/search.js';
 import { ModerationConsolePage } from './-pages/moderation.js';
 
 // WS-J.2 — the steward console.  Auth-guarded client-side; the server gates
 // every query/action by doctrine steward role + verified MFA (non-stewards see
-// an access notice).
+// an access notice).  `?tab=` deep-links a console section (WS-C.1.1b).
 export const Route = createFileRoute('/moderation')({
   beforeLoad: requireAuth,
+  validateSearch: moderationConsoleSearchSchema,
   component: ModerationConsolePage,
 });

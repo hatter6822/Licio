@@ -2,10 +2,14 @@
 //
 // WS-J.2 moderation console (steward workspace): the priority/SLA-sorted report
 // queue (emergency on top) + full-context review with the action palette
-// (WS-J.2.1/2.2/2.3), the appeal review interface enforcing independence
-// (WS-J.2.4), and the audit viewer (WS-J.2.5).  Authorization is enforced
-// server-side; a non-steward simply sees an access notice.  No financial data
-// appears on any surface.
+// (WS-J.2.1/2.2/2.3), the Sources review queue (the STEWARD_ROLES.md
+// ROLE_EVIDENCE doctrine surface over citation-bearing contributions — sourcing
+// is comment-centric, so the user-facing name is "Sources"), the appeal review
+// interface enforcing independence (WS-J.2.4), and the audit viewer (WS-J.2.5).
+// Authorization is enforced server-side; a non-steward simply sees an access
+// notice.  No financial data appears on any surface.  The page header (title +
+// back button) belongs to the route page — this component renders the tabbed
+// workspace only, optionally controlled so the active tab can live in the URL.
 import type {
   AppealQueueRow,
   AppealReviewResponse,
@@ -23,7 +27,6 @@ import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
   applyModerationAction,
-  checkEvidenceUrl,
   decideAppeal,
   fetchAppeal,
   fetchAppealQueue,
@@ -33,6 +36,7 @@ import {
   fetchEvidenceQueue,
   fetchIncidents,
   fetchReportQueue,
+  fetchUrlVerdict,
   resolveIncident,
 } from '../../lib/safety-api.js';
 import { REPORT_REASONS_BY_CODE } from '../safety/report-reasons.js';
@@ -69,21 +73,21 @@ function isForbidden(error: unknown): boolean {
 }
 
 /**
- * WS-J.2.6b: a reporter-supplied evidence link resolves the SERVER-side
- * redirect-chain malware verdict before the reviewer navigates (evidence URLs
- * are stored, never fetched at submission time).  Until a verdict exists the
- * trigger is a BUTTON, not an anchor — an `href` would let middle-click,
- * context-menu "open in new tab", and other non-click activations bypass the
- * check entirely.  `malicious` replaces it with a blocked notice;
- * `unavailable` warns but leaves the reviewer in control ("open anyway" — the
- * reviewer IS the human-review path); `clear` surfaces a real
- * `rel="noreferrer noopener"` anchor rather than auto-opening: this is a
- * reporter-supplied destination, and `window.open` cannot withhold the
- * Referer (its `noreferrer` feature string would also null the SUCCESS
- * return, making popup blocking undetectable), so the deliberate second
- * click on the anchor is the referrer-safe navigation path.
+ * WS-J.2.6b: an untrusted external link (a reporter-supplied evidence URL, or a
+ * citation under source review) resolves the SERVER-side redirect-chain malware
+ * verdict before the reviewer navigates (the URLs are stored, never fetched at
+ * submission time).  Until a verdict exists the trigger is a BUTTON, not an
+ * anchor — an `href` would let middle-click, context-menu "open in new tab",
+ * and other non-click activations bypass the check entirely.  `malicious`
+ * replaces it with a blocked notice; `unavailable` warns but leaves the
+ * reviewer in control ("open anyway" — the reviewer IS the human-review path);
+ * `clear` surfaces a real `rel="noreferrer noopener"` anchor rather than
+ * auto-opening: this is an untrusted destination, and `window.open` cannot
+ * withhold the Referer (its `noreferrer` feature string would also null the
+ * SUCCESS return, making popup blocking undetectable), so the deliberate
+ * second click on the anchor is the referrer-safe navigation path.
  */
-function EvidenceLink({ url }: { url: string }): React.ReactElement {
+function CheckedLink({ url }: { url: string }): React.ReactElement {
   const t = useT();
   const [state, setState] = useState<'idle' | 'checking' | 'clear' | 'malicious' | 'unavailable'>(
     'idle',
@@ -92,7 +96,7 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
   const activate = (): void => {
     if (state === 'checking') return;
     setState('checking');
-    void checkEvidenceUrl(url)
+    void fetchUrlVerdict(url)
       .then(({ verdict }) => setState(verdict))
       .catch(() => {
         // Fail toward flagging: an unreachable check warns, never silently opens.
@@ -103,7 +107,7 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
   if (state === 'malicious') {
     return (
       <span role="status" className="font-semibold text-error">
-        {t('console.evidenceMalicious', 'Blocked: this link resolves to a known malicious site.')}{' '}
+        {t('console.linkMalicious', 'Blocked: this link resolves to a known malicious site.')}{' '}
         <span className="font-normal text-ink-muted line-through">{url}</span>
       </span>
     );
@@ -114,28 +118,28 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
         type="button"
         className="text-left text-primary underline"
         onClick={activate}
-        title={t('console.evidenceCheckTitle', 'Checks this link for malware before opening')}
+        title={t('console.linkCheckTitle', 'Checks this link for malware before opening')}
       >
         {url}
       </button>
       {state === 'checking' ? (
         <span role="status" className="ml-1 text-ink-muted">
-          {t('console.evidenceChecking', 'checking link…')}
+          {t('console.linkChecking', 'checking link…')}
         </span>
       ) : null}
       {state === 'unavailable' ? (
         <span role="status" className="ml-1 text-warning">
-          {t('console.evidenceUnverified', 'Could not verify this link.')}{' '}
+          {t('console.linkUnverified', 'Could not verify this link.')}{' '}
           <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
-            {t('console.evidenceOpenAnyway', 'Open anyway')}
+            {t('console.linkOpenAnyway', 'Open anyway')}
           </a>
         </span>
       ) : null}
       {state === 'clear' ? (
         <span role="status" className="ml-1 text-ink-muted">
-          {t('console.evidenceVerified', 'Verified.')}{' '}
+          {t('console.linkVerified', 'Verified.')}{' '}
           <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
-            {t('console.evidenceOpen', 'Open link')}
+            {t('console.linkOpen', 'Open link')}
           </a>
         </span>
       ) : null}
@@ -143,18 +147,31 @@ function EvidenceLink({ url }: { url: string }): React.ReactElement {
   );
 }
 
-export function ModerationConsole(): React.ReactElement {
+/** The console's tab ids — also the `?tab=` deep-link vocabulary (WS-C.1.1b). */
+export type ModerationConsoleTab = 'queue' | 'sources' | 'appeals' | 'integrity' | 'audit';
+
+export interface ModerationConsoleProps {
+  /** Controlled active tab (the page syncs it to `?tab=`); omit for local state. */
+  tab?: ModerationConsoleTab;
+  onTabChange?: (tab: ModerationConsoleTab) => void;
+}
+
+export function ModerationConsole({
+  tab,
+  onTabChange,
+}: ModerationConsoleProps = {}): React.ReactElement {
   const t = useT();
   return (
-    <section aria-labelledby="console-heading" className="flex flex-col gap-4">
-      <h1 id="console-heading" className="text-2xl font-semibold text-ink">
-        {t('console.title', 'Moderation console')}
-      </h1>
+    <section aria-label={t('console.title', 'Moderation console')} className="flex flex-col gap-4">
       <Tabs
         label={t('console.tabs', 'Console sections')}
+        {...(tab !== undefined ? { value: tab } : {})}
+        {...(onTabChange !== undefined
+          ? { onValueChange: (id: string) => onTabChange(id as ModerationConsoleTab) }
+          : {})}
         tabs={[
           { id: 'queue', label: t('console.queue', 'Report queue') },
-          { id: 'evidence', label: t('console.evidence', 'Evidence') },
+          { id: 'sources', label: t('console.sources', 'Sources') },
           { id: 'appeals', label: t('console.appeals', 'Appeals') },
           { id: 'integrity', label: t('console.integrity', 'Integrity') },
           { id: 'audit', label: t('console.audit', 'Audit log') },
@@ -163,7 +180,7 @@ export function ModerationConsole(): React.ReactElement {
         {(activeId) => (
           <>
             {activeId === 'queue' ? <ReportQueuePanel /> : null}
-            {activeId === 'evidence' ? <EvidencePanel /> : null}
+            {activeId === 'sources' ? <SourcesPanel /> : null}
             {activeId === 'appeals' ? <AppealsPanel /> : null}
             {activeId === 'integrity' ? <IncidentsPanel /> : null}
             {activeId === 'audit' ? <AuditPanel /> : null}
@@ -321,12 +338,12 @@ function CaseReviewDialog({
                       {r.evidence_urls.map((url) => (
                         <li key={url} className="truncate text-xs">
                           <span className="text-ink-muted">
-                            {t('console.evidence', 'Evidence')}:{' '}
+                            {t('console.reportEvidence', 'Evidence')}:{' '}
                           </span>
                           {/* Reporter-supplied links resolve the WS-J.2.6b
                               server-side malware verdict before navigation and
                               open with no referrer/opener leakage. */}
-                          <EvidenceLink url={url} />
+                          <CheckedLink url={url} />
                         </li>
                       ))}
                     </ul>
@@ -455,14 +472,17 @@ function CaseReviewDialog({
   );
 }
 
-/** STEWARD_ROLES.md ROLE_EVIDENCE: the FIFO queue of citation-bearing
- *  contributions (sourced comments + corrections) awaiting an evidence
- *  steward's review.  Decisions are evidence METADATA — never a content action
+/** The Sources tab — STEWARD_ROLES.md ROLE_EVIDENCE: the FIFO queue of
+ *  citation-bearing contributions (sourced comments + corrections) awaiting a
+ *  source steward's review.  Sourcing is comment-centric (a comment carries
+ *  `citations`), so the user-facing surface speaks "sources"; the doctrine role
+ *  and the `/v1/moderation/evidence-*` wire endpoints keep their ratified
+ *  names.  Decisions are source METADATA — never a content action
  *  (ROLE_EVIDENCE holds no removal power): `mark-primary-source` and
  *  `flag-citation` annotate ONE citation, `clear` marks the contribution
  *  reviewed with no annotation.  Every decision lands in the reviewable
  *  "Recent decisions" trail below the queue. */
-function EvidencePanel(): React.ReactElement {
+function SourcesPanel(): React.ReactElement {
   const t = useT();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -471,28 +491,28 @@ function EvidencePanel(): React.ReactElement {
     citationUrl: string;
   } | null>(null);
   const queue = useInfiniteQuery({
-    queryKey: queryKeys.modEvidenceQueue(),
+    queryKey: queryKeys.modSourceQueue(),
     queryFn: ({ pageParam }) => fetchEvidenceQueue(pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
   const decisions = useInfiniteQuery({
-    queryKey: queryKeys.modEvidenceDecisions(),
+    queryKey: queryKeys.modSourceDecisions(),
     queryFn: ({ pageParam }) => fetchEvidenceDecisions(pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
   const refresh = (): void => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.modEvidenceQueue() });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.modEvidenceDecisions() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.modSourceQueue() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.modSourceDecisions() });
   };
   const decide = useMutation({
     mutationFn: (request: EvidenceDecisionRequest) => applyEvidenceDecision(request),
     onSuccess: () => {
       toast({
-        message: t('console.evidenceDecided', 'Evidence decision recorded.'),
+        message: t('console.sourceDecided', 'Source decision recorded.'),
         tone: 'success',
       });
       refresh();
@@ -504,12 +524,12 @@ function EvidencePanel(): React.ReactElement {
       toast({
         message: duplicate
           ? t(
-              'console.evidenceDuplicate',
+              'console.sourceDuplicate',
               'This contribution was already reviewed by another steward.',
             )
           : isForbidden(e)
-            ? t('console.evidenceForbidden', 'Your role cannot record that decision.')
-            : t('console.evidenceDecisionFailed', 'Could not record that decision.'),
+            ? t('console.sourceForbidden', 'Your role cannot record that decision.')
+            : t('console.sourceDecisionFailed', 'Could not record that decision.'),
         tone: duplicate ? 'info' : 'error',
       });
       if (duplicate) refresh();
@@ -522,13 +542,13 @@ function EvidencePanel(): React.ReactElement {
     <div className="flex flex-col gap-4">
       <p className="text-xs text-ink-muted">
         {t(
-          'console.evidenceHelp',
-          'Evidence decisions annotate citations (primary source / flagged) or mark a contribution reviewed. They never remove content.',
+          'console.sourcesHelp',
+          'Source decisions annotate citations (primary source / flagged) or mark a contribution reviewed. They never remove content.',
         )}
       </p>
       {queue.data && rows.length === 0 ? (
         <p className="text-ink-muted">
-          {t('console.evidenceQueueEmpty', 'The evidence queue is clear.')}
+          {t('console.sourcesQueueEmpty', 'The source review queue is clear.')}
         </p>
       ) : null}
       <ul className="flex flex-col gap-2">
@@ -544,8 +564,8 @@ function EvidencePanel(): React.ReactElement {
               </span>
               <span className="shrink-0 rounded border border-line px-1.5 py-px text-xs text-ink-muted">
                 {row.type === 'correction'
-                  ? t('console.evidenceCorrection', 'correction')
-                  : t('console.evidenceComment', 'comment')}
+                  ? t('console.sourceTypeCorrection', 'correction')
+                  : t('console.sourceTypeComment', 'comment')}
               </span>
             </div>
             <p className="whitespace-pre-wrap text-sm text-ink">{row.body_preview}</p>
@@ -559,8 +579,8 @@ function EvidencePanel(): React.ReactElement {
                     <span className="text-ink-muted">{t('console.citation', 'Citation')}: </span>
                     {/* Steward-facing citation links resolve the WS-J.2.6b
                         server-side malware verdict before navigation (the
-                        url-verdict route accepts evidence stewards too). */}
-                    <EvidenceLink url={citation.url} />
+                        url-verdict route accepts source stewards too). */}
+                    <CheckedLink url={citation.url} />
                   </span>
                   {citation.title ? <span className="text-ink-muted">{citation.title}</span> : null}
                   <span className="flex flex-wrap gap-2">
@@ -647,7 +667,7 @@ function EvidencePanel(): React.ReactElement {
           ))}
           {decisions.data && decisionRows.length === 0 ? (
             <li className="text-ink-muted">
-              {t('console.noDecisions', 'No evidence decisions yet.')}
+              {t('console.noDecisions', 'No source decisions yet.')}
             </li>
           ) : null}
         </ul>

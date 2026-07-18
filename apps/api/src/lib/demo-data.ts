@@ -8,6 +8,7 @@
 // — only descriptive, conversation-state signals (no-applause doctrine).
 import {
   type FeedItem,
+  LEGACY_DISTRIBUTION_REASON,
   type SignalLedgerEntry,
   type StoryDetail,
   topicIdForSlug,
@@ -40,7 +41,7 @@ const feedWater: FeedItem = {
   corrections: { active: 0, validated: 1, incorrect: 0 },
   // DEPRECATED rollout compat (see LEGACY_RATING_LABELS in @licio/shared).
   rating_label: 'deepening',
-  distribution_reason: 'Readers opened the primary dataset and added sourced comments.',
+  distribution_reason: LEGACY_DISTRIBUTION_REASON,
   context_chips: [],
   safety_state: 'ok',
   more_on_this_story: [],
@@ -57,7 +58,7 @@ const feedZoning: FeedItem = {
   sources_count: 1,
   corrections: { active: 0, validated: 0, incorrect: 0 },
   rating_label: 'bridge-active',
-  distribution_reason: 'A bridge comment reduced cross-community confusion between two rooms.',
+  distribution_reason: LEGACY_DISTRIBUTION_REASON,
   context_chips: [{ id: 'c3', label: 'cross-community', icon: 'bridge' }],
   safety_state: 'ok',
   more_on_this_story: [],
@@ -74,7 +75,7 @@ const feedTransit: FeedItem = {
   sources_count: 0,
   corrections: { active: 1, validated: 0, incorrect: 0 },
   rating_label: 'needs-context',
-  distribution_reason: 'A clarifying question identified an ambiguity awaiting evidence.',
+  distribution_reason: LEGACY_DISTRIBUTION_REASON,
   context_chips: [{ id: 'c4', label: 'awaiting evidence', icon: 'circle-question' }],
   safety_state: 'caution',
   more_on_this_story: [],

@@ -9,9 +9,9 @@
 // empty bounded maps).
 import { randomUUID } from 'node:crypto';
 import { minhashSignature } from '@licio/invariants';
-import { independentSourcesResponseSchema, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
+import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   assembleMeriCandidates,
   assemblePhiTopicData,
@@ -26,13 +26,6 @@ import {
 } from '../invariants/runner.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
-import type { CitedContribution, ModerationContentPort } from '../moderation/ports.js';
-import {
-  createInMemoryModerationServices,
-  getModerationServices,
-  resetModerationServicesForTests,
-  setModerationServices,
-} from '../moderation/services.js';
 import { createV1Routes } from '../routes/v1.js';
 import { attentionEvent } from './event-test-helpers.js';
 import {
@@ -104,158 +97,6 @@ describe('public surfaces with stored data', () => {
     expect(body.interpretations[1]?.summary).toMatch(/the same way/);
     // Invalid UUID 422s.
     expect((await app().request('http://local/v1/stories/nope/interpretations')).status).toBe(422);
-  });
-
-  it('maps all four exposure-label tiers on the drawer endpoint', async () => {
-    const fixture = freshInvariantServices();
-    const gains: Record<string, number> = {};
-    const cases: Array<{ gain: number; label: string }> = [
-      { gain: 1, label: 'independent_source' },
-      { gain: 0.5, label: 'new_angle' },
-      { gain: 0.01, label: 'same_claim_new_evidence' },
-      { gain: 0, label: 'duplicate_context' },
-    ];
-    const ids: string[] = [];
-    for (const { gain } of cases) {
-      const { storyId } = await seedStory(fixture);
-      ids.push(storyId);
-      gains[storyId] = gain;
-    }
-    await upsertOutput(fixture, {
-      invariantType: 'MERI',
-      targetType: 'feed',
-      targetId: GLOBAL_FEED_TARGET_ID,
-      scoreVector: {
-        meri: 0.8,
-        marginal_gains: gains,
-        approximation: false,
-        per_class_bounds: { 'singleton:x': 1 },
-        group_ids: [],
-      },
-    });
-    for (let i = 0; i < cases.length; i += 1) {
-      const response = await app().request(`http://local/v1/stories/${ids[i]}/independent-sources`);
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { exposure_label: string | null };
-      expect(body.exposure_label).toBe(cases[i]?.label);
-    }
-    expect((await app().request('http://local/v1/stories/nope/independent-sources')).status).toBe(
-      422,
-    );
-  });
-
-  it('a degraded MERI row contributes NOTHING: gains AND redundancy classes both gated', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId } = await seedStory(fixture);
-    await upsertOutput(fixture, {
-      invariantType: 'MERI',
-      targetType: 'feed',
-      targetId: GLOBAL_FEED_TARGET_ID,
-      scoreVector: {
-        meri: 0.8,
-        marginal_gains: { [storyId]: 1 },
-        approximation: false,
-        per_class_bounds: { 'singleton:x': 1, 'singleton:y': 0.5 },
-        group_ids: [],
-      },
-      // The WS-H.1.2c `usable` gate: an INSUFFICIENT_COVERAGE row is ABSENT to
-      // every stored-output consumer — no stale gain, no fabricated classes.
-      reasonCodes: ['INSUFFICIENT_COVERAGE'],
-    });
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.marginal_gain).toBeNull();
-    expect(body.exposure_label).toBeNull();
-    expect(body.redundancy_classes).toBe(0);
-  });
-});
-
-describe('primary_sources on the independent-sources drawer (route surface)', () => {
-  afterEach(() => {
-    resetModerationServicesForTests();
-  });
-
-  function stubContentPort(row: CitedContribution): ModerationContentPort {
-    return {
-      async resolveTarget() {
-        return { exists: true, subjectUserId: null, contentKind: 'contribution' };
-      },
-      async applyContentState() {},
-      async applyAccountState() {},
-      async contentSnapshot() {
-        return null;
-      },
-      async threadContext() {
-        return { items: [], reportedContributionId: null };
-      },
-      async getCitedContribution(contributionId) {
-        return contributionId === row.contributionId ? row : null;
-      },
-    };
-  }
-
-  it('surfaces a steward mark through the schema-validated wire response', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId, threadId } = await seedStory(fixture);
-    const contributionId = randomUUID();
-    setModerationServices(
-      createInMemoryModerationServices({
-        content: stubContentPort({
-          contributionId,
-          threadId,
-          storyId,
-          storyTitle: 'Seeded story',
-          type: 'comment',
-          bodyPreview: 'Sourced comment.',
-          citations: [{ url: 'https://example.org/primary-dataset', title: 'Primary dataset' }],
-          createdAt: new Date().toISOString(),
-          threadRemoved: false,
-        }),
-      }),
-    );
-    const inserted = await getModerationServices().evidenceDecisions.insert({
-      contributionId,
-      threadId,
-      storyId,
-      action: 'mark-primary-source',
-      citationUrl: 'https://example.org/primary-dataset',
-      citationTitle: 'Primary dataset',
-      reasonCode: null,
-      note: null,
-      decidedBy: null,
-    });
-    expect(inserted.ok).toBe(true);
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.primary_sources).toEqual([
-      { url: 'https://example.org/primary-dataset', title: 'Primary dataset' },
-    ]);
-  });
-
-  it('fail-closed: a moderation singleton without a content port surfaces nothing', async () => {
-    const fixture = freshInvariantServices();
-    const { storyId, threadId } = await seedStory(fixture);
-    // The bare in-memory seam has NO published-only `getCitedContribution`
-    // read — an unverifiable mark must surface nothing, not leak.
-    setModerationServices(createInMemoryModerationServices());
-    const inserted = await getModerationServices().evidenceDecisions.insert({
-      contributionId: randomUUID(),
-      threadId,
-      storyId,
-      action: 'mark-primary-source',
-      citationUrl: 'https://example.org/unverifiable',
-      citationTitle: null,
-      reasonCode: null,
-      note: null,
-      decidedBy: null,
-    });
-    expect(inserted.ok).toBe(true);
-    const response = await app().request(`http://local/v1/stories/${storyId}/independent-sources`);
-    expect(response.status).toBe(200);
-    const body = independentSourcesResponseSchema.parse(await response.json());
-    expect(body.primary_sources).toEqual([]);
   });
 });
 
@@ -767,41 +608,16 @@ describe('SCOI surface edge branches', () => {
     // Invalid UUIDs 422.
     expect((await req('/scoi/reports/not-a-uuid')).status).toBe(422);
     expect(
-      (
-        await req('/scoi/threads/not-a-uuid/actions', {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422);
-    expect(
       (await req('/scoi/threads/not-a-uuid/bridge-requests', { method: 'POST', body: '{}' }))
         .status,
     ).toBe(422);
     // Missing thread 404 (uuid shape, no record).
     const ghost = randomUUID();
     expect(
-      (
-        await req(`/scoi/threads/${ghost}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(404);
-    expect(
       (await req(`/scoi/threads/${ghost}/bridge-requests`, { method: 'POST', body: '{}' })).status,
     ).toBe(404);
-    // Roomless thread (no steward scope possible) 404s; merge/annotate
-    // body requirements 422 on a scoped thread.
+    // Roomless thread (no steward scope possible), then scoped guards.
     const { threadId, storyId } = await seedStory(fixture);
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'separate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(404);
     const roomId = randomUUID();
     await fixture.forum.rooms.insert({
       roomId,
@@ -825,73 +641,18 @@ describe('SCOI surface edge branches', () => {
       assignedAt: new Date().toISOString(),
     });
     await fixture.ingestion.stories.updateThread(threadId, { roomId });
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'annotate', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422); // annotate without annotation
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({ action: 'merge', reason_code: 'MOD_SPAM_001' }),
-        })
-      ).status,
-    ).toBe(422); // merge without related_thread_id
-    expect(
-      (
-        await req(`/scoi/threads/${threadId}/actions`, {
-          method: 'POST',
-          body: JSON.stringify({
-            action: 'annotate',
-            reason_code: 'MOD_SPAM_001',
-            annotation: 'No lenses exist yet.',
-          }),
-        })
-      ).status,
-    ).toBe(422); // no lens-tagged interpretations to annotate
-    // A related thread the actor does NOT steward (or that does not
-    // exist) is refused with ONE error shape — no cross-room oracle.
-    const ghostRelated = await req(`/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'separate',
-        reason_code: 'MOD_SPAM_001',
-        related_thread_id: ghost,
-      }),
-    });
-    expect(ghostRelated.status).toBe(422);
-    // SEPARATE records without recomputation (scoi_after mirrors before).
-    const separated = await req(`/scoi/threads/${threadId}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'separate',
-        reason_code: 'MOD_SPAM_001',
-      }),
-    });
-    expect(separated.status).toBe(200);
-    const actions = await fixture.invariants.scoiActions.listForThread(threadId, 5);
-    expect(actions[0]?.action).toBe('separate');
-    expect(actions[0]?.scoiBefore).toBeNull();
-    expect(actions[0]?.scoiAfter).toBeNull();
     // Bridge request without a SCOI baseline 422s (no measurement exists
     // and recompute degrades on a lens-less story).
     expect(
       (await req(`/scoi/threads/${threadId}/bridge-requests`, { method: 'POST', body: '{}' }))
         .status,
     ).toBe(422);
-    // The related thread's action listing sees the merge/separate record.
     void storyId;
   });
 
   it('bridge stores and consumer edges: single-shot credit, no-decrease, missing payloads', async () => {
     const fixture = freshInvariantServices();
-    const { InMemoryBridgeAttemptStore, InMemoryScoiContextActionStore } = await import(
-      '../invariants/stores.js'
-    );
+    const { InMemoryBridgeAttemptStore } = await import('../invariants/stores.js');
     const store = new InMemoryBridgeAttemptStore();
     expect(await store.openForThread('none')).toBeNull();
     expect(
@@ -902,24 +663,6 @@ describe('SCOI surface edge branches', () => {
         resolvedAt: new Date().toISOString(),
       }),
     ).toBeNull();
-    const actions = new InMemoryScoiContextActionStore();
-    await actions.insert({
-      actionId: randomUUID(),
-      action: 'merge',
-      threadId: 'a',
-      relatedThreadId: 'b',
-      storyId: randomUUID(),
-      roomId: null,
-      reasonCode: 'MOD_SPAM_001',
-      annotation: null,
-      actorRef: 'steward:x',
-      scoiBefore: null,
-      scoiAfter: null,
-      createdAt: new Date().toISOString(),
-    });
-    // Listed from BOTH sides of the merge.
-    expect(await actions.listForThread('a', 5)).toHaveLength(1);
-    expect(await actions.listForThread('b', 5)).toHaveLength(1);
     // Consumer ignores events without an open request or with missing fields.
     await fixture.events.router.publish({
       event_id: randomUUID(),

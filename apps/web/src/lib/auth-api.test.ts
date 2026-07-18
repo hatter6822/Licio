@@ -84,13 +84,15 @@ afterEach(() => {
 });
 
 describe('toUserContext', () => {
-  it('maps the echoed public user, defaulting a null locale', () => {
+  it('maps the echoed public user, defaulting a null locale (roles default empty — the strict login echo cannot carry them)', () => {
     expect(toUserContext(USER_PUBLIC as never)).toEqual({
       id: USER_PUBLIC.user_id,
       handle: 'ada',
       display_name: 'Ada',
       account_state: 'active',
       locale: 'en-US',
+      roles: [],
+      steward_roles: [],
     });
   });
 });
@@ -115,6 +117,64 @@ describe('email code login', () => {
         jsonResponse({ error: { code: 'invalid_code', message: 'Invalid or expired code.' } }, 400),
     });
     await expect(verifyEmailLogin('AAAAAAAA')).rejects.toMatchObject({ code: 'invalid_code' });
+  });
+
+  it('a successful login refreshes the context from /status — roles ride ONLY the status contract, so console nav unhides immediately after sign-in', async () => {
+    mockRoutes({
+      'POST /v1/auth/email/verify-login': () => jsonResponse(SESSION_RESULT),
+      'GET /v1/auth/status': () =>
+        jsonResponse({
+          authenticated: true,
+          user: {
+            id: USER_PUBLIC.user_id,
+            handle: 'ada',
+            display_name: 'Ada',
+            account_state: 'active',
+            locale: 'en-US',
+            roles: ['user', 'compliance'],
+            steward_roles: ['ROLE_SAFETY'],
+          },
+        }),
+    });
+    const user = await verifyEmailLogin('AB12CD34');
+    expect(user.roles).toEqual(['user', 'compliance']);
+    expect(user.steward_roles).toEqual(['ROLE_SAFETY']);
+  });
+
+  it('an unauthenticated (or failing) status re-read falls back to the login echo — sign-in never regresses on a status hiccup', async () => {
+    mockRoutes({
+      'POST /v1/auth/email/verify-login': () => jsonResponse(SESSION_RESULT),
+      'GET /v1/auth/status': () => jsonResponse({ authenticated: false }),
+    });
+    const user = await verifyEmailLogin('AB12CD34');
+    expect(user.id).toBe(USER_PUBLIC.user_id);
+    expect(user.roles).toEqual([]); // the strict echo cannot carry roles
+  });
+
+  it('a status answer for a DIFFERENT account is refused — the SW NetworkFirst cache can serve an OLDER session after a network failure (codex: only trust the refreshed status for the echoed user)', async () => {
+    mockRoutes({
+      'POST /v1/auth/email/verify-login': () => jsonResponse(SESSION_RESULT),
+      'GET /v1/auth/status': () =>
+        jsonResponse({
+          authenticated: true,
+          user: {
+            id: '22222222-2222-4222-8222-222222222222',
+            handle: 'stale_other',
+            display_name: 'Stale Other',
+            account_state: 'active',
+            locale: 'en-US',
+            roles: ['user', 'compliance'],
+            steward_roles: ['ROLE_SAFETY'],
+          },
+        }),
+    });
+    const user = await verifyEmailLogin('AB12CD34');
+    // The just-verified echo wins wholesale — no foreign identity, no
+    // foreign roles adopted into the persisted context.
+    expect(user.id).toBe(USER_PUBLIC.user_id);
+    expect(user.handle).toBe('ada');
+    expect(user.roles).toEqual([]);
+    expect(user.steward_roles).toEqual([]);
   });
 });
 

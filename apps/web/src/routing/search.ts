@@ -4,16 +4,21 @@
 // coerced to the route default via `.catch(...)` — never silently accepted as
 // arbitrary input. These drive the feed-mode switcher and the thread branch tab
 // from shareable URLs.
-import { feedModeSchema, uuidSchema } from '@licio/shared';
+import { feedModeCompatSchema, normalizeFeedMode, uuidSchema } from '@licio/shared';
 import { z } from 'zod';
 
 /**
  * Front-page feed search: `?mode=` ∈ feed modes. Optional so visiting `/` with no
  * param uses the reader's saved mode; an invalid value coerces to undefined (the
- * front page then falls back to the UI store), never silently accepted.
+ * front page then falls back to the UI store), never silently accepted. A legacy
+ * mode in a pre-redesign shared URL normalizes to its canonical successor
+ * instead of being dropped (the link keeps working).
  */
 export const feedSearchSchema = z.object({
-  mode: feedModeSchema.optional().catch(undefined),
+  mode: feedModeCompatSchema
+    .transform((mode) => normalizeFeedMode(mode))
+    .optional()
+    .catch(undefined),
 });
 export type FeedSearch = z.infer<typeof feedSearchSchema>;
 
@@ -75,3 +80,20 @@ export const roomDetailSearchSchema = z.object({
   governance: roomGovernanceTabSchema.optional().catch(undefined),
 });
 export type RoomDetailSearch = z.infer<typeof roomDetailSearchSchema>;
+
+/**
+ * Operator consoles (WS-J.2 moderation, WS-N.2.1c compliance): `?tab=` deep-links
+ * a console section, so an operator can bookmark or share their queue (a
+ * navigation hint only — every console endpoint re-authorizes server-side).
+ * Absent ⇒ the first tab; an unknown value coerces to undefined, never silently
+ * accepted.
+ */
+export const moderationConsoleSearchSchema = z.object({
+  tab: z.enum(['queue', 'sources', 'appeals', 'integrity', 'audit']).optional().catch(undefined),
+});
+export type ModerationConsoleSearch = z.infer<typeof moderationConsoleSearchSchema>;
+
+export const complianceConsoleSearchSchema = z.object({
+  tab: z.enum(['cases', 'fraud', 'declarations']).optional().catch(undefined),
+});
+export type ComplianceConsoleSearch = z.infer<typeof complianceConsoleSearchSchema>;

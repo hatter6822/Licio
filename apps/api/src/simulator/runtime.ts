@@ -2019,7 +2019,7 @@ export class DevTrafficSimulator {
       surface: 'front_page',
       surfaceRoomId: null,
       surfaceTopicId: null,
-      mode: 'balanced',
+      mode: 'best',
       cursor: null,
     });
     const items: SimulatorFeedPulseItem[] = served.items.slice(0, 20).map((item, index) => {

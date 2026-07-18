@@ -6,7 +6,9 @@
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
 import { uuidSchema } from './common.js';
-import { feedModeSchema } from './feed.js';
+import { feedModeCompatSchema } from './feed.js';
+import { stewardRoleIdSchema } from './steward-roles.js';
+import { platformRoleSchema } from './user.js';
 
 /** Account lifecycle state (SPEC §22.1 account_state). */
 export const accountStateSchema = z.enum(['active', 'suspended', 'restricted', 'deactivated']);
@@ -22,6 +24,17 @@ export const userContextSchema = z.object({
   display_name: z.string().min(1),
   account_state: accountStateSchema,
   locale: z.string().min(2),
+  /** The user's OWN platform roles (WS-D.1.6b) — a navigation hint for the
+   *  role-gated consoles, never a client-side authorization decision (the
+   *  server re-authorizes every console endpoint with capability + MFA).
+   *  Defaulted so pre-roles persisted contexts and login echoes rehydrate
+   *  cleanly; the boot-time /status confirm supplies the real list. */
+  roles: z.array(platformRoleSchema).default([]),
+  /** The user's OWN WS-J doctrine steward-role grants — the moderation
+   *  console's REAL access population (`isStewardActor`: any grant, or
+   *  platform admin), which the platform roles alone cannot express.  Same
+   *  hint-only semantics and default as `roles`. */
+  steward_roles: z.array(stewardRoleIdSchema).default([]),
 });
 export type UserContext = z.infer<typeof userContextSchema>;
 
@@ -35,7 +48,10 @@ export const motionPreferenceSchema = z.enum(['system', 'enabled', 'disabled']);
  * (WS-C.4.1d): personalization off ⇒ no attention aggregates are uploaded.
  */
 export const userSettingsSchema = z.object({
-  feed_mode: feedModeSchema,
+  /** Compat-accepting: stored settings rows written before the sort-mode
+   *  redesign carry legacy values (see LEGACY_FEED_MODES in feed.ts);
+   *  consumers normalize via `normalizeFeedMode`. */
+  feed_mode: feedModeCompatSchema,
   personalization_enabled: z.boolean(),
   privacy_level: privacyLevelSchema,
   theme: themePreferenceSchema,
@@ -45,6 +61,13 @@ export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 /** Defaults a fresh account starts from (personalization on, standard privacy). */
 export const DEFAULT_USER_SETTINGS: UserSettings = {
+  // A LEGACY value ON PURPOSE (rollout compat): `GET /v1/settings` serves
+  // these defaults for EVERY user with no stored settings row, and a
+  // pre-redesign cached bundle validates the response against the old mode
+  // enum — a canonical value here would break settings sync on every stale
+  // bundle. Consumers normalize (`balanced` → the canonical default). Flip
+  // to DEFAULT_FEED_MODE when LEGACY_FEED_MODES is removed (tracked in
+  // docs/ranking/README.md).
   feed_mode: 'balanced',
   personalization_enabled: true,
   privacy_level: 'standard',

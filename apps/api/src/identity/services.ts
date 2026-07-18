@@ -179,11 +179,20 @@ export interface IdentityServices {
   /** WS-L: the user's own financial wallet links + receipts for the export —
    *  truncated display address only, never the address hash (default none). */
   exportFinancialWallets?: (userId: string) => Promise<Record<string, unknown[]>>;
+  /** WS-N: the user's compliance footprint for the export — region
+   *  declaration + disclosure acknowledgments + case METADATA only (no notes,
+   *  never SAR/investigation detail — the anti-tipping-off exclusion is a
+   *  documented legal-obligation carve-out) (default none). */
+  exportComplianceData?: (userId: string) => Promise<Record<string, unknown>>;
   /** WS-G: anonymize the user's contributions on hard deletion (default no-op). */
   anonymizeContributions?: (userId: string) => Promise<void>;
   /** WS-L: purge the user's financial wallet rows + receipts on hard deletion
    *  (default no-op) — so a linked wallet never outlives the account. */
   purgeFinancialWallets?: (userId: string) => Promise<void>;
+  /** WS-N: the compliance erasure sweep — declarations delete, acks
+   *  anonymize, case subjects scrub EXCEPT under a legal hold (the audited
+   *  carve-out; erased when the hold lapses) (default no-op). */
+  purgeCompliance?: (userId: string) => Promise<void>;
   /**
    * Downstream propagation hook (WS-E): invoked when a settings change affects
    * collection, so disabling personalization / setting retention to `none`

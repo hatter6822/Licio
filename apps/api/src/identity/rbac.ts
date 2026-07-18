@@ -8,8 +8,12 @@
 //   • Object-level ownership: a user may only touch their own resources.  A
 //     cross-user reference to a PRIVATE object resolves to `not_found`, never
 //     `forbidden`, so existence is not confirmed (no enumeration oracle).
+import { PLATFORM_ROLES } from '@licio/shared';
 
-export const ROLES = ['user', 'expert', 'moderator', 'steward', 'admin'] as const;
+/** The closed role vocabulary — re-exported from the shared SSOT
+ *  (`PLATFORM_ROLES`), so the wire contexts and this policy table can never
+ *  drift.  The policy GRANTS below remain server-only on purpose. */
+export const ROLES = PLATFORM_ROLES;
 export type Role = (typeof ROLES)[number];
 
 export const ACTIONS = [
@@ -18,6 +22,8 @@ export const ACTIONS = [
   'steward.audit.read', // read the audit log / steward review surfaces
   'admin.role.assign', // assign/revoke roles
   'ai.model.manage', // register/version/deprecate AI models + run the deploy gate (the "AI team", WS-K.1.1b)
+  'compliance.review', // WS-N.2.1c-2: financial-compliance case review, fraud queue, policy admin
+  'compliance.counsel.approve', // WS-N.2.1c-2: legal-counsel approvals (SAR/STR, lawful access, policy enablement)
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -47,8 +53,35 @@ export const POLICY: Readonly<Record<Role, readonly Action[]>> = {
     // deprecate models and drive the deployment gate. Like every other action
     // here, it never joins wallet identity to attention/ranking data.
     'ai.model.manage',
+    // The full compliance plane (the 2026-07 maintainer decision reversing the
+    // original WS-N.2.1c-2 admin exclusion): admin is the FINAL LINE OF
+    // DEFENSE and holds the highest privilege — every platform surface that
+    // any lesser role can reach, admin can reach, private member-hosted (WS-S
+    // P2P) rooms excepted.  Both capabilities ride the same step-up-MFA-gated
+    // middlewares as compliance/counsel sessions (`requireCompliance` /
+    // `requireCounsel`), so the widened account stays tightly secured.
+    'compliance.review',
+    'compliance.counsel.approve',
   ],
+  // WS-N.2.1c-2 — the financial-compliance plane.  The DEDICATED compliance
+  // roles stay least-privilege in the other direction: they hold no
+  // moderation/audit/admin action, and no role below admin silently gains
+  // compliance access.  `counsel` additionally holds the legal-approval
+  // capability (SAR/STR filing approval + read, lawful-access review,
+  // jurisdiction-policy enablement four-eyes).
+  compliance: ['self.manage', 'compliance.review'],
+  counsel: ['self.manage', 'compliance.review', 'compliance.counsel.approve'],
 };
+
+/** Whether ANY of the actor's roles may review financial-compliance cases (WS-N.2.1c-2). */
+export function isComplianceReviewer(roles: readonly Role[]): boolean {
+  return authorize(roles, 'compliance.review');
+}
+
+/** Whether ANY of the actor's roles holds the legal-counsel approval capability (WS-N.2.1c-2). */
+export function isCounsel(roles: readonly Role[]): boolean {
+  return authorize(roles, 'compliance.counsel.approve');
+}
 
 /** Whether ANY of the actor's roles is on the AI team (WS-K.1.1b). */
 export function isAiTeam(roles: readonly Role[]): boolean {

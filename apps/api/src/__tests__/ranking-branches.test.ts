@@ -695,7 +695,7 @@ describe('admin route edge branches', () => {
     );
     resetRankingServices();
     const lazy = getRankingServices();
-    expect(lazy.retrievers.origins()).toHaveLength(9);
+    expect(lazy.retrievers.origins()).toHaveLength(8);
     expect(getRankingServices()).toBe(lazy);
     // Restore the fixture singleton for the rest of the suite.
     setRankingServices(fixture.ranking);
@@ -822,33 +822,7 @@ describe('feed mapping variants', () => {
     expect(item?.context_chips.some((c) => /lenses/.test(c.label))).toBe(false);
   });
 
-  it('source-diverse mode halves the source share cap (logged for replay)', async () => {
-    await seedStory(fixture.ingestion);
-    const served = await serveFeed(fixture.ranking, {
-      userId: null,
-      surface: 'front_page',
-      surfaceRoomId: null,
-      surfaceTopicId: null,
-      mode: 'source-diverse',
-    });
-    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
-    expect(log?.replay_inputs?.max_source_share_pct_override).toBe(7);
-  });
-
-  it('local mode triples the local quota target at the candidate stage', async () => {
-    const { userId } = await seedUserWithSession(fixture.identity);
-    await fixture.identity.store.updateUser(userId, { locale: 'en-GB' });
-    await seedStory(fixture.ingestion, { locationScope: { type: 'country', value: 'GB' } });
-    await seedStory(fixture.ingestion);
-    const served = await serveFeed(fixture.ranking, {
-      userId,
-      surface: 'front_page',
-      surfaceRoomId: null,
-      surfaceTopicId: null,
-      mode: 'local',
-    });
-    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
-    const local = log?.quota_outcomes.find((q) => q.quota_type === 'local');
-    expect(local?.target_pct).toBe(30); // 10% tripled
-  });
+  // The former `source-diverse` balancing override and `local` quota boost
+  // were removed with the sort-mode redesign; the legacy wire values now
+  // normalize to the ranked pipeline — see ranking-sort-modes.test.ts.
 });

@@ -62,7 +62,6 @@ const FULL_ENFORCEMENT: RankingEnforcement = {
   hodge: true,
   meri: true,
   tropical: true,
-  scoi: true,
   gwei: true,
 };
 
@@ -93,7 +92,6 @@ function buildPool(n: number): {
       freshness_timestamp: createdAt,
       retrieval_score: rng(),
       retrieval_origins: ['global_pwatt_v1'],
-      bridge_context: null,
     });
     const vector: FeatureVector = {
       item_id: itemId,
@@ -218,6 +216,7 @@ describe.skipIf(!PERF || !DB_URL)(
             feature_version: 1,
             fallback: true,
             fallback_reason: 'kill_switch',
+            user_ordering: null,
             replay_inputs: null,
             retain_until: retentionDeadline(timestamp, 180),
           };

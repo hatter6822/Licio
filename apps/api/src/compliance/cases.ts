@@ -1,0 +1,506 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// WS-N.2.1b/c — FinancialComplianceCase creation triggers + the review state
+// machine.  The transition table transcribes the AUTHORITATIVE plan table
+// (docs/planning/15-compliance.md WS-N.2.1c) exactly; anything not marked ✅
+// there is INVALID_CASE_TRANSITION here.  Every state change, assignment,
+// note, and retention action appends to the per-case hash chain with a
+// non-reversible actor ref.  Case creation is idempotent per triggering
+// incident, and every creation publishes the REGISTERED
+// `compliance.financial.case.created` topic with an OPAQUE subject ref.
+import type {
+  CaseReviewState,
+  CaseRiskLevel,
+  CaseSubjectKind,
+  CaseTriggerType,
+} from '@licio/shared';
+import { appendCaseAuditInTx, runChainedUnit } from './audit.js';
+import type { ComplianceRuntimeConfig } from './config.js';
+import type {
+  CaseAuditStore,
+  ComplianceCaseRecord,
+  ComplianceCaseStore,
+  ComplianceTransactor,
+  ComplianceTxStores,
+} from './stores.js';
+
+type Clock = () => number;
+
+/**
+ * The UTC day an engine-opened case is keyed to.
+ *
+ * The idempotency keys of cases the ENGINE raises without an identifiable
+ * attempt (a sanctions match on an address, a high-value check with no
+ * `reviewRef`) fall back to a per-day key: the same condition on the same
+ * subject opens ONE case a day rather than one per request, and the reviewer's
+ * queue is not the retry counter.  Both `screening.ts` and `risk.ts` key that
+ * way, so they key it the same way.
+ */
+export const caseDayBucket = (nowMs: number): string => new Date(nowMs).toISOString().slice(0, 10);
+
+export interface CaseDeps {
+  cases: ComplianceCaseStore;
+  caseAudit: CaseAuditStore;
+  /** The unit of work every mutation here runs inside: the change and its
+   *  hash-chain entry commit together or not at all (see `stores.ts`). */
+  transactor: ComplianceTransactor;
+  config: () => ComplianceRuntimeConfig;
+  /** Non-reversible actor/subject refs (identity `accountRef` at boot). */
+  opaqueRef: (id: string) => string;
+  /** Publish + durably persist the registered case-created event. */
+  emitCaseCreated: (input: {
+    caseId: string;
+    triggerType: CaseTriggerType;
+    subjectRef: string;
+    riskLevel: CaseRiskLevel;
+  }) => Promise<void>;
+  metric: (name: string) => void;
+  log: (event: string, meta: Record<string, unknown>) => void;
+  now: Clock;
+  uuid: () => string;
+}
+
+// ---------------------------------------------------------------------------
+// The authoritative state machine (plan table, WS-N.2.1c).
+// ---------------------------------------------------------------------------
+
+export type CaseTransitionGuard = 'critical_only' | 'reason_required' | 'senior';
+
+/** from → to → guard ('ok' when unguarded).  Absent ⇒ invalid. */
+export const CASE_TRANSITIONS: Readonly<
+  Record<CaseReviewState, Partial<Record<CaseReviewState, CaseTransitionGuard | 'ok'>>>
+> = {
+  open: { assigned: 'ok', escalated: 'critical_only' },
+  assigned: { investigating: 'ok', escalated: 'ok' },
+  investigating: { resolved: 'ok', escalated: 'ok' },
+  escalated: { assigned: 'ok', investigating: 'ok', resolved: 'senior' },
+  resolved: { investigating: 'reason_required', escalated: 'reason_required' },
+};
+
+export function caseTransitionGuard(
+  from: CaseReviewState,
+  to: CaseReviewState,
+): CaseTransitionGuard | 'ok' | null {
+  return CASE_TRANSITIONS[from]?.[to] ?? null;
+}
+
+export type CaseError = { ok: false; status: number; code: string; message: string };
+const caseErr = (status: number, code: string, message: string): CaseError => ({
+  ok: false,
+  status,
+  code,
+  message,
+});
+export type CaseOutcome = CaseError | { ok: true; record: ComplianceCaseRecord };
+
+/**
+ * A unit that could not commit.  The message is UNCONDITIONAL now: the
+ * transaction guarantees nothing was kept, so there is no "…and could not be
+ * rolled back" case left to report — that branch existed only because a
+ * compensator could fail too.
+ */
+function unitFailure(deps: CaseDeps, label: string, error: unknown): CaseError {
+  deps.metric('compliance.unit_failed');
+  deps.log('compliance.unit_failed', {
+    unit: label,
+    message: error instanceof Error ? error.message : 'unknown',
+  });
+  return caseErr(
+    503,
+    'audit_unavailable',
+    'The change was not applied: it could not be recorded, so nothing was kept.',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Creation (WS-N.2.1b).
+// ---------------------------------------------------------------------------
+
+export interface CreateCaseInput {
+  subjectKind: CaseSubjectKind;
+  subjectRef: string;
+  triggerType: CaseTriggerType;
+  riskLevel: CaseRiskLevel;
+  note: string;
+  partnerCaseRef?: string | null;
+  /** Trigger-derived incident key — the same incident never opens two cases. */
+  idempotencyKey?: string | null;
+  /** The reviewer who opened this case by hand, if any.  Automated triggers
+   *  (velocity, sanctions, the high-value review) leave it undefined and the
+   *  genesis entry reads `system`; a console-created case must name its
+   *  author, or a manual fraud/scam case is indistinguishable from one the
+   *  engine raised. */
+  actorUserId?: string | null;
+}
+
+/**
+ * Open a case (WS-N.2.1b).  The row and its genesis entry are ONE unit: an
+ * unauditable case could never be repaired, because the idempotency key makes
+ * every retry return that very row.  The event is emitted after the unit
+ * commits — a side effect outside the database must not be replayed when a
+ * chain fork makes the unit run twice.
+ */
+export async function createCase(deps: CaseDeps, input: CreateCaseInput): Promise<CaseOutcome> {
+  let result: Awaited<ReturnType<typeof createCaseInTx>>;
+  try {
+    result = await runChainedUnit(
+      deps.transactor,
+      (stores) => createCaseInTx(stores, deps, input),
+      'case creation',
+    );
+  } catch (error) {
+    return unitFailure(deps, 'case creation', error);
+  }
+  if (!result.ok || !result.created) return result;
+  await announceCaseCreated(deps, result.record, input.subjectRef);
+  return { ok: true, record: result.record };
+}
+
+/**
+ * The post-commit announcement of a new case: the registered restricted topic
+ * (opaque subject ref, never an identity) plus its metrics.
+ *
+ * EVERY path that opens a case owes this — `createCase` discharges it for its
+ * own callers, and a caller that composes `createCaseInTx` into a larger unit
+ * (the lawful-access intake) must call it once that unit commits, or its cases
+ * never reach consumers or monitoring while every other trigger's do.
+ *
+ * Called AFTER the unit commits, and best-effort BY DESIGN: the case and its
+ * chain entry are the record of truth and are already committed, so a failed
+ * notification must not destroy an audited case — nor report a false failure
+ * that sends the caller into a retry the idempotency key would short-circuit
+ * anyway.  The alert is the repair signal.
+ */
+export async function announceCaseCreated(
+  deps: CaseDeps,
+  record: ComplianceCaseRecord,
+  subjectRef: string,
+): Promise<void> {
+  try {
+    await deps.emitCaseCreated({
+      caseId: record.caseId,
+      triggerType: record.triggerType,
+      subjectRef: deps.opaqueRef(subjectRef),
+      riskLevel: record.riskLevel,
+    });
+  } catch (error) {
+    deps.metric('compliance.case.event_emit_failed');
+    deps.log('compliance.case.event_emit_failed', {
+      caseId: record.caseId,
+      triggerType: record.triggerType,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+  deps.metric(`compliance.case.created.${record.triggerType}`);
+  deps.log('compliance.case.created', {
+    caseId: record.caseId,
+    triggerType: record.triggerType,
+    riskLevel: record.riskLevel,
+  });
+}
+
+/** `createCase` within an EXISTING unit (a SAR draft, a lawful-access intake).
+ *  `created` is false for an idempotent hit — the caller skips the event. */
+export async function createCaseInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  input: CreateCaseInput,
+): Promise<CaseError | { ok: true; record: ComplianceCaseRecord; created: boolean }> {
+  const idempotencyKey = input.idempotencyKey ?? null;
+  if (idempotencyKey !== null) {
+    const existing = await stores.cases.findByIdempotencyKey(idempotencyKey);
+    if (existing !== null) return { ok: true, record: existing, created: false };
+  }
+  const nowMs = deps.now();
+  const createdAt = new Date(nowMs).toISOString();
+  const retentionDays = deps.config().retentionDaysByTrigger[input.triggerType] ?? 730;
+  const record: ComplianceCaseRecord = {
+    caseId: deps.uuid(),
+    userIdOrRoomId: input.subjectRef,
+    subjectKind: input.subjectKind,
+    triggerType: input.triggerType,
+    riskLevel: input.riskLevel,
+    partnerCaseRef: input.partnerCaseRef ?? null,
+    reviewState: 'open',
+    assignedTo: null,
+    resolution: null,
+    retentionPolicy: {
+      retention_period_days: retentionDays,
+      deletion_date: new Date(nowMs + retentionDays * 86_400_000).toISOString(),
+      legal_hold: false,
+      legal_hold_refs: [],
+    },
+    idempotencyKey,
+    createdAt,
+    updatedAt: createdAt,
+  };
+  const inserted = await stores.cases.insert(record);
+  if (inserted.caseId !== record.caseId) {
+    // A concurrent duplicate won the idempotency slot — theirs is THE case.
+    return { ok: true, record: inserted, created: false };
+  }
+  await appendCaseAuditInTx(stores, deps, {
+    caseId: inserted.caseId,
+    action: 'created',
+    actorRef:
+      input.actorUserId === undefined || input.actorUserId === null
+        ? 'system'
+        : deps.opaqueRef(input.actorUserId),
+    beforeState: null,
+    afterState: 'open',
+    note: input.note,
+  });
+  return { ok: true, record: inserted, created: true };
+}
+
+// ---------------------------------------------------------------------------
+// The review workflow (WS-N.2.1c) — one guarded transition primitive.
+// ---------------------------------------------------------------------------
+
+export interface TransitionInput {
+  caseId: string;
+  to: CaseReviewState;
+  actorUserId: string;
+  /** True when the actor holds the counsel capability (`senior` guard). */
+  isSenior: boolean;
+  reason?: string | null;
+  assigneeUserId?: string | null;
+  resolution?: ComplianceCaseRecord['resolution'];
+}
+
+/**
+ * One guarded transition (WS-N.2.1c).  The state change and its chain entry
+ * are ONE unit: an unaudited move is unrepairable, since a retry would read
+ * the NEW state and find nothing to redo.
+ */
+export async function transitionCase(deps: CaseDeps, input: TransitionInput): Promise<CaseOutcome> {
+  try {
+    return await runChainedUnit(
+      deps.transactor,
+      (stores) => transitionCaseInTx(stores, deps, input),
+      'case transition',
+    );
+  } catch (error) {
+    return unitFailure(deps, 'case transition', error);
+  }
+}
+
+/** `transitionCase` within an EXISTING unit. */
+export async function transitionCaseInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  input: TransitionInput,
+): Promise<CaseOutcome> {
+  const record = await stores.cases.getById(input.caseId);
+  if (record === null) return caseErr(404, 'not_found', 'Resource not found');
+  const guard = caseTransitionGuard(record.reviewState, input.to);
+  if (guard === null) {
+    return caseErr(
+      409,
+      'INVALID_CASE_TRANSITION',
+      `A case cannot move ${record.reviewState} -> ${input.to}.`,
+    );
+  }
+  if (guard === 'critical_only' && record.riskLevel !== 'critical') {
+    return caseErr(
+      409,
+      'INVALID_CASE_TRANSITION',
+      'Direct escalation from open is allowed only for critical risk.',
+    );
+  }
+  if (guard === 'reason_required' && (input.reason ?? '').trim() === '') {
+    return caseErr(400, 'reason_required', 'Reopening a resolved case requires a reason.');
+  }
+  if (guard === 'senior' && !input.isSenior) {
+    return caseErr(403, 'senior_required', 'Resolving an escalated case requires senior review.');
+  }
+  if (input.to === 'assigned' && (input.assigneeUserId ?? null) === null) {
+    return caseErr(400, 'assignee_required', 'Assignment requires an assignee.');
+  }
+  if (input.to === 'resolved' && (input.resolution ?? null) === null) {
+    return caseErr(400, 'resolution_required', 'Resolution requires a structured outcome.');
+  }
+  const patch: Parameters<ComplianceCaseStore['transition']>[2] = { reviewState: input.to };
+  if (input.to === 'assigned') patch.assignedTo = input.assigneeUserId ?? null;
+  if (input.to === 'resolved') patch.resolution = input.resolution ?? null;
+  const updated = await stores.cases.transition(
+    input.caseId,
+    record.reviewState,
+    patch,
+    new Date(deps.now()).toISOString(),
+  );
+  if (updated === null) {
+    return caseErr(409, 'concurrent_transition', 'Another reviewer raced this transition.');
+  }
+  await appendCaseAuditInTx(stores, deps, {
+    caseId: input.caseId,
+    action: `transition:${input.to}`,
+    actorRef: deps.opaqueRef(input.actorUserId),
+    beforeState: record.reviewState,
+    afterState: input.to,
+    note: input.reason ?? (input.to === 'resolved' ? (input.resolution?.notes ?? null) : null),
+  });
+  return { ok: true, record: updated };
+}
+
+/** An investigation note (audited; no state change). */
+export async function addCaseNote(
+  deps: CaseDeps,
+  input: { caseId: string; actorUserId: string; note: string },
+): Promise<CaseOutcome> {
+  try {
+    return await runChainedUnit(
+      deps.transactor,
+      async (stores) => {
+        const record = await stores.cases.getById(input.caseId);
+        if (record === null) return caseErr(404, 'not_found', 'Resource not found');
+        await appendCaseAuditInTx(stores, deps, {
+          caseId: input.caseId,
+          action: 'note',
+          actorRef: deps.opaqueRef(input.actorUserId),
+          beforeState: record.reviewState,
+          afterState: record.reviewState,
+          note: input.note,
+        });
+        return { ok: true, record };
+      },
+      'case note',
+    );
+  } catch (error) {
+    return unitFailure(deps, 'case note', error);
+  }
+}
+
+/**
+ * Apply/release a legal hold (SAR drafting, lawful-access intake/denial).  The
+ * hold and its entry are ONE unit: a hold the chain does not record is an
+ * unaudited change to what retention may delete.
+ */
+/**
+ * One obligation's hold on a case.
+ *
+ * `holdRef` is REQUIRED: a hold is reference-counted, because a SAR and a
+ * lawful-access request can hold the same case at once and each may release
+ * only its own.  Pass an OPAQUE ref (`deps.opaqueRef('sar:<id>')`) — the
+ * policy is reviewer-visible, and a readable ref would name the obligation.
+ */
+/**
+ * The states an automated close can start from, and the sanctioned route each
+ * takes to `resolved`.  The WS-N.2.1c table has no open→resolved edge and these
+ * paths do not get to invent one — a shortcut here would be a shortcut in the
+ * reviewers' state machine.  Both routes are unguarded ('ok' in
+ * `CASE_TRANSITIONS`): `escalated` reaches `resolved` via `investigating`
+ * precisely so an automated path never exercises the counsel-only edge.
+ */
+const RESOLUTION_ROUTE: Partial<Record<CaseReviewState, readonly CaseReviewState[]>> = {
+  open: ['assigned', 'investigating', 'resolved'],
+  assigned: ['investigating', 'resolved'],
+  investigating: ['resolved'],
+  escalated: ['investigating', 'resolved'],
+};
+
+/**
+ * Walk a case to `resolved` FROM WHEREVER IT CURRENTLY SITS, inside the
+ * caller's unit.  The route is read off the live state, never fixed: a reviewer
+ * who has already picked the case up (`assigned`, `investigating`) would make a
+ * fixed open→assigned first step return `INVALID_CASE_TRANSITION` and take the
+ * whole unit down with it — so counsel could not record a denial, or the fraud
+ * queue a decision, because someone was already looking at the case.
+ *
+ * Not idempotent step-by-step (a second run reads the moved state and finds no
+ * edge back), so it must be atomic: either the case lands on `resolved` or it
+ * never left, and the retry re-drives the whole route.  False ⇔ a step was
+ * refused; the caller must abandon its unit rather than record a decision it
+ * could not apply.
+ */
+export async function resolveCaseInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  input: {
+    caseId: string;
+    actorUserId: string;
+    resolution: NonNullable<ComplianceCaseRecord['resolution']>;
+  },
+): Promise<boolean> {
+  const record = await stores.cases.getById(input.caseId);
+  if (record === null) return false;
+  if (record.reviewState === 'resolved') {
+    // Already decided.  Only the SAME outcome is a no-op: a case a reviewer
+    // resolved `restricted` must not report success for a `cleared` decision —
+    // the consumers read the case's outcome, not the caller's intent, so the
+    // transfer would stay held while the queue said it was released.  A
+    // reviewer who means to change a decision reopens the case (an audited
+    // resolved → investigating, reason required); this path does not do it for
+    // them behind their back.
+    return record.resolution?.outcome === input.resolution.outcome;
+  }
+  const route = RESOLUTION_ROUTE[record.reviewState];
+  if (route === undefined) return false;
+  for (const to of route) {
+    // Never `senior`: every edge on both routes is unguarded, so an automated
+    // path claims no capability it was not granted.
+    const moved = await transitionCaseInTx(stores, deps, {
+      caseId: input.caseId,
+      to,
+      actorUserId: input.actorUserId,
+      isSenior: false,
+      ...(to === 'assigned' ? { assigneeUserId: input.actorUserId } : {}),
+      ...(to === 'resolved' ? { resolution: input.resolution } : {}),
+    });
+    if (!moved.ok) return false;
+  }
+  return true;
+}
+
+export interface LegalHoldInput {
+  caseId: string;
+  hold: boolean;
+  holdRef: string;
+  actorUserId: string;
+  reason: string;
+}
+
+export async function setLegalHold(deps: CaseDeps, input: LegalHoldInput): Promise<CaseOutcome> {
+  try {
+    return await runChainedUnit(
+      deps.transactor,
+      (stores) => setLegalHoldInTx(stores, deps, input),
+      'legal hold',
+    );
+  } catch (error) {
+    return unitFailure(deps, 'legal hold', error);
+  }
+}
+
+/** `setLegalHold` within an EXISTING unit (the hold and the record it exists
+ *  FOR — a SAR row, a lawful-access request — then commit together). */
+export async function setLegalHoldInTx(
+  stores: Pick<ComplianceTxStores, 'cases' | 'caseAudit'>,
+  deps: CaseDeps,
+  input: LegalHoldInput,
+): Promise<CaseOutcome> {
+  const record = await stores.cases.getById(input.caseId);
+  if (record === null) return caseErr(404, 'not_found', 'Resource not found');
+  // The store applies the ref and derives the flag UNDER A ROW LOCK — this
+  // caller never reads-then-writes the ref set, so two obligations racing on
+  // one case cannot lose each other's hold.
+  const updated = await stores.cases.applyLegalHold({
+    caseId: input.caseId,
+    holdRef: input.holdRef,
+    hold: input.hold,
+    updatedAt: new Date(deps.now()).toISOString(),
+  });
+  if (updated === null) return caseErr(404, 'not_found', 'Resource not found');
+  await appendCaseAuditInTx(stores, deps, {
+    caseId: input.caseId,
+    // The entry describes the CASE's hold, not the obligation's: `released`
+    // only when the last one lets go.  A release that leaves the case held
+    // (another obligation still needs it) is not a release of the case.
+    action: updated.retentionPolicy.legal_hold ? 'legal_hold_applied' : 'legal_hold_released',
+    actorRef: deps.opaqueRef(input.actorUserId),
+    beforeState: record.reviewState,
+    afterState: record.reviewState,
+    note: input.reason,
+  });
+  return { ok: true, record: updated };
+}

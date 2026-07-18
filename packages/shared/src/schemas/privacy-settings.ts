@@ -17,7 +17,7 @@
 //     call (fail-closed), not merely hidden in the UI.
 import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
-import { feedModeSchema } from './feed.js';
+import { feedModeCompatSchema } from './feed.js';
 import { topicRepeatPreferenceSchema } from './invariants-api.js';
 
 /** Current on-the-wire / at-rest schema version for both settings blobs. */
@@ -122,7 +122,11 @@ export const personalizationSettingsSchema = z
   .object({
     schema_version: z.literal(PRIVACY_SETTINGS_VERSION),
     topic_preferences: z.array(z.string().min(1).max(128)).max(MAX_TOPIC_PREFERENCES),
-    feed_mode: feedModeSchema,
+    /** Compat-accepting: stored blobs written before the sort-mode redesign
+     *  carry legacy values; they round-trip UNCHANGED (pre-redesign bundles
+     *  reading the same blob keep parsing) and every consumer normalizes via
+     *  `normalizeFeedMode` (see LEGACY_FEED_MODES in feed.ts). */
+    feed_mode: feedModeCompatSchema,
     locale_overrides: z.array(z.string().min(2).max(35)).max(10),
     /**
      * Per-topic MERI repeats preference (SPEC §7.6; WS-H.2.3c): adjusts the
@@ -183,6 +187,14 @@ export function defaultPersonalizationSettings(): PersonalizationSettings {
     schema_version: PRIVACY_SETTINGS_VERSION,
     topic_preferences: [],
     topic_repeat_preference: {},
+    // A LEGACY value ON PURPOSE (rollout compat): this default is SEEDED into
+    // new accounts' blobs and EMITTED on `/v1/privacy/settings` +
+    // `/v1/feed/preferences`, and a pre-redesign cached bundle validates
+    // those responses against the old mode enum — a canonical value here
+    // would break every settings read on stale bundles. Every consumer
+    // normalizes (`balanced` → the canonical default). Flip to
+    // DEFAULT_FEED_MODE when LEGACY_FEED_MODES is removed (tracked in
+    // docs/ranking/README.md).
     feed_mode: 'balanced',
     locale_overrides: [],
   };

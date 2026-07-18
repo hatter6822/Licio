@@ -35,6 +35,8 @@ const ACTIVE_USER: UserContext = {
   display_name: 'Ada',
   account_state: 'active',
   locale: 'en',
+  roles: [],
+  steward_roles: [],
 };
 
 const VALID_CONTRIBUTION = {
@@ -118,7 +120,7 @@ describe('request interceptor', () => {
       if (init) calls.push(init);
       return jsonResponse({ items: [], nextCursor: null });
     });
-    await fetchFeed('chronological');
+    await fetchFeed('new');
     expect(calls[0]?.credentials).toBe('include');
   });
 

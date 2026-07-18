@@ -9,6 +9,7 @@
 // adding a route without updating this catalog fails CI.
 export const ROUTE_PATTERNS = [
   '/',
+  '/compliance-console',
   '/debate/$debateId',
   '/dev/simulator',
   '/login',

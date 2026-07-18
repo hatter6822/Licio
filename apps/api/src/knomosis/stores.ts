@@ -14,12 +14,17 @@ import type {
   GovernanceAuditActionType,
   KnomosisEnvironment,
   KnomosisSignedActionType,
+  ProposalChallengeColumnState,
+  ProposalExecutionState,
+  ProposalType,
+  ProposalVotingState,
   ReconciliationState,
   SubmissionState,
   UnlinkState,
   WalletAccountType,
   WalletRiskState,
 } from '@licio/shared';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
 const iso = (now: Clock): string => new Date(now()).toISOString();
@@ -60,6 +65,17 @@ export interface KnomosisDeploymentRecord {
   createdAt: string;
 }
 
+/**
+ * Action states in which the attempt is DEAD and its intent is free to be
+ * retried (`retryIntent`: `failed|reverted -> created`, WS-M.3.1b).
+ *
+ * ONE definition, matching migration 0089's partial index exactly: the index
+ * decides which reservations collide, and this decides which the in-memory
+ * adapter collides and which the replay read returns — three answers that must
+ * be the same answer.
+ */
+export const DEAD_ACTION_STATES: ReadonlySet<SubmissionState> = new Set(['failed', 'reverted']);
+
 export interface KnomosisActionRecordEntity {
   actionRecordId: string;
   deploymentId: string;
@@ -83,6 +99,12 @@ export interface KnomosisActionRecordEntity {
   indexedEventRef: string | null;
   reconciliationState: ReconciliationState;
   idempotencyKey: string;
+  /** The WS-M payment intent this action settles, when it settles one.  ONE
+   *  action per intent is a DB partial unique (migration 0089): the intent is
+   *  the exclusive resource, so a second reservation for it loses the insert
+   *  and replays the winner — whoever submitted it, under whatever key.  Null
+   *  for a direct action, which carries only its actor-scoped key. */
+  paymentIntentId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -118,7 +140,7 @@ export interface GovernanceProposalRecord {
    *  votes/signatures are preserved; only the deleting user's authorship link is
    *  scrubbed (WS-L data-rights; never cascade-delete co-participants). */
   proposerUserId: string | null;
-  proposalType: 'charter_update' | 'bounty' | 'capped_grant';
+  proposalType: ProposalType;
   title: string;
   plainLanguageSummary: string;
   requestedAmount: string | null;
@@ -129,14 +151,14 @@ export interface GovernanceProposalRecord {
   requestedAction: Record<string, unknown>;
   expectedDeliverable: string;
   preflightState: 'pending' | 'passed' | 'failed';
-  votingState: 'open' | 'passed' | 'rejected' | 'quorum_not_met';
-  challengeState: 'none' | 'open' | 'upheld' | 'dismissed';
+  votingState: ProposalVotingState;
+  challengeState: ProposalChallengeColumnState;
   // `executing` is a RECOVERABLE in-progress state (WS-L.4.1c): a proposal is
   // claimed `timelocked`→`executing` BEFORE the simulated debit, and advanced to
   // `executed` ONLY after the debit + ledger are durable.  A crash mid-execution
   // leaves it `executing` — honest (never falsely `executed`) and never re-run by
   // the timelocked-only sweep, so the treasury is never double-debited.
-  executionState: 'not_executed' | 'timelocked' | 'executing' | 'executed' | 'blocked';
+  executionState: ProposalExecutionState;
   simulationMode: boolean;
   executableAfter: string | null;
   createdAt: string;
@@ -147,6 +169,16 @@ export interface GovernanceProposalRecord {
    *  scheduler, which would otherwise mis-attribute the `execution_simulated` audit
    *  row to the (null-actor) sweep instead of the initiating user (WS-L.4.1c / N2). */
   executionClaimedAt: string | null;
+  // --- WS-M production lifecycle (migration 0082; null on sim rows). ---------
+  /** The law-pack version PINNED at publication (WS-M.1.3d). */
+  lawPackVersionId?: string | null;
+  /** Spend category for treasury proposals (kernel cap category). */
+  category?: string | null;
+  deliberationEndsAt?: string | null;
+  votingEndsAt?: string | null;
+  challengeWindowEndsAt?: string | null;
+  /** The settled tally snapshot (proposalTallyWireSchema shape). */
+  tallySnapshot?: Record<string, unknown> | null;
 }
 
 export type ProposalVoteChoice = 'approve' | 'reject' | 'abstain';
@@ -169,6 +201,13 @@ export interface GovernanceSignatureRecord {
   weightSnapshot: string | null;
   eligibilityReason: string;
   createdAt: string;
+  // --- WS-M.2.3b-1 (migration 0082; defaults cover WS-L.4 rows). -------------
+  /** What the signature authorizes (the crypto scheme stays in signatureType). */
+  purpose?: 'vote' | 'approval' | 'multisig' | 'delegation';
+  /** Vote choice for purpose=vote (null otherwise). */
+  choice?: ProposalVoteChoice | null;
+  /** Per-proposal single-use nonce (anti-replay). */
+  nonce?: string | null;
 }
 
 export interface SimTreasuryRecord {
@@ -209,6 +248,15 @@ export interface GovernanceAuditRecord {
    *  by proposal so the execution row is written exactly once even if the executing
    *  proposal is re-driven by the recovery sweep (WS-L.4.1c / P2). */
   dedupeKey?: string;
+  // --- WS-M.4.3c per-room hash chain (migration 0082; absent on WS-L.4 rows).
+  /** The previous CHAINED entry's integrity hash (null = chain genesis). */
+  prevHash?: string | null;
+  /** 0x-prefixed SHA-256 over (prevHash ‖ actionType ‖ canonical(details) ‖
+   *  createdAt ‖ roomId) — computed by the WS-M audit-chain writer only. */
+  integrityHash?: string | null;
+  /** WS-M linkage (soft; null on room-level / WS-L.4 entries). */
+  proposalId?: string | null;
+  treasuryId?: string | null;
 }
 
 export interface ReconciliationResultRecord {
@@ -307,10 +355,13 @@ export interface FinancialWalletStore {
    *  A risk read-through (preflight / risk-state route) can overlap another wallet
    *  mutation (e.g. an unlink), so writing back a stale full snapshot would clobber
    *  the lifecycle fields and silently cancel the audited unlink; a column-scoped
-   *  update touches nothing else. */
+   *  update touches nothing else.  When `expected` is given the write is a CAS —
+   *  it applies only if the current `riskState` equals it (the link-time `clear`
+   *  promotes `pending`→`normal` without clobbering a racing escalation). */
   updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void>;
   /** Update ONLY the `label` column (WS-L.2.5c) — never a full-record write.  A
    *  label edit can overlap an unlink/risk mutation, so a stale full snapshot would
@@ -328,6 +379,15 @@ export interface FinancialWalletStore {
     expectedFinalizeAfter: string | null,
     unlinkedAtIso: string,
   ): Promise<boolean>;
+  /** Column-scoped CANCEL of a pending unlink (WS-L.2.5b relink-in-cooldown): flip
+   *  `unlinkState`→`active` + clear the cooling-off fields ONLY, leaving riskState/
+   *  label untouched.  A full-record write would clobber a `high` risk a compliance
+   *  escalation persisted between the caller's read and this write, silently
+   *  restoring the prior `normal` and losing the fail-closed restriction — the same
+   *  clobber `updateRiskState`/`updateLabel` are column-scoped to avoid.  Returns
+   *  the FRESH row (so the caller sees a concurrent escalation), the current row
+   *  unchanged when it is no longer pending_unlink, or null if it vanished. */
+  cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null>;
   /** WS-L data-rights: hard-delete every wallet row for a user on account
    *  deletion; returns the rows removed. */
   purgeByUser(userId: string): Promise<number>;
@@ -349,6 +409,18 @@ export interface KnomosisActionStore {
     actorUserId: string,
     idempotencyKey: string,
   ): Promise<KnomosisActionRecordEntity | null>;
+  /** The LIVE action settling this intent, if one already does — the read that
+   *  turns a lost `knomosis_action_intent_uq` race into a replay of the winner.
+   *  Live only, and for the same reason the index is: a dead attempt has
+   *  released the intent for `retryIntent`, so replaying it would hand the
+   *  caller a corpse instead of their replacement. */
+  getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
+  /** The MOST RECENT action for this intent in ANY state (incl. terminal) — the
+   *  crash-recovery read (`orphanActionFor`): a submit that failed/reverted before
+   *  the browser attached is still recoverable so the intent can reach a
+   *  terminal/retryable state instead of expiring off the ledger.  The LIVE-only
+   *  `getByPaymentIntentId` above stays the uniqueness/replay predicate. */
+  getLatestByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null>;
   update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity>;
   /** COMPARE-AND-SET the submission state: apply the patch ONLY if the stored row
    *  is still in `expectedState`, returning null when a concurrent writer (e.g.
@@ -507,6 +579,17 @@ export interface GovernanceProposalStore {
   insert(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   getById(proposalId: string): Promise<GovernanceProposalRecord | null>;
   listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]>;
+  /** PRODUCTION rows with live settle work (deliberation/open voting, or a
+   *  passed row still timelocked/executing) — bounded by open work, never by
+   *  history, so the sweep can't starve behind a full newest-N page (WS-M). */
+  /** Keyset-paged (proposalId ascending): the settle sweep walks EVERY
+   *  unsettled row — a fixed newest-first slice would let a busy room's
+   *  not-yet-due proposals starve older due ones (PR #144 W7). */
+  listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<GovernanceProposalRecord[]>;
   update(record: GovernanceProposalRecord): Promise<GovernanceProposalRecord>;
   /** ATOMICALLY claim a passed, timelocked proposal for execution: CAS the
    *  executionState `timelocked` → `executing`, returning the claimed row, or null
@@ -540,6 +623,50 @@ export interface GovernanceProposalStore {
       | { votingState: 'passed'; executionState: 'timelocked'; executableAfter: string }
       | { votingState: 'rejected' },
   ): Promise<GovernanceProposalRecord | null>;
+  /** WS-M.4.2d — generalized voting-state CAS for the PRODUCTION lifecycle:
+   *  apply `patch` only while `votingState` still equals `from`, returning the
+   *  updated row or null on a lost race.  Drives `deliberation → open` and
+   *  `open → passed/rejected/quorum_not_met` (with tally snapshot, challenge
+   *  window, and timelock columns) without racing a concurrent settle. */
+  casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Partial<
+      Pick<
+        GovernanceProposalRecord,
+        | 'executionState'
+        | 'executableAfter'
+        | 'challengeWindowEndsAt'
+        | 'votingEndsAt'
+        | 'tallySnapshot'
+        | 'challengeState'
+      >
+    >,
+  ): Promise<GovernanceProposalRecord | null>;
+  /** COLUMN-scoped execution-state CAS (sweep): the settle/expiry/failure
+   *  paths write ONLY the execution columns against an expected from-state —
+   *  a whole-row snapshot here could clobber a concurrent challenge
+   *  projection or vote settlement. */
+  casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options?: { clearClaim?: boolean },
+  ): Promise<boolean>;
+  /** COLUMN-scoped challenge projection (PR #144 W11): challenge resolution
+   *  must never write a stale whole-row snapshot back over a concurrent
+   *  execution.  `blockExecution` blocks only a not-yet-executed row;
+   *  `executableAfterFloor` restarts the execution window for a still-
+   *  timelocked row whose window elapsed under challenge review. */
+  applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean>;
   /** Timelocked proposals whose executableAfter elapsed (simulated execution). */
   listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]>;
   /** Proposals stranded mid-execution (claimed `executing` but never finalized —
@@ -648,6 +775,17 @@ export interface AuditLogCursor {
 
 export interface GovernanceAuditStore {
   append(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord>;
+  /** WS-M.4.3c: append a HASH-CHAINED entry.  The store enforces the two
+   *  fork-proof uniques from migration 0082 — at most one child per
+   *  (room, prevHash) and one chained genesis per room — and returns NULL on a
+   *  collision so the chain writer re-reads the head and retries.  Entries must
+   *  carry non-null integrityHash (and prevHash except at genesis). */
+  appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: the room's current chain head — the chained entry whose
+   *  integrityHash is no other chained entry's prevHash (null ⇒ no chain yet). */
+  chainHead(roomId: string): Promise<GovernanceAuditRecord | null>;
+  /** WS-M.4.3c: every chained entry for a room (for the chain verifier). */
+  listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]>;
   listByRoom(
     roomId: string,
     limit: number,
@@ -657,6 +795,10 @@ export interface GovernanceAuditStore {
   /** Count only qualifying simulated-practice actions for the readiness gate
    *  (WS-L.4.1f) — never the meta mode-transition/comprehension rows. */
   countQualifyingByRoom(roomId: string): Promise<number>;
+  /** WS-M.4.2c-2: one member's qualifying governance participation in a room —
+   *  the `minContributions` eligibility basis (an in-context metric; never a
+   *  cross-context content join). */
+  countQualifyingByRoomActor(roomId: string, userId: string): Promise<number>;
   /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
    *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
    *  anonymized. */
@@ -853,11 +995,14 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped: re-read the CURRENT row and set only riskState, so a
     // concurrent lifecycle mutation (unlink) is never clobbered by a stale snapshot.
     const row = this.#rows.get(walletAccountId);
     if (row === undefined) return;
+    // CAS: apply only when the current state matches `expected` (when supplied).
+    if (expected !== undefined && row.riskState !== expected) return;
     this.#rows.set(walletAccountId, { ...row, riskState });
   }
 
@@ -898,6 +1043,24 @@ export class InMemoryFinancialWalletStore implements FinancialWalletStore {
       unlinkedAt: unlinkedAtIso,
     });
     return true;
+  }
+
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped: re-read the CURRENT row and touch ONLY the unlink lifecycle
+    // fields, so a concurrent risk escalation (a `high` persisted since the caller
+    // read `existing`) survives.  Idempotent — a row already active is returned
+    // unchanged.
+    const row = this.#rows.get(walletAccountId);
+    if (row === undefined) return null;
+    if (row.unlinkState !== 'pending_unlink') return { ...row };
+    const updated: FinancialWalletRecord = {
+      ...row,
+      unlinkState: 'active',
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+    };
+    this.#rows.set(walletAccountId, updated);
+    return { ...updated };
   }
 
   async purgeByUser(userId: string): Promise<number> {
@@ -1005,6 +1168,18 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       ) {
         throw new Error('idempotency key already used');
       }
+      // `knomosis_action_intent_uq` (migration 0089): ONE LIVE action per
+      // intent, whoever submits it and whatever key they chose.  Emulated here
+      // as the in-memory adapters emulate every other DB protection — including
+      // the index's partiality: a DEAD attempt has released the intent for
+      // `retryIntent`, so it must not block the replacement.
+      if (
+        record.paymentIntentId !== null &&
+        existing.paymentIntentId === record.paymentIntentId &&
+        !DEAD_ACTION_STATES.has(existing.submissionState)
+      ) {
+        throw new UniqueViolationError('knomosis_action_intent_uq');
+      }
     }
     this.#rows.set(record.actionRecordId, structuredClone(record));
     return structuredClone(record);
@@ -1025,6 +1200,26 @@ export class InMemoryKnomosisActionStore implements KnomosisActionStore {
       }
     }
     return null;
+  }
+
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
+    for (const row of this.#rows.values()) {
+      if (row.paymentIntentId === paymentIntentId && !DEAD_ACTION_STATES.has(row.submissionState)) {
+        return structuredClone(row);
+      }
+    }
+    return null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    let best: KnomosisActionRecordEntity | null = null;
+    for (const row of this.#rows.values()) {
+      if (row.paymentIntentId !== paymentIntentId) continue;
+      if (best === null || row.createdAt > best.createdAt) best = row;
+    }
+    return best ? structuredClone(best) : null;
   }
 
   async update(record: KnomosisActionRecordEntity): Promise<KnomosisActionRecordEntity> {
@@ -1390,6 +1585,27 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     return row ? structuredClone(row) : null;
   }
 
+  async listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GovernanceProposalRecord[]> {
+    return [...this.#rows.values()]
+      .filter(
+        (row) =>
+          row.roomId === roomId &&
+          !row.simulationMode &&
+          (row.votingState === 'deliberation' ||
+            row.votingState === 'open' ||
+            (row.votingState === 'passed' &&
+              (row.executionState === 'timelocked' || row.executionState === 'executing'))),
+      )
+      .sort((a, b) => (a.proposalId < b.proposalId ? -1 : 1))
+      .filter((row) => afterId === null || row.proposalId > afterId)
+      .slice(0, limit)
+      .map((row) => structuredClone(row));
+  }
+
   async listByRoom(roomId: string, limit: number): Promise<GovernanceProposalRecord[]> {
     return [...this.#rows.values()]
       .filter((r) => r.roomId === roomId)
@@ -1439,6 +1655,59 @@ export class InMemoryGovernanceProposalStore implements GovernanceProposalStore 
     const resolved = { ...row, ...resolution };
     this.#rows.set(proposalId, structuredClone(resolved));
     return structuredClone(resolved);
+  }
+
+  async casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Parameters<GovernanceProposalStore['casVotingState']>[3],
+  ): Promise<GovernanceProposalRecord | null> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || row.votingState !== from) return null;
+    const updated = { ...row, ...patch, votingState: to };
+    this.#rows.set(proposalId, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options: { clearClaim?: boolean } = {},
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined || !fromStates.includes(row.executionState)) return false;
+    row.executionState = to;
+    if (options.clearClaim === true) row.executionClaimedAt = null;
+    return true;
+  }
+
+  async applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean> {
+    const row = this.#rows.get(proposalId);
+    if (row === undefined) return false;
+    row.challengeState = projection.challengeState;
+    if (
+      projection.blockExecution === true &&
+      (row.executionState === 'not_executed' || row.executionState === 'timelocked')
+    ) {
+      row.executionState = 'blocked';
+    }
+    if (
+      projection.executableAfterFloor !== undefined &&
+      row.executionState === 'timelocked' &&
+      (row.executableAfter === null || row.executableAfter < projection.executableAfterFloor)
+    ) {
+      row.executableAfter = projection.executableAfterFloor;
+    }
+    return true;
   }
 
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
@@ -1557,9 +1826,34 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
   }
 
   async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    const key = `${record.proposalId}:${record.walletAccountId}`;
+    // Emulate ALL THREE unique indexes from migrations 0059 + 0082 + 0084 so
+    // tests exercise database semantics: (proposal, wallet, PURPOSE) — a
+    // designated signer who voted can still record the execution co-signature
+    // — one VOTE per (proposal, user), and single-use nonce per proposal.
     for (const row of this.#rows.values()) {
-      if (`${row.proposalId}:${row.walletAccountId}` === key) return null;
+      if (row.proposalId !== record.proposalId) continue;
+      if (
+        row.walletAccountId === record.walletAccountId &&
+        (row.purpose ?? 'vote') === (record.purpose ?? 'vote')
+      ) {
+        return null;
+      }
+      if (
+        (row.purpose ?? 'vote') === 'vote' &&
+        (record.purpose ?? 'vote') === 'vote' &&
+        row.userId === record.userId
+      ) {
+        return null;
+      }
+      if (
+        row.nonce !== undefined &&
+        row.nonce !== null &&
+        record.nonce !== undefined &&
+        record.nonce !== null &&
+        row.nonce === record.nonce
+      ) {
+        return null;
+      }
     }
     this.#rows.set(record.signatureId, { ...record });
     return { ...record };
@@ -1698,6 +1992,49 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
     return structuredClone(entry);
   }
 
+  async appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null> {
+    // Emulate migration 0082's fork-proof partial uniques exactly: at most one
+    // child per (room, prevHash) and at most one chained genesis per room.
+    if (entry.integrityHash === undefined || entry.integrityHash === null) {
+      throw new Error('appendChained requires an integrityHash');
+    }
+    const chained = this.#rows.filter(
+      (r) => r.roomId === entry.roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const prev = entry.prevHash ?? null;
+    if (prev === null) {
+      if (chained.length > 0) return null; // second genesis collides
+    } else if (chained.some((r) => (r.prevHash ?? null) === prev)) {
+      return null; // second child of the same parent collides
+    }
+    this.#rows.push(structuredClone(entry));
+    return structuredClone(entry);
+  }
+
+  async chainHead(roomId: string): Promise<GovernanceAuditRecord | null> {
+    const chained = this.#rows.filter(
+      (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+    );
+    const referenced = new Set(
+      chained.map((r) => r.prevHash).filter((h): h is string => h !== undefined && h !== null),
+    );
+    const head = chained.find(
+      (r) =>
+        r.integrityHash !== undefined &&
+        r.integrityHash !== null &&
+        !referenced.has(r.integrityHash),
+    );
+    return head ? structuredClone(head) : null;
+  }
+
+  async listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]> {
+    return this.#rows
+      .filter(
+        (r) => r.roomId === roomId && r.integrityHash !== undefined && r.integrityHash !== null,
+      )
+      .map((r) => structuredClone(r));
+  }
+
   async listByRoom(
     roomId: string,
     limit: number,
@@ -1731,6 +2068,15 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
       (r) =>
         r.roomId === roomId &&
         r.simulationMode &&
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+    ).length;
+  }
+
+  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+    return this.#rows.filter(
+      (r) =>
+        r.roomId === roomId &&
+        r.actorUserId === userId &&
         READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
     ).length;
   }

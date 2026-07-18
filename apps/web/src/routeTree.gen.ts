@@ -19,6 +19,7 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as PrivateRouteImport } from './routes/private'
 import { Route as ModerationRouteImport } from './routes/moderation'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as ComplianceConsoleRouteImport } from './routes/compliance-console'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as PrivateIndexRouteImport } from './routes/private.index'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
@@ -79,6 +80,11 @@ const ModerationRoute = ModerationRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ComplianceConsoleRoute = ComplianceConsoleRouteImport.update({
+  id: '/compliance-console',
+  path: '/compliance-console',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -190,6 +196,7 @@ const StoriesStoryIdDebateDebateIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/compliance-console': typeof ComplianceConsoleRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
   '/private': typeof PrivateRouteWithChildren
@@ -221,6 +228,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/compliance-console': typeof ComplianceConsoleRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
   '/profile': typeof ProfileRoute
@@ -252,6 +260,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/compliance-console': typeof ComplianceConsoleRoute
   '/login': typeof LoginRoute
   '/moderation': typeof ModerationRoute
   '/private': typeof PrivateRouteWithChildren
@@ -285,6 +294,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/compliance-console'
     | '/login'
     | '/moderation'
     | '/private'
@@ -316,6 +326,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/compliance-console'
     | '/login'
     | '/moderation'
     | '/profile'
@@ -346,6 +357,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/compliance-console'
     | '/login'
     | '/moderation'
     | '/private'
@@ -378,6 +390,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ComplianceConsoleRoute: typeof ComplianceConsoleRoute
   LoginRoute: typeof LoginRoute
   ModerationRoute: typeof ModerationRoute
   PrivateRoute: typeof PrivateRouteWithChildren
@@ -461,6 +474,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/compliance-console': {
+      id: '/compliance-console'
+      path: '/compliance-console'
+      fullPath: '/compliance-console'
+      preLoaderRoute: typeof ComplianceConsoleRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -640,6 +660,7 @@ const StoriesStoryIdRouteWithChildren = StoriesStoryIdRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ComplianceConsoleRoute: ComplianceConsoleRoute,
   LoginRoute: LoginRoute,
   ModerationRoute: ModerationRoute,
   PrivateRoute: PrivateRouteWithChildren,

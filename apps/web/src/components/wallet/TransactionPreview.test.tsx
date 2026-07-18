@@ -63,6 +63,8 @@ describe('TransactionPreviewCard', () => {
     const PROPOSAL_MESSAGE = {
       roomId: '11111111-1111-4111-8111-111111111111',
       proposalId: '99999999-9999-4999-8999-999999999999',
+      purpose: 'vote',
+      choice: 'approve',
       actor: '0x1111111111111111111111111111111111111111',
       nonce: '3',
       expiration: '1799999999',

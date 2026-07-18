@@ -14,7 +14,13 @@ import type {
 } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
-import { isAiTeam, isSteward, type Role } from '../identity/rbac.js';
+import {
+  isAiTeam,
+  isComplianceReviewer,
+  isCounsel,
+  isSteward,
+  type Role,
+} from '../identity/rbac.js';
 import {
   authMethodInventory,
   getIdentityServices,
@@ -230,6 +236,54 @@ export function requireAiTeam(): MiddlewareHandler<AuthEnv> {
     }
     if (!auth.mfaActive || !auth.mfaVerified) {
       return c.json(deny('mfa_required', 'Verify MFA to manage AI models'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/**
+ * Require the financial-compliance reviewer capability (`compliance.review`)
+ * AND active MFA (WS-N.2.1c-2).  Gates every WS-N case/queue/policy-admin
+ * surface.  Compliance data is a least-privilege plane below admin: the
+ * steward role does NOT pass this guard; `admin` does (the 2026-07
+ * maintainer decision — admin is the final line of defense and reaches every
+ * platform surface, always behind this same step-up-MFA gate).
+ */
+export function requireCompliance(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (!isComplianceReviewer(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'Compliance role required'), 403);
+    }
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to perform compliance actions'), 403);
+    }
+    await next();
+    return;
+  };
+}
+
+/**
+ * Require the legal-counsel approval capability (`compliance.counsel.approve`)
+ * AND active MFA (WS-N.2.1c-2).  Gates SAR/STR records (READ included —
+ * anti-tipping-off, WS-N.2.1e), lawful-access review/production (WS-N.2.3d),
+ * and jurisdiction-policy enablement approvals (WS-N.1.1e four-eyes).  Held
+ * by `counsel` and — per the 2026-07 final-line-of-defense decision — by
+ * `admin`; the plain `compliance` role still does not pass.
+ */
+export function requireCounsel(): MiddlewareHandler<AuthEnv> {
+  return async (c, next) => {
+    const auth = c.get('auth');
+    if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+    if (!isCounsel(auth.roles)) {
+      await denyAudit(auth.userId);
+      return c.json(deny('forbidden', 'Legal-counsel capability required'), 403);
+    }
+    if (!auth.mfaActive || !auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to perform counsel actions'), 403);
     }
     await next();
     return;

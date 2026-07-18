@@ -26,45 +26,33 @@ function Controlled({
 }
 
 describe('FeedModeSwitcher (WS-B.2.9)', () => {
-  it('defaults to Balanced', () => {
-    expect(DEFAULT_FEED_MODE).toBe('balanced');
+  it('defaults to Best', () => {
+    expect(DEFAULT_FEED_MODE).toBe('best');
   });
 
   it('shows the current mode on the labelled combobox trigger', () => {
-    render(<FeedModeSwitcher value="balanced" onValueChange={() => undefined} />);
-    const trigger = screen.getByRole('combobox', { name: 'Feed order' });
-    expect(trigger).toHaveTextContent('Balanced');
+    render(<FeedModeSwitcher value="best" onValueChange={() => undefined} />);
+    const trigger = screen.getByRole('combobox', { name: 'Sort by' });
+    expect(trigger).toHaveTextContent('Best');
   });
 
-  it('offers all five ordering modes', async () => {
+  it('offers all five sort orders', async () => {
     const user = userEvent.setup();
-    render(<FeedModeSwitcher value="balanced" onValueChange={() => undefined} />);
-    await user.click(screen.getByRole('combobox', { name: 'Feed order' }));
+    render(<FeedModeSwitcher value="best" onValueChange={() => undefined} />);
+    await user.click(screen.getByRole('combobox', { name: 'Sort by' }));
 
     const listbox = screen.getByRole('listbox');
-    for (const label of [
-      'Balanced',
-      'Chronological',
-      'Source-diverse',
-      'Local',
-      'Low personalization',
-    ]) {
+    for (const label of ['Best', 'Rising', 'Sources', 'Debates', 'New']) {
       expect(within(listbox).getByRole('option', { name: label })).toBeInTheDocument();
     }
   });
 
   it('marks the active mode with aria-selected (the announced current state)', async () => {
     const user = userEvent.setup();
-    render(<FeedModeSwitcher value="chronological" onValueChange={() => undefined} />);
-    await user.click(screen.getByRole('combobox', { name: 'Feed order' }));
-    expect(screen.getByRole('option', { name: 'Chronological' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(screen.getByRole('option', { name: 'Balanced' })).toHaveAttribute(
-      'aria-selected',
-      'false',
-    );
+    render(<FeedModeSwitcher value="new" onValueChange={() => undefined} />);
+    await user.click(screen.getByRole('combobox', { name: 'Sort by' }));
+    expect(screen.getByRole('option', { name: 'New' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('option', { name: 'Best' })).toHaveAttribute('aria-selected', 'false');
   });
 
   it('emits the chosen mode value and reflects it on the trigger', async () => {
@@ -72,19 +60,15 @@ describe('FeedModeSwitcher (WS-B.2.9)', () => {
     const onChange = vi.fn();
     render(<Controlled onChange={onChange} />);
 
-    await user.click(screen.getByRole('combobox', { name: 'Feed order' }));
-    await user.click(screen.getByRole('option', { name: 'Source-diverse' }));
+    await user.click(screen.getByRole('combobox', { name: 'Sort by' }));
+    await user.click(screen.getByRole('option', { name: 'Rising' }));
 
-    expect(onChange).toHaveBeenCalledWith('source-diverse');
-    expect(screen.getByRole('combobox', { name: 'Feed order' })).toHaveTextContent(
-      'Source-diverse',
-    );
+    expect(onChange).toHaveBeenCalledWith('rising');
+    expect(screen.getByRole('combobox', { name: 'Sort by' })).toHaveTextContent('Rising');
   });
 
   it('does not render a separate live region (Select announces via aria-selected)', () => {
-    const { container } = render(
-      <FeedModeSwitcher value="balanced" onValueChange={() => undefined} />,
-    );
+    const { container } = render(<FeedModeSwitcher value="best" onValueChange={() => undefined} />);
     expect(container.querySelector('[aria-live]')).toBeNull();
     expect(container.querySelector('[role="status"]')).toBeNull();
   });

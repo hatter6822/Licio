@@ -50,7 +50,8 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   // existed; no rows carry it).  The label stays in the DB enum because
   // removing it costs a full audit_event_type recreate on the append-only
   // audit table for zero data benefit — the shared AUDIT_EVENT_TYPES zod
-  // mirror enumerates LIVE values only and deliberately omits it.
+  // mirror enumerates LIVE values only; reads parse retired labels through
+  // RETIRED_AUDIT_EVENT_TYPES in @licio/shared.
   'evidence_verification_change',
   'summary_change',
   'room_steward_change',
@@ -58,6 +59,11 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'invariant_config_change',
   'invariant_promotion_change',
   'mfci_case_action',
+  // GRANDFATHERED: retired with the WS-H.4.3d moderator context-action
+  // surface (merge/annotate/separate). Historic rows carry it; the label
+  // stays in the DB enum for the same append-only reason as
+  // `evidence_verification_change` above, and reads stay parseable through
+  // RETIRED_AUDIT_EVENT_TYPES in @licio/shared.
   'scoi_context_action',
   'bridge_request',
   // WS-I ranking surface (mirrors AUDIT_EVENT_TYPES in @licio/shared).
@@ -76,6 +82,11 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'knomosis_config_change',
   'governance_mode_change',
   'governance_sim_action',
+  // WS-N compliance (mirrors AUDIT_EVENT_TYPES; migration 0088).
+  'region_declaration_change',
+  'compliance_policy_change',
+  'disclosure_change',
+  'compliance_config_change',
 ]);
 
 export const auditLog = pgTable(

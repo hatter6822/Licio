@@ -28,7 +28,11 @@ afterEach(() => resetKnomosisFixture());
 
 async function seedRoom(
   forum: Awaited<ReturnType<typeof freshForumServices>>['forum'],
-  over: { governanceMode?: 'ordinary' | 'simulated'; charterSummary?: string | null } = {},
+  over: {
+    governanceMode?: 'ordinary' | 'simulated';
+    charterSummary?: string | null;
+    storageMode?: 'server' | 'p2p';
+  } = {},
 ): Promise<string> {
   const roomId = randomUUID();
   await forum.rooms.insert({
@@ -45,6 +49,7 @@ async function seedRoom(
     charterSummary: over.charterSummary ?? null,
     typeMetadata: {},
     latestActivityAt: null,
+    ...(over.storageMode !== undefined ? { storageMode: over.storageMode } : {}),
   });
   return roomId;
 }
@@ -67,6 +72,21 @@ describe('WS-L wiring ports over real in-memory services', () => {
     expect(await roomMode.setMode(roomId, 'testnet')).toBe(true);
     expect(await roomMode.currentMode(roomId)).toBe('testnet');
     expect(await roomMode.setMode(randomUUID(), 'testnet')).toBe(false);
+  });
+
+  it('a p2p room fails EVERY governance gate — WS-M/WS-L is server-room-only (W15)', async () => {
+    const forumFixture = freshForumServices();
+    const knomosisFixture = await freshKnomosisServices();
+    const roomId = await seedRoom(forumFixture.forum, { storageMode: 'p2p' });
+    const rooms = buildRoomGovernancePort(forumFixture.forum, knomosisFixture.identity);
+    // A synced private-room row must hold NO server governance/treasury state
+    // (WS-S §8): unknown to roomGovernance, no members, no stewards — even a
+    // PLATFORM steward — and nothing visible.
+    expect(await rooms.roomGovernance(roomId)).toBeNull();
+    const steward = await seedUserWithSession(knomosisFixture.identity, { steward: true });
+    expect(await rooms.isMember(roomId, steward.userId)).toBe(false);
+    expect(await rooms.isSteward(roomId, steward.userId)).toBe(false);
+    expect(await rooms.contentVisibleToUser(roomId, steward.userId)).toBe(false);
   });
 
   it('isMember treats a room STEWARD (no subscription) as a governance member (M5)', async () => {
@@ -244,6 +264,7 @@ describe('WS-L wiring ports over real in-memory services', () => {
       indexedEventRef: null,
       reconciliationState: 'pending',
       idempotencyKey: randomUUID(),
+      paymentIntentId: null,
       createdAt: old,
       updatedAt: old,
     });

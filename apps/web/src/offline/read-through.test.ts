@@ -23,7 +23,6 @@ const STORY: StoryDetail = {
   sources_count: 0,
   corrections: { active: 0, validated: 0, incorrect: 0 },
   more_on_this_story: [],
-  distribution_reason: 'Read by people who also read primary sources.',
   context_chips: [],
   safety_state: 'ok',
   dispute_status: 'none',

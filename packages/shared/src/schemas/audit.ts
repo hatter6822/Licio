@@ -58,12 +58,13 @@ export const AUDIT_EVENT_TYPES = [
   'forum_config_change',
   // WS-H invariant platform: validated invariants runtime-config writes,
   // shadow-status promotions/demotions (WS-H.1.2e), MFCI analyst case
-  // resolutions (WS-H.3.4b), SCOI moderator context actions (WS-H.4.3d),
-  // and bridge-request routing (WS-H.4.2d).
+  // resolutions (WS-H.3.4b), and bridge-request routing (WS-H.4.2d).
+  // (`scoi_context_action` was retired with the WS-H.4.3d moderator
+  // merge/annotate/separate surface; historic rows keep the label — see
+  // RETIRED_AUDIT_EVENT_TYPES below for the read-side parse vocabulary.)
   'invariant_config_change',
   'invariant_promotion_change',
   'mfci_case_action',
-  'scoi_context_action',
   'bridge_request',
   // WS-I ranking: validated ranking runtime-config writes (WS-I.2.3f),
   // kill-switch engage/release (WS-I.4.1a), decision-log queries (the
@@ -90,9 +91,39 @@ export const AUDIT_EVENT_TYPES = [
   'knomosis_config_change',
   'governance_mode_change',
   'governance_sim_action',
+  // WS-N compliance: identity-free region declarations (declare/revoke/
+  // verify — WS-N.1.1f), jurisdiction-policy admin writes + force refreshes
+  // (WS-N.1.1e; the tamper-evident before/after log is the separate
+  // hash-chained `jurisdiction_policy_audit`), risk-disclosure publication
+  // (WS-N.1.2d), and validated compliance.* runtime-config writes.  Case
+  // review actions chain in `compliance_case_audit`, not here.
+  'region_declaration_change',
+  'compliance_policy_change',
+  'disclosure_change',
+  'compliance_config_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
+/** The LIVE vocabulary — what a writer may append today. */
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
+
+/**
+ * RETIRED labels the append-only log may still HOLD: their writers were
+ * removed, but historic rows keep the label (the DB enum grandfathers them —
+ * see packages/db audit-log.ts).  Read-side schemas parse the union so a
+ * steward's activity view never throws on their own historic rows; the
+ * write-side `AuditEventType` type stays live-only, so no new row can carry
+ * a retired label.
+ */
+export const RETIRED_AUDIT_EVENT_TYPES = [
+  // Retired with the EvidenceCard removal (no writer ever existed).
+  'evidence_verification_change',
+  // Retired with the WS-H.4.3d moderator context-action surface.
+  'scoi_context_action',
+] as const;
+export const storedAuditEventTypeSchema = z.enum([
+  ...AUDIT_EVENT_TYPES,
+  ...RETIRED_AUDIT_EVENT_TYPES,
+]);
 
 /**
  * Minimized event context.  No IP, no location, no secrets — a coarse device
@@ -114,13 +145,15 @@ export const auditContextSchema = z
   .strict();
 export type AuditContext = z.infer<typeof auditContextSchema>;
 
-/** A full audit entry as stored (actor + minimized context). */
+/** A full audit entry as stored (actor + minimized context). Parses the
+ *  RETIRED labels too — the log is append-only, so reads must accept every
+ *  label rows can hold, not only what writers may append today. */
 export const auditEntrySchema = z
   .object({
     event_id: uuidSchema,
     /** The acting user, or null for system-initiated events. */
     actor_user_id: uuidSchema.nullable(),
-    event_type: auditEventTypeSchema,
+    event_type: storedAuditEventTypeSchema,
     /** Hashed where the target is a token/session; never a raw secret. */
     target_ref: z.string().nullable(),
     context: auditContextSchema,
@@ -129,11 +162,12 @@ export const auditEntrySchema = z
   .strict();
 export type AuditEntry = z.infer<typeof auditEntrySchema>;
 
-/** The owner-visible subset (no actor field beyond self, no target_ref). */
+/** The owner-visible subset (no actor field beyond self, no target_ref).
+ *  Read-side: parses retired labels for the same reason as auditEntrySchema. */
 export const securityActivityEntrySchema = z
   .object({
     event_id: uuidSchema,
-    event_type: auditEventTypeSchema,
+    event_type: storedAuditEventTypeSchema,
     context: auditContextSchema,
     created_at: isoTimestampSchema,
   })

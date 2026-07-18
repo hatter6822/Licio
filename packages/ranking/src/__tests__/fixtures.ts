@@ -25,7 +25,6 @@ export function makeCandidate(n: number, partial: Partial<Candidate> = {}): Cand
     freshness_timestamp: new Date(T0 - n * 3_600_000).toISOString(),
     retrieval_score: 0.5,
     retrieval_origins: ['global_pwatt_v1'],
-    bridge_context: null,
     ...partial,
   };
 }

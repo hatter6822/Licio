@@ -44,7 +44,6 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
           sources_count: 0,
           corrections: { active: 0, validated: 0, incorrect: 0 },
           more_on_this_story: [],
-          distribution_reason: 'Readers opened the source and added context.',
           context_chips: [],
           safety_state: 'ok',
           body_summary: 'The board released raw and processed results alongside the methodology.',
@@ -63,9 +62,6 @@ test.describe('interaction budgets (WS-C.5.1)', () => {
       await route.fulfill({
         json: { story_id: STORY, context_state: null, interpretations: [], needs_context: false },
       });
-    });
-    await page.route(`**/v1/stories/${STORY}/independent-sources`, async (route) => {
-      await route.fulfill({ json: { sources: [] } });
     });
     await page.route(`**/v1/stories/${STORY}/comments**`, async (route) => {
       await route.fulfill({

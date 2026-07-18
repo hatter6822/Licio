@@ -140,6 +140,13 @@ function toLawPack(row: typeof roomLawPacks.$inferSelect): LawPackRecord {
     version: row.version,
     lawPack: row.document as LawPack,
     createdAt: row.createdAt.toISOString(),
+    hashCommitment: row.hashCommitment,
+    auditState: row.auditState,
+    fixtures: (row.fixtures as Record<string, unknown> | null) ?? null,
+    humanSummary: row.humanSummary,
+    published: row.published,
+    effectiveAt: row.effectiveAt ? row.effectiveAt.toISOString() : null,
+    supersedesLawPackId: row.supersedesLawPackId,
   };
 }
 
@@ -526,6 +533,13 @@ export class DrizzleLawPackStore implements LawPackStore {
       version: lawPack.version,
       document: lawPack.lawPack,
       createdAt: new Date(lawPack.createdAt),
+      hashCommitment: lawPack.hashCommitment ?? null,
+      auditState: lawPack.auditState ?? 'draft',
+      fixtures: lawPack.fixtures ?? null,
+      humanSummary: lawPack.humanSummary ?? null,
+      published: lawPack.published ?? false,
+      effectiveAt: lawPack.effectiveAt ? new Date(lawPack.effectiveAt) : null,
+      supersedesLawPackId: lawPack.supersedesLawPackId ?? null,
     });
     return lawPack;
   }
@@ -537,6 +551,15 @@ export class DrizzleLawPackStore implements LawPackStore {
       .where(eq(roomLawPacks.lawPackId, lawPackId))
       .limit(1);
     return rows[0] ? toLawPack(rows[0]) : null;
+  }
+
+  async listByRoom(roomId: string): Promise<LawPackRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(roomLawPacks)
+      .where(eq(roomLawPacks.roomId, roomId))
+      .orderBy(desc(roomLawPacks.createdAt));
+    return rows.map(toLawPack);
   }
 
   async clear(): Promise<void> {

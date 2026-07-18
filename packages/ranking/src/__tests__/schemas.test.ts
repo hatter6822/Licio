@@ -69,6 +69,13 @@ describe('WS-I.2.1a feature vector schema', () => {
     expect(featureSchemaFieldNames().sort()).toEqual(
       [
         'active_attention',
+        // §11.6 `rising` sort mode — reviewed addition: the signed
+        // window-over-window delta of the SERVED PWAtt active-attention
+        // component. NON-SCORING (never a §5.4 term — it is the ordering
+        // metric of an explicit user sort, like `duplicate_cluster_id` it
+        // feeds a stage other than the objective); attention-derived, never
+        // financial.
+        'attention_velocity',
         'braid_agenda_entropy',
         'cid_defect',
         'constructive_participation',
@@ -138,15 +145,6 @@ describe('WS-I.1.1a/d candidate schema + merge', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0]?.retrieval_score).toBe(0.8);
     expect(merged[0]?.retrieval_origins).toEqual(['origin_b', 'origin_a']);
-  });
-
-  it('merge preserves bridge context from whichever retriever supplied it', () => {
-    const bridge = makeCandidate(2, {
-      source_type: 'cross_community_bridge',
-      bridge_context: { scoi: 0.7, context_state: 'split', lens_count: 3 },
-    });
-    const merged = mergeCandidates([[makeCandidate(2)], [bridge]]);
-    expect(merged[0]?.bridge_context?.context_state).toBe('split');
   });
 
   it('merge ordering is deterministic (score desc, freshness desc, id)', () => {

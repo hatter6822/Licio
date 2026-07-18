@@ -1133,11 +1133,11 @@ Build wellbeing control components:
 **ID:** WS-B.2.9
 **Ref:** Section 11.6
 
-Build the feed mode selector. Available modes: "Balanced" (default PWAtt), "Chronological," "Source-diverse," "Local," "Low personalization." The switcher is accessible as a dropdown or segmented control. Selection persists in user preferences via Zustand/localStorage. Changing mode triggers a feed reload with the selected ordering. The current mode is clearly displayed in the feed header.
+Build the feed mode selector. Available modes: "Best" (default; highest participation-weighted attention), "Rising" (fastest-increasing attention), "Sources" (most sourced), "Debates" (most debates), "New" (most recent). The switcher is accessible as a dropdown or segmented control. Selection persists in user preferences via Zustand/localStorage. Changing mode triggers a feed reload with the selected ordering. The current mode is clearly displayed in the feed header.
 
 **Acceptance criteria:**
 - All five modes are listed and selectable.
-- "Balanced" is the default selection.
+- "Best" is the default selection.
 - Selection persists across sessions.
 - Changing mode triggers a feed reload.
 - Current mode is displayed in the feed header.
@@ -1151,7 +1151,7 @@ Build the feed mode selector. Available modes: "Balanced" (default PWAtt), "Chro
 
 **Dependencies:** WS-B.1.2d, WS-C.1.3b (feed-mode state in UI store).
 
-**Accessibility/privacy notes:** "Low personalization" and "Chronological" are user-facing levers over ranking (Section 19.3: choose local vs server personalization). The switcher must announce the new mode via the Select's `aria-selected`, not a separate live region, to avoid double-announcement.
+**Accessibility/privacy notes:** "New," "Sources," and "Debates" are user-facing non-personalized levers over ranking (Section 19.3: choose local vs server personalization). The switcher must announce the new mode via the Select's `aria-selected`, not a separate live region, to avoid double-announcement.
 
 ---
 

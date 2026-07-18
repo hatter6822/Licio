@@ -30,7 +30,6 @@ const STORY: StoryDetail = {
   sources_count: 2,
   corrections: { active: 0, validated: 0, incorrect: 0 },
   more_on_this_story: [],
-  distribution_reason: 'Rising because readers opened the source and added 2 sourced comments.',
   context_chips: [],
   safety_state: 'ok',
   dispute_status: 'none',

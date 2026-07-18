@@ -131,6 +131,13 @@ export interface ForumServices {
   commentBroadcaster: CommentBroadcaster;
   /** WS-J.1.2 enforcement seam (assigned at boot; null = not enforced). */
   relationshipReader: ViewerRelationshipReader | null;
+  /** Platform-role reader for the WS-Q read bar's platform-ADMIN arm (assigned
+   *  at boot over the identity store; null = no platform arm — the private-room
+   *  content bar stays membership/room-steward only, the fail-closed default).
+   *  Consulted ONLY on the private-server-room miss path (2026-07 maintainer
+   *  decision: admin reads every server-hosted area; WS-S member-hosted rooms
+   *  stay excluded by construction). */
+  platformRolesReader: ((userId: string) => Promise<readonly string[]>) | null;
   /** WS-J.2.6 auto-block accountability seam (assigned at boot; null = none). */
   autoModerationSink: AutoModerationSink | null;
   /** WS-U bounded in-room agent seam (assigned at boot; null = no agent). */
@@ -171,6 +178,7 @@ export interface InMemoryForumOptions {
   uploadScanner?: UploadScanner;
   commentBroadcaster?: CommentBroadcaster;
   relationshipReader?: ViewerRelationshipReader;
+  platformRolesReader?: (userId: string) => Promise<readonly string[]>;
   autoModerationSink?: AutoModerationSink;
   agentModerator?: RoomAgentModerator;
   debates?: DebateStore;
@@ -204,6 +212,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     uploadScanner: options.uploadScanner ?? new LocalChecksUploadScanner(),
     commentBroadcaster: options.commentBroadcaster ?? new InMemoryCommentBroadcaster(),
     relationshipReader: options.relationshipReader ?? null,
+    platformRolesReader: options.platformRolesReader ?? null,
     autoModerationSink: options.autoModerationSink ?? null,
     agentModerator: options.agentModerator ?? null,
     debates: options.debates ?? new InMemoryDebateStore(now),

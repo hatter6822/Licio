@@ -46,6 +46,9 @@ export const failClosedReadinessChecklistPort: ReadinessChecklistPort = {
 export interface RoomModePort {
   currentMode(roomId: string): Promise<GovernanceMode | null>;
   setMode(roomId: string, mode: GovernanceMode): Promise<boolean>;
+  /** WS-M.1.1b COMPARE-AND-SET: applies only when the stored mode still equals
+   *  `expected`, so two racing transitions serialize (false ⇒ lost the race). */
+  setModeIf(roomId: string, expected: GovernanceMode, next: GovernanceMode): Promise<boolean>;
 }
 
 export interface ReadinessDeps {
@@ -141,7 +144,9 @@ const PERMITTED_TRANSITIONS: ReadonlyArray<{
  */
 export async function requestModeTransition(
   deps: ReadinessDeps,
-  args: { roomId: string; targetMode: 'simulated' | 'testnet'; userId: string; reason: string },
+  // Any GovernanceMode may be REQUESTED; edges outside PERMITTED_TRANSITIONS
+  // 409 with `transition_not_permitted` (fail-closed until WS-M wires them).
+  args: { roomId: string; targetMode: GovernanceMode; userId: string; reason: string },
 ): Promise<ModeTransitionOutcome> {
   const current = await deps.roomMode.currentMode(args.roomId);
   if (current === null) {

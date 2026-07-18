@@ -418,7 +418,7 @@ describe('WS-I.2.3b penalties', () => {
 
 describe('WS-I.2.3c hard constraints', () => {
   const context = { surface: 'front_page' as const, crossCommunity: true };
-  const FULL = { mfci: true, phi: true, scoi: true, gwei: true, meri: true };
+  const FULL = { mfci: true, phi: true, gwei: true, meri: true };
 
   it('MFCI at/above the exclusion state leaves cross-community distribution', () => {
     const result = evaluateItemConstraints(
@@ -450,44 +450,18 @@ describe('WS-I.2.3c hard constraints', () => {
     ).toBe(false);
   });
 
-  it('SCOI ladder: medium ⇒ context card (always); high ⇒ reduced when promoted', () => {
-    const medium = evaluateItemConstraints(
-      makeFeatures(2, { scoi_level: 'medium' }),
-      PROFILE,
-      SHADOW_CONSTRAINT_ENFORCEMENT,
-      context,
-    );
-    // The context card is informational — it attaches even in shadow.
-    expect(medium.flags).toContain('scoi_context_card');
-    expect(medium.distributionMultiplier).toBe(1);
-
-    const high = evaluateItemConstraints(
-      makeFeatures(3, { scoi_level: 'high' }),
-      PROFILE,
-      FULL,
-      context,
-    );
-    expect(high.flags).toContain('scoi_reduced_distribution');
-    expect(high.distributionMultiplier).toBe(PROFILE.constraints.scoi_reduce_multiplier);
-  });
-
-  it('SCOI very_high pauses cross-community distribution when promoted', () => {
-    const paused = evaluateItemConstraints(
+  it('a stale scoi_level in a persisted feature revision is ignored (parse-compat)', () => {
+    // The SCOI constraint ladder was removed; a pre-removal feature revision
+    // still carrying `scoi_level` must parse and produce NO constraint effect.
+    const result = evaluateItemConstraints(
       makeFeatures(4, { scoi_level: 'very_high' }),
       PROFILE,
       FULL,
       context,
     );
-    expect(paused.feasible).toBe(false);
-    expect(paused.flags).toContain('scoi_paused');
-    // Room-internal (non-cross-community) reads stay feasible.
-    const internal = evaluateItemConstraints(
-      makeFeatures(4, { scoi_level: 'very_high' }),
-      PROFILE,
-      FULL,
-      { surface: 'room', crossCommunity: false },
-    );
-    expect(internal.feasible).toBe(true);
+    expect(result.feasible).toBe(true);
+    expect(result.flags).toEqual([]);
+    expect(result.applications).toEqual([]);
   });
 
   it('PHI above threshold triggers per-user diversification when promoted', () => {

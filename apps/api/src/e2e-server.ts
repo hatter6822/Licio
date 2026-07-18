@@ -21,6 +21,14 @@ import {
 } from './ai-governance/services.js';
 import { registerAiGovernanceConsumers } from './ai-governance/wiring.js';
 import { createApp } from './app.js';
+import {
+  buildComplianceExport,
+  buildCompliancePort,
+  buildCompliancePurge,
+  createInMemoryComplianceServices,
+  resolveRegionForUser,
+  setComplianceServices,
+} from './compliance/services.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
   createInMemoryEventPipelineServices,
@@ -32,6 +40,13 @@ import {
   setForumServices,
 } from './forum/services.js';
 import { buildAuthorHistoryReader, createRoomAgentModerator } from './governance/forum-agent.js';
+import {
+  createGovernanceService,
+  getGovernanceService,
+  setGovernanceService,
+} from './governance/services.js';
+import { createInMemoryGovernanceStores } from './governance/stores.js';
+import { accountRef } from './identity/crypto.js';
 import { buildIdentityServicesFromEnv, setIdentityServices } from './identity/services.js';
 import {
   createInMemoryIngestionServices,
@@ -48,6 +63,7 @@ import { exportFinancialWalletData, purgeFinancialWalletData } from './knomosis/
 import { FakeKnomosisGateway } from './knomosis/gateway.js';
 import { createInMemoryKnomosisServices, setKnomosisServices } from './knomosis/services.js';
 import {
+  buildLawPackPort,
   buildRegionResolver,
   buildRoomGovernancePort,
   buildRoomModePort,
@@ -69,6 +85,14 @@ import {
 } from './ranking/services.js';
 import { createTestAuthRoute } from './routes/test-auth.js';
 import { createTestWalletRoute } from './routes/test-wallet.js';
+import { buildWsmReadinessChecklistPort } from './treasury/readiness.js';
+import {
+  buildMembershipFactsPort,
+  buildStewardElectionPort,
+  buildTreasuryExecutorPort,
+  createInMemoryTreasuryServices,
+  setTreasuryServices,
+} from './treasury/services.js';
 
 const env = validateServerEnv(process.env);
 
@@ -112,6 +136,12 @@ const forumServices = createInMemoryForumServices({
   log: (event, meta) => logger.info(meta, event),
 });
 await forumServices.reloadConfig();
+// The WS-Q read bar's platform-ADMIN arm (mirrors the production boot wiring,
+// incl. the active-account gate).
+forumServices.platformRolesReader = async (id) => {
+  const user = await identityServices.store.getUser(id);
+  return user?.accountState === 'active' ? user.roles : [];
+};
 // WS-U: the contribution path consults the in-room agent (uses the lazy
 // in-memory GovernanceService singleton in the harness), with real author-history
 // signals over the harness's in-memory stores.
@@ -213,7 +243,11 @@ const knomosisServices = createInMemoryKnomosisServices({
 });
 knomosisServices.rooms = buildRoomGovernancePort(forumServices, identityServices);
 knomosisServices.roomMode = buildRoomModePort(forumServices);
-knomosisServices.regionResolver = buildRegionResolver(identityServices);
+// Pure LOCALE resolver; `regionResolver` is replaced with the authoritative
+// ladder once compliance is wired (see below).  The compliance `localeRegion`
+// captures THIS const so the ladder is not self-referential.
+const localeRegionResolver = buildRegionResolver(identityServices);
+knomosisServices.regionResolver = localeRegionResolver;
 identityServices.exportFinancialWallets = (userId) =>
   exportFinancialWalletData(knomosisServices, userId);
 identityServices.purgeFinancialWallets = (userId) =>
@@ -224,6 +258,63 @@ await knomosisServices.reloadConfig();
 await syncPinnedDeployments(knomosisServices);
 setKnomosisServices(knomosisServices);
 eventServices.cryptoFlagEnabled = () => knomosisServices.config().cryptoEnabled;
+
+// WS-N compliance: the in-memory container + the production CompliancePort,
+// wired exactly like the production boot (identical closures over the
+// in-memory siblings) so the BFF-in-the-loop flows exercise the REAL
+// availability/region/disclosure surfaces.
+const complianceServices = createInMemoryComplianceServices({
+  configStore: eventServices.configStore,
+  log: (event, meta) => logger.info(meta, event),
+});
+complianceServices.localeRegion = (userId) => localeRegionResolver.regionForUser(userId);
+complianceServices.ageBand = async (userId) =>
+  (await identityServices.store.getUser(userId))?.ageBand ?? null;
+complianceServices.knomosisFlags = () => ({
+  cryptoEnabled: knomosisServices.config().cryptoEnabled,
+  governanceEnabled: knomosisServices.config().governanceEnabled,
+});
+complianceServices.roomStorageMode = async (roomId) =>
+  (await forumServices.rooms.getById(roomId))?.storageMode ?? null;
+complianceServices.walletOwner = async (walletAccountId) =>
+  (await knomosisServices.wallets.getById(walletAccountId))?.userId ?? null;
+complianceServices.opaqueRef = (id) => accountRef(identityServices.config.masterSecret, id);
+await complianceServices.reloadConfig();
+setComplianceServices(complianceServices);
+knomosisServices.compliance = buildCompliancePort(complianceServices);
+// The kill-switch region seam resolves the AUTHORITATIVE ladder region (verified
+// declaration → locale), matching production — a verified-region member is caught
+// by that region's pause regardless of locale.  `localeRegion` above uses the pure
+// `localeRegionResolver`, so this is not self-referential.
+knomosisServices.regionResolver = {
+  regionForUser: async (userId) => (await resolveRegionForUser(complianceServices, userId)).region,
+};
+identityServices.exportComplianceData = buildComplianceExport(complianceServices);
+identityServices.purgeCompliance = buildCompliancePurge(complianceServices, async (userId) =>
+  (await knomosisServices.wallets.listByUser(userId, true)).map((w) => w.walletAccountId),
+);
+
+// WS-U + WS-M: bind the governance service to EXPLICIT in-memory stores (so the
+// treasury container can share them) and wire the WS-M container exactly like
+// the production boot — real readiness evaluators, the shipped fail-closed
+// treasury executor, forced rotation elections.
+const governanceStores = createInMemoryGovernanceStores();
+setGovernanceService(
+  createGovernanceService({
+    stores: governanceStores,
+    cryptoFlag: () => knomosisServices.config().cryptoEnabled,
+  }),
+);
+knomosisServices.lawPacks = buildLawPackPort(governanceStores);
+const treasuryServices = createInMemoryTreasuryServices({
+  knomosis: knomosisServices,
+  governanceStores,
+  membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
+  treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService()),
+});
+setTreasuryServices(treasuryServices);
+knomosisServices.readinessChecklist = buildWsmReadinessChecklistPort(treasuryServices);
 
 await seedForumDemoData(forumServices, ingestionServices, identityServices.store);
 await seedAiGovernance(aiGovernanceServices);

@@ -27,6 +27,8 @@ import {
   feedQuerySchema,
   feedResponseSchema,
   isSentinelTopicId,
+  LEGACY_DISTRIBUTION_REASON,
+  legacyPreservingFeedMode,
   legacyRatingLabel,
   notificationPreferencesSchema,
   notificationsResponseSchema,
@@ -89,6 +91,7 @@ import { getTelemetryServices } from '../telemetry/service.js';
 import { createAiGovernanceAdminRoutes } from './ai-governance-admin.js';
 import { createAiGovernancePublicRoutes } from './ai-governance-public.js';
 import { createAuthRoutes } from './auth.js';
+import { createComplianceRoutes } from './compliance.js';
 import { createEventsRoutes } from './events.js';
 import { createForumRoutes } from './forum.js';
 import { createGovernanceRoutes } from './governance.js';
@@ -102,6 +105,7 @@ import { createRankingAdminRoutes } from './ranking-admin.js';
 import { createRoomGovernanceSimRoutes } from './room-governance.js';
 import { createRoomsRoutes } from './rooms.js';
 import { createStoriesRoutes } from './stories.js';
+import { createTreasuryGovernanceRoutes } from './treasury-governance.js';
 import { createTrustSafetyRoutes } from './trust-safety.js';
 import { createWalletRoutes } from './wallet.js';
 
@@ -216,7 +220,9 @@ function realStoryToDetail(
       lifecycleState: story.lifecycleState,
       safetyState: signals.safetyState,
     }),
-    distribution_reason: 'Recently submitted to Licio',
+    // DEPRECATED rollout compat: pre-removal cached bundles REQUIRE a
+    // non-empty distribution_reason (see LEGACY_DISTRIBUTION_REASON).
+    distribution_reason: LEGACY_DISTRIBUTION_REASON,
     context_chips: [],
     safety_state: signals.safetyState,
     // WS-T dispute posture — powers the "Challenged"/"Incorrect" badge on the
@@ -302,8 +308,10 @@ export function createV1Routes() {
       // The eight-stage pipeline serves whenever ANY real story exists:
       // candidate generation → feature join → safety filter → constrained
       // PWAtt scoring → diversification → decision log → explanations →
-      // FeedItem mapping. The kill switch / user feed modes route through
-      // the safe chronological fallback inside the service (WS-I.4.1a/b).
+      // FeedItem mapping. The kill switch routes through the safe
+      // chronological fallback; the user sort modes (`new`/`sources`/
+      // `debates`/`rising`) serve their complete deterministic orderings
+      // over the same safety-filtered set inside the service (WS-I.4.1a/b).
       // With an EMPTY story store (fresh dev boot, contract tests) the
       // legacy WS-C demo fixture serves unchanged — clearly fixture data,
       // outside the ranking pipeline, and logged as demo serving.
@@ -539,6 +547,14 @@ export function createV1Routes() {
       .route('/', createWalletRoutes())
       .route('/knomosis', createKnomosisRoutes())
       .route('/', createRoomGovernanceSimRoutes())
+      .route('/', createTreasuryGovernanceRoutes())
+
+      // --- Compliance (WS-N) --------------------------------------------------
+      // Feature availability + identity-free region declaration + risk
+      // disclosures (user surface); jurisdiction-policy admin, cases, the
+      // fraud queue, wallet-risk pins (compliance role); SAR/STR + lawful
+      // access + disclosure publication (counsel).  All fail-closed.
+      .route('/compliance', createComplianceRoutes())
 
       // --- Settings sync (SPEC §23.2 /feed/preferences) ---------------------
       .get('/settings', async (c) => {
@@ -552,7 +568,18 @@ export function createV1Routes() {
           key === undefined
             ? DEFAULT_USER_SETTINGS
             : ((await getUserSettingsStore().get(key)) ?? DEFAULT_USER_SETTINGS);
-        const merged = userSettingsSchema.parse({ ...current, ...c.req.valid('json') });
+        const patch = c.req.valid('json');
+        // Feed-mode writes store the legacy-preserving spelling (rollout
+        // compat: a stale bundle for the same account validates this
+        // response/store echo against the old mode enum; lossless for
+        // best/new — see legacyPreservingFeedMode).
+        const merged = userSettingsSchema.parse({
+          ...current,
+          ...patch,
+          ...(patch.feed_mode !== undefined
+            ? { feed_mode: legacyPreservingFeedMode(patch.feed_mode) }
+            : {}),
+        });
         if (key !== undefined) await getUserSettingsStore().set(key, merged);
         return c.json(merged);
       })

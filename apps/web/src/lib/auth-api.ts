@@ -58,6 +58,29 @@ export function toUserContext(user: AuthSessionResult['user']): UserContext {
   });
 }
 
+/**
+ * The post-login context: the /status confirm carries fields the login echo
+ * cannot (`roles` — `authSessionResultSchema` is `.strict()`, so growing the
+ * echo would break stale cached bundles mid-rollout), and it is what unhides
+ * the role-gated console navigation right after sign-in rather than on the
+ * next boot.  Best-effort: a failed or unauthenticated re-read falls back to
+ * the echoed context — sign-in itself must never regress on a status hiccup.
+ * The refreshed user is trusted ONLY when it is the account that just logged
+ * in: the SW serves /v1 GETs NetworkFirst from the `licio-api` cache, so a
+ * network failure here can answer with a STALE status — potentially an OLDER
+ * session's user — and persisting that would show the wrong account and role
+ * links (codex review of PR #146).
+ */
+async function refreshedUserContext(echoed: AuthSessionResult['user']): Promise<UserContext> {
+  const fallback = toUserContext(echoed);
+  try {
+    const status = await fetchAuthStatus();
+    return status.authenticated && status.user.id === echoed.user_id ? status.user : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export interface SignupProfile {
   handle: string;
   display_name: string;
@@ -78,7 +101,7 @@ export async function verifyEmailLogin(code: string): Promise<UserContext> {
   const res = await client.v1.auth.email['verify-login'].$post({
     json: { code: code.trim().toUpperCase() },
   });
-  return toUserContext((await parseResponse(res, authSessionResultSchema)).user);
+  return refreshedUserContext((await parseResponse(res, authSessionResultSchema)).user);
 }
 
 // --- Passkey login (WS-D.1.3a) -----------------------------------------------
@@ -93,7 +116,7 @@ export async function loginWithPasskey(): Promise<UserContext> {
   const verifyRes = await client.v1.auth.webauthn.authenticate.verify.$post({
     json: { response: webauthnAuthenticationResponseSchema.parse(assertion) },
   });
-  return toUserContext((await parseResponse(verifyRes, authSessionResultSchema)).user);
+  return refreshedUserContext((await parseResponse(verifyRes, authSessionResultSchema)).user);
 }
 
 // --- Passkey-first signup (WS-D.1.2b) ----------------------------------------
@@ -108,7 +131,7 @@ export async function signupWithPasskey(profile: SignupProfile): Promise<UserCon
   const verifyRes = await client.v1.auth.webauthn.signup.verify.$post({
     json: { response: webauthnRegistrationResponseSchema.parse(attestation) },
   });
-  return toUserContext((await parseResponse(verifyRes, authSessionResultSchema)).user);
+  return refreshedUserContext((await parseResponse(verifyRes, authSessionResultSchema)).user);
 }
 
 // --- Passwordless email registration (WS-D.1.2a) ------------------------------

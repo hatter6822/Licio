@@ -37,7 +37,7 @@ function wrapper() {
 
 describe('read hooks', () => {
   it('useFeedQuery fetches and validates the feed as an infinite query', async () => {
-    const { result } = renderHook(() => queries.useFeedQuery('chronological'), {
+    const { result } = renderHook(() => queries.useFeedQuery('new'), {
       wrapper: wrapper(),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));

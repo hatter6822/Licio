@@ -16,6 +16,7 @@
 // Retention tiers here are provisional defaults pending WS-L/M/N policy.
 import { z } from 'zod';
 import { uuidSchema } from '../../common.js';
+import { FEATURE_DISABLE_REASONS } from '../../jurisdiction.js';
 import { eventBaseShape } from '../envelope.js';
 
 /** Wallet kinds (SPEC §25.6: EOAs and contract wallets). */
@@ -281,9 +282,14 @@ export const jurisdictionFeatureDisabledEventSchema = z
   .object({
     ...eventBaseShape,
     event_type: z.literal('jurisdiction.feature.disabled'),
-    policy_id: uuidSchema,
+    /** Nullable: `policy_missing`/`unknown_region` determinations have no
+     *  policy row to reference (the WS-N.1.1c fail-closed paths). */
+    policy_id: uuidSchema.nullable(),
     country_or_region: z.string().min(2).max(64),
     feature: z.string().min(1).max(64),
+    /** Machine-readable disable reason, 1:1 with the WS-N.1.2a UX copy
+     *  (the schemas/jurisdiction.ts SSOT — never a parallel list). */
+    disable_reason: z.enum(FEATURE_DISABLE_REASONS),
     privacy_classification: z.literal('sensitive'),
     retention_tier: z.literal('security_log'),
   })

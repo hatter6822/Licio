@@ -3,8 +3,8 @@
 // STEWARD_ROLES.md ROLE_EVIDENCE surface (SPEC §16.3): the evidence queue
 // (derived from citation-bearing published contributions), the two doctrine
 // actions (`mark-primary-source` / `flag-citation`) + the `clear` workflow,
-// their authorization matrix, the audit trail, the widened url-verdict gate,
-// and the public primary-source read the independent-sources drawer consumes.
+// their authorization matrix, the audit trail, and the widened url-verdict
+// gate.
 import { randomUUID } from 'node:crypto';
 import {
   defaultPersonalizationSettings,
@@ -18,7 +18,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Role } from '../identity/rbac.js';
 import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, createSession } from '../identity/sessions.js';
-import { primarySourcesForStory } from '../moderation/evidence.js';
 import type { CitedContribution, ModerationContentPort } from '../moderation/ports.js';
 import {
   createInMemoryModerationServices,
@@ -575,85 +574,5 @@ describe('url-verdict gate widening (citations render in the evidence panel)', (
     const body = (await res.json()) as { verdict: string };
     // The unwired seam fails toward flagging, never trusting.
     expect(body.verdict).toBe('unavailable');
-  });
-});
-
-describe('primarySourcesForStory (the independent-sources drawer read)', () => {
-  it('returns marked citations deduped by URL with decision-time titles', async () => {
-    const target = cited[0];
-    const other = cited[1];
-    if (!target || !other) throw new Error('fixture missing');
-    for (const [contribution, url, title] of [
-      [target, target.citations[0]?.url ?? '', 'Source 1'],
-      [other, other.citations[0]?.url ?? '', 'Source 2'],
-    ] as const) {
-      const res = await app().fetch(
-        post(
-          '/v1/moderation/evidence-decisions',
-          {
-            contribution_id: contribution.contributionId,
-            action: 'mark-primary-source',
-            citation_url: url,
-          },
-          evidenceSteward.cookie,
-        ),
-      );
-      expect(res.status).toBe(201);
-      expect(title.length).toBeGreaterThan(0);
-    }
-    // A flag on the same citation must NOT surface as a primary source.
-    await app().fetch(
-      post(
-        '/v1/moderation/evidence-decisions',
-        {
-          contribution_id: target.contributionId,
-          action: 'flag-citation',
-          citation_url: target.citations[1]?.url ?? '',
-          reason_code: 'MOD_MISINFO_001',
-        },
-        evidenceSteward.cookie,
-      ),
-    );
-    const sources = await primarySourcesForStory(getModerationServices(), STORY);
-    expect(sources).toHaveLength(2);
-    // A mark stops surfacing once its contribution is no longer published
-    // (the content port's published-only read returns null for it).
-    const removedId = other.contributionId;
-    cited = cited.filter((c) => c.contributionId !== removedId);
-    const afterRemoval = await primarySourcesForStory(getModerationServices(), STORY);
-    expect(afterRemoval.map((s) => s.url)).toEqual([target.citations[0]?.url]);
-    cited.push(other);
-    expect(new Set(sources.map((s) => s.url))).toEqual(
-      new Set([target.citations[0]?.url, other.citations[0]?.url]),
-    );
-    expect(sources.find((s) => s.url === target.citations[0]?.url)?.title).toBe('Source 1');
-    // A different story reads nothing.
-    expect(await primarySourcesForStory(getModerationServices(), randomUUID())).toEqual([]);
-  });
-
-  it('withdraws a mark when the author edits the marked citation away', async () => {
-    const target = cited[0];
-    if (!target) throw new Error('fixture missing');
-    const markedUrl = target.citations[0]?.url ?? '';
-    const res = await app().fetch(
-      post(
-        '/v1/moderation/evidence-decisions',
-        {
-          contribution_id: target.contributionId,
-          action: 'mark-primary-source',
-          citation_url: markedUrl,
-        },
-        evidenceSteward.cookie,
-      ),
-    );
-    expect(res.status).toBe(201);
-    expect(
-      (await primarySourcesForStory(getModerationServices(), STORY)).map((s) => s.url),
-    ).toEqual([markedUrl]);
-    // The author replaces the marked URL but keeps the comment cited: the
-    // contribution stays published AND cited, yet the mark must withdraw —
-    // the steward reviewed the OLD destination, not the new one.
-    target.citations = [{ url: 'https://example.org/replacement' }];
-    expect(await primarySourcesForStory(getModerationServices(), STORY)).toEqual([]);
   });
 });

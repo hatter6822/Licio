@@ -116,7 +116,13 @@ interfaces.
   revocation, cancellable by a remaining-method re-login **or** an emailed
   single-use token, then a scheduled hard purge that anonymizes + tombstones).
 - Steward MFA: `/v1/auth/mfa/totp/{enroll,verify,disable}` — TOTP enroll with an
-  encrypt-at-rest secret, per-session `mfa_verified`, recovery codes.
+  encrypt-at-rest secret, per-session `mfa_verified`, recovery codes.  The
+  Security page presents enrollment as a scannable **QR code** (a compact,
+  equivalent otpauth URI — spec-default parameters stripped — through the
+  app's own dependency-free encoder at its v5 opt-in; the LCAP §22.3
+  micro-bundle profile stays pinned to v4) plus the grouped **setup key**
+  with a copy affordance for the manual "enter a setup key" path
+  (`apps/web/src/lib/otpauth.ts`).
 
 WS-D endpoints rely on `SameSite=Strict` + the opaque session model + a per-flow
 `login_attempt_id` binding as the CSRF defense (so they are exempt from the WS-C

@@ -132,7 +132,7 @@ Route parameters (`storyId`, `threadId`, `branchId`, `roomId`) are type-safe via
 /profile/wallet                            ⚑ cryptoEnabled (default off → RestrictedState)  (auth)
 ```
 
-Search-param schemas (zod) per route: e.g. `mode ∈ {balanced, chronological, source-diverse, local, low-personalization}`, `branch ∈ {overview, questions, evidence, challenges, lenses, chronology}`. Invalid values are rejected (coerced to default or error), never silently accepted.
+Search-param schemas (zod) per route: e.g. `mode ∈ {best, rising, sources, debates, new}` (legacy pre-redesign values normalize forward), `branch ∈ {overview, questions, evidence, challenges, lenses, chronology}`. Invalid values are rejected (coerced to default or error), never silently accepted.
 
 **Acceptance criteria:**
 - All detail routes render with correct type-safe params.
@@ -321,7 +321,7 @@ Create `useAuthStore` in Zustand. Manages: authentication state (unauthenticated
 **ID:** WS-C.1.3b
 **Ref:** Sections 6.12.4, 26.2
 
-Create `useUIStore` in Zustand. Manages: theme preference (system, light, dark), reduced motion preference (system, enabled, disabled), bottom sheet state (open/closed, which sheet), active feed mode (balanced, chronological, source-diverse, local, low-personalization), and focus mode state (on/off). Persists to `localStorage` with zod validation on rehydration.
+Create `useUIStore` in Zustand. Manages: theme preference (system, light, dark), reduced motion preference (system, enabled, disabled), bottom sheet state (open/closed, which sheet), active feed mode (best, rising, sources, debates, new), and focus mode state (on/off). Persists to `localStorage` with zod validation on rehydration.
 
 The theme preference initializes from the system preference (`prefers-color-scheme`) but can be overridden by the user. The reduced motion preference initializes from `prefers-reduced-motion` but can be overridden. These overrides are persisted.
 
@@ -339,7 +339,7 @@ The theme preference initializes from the system preference (`prefers-color-sche
 - Theme preference defaults to system, overridable to light or dark.
 - Reduced motion preference defaults to system, overridable.
 - Sheet state tracks open/closed and identifies the active sheet.
-- Feed mode defaults to "balanced" and is selectable from five modes.
+- Feed mode defaults to "best" and is selectable from five modes.
 - Focus mode defaults to off.
 - All state persists across page reloads.
 - Zod validation on rehydration rejects invalid stored state.

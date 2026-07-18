@@ -20,12 +20,19 @@ import {
   governanceAuditLogResponseSchema,
   governanceProposalCreateSchema,
   governanceProposalListResponseSchema,
-  governanceTabResponseSchema,
+  governanceTabWithProductionSchema,
   modeTransitionRequestSchema,
+  type ProductionProposal,
+  productionProposalCreateSchema,
+  productionProposalListResponseSchema,
+  productionProposalResponseSchema,
   proposalVoteRequestSchema,
+  READINESS_TARGET_MODES,
+  type ReadinessTargetMode,
   roomReadinessResponseSchema,
   simTreasuryDepositRequestSchema,
   simTreasuryResponseSchema,
+  treasuryDashboardResponseSchema,
   uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
@@ -62,6 +69,11 @@ import {
   requireAuth,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
+import { denyCapability } from '../moderation/authz.js';
+import { createProductionProposal, executeProposal } from '../treasury/proposals.js';
+import { evaluateWsmReadiness, requestWsmModeTransition } from '../treasury/readiness.js';
+import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/services.js';
+import { treasuryDashboard } from '../treasury/treasury.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
@@ -129,12 +141,59 @@ async function toWireProposal(
   };
 }
 
+/** WS-M production wire projection (production rows: simulationMode=false). */
+function toWireProductionProposal(record: GovernanceProposalRecord): ProductionProposal {
+  return {
+    proposal_id: record.proposalId,
+    room_id: record.roomId,
+    proposer_user_id: record.proposerUserId,
+    proposal_type: record.proposalType,
+    title: record.title,
+    plain_language_summary: record.plainLanguageSummary,
+    category: record.category ?? null,
+    requested_amount: record.requestedAmount,
+    asset: record.asset,
+    recipient_ref: record.recipientRef,
+    conflict_disclosures: record.conflictDisclosures,
+    risk_assessment: record.riskAssessment,
+    requested_action: record.requestedAction,
+    expected_deliverable: record.expectedDeliverable,
+    law_pack_version_id: record.lawPackVersionId ?? null,
+    preflight_state: record.preflightState,
+    voting_state:
+      record.votingState === 'open'
+        ? 'open'
+        : (record.votingState as ProductionProposal['voting_state']),
+    challenge_state: record.challengeState,
+    execution_state: record.executionState,
+    tally: (record.tallySnapshot as ProductionProposal['tally']) ?? null,
+    deliberation_ends_at: record.deliberationEndsAt ?? null,
+    voting_ends_at: record.votingEndsAt ?? null,
+    challenge_window_ends_at: record.challengeWindowEndsAt ?? null,
+    executable_after: record.executableAfter,
+    created_at: record.createdAt,
+    executed_at: record.executedAt,
+  };
+}
+
+/** The default readiness target: the next escalation step from the current mode. */
+function defaultReadinessTarget(mode: string): ReadinessTargetMode {
+  if (mode === 'ordinary') return 'simulated';
+  if (mode === 'simulated') return 'testnet';
+  if (mode === 'testnet') return 'capped_production';
+  return 'mature_production';
+}
+
 /** Availability + membership gate shared by the simulation surfaces. */
 async function simGate(
   services: KnomosisServices,
   roomId: string,
   userId: string,
   needsMembership: boolean,
+  // The LIFECYCLE surfaces (readiness) serve ordinary rooms too — the
+  // ordinary→simulated checklist is how a room ENTERS the lifecycle; only the
+  // simulation surfaces themselves are non-ordinary (WS-L.4.1a).
+  allowOrdinary = false,
 ): Promise<
   { ok: true; mode: string } | { ok: false; status: 403 | 404 | 503; code: string; message: string }
 > {
@@ -154,7 +213,7 @@ async function simGate(
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }
   // The simulation surface exists only for non-ordinary rooms (WS-L.4.1a).
-  if (room.mode === 'ordinary') {
+  if (room.mode === 'ordinary' && !allowOrdinary) {
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }
   // WS-Q §16.1 content bar — closes the private-room governance READ: a private
@@ -204,15 +263,25 @@ export function createRoomGovernanceSimRoutes() {
           (p) => p.votingState === 'open' || p.executionState === 'timelocked',
         );
         const isSimulated = gate.mode === 'simulated';
+        // MODE-AWARE projection (PR #144 review): a production spend row can
+        // never ride the sim shape (its `SIM-*` asset contract would make the
+        // response parse THROW on a USDC proposal), and a real-asset room's
+        // leftover practice rows stay off the production list — each mode
+        // serializes only its own rows, in its own shape.
+        const activeSim = active.filter((p) => p.simulationMode);
+        const activeProduction = active.filter((p) => !p.simulationMode);
         return c.json(
-          governanceTabResponseSchema.parse({
+          governanceTabWithProductionSchema.parse({
             room_id: roomId,
             governance_mode: gate.mode,
             simulation_mode: isSimulated,
             charter_summary: null,
-            active_proposals: await Promise.all(
-              active.map((p) => toWireProposal(p, services.votes)),
-            ),
+            active_proposals: isSimulated
+              ? await Promise.all(activeSim.map((p) => toWireProposal(p, services.votes)))
+              : [],
+            active_production_proposals: isSimulated
+              ? []
+              : activeProduction.map((p) => toWireProductionProposal(p)),
             treasury: isSimulated ? await simTreasuryView(sim, roomId) : null,
           }),
         );
@@ -226,9 +295,24 @@ export function createRoomGovernanceSimRoutes() {
         const gate = await simGate(services, roomId, auth.userId, false);
         if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
         const proposals = await services.proposals.listByRoom(roomId, 100);
+        if (gate.mode !== 'simulated') {
+          // Real-asset modes list the PRODUCTION lifecycle (WS-M.4.1a); the
+          // room's simulated practice history stays on the sim wire below.
+          return c.json(
+            productionProposalListResponseSchema.parse({
+              proposals: proposals
+                .filter((p) => !p.simulationMode)
+                .map((p) => toWireProductionProposal(p)),
+            }),
+          );
+        }
         return c.json(
           governanceProposalListResponseSchema.parse({
-            proposals: await Promise.all(proposals.map((p) => toWireProposal(p, services.votes))),
+            proposals: await Promise.all(
+              proposals
+                .filter((p) => p.simulationMode)
+                .map((p) => toWireProposal(p, services.votes)),
+            ),
           }),
         );
       })
@@ -237,23 +321,63 @@ export function createRoomGovernanceSimRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         roomParam,
-        zValidator('json', governanceProposalCreateSchema),
+        // The body shape is MODE-DEPENDENT (sim template vs WS-M production
+        // draft), so a loose object validator types the RPC client while the
+        // real validation happens in the handler after the mode read.
+        zValidator('json', z.record(z.string(), z.unknown())),
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
           const roomId = c.req.valid('param').roomId;
           const gate = await simGate(services, roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          const body: unknown = c.req.valid('json');
           if (gate.mode !== 'simulated') {
+            // WS-M production proposals (real-asset modes; WS-M.4.1a-c + 4.2a).
+            // Real-asset governance is ADULT-gated like signing, deposits, and
+            // treasury actions — the shared sim/production route makes the gate
+            // conditional here rather than middleware-wide (simulated practice
+            // stays age-open) (W9).
+            if (auth.ageBand !== 'adult') {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
+            if (!treasuryServicesConfigured()) {
+              return c.json(
+                deny('mode_invalid', 'Proposal templates are available in simulated mode.'),
+                409,
+              );
+            }
+            const parsed = productionProposalCreateSchema.safeParse(body);
+            if (!parsed.success) {
+              return c.json(
+                deny('invalid_request', parsed.error.issues[0]?.message ?? 'Invalid proposal.'),
+                400,
+              );
+            }
+            const result = await createProductionProposal(getTreasuryServices(), {
+              roomId,
+              userId: auth.userId,
+              create: parsed.data,
+            });
+            if ('code' in result) return c.json(deny(result.code, result.message), result.status);
             return c.json(
-              deny('mode_invalid', 'Proposal templates are available in simulated mode.'),
-              409,
+              productionProposalResponseSchema.parse({
+                proposal: toWireProductionProposal(result.proposal),
+              }),
+              201,
+            );
+          }
+          const parsed = governanceProposalCreateSchema.safeParse(body);
+          if (!parsed.success) {
+            return c.json(
+              deny('invalid_request', parsed.error.issues[0]?.message ?? 'Invalid proposal.'),
+              400,
             );
           }
           const result = await createSimProposal(simulationDeps(services), {
             roomId,
             userId: auth.userId,
-            create: c.req.valid('json'),
+            create: parsed.data,
           });
           if (!result.ok) return c.json(deny(result.code, result.message), result.status);
           return c.json({ proposal: await toWireProposal(result.proposal, services.votes) }, 201);
@@ -273,6 +397,14 @@ export function createRoomGovernanceSimRoutes() {
           if (proposal === null || proposal.roomId !== params.roomId) {
             return c.json(notFound, 404);
           }
+          // Same mode branch as the list: a production proposal opened by id
+          // must carry its production shape (law-pack pin, windows, tally) —
+          // never a simulated-shaped row with zero sim votes.
+          if (gate.mode !== 'simulated') {
+            if (proposal.simulationMode) return c.json(notFound, 404);
+            return c.json({ proposal: toWireProductionProposal(proposal) });
+          }
+          if (!proposal.simulationMode) return c.json(notFound, 404);
           return c.json({ proposal: await toWireProposal(proposal, services.votes) });
         },
       )
@@ -315,10 +447,29 @@ export function createRoomGovernanceSimRoutes() {
           const params = c.req.valid('param');
           const gate = await simGate(services, params.roomId, auth.userId, true);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
-          // Simulated execution exists only in simulated mode (real modes execute
-          // through preflight → submit, never the simulation store).
           if (gate.mode !== 'simulated') {
-            return c.json(deny('mode_invalid', 'Execution here exists in simulated mode.'), 409);
+            // WS-M production execution (WS-M.4.3b): the explicit steward
+            // trigger through the shipped fail-closed treasury executor.
+            // ADULT-gated like signing, deposits, and treasury actions — the
+            // shared sim/production route makes the gate conditional here
+            // (simulated practice stays age-open) (PR #144 review).
+            if (auth.ageBand !== 'adult') {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
+            if (!treasuryServicesConfigured()) {
+              return c.json(deny('mode_invalid', 'Execution here exists in simulated mode.'), 409);
+            }
+            const result = await executeProposal(getTreasuryServices(), {
+              roomId: params.roomId,
+              proposalId: params.proposalId,
+              userId: auth.userId,
+            });
+            if ('code' in result) return c.json(deny(result.code, result.message), result.status);
+            return c.json(
+              productionProposalResponseSchema.parse({
+                proposal: toWireProductionProposal(result.proposal),
+              }),
+            );
           }
           const result = await executeSimProposal(simulationDeps(services), {
             roomId: params.roomId,
@@ -338,10 +489,16 @@ export function createRoomGovernanceSimRoutes() {
         const gate = await simGate(services, roomId, auth.userId, false);
         if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
         if (gate.mode !== 'simulated') {
-          return c.json(
-            deny('mode_invalid', 'The simulated treasury exists in simulated mode.'),
-            409,
-          );
+          // Real-asset modes serve the WS-M dashboard: last-RECONCILED balances
+          // plus reservation headroom (WS-M.2.2c), never the simulated ledger.
+          if (!treasuryServicesConfigured()) {
+            return c.json(
+              deny('mode_invalid', 'The simulated treasury exists in simulated mode.'),
+              409,
+            );
+          }
+          const dashboard = await treasuryDashboard(getTreasuryServices(), roomId);
+          return c.json(treasuryDashboardResponseSchema.parse({ treasury: dashboard }));
         }
         return c.json(
           simTreasuryResponseSchema.parse(await simTreasuryView(simulationDeps(services), roomId)),
@@ -464,29 +621,63 @@ export function createRoomGovernanceSimRoutes() {
       )
 
       // --- Readiness + mode transition (WS-L.4.1g) ---------------------------
-      .get('/rooms/:roomId/governance/readiness', authMiddleware(), roomParam, async (c) => {
-        const auth = requireAuth(c);
-        const services = getKnomosisServices();
-        const roomId = c.req.valid('param').roomId;
-        const gate = await simGate(services, roomId, auth.userId, false);
-        if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
-        const deps = readinessDeps(services);
-        if (deps === null) {
-          return c.json(deny('unavailable', 'Governance data unavailable.'), 503);
-        }
-        const readiness = await evaluateReadiness(deps, roomId, auth.userId);
-        return c.json(
-          roomReadinessResponseSchema.parse({
-            room_id: roomId,
-            current_mode: gate.mode,
-            ready: readiness.ready,
-            unmet: readiness.unmet.map((u) => ({
-              requirement: u.requirement,
-              description: u.description,
-            })),
-          }),
-        );
-      })
+      .get(
+        '/rooms/:roomId/governance/readiness',
+        authMiddleware(),
+        roomParam,
+        // Typed for the RPC client; the enum check stays in the handler so an
+        // unknown target degrades to the default rather than a 400.
+        zValidator('query', z.object({ target_mode: z.string().max(32).optional() })),
+        async (c) => {
+          const auth = requireAuth(c);
+          const services = getKnomosisServices();
+          const roomId = c.req.valid('param').roomId;
+          // `allowOrdinary`: the ordinary→simulated checklist is how a room
+          // ENTERS the lifecycle — the readiness read must serve it (W7).
+          const gate = await simGate(services, roomId, auth.userId, false, true);
+          if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // WS-M.1.2e: the EXTENDED per-item checklist with `requiredFor`
+          // semantics, evaluated LIVE for the requested (or next) target mode.
+          if (treasuryServicesConfigured()) {
+            const rawTarget = c.req.valid('query').target_mode;
+            const target = (READINESS_TARGET_MODES as readonly string[]).includes(rawTarget ?? '')
+              ? (rawTarget as ReadinessTargetMode)
+              : defaultReadinessTarget(gate.mode);
+            const wsm = await evaluateWsmReadiness(
+              getTreasuryServices(),
+              roomId,
+              auth.userId,
+              target,
+            );
+            return c.json(
+              roomReadinessResponseSchema.parse({
+                room_id: roomId,
+                current_mode: gate.mode,
+                target_mode: target,
+                ready: wsm.ready,
+                unmet: wsm.unmet,
+                items: wsm.items,
+              }),
+            );
+          }
+          const deps = readinessDeps(services);
+          if (deps === null) {
+            return c.json(deny('unavailable', 'Governance data unavailable.'), 503);
+          }
+          const readiness = await evaluateReadiness(deps, roomId, auth.userId);
+          return c.json(
+            roomReadinessResponseSchema.parse({
+              room_id: roomId,
+              current_mode: gate.mode,
+              ready: readiness.ready,
+              unmet: readiness.unmet.map((u) => ({
+                requirement: u.requirement,
+                description: u.description,
+              })),
+            }),
+          );
+        },
+      )
       .post(
         '/rooms/:roomId/governance/mode',
         authMiddleware(),
@@ -501,14 +692,65 @@ export function createRoomGovernanceSimRoutes() {
             return c.json(deny('governance_disabled', 'Governance is not enabled.'), 503);
           }
           // Transitions are steward/staff-only (WS-L.4.1g), audited in the gate.
-          if (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId))) {
+          // PLATFORM STAFF pass even without room stewardship: the recovery
+          // edges (frozen → migrating, post-remediation) are platform-only and
+          // would otherwise be unreachable.
+          const platformStaff =
+            denyCapability(
+              {
+                userId: auth.userId,
+                platformRoles: auth.roles,
+                stewardRoles: auth.stewardRoles,
+                mfaActive: auth.mfaActive,
+                mfaVerified: auth.mfaVerified,
+              },
+              'restrict',
+            ) === null;
+          if (
+            !platformStaff &&
+            (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId)))
+          ) {
             return c.json(notFound, 404); // 404-over-403 (no steward oracle)
+          }
+          const body = c.req.valid('json');
+          // WS-M.1.1b: the FULL edge table (rollbacks, production escalations,
+          // emergency freeze, frozen→migrating recovery) with live per-target
+          // readiness and a CAS mode write.  Falls back to the WS-L.4.1g
+          // two-edge gate when the WS-M container is not wired.
+          if (treasuryServicesConfigured()) {
+            // Entering a REAL-ASSET mode enables production governance for the
+            // whole room — the same adult bar every real-asset action carries
+            // (rollbacks and recovery edges stay open) (W12).
+            if (
+              (body.target_mode === 'testnet' ||
+                body.target_mode === 'capped_production' ||
+                body.target_mode === 'mature_production') &&
+              auth.ageBand !== 'adult'
+            ) {
+              return c.json(deny('adult_required', 'This feature is not available'), 403);
+            }
+            const outcome = await requestWsmModeTransition(getTreasuryServices(), {
+              roomId,
+              targetMode: body.target_mode,
+              userId: auth.userId,
+              reason: body.reason,
+              isPlatformStaff: platformStaff,
+            });
+            if (!('mode' in outcome)) {
+              return c.json(
+                {
+                  error: { code: outcome.code, message: outcome.message },
+                  unmet: outcome.unmet ?? [],
+                },
+                outcome.status,
+              );
+            }
+            return c.json({ governance_mode: outcome.mode });
           }
           const deps = readinessDeps(services);
           if (deps === null) {
             return c.json(deny('unavailable', 'Governance data unavailable.'), 503);
           }
-          const body = c.req.valid('json');
           const outcome = await requestModeTransition(deps, {
             roomId,
             targetMode: body.target_mode,

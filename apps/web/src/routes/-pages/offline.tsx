@@ -9,6 +9,7 @@
 // route is itself code-split), and the always-available surfaces mirror state locally,
 // so the codec stays off the initial bundle.
 
+import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { OfflineBundlePanel } from '../../components/lcap/OfflineBundlePanel/index.js';
 import { ConflictWarning, OutboxStatus } from '../../components/lcap/OfflineStates/index.js';
@@ -16,12 +17,19 @@ import { P2pSyncPanel } from '../../components/lcap/P2pSyncPanel/index.js';
 import { QrMicroBundle } from '../../components/lcap/QrMicroBundle/index.js';
 import { TransportStatus } from '../../components/lcap/TransportStatus/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import { getOperationalMode } from '../../lcap/mode-state.js';
 import { type OfflineStatusSummary, readOfflineStatus } from '../../lcap/offline-status.js';
+import { usePageFocus } from './usePageFocus.js';
 
 export function OfflineBundlePage(): React.ReactElement {
   const t = useT();
+  usePageFocus(t('lcap.bundle.pageTitle', 'Offline bundles'));
+  const navigate = useNavigate();
+  // Retrace history to wherever this page was opened from; a cold-loaded deep
+  // link falls back (replacing) to the profile hub.
+  const goBack = useGoBack(() => void navigate({ to: '/profile', replace: true }));
   const mode = getOperationalMode();
   const [status, setStatus] = useState<OfflineStatusSummary | null>(null);
 
@@ -43,7 +51,7 @@ export function OfflineBundlePage(): React.ReactElement {
 
   return (
     <>
-      <PageHeader title={t('lcap.bundle.pageTitle', 'Offline bundles')} />
+      <PageHeader title={t('lcap.bundle.pageTitle', 'Offline bundles')} onBack={goBack} />
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-4">
         <p className="text-sm text-ink-muted">
           {t(

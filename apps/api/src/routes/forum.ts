@@ -22,6 +22,7 @@ import {
   debatePositionUpdateSchema,
   feedPreferencesPatchSchema,
   feedPreferencesSchema,
+  legacyPreservingFeedMode,
   linkBlocklistResponseSchema,
   MAX_CAPTION_BYTES,
   MAX_GIF_BYTES,
@@ -857,10 +858,15 @@ export function createForumRoutes() {
 
           // Single source of truth: the WS-D settings blobs (clamped/audited
           // exactly like /v1/privacy/settings — this endpoint is the §23.2
-          // canonical veneer, not a second store).
+          // canonical veneer, not a second store). Feed-mode writes store the
+          // legacy-preserving spelling (rollout compat: stale bundles on the
+          // same account keep parsing the echoed value; lossless for
+          // best/new — see legacyPreservingFeedMode).
           const nextPersonalization = personalizationSettingsSchema.parse({
             ...user.personalizationSettings,
-            ...(patch.feed_mode !== undefined ? { feed_mode: patch.feed_mode } : {}),
+            ...(patch.feed_mode !== undefined
+              ? { feed_mode: legacyPreservingFeedMode(patch.feed_mode) }
+              : {}),
             ...(patch.topic_preferences !== undefined
               ? { topic_preferences: patch.topic_preferences }
               : {}),
@@ -1244,9 +1250,13 @@ export function createForumRoutes() {
             return c.json(notFound, 404);
           }
           const identity = getIdentityServices();
+          // Mirrors the override route's gate: room grants, or the platform
+          // ADMIN with cleared MFA — the overrule affordance renders exactly
+          // for whoever the action gate would admit right now.
           const isSteward =
             arena.roomId !== null &&
-            (await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0;
+            ((await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0 ||
+              (auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified));
           const deps = debateDepsFromBundle(bundle);
           const projected = await toDebateArenaPublic(
             arena,
@@ -1401,10 +1411,12 @@ export function createForumRoutes() {
             return c.json(deny(outcome.reason, positionErrorMessage(outcome.reason)), status);
           }
           const identity = getIdentityServices();
+          // Mirrors the override route's gate (room grants ∪ MFA-cleared admin).
           const isSteward =
             outcome.arena.roomId !== null &&
-            (await bundle.forum.rooms.stewardRolesFor(outcome.arena.roomId, auth.userId)).length >
-              0;
+            ((await bundle.forum.rooms.stewardRolesFor(outcome.arena.roomId, auth.userId)).length >
+              0 ||
+              (auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified));
           const projected = await toDebateArenaPublic(
             outcome.arena,
             auth.userId,
@@ -1513,6 +1525,23 @@ export function createForumRoutes() {
           if (gateArena === null) return c.json(notFound, 404);
           if (!(await debateWriteReadable(bundle, gateArena, auth.userId))) {
             return c.json(notFound, 404);
+          }
+          // The platform-ADMIN arm of the override carries the SAME per-session
+          // MFA bar as every other platform admin action (WS-D.1.5b; codex on
+          // PR #146): a room steward acts on the room's OWN authority, but an
+          // admin overruling from the platform role must have stepped up —
+          // without this, any active verified admin session could flip a
+          // judged verdict with no TOTP.
+          if (
+            gateArena.roomId !== null &&
+            auth.roles.includes('admin') &&
+            !(auth.mfaActive && auth.mfaVerified) &&
+            (await bundle.forum.rooms.stewardRolesFor(gateArena.roomId, auth.userId)).length === 0
+          ) {
+            return c.json(
+              deny('mfa_required', 'Verify MFA to overrule a verdict as a platform admin'),
+              403,
+            );
           }
           const outcome = await overrideDebateVerdict(
             debateDepsFromBundle(bundle),

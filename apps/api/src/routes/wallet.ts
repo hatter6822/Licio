@@ -29,6 +29,11 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import {
+  buildSanctionedWalletLinkHook,
+  complianceServicesConfigured,
+  getComplianceServices,
+} from '../compliance/services.js';
 import { killSwitchDecision } from '../knomosis/killswitch.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
 import { getKnomosisServices, type KnomosisServices } from '../knomosis/services.js';
@@ -82,18 +87,25 @@ function walletDeps(services: KnomosisServices): WalletServiceDeps {
     uuid: services.uuid,
     log: services.log,
     alert: services.alert,
+    // WS-N.2.2a: a FULL sanctions match at link pins the wallet high + opens
+    // a critical case.  Absent compliance services (bare test containers) the
+    // wallet simply stays `pending` — fail-closed, it cannot move funds.
+    onSanctionedWalletLink: complianceServicesConfigured()
+      ? buildSanctionedWalletLinkHook(getComplianceServices())
+      : undefined,
   };
 }
 
 /**
- * The fail-closed availability gate every wallet route passes FIRST: the
- * crypto flag (off ⇒ 503 with a clear, non-hidden reason) then the
- * wallet-connection kill switch (WS-L.3.5a: 503, immediate effect).
+ * The base availability gate every wallet route passes FIRST: the crypto flag
+ * (off ⇒ 503 with a clear, non-hidden reason) and the wallet-connection kill
+ * switch (WS-L.3.5a: 503, immediate effect).  Nothing here bars a member from
+ * MANAGING or SEVERING a wallet they already linked.
  */
-async function walletGate(
+async function walletBaseGate(
   services: KnomosisServices,
   userId: string,
-): Promise<{ code: 'crypto_disabled' | 'wallet_disabled' } | null> {
+): Promise<{ code: WalletGateCode } | null> {
   if (!services.config().cryptoEnabled) return { code: 'crypto_disabled' };
   const region = await services.regionResolver.regionForUser(userId);
   const decision = await killSwitchDecision(services.configStore, 'wallet_connection', {
@@ -103,9 +115,54 @@ async function walletGate(
   return null;
 }
 
-const GATE_MESSAGES: Record<'crypto_disabled' | 'wallet_disabled', string> = {
+/**
+ * The FULL gate for a NEW connection (nonce/link): the base checks PLUS the
+ * region's §22.2 `wallet_connection` verdict (WS-N.1.1c).
+ *
+ * The jurisdiction leg is not optional decoration: `/compliance/availability`
+ * reports `wallet_connection` per the region's policy, and without this check
+ * these routes would go on issuing nonces and linking wallets in a region whose
+ * policy disables the cell — the platform telling the member the feature is
+ * unavailable while handing it to them anyway.  An ordinary `unknown` (no
+ * verified declaration, no locale) does NOT bar it: linking a wallet moves no
+ * money, and the region ladder is fail-closed for real funds, not for every
+ * affordance (the shipped testnet posture).  But a region resolution that FAILED
+ * — a declaration-store outage — is NOT an ordinary `unknown`: `resolveRegion`
+ * marks it `unavailable` and the engine returns `blocked`, so a member whose
+ * verified declaration names a BLOCKED region cannot link a new wallet while the
+ * store is down (the escape closed with the outage's fail-closed path).
+ *
+ * It applies ONLY to new connections.  A region that bars new links must NOT
+ * trap the wallet a member linked before the policy changed: they must still be
+ * able to list it and — the point of the affordance — UNLINK it.  Those routes
+ * pass `walletBaseGate` instead (blocking a region cannot strand a member's
+ * existing financial-wallet association until the jurisdiction re-opens).
+ */
+async function walletGate(
+  services: KnomosisServices,
+  userId: string,
+): Promise<{ code: WalletGateCode } | null> {
+  const base = await walletBaseGate(services, userId);
+  if (base !== null) return base;
+  const region = await services.regionResolver.regionForUser(userId);
+  const jurisdiction = await services.compliance.jurisdiction({
+    userId,
+    region,
+    featureCell: 'wallet_connection',
+    // Linking moves no asset — the governance signatures are the other callers
+    // that name none.
+    asset: null,
+  });
+  if (jurisdiction === 'blocked') return { code: 'wallet_region_blocked' };
+  return null;
+}
+
+type WalletGateCode = 'crypto_disabled' | 'wallet_disabled' | 'wallet_region_blocked';
+
+const GATE_MESSAGES: Record<WalletGateCode, string> = {
   crypto_disabled: 'Wallet and crypto features are not enabled.',
   wallet_disabled: 'Wallet connection is temporarily disabled.',
+  wallet_region_blocked: 'Wallet connection is not available in your region.',
 };
 
 export function createWalletRoutes() {
@@ -183,7 +240,9 @@ export function createWalletRoutes() {
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
-          const gate = await walletGate(services, auth.userId);
+          // SEVER: a member must be able to unlink a wallet they already linked
+          // even from a region that now bars new connections (base gate only).
+          const gate = await walletBaseGate(services, auth.userId);
           if (gate) return c.json(deny(gate.code, GATE_MESSAGES[gate.code]), 503);
           const body = c.req.valid('json');
           const result = await requestUnlink(walletDeps(services), {
@@ -227,7 +286,9 @@ export function createWalletRoutes() {
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
-          const gate = await walletGate(services, auth.userId);
+          // LIST: an existing wallet stays visible under a region block (base
+          // gate only) — a member cannot manage what they cannot see.
+          const gate = await walletBaseGate(services, auth.userId);
           if (gate) return c.json(deny(gate.code, GATE_MESSAGES[gate.code]), 503);
           const query = c.req.valid('query');
           const items = await listWallets(walletDeps(services), {
@@ -252,7 +313,9 @@ export function createWalletRoutes() {
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
-          const gate = await walletGate(services, auth.userId);
+          // MANAGE (relabel): metadata on an existing wallet, available under a
+          // region block (base gate only).
+          const gate = await walletBaseGate(services, auth.userId);
           if (gate) return c.json(deny(gate.code, GATE_MESSAGES[gate.code]), 503);
           const result = await setWalletLabel(walletDeps(services), {
             userId: auth.userId,
@@ -277,7 +340,9 @@ export function createWalletRoutes() {
         async (c) => {
           const auth = requireAuth(c);
           const services = getKnomosisServices();
-          const gate = await walletGate(services, auth.userId);
+          // READ risk-state: available under a region block (base gate only) —
+          // a member must be able to see why their existing wallet is flagged.
+          const gate = await walletBaseGate(services, auth.userId);
           if (gate) return c.json(deny(gate.code, GATE_MESSAGES[gate.code]), 503);
           const walletId = c.req.valid('param').walletId;
           const result = await walletRiskState(walletDeps(services), {

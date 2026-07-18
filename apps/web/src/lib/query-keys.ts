@@ -3,16 +3,12 @@
 // Query-key factory (WS-C.1.2). One place that mints consistent, serializable
 // tuple keys used for both reads and targeted invalidation, so a typo can never
 // silently split a cache entry in two.
-import type { FeedMode } from '@licio/shared';
+import { DEFAULT_FEED_MODE, type FeedMode } from '@licio/shared';
 
 export const queryKeys = {
-  feed: (mode: FeedMode = 'balanced') => ['feed', mode] as const,
+  feed: (mode: FeedMode = DEFAULT_FEED_MODE) => ['feed', mode] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
-  /** WS-H.2.3a — the SPEC §7.6 independent-sources drawer payload. */
-  storyIndependentSources: (storyId: string) => ['story', storyId, 'independent-sources'] as const,
-  /** WS-F.1.2a — the story's public claim projections. */
-  storyClaims: (storyId: string) => ['story', storyId, 'claims'] as const,
   storyComments: (
     storyId: string,
     options: {
@@ -62,13 +58,27 @@ export const queryKeys = {
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
   modIncidents: () => ['mod-incidents'] as const,
-  modEvidenceQueue: () => ['mod-evidence-queue'] as const,
-  modEvidenceDecisions: () => ['mod-evidence-decisions'] as const,
+  // The console's Sources tab (the ROLE_EVIDENCE doctrine surface — sourcing is
+  // comment-centric, so the UI cache speaks "source"; the wire keeps evidence-*).
+  modSourceQueue: () => ['mod-source-queue'] as const,
+  modSourceDecisions: () => ['mod-source-decisions'] as const,
+  // WS-N compliance console (server-gated; a 403 renders the access notice).
+  complianceCases: () => ['compliance-cases'] as const,
+  complianceFraudQueue: () => ['compliance-fraud-queue'] as const,
   // WS-L wallets + knomosis.
   wallets: () => ['wallets'] as const,
   walletRiskState: (walletId: string) => ['wallet-risk-state', walletId] as const,
   governanceTab: (roomId: string) => ['room', roomId, 'governance-tab'] as const,
   governanceProposals: (roomId: string) => ['room', roomId, 'governance-proposals'] as const,
   comprehensionQuiz: (roomId: string) => ['room', roomId, 'comprehension-quiz'] as const,
-  roomReadiness: (roomId: string) => ['room', roomId, 'readiness'] as const,
+  roomReadiness: (roomId: string, target = 'next') =>
+    ['room', roomId, 'readiness', target] as const,
+  // WS-M treasury + production governance.
+  governanceProfile: (roomId: string) => ['room', roomId, 'governance-profile'] as const,
+  treasuryTab: (roomId: string) => ['room', roomId, 'treasury-tab'] as const,
+  roomGrants: (roomId: string) => ['room', roomId, 'grants'] as const,
+  paymentIntent: (roomId: string, intentId: string) =>
+    ['room', roomId, 'payment-intent', intentId] as const,
+  auditChainVerification: (roomId: string) => ['room', roomId, 'audit-chain'] as const,
+  knomosisManifest: (deploymentId: string) => ['knomosis-manifest', deploymentId] as const,
 } as const;

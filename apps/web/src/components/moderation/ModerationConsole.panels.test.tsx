@@ -35,7 +35,7 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchEvidenceDecisions: vi.fn(),
   applyEvidenceDecision: vi.fn(),
   applyModerationAction: vi.fn(),
-  checkEvidenceUrl: vi.fn(),
+  fetchUrlVerdict: vi.fn(),
   decideAppeal: vi.fn(),
   resolveIncident: vi.fn(),
 }));
@@ -416,12 +416,12 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     });
 
     // malicious → the anchor is replaced by a blocked notice (no navigation).
-    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'malicious' });
+    vi.mocked(api.fetchUrlVerdict).mockResolvedValue({ verdict: 'malicious' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
     fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
     expect(await screen.findByText(/known malicious site/i)).toBeInTheDocument();
-    expect(api.checkEvidenceUrl).toHaveBeenCalledWith('https://example.com/evidence-1');
+    expect(api.fetchUrlVerdict).toHaveBeenCalledWith('https://example.com/evidence-1');
     expect(screen.queryByRole('button', { name: /evidence-1/ })).not.toBeInTheDocument();
   });
 
@@ -434,7 +434,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         evidence_urls: ['https://example.com/evidence-1'],
       })),
     });
-    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'unavailable' });
+    vi.mocked(api.fetchUrlVerdict).mockResolvedValue({ verdict: 'unavailable' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
     fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
@@ -452,7 +452,7 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
         evidence_urls: ['https://example.com/evidence-1'],
       })),
     });
-    vi.mocked(api.checkEvidenceUrl).mockResolvedValue({ verdict: 'clear' });
+    vi.mocked(api.fetchUrlVerdict).mockResolvedValue({ verdict: 'clear' });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
     fireEvent.click(await screen.findByRole('button', { name: /evidence-1/ }));
@@ -482,24 +482,24 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
   });
 });
 
-describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
-  function mountEvidenceTab(): void {
+describe('SourcesPanel (the Sources tab — STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
+  function mountSourcesTab(): void {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchEvidenceQueue).mockResolvedValue(evidenceQueue);
     vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue(evidenceDecisions);
     render(<ModerationConsole />, { wrapper: Providers });
-    tab('Evidence');
+    tab('Sources');
   }
 
   it('renders queue rows with their citations and the recent-decisions trail', async () => {
-    mountEvidenceTab();
+    mountSourcesTab();
     // Row context: story title, type chip, body preview, created-at.
     expect(
       await screen.findByText('Regional water board publishes the dataset'),
     ).toBeInTheDocument();
     expect(screen.getByText('comment')).toBeInTheDocument();
     expect(screen.getByText(/levels dropped after the filtration upgrade/)).toBeInTheDocument();
-    // Each citation renders through EvidenceLink — a BUTTON until the WS-J.2.6b
+    // Each citation renders through CheckedLink — a BUTTON until the WS-J.2.6b
     // malware verdict resolves (no bypassable href).
     expect(screen.getByRole('button', { name: 'https://example.com/dataset' })).toBeInTheDocument();
     expect(
@@ -526,7 +526,7 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
       action: 'mark-primary-source',
       citation_url: 'https://example.com/dataset',
     });
-    mountEvidenceTab();
+    mountSourcesTab();
     const markButtons = await screen.findAllByRole('button', { name: 'Mark primary source' });
     fireEvent.click(markButtons[0] as HTMLElement);
     await waitFor(() => expect(api.applyEvidenceDecision).toHaveBeenCalledTimes(1));
@@ -535,7 +535,7 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
       action: 'mark-primary-source',
       citation_url: 'https://example.com/dataset',
     });
-    expect(await screen.findByText(/evidence decision recorded/i)).toBeInTheDocument();
+    expect(await screen.findByText(/source decision recorded/i)).toBeInTheDocument();
   });
 
   it('flagging a citation requires a ratified reason code, then posts it', async () => {
@@ -545,7 +545,7 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
       citation_url: 'https://example.com/methodology',
       reason_code: 'MOD_HARASS_001',
     });
-    mountEvidenceTab();
+    mountSourcesTab();
     const flagButtons = await screen.findAllByRole('button', { name: 'Flag citation' });
     fireEvent.click(flagButtons[1] as HTMLElement); // the second citation
     // The Flag submit stays inert (aria-disabled) until a reason is chosen —
@@ -572,7 +572,7 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
 
   it('mark reviewed posts a clear (no citation target)', async () => {
     vi.mocked(api.applyEvidenceDecision).mockResolvedValue(evidenceDecisionView);
-    mountEvidenceTab();
+    mountSourcesTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }));
     await waitFor(() => expect(api.applyEvidenceDecision).toHaveBeenCalledTimes(1));
     expect(api.applyEvidenceDecision).toHaveBeenCalledWith({
@@ -585,7 +585,7 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
     vi.mocked(api.applyEvidenceDecision).mockRejectedValue(
       new ApiClientError('duplicate_decision', 'already decided', 409),
     );
-    mountEvidenceTab();
+    mountSourcesTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }));
     expect(await screen.findByText(/already reviewed by another steward/i)).toBeInTheDocument();
   });
@@ -595,20 +595,20 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
     vi.mocked(api.fetchEvidenceQueue).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue({ items: [], next_cursor: null });
     const { unmount } = render(<ModerationConsole />, { wrapper: Providers });
-    tab('Evidence');
-    expect(await screen.findByText(/evidence queue is clear/i)).toBeInTheDocument();
-    expect(await screen.findByText(/no evidence decisions yet/i)).toBeInTheDocument();
+    tab('Sources');
+    expect(await screen.findByText(/source review queue is clear/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no source decisions yet/i)).toBeInTheDocument();
     unmount();
 
     vi.mocked(api.fetchEvidenceQueue).mockRejectedValue(
       new ApiClientError('insufficient_capability', 'no', 403),
     );
     render(<ModerationConsole />, { wrapper: Providers });
-    tab('Evidence');
+    tab('Sources');
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
   });
 
-  it('pages the evidence queue beyond the first page', async () => {
+  it('pages the source review queue beyond the first page', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchEvidenceDecisions).mockResolvedValue(evidenceDecisions);
     vi.mocked(api.fetchEvidenceQueue).mockImplementation(async (cursor) =>
@@ -617,19 +617,19 @@ describe('EvidencePanel (STEWARD_ROLES.md ROLE_EVIDENCE)', () => {
             items: evidenceQueue.items.map((row) => ({
               ...row,
               contribution_id: '00000000-0000-4000-8000-0000000000f2',
-              story_title: 'Second page of the evidence queue',
+              story_title: 'Second page of the source review queue',
             })),
             next_cursor: null,
           }
         : { ...evidenceQueue, next_cursor: 'cursor-1' },
     );
     render(<ModerationConsole />, { wrapper: Providers });
-    tab('Evidence');
+    tab('Sources');
     expect(
       await screen.findByText('Regional water board publishes the dataset'),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /load more/i }));
-    expect(await screen.findByText('Second page of the evidence queue')).toBeInTheDocument();
+    expect(await screen.findByText('Second page of the source review queue')).toBeInTheDocument();
   });
 });
 

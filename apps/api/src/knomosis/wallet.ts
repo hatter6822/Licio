@@ -31,6 +31,7 @@ import type {
   KnomosisActionStore,
   WalletAbuseLimiterPort,
 } from './stores.js';
+import { resolveWalletRiskState } from './wallet-risk-resolve.js';
 
 const NONCE_PREFIX = 'finwallet';
 
@@ -56,6 +57,11 @@ export interface WalletServiceDeps {
   log: (event: string, meta: Record<string, unknown>) => void;
   /** Integrity alert sink (WS-L.2.5d excessive-activity escalation). */
   alert: (event: string, meta: Record<string, unknown>) => void;
+  /** WS-N.2.2a/e — the sanctioned-wallet-link response: the boot wires the
+   *  compliance pin+case hook here (the ONLY moment the plaintext address
+   *  exists server-side, so link-time screening must act HERE).  Absent ⇒
+   *  the wallet simply stays `pending` (fail-closed: it cannot move funds). */
+  onSanctionedWalletLink?: ((walletAccountId: string, userId: string) => Promise<void>) | undefined;
 }
 
 export type WalletServiceError = {
@@ -117,6 +123,70 @@ export interface LinkWalletResult {
 }
 
 /** WS-L.2.5a — verify SIWE and create/reactivate the WalletAccount. */
+/**
+ * WS-N.2.2a — the FIRST assessment's screening leg, at the only moment the
+ * plaintext address exists server-side (WS-D stores financial addresses as
+ * keyed hashes).  A `blocked` verdict fires the compliance hook (pin `high` +
+ * a critical sanctions case); an outage or error leaves the fail-closed
+ * `pending` state.  Never throws.
+ *
+ * A `clear` verdict is the ONLY thing that may take a wallet out of `pending`,
+ * and it must do so HERE.  This is the one moment the plaintext address exists
+ * (it is stored hashed), so it is the one moment the wallet can be screened at
+ * all — `walletRisk` later reads pins and cases and says `normal` when it finds
+ * none, which is just as true of a wallet that was never screened.  We RECORD
+ * the clearance by promoting the stored `pending`→`normal` (a CAS, so a racing
+ * escalation is never clobbered); the shared read-through (`resolveWalletRiskState`)
+ * then refuses to promote the rest — an absence-of-signal `normal` from
+ * `walletRisk` cannot lift a `pending` wallet.  An outage therefore leaves the
+ * wallet pending until it is re-linked — the honest outcome: we could not
+ * certify it, and nothing later can.
+ */
+async function screenLinkedWallet(
+  deps: WalletServiceDeps,
+  addressLower: string,
+  walletAccountId: string,
+  userId: string,
+): Promise<WalletRiskState | null> {
+  try {
+    const verdict = await deps.compliance.screenAddress({
+      addressLower,
+      deploymentId: 'wallet-link',
+    });
+    if (verdict === 'clear') {
+      // The ONE positive clearance: this is the only moment the plaintext address
+      // exists, so it is the only moment the wallet can be screened at all.
+      // Record it by lifting the fail-closed `pending` state to `normal` — a CAS
+      // from `pending`, so a racing escalation is never clobbered.  Absence of
+      // adverse signals can NOT do this later (`resolveWalletRiskState`): it is
+      // equally true of a wallet that was never screened.  Return the recorded
+      // state so the caller's returned record reflects it (no stale re-read).
+      await deps.wallets.updateRiskState(walletAccountId, 'normal', 'pending');
+      return 'normal';
+    }
+    if (verdict !== 'blocked') return null; // `unavailable`: stay `pending` until re-linked
+    // ALERT FIRST, then record.  A hook that throws (the chain is down) used to
+    // take the alert with it, so a sanctions match at link could leave no pin,
+    // no case, and no signal — the one outcome an operator must hear about.
+    deps.alert('knomosis.wallet.link_sanctioned', { wallet_account_id: walletAccountId });
+    if (deps.onSanctionedWalletLink !== undefined) {
+      await deps.onSanctionedWalletLink(walletAccountId, userId);
+    }
+    // `blocked`: the pin/case is the record; the wallet stays `pending` (a later
+    // read-through derives `high` from the pin) — no promotion here.
+    return null;
+  } catch (error) {
+    // Fail-closed by inaction: the wallet stays `pending`, which cannot move
+    // funds until an assessment resolves it — and every fund transfer
+    // re-screens this address anyway.
+    deps.alert('knomosis.wallet.link_screen_failed', {
+      wallet_account_id: walletAccountId,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+    return null;
+  }
+}
+
 export async function linkWallet(
   deps: WalletServiceDeps,
   args: {
@@ -231,19 +301,50 @@ export async function linkWallet(
         targetRef: reactivated.addressTruncated,
         context: { setting: 'relink' },
       });
-      return { ok: true, wallet: reactivated, alreadyLinked: false };
+      const reactivatedRisk = await screenLinkedWallet(
+        deps,
+        verified.addressLower,
+        reactivated.walletAccountId,
+        args.userId,
+      );
+      return {
+        ok: true,
+        wallet:
+          reactivatedRisk !== null ? { ...reactivated, riskState: reactivatedRisk } : reactivated,
+        alreadyLinked: false,
+      };
     }
     // active or pending_unlink: idempotent re-link; a pending unlink is
-    // CANCELLED by re-linking during the cooling-off window (WS-L.2.5b).
+    // CANCELLED by re-linking during the cooling-off window (WS-L.2.5b).  The
+    // cancel is COLUMN-SCOPED — a full-record `update({...existing})` would write
+    // the stale `existing` snapshot back over any `riskState` a compliance
+    // escalation persisted between the read above and this write, silently
+    // restoring a prior `normal` and losing the fail-closed fund restriction.  The
+    // method returns the FRESH row, so the `pending` re-screen below (and the
+    // response) reflect a concurrent escalation rather than the stale read.
     const record =
       existing.unlinkState === 'pending_unlink'
-        ? await deps.wallets.update({
-            ...existing,
-            unlinkState: 'active',
-            unlinkRequestedAt: null,
-            unlinkFinalizeAfter: null,
-          })
+        ? ((await deps.wallets.cancelPendingUnlink(existing.walletAccountId)) ?? existing)
         : existing;
+    // A wallet still `pending` from a link-time screening OUTAGE has NO other
+    // recovery route: the read-through now refuses to promote it from an
+    // absence-of-signal `normal` (thread-Y), so without re-screening here it is
+    // fund-blocked until an unlink→finalize→cooldown→relink.  Re-screen on the
+    // re-link so a recovered provider can clear it.  Idempotent: a `clear` CASes
+    // `pending`→`normal`, `unavailable` leaves it pending, and the blocked hook
+    // dedups per ACTIVE PIN (idempotent pin + `sanctions:link:<pin.id>` case), so a
+    // re-freeze after the prior incident resolved opens a fresh reviewable case.
+    if (record.riskState === 'pending') {
+      const rescreened = await screenLinkedWallet(
+        deps,
+        verified.addressLower,
+        record.walletAccountId,
+        args.userId,
+      );
+      if (rescreened !== null) {
+        return { ok: true, wallet: { ...record, riskState: rescreened }, alreadyLinked: true };
+      }
+    }
     return { ok: true, wallet: record, alreadyLinked: true };
   }
 
@@ -292,7 +393,18 @@ export async function linkWallet(
     chain_id: inserted.wallet.chainId,
     type: inserted.wallet.walletType,
   });
-  return { ok: true, wallet: inserted.wallet, alreadyLinked: false };
+  const insertedRisk = await screenLinkedWallet(
+    deps,
+    verified.addressLower,
+    inserted.wallet.walletAccountId,
+    args.userId,
+  );
+  return {
+    ok: true,
+    wallet:
+      insertedRisk !== null ? { ...inserted.wallet, riskState: insertedRisk } : inserted.wallet,
+    alreadyLinked: false,
+  };
 }
 
 /** WS-L.2.5c — the owner's wallet list with "Wallet N" label defaults. */
@@ -498,20 +610,19 @@ export async function walletRiskState(
     return err(404, 'not_found', 'Resource not found');
   }
 
-  let state: WalletRiskState = wallet.riskState;
-  // Read-through to the WS-N seam: a completed assessment updates the stored
-  // state; an unavailable engine leaves `pending` in place (fail closed).
-  const assessment = await deps.compliance.walletRisk({
+  // Read-through the shared WS-N seam (thread-Y fail-closed): a completed
+  // assessment updates the stored state and escalations apply, but an absence-of-
+  // signal `normal` never lifts a still-unscreened `pending` wallet, and an
+  // unavailable engine leaves the stored state in place.
+  const { state, assessment } = await resolveWalletRiskState(deps, {
     walletAccountId: wallet.walletAccountId,
     userId: args.userId,
+    riskState: wallet.riskState,
   });
-  if (assessment !== 'unavailable' && assessment.state !== state) {
-    state = assessment.state;
-    // Column-scoped write — never clobber a concurrent unlink with a stale snapshot.
-    await deps.wallets.updateRiskState(wallet.walletAccountId, state);
-  }
+  // Key the explanation off the RESOLVED state: when a `normal` assessment was
+  // refused (kept `pending`), show the pending copy, not "no elevated risk".
   const text =
-    assessment !== 'unavailable'
+    assessment !== 'unavailable' && assessment.state === state
       ? { explanation: assessment.explanation, nextStep: assessment.nextStep }
       : RISK_EXPLANATIONS[state];
   return { ok: true, riskState: state, explanation: text.explanation, nextStep: text.nextStep };

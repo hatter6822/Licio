@@ -117,9 +117,8 @@ export function disputeValidationInput(
 
 /**
  * WS-T — the validation BOOST: a modest additive nudge for a `validated` story
- * (challenged by a sourced correction and PROVEN accurate). Applied OUTSIDE the
- * SCOI distribution multiplier — symmetric with `disputeOrderingSink` — so a
- * validated story keeps the lift even when its interpretations diverge. Unlike
+ * (challenged by a sourced correction and PROVEN accurate). Applied after the
+ * penalty subtraction — symmetric with `disputeOrderingSink`. Unlike
  * the sink it is DELIBERATELY bounded (`vD`, default 0.25) and does NOT dominate
  * the score span: it nudges accurate content up without guaranteeing the top (so
  * it cannot be gamed into a hard promotion). Uniform across authors/topics and
@@ -157,14 +156,13 @@ function term(value: number, coefficient: number, enforced: boolean): PenaltyTer
 /**
  * WS-T — the dispute demotion is realized as an ORDERING-LEVEL SINK (the exact
  * analogue of the comment-section sink), not merely a within-convex penalty
- * term.  A convex/penalty term is subtracted INSIDE the distribution multiplier
- * and its magnitude is bounded by the positive score (≤ 2, SPEC §5.4); a story
- * with strong baseline/participation could therefore still outscore a clean
- * low-signal story even after `pD` subtracts.  This constant is subtracted
- * OUTSIDE the multiplier and exceeds the entire achievable non-sink score range
- * (positive ∈ [0, 2] minus the profile's bounded penalty coefficients) by a wide
- * margin, so a `corrected` story sorts strictly BELOW every non-disputed story —
- * deterministically and independent of the SCOI distribution multiplier.  It is
+ * term.  A convex/penalty term's magnitude is bounded by the positive score
+ * (≤ 2, SPEC §5.4); a story with strong baseline/participation could therefore
+ * still outscore a clean low-signal story even after `pD` subtracts.  This
+ * constant is subtracted after the penalty subtraction and exceeds the entire
+ * achievable non-sink score range (positive ∈ [0, 2] minus the profile's
+ * bounded penalty coefficients) by a wide margin, so a `corrected` story sorts
+ * strictly BELOW every non-disputed story — deterministically.  It is
  * a content-quality ordering signal (uniform across authors/topics, never
  * financial — neutrality-safe), never a hidden/removed state. */
 export function disputeOrderingSink(

@@ -32,6 +32,7 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -40,6 +41,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ActionNonceStore } from './services.js';
 import type {
   AuditLogCursor,
@@ -72,6 +74,7 @@ import type {
   WalletActorMappingStore,
 } from './stores.js';
 import {
+  DEAD_ACTION_STATES,
   READINESS_QUALIFYING_AUDIT_ACTIONS,
   selectGatewayBoundAction,
   TERMINAL_SUBMISSION_STATES,
@@ -292,13 +295,23 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
   async updateRiskState(
     walletAccountId: string,
     riskState: FinancialWalletRecord['riskState'],
+    expected?: FinancialWalletRecord['riskState'],
   ): Promise<void> {
     // Column-scoped UPDATE: sets ONLY risk_state, so a concurrent unlink mutation
-    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).
+    // is never clobbered by a stale full-record snapshot (WS-L.2.5c-1).  When
+    // `expected` is supplied the predicate makes it a CAS — the link-time `clear`
+    // promotes `pending`→`normal` without clobbering a racing escalation.
     await this.db
       .update(walletAccounts)
       .set({ riskState })
-      .where(eq(walletAccounts.walletAccountId, walletAccountId));
+      .where(
+        expected === undefined
+          ? eq(walletAccounts.walletAccountId, walletAccountId)
+          : and(
+              eq(walletAccounts.walletAccountId, walletAccountId),
+              eq(walletAccounts.riskState, expected),
+            ),
+      );
   }
 
   async updateLabel(walletAccountId: string, label: string | null): Promise<void> {
@@ -392,6 +405,27 @@ export class DrizzleFinancialWalletStore implements FinancialWalletStore {
       )
       .returning({ walletAccountId: walletAccounts.walletAccountId });
     return rows.length > 0;
+  }
+
+  async cancelPendingUnlink(walletAccountId: string): Promise<FinancialWalletRecord | null> {
+    // Column-scoped UPDATE predicated on `pending_unlink`: flip it back to active +
+    // clear the cooling-off fields, touching NOTHING else — a full snapshot would
+    // clobber a `high` risk a compliance escalation persisted between the caller's
+    // read and this write (the same clobber updateRiskState/updateLabel avoid).  The
+    // `.returning()` gives the FRESH row, so the caller sees a concurrent escalation.
+    const rows = await this.db
+      .update(walletAccounts)
+      .set({ unlinkState: 'active', unlinkRequestedAt: null, unlinkFinalizeAfter: null })
+      .where(
+        and(
+          eq(walletAccounts.walletAccountId, walletAccountId),
+          eq(walletAccounts.unlinkState, 'pending_unlink'),
+        ),
+      )
+      .returning();
+    // Matched: the fresh, just-reactivated row.  No match ⇒ the row was already
+    // active (idempotent) or finalized by a racing sweep — return its current state.
+    return rows[0] !== undefined ? mapWallet(rows[0]) : this.getById(walletAccountId);
   }
 
   async purgeByUser(userId: string): Promise<number> {
@@ -497,6 +531,7 @@ function mapAction(row: typeof knomosisActionRecords.$inferSelect): KnomosisActi
     indexedEventRef: row.indexedEventRef,
     reconciliationState: row.reconciliationState,
     idempotencyKey: row.idempotencyKey,
+    paymentIntentId: row.paymentIntentId,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   };
@@ -522,6 +557,7 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
       indexedEventRef: record.indexedEventRef,
       reconciliationState: record.reconciliationState,
       idempotencyKey: record.idempotencyKey,
+      paymentIntentId: record.paymentIntentId,
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
     });
@@ -550,6 +586,36 @@ export class DrizzleKnomosisActionStore implements KnomosisActionStore {
           eq(knomosisActionRecords.idempotencyKey, idempotencyKey),
         ),
       )
+      .limit(1);
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
+  async getByPaymentIntentId(paymentIntentId: string): Promise<KnomosisActionRecordEntity | null> {
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(
+        and(
+          eq(knomosisActionRecords.paymentIntentId, paymentIntentId),
+          // Live only — the same predicate `knomosis_action_intent_uq` uses, so
+          // the row this returns is exactly the row that would have collided.
+          notInArray(knomosisActionRecords.submissionState, [...DEAD_ACTION_STATES]),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? mapAction(rows[0]) : null;
+  }
+
+  async getLatestByPaymentIntentId(
+    paymentIntentId: string,
+  ): Promise<KnomosisActionRecordEntity | null> {
+    // ANY state, newest first — the crash-recovery read (see the interface); the
+    // live-only predicate above stays the uniqueness/replay path.
+    const rows = await this.db
+      .select()
+      .from(knomosisActionRecords)
+      .where(eq(knomosisActionRecords.paymentIntentId, paymentIntentId))
+      .orderBy(desc(knomosisActionRecords.createdAt))
       .limit(1);
     return rows[0] ? mapAction(rows[0]) : null;
   }
@@ -1173,6 +1239,13 @@ function mapProposal(row: typeof governanceProposals.$inferSelect): GovernancePr
     createdAt: iso(row.createdAt),
     executedAt: isoOrNull(row.executedAt),
     executionClaimedAt: isoOrNull(row.executionClaimedAt),
+    // WS-M production lifecycle columns (null on sim rows).
+    lawPackVersionId: row.lawPackVersionId,
+    category: row.category,
+    deliberationEndsAt: isoOrNull(row.deliberationEndsAt),
+    votingEndsAt: isoOrNull(row.votingEndsAt),
+    challengeWindowEndsAt: isoOrNull(row.challengeWindowEndsAt),
+    tallySnapshot: (row.tallySnapshot as Record<string, unknown> | null) ?? null,
   };
 }
 
@@ -1203,6 +1276,12 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       createdAt: new Date(record.createdAt),
       executedAt: dateOrNull(record.executedAt),
       executionClaimedAt: dateOrNull(record.executionClaimedAt),
+      lawPackVersionId: record.lawPackVersionId ?? null,
+      category: record.category ?? null,
+      deliberationEndsAt: dateOrNull(record.deliberationEndsAt ?? null),
+      votingEndsAt: dateOrNull(record.votingEndsAt ?? null),
+      challengeWindowEndsAt: dateOrNull(record.challengeWindowEndsAt ?? null),
+      tallySnapshot: record.tallySnapshot ?? null,
     });
     return record;
   }
@@ -1222,6 +1301,33 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       .from(governanceProposals)
       .where(eq(governanceProposals.roomId, roomId))
       .orderBy(desc(governanceProposals.createdAt))
+      .limit(limit);
+    return rows.map(mapProposal);
+  }
+
+  async listUnsettledByRoom(
+    roomId: string,
+    limit: number,
+    afterId: string | null = null,
+  ): Promise<GovernanceProposalRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceProposals)
+      .where(
+        and(
+          eq(governanceProposals.roomId, roomId),
+          eq(governanceProposals.simulationMode, false),
+          or(
+            inArray(governanceProposals.votingState, ['deliberation', 'open']),
+            and(
+              eq(governanceProposals.votingState, 'passed'),
+              inArray(governanceProposals.executionState, ['timelocked', 'executing']),
+            ),
+          ),
+          afterId === null ? undefined : gt(governanceProposals.proposalId, afterId),
+        ),
+      )
+      .orderBy(asc(governanceProposals.proposalId))
       .limit(limit);
     return rows.map(mapProposal);
   }
@@ -1311,6 +1417,111 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       )
       .returning();
     return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
+  async casVotingState(
+    proposalId: string,
+    from: GovernanceProposalRecord['votingState'],
+    to: GovernanceProposalRecord['votingState'],
+    patch: Parameters<GovernanceProposalStore['casVotingState']>[3],
+  ): Promise<GovernanceProposalRecord | null> {
+    // Generalized voting-state CAS (WS-M.4.2d): the WHERE carries the
+    // expectation so a concurrent settle matches zero rows, never clobbers.
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({
+        votingState: to,
+        ...(patch.executionState !== undefined ? { executionState: patch.executionState } : {}),
+        ...(patch.executableAfter !== undefined
+          ? { executableAfter: dateOrNull(patch.executableAfter ?? null) }
+          : {}),
+        ...(patch.challengeWindowEndsAt !== undefined
+          ? { challengeWindowEndsAt: dateOrNull(patch.challengeWindowEndsAt ?? null) }
+          : {}),
+        ...(patch.votingEndsAt !== undefined
+          ? { votingEndsAt: dateOrNull(patch.votingEndsAt ?? null) }
+          : {}),
+        ...(patch.tallySnapshot !== undefined ? { tallySnapshot: patch.tallySnapshot } : {}),
+        ...(patch.challengeState !== undefined ? { challengeState: patch.challengeState } : {}),
+      })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          eq(governanceProposals.votingState, from),
+        ),
+      )
+      .returning();
+    return rows[0] ? mapProposal(rows[0]) : null;
+  }
+
+  async casExecutionState(
+    proposalId: string,
+    fromStates: readonly GovernanceProposalRecord['executionState'][],
+    to: GovernanceProposalRecord['executionState'],
+    options: { clearClaim?: boolean } = {},
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(governanceProposals)
+      .set({
+        executionState: to,
+        ...(options.clearClaim === true ? { executionClaimedAt: null } : {}),
+      })
+      .where(
+        and(
+          eq(governanceProposals.proposalId, proposalId),
+          inArray(governanceProposals.executionState, [...fromStates]),
+        ),
+      )
+      .returning({ proposalId: governanceProposals.proposalId });
+    return rows.length > 0;
+  }
+
+  async applyChallengeProjection(
+    proposalId: string,
+    projection: {
+      challengeState: GovernanceProposalRecord['challengeState'];
+      blockExecution?: boolean;
+      executableAfterFloor?: string;
+    },
+  ): Promise<boolean> {
+    // COLUMN-scoped, WHERE-guarded statements — never a stale whole-row write
+    // that could undo a concurrent execution (PR #144 W11).
+    return this.db.transaction(async (tx) => {
+      const rows = await tx
+        .update(governanceProposals)
+        .set({ challengeState: projection.challengeState })
+        .where(eq(governanceProposals.proposalId, proposalId))
+        .returning({ proposalId: governanceProposals.proposalId });
+      if (rows.length === 0) return false;
+      if (projection.blockExecution === true) {
+        await tx
+          .update(governanceProposals)
+          .set({ executionState: 'blocked' })
+          .where(
+            and(
+              eq(governanceProposals.proposalId, proposalId),
+              inArray(governanceProposals.executionState, ['not_executed', 'timelocked']),
+            ),
+          );
+      }
+      if (projection.executableAfterFloor !== undefined) {
+        const floor = new Date(projection.executableAfterFloor);
+        await tx
+          .update(governanceProposals)
+          .set({ executableAfter: floor })
+          .where(
+            and(
+              eq(governanceProposals.proposalId, proposalId),
+              eq(governanceProposals.executionState, 'timelocked'),
+              or(
+                isNull(governanceProposals.executableAfter),
+                lt(governanceProposals.executableAfter, floor),
+              ),
+            ),
+          );
+      }
+      return true;
+    });
   }
 
   async listExecutable(nowIso: string): Promise<GovernanceProposalRecord[]> {
@@ -1473,6 +1684,9 @@ function mapSignature(row: typeof governanceSignatures.$inferSelect): Governance
     weightSnapshot: row.weightSnapshot,
     eligibilityReason: row.eligibilityReason,
     createdAt: iso(row.createdAt),
+    purpose: row.purpose as NonNullable<GovernanceSignatureRecord['purpose']>,
+    choice: (row.choice as GovernanceSignatureRecord['choice']) ?? null,
+    nonce: row.nonce,
   };
 }
 
@@ -1493,6 +1707,9 @@ export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore
         weightSnapshot: record.weightSnapshot,
         eligibilityReason: record.eligibilityReason,
         createdAt: new Date(record.createdAt),
+        purpose: record.purpose ?? 'vote',
+        choice: record.choice ?? null,
+        nonce: record.nonce ?? null,
       })
       .onConflictDoNothing()
       .returning({ signatureId: governanceSignatures.signatureId });
@@ -1732,9 +1949,90 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
         simulationMode: entry.simulationMode,
         createdAt: new Date(entry.createdAt),
         dedupeKey: entry.dedupeKey ?? null,
+        prevHash: entry.prevHash ?? null,
+        integrityHash: entry.integrityHash ?? null,
+        proposalId: entry.proposalId ?? null,
+        treasuryId: entry.treasuryId ?? null,
       })
       .onConflictDoNothing({ target: governanceAuditLogs.dedupeKey });
     return entry;
+  }
+
+  async appendChained(entry: GovernanceAuditRecord): Promise<GovernanceAuditRecord | null> {
+    if (entry.integrityHash === undefined || entry.integrityHash === null) {
+      throw new Error('appendChained requires an integrityHash');
+    }
+    try {
+      await this.db.insert(governanceAuditLogs).values({
+        entryId: entry.entryId,
+        roomId: entry.roomId,
+        actionType: entry.actionType,
+        actorUserId: entry.actorUserId,
+        actionDetails: entry.actionDetails,
+        simulationMode: entry.simulationMode,
+        createdAt: new Date(entry.createdAt),
+        dedupeKey: entry.dedupeKey ?? null,
+        prevHash: entry.prevHash ?? null,
+        integrityHash: entry.integrityHash,
+        proposalId: entry.proposalId ?? null,
+        treasuryId: entry.treasuryId ?? null,
+      });
+      return entry;
+    } catch (error) {
+      // A unique violation on the fork-proof chain indexes (migration 0082)
+      // means the writer must re-read the head and retry; anything else
+      // rethrows.  (Drizzle buries the SQLSTATE on the cause chain — see
+      // `isUniqueViolation`.)
+      if (isUniqueViolation(error)) return null;
+      throw error;
+    }
+  }
+
+  async chainHead(roomId: string): Promise<GovernanceAuditRecord | null> {
+    // The chain head is the chained entry whose integrity hash no other chained
+    // entry references as its parent — unique by the fork-proof indexes.
+    const rows = await this.db
+      .select()
+      .from(governanceAuditLogs)
+      .where(
+        and(
+          eq(governanceAuditLogs.roomId, roomId),
+          isNotNull(governanceAuditLogs.integrityHash),
+          sql`${governanceAuditLogs.integrityHash} NOT IN (
+            SELECT gal."prev_hash" FROM "knomosis"."governance_audit_log" gal
+            WHERE gal."room_id" = ${roomId} AND gal."prev_hash" IS NOT NULL
+          )`,
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    return row ? this.#mapChained(row) : null;
+  }
+
+  async listChainedByRoom(roomId: string): Promise<GovernanceAuditRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(governanceAuditLogs)
+      .where(
+        and(eq(governanceAuditLogs.roomId, roomId), isNotNull(governanceAuditLogs.integrityHash)),
+      );
+    return rows.map((row) => this.#mapChained(row));
+  }
+
+  #mapChained(row: typeof governanceAuditLogs.$inferSelect): GovernanceAuditRecord {
+    return {
+      entryId: row.entryId,
+      roomId: row.roomId,
+      actionType: row.actionType as GovernanceAuditRecord['actionType'],
+      actorUserId: row.actorUserId,
+      actionDetails: row.actionDetails as Record<string, unknown>,
+      simulationMode: row.simulationMode,
+      createdAt: iso(row.createdAt),
+      prevHash: row.prevHash,
+      integrityHash: row.integrityHash,
+      proposalId: row.proposalId,
+      treasuryId: row.treasuryId,
+    };
   }
 
   async listByRoom(
@@ -1752,8 +2050,11 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
               eq(governanceAuditLogs.roomId, roomId),
               // Row-value keyset comparison over the STRICT (createdAt, entryId)
               // total order — the entryId tiebreaker makes same-millisecond rows
-              // page without skips/duplicates (WS-L.4.1f).
-              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt)}, ${before.entryId}::uuid)`,
+              // page without skips/duplicates (WS-L.4.1f).  The timestamp binds
+              // as an ISO STRING + explicit cast: postgres.js cannot serialize a
+              // raw Date inside a row-value fragment (it threw on every second
+              // page until the treasury contract test caught it).
+              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.entryId}::uuid)`,
             ),
       )
       .orderBy(desc(governanceAuditLogs.createdAt), desc(governanceAuditLogs.entryId))
@@ -1766,6 +2067,10 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
       actionDetails: row.actionDetails as Record<string, unknown>,
       simulationMode: row.simulationMode,
       createdAt: iso(row.createdAt),
+      prevHash: row.prevHash,
+      integrityHash: row.integrityHash,
+      proposalId: row.proposalId,
+      treasuryId: row.treasuryId,
     }));
   }
 
@@ -1785,6 +2090,20 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
         and(
           eq(governanceAuditLogs.roomId, roomId),
           eq(governanceAuditLogs.simulationMode, true),
+          inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
+        ),
+      );
+    return rows[0]?.count ?? 0;
+  }
+
+  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(governanceAuditLogs)
+      .where(
+        and(
+          eq(governanceAuditLogs.roomId, roomId),
+          eq(governanceAuditLogs.actorUserId, userId),
           inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
         ),
       );

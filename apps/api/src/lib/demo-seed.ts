@@ -122,6 +122,19 @@ export const DEV_ACCOUNTS: ReadonlyArray<{
     roles: ['user', 'expert'],
     purpose: 'Domain expert — the platform `expert` role: may post in expert-gated rooms.',
   },
+  {
+    userId: U(23),
+    handle: 'licio_compliance',
+    displayName: 'Cora Compliance',
+    email: 'compliance@licio.test',
+    // Both WS-N roles on one dev account so the whole compliance console —
+    // cases, fraud queue, declaration verification — AND the counsel-only
+    // surfaces (SAR drafting, disclosure publishing) are exercisable in dev.
+    // In production these are separate people (isCounsel ∌ compliance.review).
+    roles: ['user', 'compliance', 'counsel'],
+    purpose:
+      'Financial-compliance reviewer + counsel — the WS-N console and SAR/disclosure surfaces.',
+  },
 ] as const;
 
 /** Idempotent: re-running against existing data is a no-op. */
@@ -1150,7 +1163,10 @@ export async function seedForumDemoData(
       firstSeenStoryId: storyId,
       // A real claim independence group so MERI's claim-extraction input is
       // present for these stories (the real batch computes their exposure).
-      independenceGroupId: `demo-claim-indep-${claimN}`,
+      // A DETERMINISTIC UUID (the claim model types group ids as UUIDs — the
+      // real dedup path mints randomUUID(); a bare string here is
+      // model-invalid seed data).
+      independenceGroupId: `5f5e9100-0000-4000-8000-${String(claimN).padStart(12, '0')}`,
       createdBy: null,
       extractionSource: 'steward',
       extractionConfidence: null,
@@ -1781,8 +1797,8 @@ export async function seedForumDemoData(
 
   // MinHash signatures for every seeded story (over the title + excerpt). These
   // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI
-  // batch — and the independent-sources drawer — detect near-duplicates from
-  // genuine signature collisions (S21 ↔ S25) rather than hand-authored groups.
+  // batch detects near-duplicates from genuine signature collisions
+  // (S21 ↔ S25) rather than hand-authored groups.
   for (const story of await ingestion.stories.listRecent(200)) {
     if (await ingestion.signatures.getByStoryId(story.storyId)) continue;
     const text = `${story.title} ${story.excerpt ?? ''}`.trim();
@@ -1980,6 +1996,24 @@ export async function seedOperationalSignals(
       branch: 'moderate',
       returns: 'few',
     },
+    {
+      owner: U(23),
+      item: S(11),
+      dwell: 'long',
+      source: true,
+      context: true,
+      branch: 'shallow',
+      returns: 'none',
+    },
+    {
+      owner: U(23),
+      item: S(2),
+      dwell: 'medium',
+      source: true,
+      context: false,
+      branch: 'none',
+      returns: 'none',
+    },
   ];
   const rows: NewStoredEvent[] = attention.map((a) => {
     const event = attentionAggregateEventSchema.parse({
@@ -2112,10 +2146,9 @@ export async function seedModerationDemo(moderation: ModerationServices): Promis
     });
   }
   // One ROLE_EVIDENCE showcase decision: the methodology citation on the
-  // sourced reply C(2) is marked a PRIMARY SOURCE, so the evidence queue, the
-  // recent-decisions panel, AND the story's independent-sources drawer all
-  // render real reviewed metadata on `pnpm dev`.  Best-effort + idempotent
-  // (a re-boot hits duplicate_decision and moves on).
+  // sourced reply C(2) is marked a PRIMARY SOURCE, so the evidence queue and
+  // the recent-decisions panel render real reviewed metadata on `pnpm dev`.
+  // Best-effort + idempotent (a re-boot hits duplicate_decision and moves on).
   await applyEvidenceDecision(
     moderation,
     {

@@ -53,6 +53,7 @@ import {
   lte,
   sql,
 } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import {
   decodeSearchCursor,
   encodeSearchCursor,
@@ -95,17 +96,6 @@ type Db = DbExecutor;
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const dateOrNull = (s: string | null): Date | null => (s === null ? null : new Date(s));
-
-function isUniqueViolation(error: unknown): boolean {
-  // Drizzle wraps the driver error (DrizzleQueryError → cause: PostgresError),
-  // so the unique-violation code must be checked down the cause chain.
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
 
 // ---------------------------------------------------------------------------
 // Stories + thread shell.

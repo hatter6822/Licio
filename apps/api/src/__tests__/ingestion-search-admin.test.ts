@@ -474,19 +474,21 @@ describe('steward source editing + syndication + config (WS-F.2.3a/2.4)', () => 
   });
 });
 
-describe('public reads (claims/source)', () => {
-  it('serves the story’s claims and the source profile', async () => {
+describe('public reads (source profile) + the internal claim model', () => {
+  it('extracts claims into the internal model and serves the source profile', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);
     const storyId = await submitBrief(cookie, {
       body: 'The reservoir level fell by 12 percent in May according to the published utility report.',
     });
+    // Claims remain an INTERNAL model (MERI/WS-K inputs) — the public
+    // per-story projection was removed with the independent-sources drawer;
+    // the path survives ONLY as the rollout-compat stub serving the constant
+    // empty payload to pre-removal cached bundles.
     const claims = await fixture.ingestion.claims.listByStory(storyId);
     expect(claims.length).toBeGreaterThanOrEqual(1);
-    const claimId = claims[0]?.claimId as string;
-    const viaStory = await app().request(`http://localhost/v1/stories/${storyId}/claims`);
-    expect(viaStory.status).toBe(200);
-    const { items } = (await viaStory.json()) as { items: Array<{ claim_id: string }> };
-    expect(items.map((c) => c.claim_id)).toContain(claimId);
+    const stub = await app().request(`http://localhost/v1/stories/${storyId}/claims`);
+    expect(stub.status).toBe(200);
+    expect(await stub.json()).toEqual({ items: [] });
 
     const source = await fixture.ingestion.sources.upsertByDomain('profile.example', {
       name: 'Profile Test',

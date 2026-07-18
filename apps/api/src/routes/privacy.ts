@@ -14,6 +14,7 @@ import {
   deletionStatusSchema,
   exportJobStatusSchema,
   isMinorBand,
+  legacyPreservingFeedMode,
   personalizationSettingsSchema,
   privacySettingsPatchSchema,
   privacySettingsResponseSchema,
@@ -92,9 +93,16 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
             for (const key of Object.keys(patch.privacy_settings)) changed.push(key);
           }
           if (patch.personalization_settings) {
+            // Feed-mode writes store the legacy-preserving spelling (rollout
+            // compat: stale bundles on the same account keep parsing the
+            // echoed value; lossless for best/new — see
+            // legacyPreservingFeedMode).
             nextPersonalization = personalizationSettingsSchema.parse({
               ...user.personalizationSettings,
               ...patch.personalization_settings,
+              ...(patch.personalization_settings.feed_mode !== undefined
+                ? { feed_mode: legacyPreservingFeedMode(patch.personalization_settings.feed_mode) }
+                : {}),
             });
             for (const key of Object.keys(patch.personalization_settings)) changed.push(key);
           }

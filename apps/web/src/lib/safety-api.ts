@@ -158,10 +158,11 @@ export async function fetchCase(caseId: string): Promise<CaseReviewResponse> {
   return parseResponse(response, caseReviewResponseSchema);
 }
 
-/** WS-J.2.6b: resolve the server-side redirect-chain malware verdict for a
- *  reported/evidence URL BEFORE the reviewer navigates to it (the fetch runs
- *  over the SSRF-hardened server fetcher — never from the reviewer's browser). */
-export async function checkEvidenceUrl(url: string): Promise<UrlVerdictResponse> {
+/** WS-J.2.6b: resolve the server-side redirect-chain malware verdict for an
+ *  untrusted URL (reporter-supplied evidence, or a citation under source
+ *  review) BEFORE the reviewer navigates to it (the fetch runs over the
+ *  SSRF-hardened server fetcher — never from the reviewer's browser). */
+export async function fetchUrlVerdict(url: string): Promise<UrlVerdictResponse> {
   const response = await client.v1.moderation['url-verdict'].$post({ json: { url } });
   return parseResponse(response, urlVerdictResponseSchema);
 }
@@ -272,10 +273,15 @@ export async function resolveIncident(
   return parseResponse(response, incidentResolveResponseSchema);
 }
 
-// --- Evidence queue + decisions (STEWARD_ROLES.md ROLE_EVIDENCE) ------------
+// --- Source review queue + decisions (STEWARD_ROLES.md ROLE_EVIDENCE) -------
+//
+// The console surfaces this plane as the "Sources" tab (sourcing is
+// comment-centric — a comment carries citations); the ratified doctrine-role
+// name and the `/v1/moderation/evidence-*` wire paths are unchanged, so these
+// client functions stay wire-aligned.
 
 /** The FIFO stream of citation-bearing contributions (sourced comments +
- *  corrections) with no evidence decision yet — oldest first. */
+ *  corrections) with no source decision yet — oldest first. */
 export async function fetchEvidenceQueue(cursor?: string): Promise<EvidenceQueueResponse> {
   const response = await client.v1.moderation['evidence-queue'].$get({
     query: cursor ? { cursor } : {},
@@ -283,7 +289,7 @@ export async function fetchEvidenceQueue(cursor?: string): Promise<EvidenceQueue
   return parseResponse(response, evidenceQueueResponseSchema);
 }
 
-/** Recent evidence decisions, newest first (the reviewability trail). */
+/** Recent source decisions, newest first (the reviewability trail). */
 export async function fetchEvidenceDecisions(cursor?: string): Promise<EvidenceDecisionsResponse> {
   const response = await client.v1.moderation['evidence-decisions'].$get({
     query: cursor ? { cursor } : {},
@@ -291,7 +297,7 @@ export async function fetchEvidenceDecisions(cursor?: string): Promise<EvidenceD
   return parseResponse(response, evidenceDecisionsResponseSchema);
 }
 
-/** Record an evidence decision — evidence METADATA, never a content action
+/** Record a source decision — source METADATA, never a content action
  *  (`mark-primary-source`/`flag-citation` annotate ONE citation; `clear` marks
  *  the contribution reviewed with no annotation). */
 export async function applyEvidenceDecision(

@@ -117,6 +117,17 @@ export interface LawPackRecord {
   version: string;
   lawPack: LawPack;
   createdAt: string;
+  // --- WS-M.1.3a/c/d (migration 0082; absent on WS-U rows → store defaults).
+  /** SHA-256 hex over the canonical bundle minus the field itself. */
+  hashCommitment?: string | null;
+  auditState?: 'draft' | 'reviewed' | 'audited';
+  /** The fixture corpus proving the pack's behavior (WS-M.1.3c). */
+  fixtures?: Record<string, unknown> | null;
+  humanSummary?: string | null;
+  /** Published versions are IMMUTABLE (DB trigger) and retained indefinitely. */
+  published?: boolean;
+  effectiveAt?: string | null;
+  supersedesLawPackId?: string | null;
 }
 export interface BindingRecord {
   roomId: string;
@@ -236,6 +247,8 @@ export interface PromptStore {
 export interface LawPackStore {
   insert(lawPack: LawPackRecord): Promise<LawPackRecord>;
   get(lawPackId: string): Promise<LawPackRecord | null>;
+  /** WS-M.1.3d: a room's version history, newest first. */
+  listByRoom(roomId: string): Promise<LawPackRecord[]>;
   clear(): Promise<void>;
 }
 export interface RatificationVoteStore {
@@ -435,6 +448,11 @@ export class InMemoryLawPackStore implements LawPackStore {
   }
   async get(lawPackId: string) {
     return this.lawPacks.get(lawPackId) ?? null;
+  }
+  async listByRoom(roomId: string) {
+    return [...this.lawPacks.values()]
+      .filter((p) => p.roomId === roomId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async clear() {
     this.lawPacks.clear();
