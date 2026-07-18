@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.8.56",
+  "version": "0.8.57",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@9.15.4",
@@ -57,7 +57,7 @@
     "@biomejs/biome": "^2.5.3",
     "@vitest/coverage-v8": "^4.1.10",
     "lefthook": "^2.1.10",
-    "node-html-parser": "^8.0.4",
+    "node-html-parser": "^9.0.0",
     "tsx": "^4.23.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10"
