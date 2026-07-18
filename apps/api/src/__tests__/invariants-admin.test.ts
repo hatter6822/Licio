@@ -529,6 +529,18 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     // a plausible empty report for a typo or a deleted room (codex).
     const phantom = await adminRequest(fixture, admin.cookie, `/scoi/reports/${randomUUID()}`);
     expect(phantom.status).toBe(404);
+    // The bridge-request sibling: an ORPHANED thread (roomId points at a
+    // removed room — migration drift) has no steward surface for admin either
+    // (codex: validate the thread room before the admin bridge bypass).
+    const { threadId: orphanThread } = await seedStory(fixture);
+    await fixture.ingestion.stories.updateThread(orphanThread, { roomId: randomUUID() });
+    const orphanBridge = await adminRequest(
+      fixture,
+      admin.cookie,
+      `/scoi/threads/${orphanThread}/bridge-requests`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+    expect(orphanBridge.status).toBe(404);
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {

@@ -321,7 +321,12 @@ export function createInvariantsAdminRoutes(
       // Bridge requests are ROOM-scoped: a roomless (global) thread has no
       // steward surface at all, for admin included — without this the admin
       // arm would open a bridge request the grants check made unreachable.
-      if (thread.roomId === null) return c.json(deny('not_found', 'No such thread'), 404);
+      // The room must also still EXIST (codex: an orphaned/migration-drift
+      // thread whose room row is gone has no steward or report surface —
+      // mirroring the reports route's phantom-room guard).
+      if (thread.roomId === null || (await forum.rooms.getById(thread.roomId)) === null) {
+        return c.json(deny('not_found', 'No such thread'), 404);
+      }
       const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
       // Same admin arm as the room SCOI reports above.
       if (roles.length === 0 && !auth.roles.includes('admin')) {

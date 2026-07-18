@@ -118,10 +118,16 @@ export default defineConfig({
             //     role + per-session-MFA gates that a cached replay would skip
             //     for a role-revoked operator or a later shared-browser
             //     session.  Operator surfaces are online-only by design.
+            //   • /v1/knomosis/actions/*: the WS-L action-status read carries
+            //     an operator (platform-admin) arm without an '/admin' path
+            //     segment, and a FINANCIAL pipeline status must never replay
+            //     stale from a cache anyway — a settled/failed action shown
+            //     as pending misleads exactly when the network is flaky.
             urlPattern: ({ url }: { url: URL }) =>
               (url.pathname.startsWith('/v1') || url.pathname.startsWith('/api')) &&
               !url.pathname.startsWith('/v1/auth/') &&
               !url.pathname.startsWith('/v1/moderation') &&
+              !url.pathname.startsWith('/v1/knomosis/actions') &&
               !url.pathname.includes('/admin'),
             handler: 'NetworkFirst',
             method: 'GET',
