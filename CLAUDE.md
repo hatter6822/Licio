@@ -120,7 +120,7 @@ pnpm --filter courier test:unit     # courier Layer-1+2 JVM unit tests (pure fra
 every build command; consult it before adding new scripts.
 
 **Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 9.15.4 (pinned
-in `package.json` `packageManager`), TypeScript 6.0.3, Vite 8.0.16,
+in `package.json` `packageManager`), TypeScript 7.0.2, Vite 8.0.16,
 Biome 2.5.3.
 
 ## Pre-commit verification (mandatory)
@@ -705,8 +705,11 @@ licio/
 │           │                                  scorer); runs on non-prod boot
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 │   └── courier/                 -- WS-R.15.4a native Android courier (Capacitor 8 shell)
-│       ├── capacitor.config.ts  --   webDir → apps/web/dist (no courier-only web fork);
+│       ├── capacitor.config.json --  webDir → apps/web/dist (no courier-only web fork);
 │       │                              androidScheme https → secure-context WebView
+│       │                              (static JSON: the Capacitor CLI's TS-config
+│       │                              loader needs the legacy typescript JS API,
+│       │                              which the TS 7 native compiler dropped)
 │       ├── scripts/
 │       │   └── check-no-fork.mjs --   byte-identity gate (web build ≡ synced WebView assets)
 │       └── android/             --   generated Capacitor Android project; `pnpm --filter
@@ -1438,8 +1441,11 @@ Biome 2.x does not support:
 - `javascript:` URL blocking — caught by `pnpm lint:security` and
   `scripts/validate-build.ts`.
 
-## TypeScript 6 notes
+## TypeScript 6+ notes
 
+- TypeScript 7 is the native (non-JS) compiler; `tsc -b` project builds
+  behave as before, but `.tsbuildinfo` caches from 6.x are not reused —
+  the first post-upgrade `pnpm typecheck` recompiles everything.
 - TypeScript 6 defaults `types` to `[]` — ambient `@types/*` packages
   must be explicitly listed in each workspace `tsconfig.json` via
   `"types": ["node"]`.

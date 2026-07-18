@@ -268,7 +268,7 @@ adapter.
 | Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8`, ~992 atomic tasks across 22 workstreams |
 | Runtime | Node.js `>=22`, pinned for local development in [`.nvmrc`](.nvmrc) |
 | Package manager | pnpm `9.15.4`, pinned by `packageManager` |
-| Language/tooling | TypeScript `6.0.3`, Vite `8`, Vitest `4`, Biome `2.5` |
+| Language/tooling | TypeScript `7.0.2`, Vite `8`, Vitest `4`, Biome `2.5` |
 | Database/cache | PostgreSQL 16 with pgvector; Redis 7 for sessions, replay/rate-limit, leases, and realtime stores |
 | AI backend | Loopback-local LLM by default (`gpt-oss:20b` via any OpenAI-compatible runtime); hosted Anthropic as explicit opt-in; deterministic fallbacks everywhere |
 | Test posture | Vitest projects are in-memory by default; integration legs run when Postgres/Redis are reachable (as in CI) |
