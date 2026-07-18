@@ -27,6 +27,8 @@ const USER: UserContext = {
   display_name: 'Ada',
   account_state: 'active',
   locale: 'en',
+  roles: [],
+  steward_roles: [],
 };
 
 beforeEach(() => {

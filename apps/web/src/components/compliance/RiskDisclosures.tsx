@@ -60,11 +60,34 @@ export function RiskDisclosures({ onAcknowledged }: RiskDisclosuresProps): React
   };
 
   if (disclosures === null) {
+    // A FAILED load (e.g. the server's fail-closed 503 while the declaration
+    // or policy store is unavailable) must surface as an error with a retry —
+    // not an endless loading line the member sent here to acknowledge cannot
+    // escape (codex on PR #146).
     return (
       <Card as="section">
-        <p className="text-sm text-ink-muted">
-          {t('compliance.disclosures.loading', 'Loading risk disclosures…')}
-        </p>
+        {error === null ? (
+          <p className="text-sm text-ink-muted">
+            {t('compliance.disclosures.loading', 'Loading risk disclosures…')}
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p role="alert" className="text-sm text-error-on-soft">
+              {error}
+            </p>
+            <div>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setError(null);
+                  void refresh();
+                }}
+              >
+                {t('compliance.disclosures.retry', 'Try again')}
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
     );
   }

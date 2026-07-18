@@ -51,6 +51,7 @@ import {
 } from './debate.js';
 import { buildDebateDeps } from './debate-scheduler.js';
 import type { DebateArenaRecord } from './debate-store.js';
+import { roomContentVisibleToUser } from './rooms.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
@@ -169,8 +170,12 @@ function invalid(code: string, message: string): ContributionCreateOutcome {
 
 /**
  * Thread visibility for WRITES and READS (WS-G.3 + 404-over-403): hidden
- * story → invisible; a restricted/expert_led room hides its threads from
- * non-members (stewards and active members see them).
+ * story → invisible; otherwise EXACTLY the room's canonical content bar
+ * (`roomContentVisibleToUser` — members, room stewards, and the platform-
+ * ADMIN arm).  Composing the chokepoint, not repeating it, is load-bearing:
+ * the inline copy this replaced silently missed the admin arm, so an admin
+ * could read a private-room story yet 404 on its own comments and debates
+ * (codex review of PR #146).
  */
 export async function threadVisibleToUser(
   bundle: Pick<ServiceBundle, 'forum' | 'ingestion'>,
@@ -182,12 +187,7 @@ export async function threadVisibleToUser(
   if (thread.roomId === null) return true;
   const room = await bundle.forum.rooms.getById(thread.roomId);
   if (!room) return true; // orphaned room link — the thread itself is public
-  if (room.visibility === 'public') return true;
-  if (userId === null) return false;
-  const subscription = await bundle.forum.rooms.getSubscription(room.roomId, userId);
-  if (subscription?.status === 'active') return true;
-  const roles = await bundle.forum.rooms.stewardRolesFor(room.roomId, userId);
-  return roles.length > 0;
+  return roomContentVisibleToUser(bundle.forum, room, userId);
 }
 
 /**

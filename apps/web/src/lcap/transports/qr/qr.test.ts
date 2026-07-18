@@ -71,3 +71,39 @@ describe('QR structural assertions (PUB-QR-2)', () => {
     expect(await roundTrip(payload)).toEqual([...payload]);
   });
 });
+
+describe('v5 opt-in (non-LCAP surfaces: the WS-D TOTP-enrollment otpauth URI)', () => {
+  it('round-trips a worst-case otpauth URI as v5 — verified against jsQR directly (the LCAP decode cap stays)', async () => {
+    // 30-char handle (the HANDLE_PATTERN maximum) + a 32-char base32 secret +
+    // the issuer param = 104 bytes, the worst case the compact URI can reach.
+    const uri = `otpauth://totp/Licio:${'h'.repeat(30)}?secret=${'A'.repeat(32)}&issuer=Licio`;
+    const payload = new TextEncoder().encode(uri);
+    expect(payload.length).toBe(104);
+    const { modules, version } = encodeQr(payload, { maxVersion: 5 });
+    expect(version).toBe(5);
+    const image = renderToImageData(modules, { scale: 8, quietZone: 4 });
+    // jsQR directly: `decodeQr` (the LCAP import path) rightly REJECTS >78-byte
+    // payloads (PUB-QR-3) and must keep doing so.
+    const { default: jsQR } = await import('jsqr');
+    const result = jsQR(image.data as Uint8ClampedArray<ArrayBuffer>, image.width, image.height);
+    expect(result).not.toBeNull();
+    expect([...Uint8Array.from(result?.binaryData ?? [])]).toEqual([...payload]);
+    expect(await decodeQr(image)).toBeNull(); // the LCAP cap is structural on decode
+  });
+
+  it('106 bytes is the exact v5 ceiling; 107 rejects; the default profile still stops at v4', () => {
+    expect(encodeQr(new Uint8Array(106), { maxVersion: 5 }).version).toBe(5);
+    expect(() => encodeQr(new Uint8Array(107), { maxVersion: 5 })).toThrow(/too large/);
+    expect(() => encodeQr(new Uint8Array(QR_MAX_PAYLOAD_BYTES + 1))).toThrow(/v1–4/);
+  });
+
+  it('a v5 payload just past the v4 bound round-trips (the new alignment centre at 30 is correct)', async () => {
+    const payload = Uint8Array.from({ length: 90 }, (_, i) => (i * 37 + 3) & 0xff);
+    const { modules, version } = encodeQr(payload, { maxVersion: 5 });
+    expect(version).toBe(5);
+    const image = renderToImageData(modules, { scale: 8, quietZone: 4 });
+    const { default: jsQR } = await import('jsqr');
+    const result = jsQR(image.data as Uint8ClampedArray<ArrayBuffer>, image.width, image.height);
+    expect([...Uint8Array.from(result?.binaryData ?? [])]).toEqual([...payload]);
+  });
+});

@@ -55,6 +55,13 @@ export async function updateRoomGovernanceSettings(
   const room = await forum.rooms.getById(roomId);
   if (room === null)
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
+  // WS-S §8: a member-hosted (p2p) room's stub accepts NO server-side
+  // administration — its join model/posting policy live in the members'
+  // MLS-governed state, and the DB pins the stub's axes with CHECKs.  The
+  // action surface behaves as absent (404-over-403), matching the stores.ts
+  // doctrine note that WS-Q guards reject p2p rooms before any side effect.
+  if (room.storageMode !== 'server')
+    return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   // Coherence (§16.2): a PUBLIC room only admits the `open` join model.
   const joinModel = room.visibility === 'public' ? 'open' : (patch.joinModel ?? room.joinModel);
   await forum.rooms.update(roomId, {
@@ -93,6 +100,12 @@ export async function changeRoomVisibility(
 ): Promise<RoomVisibilityOutcome> {
   const room = await forum.rooms.getById(roomId);
   if (room === null)
+    return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
+  // WS-S §8: a p2p stub's visibility is pinned 'private' (DB CHECK
+  // rooms_p2p_visibility_private); the server-side cascade must refuse it
+  // BEFORE any side effect — in production the CHECK would abort the write
+  // mid-cascade, and in-memory nothing would stop it (a dev↔prod divergence).
+  if (room.storageMode !== 'server')
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   if (room.visibility === target) return { ok: true, converted: 0 };
   const nowIso = new Date(forum.now()).toISOString();

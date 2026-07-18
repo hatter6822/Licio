@@ -171,6 +171,17 @@ describe('RiskDisclosures (WS-N.1.2d)', () => {
     render(<RiskDisclosures />);
     expect(await screen.findByTestId('no-disclosures')).toBeInTheDocument();
   });
+
+  it('a FAILED load surfaces the error with a retry — never an endless loading line (codex: the fail-closed 503 must not strand the ack flow)', async () => {
+    mocked.fetchDisclosures
+      .mockRejectedValueOnce(new ApiClientError('region_unavailable', 'down', 503))
+      .mockResolvedValueOnce({ disclosures: [disclosure] });
+    render(<RiskDisclosures />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load/i);
+    expect(screen.queryByText(/loading risk disclosures/i)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByText('Risk disclosure')).toBeInTheDocument();
+  });
 });
 
 describe('ComplianceConsole (WS-N.2.1c / WS-N.2.2c)', () => {

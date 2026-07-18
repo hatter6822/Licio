@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { privacyLevelSchema } from './attention.js';
 import { uuidSchema } from './common.js';
 import { feedModeCompatSchema } from './feed.js';
+import { stewardRoleIdSchema } from './steward-roles.js';
+import { platformRoleSchema } from './user.js';
 
 /** Account lifecycle state (SPEC §22.1 account_state). */
 export const accountStateSchema = z.enum(['active', 'suspended', 'restricted', 'deactivated']);
@@ -22,6 +24,17 @@ export const userContextSchema = z.object({
   display_name: z.string().min(1),
   account_state: accountStateSchema,
   locale: z.string().min(2),
+  /** The user's OWN platform roles (WS-D.1.6b) — a navigation hint for the
+   *  role-gated consoles, never a client-side authorization decision (the
+   *  server re-authorizes every console endpoint with capability + MFA).
+   *  Defaulted so pre-roles persisted contexts and login echoes rehydrate
+   *  cleanly; the boot-time /status confirm supplies the real list. */
+  roles: z.array(platformRoleSchema).default([]),
+  /** The user's OWN WS-J doctrine steward-role grants — the moderation
+   *  console's REAL access population (`isStewardActor`: any grant, or
+   *  platform admin), which the platform roles alone cannot express.  Same
+   *  hint-only semantics and default as `roles`. */
+  steward_roles: z.array(stewardRoleIdSchema).default([]),
 });
 export type UserContext = z.infer<typeof userContextSchema>;
 

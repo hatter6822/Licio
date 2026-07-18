@@ -5,7 +5,7 @@
 // content filter (WS-N.2.3e), the disclosure gate (WS-N.1.2d), retention +
 // erasure (WS-N.2.1d), and the fail-closed compliance.* config loader.
 import { describe, expect, it } from 'vitest';
-import { InMemoryPwattConfigStore } from '../../events/stores.js';
+import { InMemoryPwattConfigStore, type PwattConfigStore } from '../../events/stores.js';
 import {
   appendPolicyAuditInTx,
   computeCaseAuditHash,
@@ -333,7 +333,8 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
     gate = await disclosureGate(deps, USER);
     expect(gate.required).toBe(false);
     const listed = await listDisclosuresForUser(deps, USER);
-    expect(listed[0]?.acknowledged).toBe(true);
+    expect(listed.unavailable).toBe(false);
+    expect(listed.disclosures[0]?.acknowledged).toBe(true);
     // Idempotent re-ack.
     const again = await acknowledgeDisclosure(deps, {
       userId: USER,
@@ -364,6 +365,41 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
     const gate = await disclosureGate(buildDisclosureDeps(s), USER);
     expect(gate.unavailable).toBe(true);
     expect(gate.required).toBe(true);
+  });
+
+  it('fails closed: a DECLARATION-STORE outage returns `unavailable`, never a silent no-region pass (codex: fail closed on declaration-store disclosure outages)', async () => {
+    const s = await withPolicy();
+    s.declarations.get = async () => {
+      throw new Error('declaration store down');
+    };
+    // The member's VERIFIED region (DE) requires a disclosure; while the store
+    // naming that region is down, the gate must fail CLOSED (`unavailable` ⇒
+    // the treasury/Knomosis chokepoints 503) — never clear to `required:
+    // false` as if the member had declared no region at all.
+    const gate = await disclosureGate(buildDisclosureDeps(s), USER);
+    expect(gate.unavailable).toBe(true);
+    expect(gate.required).toBe(true);
+
+    // The ack path reports the outage (503), not "declare a region first"
+    // (409) — a dead end for a member whose declaration exists but is
+    // unreadable.
+    const ack = await acknowledgeDisclosure(buildDisclosureDeps(s), {
+      userId: USER,
+      disclosureId: 'risk-general',
+      version: 2,
+    });
+    expect(ack.ok).toBe(false);
+    if (!ack.ok) {
+      expect(ack.status).toBe(503);
+      expect(ack.code).toBe('region_unavailable');
+    }
+
+    // The list marks itself unavailable rather than presenting an empty
+    // "nothing to read" while the financial gates fail closed on the same
+    // outage.
+    const listed = await listDisclosuresForUser(buildDisclosureDeps(s), USER);
+    expect(listed.unavailable).toBe(true);
+    expect(listed.disclosures).toEqual([]);
   });
 
   it('an ack is REGION-scoped: the same id+version elsewhere does not satisfy the gate', async () => {
@@ -441,7 +477,7 @@ describe('the disclosure gate (WS-N.1.2d)', () => {
     expect(inFrance.required).toBe(true);
     expect(inFrance.missing[0]?.id).toBe('risk-general');
     // The list shows FR's version as UNacknowledged…
-    expect((await listDisclosuresForUser(deps, USER))[0]?.acknowledged).toBe(false);
+    expect((await listDisclosuresForUser(deps, USER)).disclosures[0]?.acknowledged).toBe(false);
     // …and acknowledging it clears FR without disturbing the DE evidence.
     expect(
       (
@@ -593,6 +629,72 @@ describe('the fail-closed compliance.* config loader', () => {
     expect(config.policyCacheTtlMs).toBe(5 * 60_000); // default kept
     expect(config.screeningTimeoutMs).toBe(10_000); // valid override applied
     expect(problems).toContain('policyCacheTtlMs');
+  });
+
+  it('a per-key read OUTAGE on reload keeps the LAST-GOOD value, never a looser default (codex: preserve last-good compliance config on read errors)', async () => {
+    const store = new InMemoryPwattConfigStore();
+    // Two STRICTER-than-default overrides an operator has applied.
+    await store.set('compliance.highValueReviewThresholdMinorUnits', { value: '1000' });
+    await store.set('compliance.screeningTimeoutMs', { value: 1_000 });
+    const live = await loadComplianceConfig(store);
+    expect(live.highValueReviewThresholdMinorUnits).toBe('1000');
+    expect(live.screeningTimeoutMs).toBe(1_000);
+
+    // The runtime reload hits a transient outage for ONE key, finds another
+    // deliberately REMOVED, and reads the rest fine.
+    await store.set('compliance.screeningTimeoutMs', {}); // row without `value` ⇒ removed
+    const flaky: PwattConfigStore = {
+      get: async (key: string) => {
+        if (key === 'compliance.highValueReviewThresholdMinorUnits') {
+          throw new Error('store down');
+        }
+        return store.get(key);
+      },
+      set: (key, value) => store.set(key, value),
+      clear: () => store.clear(),
+    };
+    const problems: string[] = [];
+    const reloaded = await loadComplianceConfig(flaky, (key) => problems.push(key), live);
+    // The unreadable key keeps the LIVE (stricter) value — a transient outage
+    // must never loosen the fraud threshold back to the default.
+    expect(reloaded.highValueReviewThresholdMinorUnits).toBe('1000');
+    expect(problems).toContain('highValueReviewThresholdMinorUnits');
+    // The REMOVED override resets to the default even with a base passed: a
+    // successful read of "no row" is the operator's decision, not an outage.
+    expect(reloaded.screeningTimeoutMs).toBe(5_000);
+  });
+
+  it('reloads SERIALIZE: a reload started before an operator write cannot clobber the fresh override (review: concurrent-reload revert)', async () => {
+    const store = new InMemoryPwattConfigStore();
+    let release: (() => void) | null = null;
+    let firstRead = true;
+    const gated: PwattConfigStore = {
+      get: async (key) => {
+        if (firstRead) {
+          // The scheduler tick's FIRST key read blocks mid-reload, modelling a
+          // tick that began before the operator's write landed.
+          firstRead = false;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        return store.get(key);
+      },
+      set: (key, value) => store.set(key, value),
+      clear: () => store.clear(),
+    };
+    const s = createInMemoryComplianceServices({ configStore: gated, now: () => NOW });
+    const tick = s.reloadConfig();
+    // Let the tick reach (and block on) its first read.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The operator tightens the fraud threshold and reloads (queued).
+    await store.set('compliance.highValueReviewThresholdMinorUnits', { value: '1000' });
+    const operator = s.reloadConfig();
+    (release as (() => void) | null)?.();
+    await tick;
+    await operator;
+    // The queued reload re-read AFTER the write: the stale tick cannot win.
+    expect(s.config().highValueReviewThresholdMinorUnits).toBe('1000');
   });
 
   it('rejects unknown keys and malformed velocity limits', () => {

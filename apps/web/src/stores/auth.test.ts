@@ -8,6 +8,8 @@ const ACTIVE_USER: UserContext = {
   display_name: 'Ada',
   account_state: 'active',
   locale: 'en',
+  roles: [],
+  steward_roles: [],
 };
 
 const SUSPENDED_USER: UserContext = { ...ACTIVE_USER, account_state: 'suspended' };
@@ -66,6 +68,24 @@ describe('auth store transitions', () => {
     expect(useAuthStore.getState().status).toBe('unauthenticated');
     expect(useAuthStore.getState().user).toBeNull();
     expect(localStorage.getItem('licio:auth')).toBeNull();
+  });
+
+  it('sign-out purges the SW API cache (cached /v1 responses — roles included — must not survive on a shared browser)', async () => {
+    const { useAuthStore } = await freshAuth();
+    const deleteMock = vi.fn(() => Promise.resolve(true));
+    vi.stubGlobal('caches', { delete: deleteMock });
+    try {
+      useAuthStore.getState().setAuthenticated(ACTIVE_USER);
+      useAuthStore.getState().logout();
+      expect(deleteMock).toHaveBeenCalledWith('licio-api');
+      // The cross-tab logout path purges too.
+      deleteMock.mockClear();
+      useAuthStore.getState().setAuthenticated(ACTIVE_USER);
+      useAuthStore.getState().applyRemoteLogout();
+      expect(deleteMock).toHaveBeenCalledWith('licio-api');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

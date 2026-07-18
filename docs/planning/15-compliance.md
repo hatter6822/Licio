@@ -533,7 +533,7 @@ Define the roles that gate every WS-N surface -- none exist yet. The platform RB
 
 **Testing:**
 - Unit: Policy matrix -- each role resolves exactly its actions; `authorize` rejects cross-role access.
-- Integration: A steward/admin without the compliance role cannot read a case (403); a compliance reviewer without the counsel capability cannot approve a SAR/STR; MFA-less sessions are rejected.
+- Integration: A steward without the compliance role cannot read a case (403); the platform admin passes (the 2026-07 final-line-of-defense decision — admin holds `compliance.review` + `compliance.counsel.approve`, always behind per-session MFA); a compliance reviewer without the counsel capability cannot approve a SAR/STR; MFA-less sessions are rejected.
 
 **Security considerations:**
 - Least privilege and structural separation: compliance data (cases, SAR/STR, screening detail) is more sensitive than moderation data, and giving it its own role prevents the moderation team's broad queues from becoming a de-facto window into financial investigations (and vice versa). MFA-on-session matches every other privileged surface.

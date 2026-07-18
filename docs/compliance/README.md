@@ -258,7 +258,15 @@ apps/api/src/compliance/
 │                                   exact decimal-string addition — 18-decimal amounts
 │                                   exceed 2^53 so Lua doubles are forbidden),
 │                                   screening cache, policy-invalidation pub/sub
-├── config.ts                    -- fail-closed `compliance.*` runtime config
+├── config.ts                    -- fail-closed `compliance.*` runtime config; a
+│                                   runtime reload keeps the LAST-GOOD value for a
+│                                   key whose store read fails (codex: a transient
+│                                   outage must never loosen a stricter live
+│                                   override back to a default); a SUCCESSFUL
+│                                   read of "no row" still resets to the default;
+│                                   reloads SERIALIZE (services.ts) so a tick that
+│                                   began before an operator write cannot finish
+│                                   last and transiently revert the fresh override
 ├── region.ts                    -- WS-N.1.1b resolution ladder (declared, never
 │                                   detected; basis-carrying)
 ├── policy.ts                    -- per-region policy activation + cache; a malformed
@@ -334,7 +342,11 @@ packages/db/drizzle/0088_ws_n_compliance.sql   -- hand-authored migration
 apps/web/src/components/compliance/           -- DisabledFeatureExplanation
                                     (specific, localizable, never "coming soon"),
                                     RegionDeclarationCard, RiskDisclosures,
-                                    ComplianceConsole (/compliance-console)
+                                    ComplianceConsole (/compliance-console; linked
+                                    from the profile's role-gated "Operations"
+                                    group for compliance/counsel/admin sessions —
+                                    the roles on the auth-status context are a nav
+                                    hint; the server re-authorizes every panel)
 apps/web/src/lib/compliance-api.ts             -- zod-validated typed flows
 apps/web/src/i18n/catalogs/de.ts               -- the complete German
                                     disabled-state catalog (the first real locale)
@@ -409,7 +421,22 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   allowance-consuming intent through unacknowledged.  It now returns `unavailable`
   for that outcome, and the create/preflight/submit routes 503 on it — fail closed,
   distinct from a truly `missing`/`future_dated`/`malformed` policy (no disclosures,
-  the shipped `required: false`).  The SAME reasoning
+  the shipped `required: false`).  The DECLARATION-store outage is the fourth
+  sibling (codex): `resolveRegion`'s `unavailable` marker (a failed declaration
+  read, NOT an ordinary no-region member) used to fall into the region-`null` ⇒
+  `required: false` arm, so a member whose VERIFIED region requires disclosures
+  could mint allowance-consuming intents while the store naming that region was
+  down.  `disclosureGate` now returns `required: true, unavailable: true` for it
+  (the same 503 at the chokepoints); the acknowledge path answers 503
+  `region_unavailable` instead of the dead-end 409 "declare a region first"
+  (recording the ack against an unresolved region would also misfile the consent
+  evidence); and the disclosure LIST reports the outage (503) rather than serving
+  an empty "nothing to read" while the gates fail closed.  The POST-ack
+  requirement probe is the same shape: when the follow-up `disclosureGate` read
+  hits an outage, the route 503s rather than serve `remaining: []` as
+  gate-cleared (the ack itself persisted — the retry re-acknowledges
+  idempotently and returns the true set; the strict response envelope cannot
+  say "unknown" without breaking stale bundles).  The SAME reasoning
   bars a SELF-INFLICTED downgrade — via BOTH member paths, since either erases the
   verified basis and drops `resolveRegion` to the weaker locale rung, letting a
   verified-BLOCKED member reach the routes that reject only an explicit `blocked`
@@ -491,13 +518,46 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   and 429 an emergency jurisdiction-policy change without ever holding a
   session. A budget bounds the WORK an endpoint does, and a request that 401s
   does none; connection-level flood fairness is the edge's concern (§19.1).
-- **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
-  roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
-  Enabling any cell in a jurisdiction policy takes the **counsel capability**
-  *and* a recorded `legal_approval_ref` — a compliance reviewer cannot turn
-  real funds on for a region by quoting a reference at themselves. Narrowing
-  writes (disabled/testnet/simulated/pending-legal) stay open to the
-  compliance role: they can only reduce availability.
+- **RBAC separation is deliberate — below admin.**  `compliance` and `counsel`
+  are distinct roles with distinct capabilities; `steward` does NOT inherit
+  them.  The platform **`admin`** role holds BOTH (the 2026-07 maintainer
+  decision reversing the original admin exclusion): admin is the final line of
+  defense and reaches every platform surface — always behind the same
+  per-session step-up-MFA middlewares (`requireCompliance`/`requireCounsel`)
+  as any reviewer or counsel session, so the widened account stays tightly
+  secured.
+  EXPANDING availability takes the **counsel capability** *and* a recorded
+  `legal_approval_ref` — a compliance reviewer cannot turn real funds on for a
+  region by quoting a reference at themselves.  The boundary is a DELTA
+  (`policyChangeRequiresCounsel`, shared next to `validatePolicy`), not "does
+  the document contain `enabled`" (codex): a policy write is a whole
+  replacement document, so a reviewer narrowing one cell must carry the
+  region's other, already-approved `enabled` cells forward — blanket-matching
+  `enabled` stranded exactly that emergency narrowing behind counsel
+  availability.  Counsel is required when a cell transitions non-enabled →
+  enabled (no readable prior — missing at that instant, nonconforming — fails
+  closed: every enabled cell counts), OR when a cell REMAINS enabled and any
+  governing field (`asset_flags`, `age_gate_policy`, `kyc_policy`,
+  `disclosure_refs`, `legal_approval_ref`) changes — without that second arm a
+  delta keyed on cells alone would let a reviewer widen an approved region
+  sideways (turn a new asset on, drop a KYC trigger or disclosure, rewrite the
+  recorded approval).  The delta BASELINE is the policy in force at the new
+  document's own `effective_at` (its timeline predecessor over ALL rows,
+  pending included), and a non-counsel write's `effective_at` must land in
+  [active-row, now] — policies are insert-only and served
+  greatest-`effective_at`-first, so without both arms a reviewer could plant a
+  byte-identical carry-forward of today's approved document DATED AFTER a
+  counsel-scheduled narrowing, a "no-op against today" that silently
+  re-expands the region when its date arrives (the adversarial-review HIGH
+  finding).  Scheduling — any future or behind-active `effective_at` — is
+  therefore itself a counsel act, and a counsel-scheduled re-enable after a
+  scheduled narrowing baselines on the NARROWED predecessor, so the four-eyes
+  ref is demanded even for a document equal to the currently-active one.  The
+  decision runs INSIDE the chained write unit against the same reads the audit
+  entry records (a pre-transaction check leaves a gate-then-write race), and a
+  counsel-required rollback leaves no row and no chain entry.  Immediate
+  narrowing writes stay open to the compliance role: they can only reduce
+  availability, now.
 - **No change outlives its audit entry — structurally.**  Every compliance
   mutation runs inside a `ComplianceTransactor` unit of work
   (`stores.ts`): the change and its hash-chain entry commit together or leave

@@ -166,6 +166,12 @@ export function createInMemoryComplianceServices(
   const log = options.log ?? (() => {});
   let config: ComplianceRuntimeConfig = structuredClone(DEFAULT_COMPLIANCE_CONFIG);
   const configClosure = (): ComplianceRuntimeConfig => config;
+  // Reloads SERIALIZE: the scheduler tick and an operator write's reload can
+  // otherwise interleave so the tick's pre-write read finishes last and
+  // transiently reverts a fresh, stricter override until the next tick (a
+  // silent loosening — the read succeeded, so nothing is reported).  Each
+  // queued reload re-reads the store, so ordering alone restores freshness.
+  let reloadChain: Promise<unknown> = Promise.resolve();
   const broadcaster = new InMemoryPolicyInvalidationBroadcaster();
   const policyCache = new PolicyCache(() => config.policyCacheTtlMs, now);
   bindPolicyInvalidation(broadcaster, policyCache);
@@ -230,11 +236,22 @@ export function createInMemoryComplianceServices(
 
     configStore: options.configStore,
     config: configClosure,
-    reloadConfig: async () => {
-      config = await loadComplianceConfig(options.configStore, (key, problem) =>
-        log('compliance.config.rejected', { key, problem }),
-      );
-      return config;
+    reloadConfig: () => {
+      // The LIVE config is the loader's last-good base: a transient per-key
+      // store outage keeps the current value for that key, never a silent
+      // reset to a possibly-looser default (fail-closed, WS-N).
+      const run = reloadChain.then(async () => {
+        config = await loadComplianceConfig(
+          options.configStore,
+          (key, problem) => log('compliance.config.rejected', { key, problem }),
+          config,
+        );
+        return config;
+      });
+      // The chain survives a failed reload (the failure still surfaces to
+      // THIS caller through `run`).
+      reloadChain = run.catch(() => undefined);
+      return run;
     },
     metrics: new ComplianceMetrics(),
     log,

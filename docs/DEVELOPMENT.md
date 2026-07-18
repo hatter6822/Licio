@@ -679,10 +679,21 @@ pre-seeded, so these development accounts use the email one-time-code path.
 
 | Role chip | Display name | Email | What it exercises |
 |-----------|--------------|-------|-------------------|
-| **admin** | Ada Admin | `admin@licio.test` | Full RBAC: every steward and admin surface. |
+| **admin** | Ada Admin | `admin@licio.test` | Full RBAC — the final line of defense: every steward, admin, and (2026-07 decision) compliance/counsel surface, private member-hosted (WS-S) rooms excepted. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
 | **steward** | Sam Steward | `steward@licio.test` | WS-J steward roles `ROLE_SAFETY`, `ROLE_APPEALS`, and `ROLE_INTEGRITY`: report queue, appeals, coordinated-report incidents, governance, and ranking/audit reads. |
 | **expert** | Dr. Erin Expert | `expert@licio.test` | Least-privilege `expert` role: can post top-level content in expert-gated rooms such as *Open Science*, without moderation/admin power. |
 | **compliance + counsel** | Cora Compliance | `compliance@licio.test` | The WS-N financial-compliance console at `/compliance-console` (cases, fraud queue, declaration verification) **and** the counsel-only surfaces (SAR drafting/approval, disclosure publishing, lawful-access review). Both roles sit on one dev account for convenience; in production they are separate people. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
+
+Signed in with a role-holding account, the consoles are linked from
+**Profile → Operations** — the moderation console (`/moderation`) for
+DOCTRINE-granted stewards and admins (the console's real gate is the WS-J
+doctrine grants — `steward@licio.test` holds three; the platform `steward`
+role alone carries no console access) and the compliance console
+(`/compliance-console`) for compliance/counsel/admin sessions.  The link visibility
+comes from the roles + doctrine grants on the auth-status context (a
+navigation hint); every console endpoint still authorizes server-side (role
+capability + verified step-up MFA), so an account without MFA sees the
+console's "access required" card until TOTP is enrolled and verified.
 
 There is also a plain demo author, `licio_demo`, that owns most of the seeded
 content. Use the three email accounts above when you need to test role-gated
@@ -716,10 +727,18 @@ only happens when `NODE_ENV=development`.
 Some steward/admin actions require **step-up MFA** with TOTP. Email-code
 sign-in creates an ordinary, non-MFA session; the app prompts for step-up when
 you attempt a gated action. In development, enrol an authenticator from
-**Profile → Security**. The dev build may also expose a fail-closed
-"mark verified" helper for local-only verification flows, but no shared TOTP
-secret is seeded. A known shared secret would be a security smell even in
-development.
+**Profile → Security → "Set up two-factor"** — within five minutes of signing
+in the fresh login itself satisfies the step-up freshness window, so enrollment
+starts immediately (no extra prompt); on a staler session the step-up dialog
+offers an emailed confirmation code first (it prints to the API terminal like
+every dev code). The page then shows a **QR code to scan** with any
+authenticator app, plus the grouped **setup key** (with a copy button) for the
+app's "enter a setup key" manual path, and the full `otpauth://` link. Confirm
+with a current 6-digit code; the one-time **recovery codes** appear and the
+session is immediately MFA-verified. No shared TOTP secret is seeded — a known
+shared secret would be a security smell even in development — and the
+in-memory identity store resets on API restart, so you re-enrol after each
+`pnpm dev` restart.
 
 ### Seeded product surfaces
 

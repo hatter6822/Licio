@@ -8,7 +8,7 @@
 // The server enforces the last-method guard; this page only renders its error.
 import type { SecurityActivityEntry, SessionSummary } from '@licio/shared';
 import { useQueryClient } from '@tanstack/react-query';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import {
   StepUpDialog,
   type StepUpGate,
@@ -21,6 +21,7 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { formatDate } from '../../i18n/format.js';
 import { useI18n, useT } from '../../i18n/index.js';
+import { encodeQr, renderToImageData } from '../../lcap/transports/qr/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import {
   addEmail,
@@ -40,6 +41,7 @@ import {
   verifyEmail,
 } from '../../lib/auth-api.js';
 import { cn } from '../../lib/cn.js';
+import { compactOtpauthUri, formatSetupKey, parseOtpauthTotp } from '../../lib/otpauth.js';
 import {
   useAuthCredentialsQuery,
   useAuthSessionsQuery,
@@ -527,12 +529,57 @@ function WalletsSection({ gate }: { gate: StepUpGate }): React.ReactElement | nu
 
 // --- TOTP two-factor (WS-D.1.5) ----------------------------------------------------------
 
-function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
+/**
+ * The enrollment QR: the compact otpauth URI rendered scannable (the UX every
+ * authenticator app leads with).  Encoded with the app's dependency-free QR
+ * encoder at its v5 opt-in — the LCAP §22.3 micro-bundle profile stays pinned
+ * to v4; this is not an LCAP surface.  jsdom has no 2d context, so the draw
+ * guards; the canvas carries its accessible description either way, and the
+ * setup key + full URI below remain the manual path.
+ */
+function TotpQr({ uri }: { uri: string }): React.ReactElement {
+  const t = useT();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    let rendered: ReturnType<typeof renderToImageData>;
+    try {
+      const payload = new TextEncoder().encode(compactOtpauthUri(uri));
+      rendered = renderToImageData(encodeQr(payload, { maxVersion: 5 }).modules, { scale: 4 });
+    } catch {
+      return; // oversize/unparseable URI — the setup key + URI stay usable
+    }
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d') ?? null;
+    if (!canvas || !ctx) return;
+    canvas.width = rendered.width;
+    canvas.height = rendered.height;
+    // Copy into a fresh, ArrayBuffer-backed buffer so the ImageData ctor
+    // accepts it (the renderer's Uint8ClampedArray is structurally
+    // `ArrayBufferLike`) — the QrMicroBundle pattern.
+    const buffer = new Uint8ClampedArray(rendered.data.length);
+    buffer.set(rendered.data);
+    ctx.putImageData(new ImageData(buffer, rendered.width, rendered.height), 0, 0);
+  }, [uri]);
+  return (
+    <canvas
+      ref={canvasRef}
+      role="img"
+      aria-label={t('security.totp.qrAlt', 'QR code to scan with your authenticator app')}
+      // A QR needs a LIGHT background to scan — bg-white stays in dark mode on purpose.
+      className="h-44 w-44 rounded-md border border-line bg-white [image-rendering:pixelated]"
+    />
+  );
+}
+
+/** Exported for the focused unit suite (the page test would need every query
+ *  in the file mocked); the page renders it with the shared step-up gate. */
+export function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
   const t = useT();
   const queryClient = useQueryClient();
   const credentials = useAuthCredentialsQuery();
   const [uri, setUri] = useState<string | null>(null);
   const [code, setCode] = useState('');
+  const [copiedKey, setCopiedKey] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -591,12 +638,43 @@ function TotpSection({ gate }: { gate: StepUpGate }): React.ReactElement {
           <p className="text-sm text-ink">
             {t(
               'security.totp.addToApp',
-              'Add this to your authenticator app, then confirm with a code:',
+              'Scan this with your authenticator app — or choose “enter a setup key” in the app and type the key below — then confirm with a code:',
             )}
           </p>
-          <code className="break-all rounded-md border border-line bg-surface-sunken p-2 text-xs text-ink">
-            {uri}
-          </code>
+          <TotpQr uri={uri} />
+          {(() => {
+            const parsed = parseOtpauthTotp(uri);
+            if (!parsed) return null;
+            return (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm text-ink-muted">
+                  {t('security.totp.setupKey', 'Setup key')}
+                </span>
+                <code className="rounded-md border border-line bg-surface-sunken p-2 text-xs text-ink">
+                  {formatSetupKey(parsed.secret)}
+                </code>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    void navigator.clipboard
+                      ?.writeText(parsed.secret)
+                      .then(() => setCopiedKey(true))
+                      .catch(() => undefined);
+                  }}
+                >
+                  {copiedKey
+                    ? t('security.totp.copied', 'Copied')
+                    : t('security.totp.copy', 'Copy')}
+                </Button>
+              </div>
+            );
+          })()}
+          <details className="text-xs text-ink-muted">
+            <summary>{t('security.totp.showUri', 'Show the full otpauth link')}</summary>
+            <code className="mt-1 block break-all rounded-md border border-line bg-surface-sunken p-2 text-xs text-ink">
+              {uri}
+            </code>
+          </details>
           <form
             className="flex flex-wrap items-end gap-2"
             onSubmit={(e) => {

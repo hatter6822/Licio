@@ -33,11 +33,13 @@ import {
   featureAvailabilityResponseSchema,
   fraudQueueResponseSchema,
   intentReviewRequestSchema,
+  type JurisdictionFeaturePolicy,
   lawfulAccessCreateRequestSchema,
   lawfulAccessListResponseSchema,
   lawfulAccessProduceRequestSchema,
   lawfulAccessRequestSchema,
   lawfulAccessReviewRequestSchema,
+  policyChangeRequiresCounsel,
   policyCreateRequestSchema,
   policyListResponseSchema,
   type ReviewSubject,
@@ -139,6 +141,26 @@ const RETENTION_SCHEDULE_KEYS: ReadonlySet<string> = new Set([
 // required disclosure absent and stops them retrying.  (The chain's own
 // collisions never reach it: `appendChained` re-raises them as
 // `ChainContentionError`, which `runChainedUnit` retries.)
+
+/** Thrown INSIDE the policy-write chained unit when the counsel delta
+ *  (`policyChangeRequiresCounsel`) demands legal counsel — rolls the whole
+ *  unit back (no policy row, no chain entry) and maps to a 403.  Deciding
+ *  inside the unit, against the SAME prior-active read the audit entry
+ *  records, closes the gate-then-write race a pre-transaction check leaves
+ *  open (a concurrent narrowing landing between check and insert).
+ *  `scheduling` is the timeline arm: a non-counsel write whose `effective_at`
+ *  is in the future or behind the active row — without it, a reviewer could
+ *  plant a byte-identical carry-forward of today's counsel-approved policy
+ *  DATED AFTER a counsel-scheduled narrowing, and the "no-op" delta would
+ *  silently re-expand availability when its date arrives. */
+class CounselRequiredError extends Error {
+  readonly missing: 'role' | 'approval_ref' | 'scheduling';
+  constructor(missing: 'role' | 'approval_ref' | 'scheduling') {
+    super('counsel approval required');
+    this.name = 'CounselRequiredError';
+    this.missing = missing;
+  }
+}
 
 /** Status-typed error responder (the tgError house idiom). */
 function failJson(
@@ -539,10 +561,19 @@ export function createComplianceRoutes() {
     .get('/disclosures', authMiddleware(), async (c) => {
       const auth = requireAuth(c);
       const services = getComplianceServices();
-      const disclosures = await listDisclosuresForUser(buildDisclosureDeps(services), auth.userId);
+      const listed = await listDisclosuresForUser(buildDisclosureDeps(services), auth.userId);
+      if (listed.unavailable) {
+        // Region resolution failed (declaration-store outage): an empty 200
+        // would read as "nothing to acknowledge" while the financial gates are
+        // failing closed on the same outage.
+        return c.json(
+          deny('region_unavailable', 'Your region could not be resolved right now.'),
+          503,
+        );
+      }
       return c.json(
         disclosureListResponseSchema.parse({
-          disclosures: disclosures.map((d) => ({
+          disclosures: listed.disclosures.map((d) => ({
             disclosure_id: d.disclosureId,
             region: d.region,
             version: d.version,
@@ -573,6 +604,21 @@ export function createComplianceRoutes() {
         });
         if (!result.ok) return failJson(c, result);
         const gate = await disclosureGate(buildDisclosureDeps(services), auth.userId);
+        if (gate.unavailable) {
+          // The ack DID record, but the follow-up requirement probe hit an
+          // outage: `remaining: []` here would read as gate-cleared and send
+          // the client straight into an intent create that 503s on the same
+          // outage.  The response contract cannot say "unknown" (the client
+          // envelope is strict — bundle-rollout compat), so report the outage;
+          // the retry re-acknowledges idempotently and returns the true set.
+          return c.json(
+            deny(
+              'region_unavailable',
+              'Your acknowledgment was saved, but the remaining requirements could not be verified — try again shortly.',
+            ),
+            503,
+          );
+        }
         return c.json({ acknowledged: true, remaining: gate.missing });
       },
     )
@@ -613,9 +659,14 @@ export function createComplianceRoutes() {
       },
     )
 
-    // WS-N.1.1e — the audited policy write.  Enabling any cell requires the
-    // counsel four-eyes `approval_ref` IN ADDITION to the validatePolicy
-    // legal_approval_ref invariant (enabling is the dangerous direction).
+    // WS-N.1.1e — the audited policy write.  EXPANDING availability requires
+    // the counsel four-eyes gate (`policyChangeRequiresCounsel`, decided
+    // against the prior ACTIVE policy INSIDE the chained unit) IN ADDITION to
+    // the validatePolicy legal_approval_ref invariant — expanding is the
+    // dangerous direction.  A replacement document that merely CARRIES an
+    // already-approved `enabled` cell forward while narrowing another stays
+    // open to the compliance role, so compliance can shrink availability in
+    // an approved region without counsel being online.
     .post(
       '/admin/policies',
       authMiddleware(),
@@ -627,33 +678,15 @@ export function createComplianceRoutes() {
         const services = getComplianceServices();
         const body = c.req.valid('json');
         const { reason, approval_ref, ...policyInput } = body;
-        const enablesCell = Object.values(policyInput.feature_flags).includes('enabled');
-        // Enabling a cell turns real funds on for a whole region, so it takes
-        // the COUNSEL capability — not merely a compliance reviewer quoting an
-        // approval reference at themselves.  The reference records WHICH legal
-        // approval authorizes it (validatePolicy also ties `enabled` to a
-        // recorded `legal_approval_ref`); the session proves counsel actually
-        // made the change.  Non-enabling writes (disabled/testnet/simulated/
-        // pending-legal) stay open to the compliance role — they can only
-        // narrow availability.
-        if (enablesCell && !isCounsel(auth.roles)) {
-          return c.json(
-            deny(
-              'counsel_approval_required',
-              'Enabling a feature cell requires legal counsel (the compliance role may only narrow availability).',
-            ),
-            403,
-          );
-        }
-        if (enablesCell && approval_ref === undefined) {
-          return c.json(
-            deny(
-              'counsel_approval_required',
-              'Enabling a feature cell requires a counsel approval reference (four-eyes).',
-            ),
-            403,
-          );
-        }
+        // Expanding availability turns real funds on for a whole region, so it
+        // takes the COUNSEL capability — not merely a compliance reviewer
+        // quoting an approval reference at themselves.  The reference records
+        // WHICH legal approval authorizes it (validatePolicy also ties
+        // `enabled` to a recorded `legal_approval_ref`); the session proves
+        // counsel actually made the change.  The capability is resolved here;
+        // the DECISION runs inside the unit against the same prior-active
+        // read the audit entry records (see CounselRequiredError).
+        const actorIsCounsel = isCounsel(auth.roles);
         const policyId = services.uuid();
         const candidate = { ...policyInput, policy_id: policyId };
         const validated = validatePolicy(candidate);
@@ -672,15 +705,71 @@ export function createComplianceRoutes() {
         // that failed to insert is a lie.  The unit also frees the operator's
         // retry — a rolled-back attempt leaves the (region, effective_at) slot
         // open rather than colliding with a half-written change.
+        //
+        // `previous` is the TIMELINE predecessor at the new row's own
+        // `effective_at` — the SAME row the counsel delta baselines on — so
+        // the audit snapshot shows what the write actually supersedes.  A
+        // scheduled re-enable after a scheduled shutdown must audit against
+        // the shutdown it reverses, not against today's still-enabled policy
+        // (codex review of PR #146: auditing the active-now row there hid the
+        // re-expansion the gate itself had just detected).  For a non-counsel
+        // write the window check pins effective_at into [active-row, now], so
+        // the two rows coincide and nothing changes.
         let previous: Awaited<ReturnType<typeof services.policies.activeForRegion>> = null;
         try {
           await runChainedUnit(
             services.transactor,
             async (stores) => {
-              previous = await stores.policies.activeForRegion(
+              const activeNow = await stores.policies.activeForRegion(
                 policyInput.country_or_region,
                 nowIso,
               );
+              // TIMELINE arm: a non-counsel write must take effect NOW — its
+              // `effective_at` must land in [active-row, now].  Policies are
+              // insert-only and the engine serves the greatest effective_at ≤
+              // now, so a FUTURE-dated row is a scheduling act: a reviewer
+              // could otherwise plant a carry-forward of today's approved
+              // document dated after a counsel-scheduled narrowing and
+              // silently re-expand the region when the date arrives (the
+              // delta below would read it as a no-op against TODAY's policy).
+              // A back-date behind the active row is the same class (a
+              // timeline reorder).  Immediate narrowing — the reviewer's
+              // whole use case — is unaffected.
+              const effectiveAtMs = Date.parse(policyInput.effective_at);
+              if (
+                !actorIsCounsel &&
+                (effectiveAtMs > services.now() ||
+                  (activeNow !== null && effectiveAtMs < Date.parse(activeNow.effectiveAt)))
+              ) {
+                throw new CounselRequiredError('scheduling');
+              }
+              // The delta BASELINE is the policy in force at the new
+              // document's own effective instant (its timeline predecessor)
+              // — for a window-checked non-counsel write this IS the active
+              // row, and for a counsel-scheduled write it is whatever the
+              // schedule says precedes it, so scheduling a re-enable AFTER a
+              // scheduled narrowing correctly demands the approval ref.
+              // Validated exactly as the engine reads it: a nonconforming
+              // stored row is ABSENT (fail-closed), so nothing in it can be
+              // "carried forward" — every enabled cell in the new document
+              // then counts as an expansion.  A policy-store outage throws
+              // out of the unit (503 below); nothing is gated open on an
+              // unread prior.
+              const baselineRow = await stores.policies.activeForRegion(
+                policyInput.country_or_region,
+                policyInput.effective_at,
+              );
+              previous = baselineRow; // the audit snapshots the SAME predecessor
+              let prior: JurisdictionFeaturePolicy | null = null;
+              if (baselineRow !== null) {
+                const priorValidated = validatePolicy(baselineRow.document);
+                if (priorValidated.ok) prior = priorValidated.policy;
+              }
+              const delta = policyChangeRequiresCounsel(prior, validated.policy);
+              if (delta.required && !actorIsCounsel) throw new CounselRequiredError('role');
+              if (delta.required && approval_ref === undefined) {
+                throw new CounselRequiredError('approval_ref');
+              }
               const inserted = await stores.policies.insert({
                 policyId,
                 countryOrRegion: policyInput.country_or_region,
@@ -702,9 +791,20 @@ export function createComplianceRoutes() {
             'jurisdiction policy write',
           );
         } catch (error) {
-          // The `(region, effective_at)` unique is the only expected failure
-          // here; anything else (an audit-store outage) rolled the whole unit
-          // back, so nothing went live.
+          if (error instanceof CounselRequiredError) {
+            // The unit rolled back: no policy row, no chain entry.
+            const messages = {
+              role: 'Expanding availability requires legal counsel (the compliance role may only narrow it or carry an approved policy forward unchanged).',
+              approval_ref:
+                'Expanding availability requires a counsel approval reference (four-eyes).',
+              scheduling:
+                'Scheduling or re-ordering the policy timeline requires legal counsel — a compliance write takes effect immediately (effective_at between the active policy and now).',
+            } as const;
+            return c.json(deny('counsel_approval_required', messages[error.missing]), 403);
+          }
+          // The `(region, effective_at)` unique is the only other expected
+          // failure here; anything else (an audit- or policy-store outage)
+          // rolled the whole unit back, so nothing went live.
           if (isUniqueViolation(error)) {
             return c.json(
               deny('duplicate_policy', 'A policy for this region and effective_at already exists.'),

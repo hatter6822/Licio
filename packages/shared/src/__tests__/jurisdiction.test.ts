@@ -13,8 +13,10 @@ import {
   DEFAULT_AGE_GATE_POLICY,
   FEATURE_DISABLE_REASONS,
   featureCellStatesSchema,
+  type JurisdictionFeaturePolicy,
   jurisdictionFeaturePolicySchema,
   kycPolicySchema,
+  policyChangeRequiresCounsel,
   REGION_RESOLUTION_BASES,
   regionCodeSchema,
   validatePolicy,
@@ -185,5 +187,115 @@ describe('engine vocabulary', () => {
   it('disable reasons carry the seven WS-N.1.1c values', () => {
     expect(FEATURE_DISABLE_REASONS).toHaveLength(7);
     expect(FEATURE_DISABLE_REASONS).toContain('verification_required');
+  });
+});
+
+describe('policyChangeRequiresCounsel (WS-N.1.1e write-gate delta; codex: compare policy deltas before requiring counsel)', () => {
+  // A counsel-approved region with production payments live and a testnet cell.
+  const ENABLED_PRIOR = jurisdictionFeaturePolicySchema.parse({
+    ...VALID_POLICY,
+    feature_flags: {
+      ...ALL_DISABLED_CELLS,
+      production_payments: 'enabled',
+      testnet_transactions: 'testnet',
+    },
+  });
+  const NEXT_ID = '7a9619ff-8b86-4d01-b42d-00cf4fc964aa';
+  /** A replacement document derived from ENABLED_PRIOR (new policy row). */
+  function replacement(overrides: Partial<JurisdictionFeaturePolicy> = {}) {
+    return jurisdictionFeaturePolicySchema.parse({
+      ...VALID_POLICY,
+      feature_flags: ENABLED_PRIOR.feature_flags,
+      policy_id: NEXT_ID,
+      effective_at: '2026-08-01T00:00:00.000Z',
+      ...overrides,
+    });
+  }
+
+  it('no counsel for a write with no enabled cell — with or without a prior', () => {
+    const narrowOnly = jurisdictionFeaturePolicySchema.parse(VALID_POLICY);
+    expect(policyChangeRequiresCounsel(null, narrowOnly).required).toBe(false);
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, narrowOnly).required).toBe(false);
+  });
+
+  it('with NO active prior (missing/future-dated/nonconforming ⇒ null), every enabled cell is an expansion', () => {
+    const delta = policyChangeRequiresCounsel(null, ENABLED_PRIOR);
+    expect(delta.required).toBe(true);
+    expect(delta.newlyEnabledCells).toEqual(['production_payments']);
+  });
+
+  it('carrying an approved enabled cell FORWARD while narrowing another is NOT an enablement (the codex scenario)', () => {
+    const narrowing = replacement({
+      feature_flags: {
+        ...ENABLED_PRIOR.feature_flags,
+        testnet_transactions: 'disabled', // the narrowed cell
+      },
+    });
+    const delta = policyChangeRequiresCounsel(ENABLED_PRIOR, narrowing);
+    expect(delta.required).toBe(false);
+    expect(delta.newlyEnabledCells).toEqual([]);
+    expect(delta.changedGoverningFields).toEqual([]);
+  });
+
+  it('a non-enabled → enabled transition requires counsel even when other cells were already enabled', () => {
+    const expanding = replacement({
+      feature_flags: {
+        ...ENABLED_PRIOR.feature_flags,
+        treasury_operations: 'enabled',
+      },
+    });
+    const delta = policyChangeRequiresCounsel(ENABLED_PRIOR, expanding);
+    expect(delta.required).toBe(true);
+    expect(delta.newlyEnabledCells).toEqual(['treasury_operations']);
+  });
+
+  it('while a cell REMAINS enabled, its legal terms stay counsel-controlled (no sideways widening)', () => {
+    // Each governed field changed in isolation trips the gate.
+    const widenAssets = replacement({ asset_flags: { USDC: true, ETH: true } });
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, widenAssets)).toMatchObject({
+      required: true,
+      changedGoverningFields: ['asset_flags'],
+    });
+    const dropKyc = replacement({ kyc_policy: {} });
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, dropKyc)).toMatchObject({
+      required: true,
+      changedGoverningFields: ['kyc_policy'],
+    });
+    const dropDisclosures = replacement({ disclosure_refs: [] });
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, dropDisclosures)).toMatchObject({
+      required: true,
+      changedGoverningFields: ['disclosure_refs'],
+    });
+    const swapApproval = replacement({ legal_approval_ref: 'LEGAL-2026-999' });
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, swapApproval)).toMatchObject({
+      required: true,
+      changedGoverningFields: ['legal_approval_ref'],
+    });
+  });
+
+  it('narrowing EVERY enabled cell away releases the governed fields (nothing enabled remains to govern)', () => {
+    const fullNarrow = replacement({
+      feature_flags: { ...ALL_DISABLED_CELLS },
+      kyc_policy: {}, // changed AND no cell remains enabled
+      legal_approval_ref: null,
+    });
+    expect(policyChangeRequiresCounsel(ENABLED_PRIOR, fullNarrow).required).toBe(false);
+  });
+
+  it('the comparison is key-order-insensitive for record shapes', () => {
+    // Same asset flags, reversed literal insertion order.
+    const prior = jurisdictionFeaturePolicySchema.parse({
+      ...VALID_POLICY,
+      feature_flags: { ...ALL_DISABLED_CELLS, production_payments: 'enabled' },
+      asset_flags: { USDC: true, ETH: true },
+    });
+    const next = jurisdictionFeaturePolicySchema.parse({
+      ...VALID_POLICY,
+      policy_id: NEXT_ID,
+      effective_at: '2026-08-01T00:00:00.000Z',
+      feature_flags: { ...ALL_DISABLED_CELLS, production_payments: 'enabled' },
+      asset_flags: { ETH: true, USDC: true },
+    });
+    expect(policyChangeRequiresCounsel(prior, next).required).toBe(false);
   });
 });

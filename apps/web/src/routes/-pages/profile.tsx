@@ -6,7 +6,11 @@
 // (WS-C.4.1d) and are pushed to the signal processor immediately; the Signal
 // Ledger is the private, no-applause account of attention; Wallet is flag-gated.
 import type { PrivacyLevel, SignalLedgerEntry } from '@licio/shared';
-import { DEFAULT_NOTIFICATION_PREFERENCES } from '@licio/shared';
+import {
+  canAccessComplianceConsole,
+  canAccessModerationConsole,
+  DEFAULT_NOTIFICATION_PREFERENCES,
+} from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import { type ReactNode, useEffect } from 'react';
 import { RegionDeclarationCard } from '../../components/compliance/index.js';
@@ -227,6 +231,47 @@ export function ProfilePage(): React.ReactElement {
         },
       ],
     },
+    // Role-gated operator consoles (WS-J.2 moderation, WS-N.2.1c-2 compliance).
+    // The roles on the session context are a NAVIGATION hint only: a stale or
+    // tampered value can reveal a LINK, never data — every console endpoint
+    // re-authorizes server-side (requireSteward / requireCompliance, both with
+    // per-session step-up MFA), and the console pages render an access notice
+    // on a 403.
+    ...(() => {
+      const roles = user?.roles ?? [];
+      const stewardRoles = user?.steward_roles ?? [];
+      const consoles: ProfileLink[] = [
+        ...(canAccessModerationConsole(roles, stewardRoles)
+          ? [
+              {
+                to: '/moderation',
+                label: t('profile.moderationConsole', 'Moderation console'),
+                description: t(
+                  'profile.moderationConsole.desc',
+                  'The report queue, reviews, appeals, and the audit trail.',
+                ),
+                icon: 'shield' as IconName,
+              },
+            ]
+          : []),
+        ...(canAccessComplianceConsole(roles)
+          ? [
+              {
+                to: '/compliance-console',
+                label: t('profile.complianceConsole', 'Compliance console'),
+                description: t(
+                  'profile.complianceConsole.desc',
+                  'Financial-compliance cases, the fraud queue, and region declarations.',
+                ),
+                icon: 'document-check' as IconName,
+              },
+            ]
+          : []),
+      ];
+      return consoles.length > 0
+        ? [{ heading: t('profile.group.operations', 'Operations'), links: consoles }]
+        : [];
+    })(),
     // DEVELOPMENT-ONLY tools. `import.meta.env.DEV` is a compile-time constant,
     // so this group is tree-shaken out of production builds entirely.
     ...(import.meta.env.DEV

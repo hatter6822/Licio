@@ -221,9 +221,17 @@ describe('GET /v1/auth/status', () => {
 
     const sid = await loginViaEmail(app, 's@example.com');
     const authed = await app.request('/v1/auth/status', { headers: { cookie: sid } });
-    const body = await readJson<{ authenticated: boolean; user: { handle: string } }>(authed);
+    const body = await readJson<{
+      authenticated: boolean;
+      user: { handle: string; roles: string[]; steward_roles: string[] };
+    }>(authed);
     expect(body.authenticated).toBe(true);
     expect(body.user.handle).toBe('statususer');
+    // The user's OWN roles + doctrine grants ride the status context (the
+    // console-nav hints; deliberately NOT on the strict login echo —
+    // bundle-rollout compat).
+    expect(body.user.roles).toEqual(['user']);
+    expect(body.user.steward_roles).toEqual([]);
   });
 });
 
