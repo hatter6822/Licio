@@ -705,8 +705,11 @@ licio/
 │           │                                  scorer); runs on non-prod boot
 │           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
 │   └── courier/                 -- WS-R.15.4a native Android courier (Capacitor 8 shell)
-│       ├── capacitor.config.ts  --   webDir → apps/web/dist (no courier-only web fork);
+│       ├── capacitor.config.json --  webDir → apps/web/dist (no courier-only web fork);
 │       │                              androidScheme https → secure-context WebView
+│       │                              (static JSON: the Capacitor CLI's TS-config
+│       │                              loader needs the legacy typescript JS API,
+│       │                              which the TS 7 native compiler dropped)
 │       ├── scripts/
 │       │   └── check-no-fork.mjs --   byte-identity gate (web build ≡ synced WebView assets)
 │       └── android/             --   generated Capacitor Android project; `pnpm --filter

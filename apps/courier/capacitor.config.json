@@ -1,0 +1,13 @@
+{
+  "appId": "app.licio.courier",
+  "appName": "Licio Courier",
+  "webDir": "../web/dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

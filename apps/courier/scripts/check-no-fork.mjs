@@ -67,7 +67,7 @@ function exists(path) {
 
 function checkStructural() {
   // The courier must not ship a web app of its own — only config + scripts + the
-  // generated android/ shell.  `webDir` (capacitor.config.ts) points at ../web/dist.
+  // generated android/ shell.  `webDir` (capacitor.config.json) points at ../web/dist.
   for (const forbidden of FORBIDDEN_FORK_PATHS) {
     if (exists(join(COURIER_DIR, forbidden))) {
       fail(
