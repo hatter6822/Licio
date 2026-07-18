@@ -84,10 +84,19 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   `/rooms/$roomId`),
   a back-compat `/threads/$threadId` redirect to the owning story comment section, profile sub-routes (`/profile/saved`,
   `/profile/signal-ledger`, `/profile/settings`, `/profile/privacy`,
-  `/profile/wallet`), and flag-gated routes (`/rooms/$roomId/governance`). Flat
+  `/profile/wallet`, and the **Safety & support** group — `/profile/notices`,
+  `/profile/safety`, `/support`), and flag-gated routes
+  (`/rooms/$roomId/governance`). Flat
   URLs for nested detail routes use the `_`-suffixed (non-nesting) route-id form.
+  Every page reached from the profile menu carries a `PageHeader` back button
+  (the room/comment-section pattern): `useGoBack` retraces real history, and a
+  cold-loaded deep link falls back — replacing — to the profile hub (`/support`
+  falls back to `/`, staying reachable for locked-out users).
   The operator consoles (`/moderation` WS-J.2, `/compliance-console` WS-N) are
-  linked from the profile page's role-gated **Operations** group: the auth-status
+  linked from the profile page's role-gated **Operations** group, own their page
+  headers (title + back button), and deep-link their active section via a
+  zod-validated `?tab=` search param (an unknown value coerces to the default
+  tab; tab switches replace the history entry): the auth-status
   context carries the user's OWN `roles` + `steward_roles`
   (`userContextSchema`, both defaulted for pre-roles persisted state) and the
   shared `canAccessModerationConsole` / `canAccessComplianceConsole` hints decide

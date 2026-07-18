@@ -7,13 +7,19 @@
 // SERVER-side (compliance role + active MFA); a non-reviewer sees an access
 // notice, never data.  Everything shown is transaction-derived only
 // (WS-N.2.2d) — this surface structurally cannot render attention data
-// because no API it calls carries any.
+// because no API it calls carries any.  Reads go through TanStack Query (the
+// zod-validated client flows are the queryFns), so actions invalidate rather
+// than hand-refetch; each case card carries EXACTLY the controls its
+// review_state permits, scoped to that case.  The page header (title + back
+// button) belongs to the route page; the active tab is optionally controlled
+// so it can live in `?tab=`.
 import type {
   CaseResolutionOutcome,
   FinancialComplianceCase,
   FraudQueueResponse,
 } from '@licio/shared';
-import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import {
@@ -25,6 +31,7 @@ import {
   adminReviewIntent,
   adminVerifyDeclaration,
 } from '../../lib/compliance-api.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { Button } from '../ui/Button/index.js';
 import { Card } from '../ui/Card/index.js';
 import { Input } from '../ui/Input/index.js';
@@ -51,38 +58,38 @@ const OUTCOME_LABEL: Record<CaseResolutionOutcome, string> = {
   escalated: 'Escalated',
 };
 
-type Tab = 'cases' | 'fraud' | 'declarations';
+/** The console's tab ids — also the `?tab=` deep-link vocabulary (WS-C.1.1b). */
+export type ComplianceConsoleTab = 'cases' | 'fraud' | 'declarations';
 
-export function ComplianceConsole(): React.JSX.Element {
+export interface ComplianceConsoleProps {
+  /** Controlled active tab (the page syncs it to `?tab=`); omit for local state. */
+  tab?: ComplianceConsoleTab;
+  onTabChange?: (tab: ComplianceConsoleTab) => void;
+}
+
+/** 401/403 mean "not a reviewer" — anything else is an outage, and showing the
+ *  access notice for it would misinform an authorized reviewer. */
+function isAuthError(error: unknown): boolean {
+  return error instanceof ApiClientError && (error.status === 401 || error.status === 403);
+}
+
+export function ComplianceConsole({
+  tab,
+  onTabChange,
+}: ComplianceConsoleProps = {}): React.JSX.Element {
   const t = useT();
-  const [tab, setTab] = useState<Tab>('cases');
-  const [cases, setCases] = useState<FinancialComplianceCase[] | null>(null);
-  const [queue, setQueue] = useState<FraudQueueResponse['items'] | null>(null);
-  const [denied, setDenied] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const cases = useQuery({
+    queryKey: queryKeys.complianceCases(),
+    queryFn: adminListCases,
+    retry: false,
+  });
+  const fraud = useQuery({
+    queryKey: queryKeys.complianceFraudQueue(),
+    queryFn: adminFetchFraudQueue,
+    retry: false,
+  });
 
-  const refresh = async (): Promise<void> => {
-    try {
-      const [caseList, fraudQueue] = await Promise.all([adminListCases(), adminFetchFraudQueue()]);
-      setCases(caseList.cases);
-      setQueue(fraudQueue.items);
-      setDenied(false);
-      setError(null);
-    } catch (e) {
-      if (e instanceof ApiClientError && (e.status === 403 || e.status === 401)) {
-        setDenied(true);
-        return;
-      }
-      setError(t('compliance.console.load_error', 'Could not load the compliance queues.'));
-    }
-  };
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only load — `refresh` is a fresh closure each render; depending on it would refetch every render.
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  if (denied) {
+  if (isAuthError(cases.error) || isAuthError(fraud.error)) {
     return (
       <Card as="section">
         <h2 className="text-base font-semibold">
@@ -98,21 +105,33 @@ export function ComplianceConsole(): React.JSX.Element {
     );
   }
 
+  if (cases.isError || fraud.isError) {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p role="alert" className="text-sm text-error-fg">
+          {t('compliance.console.load_error', 'Could not load the compliance queues.')}
+        </p>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            void cases.refetch();
+            void fraud.refetch();
+          }}
+        >
+          {t('common.retry', 'Try again')}
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <section aria-label={t('compliance.console.title', 'Compliance console')}>
-      <h2 className="text-lg font-semibold">
-        {t('compliance.console.title', 'Compliance console')}
-      </h2>
-      {error !== null ? (
-        <p role="alert" className="mt-2 text-sm text-error-fg">
-          {error}
-        </p>
-      ) : null}
       <Tabs
-        className="mt-3"
         label={t('compliance.console.title', 'Compliance console')}
-        value={tab}
-        onValueChange={(id) => setTab(id as Tab)}
+        {...(tab !== undefined ? { value: tab } : {})}
+        {...(onTabChange !== undefined
+          ? { onValueChange: (id: string) => onTabChange(id as ComplianceConsoleTab) }
+          : {})}
         tabs={[
           { id: 'cases', label: t('compliance.console.cases', 'Cases') },
           { id: 'fraud', label: t('compliance.console.fraud', 'Fraud queue') },
@@ -121,9 +140,9 @@ export function ComplianceConsole(): React.JSX.Element {
       >
         {(activeId) =>
           activeId === 'cases' ? (
-            <CaseQueue cases={cases} onChanged={() => void refresh()} />
+            <CaseQueue cases={cases.data?.cases ?? null} />
           ) : activeId === 'fraud' ? (
-            <FraudQueue items={queue} onChanged={() => void refresh()} />
+            <FraudQueue items={fraud.data?.items ?? null} />
           ) : (
             <DeclarationVerification />
           )
@@ -133,17 +152,9 @@ export function ComplianceConsole(): React.JSX.Element {
   );
 }
 
-function CaseQueue({
-  cases,
-  onChanged,
-}: {
-  cases: FinancialComplianceCase[] | null;
-  onChanged: () => void;
-}): React.JSX.Element {
+function CaseQueue({ cases }: { cases: FinancialComplianceCase[] | null }): React.JSX.Element {
   const t = useT();
-  const [assignee, setAssignee] = useState('');
-  const [notes, setNotes] = useState('');
-  const [resolveOutcome, setResolveOutcome] = useState<CaseResolutionOutcome>('cleared');
+  const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   if (cases === null) {
     return <p className="text-sm text-ink-muted">{t('compliance.console.loading', 'Loading…')}</p>;
@@ -155,13 +166,21 @@ function CaseQueue({
       </p>
     );
   }
+  // One guarded action at a time; success invalidates both queues (a case action
+  // can change fraud-queue rows too), failure surfaces per-action without
+  // dropping the queue.
   const act = async (run: () => Promise<unknown>): Promise<void> => {
     try {
       await run();
       setError(null);
-      onChanged();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.complianceCases() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.complianceFraudQueue() });
     } catch (e) {
-      setError(e instanceof ApiClientError ? e.message : 'Action failed');
+      setError(
+        e instanceof ApiClientError
+          ? e.message
+          : t('compliance.console.actionFailed', 'Action failed'),
+      );
     }
   };
   return (
@@ -171,88 +190,10 @@ function CaseQueue({
           {error}
         </p>
       ) : null}
-      <div className="flex flex-wrap items-end gap-2">
-        <Input
-          label={t('compliance.console.assignee', 'Assignee user id')}
-          value={assignee}
-          onChange={(event) => setAssignee(event.target.value)}
-        />
-        <Input
-          label={t('compliance.console.notes', 'Resolution notes')}
-          value={notes}
-          onChange={(event) => setNotes(event.target.value)}
-        />
-        <Select
-          label={t('compliance.console.outcome', 'Resolution outcome')}
-          value={resolveOutcome}
-          onValueChange={(value) => setResolveOutcome(value as CaseResolutionOutcome)}
-          options={RESOLVE_OUTCOMES.map((outcome) => ({
-            value: outcome,
-            label: t(`compliance.console.outcome.${outcome}`, OUTCOME_LABEL[outcome]),
-          }))}
-        />
-      </div>
       <ul className="flex flex-col gap-2">
         {cases.map((record) => (
           <li key={record.case_id}>
-            <Card as="article">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">
-                    {record.trigger_type} · {record.risk_level} · {record.review_state}
-                  </p>
-                  <p className="text-xs text-ink-muted">
-                    {t('compliance.console.opened', 'Opened {at}', {
-                      at: new Date(record.created_at).toLocaleString(),
-                    })}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {record.review_state === 'open' ? (
-                    <Button
-                      disabled={assignee.trim() === ''}
-                      onClick={() =>
-                        void act(() => adminAssignCase(record.case_id, assignee.trim()))
-                      }
-                    >
-                      {t('compliance.console.assign', 'Assign')}
-                    </Button>
-                  ) : null}
-                  {record.review_state === 'assigned' || record.review_state === 'escalated' ? (
-                    <Button
-                      onClick={() => void act(() => adminCaseAction(record.case_id, 'begin'))}
-                    >
-                      {t('compliance.console.begin', 'Begin investigation')}
-                    </Button>
-                  ) : null}
-                  {record.review_state === 'investigating' ? (
-                    <>
-                      <Button
-                        disabled={notes.trim() === ''}
-                        onClick={() =>
-                          void act(() =>
-                            adminResolveCase(record.case_id, resolveOutcome, notes.trim()),
-                          )
-                        }
-                      >
-                        {t('compliance.console.resolve', 'Resolve: {outcome}', {
-                          outcome: t(
-                            `compliance.console.outcome.${resolveOutcome}`,
-                            OUTCOME_LABEL[resolveOutcome],
-                          ),
-                        })}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        onClick={() => void act(() => adminCaseAction(record.case_id, 'escalate'))}
-                      >
-                        {t('compliance.console.escalate', 'Escalate')}
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </Card>
+            <CaseCard record={record} act={act} />
           </li>
         ))}
       </ul>
@@ -260,19 +201,100 @@ function CaseQueue({
   );
 }
 
-function FraudQueue({
-  items,
-  onChanged,
+/** One case card exposing EXACTLY the transitions the server-side state machine
+ *  permits for its review_state — with the inputs those transitions need scoped
+ *  to THIS case (a shared cross-case input made it ambiguous which case an
+ *  assignee or note was about to hit). */
+function CaseCard({
+  record,
+  act,
 }: {
-  items: FraudQueueResponse['items'] | null;
-  onChanged: () => void;
+  record: FinancialComplianceCase;
+  act: (run: () => Promise<unknown>) => Promise<void>;
 }): React.JSX.Element {
   const t = useT();
+  const [assignee, setAssignee] = useState('');
+  const [notes, setNotes] = useState('');
+  const [outcome, setOutcome] = useState<CaseResolutionOutcome>('cleared');
+  return (
+    <Card as="article">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium">
+            {record.trigger_type} · {record.risk_level} · {record.review_state}
+          </p>
+          <p className="text-xs text-ink-muted">
+            {t('compliance.console.opened', 'Opened {at}', {
+              at: new Date(record.created_at).toLocaleString(),
+            })}
+          </p>
+        </div>
+        {record.review_state === 'open' ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <Input
+              label={t('compliance.console.assignee', 'Assignee user id')}
+              value={assignee}
+              onChange={(event) => setAssignee(event.target.value)}
+            />
+            <Button
+              disabled={assignee.trim() === ''}
+              onClick={() => void act(() => adminAssignCase(record.case_id, assignee.trim()))}
+            >
+              {t('compliance.console.assign', 'Assign')}
+            </Button>
+          </div>
+        ) : null}
+        {record.review_state === 'assigned' || record.review_state === 'escalated' ? (
+          <Button onClick={() => void act(() => adminCaseAction(record.case_id, 'begin'))}>
+            {t('compliance.console.begin', 'Begin investigation')}
+          </Button>
+        ) : null}
+        {record.review_state === 'investigating' ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <Select
+              label={t('compliance.console.outcome', 'Resolution outcome')}
+              value={outcome}
+              onValueChange={(value) => setOutcome(value as CaseResolutionOutcome)}
+              options={RESOLVE_OUTCOMES.map((candidate) => ({
+                value: candidate,
+                label: t(`compliance.console.outcome.${candidate}`, OUTCOME_LABEL[candidate]),
+              }))}
+            />
+            <Input
+              label={t('compliance.console.notes', 'Resolution notes')}
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+            />
+            <Button
+              disabled={notes.trim() === ''}
+              onClick={() =>
+                void act(() => adminResolveCase(record.case_id, outcome, notes.trim()))
+              }
+            >
+              {t('compliance.console.resolve', 'Resolve: {outcome}', {
+                outcome: t(`compliance.console.outcome.${outcome}`, OUTCOME_LABEL[outcome]),
+              })}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => void act(() => adminCaseAction(record.case_id, 'escalate'))}
+            >
+              {t('compliance.console.escalate', 'Escalate')}
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
+function FraudQueue({ items }: { items: FraudQueueResponse['items'] | null }): React.JSX.Element {
+  const t = useT();
+  const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   if (items === null) {
     return <p className="text-sm text-ink-muted">{t('compliance.console.loading', 'Loading…')}</p>;
   }
-  const held = items.filter((item) => item.payment_intent_id !== null);
   if (items.length === 0) {
     return (
       <p className="text-sm text-ink-muted" data-testid="empty-fraud">
@@ -280,13 +302,19 @@ function FraudQueue({
       </p>
     );
   }
+  const held = items.filter((item) => item.payment_intent_id !== null);
   const review = async (decision: 'release' | 'reject', paymentIntentId: string): Promise<void> => {
     try {
       await adminReviewIntent(decision, paymentIntentId, `console ${decision}`);
       setError(null);
-      onChanged();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.complianceFraudQueue() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.complianceCases() });
     } catch (e) {
-      setError(e instanceof ApiClientError ? e.message : 'Review failed');
+      setError(
+        e instanceof ApiClientError
+          ? e.message
+          : t('compliance.console.reviewFailed', 'Review failed'),
+      );
     }
   };
   return (
@@ -304,42 +332,41 @@ function FraudQueue({
         )}
       </p>
       <ul className="flex flex-col gap-2">
-        {items.map((item, index) => (
-          <li key={`${item.case.case_id}:${item.payment_intent_id ?? index}`}>
-            <Card as="article">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">
-                    {item.case.trigger_type} · {item.case.risk_level}
-                    {item.payment_compliance_state !== null
-                      ? ` · ${item.payment_compliance_state}`
-                      : ''}
-                  </p>
-                  <p className="text-xs text-ink-muted">
-                    {t('compliance.console.slaDue', 'SLA due {at}', {
-                      at: new Date(item.sla_due_at).toLocaleString(),
-                    })}
-                  </p>
-                </div>
-                {item.payment_intent_id !== null && item.payment_compliance_state === 'flagged' ? (
-                  <div className="flex gap-2">
-                    <Button
-                      onClick={() => void review('release', item.payment_intent_id as string)}
-                    >
-                      {t('compliance.console.release', 'Release')}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => void review('reject', item.payment_intent_id as string)}
-                    >
-                      {t('compliance.console.reject', 'Reject')}
-                    </Button>
+        {items.map((item, index) => {
+          // Narrow once so the action closures carry a plain string (no cast).
+          const intentId = item.payment_intent_id;
+          return (
+            <li key={`${item.case.case_id}:${intentId ?? index}`}>
+              <Card as="article">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">
+                      {item.case.trigger_type} · {item.case.risk_level}
+                      {item.payment_compliance_state !== null
+                        ? ` · ${item.payment_compliance_state}`
+                        : ''}
+                    </p>
+                    <p className="text-xs text-ink-muted">
+                      {t('compliance.console.slaDue', 'SLA due {at}', {
+                        at: new Date(item.sla_due_at).toLocaleString(),
+                      })}
+                    </p>
                   </div>
-                ) : null}
-              </div>
-            </Card>
-          </li>
-        ))}
+                  {intentId !== null && item.payment_compliance_state === 'flagged' ? (
+                    <div className="flex gap-2">
+                      <Button onClick={() => void review('release', intentId)}>
+                        {t('compliance.console.release', 'Release')}
+                      </Button>
+                      <Button variant="secondary" onClick={() => void review('reject', intentId)}>
+                        {t('compliance.console.reject', 'Reject')}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              </Card>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -364,7 +391,11 @@ function DeclarationVerification(): React.JSX.Element {
             : t('compliance.console.rejected', 'Declaration rejected (stays pending).'),
       );
     } catch (e) {
-      setOutcome(e instanceof ApiClientError ? e.message : 'Verification failed');
+      setOutcome(
+        e instanceof ApiClientError
+          ? e.message
+          : t('compliance.console.verifyFailed', 'Verification failed'),
+      );
     }
   };
   return (

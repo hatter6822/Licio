@@ -8,6 +8,7 @@
 // The server enforces the last-method guard; this page only renders its error.
 import type { SecurityActivityEntry, SessionSummary } from '@licio/shared';
 import { useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from '@tanstack/react-router';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import {
   StepUpDialog,
@@ -19,6 +20,7 @@ import { Button } from '../../components/ui/Button/index.js';
 import { Input } from '../../components/ui/Input/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { formatDate } from '../../i18n/format.js';
 import { useI18n, useT } from '../../i18n/index.js';
 import { encodeQr, renderToImageData } from '../../lcap/transports/qr/index.js';
@@ -811,11 +813,15 @@ function ActivitySection(): React.ReactElement {
 export function SecurityPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('security.title', 'Security'));
+  const navigate = useNavigate();
+  // Retrace history to wherever this page was opened from; a cold-loaded deep
+  // link falls back (replacing) to the profile hub.
+  const goBack = useGoBack(() => void navigate({ to: '/profile', replace: true }));
   const gate = useStepUpGate();
 
   return (
     <>
-      <PageHeader title={t('security.title', 'Security')} />
+      <PageHeader title={t('security.title', 'Security')} onBack={goBack} />
       <div className="mx-auto w-full max-w-2xl p-4">
         <SessionsSection />
         <PasskeysSection gate={gate} />

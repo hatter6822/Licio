@@ -346,7 +346,12 @@ apps/web/src/components/compliance/           -- DisabledFeatureExplanation
                                     from the profile's role-gated "Operations"
                                     group for compliance/counsel/admin sessions —
                                     the roles on the auth-status context are a nav
-                                    hint; the server re-authorizes every panel)
+                                    hint; the server re-authorizes every panel.
+                                    Reads go through TanStack Query; each case
+                                    card carries exactly the controls its
+                                    review_state permits, scoped to that case;
+                                    the page owns the header + back button and
+                                    `?tab=` deep-links a console section)
 apps/web/src/lib/compliance-api.ts             -- zod-validated typed flows
 apps/web/src/i18n/catalogs/de.ts               -- the complete German
                                     disabled-state catalog (the first real locale)

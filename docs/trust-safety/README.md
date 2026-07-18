@@ -297,8 +297,11 @@ These are structural guarantees the code holds (each covered by a test):
   recomputed aggregate severity; and a user's moderation notices are included in
   their DSAR export (reason codes only, never reporter identity).
 
-**Evidence queue + decisions (ROLE_EVIDENCE — STEWARD_ROLES.md).**  The
-console's Evidence tab serves the doctrine surface: `GET
+**Source review queue + decisions (ROLE_EVIDENCE — STEWARD_ROLES.md).**  The
+console's **Sources** tab serves the doctrine surface (sourcing is
+comment-centric — a comment carries `citations` — so the user-facing name is
+"Sources"; the ratified role name and the `evidence-*` wire paths are
+unchanged): `GET
 /v1/moderation/evidence-queue` lists citation-bearing published contributions
 (sourced comments + corrections) OLDEST first — the queue is DERIVED
 (citation-bearing rows with no decision yet), so it can never drift from
@@ -312,7 +315,7 @@ construction: the module never touches a moderation state), audited under the
 doctrine action ids, duplicate-protected by partial unique indexes
 (`evidence_decisions`, migration 0077), and listed newest-first via `GET
 /v1/moderation/evidence-decisions`.  Decisions surface through the console's
-evidence panels (the former public independent-sources drawer projection was
+Sources panel (the former public independent-sources drawer projection was
 removed — comment-centric sourcing superseded story-level lineage).  The
 reviewer link-opening malware check (`/url-verdict`) is access-gated to the
 panels the links render in: report-queue OR evidence-queue roles — and

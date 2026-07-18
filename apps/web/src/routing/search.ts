@@ -80,3 +80,20 @@ export const roomDetailSearchSchema = z.object({
   governance: roomGovernanceTabSchema.optional().catch(undefined),
 });
 export type RoomDetailSearch = z.infer<typeof roomDetailSearchSchema>;
+
+/**
+ * Operator consoles (WS-J.2 moderation, WS-N.2.1c compliance): `?tab=` deep-links
+ * a console section, so an operator can bookmark or share their queue (a
+ * navigation hint only — every console endpoint re-authorizes server-side).
+ * Absent ⇒ the first tab; an unknown value coerces to undefined, never silently
+ * accepted.
+ */
+export const moderationConsoleSearchSchema = z.object({
+  tab: z.enum(['queue', 'sources', 'appeals', 'integrity', 'audit']).optional().catch(undefined),
+});
+export type ModerationConsoleSearch = z.infer<typeof moderationConsoleSearchSchema>;
+
+export const complianceConsoleSearchSchema = z.object({
+  tab: z.enum(['cases', 'fraud', 'declarations']).optional().catch(undefined),
+});
+export type ComplianceConsoleSearch = z.infer<typeof complianceConsoleSearchSchema>;

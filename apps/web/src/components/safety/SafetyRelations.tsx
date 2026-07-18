@@ -71,9 +71,9 @@ export function SafetyRelations(): React.ReactElement {
   return (
     <div className="flex flex-col gap-6">
       <section aria-labelledby="blocks-heading" className="flex flex-col gap-2">
-        <h1 id="blocks-heading" className="text-2xl font-semibold text-ink">
+        <h2 id="blocks-heading" className="text-base font-semibold text-ink">
           {t('safety.blocked', 'Blocked accounts')}
-        </h1>
+        </h2>
         {blocks.data && blocks.data.blocks.length === 0 ? (
           <p className="text-ink-muted">{t('safety.noBlocks', 'You have not blocked anyone.')}</p>
         ) : null}
@@ -94,7 +94,7 @@ export function SafetyRelations(): React.ReactElement {
         </ul>
       </section>
       <section aria-labelledby="mutes-heading" className="flex flex-col gap-2">
-        <h2 id="mutes-heading" className="text-2xl font-semibold text-ink">
+        <h2 id="mutes-heading" className="text-base font-semibold text-ink">
           {t('safety.muted', 'Muted accounts')}
         </h2>
         {mutes.data && mutes.data.mutes.length === 0 ? (
