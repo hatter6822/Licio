@@ -682,8 +682,11 @@ export function createKnomosisRoutes() {
           }
           const record = await services.actions.getById(c.req.valid('param').actionRecordId);
           if (record === null) return c.json(notFound, 404);
-          // Access: the actor, or a steward of the action's room (404-over-403).
-          if (record.actorUserId !== auth.userId) {
+          // Access: the actor, a steward of the action's room, or the platform
+          // ADMIN (a READ — the final-line-of-defense decision; the room-port
+          // isSteward stays room-grants-only on purpose, because it also gates
+          // treasury ACTIONS admin does not inherit).  404-over-403.
+          if (record.actorUserId !== auth.userId && !auth.roles.includes('admin')) {
             const isSteward =
               services.rooms !== null &&
               (await services.rooms.isSteward(record.roomId, auth.userId));

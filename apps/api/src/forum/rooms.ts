@@ -419,7 +419,13 @@ export async function setMembershipLens(
 }
 
 /** Steward gate for room-scoped actions: any of the five WS-A.2.2 roles in
- *  THIS room, or a platform steward/admin. */
+ *  THIS room, a platform ADMIN (the 2026-07 final-line-of-defense decision:
+ *  admin reaches everything server-hosted, and the read bar grants it the
+ *  matching visibility), or a platform steward who can SEE the room.  The
+ *  platform-steward arm is VISIBILITY-COUPLED: you cannot govern what you
+ *  cannot read, and a platform steward's private-room oversight path is the
+ *  moderation console — so its blanket arm covers public rooms and rooms it
+ *  is a member of, while per-room grants stay unconditional. */
 export async function isRoomSteward(
   forum: ForumServices,
   roomId: string,
@@ -427,7 +433,11 @@ export async function isRoomSteward(
   platformRoles: readonly Role[],
   requiredRoles?: readonly RoomStewardRole[],
 ): Promise<boolean> {
-  if (platformRoles.includes('steward') || platformRoles.includes('admin')) return true;
+  if (platformRoles.includes('admin')) return true;
+  if (platformRoles.includes('steward')) {
+    const room = await forum.rooms.getById(roomId);
+    if (room !== null && (await roomContentVisibleToUser(forum, room, userId))) return true;
+  }
   const roles = await forum.rooms.stewardRolesFor(roomId, userId);
   if (roles.length === 0) return false;
   if (!requiredRoles) return true;

@@ -103,6 +103,91 @@ describe('WS-Q.2.1 submission guards', () => {
     expect(denied.status).toBe(404);
   });
 
+  it('the platform-STEWARD action arm is VISIBILITY-COUPLED: no administering a private room it cannot read; public rooms and its own memberships stay administrable', async () => {
+    const patchJson = (path: string, body: unknown, cookie: string) =>
+      new Request(`http://localhost${path}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+    const priv = await makeRoom('private');
+    const pub = await makeRoom('public');
+    const psteward = await seedUserWithSession(fixture.identity, {
+      handle: 'psvis',
+      steward: true,
+    });
+    // Private, non-member: the settings write is refused — you cannot govern
+    // what you cannot read (the private-room oversight path is the console).
+    const denied = await app().request(
+      patchJson(
+        `/v1/rooms/${priv}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(denied.status).toBe(403);
+    // Public room: the platform-steward arm applies as before.
+    const ok = await app().request(
+      patchJson(
+        `/v1/rooms/${pub}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(ok.status).toBe(200);
+    // Membership restores visibility, and with it the arm.
+    await joinAsMember(priv, psteward.userId);
+    const asMember = await app().request(
+      patchJson(
+        `/v1/rooms/${priv}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        psteward.cookie,
+      ),
+    );
+    expect(asMember.status).toBe(200);
+  });
+
+  it('p2p stubs expose NO server steward-action surface — lens create, settings, and visibility 404 even for admin (WS-S §8)', async () => {
+    const patchJson = (path: string, body: unknown, cookie: string) =>
+      new Request(`http://localhost${path}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+    const roomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId,
+      name: 'P2P stub actions',
+      slug: `p2pa-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'invite',
+      postingPolicy: 'all_members',
+      storageMode: 'p2p',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin3', admin: true });
+    const lens = await app().request(
+      post(`/v1/rooms/${roomId}/lenses`, { name: 'Leak', lens_type: 'expert' }, admin.cookie),
+    );
+    expect(lens.status).toBe(404);
+    const settings = await app().request(
+      patchJson(`/v1/rooms/${roomId}/settings`, { posting_policy: 'all_members' }, admin.cookie),
+    );
+    expect(settings.status).toBe(404);
+    const visibility = await app().request(
+      post(`/v1/rooms/${roomId}/visibility`, { visibility: 'public' }, admin.cookie),
+    );
+    expect(visibility.status).toBe(404);
+    // Nothing leaked into the server lens store.
+    expect(await fixture.forum.lenses.listByRoom(roomId)).toEqual([]);
+  });
+
   it("the admin arm is structurally scoped to SERVER storage: a member-hosted (p2p) room's content bar stays closed to admin", async () => {
     const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin2', admin: true });
     const roomId = randomUUID();

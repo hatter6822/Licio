@@ -400,14 +400,14 @@ export function createRoomsRoutes() {
             charter_summary: room.charterSummary,
             join_pending: subscription?.status === 'pending',
             // WS-Q.5.3c — gates the steward-only room-settings UI.  Mirrors
-            // the ACTION gate (`isRoomSteward`): room grants, or the platform
-            // steward/admin roles — the flag must render the affordances for
-            // whoever the settings routes actually authorize.
+            // the ACTION gate (`isRoomSteward`) — the flag must render the
+            // affordances for whoever the settings routes actually authorize —
+            // and stays false on a p2p stub, whose server action surface is
+            // absent (WS-S §8).
             is_steward:
               userId !== null &&
-              (stewards.some((s) => s.userId === userId) ||
-                roles.includes('steward') ||
-                roles.includes('admin')),
+              room.storageMode === 'server' &&
+              (await isRoomSteward(forum, roomId, userId, roles)),
             // WS-G.2.2 — the member's chosen POSTING lens (null = Undecided, the
             // default). Drives the composer's posting lens + the lens control.
             my_lens_id: subscription?.lensId ?? null,
@@ -573,6 +573,12 @@ export function createRoomsRoutes() {
           const { roomId } = c.req.valid('param');
           const forum = getForumServices();
           const identity = getIdentityServices();
+          // WS-S §8: a p2p stub has no server-side join surface (joins bounce
+          // invite_only, membership is MLS on the members' devices).
+          const joinRoomRecord = await forum.rooms.getById(roomId);
+          if (!joinRoomRecord || joinRoomRecord.storageMode !== 'server') {
+            return c.json(notFound, 404);
+          }
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
@@ -607,6 +613,11 @@ export function createRoomsRoutes() {
           const { decision } = c.req.valid('json');
           const forum = getForumServices();
           const identity = getIdentityServices();
+          // WS-S §8: no server-side join surface for a p2p stub (see the list route).
+          const decideRoomRecord = await forum.rooms.getById(roomId);
+          if (!decideRoomRecord || decideRoomRecord.storageMode !== 'server') {
+            return c.json(notFound, 404);
+          }
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
@@ -841,6 +852,10 @@ export function createRoomsRoutes() {
           const forum = getForumServices();
           const room = await forum.rooms.getById(roomId);
           if (!room) return c.json(notFound, 404);
+          // WS-S §8: a p2p stub carries NO server-side lens rows (its
+          // interpretation contexts live in the members' MLS-governed state) —
+          // the action surface behaves as absent.
+          if (room.storageMode !== 'server') return c.json(notFound, 404);
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
