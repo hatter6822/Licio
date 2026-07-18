@@ -101,15 +101,28 @@ export default defineConfig({
           {
             // API GETs: fresh when online, cached fallback offline. Mutations are
             // GET-only here, so POST/PUT/PATCH/DELETE are never cached.
-            // /v1/auth/* NEVER enters Cache Storage (codex on PR #146): a cached
-            // /status could answer a later login as an OLDER session, and the
-            // sign-out purge races any in-flight auth GET whose NetworkFirst
-            // write lands after the delete. Offline boot does not need it — the
-            // auth store's zod-validated localStorage context covers relaunch,
-            // and a network error (unlike a 401) never downgrades the session.
+            //
+            // NEVER-CACHED surfaces (codex on PR #146) — a NetworkFirst cache
+            // replays its last 200 whenever the network path fails, BYPASSING
+            // the server's per-request authorization for up to 24h:
+            //   • /v1/auth/*: a cached /status could answer a later login as an
+            //     OLDER session, and the sign-out purge races any in-flight
+            //     auth GET whose cache write lands after the delete.  Offline
+            //     boot does not need it — the auth store's zod-validated
+            //     localStorage context covers relaunch, and a network error
+            //     (unlike a 401) never downgrades the session.
+            //   • operator consoles — any '/admin' segment (compliance cases/
+            //     fraud queue/policies, counsel SAR + lawful access, ingestion/
+            //     invariants/ranking/events/ai/knomosis/forum admin) and the
+            //     WS-J console mount /v1/moderation: these reads sit behind
+            //     role + per-session-MFA gates that a cached replay would skip
+            //     for a role-revoked operator or a later shared-browser
+            //     session.  Operator surfaces are online-only by design.
             urlPattern: ({ url }: { url: URL }) =>
               (url.pathname.startsWith('/v1') || url.pathname.startsWith('/api')) &&
-              !url.pathname.startsWith('/v1/auth/'),
+              !url.pathname.startsWith('/v1/auth/') &&
+              !url.pathname.startsWith('/v1/moderation') &&
+              !url.pathname.includes('/admin'),
             handler: 'NetworkFirst',
             method: 'GET',
             options: {

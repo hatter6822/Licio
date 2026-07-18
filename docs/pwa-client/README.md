@@ -102,8 +102,13 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   echo — growing that would break stale cached bundles — so the login flows
   re-read the status to unhide the links immediately after sign-in.  Sign-out
   (both the local and the cross-tab path) purges the SW's `licio-api` runtime
-  cache: cached `/v1` GETs — the status response with its roles included —
-  must not survive the session on a shared browser.
+  cache: cached `/v1` GETs must not survive the session on a shared browser.
+  Three surfaces never enter that cache at all (the SW runtime-caching
+  pattern excludes them): `/v1/auth/*`, every `/admin`-segment operator
+  surface, and the `/v1/moderation` console — a NetworkFirst cache would
+  replay their last 200 on a network failure, skipping the server's
+  role + step-up-MFA gates for a revoked operator or a later shared-browser
+  session.  Operator consoles are online-only by design.
 - **Conversation surface (WS-T.7/8):** story pages embed their own comment
   section using the served `thread_id`, so the feed → story → discussion path
   stays inline. That inline section shows exactly **one nested reply layer** to
