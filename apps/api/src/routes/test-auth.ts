@@ -33,8 +33,13 @@ export function createTestAuthRoute(identity: IdentityServices) {
       credentialRef: `e2e-${userId}`,
       deviceLabel: 'e2e',
       rememberMe: false,
-      // Seeded stewards arrive MFA-verified so step-up-gated surfaces are testable.
-      mfaVerified: user.roles.includes('steward'),
+      // Seeded operator accounts arrive MFA-verified so EVERY step-up-gated
+      // surface is testable in the harness — steward (moderation console),
+      // admin (all consoles — final line of defense), compliance/counsel
+      // (the WS-N console + counsel plane).
+      mfaVerified: (['steward', 'admin', 'compliance', 'counsel'] as const).some((role) =>
+        user.roles.includes(role),
+      ),
     });
     c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec));
     return c.json({ ok: true, userId });

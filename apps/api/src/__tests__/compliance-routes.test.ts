@@ -2,10 +2,12 @@
 //
 // WS-N routes — the authorization planes and the critical flows over the real
 // v1 router with authenticated sessions:
-//   • the compliance plane is least-privilege BOTH ways (user/steward/admin
-//     all 403; compliance without per-session MFA is mfa_required);
+//   • the compliance plane is least-privilege below admin (user/steward 403;
+//     ADMIN passes with per-session MFA — the 2026-07 final-line-of-defense
+//     decision; compliance without per-session MFA is mfa_required);
 //   • SAR/STR surfaces demand the COUNSEL capability even to READ
-//     (anti-tipping-off — a compliance reviewer is rejected);
+//     (anti-tipping-off — a compliance reviewer is rejected; counsel and
+//     admin pass);
 //   • enabling a policy cell takes COUNSEL plus the four-eyes approval_ref (a
 //     reviewer cannot self-authorize); narrowing writes stay reviewer-open;
 //   • a policy write whose audit entry cannot commit is rolled back;
@@ -183,8 +185,8 @@ beforeEach(async () => {
 });
 
 describe('the authorization planes (WS-N.2.1c-2)', () => {
-  it('user, steward, and admin are ALL rejected from the compliance surface', async () => {
-    for (const roles of [['user'], ['steward'], ['admin']] as Role[][]) {
+  it('user and steward are rejected from the compliance surface; ADMIN passes with MFA (final line of defense)', async () => {
+    for (const roles of [['user'], ['steward']] as Role[][]) {
       const actor = await seedUser({
         handle: `a${randomUUID().slice(0, 8)}`,
         platformRoles: roles,
@@ -193,6 +195,25 @@ describe('the authorization planes (WS-N.2.1c-2)', () => {
       const res = await app().request(get('/v1/compliance/admin/cases', actor.cookie));
       expect(res.status, `${roles[0]} must be rejected`).toBe(403);
     }
+    // The 2026-07 maintainer decision: admin holds the full compliance plane —
+    // but ONLY behind the same per-session step-up MFA as any reviewer, so the
+    // widened account stays tightly secured.
+    const adminNoMfa = await seedUser({
+      handle: `a${randomUUID().slice(0, 8)}`,
+      platformRoles: ['admin'],
+      mfa: false,
+    });
+    const deniedMfa = await app().request(get('/v1/compliance/admin/cases', adminNoMfa.cookie));
+    expect(deniedMfa.status).toBe(403);
+    expect(((await deniedMfa.json()) as { error: { code: string } }).error.code).toBe(
+      'mfa_required',
+    );
+    const admin = await seedUser({
+      handle: `a${randomUUID().slice(0, 8)}`,
+      platformRoles: ['admin'],
+      mfa: true,
+    });
+    expect((await app().request(get('/v1/compliance/admin/cases', admin.cookie))).status).toBe(200);
   });
 
   it('the compliance role passes WITH per-session MFA; without it, mfa_required', async () => {
@@ -213,7 +234,7 @@ describe('the authorization planes (WS-N.2.1c-2)', () => {
     expect(allowed.status).toBe(200);
   });
 
-  it('SAR surfaces demand the counsel capability even to READ (anti-tipping-off)', async () => {
+  it('SAR surfaces demand the counsel capability even to READ (anti-tipping-off); admin holds it', async () => {
     const reviewer = await seedUser({
       handle: `c${randomUUID().slice(0, 8)}`,
       platformRoles: ['compliance'],
@@ -228,6 +249,14 @@ describe('the authorization planes (WS-N.2.1c-2)', () => {
     });
     const allowed = await app().request(get('/v1/compliance/admin/sar', counsel.cookie));
     expect(allowed.status).toBe(200);
+    // Admin carries the counsel capability too (final line of defense) — a
+    // plain compliance reviewer still cannot read SAR records.
+    const admin = await seedUser({
+      handle: `a${randomUUID().slice(0, 8)}`,
+      platformRoles: ['admin'],
+      mfa: true,
+    });
+    expect((await app().request(get('/v1/compliance/admin/sar', admin.cookie))).status).toBe(200);
   });
 
   it('unauthenticated requests are 401 everywhere', async () => {

@@ -93,8 +93,9 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   shared `canAccessModerationConsole` / `canAccessComplianceConsole` hints decide
   which links render.  The moderation hint mirrors the console's REAL gate
   (`isStewardActor`: any WS-J doctrine grant, or platform admin — the platform
-  `steward` role alone gets no link because the console would 403 it); an
-  api-side test pins the mirror.  The hints are navigation only — every console
+  `steward` role alone gets no link because the console would 403 it), and the
+  compliance hint admits `compliance`, `counsel`, and `admin` (the 2026-07
+  final-line-of-defense decision); an api-side test pins both mirrors.  The hints are navigation only — every console
   endpoint re-authorizes server-side (role capability + step-up MFA) and the
   console pages render an access notice on a 403.  The roles ride
   `/v1/auth/status` (a tolerant non-strict schema), NOT the `.strict()` login

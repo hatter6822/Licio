@@ -1009,6 +1009,11 @@ setModerationServices(moderationServices);
 // WS-J.1.2 enforcement seam: forum interaction-rejection + thread/feed viewing
 // filters read this (ranking reads it via `services.forum`).  One wiring point.
 forumServices.relationshipReader = createRelationshipReader(moderationServices);
+// The WS-Q read bar's platform-ADMIN arm (2026-07 final-line-of-defense
+// decision): the content-visibility chokepoint consults the identity store's
+// platform roles on the private-SERVER-room miss path only.
+forumServices.platformRolesReader = async (id) =>
+  (await identityServices.store.getUser(id))?.roles ?? [];
 // WS-J.2.6 pre-checks on the contribution submission path: spam/malware
 // auto-block (recorded as appealable system actions) + duplicate-flood/policy-
 // risk flag-to-review (the WS-F denylist is consulted as the malware fallback).

@@ -136,6 +136,9 @@ const forumServices = createInMemoryForumServices({
   log: (event, meta) => logger.info(meta, event),
 });
 await forumServices.reloadConfig();
+// The WS-Q read bar's platform-ADMIN arm (mirrors the production boot wiring).
+forumServices.platformRolesReader = async (id) =>
+  (await identityServices.store.getUser(id))?.roles ?? [];
 // WS-U: the contribution path consults the in-room agent (uses the lazy
 // in-memory GovernanceService singleton in the harness), with real author-history
 // signals over the harness's in-memory stores.

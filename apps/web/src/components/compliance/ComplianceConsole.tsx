@@ -91,7 +91,7 @@ export function ComplianceConsole(): React.JSX.Element {
         <p className="mt-1 text-sm text-ink-muted">
           {t(
             'compliance.console.denied.body',
-            'This workspace is restricted to the financial-compliance team (a dedicated role with active MFA — steward and admin roles deliberately do not grant it).',
+            'This workspace is restricted to the financial-compliance team and platform administrators (active MFA required — the steward role deliberately does not grant it).',
           )}
         </p>
       </Card>

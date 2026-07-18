@@ -245,8 +245,10 @@ export function requireAiTeam(): MiddlewareHandler<AuthEnv> {
 /**
  * Require the financial-compliance reviewer capability (`compliance.review`)
  * AND active MFA (WS-N.2.1c-2).  Gates every WS-N case/queue/policy-admin
- * surface.  Compliance data is a separate least-privilege plane: neither
- * steward nor admin roles pass this guard.
+ * surface.  Compliance data is a least-privilege plane below admin: the
+ * steward role does NOT pass this guard; `admin` does (the 2026-07
+ * maintainer decision — admin is the final line of defense and reaches every
+ * platform surface, always behind this same step-up-MFA gate).
  */
 export function requireCompliance(): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
@@ -268,7 +270,9 @@ export function requireCompliance(): MiddlewareHandler<AuthEnv> {
  * Require the legal-counsel approval capability (`compliance.counsel.approve`)
  * AND active MFA (WS-N.2.1c-2).  Gates SAR/STR records (READ included —
  * anti-tipping-off, WS-N.2.1e), lawful-access review/production (WS-N.2.3d),
- * and jurisdiction-policy enablement approvals (WS-N.1.1e four-eyes).
+ * and jurisdiction-policy enablement approvals (WS-N.1.1e four-eyes).  Held
+ * by `counsel` and — per the 2026-07 final-line-of-defense decision — by
+ * `admin`; the plain `compliance` role still does not pass.
  */
 export function requireCounsel(): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {

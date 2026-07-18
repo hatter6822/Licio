@@ -251,8 +251,12 @@ export function createInvariantsAdminRoutes(
         return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
       }
       const forum = resolveForum();
+      // The room's own stewards, or the platform ADMIN (2026-07 final-line-of-
+      // defense decision; the outer surface is already requireSteward+MFA).
       const roles = await forum.rooms.stewardRolesFor(roomId, auth.userId);
-      if (roles.length === 0) return c.json(deny('not_found', 'No such report'), 404);
+      if (roles.length === 0 && !auth.roles.includes('admin')) {
+        return c.json(deny('not_found', 'No such report'), 404);
+      }
       const ingestion = resolveIngestion();
       const events = resolveEvents();
       const invariants = resolveInvariants();
@@ -310,7 +314,10 @@ export function createInvariantsAdminRoutes(
       const roles = thread.roomId
         ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
         : [];
-      if (roles.length === 0) return c.json(deny('not_found', 'No such thread'), 404);
+      // Same admin arm as the room SCOI reports above.
+      if (roles.length === 0 && !auth.roles.includes('admin')) {
+        return c.json(deny('not_found', 'No such thread'), 404);
+      }
       const events = resolveEvents();
       const invariants = resolveInvariants();
       const existing = await invariants.bridgeAttempts.openForThread(threadId);

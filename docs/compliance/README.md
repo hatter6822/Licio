@@ -344,8 +344,8 @@ apps/web/src/components/compliance/           -- DisabledFeatureExplanation
                                     RegionDeclarationCard, RiskDisclosures,
                                     ComplianceConsole (/compliance-console; linked
                                     from the profile's role-gated "Operations"
-                                    group for compliance/counsel sessions — the
-                                    roles on the auth-status context are a nav
+                                    group for compliance/counsel/admin sessions —
+                                    the roles on the auth-status context are a nav
                                     hint; the server re-authorizes every panel)
 apps/web/src/lib/compliance-api.ts             -- zod-validated typed flows
 apps/web/src/i18n/catalogs/de.ts               -- the complete German
@@ -518,8 +518,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
   and 429 an emergency jurisdiction-policy change without ever holding a
   session. A budget bounds the WORK an endpoint does, and a request that 401s
   does none; connection-level flood fairness is the edge's concern (§19.1).
-- **RBAC separation is deliberate.**  `compliance` and `counsel` are distinct
-  roles with distinct capabilities; `steward` and `admin` do NOT inherit them.
+- **RBAC separation is deliberate — below admin.**  `compliance` and `counsel`
+  are distinct roles with distinct capabilities; `steward` does NOT inherit
+  them.  The platform **`admin`** role holds BOTH (the 2026-07 maintainer
+  decision reversing the original admin exclusion): admin is the final line of
+  defense and reaches every platform surface — always behind the same
+  per-session step-up-MFA middlewares (`requireCompliance`/`requireCounsel`)
+  as any reviewer or counsel session, so the widened account stays tightly
+  secured.
   EXPANDING availability takes the **counsel capability** *and* a recorded
   `legal_approval_ref` — a compliance reviewer cannot turn real funds on for a
   region by quoting a reference at themselves.  The boundary is a DELTA

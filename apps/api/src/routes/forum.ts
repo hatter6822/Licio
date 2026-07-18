@@ -1250,9 +1250,13 @@ export function createForumRoutes() {
             return c.json(notFound, 404);
           }
           const identity = getIdentityServices();
+          // Mirrors the DebateDeps isSteward closure: room grants, or the
+          // platform ADMIN (the overrule affordance must render for whoever
+          // the action gate admits).
           const isSteward =
             arena.roomId !== null &&
-            (await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0;
+            ((await bundle.forum.rooms.stewardRolesFor(arena.roomId, auth.userId)).length > 0 ||
+              auth.roles.includes('admin'));
           const deps = debateDepsFromBundle(bundle);
           const projected = await toDebateArenaPublic(
             arena,
@@ -1407,10 +1411,12 @@ export function createForumRoutes() {
             return c.json(deny(outcome.reason, positionErrorMessage(outcome.reason)), status);
           }
           const identity = getIdentityServices();
+          // Mirrors the DebateDeps isSteward closure (room grants ∪ platform admin).
           const isSteward =
             outcome.arena.roomId !== null &&
-            (await bundle.forum.rooms.stewardRolesFor(outcome.arena.roomId, auth.userId)).length >
-              0;
+            ((await bundle.forum.rooms.stewardRolesFor(outcome.arena.roomId, auth.userId)).length >
+              0 ||
+              auth.roles.includes('admin'));
           const projected = await toDebateArenaPublic(
             outcome.arena,
             auth.userId,

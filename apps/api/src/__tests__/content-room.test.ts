@@ -9,7 +9,7 @@ import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
-import { resolveRoomCreateAxes } from '../forum/rooms.js';
+import { resolveRoomCreateAxes, roomContentVisibleToUser } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -80,6 +80,51 @@ describe('WS-Q.2.1 submission guards', () => {
       post('/v1/stories', briefSubmission({ room_id: randomUUID() }), cookie),
     );
     expect(res.status).toBe(404);
+  });
+
+  it('a platform ADMIN reads/posts in a private SERVER room without membership; a platform steward does not (2026-07 final-line-of-defense decision)', async () => {
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin', admin: true });
+    // The submission guard runs the same read-bar chokepoint every direct
+    // read uses (`roomContentVisibleToUser`) — a 201 proves the admin arm.
+    const posted = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), admin.cookie),
+    );
+    expect(posted.status).toBe(201);
+    // The platform `steward` role deliberately has NO private-room arm (its
+    // oversight path is the moderation console) — unchanged 404-over-403.
+    const steward = await seedUserWithSession(fixture.identity, {
+      handle: 'psteward',
+      steward: true,
+    });
+    const denied = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), steward.cookie),
+    );
+    expect(denied.status).toBe(404);
+  });
+
+  it("the admin arm is structurally scoped to SERVER storage: a member-hosted (p2p) room's content bar stays closed to admin", async () => {
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin2', admin: true });
+    const roomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId,
+      name: 'P2P stub',
+      slug: `p2p-${roomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'invite',
+      postingPolicy: 'all_members',
+      storageMode: 'p2p',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const room = await fixture.forum.rooms.getById(roomId);
+    if (!room) throw new Error('setup');
+    expect(await roomContentVisibleToUser(fixture.forum, room, admin.userId)).toBe(false);
   });
 
   it('a private-room outsider gets 404; an active member can post', async () => {

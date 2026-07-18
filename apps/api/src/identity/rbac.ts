@@ -53,15 +53,22 @@ export const POLICY: Readonly<Record<Role, readonly Action[]>> = {
     // deprecate models and drive the deployment gate. Like every other action
     // here, it never joins wallet identity to attention/ranking data.
     'ai.model.manage',
-    // Deliberately NO compliance.* action: financial-compliance data (cases,
-    // SAR/STR, screening detail) is a separate least-privilege plane (WS-N.2.1c-2)
-    // — an admin assigns the compliance/counsel roles but cannot read the data.
+    // The full compliance plane (the 2026-07 maintainer decision reversing the
+    // original WS-N.2.1c-2 admin exclusion): admin is the FINAL LINE OF
+    // DEFENSE and holds the highest privilege — every platform surface that
+    // any lesser role can reach, admin can reach, private member-hosted (WS-S
+    // P2P) rooms excepted.  Both capabilities ride the same step-up-MFA-gated
+    // middlewares as compliance/counsel sessions (`requireCompliance` /
+    // `requireCounsel`), so the widened account stays tightly secured.
+    'compliance.review',
+    'compliance.counsel.approve',
   ],
-  // WS-N.2.1c-2 — the financial-compliance plane. Structural separation both
-  // ways: the compliance roles hold no moderation/audit/admin action, and no
-  // pre-existing role silently gains compliance access. `counsel` additionally
-  // holds the legal-approval capability (SAR/STR filing approval + read,
-  // lawful-access review, jurisdiction-policy enablement four-eyes).
+  // WS-N.2.1c-2 — the financial-compliance plane.  The DEDICATED compliance
+  // roles stay least-privilege in the other direction: they hold no
+  // moderation/audit/admin action, and no role below admin silently gains
+  // compliance access.  `counsel` additionally holds the legal-approval
+  // capability (SAR/STR filing approval + read, lawful-access review,
+  // jurisdiction-policy enablement four-eyes).
   compliance: ['self.manage', 'compliance.review'],
   counsel: ['self.manage', 'compliance.review', 'compliance.counsel.approve'],
 };

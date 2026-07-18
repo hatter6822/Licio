@@ -90,7 +90,13 @@ export function freshIngestionServices(
   // WS-Q — the submission guards + the in-memory global-search room-visibility
   // predicate need a forum (its room store self-seeds the public Commons room
   // and wires the search room-visibility provider via the ingestion hook).
-  const forum = createInMemoryForumServices({ events, ingestion });
+  const forum = createInMemoryForumServices({
+    events,
+    ingestion,
+    // Mirror the boot wiring: the WS-Q read bar's platform-ADMIN arm reads the
+    // identity store, so role-gated visibility behaves as in production.
+    platformRolesReader: async (id) => (await identity.store.getUser(id))?.roles ?? [],
+  });
   setForumServices(forum);
   return { identity, events, ingestion, forum, pages, robots, fetchedUrls };
 }

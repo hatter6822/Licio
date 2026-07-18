@@ -232,7 +232,8 @@ export async function roomVisibleToUser(
 }
 
 /** CONTENT visibility (threads, lenses, detail): public rooms are readable by
- *  all; a PRIVATE room requires ACTIVE membership or a steward role. A pending
+ *  all; a PRIVATE room requires ACTIVE membership, a room steward role, or —
+ *  the 2026-07 maintainer decision — the platform ADMIN role.  A pending
  *  applicant may know the room exists (tier one) but reads none of its content
  *  until a steward approves the request (§16.2 — the bar `storyReadableByUser`
  *  and `threadVisibleToUser` compose). */
@@ -246,7 +247,19 @@ export async function roomContentVisibleToUser(
   const subscription = await forum.rooms.getSubscription(room.roomId, userId);
   if (subscription?.status === 'active') return true;
   const roles = await forum.rooms.stewardRolesFor(room.roomId, userId);
-  return roles.length > 0;
+  if (roles.length > 0) return true;
+  // Platform-ADMIN arm (2026-07 maintainer decision): admin is the final line
+  // of defense and reads every SERVER-hosted area, private rooms included —
+  // the platform already holds this data, and admin already carries all five
+  // doctrine roles on the moderation console.  STRUCTURALLY scoped to
+  // `storageMode === 'server'`: a WS-S member-hosted (p2p) room has no
+  // server-side content to read and stays excluded by construction.  The
+  // platform `steward` role deliberately does NOT get this arm (its private-
+  // room oversight path is the console), and an unwired reader (null seam)
+  // fails closed.
+  if (room.storageMode !== 'server') return false;
+  const platformRoles = (await forum.platformRolesReader?.(userId)) ?? [];
+  return platformRoles.includes('admin');
 }
 
 /**

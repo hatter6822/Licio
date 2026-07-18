@@ -91,14 +91,17 @@ describe('the role-gated Operations group', () => {
     expect(screen.queryByText('Moderation console')).toBeNull();
   });
 
-  it('an admin (implicitly all five doctrine roles) sees moderation but NEVER compliance (WS-N.2.1c-2 structural separation)', () => {
+  it('an admin sees BOTH consoles (final line of defense: all five doctrine roles + the compliance plane)', () => {
     authUser.mockReturnValue(user(['user', 'admin']));
     render(<ProfilePage />);
     expect(screen.getByRole('link', { name: /Moderation console/ })).toHaveAttribute(
       'href',
       '/moderation',
     );
-    expect(screen.queryByText('Compliance console')).toBeNull();
+    expect(screen.getByRole('link', { name: /Compliance console/ })).toHaveAttribute(
+      'href',
+      '/compliance-console',
+    );
   });
 
   it('the compliance role sees the compliance console link (and not moderation)', async () => {

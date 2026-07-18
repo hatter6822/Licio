@@ -80,8 +80,8 @@ export const platformRoleSchema = z.enum(PLATFORM_ROLES);
  * doctrine steward-role grant, or the platform `admin` role (which holds all
  * five doctrine roles implicitly).  The platform `steward` role alone carries
  * NO console access — a doctrine-granted plain `user` does.  The compliance
- * console's gate is the `compliance.review` capability (`compliance` or
- * `counsel`).
+ * console's gate is the `compliance.review` capability: `compliance`,
+ * `counsel`, or — per the 2026-07 final-line-of-defense decision — `admin`.
  */
 export function canAccessModerationConsole(
   roles: readonly PlatformRole[],
@@ -90,7 +90,7 @@ export function canAccessModerationConsole(
   return roles.includes('admin') || stewardRoles.length > 0;
 }
 export function canAccessComplianceConsole(roles: readonly PlatformRole[]): boolean {
-  return roles.includes('compliance') || roles.includes('counsel');
+  return roles.includes('compliance') || roles.includes('counsel') || roles.includes('admin');
 }
 
 /** Handle policy: ASCII alphanumeric + underscore, 3–30 chars (matches the DB CHECK). */

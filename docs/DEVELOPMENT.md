@@ -679,7 +679,7 @@ pre-seeded, so these development accounts use the email one-time-code path.
 
 | Role chip | Display name | Email | What it exercises |
 |-----------|--------------|-------|-------------------|
-| **admin** | Ada Admin | `admin@licio.test` | Full RBAC: every steward and admin surface. |
+| **admin** | Ada Admin | `admin@licio.test` | Full RBAC — the final line of defense: every steward, admin, and (2026-07 decision) compliance/counsel surface, private member-hosted (WS-S) rooms excepted. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
 | **steward** | Sam Steward | `steward@licio.test` | WS-J steward roles `ROLE_SAFETY`, `ROLE_APPEALS`, and `ROLE_INTEGRITY`: report queue, appeals, coordinated-report incidents, governance, and ranking/audit reads. |
 | **expert** | Dr. Erin Expert | `expert@licio.test` | Least-privilege `expert` role: can post top-level content in expert-gated rooms such as *Open Science*, without moderation/admin power. |
 | **compliance + counsel** | Cora Compliance | `compliance@licio.test` | The WS-N financial-compliance console at `/compliance-console` (cases, fraud queue, declaration verification) **and** the counsel-only surfaces (SAR drafting/approval, disclosure publishing, lawful-access review). Both roles sit on one dev account for convenience; in production they are separate people. Console actions require step-up MFA — enrol TOTP from **Profile → Security** first. |
@@ -689,7 +689,7 @@ Signed in with a role-holding account, the consoles are linked from
 DOCTRINE-granted stewards and admins (the console's real gate is the WS-J
 doctrine grants — `steward@licio.test` holds three; the platform `steward`
 role alone carries no console access) and the compliance console
-(`/compliance-console`) for compliance/counsel sessions.  The link visibility
+(`/compliance-console`) for compliance/counsel/admin sessions.  The link visibility
 comes from the roles + doctrine grants on the auth-status context (a
 navigation hint); every console endpoint still authorizes server-side (role
 capability + verified step-up MFA), so an account without MFA sees the

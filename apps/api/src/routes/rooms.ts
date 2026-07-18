@@ -399,8 +399,15 @@ export function createRoomsRoutes() {
             governance: governanceInfo(room),
             charter_summary: room.charterSummary,
             join_pending: subscription?.status === 'pending',
-            // WS-Q.5.3c — gates the steward-only room-settings UI.
-            is_steward: userId !== null && stewards.some((s) => s.userId === userId),
+            // WS-Q.5.3c — gates the steward-only room-settings UI.  Mirrors
+            // the ACTION gate (`isRoomSteward`): room grants, or the platform
+            // steward/admin roles — the flag must render the affordances for
+            // whoever the settings routes actually authorize.
+            is_steward:
+              userId !== null &&
+              (stewards.some((s) => s.userId === userId) ||
+                roles.includes('steward') ||
+                roles.includes('admin')),
             // WS-G.2.2 — the member's chosen POSTING lens (null = Undecided, the
             // default). Drives the composer's posting lens + the lens control.
             my_lens_id: subscription?.lensId ?? null,

@@ -37,8 +37,10 @@ describe('RBAC policy matrix', () => {
       'admin.role.assign',
       // The AI team (WS-K.1.1b): register/version/deprecate models + the deploy gate.
       'ai.model.manage',
-      // Deliberately NO compliance.* action (WS-N.2.1c-2 structural separation):
-      // an admin assigns the compliance/counsel roles but cannot read the data.
+      // The full compliance plane (2026-07 maintainer decision): admin is the
+      // final line of defense — every platform surface, always MFA-gated.
+      'compliance.review',
+      'compliance.counsel.approve',
     ],
     // WS-N.2.1c-2 — the financial-compliance plane (least-privilege both ways).
     compliance: ['self.manage', 'compliance.review'],
@@ -147,17 +149,21 @@ describe('isSteward', () => {
 });
 
 describe('WS-N.2.1c-2 compliance/counsel capabilities', () => {
-  it('reviewer access: compliance + counsel only — steward/admin never pass', () => {
+  it('reviewer access: compliance, counsel, and ADMIN (final line of defense) — steward never passes', () => {
     expect(isComplianceReviewer(['compliance'])).toBe(true);
     expect(isComplianceReviewer(['counsel'])).toBe(true);
-    for (const role of ['user', 'expert', 'moderator', 'steward', 'admin'] as const) {
+    // The 2026-07 maintainer decision: admin holds the full compliance plane
+    // (still behind the same step-up-MFA middleware as every reviewer session).
+    expect(isComplianceReviewer(['admin'])).toBe(true);
+    for (const role of ['user', 'expert', 'moderator', 'steward'] as const) {
       expect(isComplianceReviewer([role]), `${role} must not review compliance`).toBe(false);
     }
   });
 
-  it('counsel approval is distinct from reviewer access', () => {
+  it('counsel approval is distinct from reviewer access (compliance alone never approves)', () => {
     expect(isCounsel(['counsel'])).toBe(true);
+    expect(isCounsel(['admin'])).toBe(true); // final line of defense
     expect(isCounsel(['compliance'])).toBe(false);
-    expect(isCounsel(['admin'])).toBe(false);
+    expect(isCounsel(['steward'])).toBe(false);
   });
 });

@@ -145,7 +145,14 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     contributions: forum.contributions,
     storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
     storyContent: buildStoryContentReader(ingestion.stories),
-    isSteward: async (roomId, uid) => (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0,
+    // Room stewards, plus the platform ADMIN (2026-07 final-line-of-defense
+    // decision): the verdict-overrule power follows the same platform-admin
+    // arm as the rest of the room-steward gate family (`isRoomSteward`), while
+    // the platform `steward` role stays out (its oversight path is the
+    // console).  A null reader seam fails closed to room grants only.
+    isSteward: async (roomId, uid) =>
+      (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0 ||
+      ((await forum.platformRolesReader?.(uid)) ?? []).includes('admin'),
     setStoryDispute: async (sid, status) => {
       await ingestion.stories.update(sid, { disputeStatus: status });
       // WS-T — when a debate outcome tags a story `incorrect` (or clears it), the
