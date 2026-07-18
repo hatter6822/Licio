@@ -727,10 +727,18 @@ only happens when `NODE_ENV=development`.
 Some steward/admin actions require **step-up MFA** with TOTP. Email-code
 sign-in creates an ordinary, non-MFA session; the app prompts for step-up when
 you attempt a gated action. In development, enrol an authenticator from
-**Profile → Security**. The dev build may also expose a fail-closed
-"mark verified" helper for local-only verification flows, but no shared TOTP
-secret is seeded. A known shared secret would be a security smell even in
-development.
+**Profile → Security → "Set up two-factor"** — within five minutes of signing
+in the fresh login itself satisfies the step-up freshness window, so enrollment
+starts immediately (no extra prompt); on a staler session the step-up dialog
+offers an emailed confirmation code first (it prints to the API terminal like
+every dev code). The page then shows a **QR code to scan** with any
+authenticator app, plus the grouped **setup key** (with a copy button) for the
+app's "enter a setup key" manual path, and the full `otpauth://` link. Confirm
+with a current 6-digit code; the one-time **recovery codes** appear and the
+session is immediately MFA-verified. No shared TOTP secret is seeded — a known
+shared secret would be a security smell even in development — and the
+in-memory identity store resets on API restart, so you re-enrol after each
+`pnpm dev` restart.
 
 ### Seeded product surfaces
 

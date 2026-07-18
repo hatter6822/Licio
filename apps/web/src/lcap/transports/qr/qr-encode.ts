@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // A hand-rolled QR encoder (OFFLINE_SPEC §22.3, WS-R.15.2) — byte mode, EC level L,
-// versions 1–4 (single block), which covers the card's TINY control material
-// (checkpoint/revocation frontier, room invite, relay contact card, a small signed
-// notice).  Hand-rolled to stay dependency-free on the ENCODE side (the §31.1 ethos);
-// the harder DECODE-from-a-photo path uses jsQR.  Correctness is proven by a jsQR
-// round-trip (encode → render → decode) in the test, so any matrix/mask/format bug is
-// caught.  A payload that exceeds the v4-L byte capacity is rejected (QR is for tiny
-// control objects only).
+// versions 1–5 (all single-block; v6+ would need multi-block interleaving and v7+ a
+// version-info block, so v5 is the structural ceiling).  The LCAP micro-bundle
+// PROFILE stays pinned to v1–4 (`QR_MAX_PAYLOAD_BYTES`, the §22.3 "tiny control
+// material" bound, enforced on encode AND decode); v5 is opt-in via
+// `maxVersion: 5` for the app's OTHER QR surfaces (the WS-D TOTP-enrollment
+// otpauth URI, which does not fit v4).  Hand-rolled to stay dependency-free on the
+// ENCODE side (the §31.1 ethos); the harder DECODE-from-a-photo path uses jsQR.
+// Correctness is proven by a jsQR round-trip (encode → render → decode) in the
+// test, so any matrix/mask/format bug is caught.
 
 // --- GF(256) for Reed–Solomon (primitive polynomial 0x11D). -----------------------
 const EXP = new Uint8Array(512);
@@ -71,6 +73,10 @@ const VERSIONS: Readonly<Record<number, VersionSpec>> = {
   2: { dataCodewords: 34, ecCodewords: 10, align: [6, 18] },
   3: { dataCodewords: 55, ecCodewords: 15, align: [6, 22] },
   4: { dataCodewords: 80, ecCodewords: 20, align: [6, 26] },
+  // v5-L is still ONE Reed–Solomon block (ISO/IEC 18004 Table 9: 134 total,
+  // 26 EC, 108 data) with a single extra alignment centre — the last version
+  // this encoder's single-block structure carries without interleaving.
+  5: { dataCodewords: 108, ecCodewords: 26, align: [6, 30] },
 };
 
 function versionSpec(version: number): VersionSpec {
@@ -84,14 +90,16 @@ function versionSpec(version: number): VersionSpec {
  */
 export const QR_MAX_PAYLOAD_BYTES = versionSpec(4).dataCodewords - 2;
 
-/** The smallest v1–4 that fits `byteLen` bytes in byte mode (4-bit mode + 8-bit count). */
-function chooseVersion(byteLen: number): number {
-  for (const v of [1, 2, 3, 4]) {
+/** The smallest version ≤ `maxVersion` that fits `byteLen` bytes in byte mode
+ *  (4-bit mode + 8-bit count). */
+function chooseVersion(byteLen: number, maxVersion: number): number {
+  for (const v of [1, 2, 3, 4, 5]) {
+    if (v > maxVersion) break;
     // overhead: 4-bit mode + 8-bit count + 4-bit terminator ≈ 2 codewords headroom.
     if (byteLen + 2 <= versionSpec(v).dataCodewords) return v;
   }
   throw new RangeError(
-    `payload too large for a v1–4 QR (max ${versionSpec(4).dataCodewords - 2} bytes)`,
+    `payload too large for a v1–${maxVersion} QR (max ${versionSpec(maxVersion).dataCodewords - 2} bytes)`,
   );
 }
 
@@ -349,13 +357,22 @@ function penalty(m: Matrix): number {
   return score;
 }
 
-/** Encode `payload` to a QR module matrix (1 = dark) for versions 1–4, EC L. */
-export function encodeQr(payload: Uint8Array): {
+/**
+ * Encode `payload` to a QR module matrix (1 = dark), EC L.  The default
+ * `maxVersion` of 4 IS the LCAP §22.3 micro-bundle profile (the tiny-control
+ * ceiling `QR_MAX_PAYLOAD_BYTES` guards both directions); `maxVersion: 5`
+ * opts a NON-LCAP surface (the TOTP-enrollment otpauth URI) into the larger
+ * single-block capacity (106 bytes).
+ */
+export function encodeQr(
+  payload: Uint8Array,
+  options: { maxVersion?: 4 | 5 } = {},
+): {
   size: number;
   modules: boolean[][];
   version: number;
 } {
-  const version = chooseVersion(payload.length);
+  const version = chooseVersion(payload.length, options.maxVersion ?? 4);
   const spec = versionSpec(version);
   const data = dataCodewords(payload, version);
   const ec = rsEncode(data, spec.ecCodewords);
