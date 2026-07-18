@@ -65,12 +65,17 @@ export function toUserContext(user: AuthSessionResult['user']): UserContext {
  * the role-gated console navigation right after sign-in rather than on the
  * next boot.  Best-effort: a failed or unauthenticated re-read falls back to
  * the echoed context — sign-in itself must never regress on a status hiccup.
+ * The refreshed user is trusted ONLY when it is the account that just logged
+ * in: the SW serves /v1 GETs NetworkFirst from the `licio-api` cache, so a
+ * network failure here can answer with a STALE status — potentially an OLDER
+ * session's user — and persisting that would show the wrong account and role
+ * links (codex review of PR #146).
  */
 async function refreshedUserContext(echoed: AuthSessionResult['user']): Promise<UserContext> {
   const fallback = toUserContext(echoed);
   try {
     const status = await fetchAuthStatus();
-    return status.authenticated ? status.user : fallback;
+    return status.authenticated && status.user.id === echoed.user_id ? status.user : fallback;
   } catch {
     return fallback;
   }

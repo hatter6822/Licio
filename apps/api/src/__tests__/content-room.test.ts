@@ -101,6 +101,29 @@ describe('WS-Q.2.1 submission guards', () => {
       post('/v1/stories', briefSubmission({ room_id: room }), steward.cookie),
     );
     expect(denied.status).toBe(404);
+    // The story's COMMENTS surface follows the SAME bar (`threadVisibleToUser`
+    // composes the chokepoint — codex on PR #146: the inline copy it replaced
+    // missed the admin arm, so admin could read the story yet 404 on its own
+    // comments): 200 for admin, 404 for the grant-less platform steward.
+    const { story_id } = (await posted.json()) as { story_id: string };
+    expect(
+      (
+        await app().request(
+          new Request(`http://localhost/v1/stories/${story_id}/comments`, {
+            headers: { cookie: admin.cookie },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app().request(
+          new Request(`http://localhost/v1/stories/${story_id}/comments`, {
+            headers: { cookie: steward.cookie },
+          }),
+        )
+      ).status,
+    ).toBe(404);
   });
 
   it('the platform-STEWARD action arm is VISIBILITY-COUPLED: no administering a private room it cannot read; public rooms and its own memberships stay administrable', async () => {

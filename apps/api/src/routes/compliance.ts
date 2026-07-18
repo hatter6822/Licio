@@ -705,6 +705,16 @@ export function createComplianceRoutes() {
         // that failed to insert is a lie.  The unit also frees the operator's
         // retry — a rolled-back attempt leaves the (region, effective_at) slot
         // open rather than colliding with a half-written change.
+        //
+        // `previous` is the TIMELINE predecessor at the new row's own
+        // `effective_at` — the SAME row the counsel delta baselines on — so
+        // the audit snapshot shows what the write actually supersedes.  A
+        // scheduled re-enable after a scheduled shutdown must audit against
+        // the shutdown it reverses, not against today's still-enabled policy
+        // (codex review of PR #146: auditing the active-now row there hid the
+        // re-expansion the gate itself had just detected).  For a non-counsel
+        // write the window check pins effective_at into [active-row, now], so
+        // the two rows coincide and nothing changes.
         let previous: Awaited<ReturnType<typeof services.policies.activeForRegion>> = null;
         try {
           await runChainedUnit(
@@ -714,7 +724,6 @@ export function createComplianceRoutes() {
                 policyInput.country_or_region,
                 nowIso,
               );
-              previous = activeNow;
               // TIMELINE arm: a non-counsel write must take effect NOW — its
               // `effective_at` must land in [active-row, now].  Policies are
               // insert-only and the engine serves the greatest effective_at ≤
@@ -750,6 +759,7 @@ export function createComplianceRoutes() {
                 policyInput.country_or_region,
                 policyInput.effective_at,
               );
+              previous = baselineRow; // the audit snapshots the SAME predecessor
               let prior: JurisdictionFeaturePolicy | null = null;
               if (baselineRow !== null) {
                 const priorValidated = validatePolicy(baselineRow.document);

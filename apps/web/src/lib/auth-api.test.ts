@@ -150,6 +150,32 @@ describe('email code login', () => {
     expect(user.id).toBe(USER_PUBLIC.user_id);
     expect(user.roles).toEqual([]); // the strict echo cannot carry roles
   });
+
+  it('a status answer for a DIFFERENT account is refused — the SW NetworkFirst cache can serve an OLDER session after a network failure (codex: only trust the refreshed status for the echoed user)', async () => {
+    mockRoutes({
+      'POST /v1/auth/email/verify-login': () => jsonResponse(SESSION_RESULT),
+      'GET /v1/auth/status': () =>
+        jsonResponse({
+          authenticated: true,
+          user: {
+            id: '22222222-2222-4222-8222-222222222222',
+            handle: 'stale_other',
+            display_name: 'Stale Other',
+            account_state: 'active',
+            locale: 'en-US',
+            roles: ['user', 'compliance'],
+            steward_roles: ['ROLE_SAFETY'],
+          },
+        }),
+    });
+    const user = await verifyEmailLogin('AB12CD34');
+    // The just-verified echo wins wholesale — no foreign identity, no
+    // foreign roles adopted into the persisted context.
+    expect(user.id).toBe(USER_PUBLIC.user_id);
+    expect(user.handle).toBe('ada');
+    expect(user.roles).toEqual([]);
+    expect(user.steward_roles).toEqual([]);
+  });
 });
 
 describe('passkey login', () => {

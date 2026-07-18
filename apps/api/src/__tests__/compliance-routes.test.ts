@@ -497,6 +497,16 @@ describe('policy admin (WS-N.1.1e)', () => {
         )
       ).status,
     ).toBe(201);
+    // The audit snapshots the TIMELINE predecessor the gate baselined on —
+    // the scheduled SHUTDOWN the re-enable reverses — not today's
+    // still-enabled policy (codex: auditing active-now hid the re-expansion).
+    const trail = await compliance.policyAudit.listChained();
+    const last = trail[trail.length - 1];
+    expect(last?.changeType).toBe('update');
+    expect(
+      (last?.previousValue as { feature_flags?: { production_payments?: string } } | null)
+        ?.feature_flags?.production_payments,
+    ).toBe('disabled');
   });
 
   it('a nonconforming ACTIVE row cannot be "carried forward" — the prior is ABSENT, every enabled cell is an expansion (review: malformed-prior arm)', async () => {
