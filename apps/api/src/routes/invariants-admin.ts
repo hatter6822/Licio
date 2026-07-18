@@ -251,11 +251,14 @@ export function createInvariantsAdminRoutes(
         return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
       }
       const forum = resolveForum();
-      // The room must EXIST before any authorization arm: the grants check
-      // used to 404 nonexistent rooms incidentally (no grants on a phantom),
-      // but the admin bypass would turn a typo/deleted room into a plausible
-      // 200 with zero findings (codex on PR #146).
-      if ((await forum.rooms.getById(roomId)) === null) {
+      // The room must EXIST — and be SERVER-hosted — before any authorization
+      // arm: the grants check used to 404 nonexistent rooms incidentally (no
+      // grants on a phantom), but the admin bypass would turn a typo/deleted
+      // room into a plausible 200 with zero findings, and a member-hosted
+      // (p2p) stub has no server-side SCOI surface at all — a 200 empty
+      // report would misrepresent it as a clean server room (codex).
+      const reportRoom = await forum.rooms.getById(roomId);
+      if (reportRoom === null || reportRoom.storageMode !== 'server') {
         return c.json(deny('not_found', 'No such report'), 404);
       }
       // The room's own stewards, or the platform ADMIN (2026-07 final-line-of-
@@ -321,10 +324,12 @@ export function createInvariantsAdminRoutes(
       // Bridge requests are ROOM-scoped: a roomless (global) thread has no
       // steward surface at all, for admin included — without this the admin
       // arm would open a bridge request the grants check made unreachable.
-      // The room must also still EXIST (codex: an orphaned/migration-drift
-      // thread whose room row is gone has no steward or report surface —
-      // mirroring the reports route's phantom-room guard).
-      if (thread.roomId === null || (await forum.rooms.getById(thread.roomId)) === null) {
+      // The room must also still EXIST and be SERVER-hosted (codex: an
+      // orphaned/migration-drift thread whose room row is gone — or points at
+      // a member-hosted p2p stub — has no steward or report surface;
+      // mirroring the reports route's guard).
+      const bridgeRoom = thread.roomId === null ? null : await forum.rooms.getById(thread.roomId);
+      if (bridgeRoom === null || bridgeRoom.storageMode !== 'server') {
         return c.json(deny('not_found', 'No such thread'), 404);
       }
       const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);

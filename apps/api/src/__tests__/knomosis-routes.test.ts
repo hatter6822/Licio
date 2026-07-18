@@ -503,6 +503,22 @@ describe('preflight → submit → status → standing → receipts over HTTP', 
     const status = await get(`/knomosis/actions/${submitBody.action_record_id}`, cookie);
     expect(status.status).toBe(200);
 
+    // The platform-ADMIN read arm carries the per-session MFA bar (codex):
+    // a bare admin session falls through to the steward check and 404s;
+    // an MFA-cleared admin reads another user's action status.
+    const bareAdmin = await seedUserWithSession(fixture.identity, { handle: 'kbareadm' });
+    await fixture.identity.store.updateUser(bareAdmin.userId, { roles: ['user', 'admin'] });
+    expect(
+      (await get(`/knomosis/actions/${submitBody.action_record_id}`, bareAdmin.cookie)).status,
+    ).toBe(404);
+    const mfaAdmin = await seedUserWithSession(fixture.identity, {
+      handle: 'kmfaadm',
+      admin: true,
+    });
+    expect(
+      (await get(`/knomosis/actions/${submitBody.action_record_id}`, mfaAdmin.cookie)).status,
+    ).toBe(200);
+
     // The submission recorded the actor mapping, so standing resolves.
     const standing = await get(`/knomosis/standing/${walletAccountId}/${deploymentId}`, cookie);
     expect(standing.status).toBe(200);

@@ -529,6 +529,28 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     // a plausible empty report for a typo or a deleted room (codex).
     const phantom = await adminRequest(fixture, admin.cookie, `/scoi/reports/${randomUUID()}`);
     expect(phantom.status).toBe(404);
+    // A member-hosted (p2p) STUB has no server-side SCOI surface: 404 for
+    // admin too — a 200 empty report would misrepresent it as a clean server
+    // room (codex: exclude p2p rooms before the admin report bypass).
+    const p2pRoomId = randomUUID();
+    await fixture.forum.rooms.insert({
+      roomId: p2pRoomId,
+      name: 'P2P stub',
+      slug: `p2ps-${p2pRoomId.slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'invite',
+      postingPolicy: 'all_members',
+      storageMode: 'p2p',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const p2pReport = await adminRequest(fixture, admin.cookie, `/scoi/reports/${p2pRoomId}`);
+    expect(p2pReport.status).toBe(404);
     // The bridge-request sibling: an ORPHANED thread (roomId points at a
     // removed room — migration drift) has no steward surface for admin either
     // (codex: validate the thread room before the admin bridge bypass).
