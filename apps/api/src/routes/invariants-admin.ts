@@ -251,6 +251,13 @@ export function createInvariantsAdminRoutes(
         return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
       }
       const forum = resolveForum();
+      // The room must EXIST before any authorization arm: the grants check
+      // used to 404 nonexistent rooms incidentally (no grants on a phantom),
+      // but the admin bypass would turn a typo/deleted room into a plausible
+      // 200 with zero findings (codex on PR #146).
+      if ((await forum.rooms.getById(roomId)) === null) {
+        return c.json(deny('not_found', 'No such report'), 404);
+      }
       // The room's own stewards, or the platform ADMIN (2026-07 final-line-of-
       // defense decision; the outer surface is already requireSteward+MFA).
       const roles = await forum.rooms.stewardRolesFor(roomId, auth.userId);
@@ -311,9 +318,11 @@ export function createInvariantsAdminRoutes(
       const ingestion = resolveIngestion();
       const thread = await ingestion.stories.getThreadById(threadId);
       if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
-      const roles = thread.roomId
-        ? await forum.rooms.stewardRolesFor(thread.roomId, auth.userId)
-        : [];
+      // Bridge requests are ROOM-scoped: a roomless (global) thread has no
+      // steward surface at all, for admin included — without this the admin
+      // arm would open a bridge request the grants check made unreachable.
+      if (thread.roomId === null) return c.json(deny('not_found', 'No such thread'), 404);
+      const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
       // Same admin arm as the room SCOI reports above.
       if (roles.length === 0 && !auth.roles.includes('admin')) {
         return c.json(deny('not_found', 'No such thread'), 404);

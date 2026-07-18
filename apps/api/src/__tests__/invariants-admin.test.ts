@@ -520,6 +520,15 @@ describe('SCOI context surfaces (WS-H.4.1c/4.2d/4.3d)', () => {
     const outsider = await seedUserWithSession(fixture.identity, { steward: true });
     const denied = await adminRequest(fixture, outsider.cookie, `/scoi/reports/${roomId}`);
     expect(denied.status).toBe(404);
+
+    // The platform ADMIN passes the room-scope arm (final line of defense)…
+    const admin = await seedUserWithSession(fixture.identity, { admin: true });
+    const adminReport = await adminRequest(fixture, admin.cookie, `/scoi/reports/${roomId}`);
+    expect(adminReport.status).toBe(200);
+    // …but a NONEXISTENT room still 404s for admin — the bypass must not mint
+    // a plausible empty report for a typo or a deleted room (codex).
+    const phantom = await adminRequest(fixture, admin.cookie, `/scoi/reports/${randomUUID()}`);
+    expect(phantom.status).toBe(404);
   });
 
   it('bridge requests route multi-lens candidates; a reducing contribution credits (SCOI-2)', async () => {

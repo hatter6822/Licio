@@ -1011,9 +1011,14 @@ setModerationServices(moderationServices);
 forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // The WS-Q read bar's platform-ADMIN arm (2026-07 final-line-of-defense
 // decision): the content-visibility chokepoint consults the identity store's
-// platform roles on the private-SERVER-room miss path only.
-forumServices.platformRolesReader = async (id) =>
-  (await identityServices.store.getUser(id))?.roles ?? [];
+// platform roles on the private-SERVER-room miss path only.  ACTIVE accounts
+// only (codex on PR #146): soft-session read routes never run authMiddleware's
+// account-state check, so without this a suspended admin's still-valid cookie
+// would keep the private-room read arm.
+forumServices.platformRolesReader = async (id) => {
+  const user = await identityServices.store.getUser(id);
+  return user?.accountState === 'active' ? user.roles : [];
+};
 // WS-J.2.6 pre-checks on the contribution submission path: spam/malware
 // auto-block (recorded as appealable system actions) + duplicate-flood/policy-
 // risk flag-to-review (the WS-F denylist is consulted as the malware fallback).

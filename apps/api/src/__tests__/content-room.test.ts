@@ -211,6 +211,98 @@ describe('WS-Q.2.1 submission guards', () => {
     expect(await fixture.forum.lenses.listByRoom(roomId)).toEqual([]);
   });
 
+  it('a SUSPENDED admin session loses the read arm — the soft read paths must not outrank authMiddleware (codex: require an active account)', async () => {
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin4', admin: true });
+    const record = await fixture.forum.rooms.getById(room);
+    if (!record) throw new Error('setup');
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(true);
+    await fixture.identity.store.updateUser(admin.userId, { accountState: 'suspended' });
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(false);
+  });
+
+  it('the debate-override platform-admin arm carries the per-session MFA bar (codex: require MFA before admin overrides)', async () => {
+    // A judged arena over a real public-room story, planted directly at the
+    // store (the full correction→arena lifecycle is the forum-debate suite's
+    // job; this test pins the ROUTE gate).
+    const author = await seedUserWithSession(fixture.identity, { handle: 'dauthor' });
+    const created = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: COMMONS_ROOM_ID }), author.cookie),
+    );
+    expect(created.status).toBe(201);
+    const { story_id } = (await created.json()) as { story_id: string };
+    const thread = await fixture.ingestion.stories.getThreadByStoryId(story_id);
+    if (!thread) throw new Error('setup');
+    const nowIso = new Date().toISOString();
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const arena = await fixture.forum.debates.open({
+      debateId: randomUUID(),
+      storyId: story_id,
+      threadId: thread.threadId,
+      roomId: COMMONS_ROOM_ID,
+      targetType: 'story',
+      targetContributionId: null,
+      challengerContributionId: randomUUID(),
+      incumbentUserId: author.userId,
+      challengerUserId: author.userId,
+      state: 'judged',
+      positions: {
+        incumbent: { summary: 'held', citations: [], updatedAt: null },
+        challenger: { summary: 'challenged', citations: [], updatedAt: null },
+      },
+      editDeadlineAt: future,
+      resolveDueAt: future,
+      lockedAt: nowIso,
+      lockedContent: null,
+      incumbentLastActiveAt: nowIso,
+      challengerLastActiveAt: nowIso,
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'ai',
+      rationale: null,
+      confidence: null,
+      aiOutputId: null,
+      verdictAt: nowIso,
+      overrideDeadlineAt: future,
+      overriddenByUserId: null,
+      overrideReason: null,
+      resolvedAt: null,
+    });
+    if (!arena) throw new Error('setup');
+    const overrideBody = { winner: 'incumbent', reason: 'Platform review of the record.' };
+
+    // An admin WITHOUT per-session MFA: the platform arm refuses with
+    // mfa_required — an active verified session alone must not flip verdicts.
+    const bareAdmin = await seedUserWithSession(fixture.identity, { handle: 'noMfaAdmin' });
+    await fixture.identity.store.updateUser(bareAdmin.userId, { roles: ['user', 'admin'] });
+    const denied = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, bareAdmin.cookie),
+    );
+    expect(denied.status).toBe(403);
+    expect(((await denied.json()) as { error: { code: string } }).error.code).toBe('mfa_required');
+
+    // A plain member still gets the service's own not_steward (the gate only
+    // intercepts the ADMIN arm).
+    const member = await seedUserWithSession(fixture.identity, { handle: 'plainm' });
+    const notSteward = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, member.cookie),
+    );
+    expect(notSteward.status).toBe(403);
+    expect(((await notSteward.json()) as { error: { code: string } }).error.code).toBe(
+      'not_steward',
+    );
+
+    // An MFA-cleared admin passes the gate AND the service's steward check.
+    const mfaAdmin = await seedUserWithSession(fixture.identity, {
+      handle: 'mfaAdmin',
+      admin: true,
+    });
+    const allowed = await app().request(
+      post(`/v1/debates/${arena.debateId}/override`, overrideBody, mfaAdmin.cookie),
+    );
+    expect(allowed.status).toBe(200);
+  });
+
   it("the admin arm is structurally scoped to SERVER storage: a member-hosted (p2p) room's content bar stays closed to admin", async () => {
     const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin2', admin: true });
     const roomId = randomUUID();

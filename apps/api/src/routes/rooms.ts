@@ -103,7 +103,12 @@ async function softUserContext(
   const userId = await softUserId(cookieHeader, identity);
   if (userId === null) return { userId: null, roles: [] };
   const user = await identity.store.getUser(userId);
-  return { userId, roles: user?.roles ?? [] };
+  // A non-active account resolves as ANONYMOUS (codex on PR #146): these soft
+  // read paths never run authMiddleware's account-state check, and a
+  // suspended account's still-valid session must not keep member/steward/
+  // admin visibility the authenticated routes would refuse it.
+  if (user?.accountState !== 'active') return { userId: null, roles: [] };
+  return { userId, roles: user.roles };
 }
 
 function toLensPublic(lens: LensRecord) {

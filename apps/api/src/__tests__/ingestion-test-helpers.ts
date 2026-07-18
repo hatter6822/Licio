@@ -94,8 +94,12 @@ export function freshIngestionServices(
     events,
     ingestion,
     // Mirror the boot wiring: the WS-Q read bar's platform-ADMIN arm reads the
-    // identity store, so role-gated visibility behaves as in production.
-    platformRolesReader: async (id) => (await identity.store.getUser(id))?.roles ?? [],
+    // identity store (ACTIVE accounts only), so role-gated visibility behaves
+    // as in production.
+    platformRolesReader: async (id) => {
+      const user = await identity.store.getUser(id);
+      return user?.accountState === 'active' ? user.roles : [];
+    },
   });
   setForumServices(forum);
   return { identity, events, ingestion, forum, pages, robots, fetchedUrls };

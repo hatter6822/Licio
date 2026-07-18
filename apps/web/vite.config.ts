@@ -101,8 +101,15 @@ export default defineConfig({
           {
             // API GETs: fresh when online, cached fallback offline. Mutations are
             // GET-only here, so POST/PUT/PATCH/DELETE are never cached.
+            // /v1/auth/* NEVER enters Cache Storage (codex on PR #146): a cached
+            // /status could answer a later login as an OLDER session, and the
+            // sign-out purge races any in-flight auth GET whose NetworkFirst
+            // write lands after the delete. Offline boot does not need it — the
+            // auth store's zod-validated localStorage context covers relaunch,
+            // and a network error (unlike a 401) never downgrades the session.
             urlPattern: ({ url }: { url: URL }) =>
-              url.pathname.startsWith('/v1') || url.pathname.startsWith('/api'),
+              (url.pathname.startsWith('/v1') || url.pathname.startsWith('/api')) &&
+              !url.pathname.startsWith('/v1/auth/'),
             handler: 'NetworkFirst',
             method: 'GET',
             options: {

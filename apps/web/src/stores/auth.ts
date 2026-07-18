@@ -52,9 +52,13 @@ function postLogout(): void {
 /**
  * Purge the SW's `licio-api` runtime cache on sign-out.  Cached /v1 GETs (the
  * NetworkFirst offline fallback) hold the signed-out user's data for up to
- * 24h — /v1/auth/status now includes their operator roles — and on a shared
- * browser the next user (or any same-origin script) could read them from
- * Cache Storage.  Best-effort: Cache Storage may be absent (older WebViews,
+ * 24h, and on a shared browser the next user (or any same-origin script)
+ * could read them from Cache Storage.  /v1/auth/* never enters the cache at
+ * all (excluded in the SW's runtime-caching pattern — codex on PR #146: a
+ * cached /status could answer a later login as an older session, and this
+ * fire-and-forget purge races any in-flight auth GET whose NetworkFirst
+ * write lands after the delete); this purge clears the REST of the user's
+ * cached data.  Best-effort: Cache Storage may be absent (older WebViews,
  * some test environments), and a failed purge must never block sign-out.
  */
 function purgeApiCache(): void {
