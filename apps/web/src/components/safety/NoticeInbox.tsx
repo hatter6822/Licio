@@ -42,10 +42,9 @@ export function NoticeInbox(): React.ReactElement {
   });
 
   return (
-    <section aria-labelledby="notices-heading" className="flex flex-col gap-3">
-      <h1 id="notices-heading" className="text-2xl font-semibold text-ink">
-        {t('notices.title', 'Notices')}
-      </h1>
+    // The page header (PageHeader in the route page) owns the visible <h1>;
+    // this section carries an accessible name only.
+    <section aria-label={t('notices.title', 'Notices')} className="flex flex-col gap-3">
       {isLoading ? <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p> : null}
       {data && notices.length === 0 ? (
         <p className="text-ink-muted">{t('notices.empty', 'You have no moderation notices.')}</p>

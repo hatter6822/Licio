@@ -18,10 +18,9 @@ export function SupportContact(): React.ReactElement {
   });
 
   return (
-    <section aria-labelledby="support-heading" className="flex flex-col gap-4">
-      <h1 id="support-heading" className="text-2xl font-semibold text-ink">
-        {t('support.title', 'Get help')}
-      </h1>
+    // The page header (PageHeader in the route page) owns the visible <h1>;
+    // this section carries an accessible name only.
+    <section aria-label={t('support.title', 'Get help')} className="flex flex-col gap-4">
       {isLoading ? <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p> : null}
       {isError ? (
         <p className="text-ink-muted">

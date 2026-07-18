@@ -81,7 +81,10 @@ export const penaltyComponentsSchema = z
   .strict();
 export type PenaltyComponents = z.infer<typeof penaltyComponentsSchema>;
 
-/** Constraint flags a scored item can carry (WS-I.2.3c / 2.4). */
+/** Constraint flags a scored item can carry (WS-I.2.3c / 2.4). The three
+ *  `scoi_*` members are DEPRECATED — the SCOI constraint ladder was removed
+ *  and no producer emits them; they stay ONLY so persisted decision-log
+ *  `score_components` written before the removal keep parsing on replay. */
 export const CONSTRAINT_FLAGS = [
   'mfci_cross_community_excluded',
   'mfci_review_flagged',
@@ -99,9 +102,8 @@ export type ConstraintFlag = (typeof CONSTRAINT_FLAGS)[number];
 export const scoredItemSchema = z
   .object({
     item_id: z.string().uuid(),
-    /** Final PWAtt score: (baseline + positive − applied penalties) × the SCOI
-     *  distribution multiplier, then − the dispute ordering sink + the validation
-     *  boost (both WS-T, applied outside the multiplier). */
+    /** Final PWAtt score: baseline + positive − applied penalties, then − the
+     *  dispute ordering sink + the validation boost (both WS-T). */
     pwatt_score: z.number(),
     score_components: scoreComponentsSchema,
     penalty_components: penaltyComponentsSchema,

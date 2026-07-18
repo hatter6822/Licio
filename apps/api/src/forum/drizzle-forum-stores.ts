@@ -43,6 +43,7 @@ import { and, asc, count, desc, eq, inArray, isNull, type SQL, sql } from 'drizz
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
+import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
 import type {
   ContributionEditRecord,
   ContributionInsertOutcome,
@@ -73,29 +74,6 @@ function iso(value: Date): string {
 
 function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  // Drizzle wraps the driver error (DrizzleQueryError → cause: PostgresError),
-  // so the unique-violation code must be checked down the cause chain (the
-  // WS-F adapter precedent; proven by the gated integration tests).
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    if ((current as { code?: string }).code === '23505') return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
-/** The violated constraint's name, from anywhere in the cause chain. */
-function uniqueViolationConstraint(error: unknown): string {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
-    const name = (current as { constraint_name?: unknown }).constraint_name;
-    if (typeof name === 'string') return name;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return '';
 }
 
 // WS-T: the section sink key (`incorrect` = 1, else 0).  `incorrect` comments
@@ -804,6 +782,21 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0] ? this.#toRoom(rows[0]) : null;
   }
 
+  async updateGovernanceModeIf(
+    roomId: string,
+    expected: RoomRecord['governanceMode'],
+    next: RoomRecord['governanceMode'],
+  ): Promise<boolean> {
+    // Conditional UPDATE — the WHERE carries the expectation, so two racing
+    // transitions serialize at the row (the loser matches zero rows).
+    const rows = await this.#db
+      .update(roomsTable)
+      .set({ governanceMode: next, updatedAt: new Date() })
+      .where(and(eq(roomsTable.roomId, roomId), eq(roomsTable.governanceMode, expected)))
+      .returning({ roomId: roomsTable.roomId });
+    return rows.length > 0;
+  }
+
   async freeze(roomId: string, migratedToRoomId: string | null): Promise<RoomRecord | null> {
     const rows = await this.#db
       .update(roomsTable)
@@ -991,6 +984,20 @@ export class DrizzleRoomStore implements RoomStore {
       ) voters
     `)) as unknown as Array<{ value: number }>;
     return rows[0]?.value ?? 0;
+  }
+
+  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+    const rows = (await this.#db.execute(sql`
+      SELECT voters.user_id AS value FROM (
+        SELECT ${roomSubscriptionsTable.userId} AS user_id FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+        UNION
+        SELECT ${roomStewardsTable.userId} AS user_id FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: string }>;
+    return rows.map((row) => row.value);
   }
 
   async listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]> {

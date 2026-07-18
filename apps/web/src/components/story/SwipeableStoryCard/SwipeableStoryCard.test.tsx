@@ -16,7 +16,6 @@ const sample: StoryCardData = {
   },
   sourcesCount: 2,
   corrections: { active: 0, validated: 0, incorrect: 0 },
-  distributionReason: 'Rising from independent source opens and sourced comments',
 };
 
 /** Drive a synthetic swipe across the gesture surface. */

@@ -11,9 +11,19 @@ import { parseFeedSearch } from './search.js';
 describe('search param parsing', () => {
   it('keeps a valid feed mode and coerces an invalid/absent one to undefined', () => {
     // The front page falls back to the reader's saved mode when the param is absent.
-    expect(parseFeedSearch({ mode: 'chronological' }).mode).toBe('chronological');
+    expect(parseFeedSearch({ mode: 'debates' }).mode).toBe('debates');
     expect(parseFeedSearch({ mode: 'bogus' }).mode).toBeUndefined();
     expect(parseFeedSearch({}).mode).toBeUndefined();
+  });
+
+  it('normalizes a legacy shared-URL mode instead of dropping it', () => {
+    // Pre-redesign links keep working: the legacy value maps to its canonical
+    // successor (chronological → new; the removed modes → best).
+    expect(parseFeedSearch({ mode: 'chronological' }).mode).toBe('new');
+    expect(parseFeedSearch({ mode: 'balanced' }).mode).toBe('best');
+    expect(parseFeedSearch({ mode: 'local' }).mode).toBe('best');
+    // The reduce-personalization intent survives: `new` is non-personalized.
+    expect(parseFeedSearch({ mode: 'low-personalization' }).mode).toBe('new');
   });
 });
 

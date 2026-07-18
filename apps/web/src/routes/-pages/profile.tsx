@@ -6,9 +6,14 @@
 // (WS-C.4.1d) and are pushed to the signal processor immediately; the Signal
 // Ledger is the private, no-applause account of attention; Wallet is flag-gated.
 import type { PrivacyLevel, SignalLedgerEntry } from '@licio/shared';
-import { DEFAULT_NOTIFICATION_PREFERENCES } from '@licio/shared';
-import { Link } from '@tanstack/react-router';
+import {
+  canAccessComplianceConsole,
+  canAccessModerationConsole,
+  DEFAULT_NOTIFICATION_PREFERENCES,
+} from '@licio/shared';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { type ReactNode, useEffect } from 'react';
+import { RegionDeclarationCard } from '../../components/compliance/index.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import {
   type SignalKind,
@@ -26,6 +31,7 @@ import { useToast } from '../../components/ui/Toast/index.js';
 import { WalletManager } from '../../components/wallet/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
+import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import { revokeCurrentSession } from '../../lib/auth-api.js';
 import { cn } from '../../lib/cn.js';
@@ -59,6 +65,14 @@ import {
 import { PageScaffold } from './PageScaffold.js';
 import { DangerZoneSection, DataRightsSection } from './privacy-data.js';
 import { usePageFocus } from './usePageFocus.js';
+
+/** Every profile SUBPAGE carries a header back button (the room/comment-section
+ *  pattern): retrace history to wherever the page was opened from; a cold-loaded
+ *  deep link falls back (replacing) to the profile hub. */
+function useProfileBack(): () => void {
+  const navigate = useNavigate();
+  return useGoBack(() => void navigate({ to: '/profile', replace: true }));
+}
 
 function Section({ title, children }: { title: string; children: ReactNode }): React.ReactElement {
   return (
@@ -200,6 +214,42 @@ export function ProfilePage(): React.ReactElement {
         },
       ],
     },
+    // Safety & support: the WS-J.1 user-facing surfaces.  These pages existed
+    // but had NO navigation entry point — a notice inbox (statements of
+    // reasons + appeals) a user cannot find fails its purpose, so the menu is
+    // their canonical home.
+    {
+      heading: t('profile.group.safety', 'Safety & support'),
+      links: [
+        {
+          to: '/profile/notices',
+          label: t('profile.notices', 'Notices'),
+          description: t(
+            'profile.notices.desc',
+            'Moderation notices about your content, and your appeals.',
+          ),
+          icon: 'inbox',
+        },
+        {
+          to: '/profile/safety',
+          label: t('profile.safetyRelations', 'Blocked & muted'),
+          description: t(
+            'profile.safetyRelations.desc',
+            'Accounts you have blocked or muted, with undo.',
+          ),
+          icon: 'volume-x',
+        },
+        {
+          to: '/support',
+          label: t('profile.support', 'Get help'),
+          description: t(
+            'profile.support.desc',
+            'Contact the safety team and find emergency resources.',
+          ),
+          icon: 'circle-question',
+        },
+      ],
+    },
     {
       heading: t('profile.group.connectivity', 'Sharing & offline'),
       links: [
@@ -226,6 +276,47 @@ export function ProfilePage(): React.ReactElement {
         },
       ],
     },
+    // Role-gated operator consoles (WS-J.2 moderation, WS-N.2.1c-2 compliance).
+    // The roles on the session context are a NAVIGATION hint only: a stale or
+    // tampered value can reveal a LINK, never data — every console endpoint
+    // re-authorizes server-side (requireSteward / requireCompliance, both with
+    // per-session step-up MFA), and the console pages render an access notice
+    // on a 403.
+    ...(() => {
+      const roles = user?.roles ?? [];
+      const stewardRoles = user?.steward_roles ?? [];
+      const consoles: ProfileLink[] = [
+        ...(canAccessModerationConsole(roles, stewardRoles)
+          ? [
+              {
+                to: '/moderation',
+                label: t('profile.moderationConsole', 'Moderation console'),
+                description: t(
+                  'profile.moderationConsole.desc',
+                  'The report queue, reviews, appeals, and the audit trail.',
+                ),
+                icon: 'shield' as IconName,
+              },
+            ]
+          : []),
+        ...(canAccessComplianceConsole(roles)
+          ? [
+              {
+                to: '/compliance-console',
+                label: t('profile.complianceConsole', 'Compliance console'),
+                description: t(
+                  'profile.complianceConsole.desc',
+                  'Financial-compliance cases, the fraud queue, and region declarations.',
+                ),
+                icon: 'document-check' as IconName,
+              },
+            ]
+          : []),
+      ];
+      return consoles.length > 0
+        ? [{ heading: t('profile.group.operations', 'Operations'), links: consoles }]
+        : [];
+    })(),
     // DEVELOPMENT-ONLY tools. `import.meta.env.DEV` is a compile-time constant,
     // so this group is tree-shaken out of production builds entirely.
     ...(import.meta.env.DEV
@@ -340,6 +431,7 @@ export function SettingsPage(): React.ReactElement {
   const t = useT();
   const { toast } = useToast();
   usePageFocus(t('profile.settings', 'Settings'));
+  const goBack = useProfileBack();
   const theme = useUIStore((state) => state.theme);
   const setTheme = useUIStore((state) => state.setTheme);
   const reducedMotion = useUIStore((state) => state.reducedMotion);
@@ -367,7 +459,7 @@ export function SettingsPage(): React.ReactElement {
 
   return (
     <>
-      <PageHeader title={t('profile.settings', 'Settings')} />
+      <PageHeader title={t('profile.settings', 'Settings')} onBack={goBack} />
       <div className="mx-auto w-full max-w-2xl p-4">
         <Section title={t('settings.appearance', 'Appearance')}>
           <ThemeToggle value={theme} onValueChange={setTheme} />
@@ -413,11 +505,15 @@ export function SettingsPage(): React.ReactElement {
             <Button
               variant="secondary"
               onClick={() => {
-                applyFeedMode('low-personalization');
+                // PHI-4 contract: "changes only how your feed is ordered" —
+                // `new` is the fully non-personalized, non-attention order
+                // (strict chronological), the strongest reduction a feed-mode
+                // switch can make without touching the account.
+                applyFeedMode('new');
                 toast({
                   message: t(
                     'settings.personalization.reduced',
-                    'Feed switched to low personalization.',
+                    'Feed switched to newest-first — no personalization.',
                   ),
                 });
               }}
@@ -489,6 +585,7 @@ export function SettingsPage(): React.ReactElement {
 export function PrivacyPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.privacy', 'Privacy'));
+  const goBack = useProfileBack();
   const settings = useSettingsQuery();
   const updateSettings = useUpdateSettingsMutation();
   const updateDurablePrivacy = useUpdateDurablePrivacyMutation();
@@ -511,7 +608,7 @@ export function PrivacyPage(): React.ReactElement {
   };
 
   return (
-    <PageScaffold title={t('profile.privacy', 'Privacy')} query={settings}>
+    <PageScaffold title={t('profile.privacy', 'Privacy')} onBack={goBack} query={settings}>
       {(data) => (
         <div className="flex flex-col">
           <Section title={t('privacy.personalization', 'Personalization')}>
@@ -557,6 +654,12 @@ export function PrivacyPage(): React.ReactElement {
               )}
             </p>
           </Section>
+          <Section title={t('privacy.region', 'Region')}>
+            {/* WS-N.1.1f: the identity-free region declaration — Licio never
+                detects location, so financial-feature jurisdiction is
+                self-declared here (and verified for real funds). */}
+            <RegionDeclarationCard />
+          </Section>
           <Section title={t('privacy.data', 'Your data')}>
             <DataRightsSection />
           </Section>
@@ -596,10 +699,12 @@ function toLedgerItem(entry: SignalLedgerEntry): SignalLedgerItem {
 export function SignalLedgerPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.signalLedger', 'Signal Ledger'));
+  const goBack = useProfileBack();
   const ledger = useSignalLedgerQuery();
   return (
     <PageScaffold
       title={t('profile.signalLedger', 'Signal Ledger')}
+      onBack={goBack}
       query={ledger}
       isEmpty={(data) => data.items.length === 0}
       emptyTitle={t('signalLedger.empty.title', 'Nothing recorded yet')}
@@ -616,11 +721,13 @@ export function SignalLedgerPage(): React.ReactElement {
 export function SavedStoriesPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.saved', 'Saved stories'));
+  const goBack = useProfileBack();
   const saved = useSavedStoriesQuery();
   const toggle = useToggleSavedStoryMutation();
   return (
     <PageScaffold
       title={t('profile.saved', 'Saved stories')}
+      onBack={goBack}
       query={saved}
       isEmpty={(data) => data.length === 0}
       emptyTitle={t('saved.empty.title', 'No saved stories yet')}
@@ -661,6 +768,7 @@ export function SavedStoriesPage(): React.ReactElement {
 export function WalletPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('profile.wallet', 'Wallet'));
+  const goBack = useProfileBack();
   const cryptoEnabled = useFeatureFlagStore(selectCryptoEnabled);
   // Reaching a flag-gated page is a fail-closed restriction worth observing
   // (route PATTERN only, no PII) so accidental enablement/lockout is visible.
@@ -671,7 +779,7 @@ export function WalletPage(): React.ReactElement {
   }, [cryptoEnabled]);
   return (
     <>
-      <PageHeader title={t('profile.wallet', 'Wallet')} />
+      <PageHeader title={t('profile.wallet', 'Wallet')} onBack={goBack} />
       <div className="mx-auto w-full max-w-2xl p-4">
         {cryptoEnabled ? (
           <WalletManager enabled={cryptoEnabled} />

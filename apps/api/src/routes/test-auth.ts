@@ -27,14 +27,26 @@ export function createTestAuthRoute(identity: IdentityServices) {
     if (user?.accountState !== 'active') {
       return c.json({ ok: false, error: 'no_such_active_user' }, 404);
     }
+    // Seeded operator accounts arrive fully MFA-cleared so EVERY step-up-gated
+    // surface is testable in the harness — steward (moderation console), admin
+    // (all consoles — final line of defense), compliance/counsel (the WS-N
+    // console + counsel plane).  BOTH halves matter (codex on PR #146): the
+    // require* guards check `mfaActive && mfaVerified`, and authMiddleware
+    // derives `mfaActive` from the identity record's `mfaEnabled` — a session
+    // flag alone still answers `mfa_required`.
+    const operator = (['steward', 'admin', 'compliance', 'counsel'] as const).some((role) =>
+      user.roles.includes(role),
+    );
+    if (operator) {
+      await identity.store.setAuth(userId, { mfaEnabled: true, mfaPending: false });
+    }
     const created = await createSession(identity.sessions, {
       userId,
       authMethod: 'webauthn',
       credentialRef: `e2e-${userId}`,
       deviceLabel: 'e2e',
       rememberMe: false,
-      // Seeded stewards arrive MFA-verified so step-up-gated surfaces are testable.
-      mfaVerified: user.roles.includes('steward'),
+      mfaVerified: operator,
     });
     c.header('Set-Cookie', buildSessionCookie(created.token, created.maxAgeSec));
     return c.json({ ok: true, userId });

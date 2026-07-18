@@ -284,12 +284,18 @@ export class GovernanceService {
     return this.deps.stores.seats.get(roomId);
   }
 
-  /** Schedule an election when the term has elapsed and none is open (ADR-7). */
-  async scheduleElection(roomId: string): Promise<GovernanceResult<string>> {
+  /** Schedule an election when the term has elapsed and none is open (ADR-7).
+   *  `options.force` skips the term-elapsed check for a COMMUNITY-VOTED early
+   *  rotation (a WS-M `steward_rotation` proposal execution) — the one-open-
+   *  per-room guard still applies unconditionally. */
+  async scheduleElection(
+    roomId: string,
+    options: { force?: boolean } = {},
+  ): Promise<GovernanceResult<string>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat) return err('no_seat', 'Room has no steward seat.');
     if (seat.currentElectionId) return err('election_open', 'An election is already open.');
-    if (this.deps.now().getTime() < Date.parse(seat.termEnd)) {
+    if (!options.force && this.deps.now().getTime() < Date.parse(seat.termEnd)) {
       return err('term_active', 'The current term has not elapsed.');
     }
     const electionId = this.deps.uuid();
@@ -1430,6 +1436,11 @@ export class GovernanceService {
        *  policy — the per-asset target allocation the kernel checks against the
        *  community-voted bands. */
       targetAllocation?: readonly { asset: string; fraction: number }[] | null;
+      /** A PROPOSAL-pinned law-pack (WS-M.4.3b): the community-voted execution
+       *  path evaluates the kernel under the pack the spend was authorized
+       *  with, and needs no AI-agent binding — the vote is the authority.
+       *  Omitted/null ⇒ the autonomous-agent path (binding + capabilities). */
+      lawPack?: LawPack | null;
     },
   ): Promise<GovernanceResult<Verdict>> {
     if (!this.cryptoEnabled()) return err('crypto_disabled', 'Crypto features are disabled.');
@@ -1439,13 +1450,6 @@ export class GovernanceService {
     if (this.deps.killSwitches && (await this.deps.killSwitches.treasuryExecutionBlocked(roomId))) {
       return err('kill_switch_active', 'Treasury execution is temporarily paused.');
     }
-    const binding = await this.deps.stores.bindings.get(roomId);
-    if (binding === null || !binding.active)
-      return err('no_agent', 'No active agent for the room.');
-    if (!hasCapability(binding.capabilityDescriptor, 'gateway.submit_signed_action')) {
-      return err('no_capability', 'The agent lacks the gateway submission capability.');
-    }
-    const lawPack = await this.resolveLawPack(roomId, binding.lawPackId);
     const action = treasuryActionSchema.safeParse({
       actionId: this.deps.uuid(),
       roomId,
@@ -1459,11 +1463,27 @@ export class GovernanceService {
       targetAllocation: input.targetAllocation ?? null,
     });
     if (!action.success) return err('invalid_action', 'The treasury action is malformed.');
-    // Per-category capability gate (in addition to the gateway cap above): the
-    // community must have granted the capability for THIS category of spend.
-    const categoryCap = TREASURY_ACTION_CAPABILITY[action.data.category];
-    if (!hasCapability(binding.capabilityDescriptor, categoryCap)) {
-      return err('no_capability', `The agent lacks the ${categoryCap} capability.`);
+    let lawPack: LawPack;
+    if (input.lawPack != null) {
+      // Proposal-driven execution: the pinned pack IS the rulebook, and the
+      // agent-capability gates do not apply (they scope what the room's AI
+      // may do autonomously, not what the members voted — WS-M's caller has
+      // already verified the vote, timelock, challenges, and reservation).
+      lawPack = input.lawPack;
+    } else {
+      const binding = await this.deps.stores.bindings.get(roomId);
+      if (binding === null || !binding.active)
+        return err('no_agent', 'No active agent for the room.');
+      if (!hasCapability(binding.capabilityDescriptor, 'gateway.submit_signed_action')) {
+        return err('no_capability', 'The agent lacks the gateway submission capability.');
+      }
+      // Per-category capability gate (in addition to the gateway cap above): the
+      // community must have granted the capability for THIS category of spend.
+      const categoryCap = TREASURY_ACTION_CAPABILITY[action.data.category];
+      if (!hasCapability(binding.capabilityDescriptor, categoryCap)) {
+        return err('no_capability', `The agent lacks the ${categoryCap} capability.`);
+      }
+      lawPack = await this.resolveLawPack(roomId, binding.lawPackId);
     }
     const history: TreasuryHistoryEntry[] = (
       await this.deps.stores.treasuryActions.acceptedByRoom(roomId)
@@ -1614,6 +1634,11 @@ const TREASURY_ACTION_CAPABILITY: Record<TreasuryCategory, Capability> = {
   grant: 'treasury.grant',
   bounty: 'treasury.grant',
   investment_rebalance: 'treasury.invest',
+  // WS-M spend categories (proposal-driven disbursements, SPEC §17.6): routine
+  // operational costs are distributions; steward compensation is grant-class
+  // (COI-sensitive, independent-review-eligible).
+  operational: 'treasury.distribute',
+  steward_compensation: 'treasury.grant',
 };
 
 /**

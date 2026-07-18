@@ -68,6 +68,9 @@ export async function assembleExport(
       wallets: [],
       receipts: [],
     },
+    // WS-N: region declaration + disclosure acknowledgments + case metadata
+    // (no notes, never SAR detail — the anti-tipping-off carve-out).
+    compliance: (await services.exportComplianceData?.(userId)) ?? {},
   };
 }
 
@@ -169,6 +172,10 @@ export async function runDeletionPurge(
   for (const req of due) {
     await services.anonymizeContributions?.(req.userId);
     await services.purgeAttention?.(req.userId, 'delete');
+    // WS-N: the compliance erasure sweep runs BEFORE the wallet purge (it
+    // resolves the user's wallet ids for the pin purge from the still-present
+    // rows).  Legal holds skip the case scrub — audited, erased on lapse.
+    await services.purgeCompliance?.(req.userId);
     // WS-L: a linked financial wallet + its receipts must never outlive the
     // account — purge them alongside the other domains' personal data.
     await services.purgeFinancialWallets?.(req.userId);

@@ -6,8 +6,9 @@
 //
 // Security notes baked into the shapes:
 //   • Session STATE never carries the raw token — Redis is keyed by sha256(token)
-//     and the record holds only derived material (ip_hash, credential_ref).
-//   • IP appears ONLY as a keyed hash (`ip_hash`), never plaintext (§19.5).
+//     and the record holds only derived material (credential_ref, device_label).
+//   • No IP and no location, ever — not even hashed (the §19.1 amendment removed
+//     the former `ip_hash`): a session carries only a coarse device descriptor.
 //   • Wallet/auth-wallet addresses appear as a keyed hash + a truncated display
 //     form, never the full address in plaintext (§19.5 treats addresses as PII).
 import { z } from 'zod';

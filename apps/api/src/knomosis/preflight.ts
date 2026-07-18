@@ -15,9 +15,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { decCompare, type TreasuryBounds } from '@licio/governance';
 import {
+  featureCellForAction,
   formatMinorUnits,
   type GovernanceMode,
   getTypedDataStruct,
+  KNOMOSIS_ASSET_DECIMALS,
   KNOMOSIS_EIP712_DOMAIN_NAME,
   type KnomosisEip712Domain,
   type KnomosisEnvironment,
@@ -25,6 +27,9 @@ import {
   type KnomosisReasonCode,
   type KnomosisSignedActionType,
   type PreflightStep,
+  REAL_FUNDS_ENVIRONMENTS,
+  reviewSubjectForAction,
+  screeningTargetsFor,
 } from '@licio/shared';
 import type { AuditStore } from '../identity/audit.js';
 import type { EphemeralStore } from '../identity/ephemeral-store.js';
@@ -32,12 +37,14 @@ import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import type { KnomosisRuntimeConfig } from './config.js';
 import { isContractAllowed, type PinnedDeployment, pinnedDeployment } from './pin.js';
 import type { CompliancePort } from './ports.js';
+import { worstSanctionsVerdict } from './ports.js';
 import { type ContractTypedDataVerifier, verifyActionSignature } from './signatures.js';
 import type {
   FinancialWalletStore,
   GovernanceProposalStore,
   KnomosisActionStore,
 } from './stores.js';
+import { resolveWalletRiskState } from './wallet-risk-resolve.js';
 
 /** Room facts the pipeline needs (wired to the forum service at boot). */
 export interface RoomGovernancePort {
@@ -82,6 +89,9 @@ export interface PreflightDeps {
 export interface PreflightRequestInput {
   userId: string;
   actionType: string;
+  /** The WS-M intent this action settles (see the wire schema); its review
+   *  and this one are the same attempt. */
+  paymentIntentId?: string | undefined;
   roomId: string;
   deploymentId: string;
   walletAccountId: string;
@@ -91,7 +101,18 @@ export interface PreflightRequestInput {
 
 const PREFLIGHT_TOKEN_PREFIX = 'knomosis:preflight:';
 
-/** The submission-side binding a pass token carries (WS-L.3.1c/3.2a). */
+/**
+ * What a pass token PROMISES about the submission it permits (WS-L.3.1c/3.2a).
+ *
+ * Every field here is minted by `buildPreflightBinding` and compared by
+ * `preflightBindingMismatch`, which walks EVERY key — so a field added to this
+ * type is bound and checked by construction.  It used to be two hand-written
+ * lists (a literal at mint, an `if` chain at submit), and the moment a new input
+ * arrived that decided a compliance verdict — the claimed `payment_intent_id` —
+ * it was added to the flow and forgotten by both.  Submit could then swap or
+ * drop the intent the preflight was cleared under, and re-run the fraud check
+ * against a different review.
+ */
 export interface PreflightTokenBinding {
   userId: string;
   actionType: KnomosisSignedActionType;
@@ -99,12 +120,49 @@ export interface PreflightTokenBinding {
   deploymentId: string;
   walletAccountId: string;
   typedDataHash: string;
+  /** The intent this action settles; null ⇔ none claimed.  It decides the
+   *  fraud review ref, so submit must name the SAME one. */
+  paymentIntentId: string | null;
 }
 
-export const REAL_FUNDS_ENVIRONMENTS: ReadonlySet<KnomosisEnvironment> = new Set([
-  'capped_production',
-  'mature_production',
-]);
+/** The ONE constructor: mint and normalization both go through it. */
+export function buildPreflightBinding(input: {
+  userId: string;
+  actionType: KnomosisSignedActionType;
+  roomId: string;
+  deploymentId: string;
+  walletAccountId: string;
+  typedDataHash: string;
+  paymentIntentId?: string | null | undefined;
+}): PreflightTokenBinding {
+  return {
+    userId: input.userId,
+    actionType: input.actionType,
+    roomId: input.roomId,
+    deploymentId: input.deploymentId,
+    walletAccountId: input.walletAccountId,
+    typedDataHash: input.typedDataHash,
+    paymentIntentId: input.paymentIntentId ?? null,
+  };
+}
+
+/**
+ * Does this binding describe that submission?  TOTAL over the binding's keys —
+ * there is no list to keep in step, so a field cannot be bound and left
+ * unchecked.  Returns the human message for the first disagreement, or null.
+ */
+export function preflightBindingMismatch(
+  bound: PreflightTokenBinding,
+  actual: PreflightTokenBinding,
+): string | null {
+  for (const key of Object.keys(bound) as (keyof PreflightTokenBinding)[]) {
+    if (bound[key] === actual[key]) continue;
+    return key === 'typedDataHash'
+      ? 'The submitted payload differs from the preflighted action.'
+      : 'The submission does not match the preflighted action.';
+  }
+  return null;
+}
 
 /** Governance modes permitted to submit REAL signed actions, per deployment
  *  environment (simulated/ordinary rooms never reach the gateway). */
@@ -156,17 +214,12 @@ export function buildEip712Domain(deployment: PinnedDeployment): KnomosisEip712D
   };
 }
 
-/**
- * Minor-unit precision per SUPPORTED asset (the interim validated metadata until a
- * formal asset registry ships).  An asset NOT listed here has no validated
- * precision, so its amount is shown as RAW minor units rather than mis-scaled at a
- * guessed 6 decimals — an 18-decimal asset formatted as 6 would grossly misstate
- * the value in the signed summary + receipt (WS-L.3.1a).
- */
-export const KNOMOSIS_ASSET_DECIMALS: Readonly<Record<string, number>> = {
-  USDC: 6,
-  'SIM-USDC': 6,
-};
+// Minor-unit precision per SUPPORTED asset now lives in `@licio/shared`
+// (`KNOMOSIS_ASSET_DECIMALS`) so the client deposit entry and this server-side
+// summary can never scale the same asset differently.  An asset NOT listed
+// there has no validated precision, so its amount is shown as RAW minor units
+// rather than mis-scaled at a guessed 6 decimals (WS-L.3.1a).
+export { KNOMOSIS_ASSET_DECIMALS } from '@licio/shared';
 
 /** Deterministic plain-language summary the §23.5 hash pairing covers. */
 export function buildHumanSummary(
@@ -313,16 +366,15 @@ export async function runPreflight(
   // persists the concrete state (WS-L.2.5c-1/3.1b).
   let riskState = wallet.riskState;
   if (riskState === 'pending' || FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const assessment = await deps.compliance.walletRisk({
+    // The shared read-through (thread-Y): escalations apply, but an absence-of-
+    // signal `normal` never lifts a still-unscreened `pending` wallet — that is
+    // recorded only by a link-time `clear` — and an `unavailable` engine leaves
+    // the stored state in place.
+    ({ state: riskState } = await resolveWalletRiskState(deps, {
       walletAccountId: wallet.walletAccountId,
       userId: input.userId,
-    });
-    if (assessment !== 'unavailable' && assessment.state !== riskState) {
-      riskState = assessment.state;
-      // Column-scoped write — never a stale full-record snapshot that could clobber
-      // a concurrent unlink (WS-L.2.5c-1).
-      await deps.wallets.updateRiskState(wallet.walletAccountId, riskState);
-    }
+      riskState,
+    }));
   }
   if (riskState === 'high') {
     return audited(
@@ -515,11 +567,15 @@ export async function runPreflight(
   //    environments fail closed on unavailable screening/unknown jurisdiction.
   const realFunds = REAL_FUNDS_ENVIRONMENTS.has(deployment.environment);
   if (FUND_TRANSFER_ACTIONS.has(actionType)) {
-    const screenTarget = (message['recipient'] ?? verified.actorLower).toLowerCase();
-    const sanctions = await deps.compliance.screenAddress({
-      addressLower: screenTarget,
-      deploymentId: input.deploymentId,
-    });
+    // BOTH counterparties: the payer who authorizes the movement and the payee
+    // who receives it.  Screening `recipient ?? actor` left a payout's actor
+    // unscreened at every action — its only screen was at link, so an outage
+    // there was permanent.
+    const sanctions = await worstSanctionsVerdict(
+      deps.compliance,
+      screeningTargetsFor({ ...message, actor: verified.actorLower }),
+      input.deploymentId,
+    );
     if (sanctions === 'blocked') {
       return audited(
         fail('sanctions', 'SANCTIONS_BLOCKED', 'This action cannot be completed.', input, nowIso),
@@ -548,7 +604,22 @@ export async function runPreflight(
   //     per the WS-N port contract, so a binding proposal_sign / charter_update /
   //     steward_rotation signature must be gated on region eligibility too.
   const region = await deps.regionForUser(input.userId);
-  const jurisdiction = await deps.compliance.jurisdiction({ userId: input.userId, region });
+  const jurisdiction = await deps.compliance.jurisdiction({
+    userId: input.userId,
+    region,
+    // The action's own policy cell: a region may permit payments and prohibit
+    // governance (or the reverse), and the verdict must answer for the cell
+    // this signature exercises — not for the region in aggregate.
+    // The cell this action exercises ON THIS DEPLOYMENT.  Environment-aware:
+    // a region that enables `testnet_transactions` and leaves the real-funds
+    // cells disabled — the ordinary posture before production approval — would
+    // otherwise be told `blocked` for a testnet action its own cell permits.
+    featureCell: featureCellForAction(actionType, deployment.environment),
+    // …and its asset, which `asset_flags` bars independently of the cell (a
+    // region can allow payments and still prohibit one asset).  The
+    // governance signatures move nothing, so they name no asset.
+    asset: message['asset'] ?? null,
+  });
   if (jurisdiction === 'blocked') {
     return audited(
       fail(
@@ -580,10 +651,46 @@ export async function runPreflight(
     userId: input.userId,
     actionType,
     amountMinorUnits: message['amount'] ?? null,
+    // ONLY an intent-backed transfer names a review attempt (its intent id — a
+    // genuine per-attempt id, single-use and reviewable).  A DIRECT transfer
+    // passes NO ref: `fraudRisk` day-buckets a null-ref high-value case and
+    // withholds the cleared-review exit (fail-closed), so a direct high-value
+    // transfer stays held and can never be cleared-and-reused for an unlimited
+    // stream of identical transfers.  A stable movement key would have let ONE
+    // clearance cover every later identical transfer; the per-attempt hash would
+    // have re-opened a case on each retry.  High-value transfers that need review
+    // must go through a PAYMENT INTENT (whose id IS the durable per-attempt ref).
+    reviewRef: input.paymentIntentId ?? null,
+    // The same subject the WS-M intent leg derives, from the same cell: a
+    // room-treasury payout is the ROOM's review, a pay-in is the payer's.
+    // Classifying it differently here would split one transfer's review in two.
+    reviewSubject: reviewSubjectForAction(actionType, {
+      userId: input.userId,
+      roomId: input.roomId,
+    }),
   });
   if (fraud === 'blocked') {
     return audited(
       fail('fraud_risk', 'FRAUD_RISK', 'This action was flagged by risk checks.', input, nowIso),
+    );
+  }
+  // `elevated` = manual review required (§17.10 high-value disbursements).  An
+  // intent-backed transfer expresses that by HOLDING in the fraud queue, and a
+  // reviewer clearing THAT intent's review lets the retry through.  A DIRECT
+  // transfer has no clearable per-attempt review (its null ref is never cleared),
+  // so it is refused with guidance to use a payment intent — never held on a
+  // review it can never satisfy.
+  if (fraud === 'elevated' && FUND_TRANSFER_ACTIONS.has(actionType)) {
+    return audited(
+      fail(
+        'fraud_risk',
+        'FRAUD_RISK',
+        input.paymentIntentId === undefined
+          ? 'High-value transfers must go through a payment intent so the amount can be reviewed.'
+          : 'This action is held for compliance review before it can proceed.',
+        input,
+        nowIso,
+      ),
     );
   }
   /* c8 ignore start -- the fraud-unavailable arm is the real-funds path (dead
@@ -616,14 +723,18 @@ export async function runPreflight(
 
   // PASS — mint the single-use token binding the exact typed-data hash.
   const token = randomBytes(24).toString('hex');
-  const binding: PreflightTokenBinding = {
+  const binding = buildPreflightBinding({
     userId: input.userId,
     actionType,
     roomId: input.roomId,
     deploymentId: input.deploymentId,
     walletAccountId: input.walletAccountId,
     typedDataHash: verified.typedDataHash,
-  };
+    // The intent this preflight was cleared UNDER — the fraud check above used
+    // it as the review ref, so the token may not permit a submit that names a
+    // different one (or none).
+    paymentIntentId: input.paymentIntentId,
+  });
   await deps.ephemeral.set(
     `${PREFLIGHT_TOKEN_PREFIX}${token}`,
     JSON.stringify(binding),
@@ -651,9 +762,34 @@ export async function consumePreflightToken(
   token: string,
 ): Promise<PreflightTokenBinding | null> {
   const raw = await ephemeral.take(`${PREFLIGHT_TOKEN_PREFIX}${token}`);
+  return parseBinding(raw);
+}
+
+/**
+ * Read a preflight token WITHOUT consuming it (`get`, not `take`).
+ *
+ * The single-use consumption stays where it belongs — after the reservation, so
+ * a token is never burned by a submission that left no record.  But that is
+ * late: everything before it runs for a request that may be about to fail the
+ * token gate, and some of it MUTATES compliance state.  This is the cheap
+ * advisory check that stops those side effects; it is not the security
+ * boundary, because a token can lapse or be used between the peek and the take
+ * — `consumePreflightToken` remains the one that decides.
+ */
+export async function peekPreflightToken(
+  ephemeral: EphemeralStore,
+  token: string,
+): Promise<PreflightTokenBinding | null> {
+  const raw = await ephemeral.get(`${PREFLIGHT_TOKEN_PREFIX}${token}`);
+  return parseBinding(raw);
+}
+
+function parseBinding(raw: string | null): PreflightTokenBinding | null {
   if (raw === null) return null;
   try {
-    return JSON.parse(raw) as PreflightTokenBinding;
+    // Through the constructor, so a token minted before a field existed reads
+    // back with that field's normalized default rather than `undefined`.
+    return buildPreflightBinding(JSON.parse(raw) as PreflightTokenBinding);
   } catch {
     return null;
   }

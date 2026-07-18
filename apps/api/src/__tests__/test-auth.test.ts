@@ -68,4 +68,27 @@ describe('test-auth route (WS-P E2E harness)', () => {
     expect(res.status).toBe(404);
     expect(res.headers.get('set-cookie')).toBeNull();
   });
+
+  it('an OPERATOR account arrives fully MFA-cleared — the identity record AND the session flag (codex: mfaActive derives from mfaEnabled)', async () => {
+    const identity = identityWith({ state: 'active' });
+    await identity.store.updateUser(USER_ID, { roles: ['user', 'admin'] });
+    const res = await login(createTestAuthRoute(identity), {});
+    expect(res.status).toBe(200);
+    const token = (res.headers.get('set-cookie') ?? '').split(';')[0]?.split('=')[1] ?? '';
+    const validated = await validateSession(identity.sessions, token);
+    expect(validated?.record.mfa_verified).toBe(true);
+    // BOTH halves: require* checks `mfaActive && mfaVerified`, and
+    // authMiddleware derives mfaActive from the identity record.
+    expect((await identity.store.getAuth(USER_ID))?.mfaEnabled).toBe(true);
+  });
+
+  it('a plain user gets NO phantom MFA enrollment', async () => {
+    const identity = identityWith({ state: 'active' });
+    const res = await login(createTestAuthRoute(identity), {});
+    expect(res.status).toBe(200);
+    const token = (res.headers.get('set-cookie') ?? '').split(';')[0]?.split('=')[1] ?? '';
+    const validated = await validateSession(identity.sessions, token);
+    expect(validated?.record.mfa_verified).toBe(false);
+    expect((await identity.store.getAuth(USER_ID))?.mfaEnabled ?? false).toBe(false);
+  });
 });

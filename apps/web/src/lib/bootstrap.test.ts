@@ -27,6 +27,8 @@ const USER: UserContext = {
   display_name: 'Ada',
   account_state: 'active',
   locale: 'en',
+  roles: [],
+  steward_roles: [],
 };
 
 beforeEach(() => {
@@ -88,7 +90,7 @@ describe('applySignalPolicy', () => {
     const spy = vi.spyOn(processor, 'setCollectionPolicy');
     setSignalProcessor(processor);
     vi.mocked(api.fetchSettings).mockResolvedValue({
-      feed_mode: 'balanced',
+      feed_mode: 'best',
       personalization_enabled: false,
       privacy_level: 'standard',
       theme: 'system',
@@ -128,7 +130,7 @@ describe('applySignalPolicy', () => {
     useAuthStore.getState().setAuthenticated(USER);
     useAuthStore.getState().expireSession();
     vi.mocked(api.fetchSettings).mockResolvedValue({
-      feed_mode: 'balanced',
+      feed_mode: 'best',
       personalization_enabled: true,
       privacy_level: 'standard',
       theme: 'system',
@@ -147,7 +149,7 @@ describe('applySignalPolicy', () => {
     // effective id after the await keeps this stale invocation correct (collect:false).
     type Settings = Awaited<ReturnType<typeof api.fetchSettings>>;
     const settings: Settings = {
-      feed_mode: 'balanced',
+      feed_mode: 'best',
       personalization_enabled: true,
       privacy_level: 'standard',
       theme: 'system',
@@ -186,7 +188,7 @@ describe('startRuntime', () => {
     });
     vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: false });
     vi.mocked(api.fetchSettings).mockResolvedValue({
-      feed_mode: 'balanced',
+      feed_mode: 'best',
       personalization_enabled: true,
       privacy_level: 'standard',
       theme: 'system',

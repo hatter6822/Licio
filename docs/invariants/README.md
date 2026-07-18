@@ -36,7 +36,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Platform contracts | `packages/invariants/src/platform/` | `InvariantService` interface, promotion checklist logic, envelope builders, synthetic datasets, the regression harness + pinned baselines |
 | Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
-| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `scoi_context_actions` (WS-H.4.3d), `bridge_attempts` (WS-H.4.2d) |
+| Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `bridge_attempts` (WS-H.4.2d) |
 | Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls (the MERI exposure label is no longer surfaced on feed cards) |
 
 ## The numeric kernels (`packages/invariants/src/math/`)
@@ -204,19 +204,21 @@ change.
 
 **Context surfaces** (`scoi-actions.ts`): room stewards get per-room
 reports (WS-H.4.1c; scope is the room's OWN steward roster, 404-over-403)
-with context state, per-lens interpretation summaries, recommended actions
-(invite-bridge/annotate for split/obstructed, safety review for
-weaponized), the §10.5 "Bridge attempts" record, and recent context
-actions. Moderator context actions (WS-H.4.3d / SCOI-4: merge, annotate,
-separate) require a RATIFIED WS-A reason code, are audited
-(`scoi_context_action`), and record the measured SCOI before/after.
-Annotation is mathematically honest: ONE shared system comment per active
-lens (tagged through `metadata.lens_id`, which is what the SCOI assembly
-keys on) pulls every interpretation vector toward the same point, so the
-Dirichlet energy genuinely decreases — measured by re-computation, never
-asserted (the acceptance test pins the decrease on a synthetic split
-case). Merge/separate are audited records whose physical tree mechanics
-belong to WS-G/WS-J tooling. Bridge routing (WS-H.4.2d / SCOI-2):
+with context state, per-lens interpretation summaries, and the §10.5
+"Bridge attempts" record. (The WS-H.4.3d moderator context actions —
+merge/annotate/separate, the `scoi_context_actions` table, and the
+per-state recommended-action strings — were REMOVED with their steward
+surface; historic `scoi_context_action` audit rows survive in the
+append-only audit log — parseable on read via `RETIRED_AUDIT_EVENT_TYPES`
+— and migration 0081 archives a POPULATED operational table as
+`scoi_context_actions_retired` (the identity-audit context allowlist never
+carried the action details, so the table is the only durable copy) and
+drops only an empty one.
+The SCOI ranking-constraint ladder and the cross-community-bridge
+retriever were removed on the WS-I side at the same time — SCOI's
+reader-facing surface is the story page's "Where interpretations differ"
+drawer plus the room lens read, both fed straight from the invariant
+store.) Bridge routing (WS-H.4.2d / SCOI-2):
 candidates are multi-lens participants; an open request carries the SCOI
 baseline, and the durable `invariant-scoi-bridge` consumer credits a
 contribution (single-shot) when re-computation measures a real decrease —
@@ -395,28 +397,25 @@ health, reason-code-filterable outputs, WS-H.1.1b version comparison
 controls) + case resolution, GWEI dashboards + the transparency export,
 promotion apply/history, validated config writes, on-demand regression.
 
-Public reads (`/v1/stories/:id/interpretations`,
-`/v1/stories/:id/independent-sources`, and the SCOI `/v1/stories/:id/lenses`
-read): each gates on the WS-Q item read bar (`storyReadableByUser`, soft
-session resolution, fail-closed on an unknown room) — a `room_only` story in
-a private room is 404 to non-members (404-over-403, no existence oracle),
-and every independent-sources lineage co-member is ITSELF read-bar-filtered
-so a public story never surfaces a contained near-duplicate's id/title (the
-raw MinHash/syndication candidate sets are not tier-scoped). Served from
-STORED shadow outputs only — a page load never triggers computation.
+Public reads (`/v1/stories/:id/interpretations` and the SCOI
+`/v1/stories/:id/lenses` read): each gates on the WS-Q item read bar
+(`storyReadableByUser`, soft session resolution, fail-closed on an unknown
+room) — a `room_only` story in a private room is 404 to non-members
+(404-over-403, no existence oracle). Served from STORED shadow outputs only —
+a page load never triggers computation. (The former
+`/v1/stories/:id/independent-sources` lineage read was removed with the
+drawer below; the path survives only as an inert rollout-compat stub —
+constant honest-absence payload, no story lookup — for pre-removal cached
+bundles.)
 
-Client: the MERI exposure label was REMOVED as a user-facing surface — no
-`ExposureLabel` badge on feed cards, and the feed/story wire no longer
-carries an `exposure_label` field. The computed source-independence signal
-survives everywhere it does real work: the WS-I ranking
-features/penalty/quota and the
-`GET /v1/stories/:id/independent-sources` lineage read — consumed by the
-story page's "Independent sources" drawer (`IndependentSourcesDrawer`, the
-SPEC §7.6 promise): exposure label, source lineage + syndication, the "Same
-coverage elsewhere" co-group members (near-duplicates by MinHash +
-confirmed-syndication siblings, visibility-gated server-side), the
-evidence-steward-marked primary sources, and the story's claims
-(`GET /v1/stories/:id/claims`) — remains available),
+Client: MERI has NO reader-facing surface — the exposure label was removed
+from feed cards, and the story page's "Independent sources" lineage drawer
+(with its `GET /v1/stories/:id/independent-sources` and
+`GET /v1/stories/:id/claims` reads) was removed outright: comment-centric
+sourcing (citations on contributions, the Sources view, the §5.6 sources
+count) superseded story-level lineage. The computed source-independence
+signal survives everywhere it does real work: the WS-I ranking
+features/penalty/quota. The remaining client surfaces are
 `WhereInterpretationsDiffer` (+ the needs-context framing; human lens
 NAMES resolved through the room when available), the composer
 `ContextWarning` (dismissible; the user can always proceed), the
@@ -430,7 +429,7 @@ rarely — computed entirely in-browser, sentinel-excluded, and recovering over
 time; `apps/web/src/signals/topic-dampening.ts`), and the PHI-4 wellbeing
 controls ("Reset topic
 history" clears the device-local sequence and the quiet-topic set;
-"Reduce personalization" switches the feed mode) — plus the per-topic
+"Reduce personalization" switches the feed to the non-personalized `new` sort) — plus the per-topic
 repeats preference control on the story page (WS-H.2.3c), persisted in
 `personalization_settings.topic_repeat_preference` and consumable by
 the WS-I ranking pipeline. Feed-mode choices sync to the durable settings
@@ -508,11 +507,9 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   override remain consumable through the same surfaces.
 - **WS-J** takes ownership of the analyst queue UX and supplies the
   hostility signal behind the Hodge seam (defaults to 0) and the appeals
-  flow that surfaces `mfci_cases.appeal_summary` and the
-  `scoi_context_actions` records (every moderator context action is
-  already reason-coded and audited for it). Physical thread merge/split
-  tree mechanics ride WS-G/WS-J moderation tooling; until then merge/
-  separate are audited records surfaced on the steward report.
+  flow that surfaces `mfci_cases.appeal_summary`. (The former
+  merge/annotate/separate context-action records were removed with the
+  WS-H.4.3d surface; historic audit rows remain in the append-only log.)
 - **WS-K** owns learned restriction maps (SCOI v2 estimation), the
   framing/misleading classifiers MERI's semantic dimension awaits, and
   governed summary generation.
@@ -538,3 +535,20 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **WS-P** wires the GWEI release gate and the CID model-release gate into
   the experiment framework, and owns the transparency-report pipeline the
   export feeds.
+- **PHI session-health path signature (`classifySessionHealth`, WS-H.7.6b):**
+  the action×time Lévy area (`actionTimeArea = signedArea(sig, 1, 2)`) is
+  computed, returned in `features`, and PERSISTED on the PHI invariant output's
+  score vector (`services-impl.ts`, key `action_time_area`) — a recorded,
+  order-sensitive calibration signal. The classification chain deliberately uses
+  only the interpretable scalar heuristics (rapid-reply/return, revisit ratio,
+  deep-action share) and does NOT threshold on the area. This is not an
+  oversight: execution shows the area's SIGN is a geometric pacing signal that
+  does not separate the health classes — a constructive `read→open_source→
+  question` (+0.70) and a bursty `scroll→reply→scroll` (+0.75) both circulate
+  POSITIVELY, and a genuine rage burst is also positive (+0.17), so no simple
+  sign/threshold on this one projection is a valid classifier. **Closure
+  target:** the principled consumer is a LEARNED model over the full truncated
+  signature (all level-2/level-3 terms, not this single projection), delivered
+  through the WS-P experiment/calibration framework; until then the signature is
+  recorded per session and the classifier stays on the scalar heuristics (no
+  speculative threshold on a wellbeing signal).

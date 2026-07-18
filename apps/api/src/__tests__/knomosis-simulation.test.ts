@@ -196,6 +196,49 @@ describe('WS-L.4.1b/c proposal templates + simulated treasury', () => {
     }
   });
 
+  it('a retry REPLAYS even after the kill switch engages — gates are for NEW deposits', async () => {
+    const fixture = await freshKnomosisServices();
+    const { userId } = await seedUserWithSession(fixture.identity);
+    await passComprehension(fixture, userId);
+    const deps = simulationDeps(fixture.knomosis);
+    const key = crypto.randomUUID();
+    const first = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: key,
+    });
+    expect(first.ok).toBe(true);
+    // The payment_intent_creation kill switch engages AFTER the credit landed.
+    await fixture.knomosis.configStore.set(switchConfigKey('payment_intent_creation'), {
+      scopes: { global: true, regions: [], room_ids: [] },
+      release_card: null,
+      engaged_at: '2026-01-01T00:00:00.000Z',
+      deactivation_requested_by: null,
+    });
+    // The retry REPLAYS its result — idempotency runs before the mint-only gate,
+    // so the switch cannot hide the credit the retry cannot otherwise learn landed.
+    const retry = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: key,
+    });
+    expect(retry.ok).toBe(true);
+    // …but a NEW deposit (different key) IS paused by the engaged switch.
+    const fresh = await simDeposit(deps, {
+      roomId: ROOM,
+      userId,
+      asset: 'SIM-USDC',
+      amount: '1000000',
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(fresh.ok).toBe(false);
+    if (!fresh.ok) expect(fresh.code).toBe('kill_switch_active');
+  });
+
   it('rejects a deposit whose SUMMED balance would overflow 78 digits (R7-6)', async () => {
     const fixture = await freshKnomosisServices();
     const { userId } = await seedUserWithSession(fixture.identity);
@@ -996,6 +1039,7 @@ describe('WS-L.4.1g readiness gate + mode transitions', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => 'simulated',
       setMode: async () => true,
+      setModeIf: async (_r, expected) => expected === 'simulated',
     };
     const readinessDeps = {
       checklist: fixture.knomosis.readinessChecklist,
@@ -1027,6 +1071,11 @@ describe('WS-L.4.1g readiness gate + mode transitions', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => mode as never,
       setMode: async (_r, m) => {
+        mode = m;
+        return true;
+      },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
         mode = m;
         return true;
       },

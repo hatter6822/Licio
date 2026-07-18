@@ -103,7 +103,7 @@ function Gallery(): React.ReactElement {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [checked, setChecked] = useState(true);
   const [radio, setRadio] = useState('a');
-  const [select, setSelect] = useState('balanced');
+  const [select, setSelect] = useState('best');
   const [focusOn, setFocusOn] = useState(false);
 
   return (
@@ -141,12 +141,12 @@ function Gallery(): React.ReactElement {
             <Input label="Email" error="Enter a valid email" />
             <TextArea label="What are you adding?" maxLength={280} />
             <Select
-              label="Feed order"
+              label="Sort by"
               value={select}
               onValueChange={setSelect}
               options={[
-                { value: 'balanced', label: 'Balanced' },
-                { value: 'chronological', label: 'Chronological' },
+                { value: 'best', label: 'Best' },
+                { value: 'new', label: 'New' },
               ]}
             />
             <Checkbox label="Email me updates" checked={checked} onCheckedChange={setChecked} />
@@ -210,7 +210,6 @@ function Gallery(): React.ReactElement {
             }}
             sourcesCount={3}
             corrections={{ active: 1, validated: 0, incorrect: 0 }}
-            distributionReason="Rising from independent source opens and sourced comments"
             contextChips={[{ id: 'c2', label: '2 primary sources' }]}
             onSave={() => undefined}
             onOpenContext={() => undefined}

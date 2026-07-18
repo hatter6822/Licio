@@ -270,6 +270,11 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
         mode = m;
         return true;
       },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
+        mode = m;
+        return true;
+      },
     };
     const { cookie } = await seedUserWithSession(fixture.identity);
     const readiness = await req('GET', `/rooms/${ROOM}/governance/readiness`, cookie);
@@ -301,8 +306,19 @@ describe('WS-L.4.1g readiness + mode transition over HTTP', () => {
         mode = m;
         return true;
       },
+      setModeIf: async (_r, expected, m) => {
+        if (mode !== expected) return false;
+        mode = m;
+        return true;
+      },
     };
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    // The READINESS read serves ordinary rooms (W7): the ordinary→simulated
+    // checklist is how a room enters the lifecycle — the dialog's lifecycle
+    // tab must not land on a 404.
+    const readiness = await req('GET', `/rooms/${ROOM}/governance/readiness`, cookie);
+    expect(readiness.status).toBe(200);
+    expect(((await readiness.json()) as { room_id: string }).room_id).toBe(ROOM);
     // The tab 404s for an ordinary room, but the mode transition to simulated
     // is the safe onboarding direction.
     const transition = await req('POST', `/rooms/${ROOM}/governance/mode`, cookie, {
@@ -357,6 +373,7 @@ describe('governance surface fail-closed gates', () => {
     fixture.knomosis.roomMode = {
       currentMode: async () => 'simulated',
       setMode: async () => true,
+      setModeIf: async (_r, expected) => expected === 'simulated',
     };
     const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
     const res = await req('POST', `/rooms/${ROOM}/governance/mode`, cookie, {

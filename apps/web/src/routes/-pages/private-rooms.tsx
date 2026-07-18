@@ -25,6 +25,9 @@ export function PrivateRoomsPage(): React.ReactElement {
   const t = useT();
   usePageFocus(t('privateRoom.list.title', 'Private rooms'));
   const navigate = useNavigate();
+  // Retrace history to wherever the list was opened from (usually the profile
+  // menu); a cold-loaded deep link falls back (replacing) to the profile hub.
+  const goBack = useGoBack(() => void navigate({ to: '/profile', replace: true }));
   const [rooms, setRooms] = useState<RoomSummary[] | null>(null);
   const [showWizard, setShowWizard] = useState(false);
 
@@ -37,6 +40,7 @@ export function PrivateRoomsPage(): React.ReactElement {
     <>
       <PageHeader
         title={t('privateRoom.list.title', 'Private rooms')}
+        onBack={goBack}
         actions={
           <Button type="button" variant="primary" onClick={() => setShowWizard((s) => !s)}>
             {showWizard

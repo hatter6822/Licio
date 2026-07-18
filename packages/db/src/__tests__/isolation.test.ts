@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertContextsClassified,
+  COMPLIANCE_CONTEXT_TABLES,
+  CONTEXT_SCHEMAS,
   checkSchemaIsolation,
   FK_INTROSPECTION_SQL,
   type IntrospectionRow,
@@ -395,5 +397,69 @@ describe('introspectEventPartitions', () => {
       { child_schema: 'public', child_table: 'events_default' },
     ]);
     expect(partitions).toEqual(['public.events_attention_aggregated', 'public.events_default']);
+  });
+});
+
+describe('WS-N compliance context isolation (WS-N.2.2d)', () => {
+  it('classifies every compliance table and covers the compliance schema fail-closed', () => {
+    expect(CONTEXT_SCHEMAS).toContain('compliance');
+    for (const table of COMPLIANCE_CONTEXT_TABLES) {
+      expect(ISOLATION_CONTEXTS.walletTables.has(table), `${table} seeds the BFS`).toBe(true);
+    }
+    // Every table declared in migration 0088 must be classified — a new
+    // compliance table added without listing it fails here (fail-closed).
+    const result = assertContextsClassified(
+      [...COMPLIANCE_CONTEXT_TABLES, 'compliance.new_unclassified'],
+      ISOLATION_CONTEXTS,
+      CONTEXT_SCHEMAS,
+    );
+    expect(result.classified).toBe(false);
+    expect(result.unclassified).toEqual(['compliance.new_unclassified']);
+  });
+
+  it('classification covers exactly the migration-0088 table set', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const sql = await readFile(
+      join(import.meta.dirname, '../../drizzle/0088_ws_n_compliance.sql'),
+      'utf8',
+    );
+    const created = new Set<string>();
+    for (const match of sql.matchAll(/CREATE TABLE "compliance"\."([^"]+)"/g)) {
+      if (match[1]) created.add(`compliance.${match[1]}`);
+    }
+    expect([...created].sort()).toEqual([...COMPLIANCE_CONTEXT_TABLES].sort());
+  });
+
+  it('holds isolation for the real compliance FK shape (users + intra-compliance only)', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [
+        { from: 'compliance.financial_compliance_case', to: 'public.users' },
+        { from: 'compliance.compliance_case_audit', to: 'compliance.financial_compliance_case' },
+        { from: 'compliance.region_declaration', to: 'public.users' },
+        { from: 'compliance.disclosure_acknowledgment', to: 'public.users' },
+        { from: 'compliance.sar_report', to: 'compliance.financial_compliance_case' },
+        { from: 'compliance.lawful_access_request', to: 'compliance.financial_compliance_case' },
+        { from: 'public.events', to: 'public.users' },
+        { from: 'public.signal_ledger_entries', to: 'public.users' },
+      ],
+      views: [],
+    };
+    expect(checkSchemaIsolation(graph, ISOLATION_CONTEXTS).isolated).toBe(true);
+  });
+
+  it('fails if a view ever bridges a compliance table to an attention table', () => {
+    const graph: SchemaGraph = {
+      foreignKeys: [{ from: 'compliance.financial_compliance_case', to: 'public.users' }],
+      views: [
+        {
+          view: 'public.v_compliance_attention',
+          dependsOn: ['compliance.financial_compliance_case', 'public.attention_aggregates'],
+        },
+      ],
+    };
+    const result = checkSchemaIsolation(graph, ISOLATION_CONTEXTS);
+    expect(result.isolated).toBe(false);
+    expect(result.offendingPath).toContain('public.v_compliance_attention');
   });
 });

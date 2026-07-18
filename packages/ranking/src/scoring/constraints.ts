@@ -17,7 +17,7 @@
 
 import type { RankingSurface } from '../schemas/candidate.js';
 import type { ConstraintApplication } from '../schemas/decision-log.js';
-import type { FeatureVector, ScoiLevel } from '../schemas/feature-vector.js';
+import type { FeatureVector } from '../schemas/feature-vector.js';
 import type { RankingProfileConfig } from '../schemas/profile.js';
 import type { ConstraintFlag } from '../schemas/scored-item.js';
 
@@ -25,7 +25,6 @@ import type { ConstraintFlag } from '../schemas/scored-item.js';
 export interface ConstraintEnforcement {
   mfci: boolean;
   phi: boolean;
-  scoi: boolean;
   gwei: boolean;
   meri: boolean;
 }
@@ -33,7 +32,6 @@ export interface ConstraintEnforcement {
 export const SHADOW_CONSTRAINT_ENFORCEMENT: ConstraintEnforcement = {
   mfci: false,
   phi: false,
-  scoi: false,
   gwei: false,
   meri: false,
 };
@@ -45,20 +43,11 @@ const MFCI_ORDER: Readonly<Record<string, number>> = {
   severe: 3,
 };
 
-const SCOI_ORDER: Readonly<Record<ScoiLevel, number>> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  very_high: 3,
-};
-
 export interface ConstraintEvaluation {
   /** True ⇒ the item stays in the feasible set for this surface. */
   feasible: boolean;
   flags: ConstraintFlag[];
   applications: ConstraintApplication[];
-  /** Multiplier (0, 1] applied to the final score (SCOI reduced spread). */
-  distributionMultiplier: number;
 }
 
 export interface ConstraintContext {
@@ -69,10 +58,10 @@ export interface ConstraintContext {
 }
 
 /**
- * Evaluate the per-item hard constraints (MFCI severe exclusion, SCOI
- * gating). MERI cluster caps and source/topic balancing are per-FEED
- * constraints applied by the diversification stage; PHI is per-USER and
- * evaluated by `phiDiversification`.
+ * Evaluate the per-item hard constraints (MFCI severe exclusion). MERI
+ * cluster caps and source/topic balancing are per-FEED constraints applied
+ * by the diversification stage; PHI is per-USER and evaluated by
+ * `phiDiversification`.
  */
 export function evaluateItemConstraints(
   features: FeatureVector,
@@ -83,7 +72,6 @@ export function evaluateItemConstraints(
   const flags: ConstraintFlag[] = [];
   const applications: ConstraintApplication[] = [];
   let feasible = true;
-  let distributionMultiplier = 1;
 
   // --- MFCI: at/above the profile's exclusion state, the item leaves
   // cross-community distribution and is flagged for immediate review.
@@ -109,54 +97,7 @@ export function evaluateItemConstraints(
     }
   }
 
-  // --- SCOI: context gating ladder (SPEC §10.6; actions in WS-I.2.4c).
-  const scoi = features.scoi_level;
-  if (scoi !== undefined) {
-    const level = SCOI_ORDER[scoi];
-    if (level >= SCOI_ORDER[profile.constraints.scoi_context_card_at]) {
-      // The context card is INFORMATIONAL (never a sanction): it attaches
-      // regardless of promotion state — "Needs Context" never means false.
-      flags.push('scoi_context_card');
-      applications.push({
-        constraint: 'scoi_context_required',
-        item_id: features.item_id,
-        threshold: profile.constraints.scoi_context_card_at,
-        actual: scoi,
-        action: 'context_card',
-        enforced: true,
-      });
-    }
-    if (level >= SCOI_ORDER[profile.constraints.scoi_reduce_at] && context.crossCommunity) {
-      applications.push({
-        constraint: 'scoi_reduced_distribution',
-        item_id: features.item_id,
-        threshold: profile.constraints.scoi_reduce_at,
-        actual: scoi,
-        action: 'reduced',
-        enforced: enforcement.scoi,
-      });
-      if (enforcement.scoi) {
-        flags.push('scoi_reduced_distribution');
-        distributionMultiplier *= profile.constraints.scoi_reduce_multiplier;
-      }
-    }
-    if (scoi === 'very_high' && context.crossCommunity) {
-      applications.push({
-        constraint: 'scoi_paused_pending_review',
-        item_id: features.item_id,
-        threshold: 'very_high',
-        actual: scoi,
-        action: 'paused',
-        enforced: enforcement.scoi,
-      });
-      if (enforcement.scoi) {
-        feasible = false;
-        flags.push('scoi_paused');
-      }
-    }
-  }
-
-  return { feasible, flags, applications, distributionMultiplier };
+  return { feasible, flags, applications };
 }
 
 /**

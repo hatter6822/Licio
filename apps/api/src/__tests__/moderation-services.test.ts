@@ -192,6 +192,40 @@ describe('submitReport', () => {
     expect(c.ok && c.response.idempotent).toBe(true);
   });
 
+  it('replays an existing report BEFORE the key-material scan (offline-idempotent, WS-N.2.3e)', async () => {
+    const op = 'op-replay-key';
+    // Accepted with clean text (or before the filter / a detector tuning shipped).
+    const first = await submitReport(
+      services,
+      REPORTER,
+      report({ local_operation_id: op, context: 'Please look into this thread.' }),
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    // A lost-response RETRY under the SAME op id now carries key-like text: it
+    // must REPLAY the stored report (storing no new secret), never be denied
+    // `key_material_blocked` — the scan gates a NEW row only.
+    const retry = await submitReport(
+      services,
+      REPORTER,
+      report({ local_operation_id: op, context: 'a'.repeat(64) }),
+    );
+    expect(retry.ok).toBe(true);
+    if (retry.ok) {
+      expect(retry.response.report_id).toBe(first.response.report_id);
+      expect(retry.response.idempotent).toBe(true);
+    }
+  });
+
+  it('still blocks key material on a report that would create a NEW row', async () => {
+    const r = await submitReport(
+      services,
+      REPORTER,
+      report({ local_operation_id: 'op-new-key', context: 'a'.repeat(64) }),
+    );
+    expect(r).toMatchObject({ ok: false, code: 'key_material_blocked' });
+  });
+
   it('routes an emergency reason code to the emergency path and pages on-call', async () => {
     const r = await submitReport(services, REPORTER, report({ reason_code: 'MOD_THREAT_001' }));
     expect(r.ok && r.response.routed_to).toBe('emergency');
@@ -1170,6 +1204,34 @@ describe('appeals (independence enforced)', () => {
     });
     expect(dup.ok).toBe(false);
     expect(!dup.ok && dup.code).toBe('appeal_already_exists');
+  });
+
+  it('replays an existing appeal BEFORE the key-material scan (offline-idempotent, WS-N.2.3e)', async () => {
+    const actionId = await applyHide();
+    const first = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'Please reconsider.',
+    });
+    expect(first.ok).toBe(true);
+    // A lost-response retry whose statement now trips the key-material detector
+    // (a tuning change, or an appeal accepted before the filter shipped) recovers
+    // the EXISTING appeal, not a fresh key_material_blocked — no new row either way.
+    const retry = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'a'.repeat(64),
+    });
+    expect(retry.ok).toBe(false);
+    if (!retry.ok) expect(retry.code).toBe('appeal_already_exists');
+  });
+
+  it('still blocks key material on a NEW appeal (would create a row)', async () => {
+    const actionId = await applyHide();
+    const r = await submitAppeal(services, AUTHOR, {
+      action_id: actionId,
+      user_statement: 'a'.repeat(64),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('key_material_blocked');
   });
 
   it('#1 rejects a modify whose action does not apply to the original target type', async () => {

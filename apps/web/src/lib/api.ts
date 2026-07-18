@@ -28,14 +28,9 @@ import {
   debateArenaResponseSchema,
   type FeatureFlags,
   type FeedMode,
-  type FeedPreferences,
-  type FeedPreferencesPatch,
   type FeedResponse,
   featureFlagsResponseSchema,
-  feedPreferencesSchema,
   feedResponseSchema,
-  type IndependentSourcesResponse,
-  independentSourcesResponseSchema,
   type LensCreateRequest,
   type LensPublic,
   lensPublicSchema,
@@ -66,7 +61,6 @@ import {
   type StoryDetail,
   type StoryInterpretationsResponse,
   signalLedgerResponseSchema,
-  storyClaimsResponseSchema,
   storyCommentsResponseSchema,
   storyCreateResponseSchema,
   storyDebatesResponseSchema,
@@ -189,8 +183,10 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   return run;
 }
 
-/** The typed RPC client. All app calls go through {@link apiFetch}. */
-export const client = hc<AppType>(API_BASE, { fetch: apiFetch });
+/** The typed RPC client. All app calls go through {@link apiFetch}.  The
+ *  explicit annotation keeps the (very large) inferred structural type out of
+ *  the declaration emit (TS7056) without weakening any call-site typing. */
+export const client: ReturnType<typeof hc<AppType>> = hc<AppType>(API_BASE, { fetch: apiFetch });
 
 async function normalizeError(response: Response): Promise<ApiClientError> {
   let code = `http_${response.status}`;
@@ -252,26 +248,6 @@ export async function fetchStoryInterpretations(
     param: { storyId },
   });
   return parseResponse(response, storyInterpretationsResponseSchema);
-}
-
-/** The SPEC §7.6 independent-sources drawer payload (MERI lineage, WS-H.2.3a):
- *  exposure label, publisher lineage, same-coverage group, primary sources. */
-export async function fetchIndependentSources(
-  storyId: string,
-): Promise<IndependentSourcesResponse> {
-  const response = await client.v1.stories[':storyId']['independent-sources'].$get({
-    param: { storyId },
-  });
-  return parseResponse(response, independentSourcesResponseSchema);
-}
-
-export type StoryClaimsResponse = z.infer<typeof storyClaimsResponseSchema>;
-
-/** The story's public claim projections (WS-F.1.2a; `independence_group_id`
- *  marks lineages MERI treats as non-independent, SPEC §13.6). */
-export async function fetchStoryClaims(storyId: string): Promise<StoryClaimsResponse> {
-  const response = await client.v1.stories[':storyId'].claims.$get({ param: { storyId } });
-  return parseResponse(response, storyClaimsResponseSchema);
 }
 
 export async function fetchThread(threadId: string): Promise<ThreadDetail> {
@@ -361,16 +337,6 @@ export async function createLens(roomId: string, request: LensCreateRequest): Pr
     json: request,
   });
   return parseResponse(response, lensPublicSchema);
-}
-
-export async function fetchFeedPreferences(): Promise<FeedPreferences> {
-  const response = await client.v1.feed.preferences.$get();
-  return parseResponse(response, feedPreferencesSchema);
-}
-
-export async function updateFeedPreferences(patch: FeedPreferencesPatch): Promise<FeedPreferences> {
-  const response = await client.v1.feed.preferences.$patch({ json: patch });
-  return parseResponse(response, feedPreferencesSchema);
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatusResponse> {

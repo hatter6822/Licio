@@ -234,7 +234,10 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - name: Audit dependencies
-        run: pnpm audit --audit-level=high
+        # `pnpm audit` calls the classic audit endpoint the registry retired
+        # (HTTP 410); this gate posts the lockfile to the documented bulk
+        # advisory successor with the same high/critical threshold.
+        run: pnpm audit:advisories
       - name: Lockfile integrity
         run: pnpm lint:lockfile
       - name: Check workspace boundaries

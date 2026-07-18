@@ -62,7 +62,11 @@ describe('ModerationConsole', () => {
     });
     const { container } = render(<ModerationConsole />, { wrapper: Providers });
     await waitFor(() => expect(screen.getByText(/MOD_THREAT_001/)).toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: 'Moderation console' })).toBeInTheDocument();
+    // The page header (h1 + back button) is the route page's; the component
+    // renders the labelled tabbed workspace — including the Sources tab (the
+    // ROLE_EVIDENCE surface presents as "Sources": sourcing is comment-centric).
+    expect(screen.getByRole('tablist', { name: 'Console sections' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Sources' })).toBeInTheDocument();
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 

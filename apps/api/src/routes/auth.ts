@@ -97,6 +97,15 @@ function createLoginRoutes(resolve: () => IdentityServices) {
               display_name: user.displayName,
               account_state: 'active',
               locale: user.locale ?? 'en-US',
+              // The user's OWN roles + doctrine grants: the client's
+              // console-navigation hints (`canAccess*Console` — the
+              // moderation console's real population is doctrine grants, not
+              // the platform `steward` role).  Deliberately absent from the
+              // login echoes (`authSessionResultSchema` is `.strict()`, so a
+              // new key would break stale cached bundles) — login flows
+              // re-read this status instead.
+              roles: user.roles,
+              steward_roles: user.stewardRoles,
             },
           }),
         );

@@ -22,7 +22,6 @@ const sample: StoryCardData = {
   sourcesCount: 3,
   corrections: { active: 1, validated: 2, incorrect: 1 },
   safetyState: 'under-review',
-  distributionReason: 'Multiple communities are engaging with improving coherence',
   contextChips: [
     { id: 'c1', label: '3 evidence cards' },
     { id: 'c2', label: '2 primary sources' },

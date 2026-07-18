@@ -57,7 +57,7 @@ export const profilePenaltiesSchema = z
     pD: z.number().nonnegative().optional(),
     /** WS-T validation BOOST — the sole ADDITIVE coefficient here: a `validated`
      *  story (challenged and proven accurate) is nudged UP by `vD`, applied
-     *  OUTSIDE the SCOI multiplier (symmetric with the dispute sink). CAPPED at 1
+     *  after the penalty subtraction (symmetric with the dispute sink). CAPPED at 1
      *  (half the ≤ 2 positive-score span) so a runtime/steward config can never
      *  set it high enough to HARD-promote a zero-signal validated story past a
      *  strong clean one — it stays a soft lift, never a guaranteed top. Optional,
@@ -80,12 +80,12 @@ export const profileConstraintsSchema = z
     gwei_max_disparity: z.number().positive(),
     /** Max items from one MERI duplicate cluster per feed page (≥ 1). */
     meri_max_per_cluster: z.number().int().min(1).max(10),
-    /** SCOI level at which a context card is required. */
-    scoi_context_card_at: z.enum(['medium', 'high', 'very_high']),
-    /** SCOI level at which cross-community distribution is reduced. */
-    scoi_reduce_at: z.enum(['high', 'very_high']),
-    /** Dampening multiplier applied at `scoi_reduce_at` (0 < m < 1). */
-    scoi_reduce_multiplier: z.number().gt(0).lt(1),
+    /** DEPRECATED — the SCOI constraint ladder was removed; these three keys
+     *  stay optional ONLY so decision-log `replay_inputs.profile_snapshot`
+     *  rows written before the removal keep parsing. Nothing reads them. */
+    scoi_context_card_at: z.enum(['medium', 'high', 'very_high']).optional(),
+    scoi_reduce_at: z.enum(['high', 'very_high']).optional(),
+    scoi_reduce_multiplier: z.number().gt(0).lt(1).optional(),
   })
   .strict();
 
@@ -302,9 +302,6 @@ const DEFAULT_CONSTRAINTS: z.infer<typeof profileConstraintsSchema> = {
   phi_sensitive_factor: 0.5,
   gwei_max_disparity: 0.35,
   meri_max_per_cluster: 2,
-  scoi_context_card_at: 'medium',
-  scoi_reduce_at: 'high',
-  scoi_reduce_multiplier: 0.5,
 };
 
 const DEFAULT_BALANCING: z.infer<typeof profileBalancingSchema> = {

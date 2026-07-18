@@ -521,6 +521,12 @@ When production must fall back from the matroid model to a general similarity-gr
 **ID:** WS-H.2.3a
 **Ref:** Section 7.6
 
+> **Superseded (2026-07):** the reader-facing MERI exposure label was removed
+> from feed cards, and later the story-page lineage drawer too — MERI has no
+> reader-facing surface. The computed labels/gains drive ranking (the
+> `exposure_independence` feature, redundancy penalty, §13.2 quota) only.
+> The original task text is retained below for the historical record.
+
 **Description:**
 Feed cards display MERI-derived labels: "New angle," "Independent source," "Duplicate context," or "Same claim, new evidence." Labels are derived from the independence dimensions and marginal gain category. The app never says "this is true because many outlets repeated it" -- repetition is not independence. MERI-5 satisfied: MERI features are explainable in user-facing terms.
 
@@ -543,6 +549,14 @@ Feed cards display MERI-derived labels: "New angle," "Independent source," "Dupl
 ### WS-H.2.3b Independent sources drawer
 **ID:** WS-H.2.3b
 **Ref:** Section 7.6
+
+> **Removed (2026-07):** the drawer and its public reads
+> (`/v1/stories/:id/independent-sources`, `/v1/stories/:id/claims`) were
+> removed — comment-centric sourcing (citations on contributions, the
+> Sources view, the §5.6 sources count) superseded story-level lineage as
+> the reader-facing surface. Claims + independence groups remain internal
+> MERI/WS-K inputs. The original task text is retained below for the
+> historical record.
 
 **Description:**
 Topic pages include an "independent sources" drawer that displays source lineage and evidence lineage for a story. Users can see which sources are independent, which share lineage, and what evidence bases support different claims. MERI-3 satisfied: topic pages expose source lineage and evidence lineage.
@@ -1569,10 +1583,10 @@ When narrow-loop or compulsive-session detection triggers, display a non-blockin
 **Ref:** Sections 11.5, 11.6
 
 **Description:**
-User controls reachable from the wellbeing prompt and feed settings: feed-mode switch (Balanced, Chronological, Source-diverse, Local, Low personalization), "reset topic history," and "reduce personalization." PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
+User controls reachable from the wellbeing prompt and feed settings: feed-mode switch (Best, Rising, Sources, Debates, New), "reset topic history," and "reduce personalization" (switches the feed to the non-personalized New sort). PHI-4 satisfied: users can reset or reduce personalization without deleting their account.
 
 **Acceptance criteria:**
-- Feed-mode switch accessible from prompt and from feed settings; modes: Balanced, Chronological, Source-diverse, Local, Low personalization.
+- Feed-mode switch accessible from prompt and from feed settings; modes: Best, Rising, Sources, Debates, New.
 - "Reset topic history" clears the user's topic-sequence state without affecting account or contributions.
 - "Reduce personalization" adjusts the personalization weight without full reset.
 - PHI-4 satisfied: reset/reduce personalization is available and does not require account deletion.

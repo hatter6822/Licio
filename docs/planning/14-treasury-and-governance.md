@@ -1,6 +1,17 @@
 # WS-M: Forum-Commons, Law-Packs, and Treasury
 
-**Milestone:** M4-M5 | **Priority:** 4-5 | **Dependencies:** WS-L (Knomosis gateway/wallets), WS-G (forum/conversation), WS-J (trust and safety), WS-N (compliance) | **Wave:** 8 | **Estimated duration:** 5-6 weeks
+**Milestone:** M4-M5 | **Priority:** 4-5 | **Dependencies:** WS-L (Knomosis gateway/wallets — **shipped**, residuals in `docs/knomosis/README.md`), WS-U (AI-governed rooms — **runtime shipped**, residuals in `docs/governance/README.md`), WS-G (forum/conversation — complete), WS-J (trust and safety — complete), WS-N (compliance — planned) | **Wave:** 8 | **Estimated duration:** 5-6 weeks
+
+> **Status: SHIPPED (2026-07-14)** behind the fail-closed `cryptoEnabled`/`governanceEnabled`
+> flags.  The implementation reference is `docs/treasury/README.md` (source layout, route
+> surface, invariants, operations, and the tracked residuals: the WS-N compliance engine,
+> the delegation/grant-review web forms, the m-of-n multisig ceremony UI, and the
+> WS-L-owned external-audit gates that precede any capped real-funds pilot).  This
+> document remains the design rationale + task decomposition; where it says "extend the
+> shipped artifact," that extension has now landed (migration `0082`, the
+> `apps/api/src/treasury/` services, the mode-aware `room-governance.ts` extensions, the
+> `treasury-governance.ts` route surface, and the `apps/web/src/components/treasury/`
+> member/steward surfaces).
 
 ---
 
@@ -12,19 +23,88 @@ This workstream is the application layer of the four-layer Knomosis interpretati
 
 > **AI-governed-rooms redesign (2026-06-19) — elected steward, Knomosis-vote model/prompt
 > approval, and an AI-executed treasury within bounds.** See `docs/planning/22-ai-governed-rooms.md`
-> (WS-U) and SPEC §16.6/§17.4/§17.5/§17.6/§24.6. WS-M additions: (1) the **elected room steward**
-> seat + yearly **Knomosis election** (`room_steward_seat`, `steward_election`, in the `knomosis`
-> bounded context); (2) **model/prompt approval as a governance proposal type** (member-ratified
-> by Knomosis vote); (3) the community-approved **AI agent as executor** of voted-interval reports,
-> member benefits/distributions, and the community-**voted investment strategy for the room
-> treasury** — each executing through the kernel within the law-pack's caps/intervals/categories/
-> timelocks/COI, with **the agent holding no keys** (it submits signed actions via WS-L). The
-> seven WS-M invariants below are **inherited unchanged** and are precisely the safety envelope:
-> invariant 3 (**platform-moderation supremacy**) is the Layer-3 legal floor the agent can never
-> countermand, and invariant 4 (**no pay-to-rank**) firewalls the agent from ranking exactly as it
-> firewalls the treasury. Managing the *room treasury* within voted bounds is permitted;
-> personalized financial advice to, or wealth profiling of, *individual users* stays prohibited
-> (SPEC §24.5).
+> (WS-U) and SPEC §16.6/§17.4/§17.5/§17.6/§24.6. Of the three WS-M additions this redesign
+> introduced, the first two **have since shipped with the WS-U runtime** (2026-06-20; see
+> `docs/governance/README.md`): (1) the **elected room steward** seat + yearly **Knomosis
+> election** (`room_steward_seat`, `steward_election`, `steward_governance_vote` in the `knomosis`
+> bounded context, with the pure `tallyElection` in `@licio/governance`); (2) **model/prompt
+> approval by member-ratified Knomosis vote** (the shipped `model_ratification` /
+> `model_ratification_ballot` flow with a frozen electorate — a dedicated ratification vote, not a
+> row in the WS-M proposal table). (3) the community-approved **AI agent as executor** of
+> voted-interval reports, member benefits/distributions, and the community-**voted investment
+> strategy for the room treasury** is **partially shipped**: the proof-carrying kernel
+> (`evaluateTreasuryAction` + investment bands in `@licio/governance`) and the fail-closed
+> `GovernanceService.executeTreasuryAction` executor exist behind the crypto flag, and **WS-M owns
+> their missing production caller** — the proposal-lifecycle → wallet/payment-intent flow (the
+> tracked WS-U residual). Each execution goes through the kernel within the law-pack's
+> caps/intervals/categories/timelocks/COI, with **the agent holding no keys** (it submits signed
+> actions via WS-L). The seven WS-M invariants below are **inherited unchanged** and are precisely
+> the safety envelope: invariant 3 (**platform-moderation supremacy**) is the Layer-3 legal floor
+> the agent can never countermand, and invariant 4 (**no pay-to-rank**) firewalls the agent from
+> ranking exactly as it firewalls the treasury. Managing the *room treasury* within voted bounds
+> is permitted; personalized financial advice to, or wealth profiling of, *individual users* stays
+> prohibited (SPEC §24.5).
+
+### Shipped substrate this plan builds on (2026-07-13 audit)
+
+This document predates most of the WS-L/WS-U implementation. The following already exists in the
+codebase; **every task below that names one of these artifacts means "extend or evolve the shipped
+artifact" (with a migration where the shape changes), never "define it greenfield"** — implementing
+the original text as written would collide with live tables and routes in the same `knomosis`
+Postgres schema.
+
+- **WS-L is complete** (`docs/knomosis/README.md`): the pinned deployment manifest + `check:knomosis-pins`
+  (WS-L.1.1a), the shared EIP-712 typed-data registry + full-disclosure preview assembly
+  (`packages/shared/src/knomosis/`, WS-L.2.6), the ordered preflight pipeline (WS-L.3.1),
+  submission + anti-replay nonces (WS-L.3.2), gateway-event ingestion with fail-closed gap/orphan
+  halt (WS-L.3.3), three-source reconciliation + the `canExpandTreasury` expansion gate (WS-L.3.4),
+  the five kill switches incl. `payment_intent_creation` (WS-L.3.5), and ECDSA(low-s)/EIP-1271
+  verification (`apps/api/src/knomosis/signatures.ts`). All behind the fail-closed
+  `cryptoEnabled`/`governanceEnabled` flags (`apps/api/src/knomosis/config.ts` is the single
+  runtime source; `FAIL_CLOSED_FLAGS` on the client).
+- **WS-L.4 simulated governance is live** (`apps/api/src/knomosis/simulation.ts`,
+  `apps/api/src/routes/room-governance.ts`): the governance tab bundle
+  (`GET /rooms/:roomId/governance`), proposal templates/create/vote/execute
+  (**simulated-mode-only** — real modes execute via WS-M), the simulated treasury
+  (`GET /rooms/:roomId/governance/treasury`, `POST …/treasury/deposits`), the append-only
+  audit log, the comprehension quiz (WS-L.4.1e), and the **WS-L.4.1g readiness gate + mode
+  transitions** (`GET /rooms/:roomId/governance/readiness`,
+  `POST /rooms/:roomId/governance/mode`; shipped edges `ordinary → simulated` and
+  `simulated → testnet`, consuming the fail-closed WS-M.1.2 `ReadinessChecklistPort` seam in
+  `apps/api/src/knomosis/readiness.ts`).
+- **The WS-U runtime is shipped** (`docs/governance/README.md`): the pure `@licio/governance`
+  domain (treasury kernel + investment bands, capability model + floor-reserved disjointness,
+  `tallyElection`/`tallyRatification`, lawmaking summarize/schedule/attest, the deterministic
+  moderation bound), the `knomosis` pgSchema tables (`room_steward_seat`, `steward_election`,
+  `steward_governance_vote`, `room_governance_model`, `room_governance_prompt`,
+  `model_ratification`, `model_ratification_ballot`, `room_law_pack`, `room_agent_binding`,
+  `agent_action_log`, `room_pending_remoderation`, `agent_treasury_action`; migrations
+  0035–0038/0053/0054/0066/0067), and the WS-U HTTP surface
+  (`apps/api/src/routes/governance.ts`: steward/elections/models/ratification/law-packs/
+  lawmaking-summarize/agent + freeze/unfreeze). The WS-L.4 sim routes and the WS-U routes
+  compose without overlap.
+- **Shipped WS-L governance tables** (`packages/db/src/schema/knomosis-gateway.ts`, same
+  `knomosis` schema): `governance_proposal`, `governance_proposal_vote`, `governance_signature`,
+  `governance_audit_log`, `sim_treasury`, `sim_treasury_entry`, `knomosis_deployment`,
+  `on_chain_event`, `knomosis_action_record`, `knomosis_action_nonce`, `wallet_actor_mapping`,
+  `knomosis_reconciliation_result`, `knomosis_receipt`, `comprehension_result`.
+  `governance_mode` (the shared seven-value `GOVERNANCE_MODES` enum) and `charter_summary`
+  already live **on the `rooms` row** (read-only in WS-G; transitions owned by the WS-L.4.1g
+  gate).
+- **The knomosis event bounded context is registered**
+  (`packages/shared/src/schemas/events/knomosis/index.ts`): 18 topics including every event this
+  document names (`governance.proposal.created/executed/challenged`,
+  `governance.signature.recorded`, `room.governance.mode.changed`, `treasury.deposit.indexed`,
+  `treasury.grant.approved`, `treasury.payout.executed`, `payment.intent.created/failed`,
+  `payment.receipt.indexed`). WS-M emits through these registered topics.
+
+**What remains genuinely WS-M-owned** (unchanged in substance): the real-asset
+`RoomGovernanceProfile`/`RoomTreasury`/`PaymentIntent`/`TreasuryGrant`/`ActionBudget`/
+`DelegationRecord` entities and their lifecycles, the production proposal lifecycle (deliberation →
+voting → challenge → execution) that **calls the shipped `executeTreasuryAction`**, the full
+law-pack bundle + validation + versioning, the production mode-transition edges beyond
+`simulated → testnet`, deposit/spend/cap/reservation enforcement, freeze/pause propagation,
+three-way treasury reconciliation on real balances, and the full §17.5 anti-capture suite.
 
 ### Invariants this workstream must never violate
 
@@ -40,7 +120,7 @@ These constraints are restated here because every task below inherits them, and 
 
 ### Bounded-context placement
 
-All entities defined in this workstream (`RoomGovernanceProfile`, `LawPack`, `RoomTreasury`, `GovernanceProposal`, `GovernanceSignature`, `TreasuryGrant`, `PaymentIntent`, plus the supporting `ActionBudget`, `DelegationRecord`, `GovernanceAuditEntry`, and reconciliation snapshot tables introduced below) live in the Knomosis bounded context (Section 21.5), physically and logically separated from feed ranking and ordinary social analytics. The cross-context appendix (end of this document) consolidates the full Drizzle schema, zod schemas, state-transition tables, API shapes, and policy structures so reviewers can verify isolation and completeness in one place.
+All entities defined in this workstream (`RoomGovernanceProfile`, `LawPack`, `RoomTreasury`, `GovernanceProposal`, `GovernanceSignature`, `TreasuryGrant`, `PaymentIntent`, plus the supporting `ActionBudget`, `DelegationRecord`, `GovernanceAuditEntry`, and reconciliation snapshot tables introduced below) live in the Knomosis bounded context (Section 21.5), physically and logically separated from feed ranking and ordinary social analytics.  The `knomosis` Postgres schema is **already instantiated** (`knomosisSchema = pgSchema('knomosis')`, `packages/db/src/schema/governance.ts`) and shared with the shipped WS-L/WS-U tables listed in the substrate section above; the WS-D.3.2 BFS isolation proof (`packages/db/src/isolation.ts`) already covers it.  Where a WS-M entity collides with a shipped table of the same name (`governance_proposal`, `governance_signature`, `governance_audit_log`, `room_law_pack`), the task evolves that table by migration. The cross-context appendix (end of this document) consolidates the full Drizzle schema, zod schemas, state-transition tables, API shapes, and policy structures so reviewers can verify isolation and completeness in one place.
 
 ---
 
@@ -52,6 +132,15 @@ All entities defined in this workstream (`RoomGovernanceProfile`, `LawPack`, `Ro
 
 **Description:**
 Define the `RoomGovernanceProfile` entity with all fields from the data model: `room_id` (FK to Room), `governance_mode` (enum: `ordinary`, `simulated`, `testnet`, `capped_production`, `mature_production`, `frozen`, `migrating`), `law_pack_id` (FK to LawPack, nullable for ordinary rooms), `charter_version_id` (FK to charter version record), `treasury_id` (FK to RoomTreasury, nullable), `quorum_policy_ref` (JSONB reference to quorum rules within the law-pack), `threshold_policy_ref` (JSONB reference to threshold rules), `timelock_policy_ref` (JSONB reference to timelock rules), `jurisdiction_policy_id` (FK to JurisdictionFeaturePolicy), `freeze_state` (enum: `active`, `frozen`). When `freeze_state = frozen`, all governance actions -- proposals, votes, executions, treasury operations -- are halted. The schema lives in the Knomosis bounded context, isolated from ranking and social analytics (Section 21.5).
+
+> **Shipped substrate.** The seven-value `governance_mode` enum is already the shared SSOT
+> (`GOVERNANCE_MODES` in `packages/shared/src/schemas/room.ts`), and `governance_mode` +
+> `charter_summary` already live **on the `rooms` row** (default `ordinary`; read-only in WS-G,
+> written only by the WS-L.4.1g transition gate through the `RoomModePort` seam). Introducing
+> `room_governance_profile` must reconcile with that placement: either migrate the mode into the
+> profile and repoint `RoomModePort`, or keep the room-row column as the fast read model with the
+> profile as the transition owner — one SSOT, decided and enforced in this task, never two
+> independently writable copies.
 
 **Drizzle schema (authoritative shape; full version in appendix):**
 ```ts
@@ -102,11 +191,21 @@ export const roomGovernanceProfile = knomosisSchema.table('room_governance_profi
 **Description:**
 Implement the governance mode state machine that enforces valid transitions between modes. Valid transitions: `ordinary -> simulated`, `simulated -> testnet`, `testnet -> capped_production`, `capped_production -> mature_production`, `mature_production -> frozen`, any mode `-> frozen` (emergency), `frozen -> migrating` (after remediation review), `migrating -> capped_production` or `migrating -> ordinary` (rollback). All transitions require audit log entries with actor, reason, and timestamp. The `frozen` state halts all governance actions immediately -- proposals, votes, executions, deposits, and spend authorizations are blocked. Transitions to production modes require readiness checklist completion (WS-M.1.2e).
 
+> **Shipped substrate.** The first two edges are live (WS-L.4.1g,
+> `apps/api/src/knomosis/readiness.ts` `PERMITTED_TRANSITIONS` +
+> `POST /rooms/:roomId/governance/mode`): `ordinary → simulated` requires **no readiness
+> checklist** — entering simulation is the safe direction (SPEC §16.5: simulated governance
+> without a treasury runs independently of the crypto gate) — and `simulated → testnet` requires
+> the **full** gate. Both transitions are steward/staff-only and already audit both the request
+> (`mode_transition_requested`) and the application (`mode_transition_applied`) to
+> `governance_audit_log`. This task **extends** `PERMITTED_TRANSITIONS` with the remaining edges
+> below; it does not re-implement the shipped ones.
+
 **Governance mode transition table (authoritative):**
 
 | From \\ To | ordinary | simulated | testnet | capped_production | mature_production | frozen | migrating |
 |---|---|---|---|---|---|---|---|
-| **ordinary** | — | ✅ checklist | ❌ | ❌ | ❌ | ✅ emergency | ❌ |
+| **ordinary** | — | ✅ free (safe direction) | ❌ | ❌ | ❌ | ✅ emergency | ❌ |
 | **simulated** | ✅ rollback | — | ✅ checklist | ❌ | ❌ | ✅ emergency | ❌ |
 | **testnet** | ✅ rollback | ❌ | — | ✅ checklist+legal | ❌ | ✅ emergency | ❌ |
 | **capped_production** | ❌ | ❌ | ❌ | — | ✅ checklist+audit | ✅ emergency | ✅ via frozen only |
@@ -114,7 +213,7 @@ Implement the governance mode state machine that enforces valid transitions betw
 | **frozen** | ❌ | ❌ | ❌ | ❌ | ❌ | — | ✅ post-remediation |
 | **migrating** | ✅ rollback | ❌ | ❌ | ✅ resume | ❌ | ✅ emergency | — |
 
-Notes: "checklist" = WS-M.1.2e gate; "legal" = jurisdiction approval (WS-N); "audit" = external audit sign-off (WS-O, Section 17.11). Any cell not marked ✅ is rejected with `INVALID_MODE_TRANSITION`. Every accepted transition writes a `GovernanceAuditEntry` (WS-M.4.3c).
+Notes: "free (safe direction)" = no readiness required (shipped behavior, WS-L.4.1g); "checklist" = WS-M.1.2e gate; "legal" = jurisdiction approval (WS-N); "audit" = external audit sign-off (WS-O, Section 17.11). Any cell not marked ✅ is rejected with `INVALID_MODE_TRANSITION` (the shipped gate's code is `transition_not_permitted`; unify on one code in this task). Every accepted transition writes a `GovernanceAuditEntry` (WS-M.4.3c).
 
 **Acceptance criteria:**
 - All valid transitions are accepted and produce updated records.
@@ -178,10 +277,10 @@ Display the room's current governance mode prominently in the governance tab and
 **Ref:** Section 16.5
 
 **Description:**
-Require a plain-language charter before a room can enable any governance mode beyond `ordinary`. The charter must describe: the room's purpose and scope; how decisions are made; how funds (if any) are managed; member rights and responsibilities; dispute resolution process; and conditions under which the charter can be amended. The charter is stored as a versioned document with immutable version history. Each version is hash-committed for integrity. The charter must be written in plain language accessible to a general audience, not legal jargon.
+Require a plain-language charter before a room can leave `simulated` for any real-asset governance mode (`testnet`+; entering `simulated` itself is ungated per the shipped WS-L.4.1g edge — the charter is verified by the `charter_present` readiness item when the room opts into Knomosis-enabled governance, SPEC §16.5). The charter must describe: the room's purpose and scope; how decisions are made; how funds (if any) are managed; member rights and responsibilities; dispute resolution process; and conditions under which the charter can be amended. The charter is stored as a versioned document with immutable version history. Each version is hash-committed for integrity. The charter must be written in plain language accessible to a general audience, not legal jargon.
 
 **Acceptance criteria:**
-- Charter is required before transitioning from `ordinary` to any governance mode.
+- Charter is required before any transition out of `simulated` (the `charter_present` readiness item); `ordinary → simulated` stays ungated.
 - Charter includes all required sections: purpose, decision-making, fund management, member rights, dispute resolution, amendment process.
 - Each charter version is immutable and hash-committed.
 - Charter version history is publicly viewable by room members.
@@ -207,27 +306,26 @@ Require a plain-language charter before a room can enable any governance mode be
 **Ref:** Section 16.5
 
 **Description:**
-Require at least two independent stewards and a documented appeals path before a room can enable governance. Independence means: stewards do not share a known wallet address, do not share a known organizational affiliation, and were not appointed by the same single actor. The appeals path must designate at least one person or process outside the steward group that can hear appeals of steward decisions. Steward records include: user_id, appointment timestamp, appointing authority, independence attestation, and active/inactive state.
+Require the §16.5-ratified stewardship preconditions before a room can enable governance: an **elected room steward seat** (§16.6 — exactly one per room, bootstrapped to the room creator, re-elected yearly by Knomosis vote) and a **documented appeals path to the platform legal floor** (a person or process outside the room's local governance that can hear appeals of in-room decisions). The seat lifecycle is **shipped** with WS-U (`room_steward_seat`, `steward_election`, `tallyElection`; see the substrate section) — this task verifies it as a readiness item (`stewards_designated` on the shipped `ReadinessChecklistPort`) rather than re-implementing it. Where AI governance is adopted, the seat holder's only powers are proposing the model/prompt for member ratification; the steward has **no** direct moderation, treasury, or lawmaking authority (§16.6). Multi-party independence requirements survive where they belong under §17.5: the **`multisig_steward` execution model** (WS-M.2.3b) requires several independent signers plus a timelock — independence means no shared known wallet address, no shared known organizational affiliation, and no common Sybil cluster.
 
 **Acceptance criteria:**
-- Minimum of two stewards with independence attestation before governance enablement.
-- Independence check: no shared wallet addresses, no shared organizational affiliation.
-- Appeals path designates a reviewer outside the steward group.
-- Steward records include all required fields.
-- Removing a steward that would bring the count below two is blocked unless a replacement is simultaneously appointed.
-- Steward requirement is enforced at mode transition and continuously (deactivating stewards below threshold triggers a warning and grace period).
+- The `stewards_designated` readiness item verifies: the room's steward seat is filled (never vacant), and a documented appeals path to the platform legal floor exists.
+- Signer-set independence check (for rooms adopting `multisig_steward` execution): no shared wallet addresses, no shared organizational affiliation, no common wallet cluster among the designated signers.
+- Appeals path designates a reviewer/process outside the room's local governance (platform floor).
+- A steward-seat vacancy (e.g., account deletion mid-term) triggers an interim election per the shipped WS-U seat lifecycle; governance-mode escalation is blocked while the seat is vacant.
+- The requirement is enforced at mode transition and continuously (a vacancy during active governance triggers a warning and grace period).
 
 **Testing:**
-- Unit: Mode transition blocked with zero or one steward.
-- Unit: Mode transition blocked when stewards share a wallet address.
-- Unit: Steward removal below threshold is blocked.
-- Integration: Grace period triggered when steward count drops below minimum during active governance.
+- Unit: Mode transition blocked when the steward seat is vacant or the appeals path is missing.
+- Unit: Multisig signer set with a shared wallet address (or common cluster) fails independence.
+- Integration: Grace period + interim election triggered when the seat empties during active governance.
+- Integration: The readiness item consumes the shipped seat state (no parallel steward bookkeeping).
 
 **Security considerations:**
-- A single steward with unchecked authority enables governance capture. The two-steward minimum with independence requirements is an anti-capture control.
-- The wallet-cluster check must consult the same cluster heuristics used by anti-capture voting (WS-M.4.2c-2) so that two stewards in one Sybil cluster fail independence even with distinct addresses.
+- Capturing the elected seat grants only agenda-setting (the right to *propose* a model/prompt), checked by the yearly election and the members' ratifying vote (§16.6); execution authority concentrates in the multisig/contract + timelock, which is why signer independence is the anti-capture control there.
+- The wallet-cluster check must consult the same cluster heuristics used by anti-capture voting (WS-M.4.2c-2) so that two signers in one Sybil cluster fail independence even with distinct addresses.
 
-**Dependencies:** WS-M.1.1a, WS-A.2 (steward role definitions), WS-D.3 (wallet identity for cluster checks).
+**Dependencies:** WS-M.1.1a, WS-U (shipped seat/election lifecycle), WS-A.2 (platform steward role definitions — the five §16.3 roles are distinct from the elected seat), WS-D.3 (wallet identity for cluster checks).
 
 ---
 
@@ -303,20 +401,25 @@ Ensure that platform moderation authority is preserved regardless of local gover
 **Ref:** Section 16.5
 
 **Description:**
-Implement an API-level enforcement gate that blocks governance enablement until all readiness checklist items are satisfied. The checklist includes: charter completeness (WS-M.1.2a), steward requirements (WS-M.1.2b), treasury policy (WS-M.1.2c), safety override acknowledgment (WS-M.1.2d), jurisdiction policy evaluation (WS-N), and law-pack selection and validation (WS-M.1.3c). The API returns the full checklist with pass/fail status per item and blocks the mode transition until all items pass.
+Implement the readiness checklist items behind the **shipped** enforcement gate. The gate itself is live (WS-L.4.1g): `GET /rooms/:roomId/governance/readiness` and the checklist-gated `POST /rooms/:roomId/governance/mode` already exist, consuming a fail-closed `ReadinessChecklistPort` (`apps/api/src/knomosis/readiness.ts`) whose four WS-M-owned items — `charter_present` (WS-M.1.2a), `stewards_designated` (WS-M.1.2b), `treasury_policy_defined` (WS-M.1.2c), `safety_override_acknowledged` (WS-M.1.2d) — all **verify `false` until this task wires real evaluators**, and whose two WS-L-owned items — `comprehension_passed` (WS-L.4.1e) and `simulation_track_record` (WS-L.4.1f) — are already evaluated. This task (a) implements the four port items, and (b) extends the shipped vocabulary and response with the items and `requiredFor` semantics needed beyond `simulated → testnet`: `jurisdiction_supported` (WS-N), `law_pack_valid` (WS-M.1.3c), `governance_model_ratified` (§16.5 — required where the room adopts AI governance, `not_applicable` otherwise; verified against the shipped WS-U ratification state), and `external_audit_passed` (production modes only).
 
-**Readiness response shape:**
+**Readiness response shape (extends the shipped `roomReadinessResponseSchema` — the shipped
+fields `room_id`, `current_mode`, `ready`, `unmet[{requirement, description}]` stay
+wire-compatible):**
 ```ts
-// GET /v1/rooms/:id/governance/readiness
+// GET /rooms/:roomId/governance/readiness   (shipped route; this task extends the payload)
 {
-  roomId: string,
-  targetMode: 'simulated' | 'testnet' | 'capped_production' | 'mature_production',
-  overall: 'pass' | 'fail',
+  room_id: string,
+  current_mode: GovernanceMode,
+  target_mode: 'simulated' | 'testnet' | 'capped_production' | 'mature_production',
+  ready: boolean,
   items: Array<{
-    id: 'charter' | 'stewards' | 'treasury_policy' | 'safety_override'
-      | 'jurisdiction' | 'law_pack' | 'external_audit',
+    requirement: 'charter_present' | 'stewards_designated' | 'treasury_policy_defined'
+      | 'safety_override_acknowledged' | 'comprehension_passed' | 'simulation_track_record'
+      | 'jurisdiction_supported' | 'law_pack_valid' | 'governance_model_ratified'
+      | 'external_audit_passed',                          // extends the shipped ReadinessRequirement
     status: 'pass' | 'fail' | 'not_applicable',
-    detail: string,           // actionable message when failing
+    description: string,      // actionable message when failing (shipped field)
     requiredFor: Array<'simulated' | 'testnet' | 'capped_production' | 'mature_production'>,
     evaluatedAt: string,      // ISO timestamp
   }>,
@@ -324,13 +427,14 @@ Implement an API-level enforcement gate that blocks governance enablement until 
 ```
 
 **Acceptance criteria:**
-- `GET /v1/rooms/:id/governance/readiness` returns the checklist with per-item status.
-- `POST /v1/rooms/:id/governance/mode` rejects transitions to non-ordinary modes when any checklist item required for the target mode fails.
+- The shipped `GET /rooms/:roomId/governance/readiness` returns the extended checklist with per-item status.
+- The shipped `POST /rooms/:roomId/governance/mode` rejects gated transitions when any checklist item required for the target mode fails (already true for `simulated → testnet`; extended to the production edges).
+- The four WS-M-owned `ReadinessChecklistPort` items are backed by real evaluators (the fail-closed defaults are replaced).
 - Each checklist item has a clear, actionable failure message.
 - Checklist evaluation is atomic: partial pass does not enable partial governance.
 - Checklist is re-evaluated at every mode transition (not just the first).
 - Stewards see the checklist in the governance tab UI with progress indicators.
-- Items carry `requiredFor` so the gate applies the correct subset per target mode (e.g., `external_audit` is `not_applicable` for `simulated`/`testnet` but required for `mature_production`).
+- Items carry `requiredFor` so the gate applies the correct subset per target mode (e.g., `external_audit_passed` is `not_applicable` for `simulated`/`testnet` but required for `mature_production`; `governance_model_ratified` is `not_applicable` where the room does not adopt AI governance).
 
 **Testing:**
 - Unit: Each checklist item can independently pass or fail.
@@ -354,10 +458,23 @@ Implement an API-level enforcement gate that blocks governance enablement until 
 **Description:**
 Define the `LawPack` entity and its internal structure. Top-level fields: `law_pack_id` (UUID PK), `version` (semver string), `knomosis_commit` (pinned commit hash from WS-L.1.1a), `schema_version` (integer for forward compatibility), `human_summary` (plain-language description of what this law-pack permits and prohibits), `machine_spec_ref` (reference to the machine-readable specification bundle). Machine-readable bundle contents: `identifier` (unique name), `version`, `allowed_proposal_types` (enum array), `disallowed_proposal_types` (enum array), `role_definitions` (structured role-permission mapping), `quorum_rules` (per-proposal-type quorum requirements), `threshold_rules` (per-proposal-type threshold requirements), `timelock_rules` (per-proposal-type timelock durations), `spend_caps` (per-category and per-period caps), `coi_requirements` (disclosure triggers, recusal rules), `appeal_rules` (who can appeal, timeline, process), `fork_exit_rules` (conditions, process, fund handling), `emergency_constraints` (freeze triggers, escalation), `hash_commitment` (integrity hash of the full bundle), `test_fixture_corpus_ref` (reference to test fixtures that prove behavior). Additional metadata: `audit_state` (enum: draft, reviewed, audited), `effective_at` (timestamp).
 
+> **Shipped substrate.** A first-cut law-pack already exists: the `knomosis.room_law_pack` table
+> (WS-U) and the pure `lawPackSchema` in `@licio/governance` (`lawPackId`, `version`,
+> `allowedProposalTypes`, `permittedCapabilities`, `treasury` bounds — per-category caps keyed by
+> the shipped `treasuryCategorySchema`, `minIntervalSeconds`, `timelockSeconds`,
+> `materialThreshold`, `requireCoiFor`, investment allocation bands — and `election` rules with
+> `weightModel: 'one_civic_account_one_vote'`, `perAccountCap`, `minQuorum`, `minTurnout`,
+> `termSeconds`). The kernel (`evaluateTreasuryAction`) already enforces those treasury bounds.
+> This task **extends** that shipped shape to the full bundle below (quorum/threshold/timelock per
+> proposal type, the remaining weight models, eligibility, appeal/fork/emergency rules, action
+> budgets, hash commitment, fixture corpus) — one schema, evolved by migration, never a parallel
+> `law_pack` entity.
+
 **Law-pack bundle zod schema (authoritative; full version in appendix):**
 ```ts
 const WeightModel = z.enum([
-  'one_account_one_vote', 'reputation_bounded', 'role_based_quorum',
+  'one_civic_account_one_vote', // the shipped WS-U identifier (§17.5 "one verified civic account, one vote")
+  'reputation_bounded', 'role_based_quorum',
   'capped_token', 'quadratic_capped', 'delegated', 'multisig_steward',
 ]); // Section 17.5
 
@@ -452,7 +569,7 @@ Create an MVP law-pack template that covers the baseline governance operations. 
 - Template produces correct behavior when used with test fixtures (WS-M.1.3c).
 - Human summary accurately describes the template's rules in plain language.
 - Template can be used as-is by rooms adopting governance for the first time.
-- Template `weight_model` defaults to `one_account_one_vote` and excludes `quadratic_capped`/`capped_token` (those require Sybil controls + legal review per Section 17.5 and are out of MVP scope).
+- Template `weight_model` defaults to `one_civic_account_one_vote` and excludes `quadratic_capped`/`capped_token` (those require Sybil controls + legal review per Section 17.5 and are out of MVP scope).
 
 **Testing:**
 - Unit: Template passes schema validation.
@@ -543,6 +660,15 @@ Implement law-pack versioning with immutability guarantees. Published law-pack v
 
 **Description:**
 Define the `RoomTreasury` entity with all fields from the data model: `treasury_id` (UUID PK), `room_id` (FK to Room, unique -- one treasury per room), `deployment_id` (FK to KnomosisDeployment), `treasury_address` (on-chain address for this treasury's contract), `accepted_assets` (JSONB array of asset identifiers the treasury can hold), `balance_snapshot_ref` (JSONB reference to the latest reconciled balance snapshot), `deposit_limits_ref` (JSONB reference to deposit limit configuration), `spend_limits_ref` (JSONB reference to spend limit configuration), `freeze_state` (enum: `active`, `frozen`), `reconciliation_state` (enum: `synced`, `pending`, `divergent`). The schema lives in the Knomosis bounded context. No commingling: each treasury has a unique on-chain address, and platform operating funds use a separate address space.
+
+> **Shipped substrate.** Simulated mode already has a treasury: `knomosis.sim_treasury` +
+> `knomosis.sim_treasury_entry` (WS-L.4, served by `GET /rooms/:roomId/governance/treasury` and
+> `POST …/treasury/deposits`, simulated-mode-only), and the WS-U executor already logs
+> kernel-proven agent actions to `knomosis.agent_treasury_action`. `RoomTreasury` below is the
+> **real-asset** entity for `testnet`+ modes; define the mode-aware read path so the dashboard
+> serves the simulated ledger in `simulated` mode and this entity thereafter, and reconcile the
+> deposit route so one endpoint shape covers both (the simulated path stays gated by the
+> governance flag, the real path by the crypto flag + payment-intent kill switch).
 
 **Drizzle schema (authoritative shape; full version in appendix):**
 ```ts
@@ -713,6 +839,17 @@ Generate a deposit receipt after the transaction reaches finality (confirmed by 
 **Description:**
 Enforce spend categories and caps from the room's law-pack. Every spend proposal must declare a category (e.g., bounty, grant, operational, steward_compensation). The declared category must be in the law-pack's allowed categories. Spend caps are enforced per category, per period, and per single disbursement. Aggregate spend tracking accumulates all approved and executed spends per category per period. The preflight pipeline checks category validity and cap compliance before the proposal can be published.
 
+> **Shipped substrate.** The per-category cap mathematics is already the kernel's
+> (`evaluateTreasuryAction` in `@licio/governance`: `no_cap_configured`,
+> `per_action_cap_exceeded`, `per_window_cap_exceeded`, `min_interval_violated` — keyed by the
+> shipped `treasuryCategorySchema`: `transparency_report`, `member_distribution`, `grant`,
+> `bounty`, `investment_rebalance`), and the fail-closed `executeTreasuryAction` executor already
+> consumes it. This task supplies what the pure kernel cannot hold: the durable per-(treasury,
+> category, period) aggregate/history store the kernel folds over, the reservation ledger
+> (WS-M.2.3a-1), and the preflight wiring — every enforcement decision **routes through the
+> kernel**, never a parallel cap check. Extend `treasuryCategorySchema` (e.g., `operational`,
+> `steward_compensation`) rather than introducing a second category vocabulary.
+
 **Acceptance criteria:**
 - Every spend proposal requires a declared category.
 - Declared category must be in the law-pack's allowed categories.
@@ -806,7 +943,15 @@ Implement multi-role approval for treasury spend operations. Approval requiremen
 **Description:**
 Define and implement the `GovernanceSignature` entity and the collection/verification flow that backs multi-role approval and voting. Fields (Section 22.2): `signature_id`, `proposal_id`, `user_id`, `wallet_ref`, `signature_type` (enum: `vote`, `approval`, `multisig`, `delegation`), `typed_data_hash`, `signature_ref`, `weight_snapshot` (the voting weight applied, captured at signing time), `eligibility_reason` (why the signer was eligible), `created_at`. Signatures are EIP-712 typed data with domain separation (Section 17.3.1) exposing action, room, chain, contract, expiration, and nonce. ECDSA and EIP-1271 (contract wallet / multisig) signatures are both verified. A used nonce is rejected (anti-replay, integrates with WS-L.3.2c).
 
-**Drizzle schema (authoritative shape):**
+> **Shipped substrate.** A `knomosis.governance_signature` table already exists
+> (`packages/db/src/schema/knomosis-gateway.ts`), as does the verification layer this task needs:
+> EIP-712 digesting + ECDSA(low-s) + EIP-1271 in `apps/api/src/knomosis/signatures.ts`, and the
+> `knomosis_action_nonce` anti-replay ledger (WS-L.3.2c). This task **evolves the shipped table by
+> migration** to the shape below (adding `weight_snapshot`, `eligibility_reason`,
+> `signature_type`, the per-proposal nonce uniqueness) and reuses the shipped verifiers — no
+> second signature-verification path.
+
+**Drizzle schema (authoritative shape; evolves the shipped table):**
 ```ts
 export const governanceSignature = knomosisSchema.table('governance_signature', {
   signatureId: uuid('signature_id').primaryKey().defaultRandom(),
@@ -857,6 +1002,13 @@ export const governanceSignature = knomosisSchema.table('governance_signature', 
 **Description:**
 Enforce configurable timelocks on treasury disbursements. The timelock duration is defined per proposal type in the law-pack's timelock rules (e.g., 48 hours for grants, 72 hours for charter amendments, 24 hours for bounty payouts). After a proposal meets all approval requirements, the timelock countdown begins. During the timelock period, the proposal can be challenged (WS-M.4.3a). Execution is blocked until the timelock expires and no unresolved challenges remain. The timelock duration and expiration time are displayed prominently in the proposal detail view.
 
+> **Shipped substrate.** The kernel already enforces a per-action timelock at execution time
+> (`timelock_not_elapsed`, tripping at/above the law-pack's `materialThreshold`, from
+> `proposedAt`). This task adds the **lifecycle** timelock (per-proposal-type countdown between
+> approval and execution, challenge-pause semantics) and feeds `proposedAt`/bounds so the kernel's
+> execution-time re-check and the lifecycle countdown agree — the kernel remains the final,
+> non-bypassable enforcement point.
+
 **Acceptance criteria:**
 - Timelock duration sourced from the law-pack for the specific proposal type.
 - Countdown begins after all approval requirements are met.
@@ -886,6 +1038,11 @@ Enforce configurable timelocks on treasury disbursements. The timelock duration 
 
 **Description:**
 Require conflict-of-interest declarations for treasury spend proposals, particularly grants and bounties. Proposers must disclose: any financial relationship with the recipient, any organizational affiliation with the recipient, any prior arrangements regarding the proposed work, and any personal benefit from the proposal's execution. COI disclosures are publicly visible in the proposal detail view. For grants and bounties, an independent review is required: at least one reviewer with no disclosed COI must approve the proposal. Reviewers must also file COI declarations. Undisclosed conflicts discovered after execution trigger a postmortem and potential freeze.
+
+> **Shipped substrate.** The kernel already refuses execution without a COI declaration for the
+> categories the law-pack lists in `requireCoiFor` (`coi_required` rejection). This task supplies
+> the declaration content model, the public disclosure surface, the independent-review workflow,
+> and the postmortem path; the kernel check stays the execution-time backstop.
 
 **Acceptance criteria:**
 - COI declaration is required for all spend proposals (mandatory field, cannot be left blank).
@@ -1265,7 +1422,16 @@ export const actionBudget = knomosisSchema.table('action_budget', {
 **Description:**
 Define the `GovernanceProposal` entity with all fields from the data model: `proposal_id` (UUID PK), `room_id` (FK to Room), `proposer_user_id` (FK to User), `proposal_type` (enum, values defined by the law-pack's allowed types), `title` (text, max 200 chars), `plain_language_summary` (text, max 2000 chars), `structured_payload_ref` (JSONB reference to the proposal's structured action payload), `requested_amount` (numeric, nullable -- for spend proposals), `asset` (text, nullable -- for spend proposals), `recipient_ref` (JSONB reference to recipient, nullable), `conflict_disclosures_ref` (JSONB reference to COI disclosures), `preflight_state` (enum: `pending`, `passed`, `failed`), `voting_state` (enum: `draft`, `deliberation`, `voting`, `closed`), `challenge_state` (enum: `none`, `challenged`, `resolved`, `escalated`), `execution_state` (enum: `pending`, `approved`, `executing`, `executed`, `rejected`, `expired`), `created_at` (timestamptz), `executed_at` (timestamptz, nullable). The schema lives in the Knomosis bounded context.
 
-**Drizzle schema (authoritative shape; full version in appendix):**
+> **Shipped substrate.** `knomosis.governance_proposal` and `knomosis.governance_proposal_vote`
+> already exist (`packages/db/src/schema/knomosis-gateway.ts`) and back the live **simulated**
+> proposal lifecycle (WS-L.4: templates, create, vote, execute — simulated-mode-only; real modes
+> execute via this workstream). This task **evolves the shipped table by migration** to the full
+> production shape below (the four independent state columns, `law_pack_version_id` pinning, COI
+> refs, spend fields) so simulated history is preserved and one proposal entity serves both modes.
+> Note the WS-U **model/prompt ratification** vote is a separate shipped flow
+> (`model_ratification` + frozen electorate) — it is *not* folded into this table.
+
+**Drizzle schema (authoritative shape; evolves the shipped table):**
 ```ts
 export const governanceProposal = knomosisSchema.table('governance_proposal', {
   proposalId: uuid('proposal_id').primaryKey().defaultRandom(),
@@ -1350,7 +1516,7 @@ Implement completeness validation for proposal drafts. Before a proposal can be 
 **Ref:** Sections 17.4, 23.4
 
 **Description:**
-Implement proposal-specific preflight checks that run before a proposal can be published. Preflight simulates the proposal's action to verify it would succeed: for spend proposals, verify the treasury has sufficient funds after accounting for already-approved proposals; for charter amendments, verify the new charter passes validation; for steward rotation, verify the result meets the minimum steward requirement. Additionally check: the proposer has the required role to create this proposal type, the proposal does not conflict with existing active proposals (e.g., two proposals spending the same funds), all signatures are valid, and all constraints in the law-pack are satisfied.
+Implement proposal-specific preflight checks that run before a proposal can be published. Preflight simulates the proposal's action to verify it would succeed: for spend proposals, verify the treasury has sufficient funds after accounting for already-approved proposals; for charter amendments, verify the new charter passes validation; for steward rotation, verify the result leaves the elected steward seat filled (§16.6 single-seat model) and any multisig signer set independent (WS-M.1.2b). Additionally check: the proposer has the required role to create this proposal type, the proposal does not conflict with existing active proposals (e.g., two proposals spending the same funds), all signatures are valid, and all constraints in the law-pack are satisfied.
 
 **Preflight check list (per Section 17.4 and 29.6 risk review):**
 type validity; signatures; role permissions; spend caps + reserved headroom; policy conflicts; distribution/no-pay-to-rank constraints; sanctions/fraud screening (WS-N.2.2a); prohibited-target classifier (WS-M.1.2d); jurisdiction availability (WS-N.1.1c); COI completeness (WS-M.2.3d); action-budget sufficiency (WS-M.3.2a).
@@ -1386,7 +1552,7 @@ type validity; signatures; role permissions; spend caps + reserved headroom; pol
 **Ref:** Section 17.4
 
 **Description:**
-Publish a validated proposal to the room's governance tab and automatically create a linked discussion thread. The discussion thread uses the existing conversation infrastructure (WS-G) but is scoped to the governance context. The proposal detail view links to the discussion thread. Contributions in the discussion thread are visible from the proposal view. The proposal's status (deliberation, voting, challenge, execution) is displayed alongside the discussion. Publication emits a `governance.proposal.created` event for notification subscribers.
+Publish a validated proposal to the room's governance tab and automatically create a linked discussion. The discussion uses the existing conversation infrastructure (WS-G contributions — note the platform is **comment-centric** since WS-T: model the proposal discussion as a comment surface on the proposal, the way story comments work, rather than a legacy standalone thread view). The proposal detail view links to the discussion. Contributions in the discussion are visible from the proposal view. The proposal's status (deliberation, voting, challenge, execution) is displayed alongside the discussion. Publication emits a `governance.proposal.created` event for notification subscribers (the topic is **already registered** in the knomosis event bounded context, `packages/shared/src/schemas/events/knomosis/index.ts` — emit through it, do not define a new topic).
 
 **Acceptance criteria:**
 - Publishing a proposal transitions its `voting_state` from `draft` to `deliberation`.
@@ -1445,10 +1611,10 @@ Rank contributions in the proposal discussion thread by constructive participati
 **Ref:** Sections 17.4, 17.5, 17.9
 
 **Description:**
-Implement voting on governance proposals with configurable anti-capture controls. Voting weight model is defined in the law-pack (default for MVP: one-account-one-vote). Anti-capture controls: maximum voting weight per account (prevents a single large holder from dominating), eligibility requirements (minimum membership duration, minimum participation, verified identity), COI disclosure requirement (voters with a disclosed COI may be required to recuse on specific proposals), and cooling-off period for new wallets (recently linked wallets cannot vote until after a configurable period). MFCI monitoring detects suspicious synchronized voting patterns. Vote tallies are public. Individual votes may be public or private depending on law-pack configuration.
+Implement voting on governance proposals with configurable anti-capture controls. Voting weight model is defined in the law-pack (default for MVP: one-civic-account-one-vote). Anti-capture controls: maximum voting weight per account (prevents a single large holder from dominating), eligibility requirements (minimum membership duration, minimum participation, verified identity), COI disclosure requirement (voters with a disclosed COI may be required to recuse on specific proposals), and cooling-off period for new wallets (recently linked wallets cannot vote until after a configurable period). MFCI monitoring detects suspicious synchronized voting patterns. Vote tallies are public. Individual votes may be public or private depending on law-pack configuration.
 
 **Acceptance criteria:**
-- Voting weight model is sourced from the law-pack (default: one-account-one-vote).
+- Voting weight model is sourced from the law-pack (default: one-civic-account-one-vote).
 - Maximum voting weight per account is enforced.
 - Eligibility requirements (membership duration, participation) are checked before vote acceptance.
 - COI-recusal requirement blocks votes from conflicted participants where configured.
@@ -1480,13 +1646,20 @@ Implement voting on governance proposals with configurable anti-capture controls
 **Split from:** WS-M.4.2c
 
 **Description:**
-Implement the per-room voting-weight resolver supporting the permitted weight models from Section 17.5: `one_account_one_vote`, `reputation_bounded` (capped, explainable), `role_based_quorum` (distinct role classes), `capped_token`, `quadratic_capped`, `delegated` (revocable, public logs), and `multisig_steward`. The resolver computes a voter's effective weight for a given proposal, applying the law-pack's `max_voting_weight_per_account` cap and producing a human-readable `eligibility_reason`. `capped_token` and `quadratic_capped` are gated: they require that Sybil controls, anti-bribery monitoring, and legal review are recorded as satisfied for the room; absent that, the resolver refuses these models (fail closed) and they remain out of MVP scope. The resolver output feeds the `weight_snapshot` on each `GovernanceSignature`.
+Implement the per-room voting-weight resolver supporting the permitted weight models from Section 17.5: `one_civic_account_one_vote`, `reputation_bounded` (capped, explainable), `role_based_quorum` (distinct role classes), `capped_token`, `quadratic_capped`, `delegated` (revocable, public logs), and `multisig_steward`. The resolver computes a voter's effective weight for a given proposal, applying the law-pack's `max_voting_weight_per_account` cap and producing a human-readable `eligibility_reason`. `capped_token` and `quadratic_capped` are gated: they require that Sybil controls, anti-bribery monitoring, and legal review are recorded as satisfied for the room; absent that, the resolver refuses these models (fail closed) and they remain out of MVP scope. The resolver output feeds the `weight_snapshot` on each `GovernanceSignature`.
+
+> **Placement (SPEC §17.5 as amended by WS-U).** The **kernel computes quorum, threshold, weight,
+> and tally** — the resolver is a pure `@licio/governance` module beside the shipped
+> `tallyElection`/`tallyRatification` and `electionRulesSchema` (which already implement
+> `one_civic_account_one_vote` with `perAccountCap`, quorum/turnout gating, and fail-safe
+> tie-breaks). Extend that shipped election-rules shape with the remaining six models; the room's
+> AI agent facilitates deliberation but holds no vote and no tally authority.
 
 **Acceptance criteria:**
 - Resolver supports all seven weight models and returns `{ weight, eligibilityReason }`.
 - `max_voting_weight_per_account` caps the computed weight for every model.
 - `capped_token`/`quadratic_capped` are refused unless Sybil controls + anti-bribery monitoring + legal review flags are present for the room.
-- `one_account_one_vote` returns weight 1 for eligible voters, 0 otherwise.
+- `one_civic_account_one_vote` returns weight 1 for eligible voters, 0 otherwise.
 - `reputation_bounded` is explainable: the `eligibility_reason` states the inputs and the applied cap.
 - Resolver is deterministic and pure given (room, proposal, voter, law-pack version).
 
@@ -1616,7 +1789,7 @@ Implement quorum and threshold checks per the room's law-pack. Quorum: the minim
 **Ref:** Section 17.4
 
 **Description:**
-Implement a challenge window between vote passage and proposal execution. After a proposal meets quorum and threshold, it enters a challenge window (duration defined in the law-pack, e.g., 48-72 hours). During this window, any eligible room member can file a challenge. Challenge types: conflict of interest (undisclosed COI), fraud (fabricated evidence or false claims), capture (coordinated manipulation), legal concern (regulatory or legal issue), and evidence defect (insufficient or invalid evidence for bounties). A challenge includes: challenge type, description, supporting evidence. Challenges are reviewed by stewards (or an independent reviewer for COI challenges involving stewards). Unresolved challenges block execution.
+Implement a challenge window between vote passage and proposal execution. (Terminology: this is the *governance-proposal* challenge — unrelated to the shipped WS-T "challenge resolution" debate arena, which adjudicates story/comment corrections. Keep the wire/UI vocabulary distinct, e.g. `proposal_challenge`.) After a proposal meets quorum and threshold, it enters a challenge window (duration defined in the law-pack, e.g., 48-72 hours). During this window, any eligible room member can file a challenge. Challenge types: conflict of interest (undisclosed COI), fraud (fabricated evidence or false claims), capture (coordinated manipulation), legal concern (regulatory or legal issue), and evidence defect (insufficient or invalid evidence for bounties). A challenge includes: challenge type, description, supporting evidence. Challenges are reviewed by stewards (or an independent reviewer for COI challenges involving stewards). Unresolved challenges block execution.
 
 **Acceptance criteria:**
 - Challenge window begins after quorum and threshold are met.
@@ -1650,7 +1823,7 @@ Implement a challenge window between vote passage and proposal execution. After 
 **Ref:** Sections 17.4, 17.6
 
 **Description:**
-Execute a proposal after all prerequisites are met: quorum and threshold passed, challenge window expired with no unresolved challenges, timelock expired, and all approval requirements satisfied. Execution is triggered via an explicit endpoint (not automatic) to ensure human oversight. Execution creates a KnomosisActionRecord (WS-L.3.2a), submits through the gateway preflight pipeline (WS-L.3.1a), and follows the action submission lifecycle. On successful execution, the proposal's `execution_state` transitions to `executed` and `executed_at` is set. Failed execution transitions to `failed` with a reason.
+Execute a proposal after all prerequisites are met: quorum and threshold passed, challenge window expired with no unresolved challenges, timelock expired, and all approval requirements satisfied. Execution is triggered via an explicit endpoint (not automatic) to ensure human oversight. Execution creates a KnomosisActionRecord (WS-L.3.2a), submits through the gateway preflight pipeline (WS-L.3.1a), and follows the action submission lifecycle. On successful execution, the proposal's `execution_state` transitions to `executed` and `executed_at` is set. Failed execution transitions to `failed` with a reason. **This task is the production caller of the shipped, fail-closed `GovernanceService.executeTreasuryAction`** (kernel-proven, kill-switch-checked, capability-gated, logged to `agent_treasury_action`) — closing the tracked WS-U residual (`docs/governance/README.md`); treasury-category proposals execute through it, never around it.
 
 **Acceptance criteria:**
 - Execution is blocked unless: quorum met, threshold met, challenge window clear, timelock expired, all approvals received.
@@ -1685,9 +1858,18 @@ Execute a proposal after all prerequisites are met: quorum and threshold passed,
 **Description:**
 Index all governance actions to an immutable audit log. Every state transition across the governance lifecycle is logged: proposal creation, publication, vote cast, vote tally update, challenge filed, challenge resolved, timelock start, timelock expiration, execution start, execution result, receipt generation. Each audit log entry includes: entry_id, action_type, proposal_id (if applicable), room_id, actor_user_id, timestamp, details (structured payload with before/after state), and integrity_hash (chained hash for tamper detection). The audit log is publicly viewable by room members in the governance tab.
 
-**GovernanceAuditEntry schema (authoritative shape):**
+> **Shipped substrate.** An append-only `knomosis.governance_audit_log` already exists and
+> records the simulated lifecycle plus the WS-L.4.1g mode transitions
+> (`mode_transition_requested` / `mode_transition_applied`), with a public read route in the sim
+> surface; the WS-U agent separately logs to `knomosis.agent_action_log` and
+> `knomosis.agent_treasury_action`. This task **evolves the shipped `governance_audit_log` by
+> migration** (adding the per-room `prev_hash`/`integrity_hash` chain and the `treasury_id`
+> column) rather than creating a parallel `governance_audit_entry` table; the agent logs stay
+> separate (they are the WS-U capability-audit plane, not the governance-lifecycle ledger).
+
+**GovernanceAuditEntry schema (authoritative shape; evolves the shipped `governance_audit_log`):**
 ```ts
-export const governanceAuditEntry = knomosisSchema.table('governance_audit_entry', {
+export const governanceAuditEntry = knomosisSchema.table('governance_audit_log', {
   entryId: uuid('entry_id').primaryKey().defaultRandom(),
   roomId: uuid('room_id').notNull().references(() => room.roomId),
   actionType: text('action_type').notNull(),     // proposal.created, vote.cast, freeze.set, ...
@@ -1821,6 +2003,12 @@ export const treasuryGrant = knomosisSchema.table('treasury_grant', {
 **Description:**
 Implement the treasury-side of three-way reconciliation consuming the gateway reconciliation engine (WS-L.3.4a). For each treasury, a reconciliation worker snapshots and compares three sources (Section 28.3, 29.7): (1) the product DB ledger (sum of confirmed deposits, executed disbursements, reserved amounts), (2) Knomosis receipts (finalized PaymentIntent receipts, WS-M.3.1d), and (3) L1/L2 observations (on-chain balance/events, WS-L.3.3a). The reconciliation must be **zero-or-explained**: any divergence either nets to zero or is annotated with a documented cause (pending finality, known reorg, in-flight intent). A divergence that is neither zero nor explained sets `reconciliation_state = divergent`, raises a critical alert, and is a hard blocker on cap/mode expansion (Section 28.3 treasury-reconciliation-gap).
 
+> **Shipped substrate.** The gateway side is live: `apps/api/src/knomosis/reconciliation.ts`
+> implements WS-L.3.4a/b three-source reconciliation with divergence severity, the
+> `knomosis_reconciliation_result` table, and the **`canExpandTreasury` expansion gate** this
+> task's blocker consumes. WS-M adds the per-treasury/per-asset snapshot worker below over the
+> real `RoomTreasury` balances and wires `canExpandTreasury` into the WS-M.1.1b/1.2e mode gates.
+
 **Reconciliation snapshot schema (authoritative shape):**
 ```ts
 export const treasuryReconciliationSnapshot = knomosisSchema.table('treasury_reconciliation_snapshot', {
@@ -1920,6 +2108,14 @@ This appendix consolidates the authoritative shapes so reviewers can verify comp
 
 ### A.2 Entity-to-task map
 
+Entities marked *(evolves shipped)* already exist in the `knomosis` schema (see the substrate
+section) and are migrated to the WS-M shape, not created: `GovernanceProposal` and
+`GovernanceSignature` (from `knomosis-gateway.ts`), `GovernanceAuditEntry` (the shipped
+`governance_audit_log`), `LawPack` (the shipped `room_law_pack` + `@licio/governance`
+`lawPackSchema`). The WS-U tables (`room_steward_seat`, `steward_election`,
+`model_ratification`, `room_agent_binding`, `agent_treasury_action`, …) are consumed, not owned,
+by WS-M.
+
 | Entity (Section 22.2 / new) | Defined in |
 |---|---|
 | RoomGovernanceProfile | WS-M.1.1a |
@@ -1940,24 +2136,30 @@ This appendix consolidates the authoritative shapes so reviewers can verify comp
 
 All financial/governance endpoints are versioned, idempotent, audit-logged, separated from social APIs, and gated by the Knomosis feature flags (fail-closed when disabled).
 
-| Method + path | Backed by | Notes |
-|---|---|---|
-| `GET /rooms/{room_id}/governance` | WS-M.1.1a/c | Returns mode, freeze/pause, law-pack ref, readiness summary. |
-| `GET /v1/rooms/{room_id}/governance/readiness` | WS-M.1.2e | Per-item checklist with `requiredFor`. |
-| `POST /v1/rooms/{room_id}/governance/mode` | WS-M.1.1b | Mode transition; serialized; checklist-gated. |
-| `POST /rooms/{room_id}/governance/proposals` | WS-M.4.1b/c, WS-M.4.2a | Create/publish; preflight required; idempotency-keyed. |
-| `GET /rooms/{room_id}/governance/proposals/{proposal_id}` | WS-M.4.1a | Detail incl. status, COI, discussion link. |
-| `POST /rooms/{room_id}/governance/proposals/{proposal_id}/sign` | WS-M.2.3b-1, WS-M.4.2c | Vote/approve/delegate; typed-data + nonce. |
-| `POST /rooms/{room_id}/governance/proposals/{proposal_id}/challenge` | WS-M.4.3a | File challenge during window. |
-| `POST /rooms/{room_id}/governance/proposals/{proposal_id}/execute` | WS-M.4.3b | Explicit, allowlisted executor; all prereqs re-checked. |
-| `GET /rooms/{room_id}/treasury` | WS-M.2.1a, WS-M.2.2c | Dashboard: reconciled balance, freeze/pause state. |
-| `POST /rooms/{room_id}/treasury/payment-intents` | WS-M.3.1a-c | Create intent; idempotency-keyed; fail-closed jurisdiction/compliance. |
-| `GET /rooms/{room_id}/treasury/payment-intents/{payment_intent_id}` | WS-M.3.1b | Lifecycle status + receipt ref. |
-| `GET /rooms/{room_id}/treasury/grants` | WS-M.5.1a | List grants with milestone/payout state. |
-| `POST /rooms/{room_id}/treasury/grants` | WS-M.5.1a | Create grant from approved proposal. |
-| `GET /rooms/{room_id}/treasury/audit-log` | WS-M.4.3c | Public, paginated, filterable, hash-chained. |
+**Status** marks the 2026-07-13 state: ✅ = shipped (WS-L.4 sim surface, `room-governance.ts`) —
+WS-M extends the payload/gating for real-asset modes; 🔲 = WS-M builds it. The shipped **WS-U**
+surface (`governance.ts`: `GET /rooms/:id/steward`, elections vote, models propose/list/download,
+ratification open/ballot/read, law-packs register, lawmaking summarize, agent read + platform
+freeze/unfreeze) composes with this table without overlap and is not repeated here.
 
-Consumed cross-workstream endpoints: `POST /knomosis/actions/preflight`, `POST /knomosis/actions/submit`, `GET /knomosis/actions/{id}` (WS-L.3); `GET /jurisdiction/features`, `POST /compliance/financial/preflight`, `POST /compliance/financial/case` (WS-N).
+| Status | Method + path | Backed by | Notes |
+|---|---|---|---|
+| ✅ | `GET /rooms/{room_id}/governance` | WS-L.4 (extend: WS-M.1.1a/c) | Returns mode + sim bundle today; add freeze/pause, law-pack ref, readiness summary. |
+| ✅ | `GET /rooms/{room_id}/governance/readiness` | WS-L.4.1g (extend: WS-M.1.2e) | Ships `{ready, unmet[]}`; add per-item status + `requiredFor`. |
+| ✅ | `POST /rooms/{room_id}/governance/mode` | WS-L.4.1g (extend: WS-M.1.1b) | Ships `ordinary→simulated`, `simulated→testnet`; add the remaining serialized, checklist-gated edges. |
+| ✅ | `POST /rooms/{room_id}/governance/proposals` | WS-L.4 sim (extend: WS-M.4.1b/c, WS-M.4.2a) | Simulated-mode-only today; add the production lifecycle, preflight, idempotency key. |
+| ✅ | `GET /rooms/{room_id}/governance/proposals/{proposal_id}` | WS-L.4 sim (extend: WS-M.4.1a) | Add full status, COI, discussion link. |
+| 🔲 | `POST /rooms/{room_id}/governance/proposals/{proposal_id}/sign` | WS-M.2.3b-1, WS-M.4.2c | Vote/approve/delegate; typed-data + nonce (sim voting today is a simpler vote route). |
+| 🔲 | `POST /rooms/{room_id}/governance/proposals/{proposal_id}/challenge` | WS-M.4.3a | File challenge during window. |
+| ✅ | `POST /rooms/{room_id}/governance/proposals/{proposal_id}/execute` | WS-L.4 sim (extend: WS-M.4.3b) | Sim executes in `simulated` mode only; real modes execute here via the shipped `executeTreasuryAction`. |
+| ✅ | `GET /rooms/{room_id}/governance/treasury` | WS-L.4 sim (extend: WS-M.2.1a, WS-M.2.2c) | Sim ledger today; serve the reconciled real-asset dashboard in `testnet`+ modes. |
+| 🔲 | `POST /rooms/{room_id}/treasury/payment-intents` | WS-M.3.1a-c | Create intent; idempotency-keyed; fail-closed jurisdiction/compliance. |
+| 🔲 | `GET /rooms/{room_id}/treasury/payment-intents/{payment_intent_id}` | WS-M.3.1b | Lifecycle status + receipt ref. |
+| 🔲 | `GET /rooms/{room_id}/treasury/grants` | WS-M.5.1a | List grants with milestone/payout state. |
+| 🔲 | `POST /rooms/{room_id}/treasury/grants` | WS-M.5.1a | Create grant from approved proposal. |
+| ✅ | `GET /rooms/{room_id}/governance/audit-log` | WS-L.4 (extend: WS-M.4.3c) | Public + paginated today; add filtering + the integrity-hash chain. |
+
+Consumed cross-workstream endpoints: `POST /knomosis/actions/preflight`, `POST /knomosis/actions/submit`, `GET /knomosis/actions/{id}` (WS-L.3 — shipped); `GET /jurisdiction/features`, `POST /compliance/financial/preflight`, `POST /compliance/financial/case` (WS-N — planned).
 
 ### A.4 Multisig / timelock / quorum / threshold policy structures
 
@@ -2028,7 +2230,8 @@ These structures are stored inside the law-pack bundle (WS-M.1.3a) and reference
 
 | Dependency | Required for | Nature |
 |---|---|---|
-| WS-L (Knomosis gateway/wallets) | All treasury operations, payment intents, on-chain governance actions | Hard -- WS-M cannot submit on-chain actions without the gateway |
+| WS-L (Knomosis gateway/wallets) — **shipped** | All treasury operations, payment intents, on-chain governance actions | Hard -- WS-M cannot submit on-chain actions without the gateway (all WS-L seams below are live; residuals in `docs/knomosis/README.md`) |
+| WS-U (AI-governed rooms) — **runtime shipped** | The elected steward seat + election, model/prompt ratification, the law-pack + treasury kernel (`@licio/governance`), the fail-closed `executeTreasuryAction` executor WS-M's proposal lifecycle must call | Hard -- WS-M evolves the shipped `knomosis`-schema tables and closes the WS-U proposal-lifecycle residual; the kernel is the non-bypassable enforcement point for caps/timelocks/COI/investment bands |
 | WS-L.1.1a (deployment/commit pin) | Supported assets, chain IDs, contract manifest for every entity | Hard -- no assumptions about chain properties without the manifest |
 | WS-L.2.4 (signature verification, EIP-1271) | Votes, approvals, multisig, delegation | Hard -- contract wallets/multisigs verified via EIP-1271 |
 | WS-L.2.6 (transaction preview) | Deposit preview, spend preview, budget consumption display | Hard -- all financial actions require full-disclosure preview |
@@ -2058,3 +2261,4 @@ WS-M is complete when:
 4. **Proposals and governance:** Draft validation (server-authoritative) enforces completeness; preflight simulates actions read-only and fails closed; deliberation is ranked by constructive participation with zero wealth weight (denylist-enforced, GWEI-audited). Voting uses the weight resolver (seven Section 17.5 models, token models gated and fail-closed), the eligibility/COI/cooling-off/cluster gate, and revocable public delegation, all capped per account and MFCI-monitored. Quorum and threshold sum recorded weight snapshots. Challenge windows (with platform escalation) precede explicit, allowlisted, fully re-checked execution. The hash-chained, per-room audit log records every transition synchronously and excludes on-chain-prohibited data. Disputes and postmortems handle high-impact failures and reconcile all three sources.
 5. **Grants and reconciliation:** Capped grants pay per accepted milestone through the intent lifecycle, gated by independent review and recipient screening, with cap reservations spanning tranches and clawback where reversible. Three-way reconciliation (product DB vs receipts vs L1/L2) is zero-or-explained; any unexplained divergence raises a critical alert and hard-blocks cap/mode expansion. Accounting/tax export is produced from reconciled data with event-time valuations and access control.
 6. **Cross-cutting invariants:** Crypto behind flags, disabled by default, fail-closed. Platform moderation always overrides local governance. No treasury commingling. No crypto influence on ranking, search, notifications, or trends. No on-chain sensitive data. All financial actions use full-disclosure previews. All operations are audit-logged and reconciled. WS-M's governance and treasury apply to **server-hosted rooms only** (`public_server` / `restricted_server`); `private_p2p` rooms (WS-S, `authority_model='room_keys'`) self-govern locally via room keys and have no server treasury, proposals, or governance mode.
+7. **Shipped-substrate closure:** The four WS-M-owned `ReadinessChecklistPort` items are backed by real evaluators (the fail-closed defaults in `apps/api/src/knomosis/readiness.ts` are replaced); the production proposal-execution path calls the shipped `GovernanceService.executeTreasuryAction` (closing the WS-U residual tracked in `docs/governance/README.md`); every shipped-table collision (`governance_proposal`, `governance_signature`, `governance_audit_log`, `room_law_pack`) is resolved by migration on the shipped table, with simulated-mode history preserved; and all cap/timelock/COI/investment-band enforcement decisions route through the `@licio/governance` kernel.

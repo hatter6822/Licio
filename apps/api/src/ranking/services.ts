@@ -183,19 +183,6 @@ export function createCandidateDataPorts(
       }
       return seen;
     },
-    async latestScoi(storyId) {
-      const row = await events.invariantStore.latest('SCOI', storyId);
-      if (row === null) return null;
-      const scoi = row.scoreVector['scoi'];
-      const state = row.scoreVector['context_state'];
-      const lensCount = row.scoreVector['lens_count'];
-      if (typeof scoi !== 'number' || typeof state !== 'string') return null;
-      return {
-        scoi,
-        contextState: state,
-        lensCount: typeof lensCount === 'number' ? lensCount : 0,
-      };
-    },
     async latestPwattComponents(storyId) {
       // The retrieval leg reads PWAtt through the SAME §30.5 bounded-input gate
       // as the feature join (WS-I.2.1d): the lift constant + the row's own
@@ -292,16 +279,15 @@ export function createInMemoryRankingServices(
     },
     async enforcement(): Promise<RankingEnforcement> {
       const gate = invariants.promotionService;
-      const [mfci, phi, scoi, gwei, meri, hodge, tropical] = await Promise.all([
+      const [mfci, phi, gwei, meri, hodge, tropical] = await Promise.all([
         gate.effectsEnabled(InvariantType.MFCI),
         gate.effectsEnabled(InvariantType.PHI),
-        gate.effectsEnabled(InvariantType.SCOI),
         gate.effectsEnabled(InvariantType.GWEI),
         gate.effectsEnabled(InvariantType.MERI),
         gate.effectsEnabled(InvariantType.HodgeTension),
         gate.effectsEnabled(InvariantType.TropicalCascade),
       ]);
-      return { mfci, phi, scoi, gwei, meri, hodge, tropical };
+      return { mfci, phi, gwei, meri, hodge, tropical };
     },
     async userPhiRisk(userId) {
       // The requesting user's OWN PHI outputs: the MAX holonomy over their

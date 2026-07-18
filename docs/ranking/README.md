@@ -1,17 +1,17 @@
 # WS-I: Ranking and Distribution — implementation reference
 
-This document describes the implemented WS-I surface: the eight-stage feed
-pipeline (candidate generation, invariant feature join, safety filter,
-constrained PWAtt scoring, diversification, decision logging, explanation
-generation, feed response), the ranking-neutrality test suite, the kill
-switch and safe fallback, and the steward audit surface. The design
+This document describes the implemented WS-I surface: the feed pipeline
+(candidate generation, invariant feature join, safety filter, constrained
+PWAtt scoring, diversification, decision logging, feed response), the
+ranking-neutrality test suite, the kill switch and safe fallback, and the
+steward audit surface. The design
 specification is SPEC §5.4–§5.5, §13, §21.2, §22.4, §23.3, §24.4, and
 §30.5–§30.6; the task plan is `docs/planning/10-ranking-and-distribution.md`.
 
 Three constraints govern everything here:
 
 1. **No pay-to-rank, structurally.** Candidate retrieval, the feature
-   store, scoring, and explanations are incapable of reading wallet,
+   store, scoring, and the served card fields are incapable of reading wallet,
    payment, treasury, donor, follower-count, or membership data: the stage
    schemas are strict-closed with no financial field, the WS-I.2.1b
    denylist (the SAME shared WS-A.1.1 term list the WS-F/WS-G table checks
@@ -37,21 +37,23 @@ Three constraints govern everything here:
    mutated PWAtt scores).
 3. **The eleven invariants remain promotion-gated (WS-H.1.2e).** Every
    invariant-derived penalty (pM/pH/pT/pR) and constraint (MFCI exclusion,
-   SCOI reduction/pause, PHI diversification, GWEI deployment gate, MERI
-   effects) applies only when `effectsEnabled(invariantType)` — otherwise it
-   is computed and RECORDED in the decision log with `enforced: false`
-   (observable, never a hidden sanction). The SCOI divergence flag
-   (`scoi_context_card`) is the one deliberate exception: it is informational
-   (a needs-context state never means false), so it attaches regardless of
-   promotion state — feeding the context-gate observability counter; the
+   PHI diversification, GWEI deployment gate, MERI effects) applies only
+   when `effectsEnabled(invariantType)` — otherwise it is computed and
+   RECORDED in the decision log with `enforced: false` (observable, never a
+   hidden sanction). (The former SCOI constraint ladder — context-card
+   flag, reduced-spread multiplier, very-high pause — was removed: it was
+   never promoted, and its upper levels were unreachable under production
+   calibration. SCOI's reader surface is the story page's "Where
+   interpretations differ" drawer, read directly from the invariant store;
+   the
    lens-map detail lives on the story read surface.
 
 ## Architecture
 
 | Layer | Location | Contents |
 |---|---|---|
-| Pure domain logic | `packages/ranking/src/` | Deterministic, I/O-free stage functions: the §5.4 scoring arithmetic, penalties, constraints, matroid dedup, balancing, explanation templates (locale-ready), the pipeline core, the replay diff — plus the strict stage-boundary zod schemas and the denylist with its versioned artifact (`denylist.config.json`) |
-| Services | `apps/api/src/ranking/` | Stores (+ Drizzle adapters), the eight organic retrievers + the room-surface scoper, quotas, the candidate orchestrator, the feature population pipeline, the safety filter (WS-J seam), the feed service + replay, the kill switch, fail-closed config, the lease-guarded scheduler |
+| Pure domain logic | `packages/ranking/src/` | Deterministic, I/O-free stage functions: the §5.4 scoring arithmetic, penalties, constraints, matroid dedup, balancing, the §13.6/§30.6 prohibited-vocabulary artifact (`prohibited-language.ts`), the pipeline core, the replay diff — plus the strict stage-boundary zod schemas and the denylist with its versioned artifact (`denylist.config.json`) |
+| Services | `apps/api/src/ranking/` | Stores (+ Drizzle adapters), the seven organic retrievers + the room-surface scoper, quotas, the candidate orchestrator, the feature population pipeline, the safety filter (WS-J seam), the feed service + replay, the kill switch, fail-closed config, the lease-guarded scheduler |
 | Routes | `apps/api/src/routes/ranking-admin.ts`, the feed handlers in `routes/v1.ts` | Steward audit/replay/kill-switch/config/feature-snapshot surface; `GET /v1/feed` (front page + `?topic=`), `GET /v1/rooms/:roomId/feed` |
 | Tables | `packages/db/src/schema/ranking.ts` (migrations 0012/0013) | `ranking_feature_vectors` (append-only revisions), `ranking_decision_logs` (one per request, §22.4 retention) |
 | Neutrality suite | `apps/api/src/__tests__/ranking-neutrality.test.ts` | The ten WS-I.3 tests (`pnpm check:neutrality`) |
@@ -60,7 +62,7 @@ Workspace boundary: `@licio/ranking` depends on `@licio/shared` and
 `@licio/invariants` only — NEVER `@licio/db` (the ranking math has no
 database access by construction; `pnpm check:workspace-deps` enforces it).
 
-## The eight stages (SPEC §13.3)
+## The pipeline stages (SPEC §13.3)
 
 ```
 serveFeed(services, { userId, surface, surfaceRoomId, surfaceTopicId, mode })
@@ -93,7 +95,7 @@ serveFeed(services, { userId, surface, surfaceRoomId, surfaceTopicId, mode })
                             re-admission path (asserted)
   4. constrained scoring    rankFeasibleSet: baseline + §5.4 positive
                             combination − promotion-gated penalties;
-                            per-item constraints (MFCI/SCOI) evaluated once
+                            per-item constraints (MFCI) evaluated once
   5. diversification        MERI cluster cap (default 2/page, demoted items
                             become the representatives' "more on this
                             story" expansion), source ≤ 15% / topic ≤ 25%
@@ -106,12 +108,7 @@ serveFeed(services, { userId, surface, surfaceRoomId, surfaceTopicId, mode })
                             item (built as one batch, persisted with ONE
                             insertMany); a failed write is a loudly-counted
                             auditability incident, never a serving failure
-  7. explanations           highest-priority template from the item's REAL
-                            signal profile; constraint/safety slowing
-                            reasons outrank positive ones; prohibited
-                            phrasings are structurally impossible; the
-                            renderer is locale-ready (served in `en`)
-  8. feed response          §23.3 FeedItem mapping with BATCHED reads (bulk
+  7. feed response          §23.3 FeedItem mapping with BATCHED reads (bulk
                             stories/threads/safety states, one lens listing
                             per distinct room) + `request_id`,
                             `more_on_this_story`, and `context_card` on the
@@ -149,8 +146,12 @@ keeps working while ranking is paused.
 
 ## Candidate generation (WS-I.1)
 
-The eight retrievers (`apps/api/src/ranking/retrievers.ts`) implement
-`CandidateRetriever` over the read-only `CandidateDataPorts` seam:
+The seven organic retrievers plus the room-surface scoper
+(`apps/api/src/ranking/retrievers.ts`) implement `CandidateRetriever` over
+the read-only `CandidateDataPorts` seam. (The former
+`cross_community_bridges_v1` retriever — SCOI split/obstructed stories —
+was removed: those states were effectively unreachable under production
+calibration, so it never fired.)
 
 | Origin | Source type | Strategy |
 |---|---|---|
@@ -159,10 +160,9 @@ The eight retrievers (`apps/api/src/ranking/retrievers.ts`) implement
 | `global_pwatt_v1` | global | PWAtt component threshold (never engagement counts); fresh uncovered stories enter at a LOWER cold-start score |
 | `emerging_discussions_v1` | emerging_discussion | CONSTRUCTIVE velocity (correction/bridge counts in the latest 24h window), never raw volume |
 | `independent_additions_v1` | independent_source_addition | Previously-seen stories (the user's OWN attention rows) that gained sourced comments since last seen |
-| `cross_community_bridges_v1` | cross_community_bridge | SCOI split/obstructed stories, carrying `bridge_context` metadata |
 | `expert_explanations_v1` | expert_explanation | Expert-led-room threads (public rooms with the experts_and_stewards posting policy) |
 | `chronological_catch_up_v1` | chronological_catch_up | Recent unseen items in time order, respecting the per-room last-seen mark |
-| `room_surface_v1` | subscribed_room | Room-surface scoper: the requested room's recent threads (inert outside room feeds — the eight ORGANIC front-page sources remain exactly SPEC §13.2's) |
+| `room_surface_v1` | subscribed_room | Room-surface scoper: the requested room's recent threads (inert outside room feeds — the seven ORGANIC front-page sources remain exactly SPEC §13.2's) |
 
 Hidden (takedown/safety) and archived stories never retrieve. Quotas
 (WS-I.1.1b) reserve `ceil(pct × budget)` slots per class — fresh ≥ 15%,
@@ -271,11 +271,8 @@ then PHI's ranking effect is diversification only.)
   disagreement can never be penalized; pR = the MERI redundancy hook. All
   four are nonnegative; enforced penalties can drive a total below zero.
 - **Constraints (WS-I.2.3c).** MFCI at/above the profile state excludes
-  cross-community distribution + flags review; SCOI medium attaches the
-  divergence flag (always — it feeds the context-gate counter), high
-  reduces cross-community distribution by the
-  profile multiplier, very-high pauses pending review (room-internal reads
-  stay feasible); PHI above threshold diversifies the REQUESTING USER's
+  cross-community distribution + flags review; PHI above threshold
+  diversifies the REQUESTING USER's
   feed (topic caps halve) — the per-user input is the MAX holonomy over the
   user's recent session buckets (7-day window, ≤ 8 buckets; a single-latest
   read missed older high-holonomy sessions); the GWEI deployment gate
@@ -307,11 +304,13 @@ values), candidate/selected ids, full per-selected-item score and penalty
 breakdowns, feature revisions for every FEASIBLE item, the invariant
 version map, every constraint application with its `enforced` flag, safety
 exclusions with policy reasons, quota outcomes (target always reported,
-with the `applicable` flag), explanation template ids, experiment ids, the
+with the `applicable` flag), experiment ids, the
 profile id/version, and `replay_inputs` (the exact profile snapshot, the
 promotion-enforcement flags in force, per-item resolved topic relevance —
-the user's interest LIST is never persisted — the user PHI input, any
-feed-mode balancing override, and the per-item LENS assignments room
+the user's interest LIST is never persisted — the user PHI input, the
+feed-mode balancing override slot (always null since the `source-diverse`
+mode was removed; retained so pre-redesign logs replay at their recorded
+inputs), and the per-item LENS assignments room
 surfaces ranked with: each item's lens is the most frequent `lens_id`
 among its thread's lens-tagged contributions, ties lexicographic, so lens
 balancing is deterministic and replayable). Retention is 180–365 days
@@ -338,33 +337,45 @@ and health. Every decision-log read is itself audited
 (`ranking_decision_query` — the WS-I.2.5c meta-audit), as are replays,
 kill-switch changes, and config writes.
 
-## Explanations and the client surface (WS-I.2.6)
+## The client surface (the removed explanation line + card fields)
 
-Every served item carries a `distribution_reason` rendered from a
-registered, parameterized template (free-form strings cannot reach the
-wire); the FEED CARD (`StoryCard`) renders it. The story DETAIL page
-deliberately omits the per-item reason and the source/provenance line —
-readers inspect their OWN Signal Ledger from their profile
-(`/profile/signal-ledger`); §13.5 explanations remain inspectable, never
-vague. Room counts are only claimed when genuinely
-multi-room (the single-room evidence variant makes no count claim). The
-renderer is LOCALIZATION-READY: `renderTemplate(id, params, locale)`
-guards prohibited language on the canonical English rendering (the
-§13.6/§30.6 vocabulary is English doctrine), then localizes — the
-`x-pseudo` pseudo-locale is the standard two-language readiness proof
-(every template renders distinctly in both locales with parameters
-intact), and real translation catalogs slot into `LOCALE_CATALOGS`
-without touching any template. Serving currently fixes `en`.
+The per-item explanation system (WS-I.2.6: the template registry, the
+`explainItem` selector, and the per-card `distribution_reason` line) was
+REMOVED as a product decision — the card no longer claims to explain why
+an item was shown, and no template registry exists. What survives is the
+DOCTRINE artifact: `packages/ranking/src/prohibited-language.ts` carries
+the §13.6/§30.6 prohibited ranking vocabulary, and neutrality test 9
+scans every payment-adjacent line of the web i18n catalog with it, so
+"trending"/"popular"/"boosted"/endorsement framing still cannot reach any
+user-facing string. Readers inspect their OWN Signal Ledger from their
+profile (`/profile/signal-ledger`).
 
-Two §23.3 wire fields carry the diversification/context outputs:
+- **`distribution_reason` (DEPRECATED compat — tracked residual)** —
+  pre-removal cached PWA bundles validate feed/detail responses against a
+  schema that REQUIRES a non-empty `distribution_reason`, so every
+  producer keeps emitting the single legacy constant
+  (`LEGACY_DISTRIBUTION_REASON` in `@licio/shared`: "Shown in your feed."
+  — universally true, never score-like, prohibited-vocabulary-clean,
+  because those stale bundles render it on every card) and the field stays
+  declared optional in `feedItemSchema` so response validation does not
+  strip it. New clients never read or render it. **Removal target:**
+  delete the field, the emitters, and the constant together with
+  `rating_label` (below) once pre-removal bundles have aged out of
+  service-worker caches. Decision-log parse-compat rides the same cut:
+  `explanation_ids` (and the enforcement snapshot's `scoi` key, the
+  `scoi_*` constraint flags, `scoi_level`, and the profile's three
+  `scoi_*` constraint keys) stay schema-OPTIONAL so pre-removal logs and
+  feature revisions replay; nothing writes them. `FEATURE_SCHEMA_VERSION`
+  bumped 3 → 4 so already-stored v3 vectors (which may still carry a
+  populated `context_coherence_gain`) rebuild on first serve via the
+  migration-on-read path instead of contributing `wC·C` until the next
+  batch refresh.
+
+The §23.3 wire fields that carry the diversification/context outputs:
 
 - **`more_on_this_story`** — the demoted same-cluster sibling ids on the
   cluster representative (WS-I.2.4a; the "+N more on this story" chip),
   bounded at 12.
-- **`context_card`** — the compact SCOI card (WS-I.2.4c) on items flagged
-  `scoi_context_card`: the SCOI level, lens count from the stored row,
-  open bridge attempts, and the "Where interpretations differ" pointer.
-  Cards are built from STORED rows only — never computed on request.
 - **`sources_count` + `corrections`** — the §5.6 story-card signals,
   derived by the single shared `storyCardSignals`
   (`apps/api/src/forum/card-signals.ts`, also used by the story-detail read
@@ -384,9 +395,7 @@ Two §23.3 wire fields carry the diversification/context outputs:
   trips; the WS-I.4.1b fallback serves the same honest signals. (These
   replaced the former §5.6 `rating_label` prose cascade — removed with the
   story-card signal redesign; the earlier `well-sourced` label had already
-  been removed with the EvidenceCard entity. The served SCOI divergence
-  volume still increments the `ranking.context_gate.card` counter via
-  `recordInterpretationDivergence`.)
+  been removed with the EvidenceCard entity.)
 - **`rating_label` (DEPRECATED compat — tracked residual)** — pre-redesign
   cached PWA bundles validate feed/detail responses against a schema that
   REQUIRES `rating_label`, so both producers keep emitting a legacy
@@ -407,6 +416,76 @@ Two §23.3 wire fields carry the diversification/context outputs:
   (it never silently collapses to `ok`); the card renders any review/restricted
   posture as the descriptive "Under review" chip.
 
+## Feed sort modes (SPEC §11.6)
+
+The reader-facing sort switch serves five OBJECTIVE, content-derived
+orders — never popularity, never location (the platform collects no user
+location, so the former "Local" mode was removed):
+
+| Mode | Ordering | Path |
+|---|---|---|
+| `best` (default) | Highest participation-weighted attention right now — the §5.4 constrained-optimization objective | The full ranked pipeline |
+| `rising` | Fastest-INCREASING attention: the `attention_velocity` feature (the signed window-over-window delta of the served PWAtt active-attention component, §30.5-gated at assembly) | `metricOrder` user ordering |
+| `sources` | Most sourced: the §5.6 `sources_count` card signal (published comments with ≥1 citation), batched over the whole feasible set | `metricOrder` user ordering |
+| `debates` | Most WS-T debates: the corrections tally (`active + validated + incorrect`) | `metricOrder` user ordering |
+| `new` | Most recent (strict chronological) | `chronologicalOrder` user ordering |
+
+The user orderings are COMPLETE deterministic sorts over the SAME
+safety-filtered, visibility-gated pool as the ranked path (neither filter
+is ever bypassed; ties break chronologically, then by item id). They log
+`fallback: true, fallback_reason: 'user_mode'` with the honest
+`user_ordering` field, paginate with the same seen-aware cursor chain, and
+carry the same §5.6 card signals. The engaged kill switch outranks every
+mode (plain chronological, reason `kill_switch`); the GWEI gate binds only
+the ranked objective it measures. The `rising` path shares the ranked
+path's stage-2 feature join (`currentFeaturesFor`: cold-start
+write-through + the migration-on-read rebuild), so it orders on
+current-schema vectors instead of silently sorting stale rows as 0.
+
+**Legacy modes (DEPRECATED compat — tracked residual).** The pre-redesign
+mode set (`balanced`, `chronological`, `source-diverse`, `local`,
+`low-personalization`) stays wire- and storage-ACCEPTED
+(`feedModeCompatSchema` / `LEGACY_FEED_MODES` in `@licio/shared`): stored
+personalization blobs round-trip unchanged so pre-redesign bundles keep
+parsing them, and every consumer normalizes through `normalizeFeedMode`
+(`balanced`/`source-diverse`/`local`→`best`; `chronological` AND
+`low-personalization`→`new`). Two mapping choices are deliberate:
+`source-diverse` does NOT map to `sources` (outlet-share balancing and
+citation counts are different things), and `low-personalization` maps to
+the fully NON-personalized `new` sort — mapping it to `best` would
+silently re-enable personalized ranking the moment an updated client
+normalizes and re-sends the canonical mode; `new` preserves the user's
+reduce-personalization intent on every path (live request, stored default,
+persisted slice), matching the PHI-4 "Reduce personalization" control. The
+durable OFF switch remains the `personalization_enabled` privacy setting.
+The removed pipeline modulations (the `source-diverse` balancing override
+and the `local` candidate-quota boost) are gone outright — the §13.2 local
+diversity QUOTA itself (user-configured locale, never geolocation) is
+unaffected. The stored/wire DEFAULTS
+(`defaultPersonalizationSettings().feed_mode`,
+`DEFAULT_USER_SETTINGS.feed_mode`) stay on the LEGACY `balanced` value
+until the compat cut: the defaults are seeded into new accounts and
+emitted on `/v1/privacy/settings`, `/v1/feed/preferences`, and
+`/v1/settings` (for users with no stored row), and a pre-redesign bundle
+validates those responses against the old enum — a canonical default
+would break every settings read on stale bundles (a shared test pins
+this). DURABLE WRITES apply the same discipline
+(`legacyPreservingFeedMode`, applied at all three PATCH boundaries): a
+mode change to `best`/`new` stores its LOSSLESS legacy spelling
+(`balanced`/`chronological` — normalization maps it straight back), so a
+stale bundle on the same account keeps parsing the echoed settings. The
+three genuinely new sorts (`rising`/`sources`/`debates`) have no legacy
+spelling — a downgrade would lose the preference for updated devices —
+so they store canonically, and a stale sibling bundle's settings read
+fails until its service worker updates (the one narrow, self-healing
+residual of this compat layer). **Removal target:** drop `LEGACY_FEED_MODES` +
+`feedModeCompatSchema` acceptance, flip both defaults to
+`DEFAULT_FEED_MODE`, and delete the two inert independent-sources-drawer
+compat stubs (`GET /v1/stories/:id/independent-sources` +
+`GET /v1/stories/:id/claims` — constant honest-absence payloads for
+pre-removal bundles), together with `rating_label` (below) once
+pre-redesign bundles have aged out of service-worker caches.
+
 ## Kill switch and fallback (WS-I.4)
 
 The kill switch is a RUNTIME control in the shared config store
@@ -416,10 +495,8 @@ path, review date) required on engage, audited engage/release, effective on
 the next request with no deployment. An UNREADABLE stored state fails
 closed to the fallback. The safe fallback ranker serves strictly
 chronological order over the SAFETY-FILTERED set (the filter is never
-bypassed), applies no PWAtt and no personalization, attaches the honest
-"Shown in time order while ranking is paused." explanation (the
-user-chosen chronological mode gets "as your feed mode requests"), and
-still writes a `fallback: true` decision log. Neutrality test 1 runs
+bypassed), applies no PWAtt and no personalization, and still writes a
+`fallback: true` decision log with the honest `fallback_reason`. Neutrality test 1 runs
 against the fallback too.
 
 ## The neutrality suite (WS-I.3)
@@ -441,8 +518,8 @@ events plug into before any real-funds pilot.
 | 5 | Votes cannot relabel claims | A governance-outcome event in the durable log changes no claim status — AND a schema-valid `governance.proposal.executed` published through the LIVE router (crypto flag on, ranking consumers registered) reaches no claim and no feature vector; the steward path still works |
 | 6 | Paid status bypasses nothing | Identical rate-limit decisions, identical safety filtering, for wallet-linked vs not; no membership read in any safety/ranking path |
 | 7 | ML feature audit | Adding `wallet_balance_usd` to the feature field set fails the audit naming the field + pattern; the write boundary rejects the same vector |
-| 8 | Sponsored content excluded | The organic source-type enum is closed (no `sponsored`); forged candidates fail the stage boundary; served origins come from the closed registry (eight organic + the room scoper), none financial |
-| 9 | Payments never framed as endorsements | The shared prohibited-language artifact (also enforced at template render) scans every template and the web i18n catalog's payment-adjacent lines |
+| 8 | Sponsored content excluded | The organic source-type enum is closed (no `sponsored`); forged candidates fail the stage boundary; served origins come from the closed registry (seven organic + the room scoper), none financial |
+| 9 | Payments never framed as endorsements | The shared prohibited-language artifact scans the web i18n catalog's payment-adjacent lines |
 | 10 | Dashboard separation | Every product-health metric name (events + ingestion registries) passes the financial-name check, and the ACTUAL admin health payload is fetched and deep-walked — a financial dimension added to it fails without updating any hard-coded list |
 
 Complementary structural controls: `ranking_feature_vectors` and
@@ -467,9 +544,7 @@ The kill-switch state lives under `ranking.killswitch` (see above).
 `startRankingScheduler` ticks hourly under the `ranking_hourly` Postgres
 job lease (at most one executor per window; crashed holders self-heal):
 config reload, feature-store batch refresh, the §22.4 decision-log sweep,
-the replay-regression sample (which also verifies every logged explanation
-template id still exists in the registry — a removed/renamed template
-would silently orphan served reasons), and the feature-staleness needle
+the replay-regression sample, and the feature-staleness needle
 (the oldest unrefreshed vector's age). Task failures are isolated per
 task.
 
@@ -487,20 +562,17 @@ share) / `ranking.feature.staleness`, `ranking.safety_filter.applied`,
 `ranking.fallback.served`, `ranking.killswitch.changed` /
 `ranking.killswitch.unreadable`, `ranking.replay.completed` /
 `ranking.replay.regression`, `ranking.config.rejected` /
-`ranking.config.changed`, `ranking.gwei_gate.overridden`, the
-`ranking.context_gate.card` / `.reduced` / `.paused` counters (the volume
-feeding the bridge/expert-queue dashboard), the
-`ranking.explanation.unknown_template` counter, and the
+`ranking.config.changed`, `ranking.gwei_gate.overridden`, and the
 `ranking.decision_log.write_failed` incident counter.
 
 ## Testing
 
 | Suite | Location | Covers |
 |---|---|---|
-| Pure domain (7 files, 124 tests) | `packages/ranking/src/__tests__/` | Denylist patterns (nested/camel/case) + the versioned-artifact pinning, strict schemas + field-name snapshot, §5.5 guardrail property fuzzing + baseline-weight validation + legacy-snapshot defaults, §5.4 exact arithmetic + configurable baseline weights, penalty derivations (tension-without-hostility ≡ 0, sensitive strictness, negative totals, shadow non-application, inclusive-tie enforcement), constraint ladders, dedup/balancing properties, template rendering + prohibited-language structural block + the x-pseudo localization proof, pipeline determinism, replay diff |
-| Candidates | `apps/api/src/__tests__/ranking-candidates.test.ts` | All eight organic retrievers against seeded stores, quota reservation/degradation + JOINT class protection, orchestrator merge/failure-isolation/budget, the closed 9-origin registry |
+| Pure domain (7 files, ~120 tests) | `packages/ranking/src/__tests__/` | Denylist patterns (nested/camel/case) + the versioned-artifact pinning, strict schemas + field-name snapshot, §5.5 guardrail property fuzzing + baseline-weight validation + legacy-snapshot defaults, §5.4 exact arithmetic + configurable baseline weights, penalty derivations (tension-without-hostility ≡ 0, sensitive strictness, negative totals, shadow non-application, inclusive-tie enforcement), constraint ladders, dedup/balancing properties, the prohibited-vocabulary artifact, pipeline determinism, replay diff |
+| Candidates | `apps/api/src/__tests__/ranking-candidates.test.ts` | All seven organic retrievers against seeded stores, quota reservation/degradation + JOINT class protection, orchestrator merge/failure-isolation/budget, the closed 8-origin registry |
 | Pipeline | `apps/api/src/__tests__/ranking-pipeline.test.ts` | Feature store semantics, assembly provenance (incl. pre-lift shadow rows staying powerless), the real-time consumer, the non-overridable safety filter, end-to-end serving (ranked + every fallback reason), replay exactness/pinning/diffs, config, the admin surface, the scheduler |
-| Surfaces | `apps/api/src/__tests__/ranking-surfaces.test.ts` | The room feed route (WS-G visibility 404s, room-scoped pool, REAL lens balancing pinned + replayed), the distribution-side room-visibility bar (restricted content never on public feeds), seen-aware pagination (chain coverage/no-duplicates/replay, unknown-cursor recovery, fallback + room-route paging), the topic surface (scoping + sensitivity-driven profile), the wire fields (context_card, more_on_this_story), GWEI gate semantics (window, suppression, TTL cache, owner override), the MFCI intake-path refresh at the 100-target bound, audit-write outage resilience, near-duplicate CHAIN clustering (exact hand-crafted signatures), replay backward-compatibility for pre-baseline_weights logs, /v1/feed stability under the kill switch |
+| Surfaces | `apps/api/src/__tests__/ranking-surfaces.test.ts` | The room feed route (WS-G visibility 404s, room-scoped pool, REAL lens balancing pinned + replayed), the distribution-side room-visibility bar (restricted content never on public feeds), seen-aware pagination (chain coverage/no-duplicates/replay, unknown-cursor recovery, fallback + room-route paging), the topic surface (scoping + sensitivity-driven profile), the wire fields (more_on_this_story, the card signals), GWEI gate semantics (window, suppression, TTL cache, owner override), the MFCI intake-path refresh at the 100-target bound, audit-write outage resilience, near-duplicate CHAIN clustering (exact hand-crafted signatures), replay backward-compatibility for pre-baseline_weights logs, /v1/feed stability under the kill switch |
 | Branch edges | `apps/api/src/__tests__/ranking-branches.test.ts` | Audit-dimension queries, per-key config, MERI/tropical/cluster joins, PHI/GWEI helpers, lease behavior, mapping variants, fail-closed paths |
 | Neutrality | `apps/api/src/__tests__/ranking-neutrality.test.ts` | The ten WS-I.3 tests |
 | Gated integration | `apps/api/src/__tests__/ranking-integration.test.ts` | Drizzle adapters against the REAL migration chain (PK-collision concurrency, jsonb audit-dimension queries, retention sweep, the privacy-bucket CHECK, DISTINCT ON `getLatestMany`, by-timestamp `getAt`, TRUE keyset pagination with same-timestamp tie-breaks, `listByTypeSince`, bulk safety/story/thread reads); runs in CI's service containers |
@@ -537,7 +609,7 @@ eligibility field, never a score:
   proves flipping it changes neither order nor scores); legacy feature
   snapshots and decision logs default to `public` so pre-WS-Q decisions replay
   unchanged.
-- **Visibility-scoped retrievers.** The eight organic retrievers apply the
+- **Visibility-scoped retrievers.** The seven organic retrievers apply the
   two-condition global predicate `story.visibility = 'public' AND room.visibility
   = 'public'` (`globallyRetrievable`), so a `room_only` item — or a
   transiently-mislabeled public item in a private room — appears in NONE of

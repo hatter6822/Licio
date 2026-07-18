@@ -10,6 +10,7 @@ import {
   chronologicalOrder,
   diffRankings,
   emptyFeatureVector,
+  metricOrder,
   type RankingEnforcement,
   rankFeasibleSet,
   SHADOW_RANKING_ENFORCEMENT,
@@ -24,7 +25,6 @@ const FULL_ENFORCEMENT: RankingEnforcement = {
   hodge: true,
   meri: true,
   tropical: true,
-  scoi: true,
   gwei: true,
 };
 
@@ -326,7 +326,10 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
     );
   });
 
-  it('SCOI reduced distribution multiplies the score down (enforced only)', () => {
+  it('a stale scoi_level in a persisted feature revision never changes the score', () => {
+    // Parse-compat regression: the SCOI ranking ladder was removed, so a
+    // pre-removal feature revision carrying `scoi_level` scores identically
+    // under full and shadow enforcement.
     const candidates = [makeCandidate(1)];
     const features = featureMap([makeFeatures(1, { scoi_level: 'high' })]);
     const enforced = rankFeasibleSet(
@@ -343,12 +346,7 @@ describe('WS-I.2.3e deterministic scoring orchestrator', () => {
       SHADOW_RANKING_ENFORCEMENT,
       makeContext(),
     );
-    const enforcedScore = enforced.selected[0]?.pwatt_score ?? 0;
-    const shadowScore = shadow.selected[0]?.pwatt_score ?? 0;
-    expect(enforcedScore).toBeCloseTo(
-      shadowScore * EVERGREEN_PROFILE.constraints.scoi_reduce_multiplier,
-      12,
-    );
+    expect(enforced.selected[0]?.pwatt_score).toBe(shadow.selected[0]?.pwatt_score);
   });
 });
 
@@ -361,6 +359,95 @@ describe('WS-I.4.1b chronological fallback ordering', () => {
       makeCandidate(3, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
     ]);
     expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(3), uuidOf(1), uuidOf(2)]);
+  });
+
+  it('an unparseable timestamp sorts as epoch 0 and keeps the order permutation-stable', () => {
+    // `freshness_timestamp` is `z.string()`, so a malformed value would make
+    // `Date.parse` return NaN. A NaN comparator term is NOT a total order — it
+    // silently drops to the id tie-break for the bad pair only, which can form
+    // an intransitive cycle and make V8's sort input-order-dependent (breaking
+    // the serving↔replay byte-identity gate). Coercing NaN→0 keeps the order
+    // total: the garbage-timestamp item sinks to last, identically for EVERY
+    // input permutation.
+    const base = [
+      makeCandidate(1, { freshness_timestamp: new Date(T0 + 10_000).toISOString() }),
+      makeCandidate(2, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
+      makeCandidate(3, { freshness_timestamp: 'not-a-real-date' }),
+    ] as const;
+    const expected = [uuidOf(1), uuidOf(2), uuidOf(3)];
+    for (const perm of [
+      [base[0], base[1], base[2]],
+      [base[2], base[0], base[1]],
+      [base[1], base[2], base[0]],
+      [base[2], base[1], base[0]],
+    ]) {
+      expect(chronologicalOrder(perm).map((c) => c.item_id)).toEqual(expected);
+    }
+  });
+});
+
+describe('§11.6 user metric sort orders (metricOrder)', () => {
+  it('orders by metric desc, then freshness desc, then item id', () => {
+    const tied = new Date(T0).toISOString();
+    const candidates = [
+      makeCandidate(1, { freshness_timestamp: tied }),
+      makeCandidate(2, { freshness_timestamp: new Date(T0 + 1000).toISOString() }),
+      makeCandidate(3, { freshness_timestamp: tied }),
+      makeCandidate(4, { freshness_timestamp: new Date(T0 + 2000).toISOString() }),
+    ];
+    const ordered = metricOrder(
+      candidates,
+      new Map([
+        [uuidOf(1), 3],
+        [uuidOf(2), 3],
+        [uuidOf(3), 1],
+      ]),
+    );
+    // 2 beats 1 on freshness within the metric tie; 4 (no metric ⇒ 0) sinks
+    // below 3 (metric 1) despite being the freshest candidate overall.
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(2), uuidOf(1), uuidOf(3), uuidOf(4)]);
+  });
+
+  it('a signed metric puts falling items below flat ones', () => {
+    const tied = new Date(T0).toISOString();
+    const ordered = metricOrder(
+      [
+        makeCandidate(1, { freshness_timestamp: tied }),
+        makeCandidate(2, { freshness_timestamp: tied }),
+        makeCandidate(3, { freshness_timestamp: tied }),
+      ],
+      new Map([
+        [uuidOf(1), -0.4], // falling
+        [uuidOf(3), 0.4], // rising
+        // 2 absent ⇒ 0 (flat / no history)
+      ]),
+    );
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(3), uuidOf(2), uuidOf(1)]);
+  });
+
+  it('a non-finite metric sorts as 0 and never corrupts the order', () => {
+    const tied = new Date(T0).toISOString();
+    const ordered = metricOrder(
+      [
+        makeCandidate(1, { freshness_timestamp: tied }),
+        makeCandidate(2, { freshness_timestamp: tied }),
+      ],
+      new Map([
+        [uuidOf(2), Number.NaN],
+        [uuidOf(1), 1],
+      ]),
+    );
+    expect(ordered.map((c) => c.item_id)).toEqual([uuidOf(1), uuidOf(2)]);
+  });
+
+  it('is deterministic (identical inputs ⇒ identical output; input untouched)', () => {
+    const candidates = [makeCandidate(2), makeCandidate(1), makeCandidate(3)];
+    const inputOrder = candidates.map((c) => c.item_id);
+    const metric = new Map([[uuidOf(1), 2]]);
+    const a = metricOrder(candidates, metric).map((c) => c.item_id);
+    const b = metricOrder(candidates, metric).map((c) => c.item_id);
+    expect(a).toEqual(b);
+    expect(candidates.map((c) => c.item_id)).toEqual(inputOrder);
   });
 });
 

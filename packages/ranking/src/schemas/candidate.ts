@@ -9,16 +9,18 @@
 
 import { z } from 'zod';
 
-/** The eight organic candidate source types (SPEC §13.2). CLOSED set: there
+/** The seven organic candidate source types (SPEC §13.2). CLOSED set: there
  *  is deliberately no `sponsored` member — sponsored/treasury-funded content
- *  cannot enter organic retrieval (WS-I.3.1h). */
+ *  cannot enter organic retrieval (WS-I.3.1h). The former
+ *  `cross_community_bridge` type was removed with its retriever (the SCOI
+ *  split/obstructed gate it keyed on never fired under production
+ *  calibration, so the retriever was inert). */
 export const CANDIDATE_SOURCE_TYPES = [
   'subscribed_room',
   'local_news',
   'global',
   'emerging_discussion',
   'independent_source_addition',
-  'cross_community_bridge',
   'expert_explanation',
   'chronological_catch_up',
 ] as const;
@@ -29,16 +31,6 @@ export const candidateSourceTypeSchema = z.enum(CANDIDATE_SOURCE_TYPES);
 export const RANKING_SURFACES = ['front_page', 'room', 'topic'] as const;
 export type RankingSurface = (typeof RANKING_SURFACES)[number];
 export const rankingSurfaceSchema = z.enum(RANKING_SURFACES);
-
-/** SCOI context metadata attached to cross-community bridge candidates. */
-export const bridgeContextSchema = z
-  .object({
-    scoi: z.number().min(0).max(1),
-    context_state: z.string().min(1).max(32),
-    lens_count: z.number().int().nonnegative(),
-  })
-  .strict();
-export type BridgeContext = z.infer<typeof bridgeContextSchema>;
 
 /**
  * One candidate item. `retrieval_origins` is the audit trail of named
@@ -68,14 +60,29 @@ export const candidateSchema = z
     retrieval_score: z.number().min(0).max(1),
     /** Named retrievers that produced this candidate (audit; merged). */
     retrieval_origins: z.array(z.string().min(1).max(64)).min(1).max(8),
-    /** SCOI metadata, present on cross-community bridge candidates. */
-    bridge_context: bridgeContextSchema.nullable(),
   })
   .strict();
 export type Candidate = z.infer<typeof candidateSchema>;
 
 /** Validate a merged candidate pool at the stage boundary (WS-I.1.1d). */
 export const candidatePoolSchema = z.array(candidateSchema);
+
+/**
+ * Parse an ISO instant to epoch-ms for ordering, mapping an unparseable value
+ * to 0. The timestamp fields the ordering comparators read (`freshness_
+ * timestamp`, `created_at`) are typed `z.string()`, so a malformed value would
+ * make `Date.parse` return NaN — and a NaN term in a `Date.parse(a) -
+ * Date.parse(b)` comparator is NOT a total order (it silently drops to the id
+ * tie-break for the bad pair while valid pairs still compare by time, which can
+ * form an intransitive cycle and make V8's sort input-order-dependent). Coercing
+ * to 0 keeps every comparator a TOTAL order, so the serving↔replay byte-identity
+ * guarantee (the M3 reproducibility gate) holds for any input, not just today's
+ * ISO-only production data.
+ */
+export function parseTimestampOrZero(iso: string): number {
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 /**
  * Merge candidates produced by multiple retrievers into a deduplicated pool
@@ -108,7 +115,6 @@ export function mergeCandidates(batches: ReadonlyArray<readonly Candidate[]>): C
       byId.set(candidate.item_id, {
         ...(better ? candidate : existing),
         retrieval_origins: origins,
-        bridge_context: existing.bridge_context ?? candidate.bridge_context,
         retrieval_score: Math.max(existing.retrieval_score, candidate.retrieval_score),
       });
     }
@@ -116,7 +122,7 @@ export function mergeCandidates(batches: ReadonlyArray<readonly Candidate[]>): C
   return [...byId.values()].sort(
     (a, b) =>
       b.retrieval_score - a.retrieval_score ||
-      Date.parse(b.freshness_timestamp) - Date.parse(a.freshness_timestamp) ||
+      parseTimestampOrZero(b.freshness_timestamp) - parseTimestampOrZero(a.freshness_timestamp) ||
       a.item_id.localeCompare(b.item_id),
   );
 }

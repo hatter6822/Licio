@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_FEED_MODE, LEGACY_FEED_MODES, normalizeFeedMode } from '../schemas/feed.js';
 import {
   ATTENTION_RETENTION_PREFERENCES,
   type AttentionRetentionPreference,
@@ -17,6 +18,7 @@ import {
   type SensitiveTopicHandling,
   teenFloorPrivacySettings,
 } from '../schemas/privacy-settings.js';
+import { DEFAULT_USER_SETTINGS } from '../schemas/profile.js';
 
 /** Privacy rank: index in the (least→most private) ordering. Higher = more private. */
 function rank<T extends string>(order: readonly T[], value: T): number {
@@ -233,6 +235,20 @@ describe('personalization settings', () => {
     const d = defaultPersonalizationSettings();
     expect(() => personalizationSettingsSchema.parse(d)).not.toThrow();
     expect(d.topic_preferences).toEqual([]);
+  });
+
+  it('the DEFAULT feed_mode stays legacy-parseable until the compat cut', () => {
+    // Rollout compat: the defaults are SEEDED into new accounts and EMITTED
+    // on `/v1/privacy/settings`, `/v1/feed/preferences`, and `/v1/settings`
+    // (for users with no stored row) — a pre-redesign cached bundle validates
+    // those responses against the OLD mode enum, so a canonical default would
+    // break every settings read on stale bundles. Consumers normalize
+    // (`normalizeFeedMode`). Delete this pin together with LEGACY_FEED_MODES.
+    expect(LEGACY_FEED_MODES).toContain(defaultPersonalizationSettings().feed_mode);
+    expect(LEGACY_FEED_MODES).toContain(DEFAULT_USER_SETTINGS.feed_mode);
+    // …and both normalize to the canonical default for the new client.
+    expect(normalizeFeedMode(defaultPersonalizationSettings().feed_mode)).toBe(DEFAULT_FEED_MODE);
+    expect(normalizeFeedMode(DEFAULT_USER_SETTINGS.feed_mode)).toBe(DEFAULT_FEED_MODE);
   });
 
   it('rejects more than the bounded number of topic preferences', () => {

@@ -208,6 +208,35 @@ describe('POST /v1/reports', () => {
     expect(((await b.json()) as { idempotent: boolean }).idempotent).toBe(true);
   });
 
+  it('WS-N.2.3e: key-like material in the free text is BLOCKED with the warning, never stored', async () => {
+    const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
+    const phrase =
+      'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const res = await app().request(
+      post('/v1/reports', reportBody({ context: `help, my seed is ${phrase}` }), cookie),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('key_material_blocked');
+    expect(body.error.message).toContain('Never share your private key or seed phrase');
+    // The matched value was DISCARDED: no report row exists.
+    const mod = getModerationServices();
+    expect(await mod.reports.countByReporterSince('any', '2000-01-01T00:00:00.000Z')).toBe(0);
+    // A 0x-prefixed 64-hex value is blocked too: it is BOTH a transaction
+    // hash and a private-key export, and nothing can tell them apart. The
+    // warning points at the structured evidence field for real references.
+    const hex = `0x${'e9873d79c6d87dc0fb6a5778633389f4453213303da61f20bd67fc233aa33262'}`;
+    const keyLike = await app().request(
+      post('/v1/reports', reportBody({ context: `wrong transfer ${hex}` }), cookie),
+    );
+    expect(keyLike.status).toBe(422);
+    // …while an ordinary report still goes through untouched.
+    const ok = await app().request(
+      post('/v1/reports', reportBody({ context: 'this post is spam' }), cookie),
+    );
+    expect(ok.status).toBe(201);
+  });
+
   it('404s an account report against a non-existent target', async () => {
     const { cookie } = await seedUser({ handle: `r${randomUUID().slice(0, 6)}` });
     const res = await app().request(
@@ -758,6 +787,26 @@ describe('trust-safety route branches', () => {
     expect(
       (await app().request(get(`/v1/appeals/eligibility/${actionId}`, safety.cookie))).status,
     ).toBe(404);
+    // WS-N.2.3e: an appeal is the OTHER free-text lane into this queue, so it
+    // runs the same no-key filter the report edge does — a user pasting a seed
+    // phrase while appealing would otherwise put the secret straight into the
+    // appeal queue and reviewer views.
+    const keyed = await app().request(
+      post(
+        '/v1/appeals',
+        {
+          action_id: actionId,
+          user_statement:
+            'my seed is abandon ability able about above absent absorb abstract absurd abuse access accident',
+        },
+        AUTHOR_COOKIE,
+      ),
+    );
+    expect(keyed.status).toBe(422);
+    expect(((await keyed.json()) as { error: { code: string } }).error.code).toBe(
+      'key_material_blocked',
+    );
+    // …and the blocked appeal was DISCARDED, so the real one still goes through.
     // First appeal succeeds; the duplicate is 409.
     expect(
       (

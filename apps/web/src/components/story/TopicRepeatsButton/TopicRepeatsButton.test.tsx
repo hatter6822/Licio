@@ -22,7 +22,7 @@ const SETTINGS = {
   privacy_settings: {},
   personalization_settings: {
     topic_repeat_preference: { water: 'fewer_repeats', transit: 'show_all' },
-    feed_mode: 'balanced',
+    feed_mode: 'best',
   },
 };
 

@@ -46,7 +46,14 @@ describe('loadCatalog', () => {
     expect(frLoaded).toBe(false); // the French chunk was never fetched
   });
 
-  it('ships no real catalogs yet (pseudo-locale proves the pipeline)', () => {
-    expect(catalogs).toEqual({});
+  it('ships the German catalog (the WS-N.1.2b disabled-state completeness locale)', async () => {
+    expect(Object.keys(catalogs)).toEqual(['de']);
+    const messages = await loadCatalog('de');
+    // The disabled-state keys resolve through the REAL registry, base-language
+    // fallback included (`de-AT` → `de`).
+    expect(messages['disabled.production_payments.title']).toBeTruthy();
+    expect(await loadCatalog('de-AT')).toEqual(messages);
+    // An unregistered locale still falls back to the inline English defaults.
+    expect(await loadCatalog('fr')).toEqual({});
   });
 });

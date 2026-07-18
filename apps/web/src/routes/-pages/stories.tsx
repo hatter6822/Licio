@@ -14,7 +14,6 @@ import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
-import { IndependentSourcesDrawer } from '../../components/story/IndependentSourcesDrawer/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
 import { StoryMedia } from '../../components/story/StoryMedia/index.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -26,7 +25,6 @@ import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import {
   useSavedStoriesQuery,
-  useStoryInterpretationsQuery,
   useStoryQuery,
   useToggleSavedStoryMutation,
 } from '../../lib/queries.js';
@@ -100,7 +98,6 @@ function StoryCorrectionButton({
 function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();
   const story = useStoryQuery(storyId);
-  const interpretations = useStoryInterpretationsQuery(storyId);
   const [readerOpen, setReaderOpen] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
@@ -191,13 +188,7 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               <ShareStoryButton
                 title={data.title}
                 url={typeof window !== 'undefined' ? window.location.href : ''}
-                needsContext={interpretations.data?.needs_context ?? false}
-                contextStatusPending={interpretations.isPending}
               />
-              {/* SPEC §7.6 — the MERI independent-sources drawer (WS-H.2.3a).
-                  Visible for every readable story; its reads are lazy (fired
-                  only once the sheet opens), so it costs nothing here. */}
-              <IndependentSourcesDrawer storyId={data.story_id} />
               {/* WS-T — raise a sourced correction against the story (opens a debate). */}
               {data.thread_id ? (
                 <StoryCorrectionButton storyId={data.story_id} threadId={data.thread_id} />

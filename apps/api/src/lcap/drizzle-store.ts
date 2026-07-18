@@ -19,6 +19,7 @@ import {
   lcapRecordClosure,
 } from '@licio/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   AcceptContributionResult,
   CapabilityQuotaLimits,
@@ -28,16 +29,6 @@ import type {
   RecordEdgeRelation,
   StoredObject,
 } from './store.js';
-
-/** A Postgres unique/PK violation (SQLSTATE 23505) — used to retry a seq/cid race. */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === '23505'
-  );
-}
 
 export class DrizzleLcapServerStore implements LcapServerStore {
   readonly #db: DbExecutor;

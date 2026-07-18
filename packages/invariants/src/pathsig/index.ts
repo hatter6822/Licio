@@ -15,9 +15,17 @@
 // Both are EXACT for piecewise-linear paths — no quadrature. Consequences
 // used as tests: inserting a collinear midpoint never changes the
 // signature (exp(a)⊗exp(b) = exp(a+b) for parallel a, b), while the same
-// event multiset in a different ORDER changes level ≥ 2 (the Lévy area
-// S²[i][j] − S²[j][i] measures signed circulation — e.g. read→source→
-// question vs scroll→rage-reply→repeat circulate oppositely).
+// event multiset in a different ORDER changes level ≥ 2. The Lévy area
+// S²[i][j] − S²[j][i] is the SIGNED circulation of the (i, j) projection —
+// for (action-depth, time) it is positive when action-depth arcs ABOVE its
+// start→end chord over the session and negative when it arcs BELOW: e.g.
+// read→open_source→read circulates +, open_source→read→open_source circulates
+// −. NOTE this sign is a geometric pacing signal, NOT a health label — it does
+// not separate the health classes (a constructive read→source→question and a
+// bursty scroll→reply→scroll both circulate positively), so `actionTimeArea`
+// is RECORDED as an interpretable feature (persisted on the PHI output for
+// calibration), not used as a classification threshold — see
+// `classifySessionHealth`.
 //
 // Privacy: the input type carries event-type codes, topic-cluster ordinals
 // and timestamps only; classification reads signature features, never text.
@@ -215,9 +223,17 @@ export const DEFAULT_SESSION_HEALTH_CONFIG: SessionHealthConfig = {
 
 /**
  * Classify session health from the path and its signature features
- * (WS-H.7.6b). Order matters through the signature's action×time signed
- * area: deep actions late (building toward sources/questions) circulate
- * positively; early-peaking scroll/reply bursts negatively.
+ * (WS-H.7.6b). The classification runs on the interpretable scalar heuristics
+ * (rapid-reply/return, revisit ratio, deep-action share). The signature's
+ * action×time signed area (`actionTimeArea`) is ALSO returned in `features` and
+ * PERSISTED on the PHI invariant output (see `services-impl.ts`) as an
+ * order-sensitive calibration signal — it is deliberately NOT a classification
+ * threshold: the area's SIGN is a geometric pacing signal that does not separate
+ * the health classes (verified — a constructive read→source→question and a
+ * bursty scroll→reply→scroll both circulate positively). A learned model over
+ * the full signature, not a hand-picked threshold on this one projection, is the
+ * principled way to consume it; that is tracked as a residual
+ * (docs/invariants/README.md).
  */
 export function classifySessionHealth(
   events: readonly SessionPathEvent[],

@@ -33,10 +33,13 @@ export interface StorySafetyStateInputs {
 
 /**
  * Derive a story's wire-facing safety posture (SPEC §22.1 `safety_state`) — the
- * SINGLE derivation shared by the WS-I feed and the story-detail read, applied
- * to each surface's view of the same underlying state (the feed reads the
- * MFCI-risk ranking feature, the detail reads the durable MFCI risk-state store
- * it caches), so they agree by construction. Descriptive, never a sanction:
+ * SINGLE derivation shared by the WS-I feed and the story-detail read. BOTH
+ * surfaces feed it the DURABLE MFCI risk-state store (the feed page reads it in
+ * `buildFeedItems`, the detail read in `assembleStoryReadSignals`), so they
+ * agree by construction on EVERY path — including the WS-I.4.1b degradation
+ * fallbacks, which serve feature-blind under §30.5 yet still carry the honest
+ * posture because MFCI risk is a WS-H integrity signal, not a PWAtt value.
+ * Descriptive, never a sanction:
  * `under-review` means a coordination/safety/policy signal warrants review, not
  * that the content is false or banned. The cascade, strongest first: a thread
  * under an active §18.3 RESTRICTION is `restricted` (access-limited, not merely
