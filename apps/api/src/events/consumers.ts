@@ -24,8 +24,15 @@ import { actorKeyOfPayload, type EventPipelineServices } from './services.js';
 export interface TriggerOptions {
   /** Called when an item's real-time volume crosses the trigger threshold. */
   onVolumeTrigger?: (itemId: string, windowStartMs: number) => void;
-  /** The threshold (kept in sync with pwatt config by the boot wiring). */
+  /** The INITIAL threshold (the boot-loaded pwatt config value). */
   triggerThreshold?: number;
+  /** A live reader for the runtime `trigger_threshold` (e.g. `loadTriggerThreshold`).
+   *  When set, the consumer refreshes the threshold at most once per
+   *  `thresholdRefreshMs` so runtime tuning takes effect WITHOUT a restart — never
+   *  a per-event read.  Absent (tests) ⇒ the static `triggerThreshold` is used. */
+  readTriggerThreshold?: () => Promise<number>;
+  /** How often the live reader may be consulted (default 60s). */
+  thresholdRefreshMs?: number;
 }
 
 /** Register the default consumers on the services' router. */
@@ -33,7 +40,24 @@ export function registerDefaultConsumers(
   events: EventPipelineServices,
   options: TriggerOptions = {},
 ): void {
-  const threshold = options.triggerThreshold ?? 500;
+  let threshold = options.triggerThreshold ?? 500;
+  // Refresh the live threshold at most once per window so runtime tuning applies
+  // without a restart, without a DB read per scored event.  On a read failure the
+  // last-known value is kept (fail-open: the scheduled boundary run is the safety
+  // net for the early trigger either way).
+  const refreshMs = options.thresholdRefreshMs ?? 60_000;
+  let nextRefreshAt = Number.NEGATIVE_INFINITY;
+  const currentThreshold = async (nowMs: number): Promise<number> => {
+    if (options.readTriggerThreshold && nowMs >= nextRefreshAt) {
+      nextRefreshAt = nowMs + refreshMs;
+      try {
+        threshold = await options.readTriggerThreshold();
+      } catch {
+        // keep the last-known threshold
+      }
+    }
+    return threshold;
+  };
   /** Items that already fired the early-aggregation trigger, bucketed by window
    *  start.  Bounded to the live-window horizon (evicted below on the SAME
    *  boundary the aggregator uses) so it can never grow for the process lifetime. */
@@ -76,20 +100,23 @@ export function registerDefaultConsumers(
       }
       // Volume-threshold trigger for early aggregation (WS-E.2.1a).
       if (options.onVolumeTrigger) {
+        const nowMs = Date.now();
         // Evict debounce buckets whose window's realtime counters are already
         // gone, mirroring InMemoryRealtimeAggregator#expire so a key is dropped
         // only AFTER its counter — never a window early enough for a late event
         // to re-fire the trigger.
-        const oldest = Date.now() - REALTIME_TTL_MS;
+        const oldest = nowMs - REALTIME_TTL_MS;
         for (const windowStart of fired.keys()) {
           if (windowStart + REALTIME_WINDOW_MS <= oldest) fired.delete(windowStart);
         }
+        // The live-tunable threshold (refreshed at most once per window).
+        const activeThreshold = await currentThreshold(nowMs);
         for (const itemId of itemIds) {
           const windowStartMs = realtimeWindowStart(Date.parse(event.timestamp));
           let bucket = fired.get(windowStartMs);
           if (bucket?.has(itemId)) continue;
           const snapshot = await events.realtime.snapshot(itemId, windowStartMs);
-          if (snapshot && snapshot.eventCount >= threshold) {
+          if (snapshot && snapshot.eventCount >= activeThreshold) {
             if (bucket === undefined) {
               bucket = new Set();
               fired.set(windowStartMs, bucket);

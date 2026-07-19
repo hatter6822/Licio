@@ -131,6 +131,38 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
     expect(replay.outcomes).toEqual(['replay']);
   });
 
+  it('rejects a CROSS-SURFACE replay: online-ingested, then offline-replayed 6 days later', async () => {
+    // The event first arrives ONLINE (5-min window). The nonce is sized to the
+    // MAX cross-surface window (7 days), NOT the online policy — so the SAME event
+    // re-submitted via the offline batch wire days later is still caught, even
+    // after the durable event row is retention-purged.
+    let clock = Date.parse('2026-06-22T00:00:00Z');
+    const local = freshEventServices({ now: () => clock });
+    const { userId } = await seedUserWithSession(local.identity, { nowMs: clock });
+    const event = attentionEvent(userId, { timestamp: new Date(clock).toISOString() });
+    const first = await ingestAttentionEvents(
+      local.events,
+      local.identity,
+      userId,
+      [event],
+      ONLINE_ACCEPTANCE,
+    );
+    expect(first.outcomes).toEqual(['accepted']);
+    // The short-retention row is purged (so only the nonce can catch the replay).
+    await local.events.eventStore.deleteByOwner(userId);
+    // 6 days later — long past the ~10-min online nonce TTL, still inside the
+    // offline 7-day window (so the timestamp is accepted by that surface).
+    clock += 6 * 86_400_000;
+    const replay = await ingestAttentionEvents(
+      local.events,
+      local.identity,
+      userId,
+      [event],
+      OFFLINE_SYNC_ACCEPTANCE,
+    );
+    expect(replay.outcomes).toEqual(['replay']);
+  });
+
   it('rejects stale (> 5 min) and future (> 30 s) timestamps with 400', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const stale = attentionEvent(userId, {

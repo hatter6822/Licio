@@ -279,7 +279,7 @@ import {
   startRendezvousScheduler,
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
-import { loadPwattRuntimeConfig } from './pwatt/config.js';
+import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
   startEventPipelineScheduler,
@@ -425,6 +425,9 @@ if (db) {
 const bootConfig = await loadPwattRuntimeConfig(eventServices);
 registerDefaultConsumers(eventServices, {
   triggerThreshold: bootConfig.triggerThreshold,
+  // Live-tunable: the consumer refreshes the runtime `trigger_threshold` from the
+  // config store (≤ once/min) so operator tuning applies without a restart.
+  readTriggerThreshold: () => loadTriggerThreshold(eventServices),
   onVolumeTrigger: (itemId, windowStartMs) => {
     logger.info({ itemId, windowStartMs }, 'volume threshold reached: early PWAtt run');
     void runPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch((err) =>
