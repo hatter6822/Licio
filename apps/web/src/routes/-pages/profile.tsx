@@ -29,6 +29,7 @@ import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { WalletManager } from '../../components/wallet/index.js';
+import { FocusModeToggle } from '../../components/wellbeing/FocusModeToggle/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
@@ -478,12 +479,7 @@ export function SettingsPage(): React.ReactElement {
           <FeedModeSwitcher value={feedMode} onValueChange={applyFeedMode} />
         </Section>
         <Section title={t('settings.wellbeing', 'Wellbeing')}>
-          <Switch
-            label={t('settings.focusMode', 'Focus mode')}
-            description={t('settings.focusMode.desc', 'A calmer, distraction-reduced layout.')}
-            checked={focusMode}
-            onCheckedChange={setFocusMode}
-          />
+          <FocusModeToggle enabled={focusMode} onEnabledChange={setFocusMode} />
           {/* PHI-4 (WS-H.6.1c-2): reset/reduce personalization without
               touching the account or any contribution. */}
           <div className="flex flex-wrap items-center gap-2">

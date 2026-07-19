@@ -7,6 +7,7 @@ import type { FeedItem, FeedMode } from '@licio/shared';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
+import { SectionEndpoint } from '../../components/feed/SectionEndpoint/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { BrandLogo } from '../../components/ui/BrandLogo/index.js';
 import { useT } from '../../i18n/index.js';
@@ -119,7 +120,13 @@ export function FrontPage(): React.ReactElement {
                     : {})}
                 />
               </li>
-            ) : null}
+            ) : (
+              // WS-B.2.8a — a calm end marker when there is no next page (never
+              // an infinite scroll); the prior behaviour rendered nothing.
+              <li>
+                <SectionEndpoint />
+              </li>
+            )}
           </ul>
         )}
       </PageScaffold>
