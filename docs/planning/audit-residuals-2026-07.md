@@ -105,18 +105,26 @@ DONE this pass:
 - **FocusModeToggle** (WS-B.2.8c) — profile now uses the component (inline dup removed).
 - Dead wallet-api duplicates + dead `setSessionCookie` removed.
 
+DONE (second pass):
+- **AiLabel** provenance badge (WS-K §24.1/§24.3) — i18n-ified (`ai.label.*` keys,
+  English defaults) and mounted on `TranslationDisclosure` (SSOT `AI-translated`
+  badge) and the debate `VerdictPanel` (machine-generated rationale). NOT mounted
+  on the story `body_summary` (no provenance field distinguishes an AI summary
+  from a user's own brief — labeling it would risk mislabeling authored content;
+  needs a server summary-provenance field first).
+- **DisabledFeatureExplanation** (WS-N §17.10) — wired on the wallet page via
+  `useFeatureAvailabilityQuery` (the `/v1/compliance/availability` endpoint already
+  carries `disable_reason` + `region`), so a locked wallet shows the concrete
+  reason + next step.
+
 REMAINING (each needs more than a trivial mount — do as a focused follow-up):
-- **AiLabel** provenance badge (WS-K §24.1/§24.3): mount on AI artifacts. NOTE:
-  `AiLabel` is NOT i18n-aware, so swapping it into `TranslationDisclosure` (which
-  has a localized badge) would regress localization — either i18n-ify `AiLabel`
-  first (add `useT` + keys for all 7 labels), or mount it on the currently
-  un-badged debate `VerdictPanel` with an arena-state→provenance-label mapping.
-- **BlockMuteButtons** (WS-J.1.2): mount on the comment author-actions row (next
-  to Report) with a self-block guard; `lib/safety-api` createBlock/createMute
-  already exist. No new API, but needs UI placement + a self-target guard + tests.
-- **DisabledFeatureExplanation** (WS-N §17.10): needs the server to expose a
-  per-feature disable REASON (the feature-flags response carries booleans only)
-  before the component can replace the generic "wallet unavailable" RestrictedState.
+- **BlockMuteButtons** (WS-J.1.2): the server block/mute requires a stable
+  `blocked_user_id` (self-block guarded), but the public comment payload exposes
+  only a HANDLE by identity-minimization design — no user-id. Mounting on comments
+  therefore needs a HANDLE-based block/mute API (server resolves handle→id at
+  block time, storing the stable id) so no user-id is leaked on every comment;
+  that is a block-model design decision (mutable-handle semantics), NOT a trivial
+  mount. Block/mute remain reachable via the safety settings page meanwhile.
 - **SwipeableStoryCard** + `useStoryCardSwipe` (WS-B.2.2 gestures), **SourceReader
   reader-mode** (its sole caller passes no source HTML — needs the source-HTML
   fetch), **VoiceDictation** (pick one of the two impls, mount in the composer),
