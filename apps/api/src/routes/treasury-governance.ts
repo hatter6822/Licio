@@ -50,6 +50,7 @@ import {
   getComplianceServices,
 } from '../compliance/services.js';
 import { getKnomosisServices } from '../knomosis/services.js';
+import { createLogger } from '../lib/logger.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -85,6 +86,7 @@ import { recordReadinessAttestation } from '../treasury/readiness.js';
 import { getTreasuryServices } from '../treasury/services.js';
 import { createTreasury, treasuryDashboard } from '../treasury/treasury.js';
 
+const log = createLogger();
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
 
@@ -746,15 +748,26 @@ export function createTreasuryGovernanceRoutes() {
               target.userId !== null
                 ? { kind: 'user' as const, ref: target.userId }
                 : { kind: 'room' as const, ref: target.roomId };
-            await createCase(buildCaseDeps(getComplianceServices()), {
-              subjectKind: subject.kind,
-              subjectRef: subject.ref,
-              triggerType: 'manual',
-              riskLevel: 'medium',
-              note: `Finalized payment intent ${paymentIntentId} disputed: ${reason}`,
-              idempotencyKey: `intent-dispute:${paymentIntentId}`,
-              actorUserId: auth.userId,
-            });
+            // The dispute is already committed + audited; the review case is a
+            // SECONDARY artifact.  A store failure here (e.g. a transient DB
+            // outage) must NOT 500 the request — the intent is terminal, so a
+            // retry would answer `not_disputable` and never re-open the case.
+            try {
+              await createCase(buildCaseDeps(getComplianceServices()), {
+                subjectKind: subject.kind,
+                subjectRef: subject.ref,
+                triggerType: 'manual',
+                riskLevel: 'medium',
+                note: `Finalized payment intent ${paymentIntentId} disputed: ${reason}`,
+                idempotencyKey: `intent-dispute:${paymentIntentId}`,
+                actorUserId: auth.userId,
+              });
+            } catch (error) {
+              log.warn(
+                { err: error, payment_intent_id: paymentIntentId },
+                'dispute committed but compliance-case open failed',
+              );
+            }
           }
           return c.json({ execution_state: result.intent.executionState });
         },

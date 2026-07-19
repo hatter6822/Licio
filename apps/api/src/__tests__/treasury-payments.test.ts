@@ -884,6 +884,17 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     });
   });
 
+  it('a disputed intent is terminal — it holds no wallet-unlink obligation (WS-M.4.3d)', async () => {
+    const deps = buildDeps();
+    const id = await driveToFinalized(deps);
+    expect(await disputeIntent(deps, id, USER)).toMatchObject({ ok: true });
+    expect((await deps.intents.getById(id))?.executionState).toBe('disputed');
+    // `disputed` is terminal (post-finality review, not an in-flight payment),
+    // so it must NOT appear as an active intent for the wallet-unlink guard.
+    const active = await deps.intents.listActiveByUser(USER, 100);
+    expect(active.some((i) => i.paymentIntentId === id)).toBe(false);
+  });
+
   it('expires timed states to abandoned on the sweep', async () => {
     const deps = buildDeps();
     await provisionTreasury(deps);

@@ -196,19 +196,15 @@ export function rankFeasibleSet(
 ): RankedSelection {
   const applications: ConstraintApplication[] = [];
 
-  // PHI per-user diversification (the `holonomy_limits` constraint).  A request
-  // that surfaces ANY sensitive item is a sensitive journey, so the stricter
-  // (phi_sensitive_factor-scaled) holonomy threshold applies — derived here the
-  // same way scoreItem derives the per-item sensitivity flag.
-  const sensitiveContext = feasible.some((candidate) => {
-    const features = featuresById.get(candidate.item_id);
-    return features !== undefined && isSensitiveItem(features, context.sensitiveTopicIds);
-  });
-  const phi = phiDiversification(context.userPhiRisk, profile, enforcement, sensitiveContext);
-  if (phi.application !== null) applications.push(phi.application);
-
-  // Evaluate constraints ONCE per item; infeasible items leave the set.
-  const scored: Array<{ item: ScoredItem; candidate: Candidate; features: FeatureVector }> = [];
+  // Evaluate constraints ONCE per item; infeasible items (e.g. MFCI-severe
+  // cross-community) leave the set BEFORE the PHI decision — so a sensitive item
+  // that is filtered out and never served cannot make a neutral page a
+  // "sensitive journey".
+  const feasibleItems: Array<{
+    candidate: Candidate;
+    features: FeatureVector;
+    flags: ConstraintFlag[];
+  }> = [];
   for (const candidate of feasible) {
     const features =
       featuresById.get(candidate.item_id) ?? emptyFeatureVector(candidate, context.nowMs);
@@ -218,15 +214,33 @@ export function rankFeasibleSet(
     });
     applications.push(...evaluation.applications);
     if (!evaluation.feasible) continue;
-    const flags: ConstraintFlag[] = phi.diversify
-      ? [...evaluation.flags, 'phi_diversify']
-      : evaluation.flags;
-    scored.push({
-      item: scoreItem(candidate, features, profile, enforcement, context, flags),
+    feasibleItems.push({ candidate, features, flags: evaluation.flags });
+  }
+
+  // PHI per-user diversification (the `holonomy_limits` constraint): a request is
+  // a sensitive journey only if it actually SERVES a sensitive item, so the
+  // stricter (phi_sensitive_factor-scaled) threshold is derived from the FEASIBLE
+  // set — the same sensitivity rule scoreItem applies per item.  The phi
+  // application is kept first in the log (unshift) to preserve replay order.
+  const sensitiveContext = feasibleItems.some(({ features }) =>
+    isSensitiveItem(features, context.sensitiveTopicIds),
+  );
+  const phi = phiDiversification(context.userPhiRisk, profile, enforcement, sensitiveContext);
+  if (phi.application !== null) applications.unshift(phi.application);
+
+  const scored: Array<{ item: ScoredItem; candidate: Candidate; features: FeatureVector }> =
+    feasibleItems.map(({ candidate, features, flags }) => ({
+      item: scoreItem(
+        candidate,
+        features,
+        profile,
+        enforcement,
+        context,
+        phi.diversify ? [...flags, 'phi_diversify'] : flags,
+      ),
       candidate,
       features,
-    });
-  }
+    }));
 
   const ordered = orderScored(scored);
 
