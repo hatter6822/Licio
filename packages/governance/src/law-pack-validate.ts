@@ -272,14 +272,25 @@ function runOneFixture(pack: LawPack, fixture: LawPackFixture): FixtureFailure |
           actual: `no quorum/threshold rule for proposal type "${fixture.proposalType}"`,
         };
       }
-      const result = tallyProposalVotes(
-        fixture.votes,
-        { quorum, threshold },
-        {
-          eligibleCount: fixture.eligibleCount,
-          deadlinePassed: fixture.deadlinePassed,
-        },
-      );
+      // Mirror the runtime's role_class basis (proposals.ts): the quorum
+      // population is the multisig signer set and only signer ballots count
+      // toward turnout — otherwise a role_class fixture tallies differently from
+      // runtime, breaking the fixture=runtime guarantee.
+      const ctx =
+        quorum.basis === 'role_class'
+          ? (() => {
+              const signers = new Set(pack.multisig?.signers ?? []);
+              const signerVoters = new Set(
+                fixture.votes.filter((v) => signers.has(v.voterUserId)).map((v) => v.voterUserId),
+              );
+              return {
+                eligibleCount: signers.size,
+                deadlinePassed: fixture.deadlinePassed,
+                quorumParticipants: signerVoters.size,
+              };
+            })()
+          : { eligibleCount: fixture.eligibleCount, deadlinePassed: fixture.deadlinePassed };
+      const result = tallyProposalVotes(fixture.votes, { quorum, threshold }, ctx);
       return result.outcome === fixture.expect
         ? null
         : { label: fixture.label, expected: fixture.expect, actual: result.outcome };
