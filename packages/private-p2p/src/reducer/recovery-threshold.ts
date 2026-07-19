@@ -10,6 +10,12 @@
 // threshold is met.  A successful recovery then proceeds through the NORMAL
 // membership path (a `member.add` = an MLS Add + epoch rotation, WS-S.3.1b),
 // so removed/old epochs stay sealed and no root key is shared or rebuilt.
+//
+// STATUS (tracked debt — see docs/private-p2p/README.md): this evaluator is the
+// COMPLETE decision function, but the reducer does not yet CONSUME it to GATE a
+// re-admit — `applyMemberAdd` has neither the manifest-configured M nor a
+// recovery linkage from `member.add` to a recovery request.  Until that wiring
+// lands, the M-of-N gate is NOT enforced; WS-S.3.6c is not yet shipped-enforced.
 
 import type { RoomReducerState } from './state.js';
 

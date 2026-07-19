@@ -219,10 +219,14 @@ export const P2P_ENDPOINT_REJECTION_MARKERS: readonly RequiredMarker[] = [
 ];
 
 /** §23.5 — every retriever predicates server storage (the shared helper + the
- *  room-surface scoper both consult `roomStorageMode`). */
+ *  room-surface scoper both consult `roomAxes`, whose `storageMode` they gate
+ *  on: the global helper requires `=== 'server'`, the scoper rejects `!== 'server'`). */
 export const P2P_RANKING_EXCLUSION_MARKERS: readonly RequiredMarker[] = [
-  { file: 'ranking/retrievers.ts', markers: ['roomStorageMode', "!== 'server'"] },
-  { file: 'ranking/services.ts', markers: ['roomStorageMode'] },
+  {
+    file: 'ranking/retrievers.ts',
+    markers: ['roomAxes', "storageMode === 'server'", "storageMode !== 'server'"],
+  },
+  { file: 'ranking/services.ts', markers: ['roomAxes'] },
 ];
 
 /** §23.6 — server search indexes + serves only server-storage rooms. */

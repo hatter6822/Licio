@@ -103,14 +103,21 @@ export function evaluateItemConstraints(
 /**
  * PHI per-user constraint (WS-I.2.3c): a requesting user whose recommendation
  * sequence holonomy exceeds the threshold gets feed diversification — the
- * diversification stage tightens topic balancing for this request.
+ * diversification stage tightens topic balancing for this request.  On a
+ * SENSITIVE journey (the request surfaces sensitive content) the effective
+ * threshold is tightened by `phi_sensitive_factor` ∈ (0, 1], so the stricter
+ * holonomy limit bites sooner than it would for a neutral journey.
  */
 export function phiDiversification(
   userPhiRisk: number | null,
   profile: RankingProfileConfig,
   enforcement: Pick<ConstraintEnforcement, 'phi'>,
+  sensitiveContext = false,
 ): { diversify: boolean; application: ConstraintApplication | null } {
-  if (userPhiRisk === null || userPhiRisk < profile.constraints.phi_diversify_threshold) {
+  const threshold = sensitiveContext
+    ? profile.constraints.phi_diversify_threshold * profile.constraints.phi_sensitive_factor
+    : profile.constraints.phi_diversify_threshold;
+  if (userPhiRisk === null || userPhiRisk < threshold) {
     return { diversify: false, application: null };
   }
   return {
@@ -118,7 +125,7 @@ export function phiDiversification(
     application: {
       constraint: 'phi_holonomy_diversification',
       item_id: null,
-      threshold: profile.constraints.phi_diversify_threshold,
+      threshold,
       actual: userPhiRisk,
       action: 'diversified',
       enforced: enforcement.phi,

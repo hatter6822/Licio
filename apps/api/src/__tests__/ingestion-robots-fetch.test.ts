@@ -226,6 +226,12 @@ describe('safeFetch against a live local server', () => {
           res.writeHead(200);
           res.end('late');
         }, 10_000);
+      } else if (req.url === '/drip') {
+        // Stream one byte every 100ms forever: this keeps the socket ACTIVE so
+        // the idle timeout never fires — only a wall-clock cap can stop it.
+        res.writeHead(200, { 'content-type': 'text/html' });
+        const iv = setInterval(() => res.write('x'), 100);
+        res.on('close', () => clearInterval(iv));
       } else {
         res.writeHead(404);
         res.end();
@@ -319,6 +325,16 @@ describe('safeFetch against a live local server', () => {
     it('enforces the deadline across the WHOLE chain (timeout)', async () => {
       const result = await safeFetch(`${origin}/slow`, { ...LIMITS, timeoutMs: 500 });
       expect(result).toEqual({ ok: false, reason: 'timeout' });
+    });
+
+    it('enforces a WALL-CLOCK cap even when a slow-drip body resets the idle timeout', async () => {
+      // Bytes arrive every 100ms — under the 500ms idle window, so the socket
+      // idle timeout never fires.  Only the hard wall-clock timer stops it, and
+      // it must stop LONG before the drip could reach maxBytes (~102s).
+      const started = Date.now();
+      const result = await safeFetch(`${origin}/drip`, { ...LIMITS, timeoutMs: 500 });
+      expect(result).toEqual({ ok: false, reason: 'timeout' });
+      expect(Date.now() - started).toBeLessThan(2_000);
     });
   });
 });

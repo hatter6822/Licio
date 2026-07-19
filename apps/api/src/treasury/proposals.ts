@@ -865,6 +865,27 @@ export async function signProposal(
       .filter((s) => s.purpose === 'vote' && s.weightSnapshot != null)
       .map((s) => s.userId),
   );
+  // The SYMMETRIC mitigation (WS-M.4.2c-1): the incoming-side guard above stops a
+  // delegator-first double-count, but if the DELEGATE signed first, the
+  // delegator's weight is already inside the delegate's snapshot — a later DIRECT
+  // ballot by the delegator would count that unit twice.  Refuse the direct vote
+  // while an active outgoing delegation's delegate has already voted.
+  if (model === 'delegated' && input.purpose === 'vote') {
+    const outgoing = await deps.delegations.listActiveByDelegator(input.roomId, input.userId);
+    const delegateAlreadyVoted = outgoing.some(
+      (d) =>
+        d.delegateUserId !== null &&
+        (d.scopeKey === 'all' || d.scopeKey === `type:${proposal.proposalType}`) &&
+        alreadyVoted.has(d.delegateUserId),
+    );
+    if (delegateAlreadyVoted) {
+      return tgErr(
+        409,
+        'delegated_weight_already_cast',
+        'Your vote was already cast via your delegate; revoke the delegation to vote directly.',
+      );
+    }
+  }
   const incoming = [];
   for (const delegation of delegations) {
     if (delegation.delegatorUserId !== null && alreadyVoted.has(delegation.delegatorUserId)) {

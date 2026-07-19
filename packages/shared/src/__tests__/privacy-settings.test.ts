@@ -92,56 +92,52 @@ describe('clampPrivacySettingsToTeenFloor', () => {
     }
   }
 
-  it.each(combos)('never weakens privacy and enforces the floor: %o', ({
-    retention,
-    locality,
-    sensitive,
-    sync,
-    analytics,
-    aggregate,
-  }) => {
-    const input = {
-      ...defaultPrivacySettings(),
-      attention_retention_preference: retention,
-      local_vs_server_personalization: locality,
-      sensitive_topic_handling: sensitive,
-      cross_device_sync: sync,
-      data_sharing_preferences: {
-        analytics_opt_in: analytics,
-        aggregate_signal_opt_in: aggregate,
-      },
-    };
-    const out = clampPrivacySettingsToTeenFloor(input);
+  it.each(combos)(
+    'never weakens privacy and enforces the floor: %o',
+    ({ retention, locality, sensitive, sync, analytics, aggregate }) => {
+      const input = {
+        ...defaultPrivacySettings(),
+        attention_retention_preference: retention,
+        local_vs_server_personalization: locality,
+        sensitive_topic_handling: sensitive,
+        cross_device_sync: sync,
+        data_sharing_preferences: {
+          analytics_opt_in: analytics,
+          aggregate_signal_opt_in: aggregate,
+        },
+      };
+      const out = clampPrivacySettingsToTeenFloor(input);
 
-    // (1) Monotone toward privacy: the clamped value is at least as private as the input.
-    expect(
-      rank(ATTENTION_RETENTION_PREFERENCES, out.attention_retention_preference),
-    ).toBeGreaterThanOrEqual(
-      rank(ATTENTION_RETENTION_PREFERENCES, input.attention_retention_preference),
-    );
-    expect(
-      rank(PERSONALIZATION_LOCALITIES, out.local_vs_server_personalization),
-    ).toBeGreaterThanOrEqual(
-      rank(PERSONALIZATION_LOCALITIES, input.local_vs_server_personalization),
-    );
-    expect(rank(SENSITIVE_TOPIC_HANDLINGS, out.sensitive_topic_handling)).toBeGreaterThanOrEqual(
-      rank(SENSITIVE_TOPIC_HANDLINGS, input.sensitive_topic_handling),
-    );
+      // (1) Monotone toward privacy: the clamped value is at least as private as the input.
+      expect(
+        rank(ATTENTION_RETENTION_PREFERENCES, out.attention_retention_preference),
+      ).toBeGreaterThanOrEqual(
+        rank(ATTENTION_RETENTION_PREFERENCES, input.attention_retention_preference),
+      );
+      expect(
+        rank(PERSONALIZATION_LOCALITIES, out.local_vs_server_personalization),
+      ).toBeGreaterThanOrEqual(
+        rank(PERSONALIZATION_LOCALITIES, input.local_vs_server_personalization),
+      );
+      expect(rank(SENSITIVE_TOPIC_HANDLINGS, out.sensitive_topic_handling)).toBeGreaterThanOrEqual(
+        rank(SENSITIVE_TOPIC_HANDLINGS, input.sensitive_topic_handling),
+      );
 
-    // (2) The floor is enforced regardless of input.
-    expect(out.cross_device_sync).toBe(false);
-    expect(out.local_vs_server_personalization).toBe('local');
-    expect(out.sensitive_topic_handling).toBe('strict');
-    expect(out.attention_retention_preference).not.toBe('default');
-    expect(out.data_sharing_preferences.analytics_opt_in).toBe(false);
-    expect(out.data_sharing_preferences.aggregate_signal_opt_in).toBe(false);
+      // (2) The floor is enforced regardless of input.
+      expect(out.cross_device_sync).toBe(false);
+      expect(out.local_vs_server_personalization).toBe('local');
+      expect(out.sensitive_topic_handling).toBe('strict');
+      expect(out.attention_retention_preference).not.toBe('default');
+      expect(out.data_sharing_preferences.analytics_opt_in).toBe(false);
+      expect(out.data_sharing_preferences.aggregate_signal_opt_in).toBe(false);
 
-    // (3) Idempotence: clamp(clamp(x)) === clamp(x).
-    expect(clampPrivacySettingsToTeenFloor(out)).toEqual(out);
+      // (3) Idempotence: clamp(clamp(x)) === clamp(x).
+      expect(clampPrivacySettingsToTeenFloor(out)).toEqual(out);
 
-    // (4) The result remains a valid PrivacySettings.
-    expect(() => privacySettingsSchema.parse(out)).not.toThrow();
-  });
+      // (4) The result remains a valid PrivacySettings.
+      expect(() => privacySettingsSchema.parse(out)).not.toThrow();
+    },
+  );
 
   it('preserves fields the floor does not constrain (quiet hours, push, personalization)', () => {
     const input = {

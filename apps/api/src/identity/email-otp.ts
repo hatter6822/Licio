@@ -14,11 +14,20 @@ export const RESEND_COOLDOWN_MS = 60_000;
 
 const loginKey = (attemptId: string): string => `emaillogin:${attemptId}`;
 const verifyKey = (userId: string): string => `emailverify:${userId}`;
+// Step-up satisfaction lives in its OWN slot, disjoint from the factor-verify
+// slot: a step-up code (sent to the CURRENT verified address) must never be
+// consumable by /email/verify to confirm a DIFFERENT pending address change.
+const stepUpKey = (userId: string): string => `emailstepup:${userId}`;
 const resendKey = (accountRef: string): string => `emailresend:${accountRef}`;
 
 interface OtpRecord {
   /** Login: the resolved user; factor-verify: the enrolling user. */
   userId: string;
+  /** The address the code was DELIVERED to.  The email-change promotion path
+   *  binds a pending-address change to this, so a code proving control of the
+   *  CURRENT address can never confirm a DIFFERENT pending address.  Empty for
+   *  the login path (browser-bound via `login_attempt_id`, not address-bound). */
+  target: string;
   codeHash: string;
   attempts: number;
   /** Absolute expiry (epoch ms) — preserved across re-store so attempts never extend it. */
@@ -26,7 +35,7 @@ interface OtpRecord {
 }
 
 export type OtpVerifyResult =
-  | { ok: true; userId: string }
+  | { ok: true; userId: string; target: string }
   | { ok: false; reason: 'no_code' | 'expired' | 'too_many_attempts' | 'mismatch' };
 
 /** Mint and store a login code; returns the plaintext code for the caller to email. */
@@ -36,27 +45,46 @@ export async function startEmailLogin(
   userId: string,
   now: number = Date.now(),
 ): Promise<{ code: string }> {
-  return issueCode(store, loginKey(attemptId), userId, now);
+  return issueCode(store, loginKey(attemptId), userId, '', now);
 }
 
-/** Mint and store an email-factor verification code (enroll an email on an account). */
+/**
+ * Mint and store an email-factor verification code (enroll/confirm an email on
+ * an account), bound to the address `target` it is delivered to.
+ */
 export async function startEmailVerification(
   store: EphemeralStore,
   userId: string,
+  target: string,
   now: number = Date.now(),
 ): Promise<{ code: string }> {
-  return issueCode(store, verifyKey(userId), userId, now);
+  return issueCode(store, verifyKey(userId), userId, target, now);
+}
+
+/**
+ * Mint and store a step-up satisfaction code (re-prove control of the account's
+ * current verified email) in its OWN slot — see `stepUpKey`.
+ */
+export async function startEmailStepUp(
+  store: EphemeralStore,
+  userId: string,
+  target: string,
+  now: number = Date.now(),
+): Promise<{ code: string }> {
+  return issueCode(store, stepUpKey(userId), userId, target, now);
 }
 
 async function issueCode(
   store: EphemeralStore,
   key: string,
   userId: string,
+  target: string,
   now: number,
 ): Promise<{ code: string }> {
   const code = generateOneTimeCode();
   const record: OtpRecord = {
     userId,
+    target,
     codeHash: hashOneTimeCode(code),
     attempts: 0,
     expiresAt: now + EMAIL_OTP_TTL_MS,
@@ -103,6 +131,16 @@ export async function verifyEmailFactor(
   return consumeCode(store, verifyKey(userId), submittedCode, now);
 }
 
+/** Verify a step-up satisfaction email code for `userId` (its own slot). */
+export async function verifyEmailStepUp(
+  store: EphemeralStore,
+  userId: string,
+  submittedCode: string,
+  now: number = Date.now(),
+): Promise<OtpVerifyResult> {
+  return consumeCode(store, stepUpKey(userId), submittedCode, now);
+}
+
 async function consumeCode(
   store: EphemeralStore,
   key: string,
@@ -131,7 +169,7 @@ async function consumeCode(
 
   if (verifyOneTimeCode(submittedCode, record.codeHash)) {
     await store.delete(key); // single-use
-    return { ok: true, userId: record.userId };
+    return { ok: true, userId: record.userId, target: record.target ?? '' };
   }
 
   const attempts = record.attempts + 1;

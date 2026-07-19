@@ -5,6 +5,7 @@
 // contribution edit/tombstone (creator vs moderator vs unauthorized), summary,
 // attachment, snapshot, invite, and the room-state commitment over recovery +
 // snapshot state.
+import { MAX_CONTRIBUTION_DEPTH } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { reduceRoom } from '../reducer/reduce.js';
 import { roomStateCommitment } from '../reducer/state.js';
@@ -230,6 +231,80 @@ describe('content transitions', () => {
     expect(c?.bodyMarkdownLite).toBe('edited');
     expect(c?.editCount).toBe(1);
     expect(c?.tombstoned).toBe(true);
+  });
+
+  it('rejects a reply whose parent lives in a DIFFERENT thread (WS-S.5.3c parity)', () => {
+    const ops = [
+      ...room(), // thread t1 via story s1
+      mkOp({
+        type: 'story.create',
+        story_id: 's2',
+        thread_id: 't2',
+        title: 'v2',
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      }),
+      mkOp(
+        {
+          type: 'contribution.create',
+          contribution_id: 'c1',
+          thread_id: 't1',
+          contribution_type: 'comment',
+          body_markdown_lite: 'in t1',
+          citations: [],
+          metadata: {},
+          client_draft_id: 'd1',
+        },
+        { author_member_id: 'bob', author_device_id: 'bob-dev' },
+      ),
+      // c2 lives in t2 but replies to c1 (in t1): a cross-thread parent.
+      mkOp(
+        {
+          type: 'contribution.create',
+          contribution_id: 'c2',
+          thread_id: 't2',
+          parent_contribution_id: 'c1',
+          contribution_type: 'comment',
+          body_markdown_lite: 'cross-thread reply',
+          citations: [],
+          metadata: {},
+          client_draft_id: 'd2',
+        },
+        { author_member_id: 'bob', author_device_id: 'bob-dev' },
+      ),
+    ];
+    const state = reduceRoom(ops);
+    expect(state.contributions.has('c2')).toBe(false);
+    expect(state.rejected.some((r) => r.reason === 'parent_thread_mismatch')).toBe(true);
+  });
+
+  it('rejects a reply chain deeper than MAX_CONTRIBUTION_DEPTH', () => {
+    const base = room(); // build the room ops FIRST so they sort before the chain
+    const chain = [];
+    for (let i = 0; i <= MAX_CONTRIBUTION_DEPTH + 1; i += 1) {
+      chain.push(
+        mkOp(
+          {
+            type: 'contribution.create',
+            contribution_id: `c${i}`,
+            thread_id: 't1',
+            ...(i === 0 ? {} : { parent_contribution_id: `c${i - 1}` }),
+            contribution_type: 'comment',
+            body_markdown_lite: `depth ${i}`,
+            citations: [],
+            metadata: {},
+            client_draft_id: `draft${i}`,
+          },
+          { author_member_id: 'bob', author_device_id: 'bob-dev' },
+        ),
+      );
+    }
+    const state = reduceRoom([...base, ...chain]);
+    // Roots are depth 0, so c0..c10 (depth 0..10) accept; c11 (depth 11) rejects.
+    expect(state.contributions.has(`c${MAX_CONTRIBUTION_DEPTH}`)).toBe(true);
+    expect(state.contributions.has(`c${MAX_CONTRIBUTION_DEPTH + 1}`)).toBe(false);
+    expect(state.rejected.some((r) => r.reason === 'max_depth_exceeded')).toBe(true);
   });
 
   it('editing/tombstoning a missing target is rejected', () => {

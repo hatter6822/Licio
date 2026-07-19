@@ -61,6 +61,9 @@ export interface KnomosisRuntimeConfig {
   wsmIntentSignedTtlMs: number;
   /** Bounded retries for failed/reverted intents (WS-M.3.1b). */
   wsmIntentMaxRetries: number;
+  /** Grace window for a `reorged` intent to re-confirm on the canonical chain
+   *  before it is abandoned for a clean terminal audit trail (WS-M.3.1d). */
+  wsmIntentReorgRecoveryMs: number;
   /** Default proposal windows where the law-pack sets none (WS-M.4.2a/2d/3a). */
   wsmDeliberationSeconds: number;
   wsmVotingSeconds: number;
@@ -98,6 +101,7 @@ export const DEFAULT_KNOMOSIS_CONFIG: KnomosisRuntimeConfig = {
   wsmIntentQuotedTtlMs: 5 * 60_000,
   wsmIntentSignedTtlMs: 5 * 60_000,
   wsmIntentMaxRetries: 3,
+  wsmIntentReorgRecoveryMs: 60 * 60_000,
   wsmDeliberationSeconds: 24 * 3600,
   wsmVotingSeconds: 3 * 24 * 3600,
   wsmChallengeWindowSeconds: 2 * 24 * 3600,
@@ -136,6 +140,7 @@ const VALIDATORS: Readonly<Record<keyof KnomosisRuntimeConfig, z.ZodType>> = {
   wsmIntentQuotedTtlMs: z.number().int().min(60_000).max(86_400_000),
   wsmIntentSignedTtlMs: z.number().int().min(60_000).max(86_400_000),
   wsmIntentMaxRetries: z.number().int().min(0).max(10),
+  wsmIntentReorgRecoveryMs: z.number().int().min(60_000).max(604_800_000),
   wsmDeliberationSeconds: z
     .number()
     .int()

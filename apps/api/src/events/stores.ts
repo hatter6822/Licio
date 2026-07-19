@@ -755,7 +755,17 @@ export class InMemorySignalLedgerStore implements SignalLedgerStore {
 
   async upsertMany(entries: readonly SignalLedgerRecord[]): Promise<void> {
     for (const entry of entries) {
-      this.#rows.set(this.#naturalKey(entry), { ...entry, antiSignals: [...entry.antiSignals] });
+      const key = this.#naturalKey(entry);
+      const existing = this.#rows.get(key);
+      // Preserve the ORIGINAL entryId + recordedAt on an idempotent re-score of
+      // the same (owner,item,window) — so the keyset cursor (recordedAt|entryId)
+      // stays valid and re-scored rows do not jump to the top of the ledger.
+      // Matches the Drizzle upsert (which omits both from its conflict update).
+      this.#rows.set(key, {
+        ...entry,
+        antiSignals: [...entry.antiSignals],
+        ...(existing ? { entryId: existing.entryId, recordedAt: existing.recordedAt } : {}),
+      });
     }
   }
 
@@ -773,10 +783,18 @@ export class InMemorySignalLedgerStore implements SignalLedgerStore {
     let start = 0;
     if (cursor) {
       const [cursorRecordedAt, cursorEntryId] = cursor.split('|');
-      start = sorted.findIndex(
-        (r) => r.recordedAt === cursorRecordedAt && r.entryId === cursorEntryId,
+      // Keyset (range) resolution matching the Drizzle store: the first row that
+      // sorts strictly AFTER the cursor in the (recordedAt DESC, entryId ASC)
+      // order.  Resolving by range (not an exact row match) degrades gracefully
+      // if the cursor's row was purged — pagination resumes at the right place
+      // instead of resetting to page 1.
+      const cursorMs = Date.parse(cursorRecordedAt ?? '');
+      const found = sorted.findIndex(
+        (r) =>
+          Date.parse(r.recordedAt) < cursorMs ||
+          (r.recordedAt === cursorRecordedAt && r.entryId > (cursorEntryId ?? '')),
       );
-      start = start === -1 ? 0 : start + 1;
+      start = found === -1 ? sorted.length : found;
     }
     const page = sorted.slice(start, start + limit);
     const last = page[page.length - 1];

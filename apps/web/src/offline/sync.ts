@@ -258,6 +258,12 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
   if (processing) return result;
   processing = true;
   try {
+    // Reclaim operations stranded `in-flight` by a prior process death (tab
+    // closed / PWA killed between markInFlight and the send settling): reset
+    // them to `pending` so this drain re-sends them (server idempotency keys
+    // make a possibly-delivered re-send safe).  The reentrancy guard above
+    // guarantees no concurrent drain of this process is mid-send.
+    await queue.reclaimInFlight();
     const pending = await queue.listPending();
     for (const operation of pending) {
       // Attention aggregates are coalesced into one upload below; draft-sync is

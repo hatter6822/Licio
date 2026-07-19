@@ -110,6 +110,21 @@ describe('processPendingQueue', () => {
     expect(await queue.count()).toBe(0);
   });
 
+  it('reclaims an operation stranded in-flight by a prior process death (WS-C.2.3)', async () => {
+    vi.mocked(api.createContribution).mockResolvedValue({} as never);
+    // Simulate a tab closed / PWA killed between markInFlight and the send
+    // settling: the record is left `in-flight` on disk.
+    await queue.enqueue('contribution', CONTRIBUTION_PAYLOAD, 'op-stranded');
+    await queue.markInFlight('op-stranded');
+    expect((await queue.get('op-stranded'))?.status).toBe('in-flight');
+
+    // The next drain must reclaim it, re-send, and remove it — never silently lose it.
+    const result = await processPendingQueue();
+    expect(result.sent).toBe(1);
+    expect(api.createContribution).toHaveBeenCalledOnce();
+    expect(await queue.count()).toBe(0);
+  });
+
   it('parks a 4xx server rejection as terminal and preserves it for manual retry', async () => {
     vi.mocked(api.createContribution).mockRejectedValue(
       new ApiClientError('thread_locked', 'Thread is locked', 423),

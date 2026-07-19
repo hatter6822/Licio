@@ -563,6 +563,10 @@ export async function runPwattWindow(
       if (!user) continue;
       const preference = user.privacySettings.attention_retention_preference;
       ledgerEntries.push({
+        // entryId + recordedAt below are the FIRST-write identity/time for this
+        // (owner,item,window): the ledger store's upsert PRESERVES both on an
+        // idempotent re-score (it keys by the natural tuple), so a re-score never
+        // churns the id or reorders the entry. See {InMemory,Drizzle}SignalLedgerStore.
         entryId: randomUUID(),
         ownerUserId: actorKey,
         itemId: item.itemId,

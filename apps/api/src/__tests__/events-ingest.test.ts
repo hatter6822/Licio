@@ -101,6 +101,36 @@ describe('POST /v1/events/attention (WS-E.1.3a)', () => {
     expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(1);
   });
 
+  it('rejects an offline-sync replay past the 10-min TTL, even after the durable row is purged (WS-E.1.3b)', async () => {
+    // The `none`/shortened-retention gap: the durable event row is purged before
+    // the 7-day offline window closes, so ONLY the replay nonce can catch a
+    // re-ingest.  The nonce must therefore span the acceptance window.
+    let clock = Date.parse('2026-06-22T00:00:00Z');
+    const local = freshEventServices({ now: () => clock });
+    const { userId } = await seedUserWithSession(local.identity, { nowMs: clock });
+    const event = attentionEvent(userId, { timestamp: new Date(clock).toISOString() });
+    const first = await ingestAttentionEvents(
+      local.events,
+      local.identity,
+      userId,
+      [event],
+      OFFLINE_SYNC_ACCEPTANCE,
+    );
+    expect(first.outcomes).toEqual(['accepted']);
+    // Simulate the retention sweep purging the durable row (the `none` case).
+    await local.events.eventStore.deleteByOwner(userId);
+    // 20 minutes later — past the OLD 10-min nonce TTL, still inside the 7 days.
+    clock += 20 * 60_000;
+    const replay = await ingestAttentionEvents(
+      local.events,
+      local.identity,
+      userId,
+      [event],
+      OFFLINE_SYNC_ACCEPTANCE,
+    );
+    expect(replay.outcomes).toEqual(['replay']);
+  });
+
   it('rejects stale (> 5 min) and future (> 30 s) timestamps with 400', async () => {
     const { userId, cookie } = await seedUserWithSession(fixture.identity);
     const stale = attentionEvent(userId, {

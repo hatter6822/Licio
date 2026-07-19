@@ -18,7 +18,7 @@ import type {
   IntegritySignalDetectedEvent,
   SourceOpenedAggregateEvent,
 } from '@licio/shared';
-import { realtimeWindowStart } from './realtime.js';
+import { REALTIME_TTL_MS, REALTIME_WINDOW_MS, realtimeWindowStart } from './realtime.js';
 import { actorKeyOfPayload, type EventPipelineServices } from './services.js';
 
 export interface TriggerOptions {
@@ -34,8 +34,10 @@ export function registerDefaultConsumers(
   options: TriggerOptions = {},
 ): void {
   const threshold = options.triggerThreshold ?? 500;
-  /** Item-windows that already fired the trigger (debounce). */
-  const triggered = new Set<string>();
+  /** Items that already fired the early-aggregation trigger, bucketed by window
+   *  start.  Bounded to the live-window horizon (evicted below on the SAME
+   *  boundary the aggregator uses) so it can never grow for the process lifetime. */
+  const fired = new Map<number, Set<string>>();
 
   events.router.register({
     name: 'realtime-aggregation',
@@ -74,13 +76,25 @@ export function registerDefaultConsumers(
       }
       // Volume-threshold trigger for early aggregation (WS-E.2.1a).
       if (options.onVolumeTrigger) {
+        // Evict debounce buckets whose window's realtime counters are already
+        // gone, mirroring InMemoryRealtimeAggregator#expire so a key is dropped
+        // only AFTER its counter — never a window early enough for a late event
+        // to re-fire the trigger.
+        const oldest = Date.now() - REALTIME_TTL_MS;
+        for (const windowStart of fired.keys()) {
+          if (windowStart + REALTIME_WINDOW_MS <= oldest) fired.delete(windowStart);
+        }
         for (const itemId of itemIds) {
           const windowStartMs = realtimeWindowStart(Date.parse(event.timestamp));
-          const key = `${itemId}|${windowStartMs}`;
-          if (triggered.has(key)) continue;
+          let bucket = fired.get(windowStartMs);
+          if (bucket?.has(itemId)) continue;
           const snapshot = await events.realtime.snapshot(itemId, windowStartMs);
           if (snapshot && snapshot.eventCount >= threshold) {
-            triggered.add(key);
+            if (bucket === undefined) {
+              bucket = new Set();
+              fired.set(windowStartMs, bucket);
+            }
+            bucket.add(itemId);
             options.onVolumeTrigger(itemId, windowStartMs);
           }
         }

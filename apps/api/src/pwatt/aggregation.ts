@@ -248,7 +248,13 @@ export async function computeAggregationWindow(
         // the hourly reconciliation does not flag save-only windows as
         // discrepancies. `uniqueActiveUsers` is a monitoring/reconciliation stat
         // only (never a PWAtt scoring input), so this shifts no ranking.
-        actor.saved;
+        actor.saved ||
+        // A commenter and a bounce-only reader are ALSO active participants the
+        // realtime HLL counts (recordContribution adds each commenter; any
+        // source-open — bounce included — adds the reader). Count them here too
+        // so comment-heavy / clickbait windows do not emit false discrepancies.
+        Object.keys(actor.contributions).length > 0 ||
+        actor.sawBounceAdjacentOpen;
       if (hasAttention) uniqueActiveUsers += 1;
       if (actor.sawMeaningfulSourceOpen) sourceOpens += 1;
       if (actor.contextOpened) contextOpens += 1;

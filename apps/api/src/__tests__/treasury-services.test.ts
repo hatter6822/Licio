@@ -194,11 +194,12 @@ describe('runWsmTick (WS-M sweeps)', () => {
       reconciliationState: 'pending',
       createdAt: new Date().toISOString(),
     });
-    // Break both intent sweeps: reconcile AND expiry each report separately,
-    // and the treasury reconciliation still runs afterwards.  (The tick
-    // RECOVERS before it reaps — reconcile attaches a died-mid-flow client's
-    // durable action, W13, and expiry then abandons only what is genuinely
-    // dead — so reconcile's failure is reported first.  This test is about the
+    // Break every intent sweep: reconcile, expiry, AND the reorg-recovery pass
+    // each report separately, and the treasury reconciliation still runs
+    // afterwards.  (The tick RECOVERS before it reaps — reconcile attaches a
+    // died-mid-flow client's durable action, W13; expiry abandons only what is
+    // genuinely dead; the reorg-recovery pass abandons a reorg past its grace
+    // window — so the failures report in sweep order.  This test is about the
     // failures being independent; the order is the sweep order.)
     services.intents.listExpired = async () => {
       throw new Error('expiry down');
@@ -208,7 +209,11 @@ describe('runWsmTick (WS-M sweeps)', () => {
     };
     const failures: WsmSchedulerTask[] = [];
     await runWsmTick(services, (_error, task) => failures.push(task));
-    expect(failures).toEqual(['wsm_intent_reconcile', 'wsm_intent_expiry']);
+    expect(failures).toEqual([
+      'wsm_intent_reconcile',
+      'wsm_intent_expiry',
+      'wsm_intent_reorg_recovery',
+    ]);
     // The empty ledger reconciles to synced: the sweep reached the treasury.
     const [treasury] = await services.treasuries.listAll();
     expect(treasury?.reconciliationState).toBe('synced');

@@ -7,9 +7,11 @@ import {
   MAX_OTP_ATTEMPTS,
   RESEND_COOLDOWN_MS,
   startEmailLogin,
+  startEmailStepUp,
   startEmailVerification,
   verifyEmailFactor,
   verifyEmailLogin,
+  verifyEmailStepUp,
 } from '../email-otp.js';
 import { InMemoryEphemeralStore } from '../ephemeral-store.js';
 
@@ -27,7 +29,11 @@ describe('email OTP login', () => {
 
   it('verifies a correct code once, then the code is single-use', async () => {
     const { code } = await startEmailLogin(store, ATTEMPT, USER, now);
-    expect(await verifyEmailLogin(store, ATTEMPT, code, now)).toEqual({ ok: true, userId: USER });
+    expect(await verifyEmailLogin(store, ATTEMPT, code, now)).toEqual({
+      ok: true,
+      userId: USER,
+      target: '',
+    });
     // Single-use: a second presentation finds no code.
     expect(await verifyEmailLogin(store, ATTEMPT, code, now)).toEqual({
       ok: false,
@@ -85,11 +91,30 @@ describe('email OTP login', () => {
 });
 
 describe('email factor verification (enroll)', () => {
-  it('uses a per-user key and verifies the enrollment code', async () => {
+  it('uses a per-user key and verifies the enrollment code, returning the bound address', async () => {
     const now = 1_700_000_000_000;
     const store = new InMemoryEphemeralStore(() => now);
-    const { code } = await startEmailVerification(store, USER, now);
-    expect(await verifyEmailFactor(store, USER, code, now)).toEqual({ ok: true, userId: USER });
+    const { code } = await startEmailVerification(store, USER, 'enroll@example.com', now);
+    expect(await verifyEmailFactor(store, USER, code, now)).toEqual({
+      ok: true,
+      userId: USER,
+      target: 'enroll@example.com',
+    });
+  });
+
+  it('keeps the step-up slot disjoint from the factor-verify slot (WS-D.1.4b)', async () => {
+    const now = 1_700_000_000_000;
+    const store = new InMemoryEphemeralStore(() => now);
+    // A step-up code (sent to the current address) must NOT be consumable by the
+    // factor-verify path, and vice-versa — else a code proving control of the
+    // current address could confirm a different pending address change.
+    const stepUp = await startEmailStepUp(store, USER, 'current@example.com', now);
+    expect((await verifyEmailFactor(store, USER, stepUp.code, now)).ok).toBe(false);
+    expect(await verifyEmailStepUp(store, USER, stepUp.code, now)).toEqual({
+      ok: true,
+      userId: USER,
+      target: 'current@example.com',
+    });
   });
 });
 

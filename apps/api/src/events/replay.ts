@@ -2,14 +2,18 @@
 //
 // Replay protection (WS-E.1.3b, SPEC §25.5 "forged attention events"). Two
 // layers:
-//   1. the FAST layer here — a single-use nonce set with a TTL covering the
-//      acceptance window (keys are user-scoped, so cross-user collisions are
-//      impossible and the set never becomes an attention-history store);
+//   1. the FAST layer here — a single-use nonce set whose TTL is sized by the
+//      caller to the acceptance window (10min online; the full 7 days for the
+//      offline-sync path).  Keys carry a non-reversible account ref (never the
+//      raw user id) and hold NO attention value, so even at the 7-day offline
+//      TTL the set is only an opaque replayed-id memory, not an attention log;
 //   2. the DURABLE backstop — the event store's event_id uniqueness, which
-//      rejects a replayed event even after the nonce TTL lapses.
+//      rejects a replayed event WHILE the row lives (it is retention-purged for
+//      `none`/shortened users, which is exactly why layer 1 must span the window).
 // Nonce keys carry a non-reversible account ref, never the raw user id.
 
-/** Nonce TTL: events older than the acceptance window are rejected anyway. */
+/** Minimum nonce TTL (the online window); the ingest path raises it to span the
+ *  acceptance window so a replay is caught for the window's full duration. */
 export const NONCE_TTL_MS = 10 * 60_000;
 
 export interface ReplayNonceStore {

@@ -165,6 +165,11 @@ describe('contribution-type hierarchy (WS-E.2.3b)', () => {
     expect(() =>
       assertV1HierarchyOrder({ ...V1_CONTRIBUTION_WEIGHTS, low_info_reply: 0.1 }),
     ).toThrow(/low_info_reply/);
+    // A zero-weight explanation violates explanation > low_info_reply and must be
+    // rejected (the middle rung is enforced, not just the two endpoints).
+    expect(() => assertV1HierarchyOrder({ ...V1_CONTRIBUTION_WEIGHTS, explanation: 0 })).toThrow(
+      /explanation must outweigh low_info_reply/,
+    );
   });
 });
 

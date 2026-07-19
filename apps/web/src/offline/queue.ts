@@ -113,6 +113,26 @@ export function markFailed(operationId: string, reason: string): Promise<void> {
   return update(operationId, { status: 'failed', lastError: reason });
 }
 
+/**
+ * Reclaim operations stranded `in-flight` by a process death between markInFlight
+ * and the send settling (the tab was closed / the PWA was killed mid-request):
+ * reset them to `pending` so the next drain re-sends them.  `attempts` is
+ * preserved — an interruption is not a send failure — and re-sending is safe
+ * because every replayable op carries a server idempotency key (contribution
+ * `client_draft_id`, report `local_operation_id`, attention `aggregate_id`), so
+ * an op the server already received is deduped.  Without this, a killed-mid-send
+ * op would sit `in-flight` forever: never re-drained, never surfaced — a silent
+ * loss of user-authored content that breaks the queue's core invariant.  Returns
+ * the number reclaimed.
+ */
+export async function reclaimInFlight(): Promise<number> {
+  const stranded = await listByStatus('in-flight');
+  for (const operation of stranded) {
+    await update(operation.operationId, { status: 'pending' });
+  }
+  return stranded.length;
+}
+
 // Monotonic count of operations removed after a CONFIRMED ack. Eviction
 // detection reconciles a pending-count drop against this so a legitimate drain
 // (incl. a background-sync flush while hidden) is not misread as data loss.

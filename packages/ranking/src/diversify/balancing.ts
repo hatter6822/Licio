@@ -103,7 +103,9 @@ export function applyBalancing(
       item_id: item.itemId,
       threshold: rule === 'source' ? config.maxSourceSharePct : topicSharePct,
       actual: rule,
-      action: 'demoted',
+      // This item IS admitted (over-cap graceful fill), so it is NOT demoted;
+      // the `*_degraded` constraint name conveys the over-cap admission.
+      action: 'diversified',
       enforced: true,
     });
     admit(item);
@@ -153,6 +155,9 @@ export function applyBalancing(
       if (replaceable === undefined) break;
       page.splice(page.indexOf(replaceable), 1);
       demoted.push(replaceable);
+      // Record BOTH: why the lens was promoted (candidate entered) AND that the
+      // evicted page item (replaceable) was demoted — so the audit log names the
+      // item that actually left the page, not only the one that entered.
       applications.push({
         constraint: 'lens_representation',
         item_id: candidate.itemId,
@@ -161,6 +166,27 @@ export function applyBalancing(
         action: 'diversified',
         enforced: true,
       });
+      applications.push({
+        constraint: 'lens_representation',
+        item_id: replaceable.itemId,
+        threshold: wanted,
+        actual: present.size,
+        action: 'demoted',
+        enforced: true,
+      });
+      // If this promoted candidate had been demoted earlier by a source/topic
+      // cap, it is now SERVED: clear its stale demotion from both the list and
+      // the log so a served item never appears as demoted.
+      const priorDemotionIdx = demoted.findIndex((d) => d.itemId === candidate.itemId);
+      if (priorDemotionIdx !== -1) {
+        demoted.splice(priorDemotionIdx, 1);
+        const staleAppIdx = applications.findIndex(
+          (a) =>
+            a.item_id === candidate.itemId &&
+            (a.constraint === 'source_share_cap' || a.constraint === 'topic_share_cap'),
+        );
+        if (staleAppIdx !== -1) applications.splice(staleAppIdx, 1);
+      }
       admit(candidate);
     }
     // Keep the page score-ordered after lens promotion (stable, deterministic).

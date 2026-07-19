@@ -141,6 +141,30 @@ describe('display ordering (WS-R.2.3)', () => {
     expect(displayOrder([seq1, seq0]).map((r) => r.recordCid)).toEqual(['r-0', 'r-1']);
   });
 
+  it('does not let a one-sided phone-clock claim outrank the deterministic tiebreak', () => {
+    // Different devices, no room-log/checkpoint: the ONLY difference is that
+    // r-zzz carries a (spoofable) claimed timestamp and r-aaa does not.  A weak
+    // hint present on just one side must NOT decide the order — it ties and
+    // defers to record_cid, so r-aaa (lexicographically first) still sorts first.
+    const withClaim = tr(
+      'r-zzz',
+      mkRecord({
+        event_type: 'post',
+        author_device_key_id: 'key-1',
+        device_seq: 0,
+        created_at_claim_ms: 1000,
+      }),
+    );
+    const withoutClaim = tr(
+      'r-aaa',
+      mkRecord({ event_type: 'post', author_device_key_id: 'key-2', device_seq: 0 }),
+    );
+    expect(displayOrder([withClaim, withoutClaim]).map((r) => r.recordCid)).toEqual([
+      'r-aaa',
+      'r-zzz',
+    ]);
+  });
+
   it('places a causal parent before its child regardless of other hints', () => {
     const parent = tr(
       'r-p',

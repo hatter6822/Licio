@@ -12,6 +12,7 @@ import {
   markFailed,
   markForRetry,
   markInFlight,
+  reclaimInFlight,
   remove,
 } from './queue.js';
 
@@ -72,5 +73,20 @@ describe('pending queue', () => {
   it('is a no-op when updating an unknown operation', async () => {
     await expect(markInFlight('missing')).resolves.toBeUndefined();
     expect(await count()).toBe(0);
+  });
+
+  it('reclaims operations stranded in-flight back to pending, preserving attempts', async () => {
+    await enqueue('contribution', { a: 1 }, 'op-1');
+    await markForRetry(await enqueue('report', { b: 2 }, 'op-2'), 'transient'); // attempts=1, pending
+    await markInFlight('op-1'); // stranded by a process death mid-send
+    await markInFlight('op-2');
+
+    const reclaimed = await reclaimInFlight();
+    expect(reclaimed).toBe(2);
+    expect((await get('op-1'))?.status).toBe('pending');
+    expect((await get('op-2'))?.status).toBe('pending');
+    expect((await get('op-2'))?.attempts).toBe(1); // interruption is not a failed attempt
+    expect(await listPending()).toHaveLength(2);
+    expect(await listByStatus('in-flight')).toHaveLength(0);
   });
 });

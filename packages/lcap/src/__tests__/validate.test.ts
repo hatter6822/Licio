@@ -19,7 +19,10 @@ import {
   RevocationIndex,
 } from '../identity/index.js';
 import { encodeContributionEvent } from '../records/index.js';
-import { inclusionProofRecordV2Schema } from '../schemas/checkpoint.js';
+import {
+  consistencyProofRecordV2Schema,
+  inclusionProofRecordV2Schema,
+} from '../schemas/checkpoint.js';
 import type { ContributionEventRecordV2 } from '../schemas/records.js';
 import { type ValidationInput, validate } from '../validate/index.js';
 
@@ -331,6 +334,46 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
       input({ consensus: { inclusion: { proof: otherTarget, checkpoint } } }),
     );
     expect(result.state).toBe('authorized_provisional');
+  });
+
+  it('does not downgrade an authorized record on a consistency failure for a DIFFERENT room', async () => {
+    // A consistency proof over some OTHER room's checkpoints must not force THIS
+    // record (room-1) into `conflicting`: a consistency proof is bound to its
+    // own room's log, mirroring the inclusion-proof room binding above.  The
+    // proof here would FAIL verification, but the room mismatch skips it.
+    const otherLog = new RoomLog('RFC9162_SHA256', NET);
+    await otherLog.append(await cidFor('record', new Uint8Array([1])));
+    const oldCp = await buildCheckpoint(otherLog, {
+      roomId: 'room-other',
+      treeSize: otherLog.size,
+      policyEpoch: 1,
+      revocationEpoch: 0,
+      issuedAtMs: NOW,
+      signerAuthorityId: 'auth-1',
+    });
+    await otherLog.append(await cidFor('record', new Uint8Array([2])));
+    const newCp = await buildCheckpoint(otherLog, {
+      roomId: 'room-other',
+      treeSize: otherLog.size,
+      policyEpoch: 1,
+      revocationEpoch: 0,
+      issuedAtMs: NOW,
+      signerAuthorityId: 'auth-1',
+    });
+    const proof = consistencyProofRecordV2Schema.parse({
+      record_version: 2,
+      kind: 'consistency_proof',
+      room_id: 'room-other',
+      old_checkpoint_cid: await cidFor('record', new Uint8Array([3])),
+      new_checkpoint_cid: await cidFor('record', new Uint8Array([4])),
+      old_tree_size: 1,
+      new_tree_size: 2,
+      proof_hashes: [], // an empty proof would FAIL verification if it were reached
+    });
+    const result = await validate(
+      input({ consensus: { consistency: { proof, oldCheckpoint: oldCp, newCheckpoint: newCp } } }),
+    );
+    expect(result.state).not.toBe('conflicting');
   });
 
   it('reaches witnessed (the lub over checkpoint + witness)', async () => {

@@ -7,9 +7,11 @@
 // `MAX_CITATIONS`, `citationSchema`, `CONTRIBUTION_TYPES`,
 // `submissionTypeSchema`, the thread state machines), so the two can never
 // drift.  The structural reducer rules that need thread/room state
-// (answer→question parent, depth ≤ 10, lens-in-room, client_draft dedup) are
-// enforced in the reducer (WS-S.5.3c) on decrypted state; this card pins the
-// SHAPE + the schema-checkable body caps / citation rules.
+// (answer→question parent, same-thread parent, depth ≤ 10, client_draft dedup)
+// are enforced in the reducer (WS-S.5.3c) on decrypted state; this card pins the
+// SHAPE + the schema-checkable body caps / citation rules.  The `lens-in-room`
+// rule is TRACKED-DEFERRED — the private plane has no lens op/state yet, so
+// `lens_id` is unvalidated (closure target in docs/private-p2p/README.md).
 import {
   CONTRIBUTION_BODY_LIMITS,
   CONTRIBUTION_TYPES,

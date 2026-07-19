@@ -10,6 +10,9 @@ export interface UgcWhatwgUrl {
   readonly hostname: string;
   readonly pathname: string;
   readonly search: string;
+  /** The fragment, including the leading `#` (empty when absent).  Hash-routed
+   *  dApps carry their action in here, so link-safety must inspect it too. */
+  readonly hash: string;
   toString(): string;
 }
 

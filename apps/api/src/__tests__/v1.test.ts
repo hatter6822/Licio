@@ -274,22 +274,80 @@ describe('v1 push + notifications', () => {
     expect(res.status).toBe(503);
   });
 
-  it('registers and removes a push subscription', async () => {
+  it('requires authentication to register or remove a push subscription', async () => {
     const a = app();
     const sub = {
-      subscription: {
-        endpoint: 'https://push.example/abc',
-        keys: { p256dh: 'x', auth: 'y' },
-      },
+      subscription: { endpoint: 'https://push.example/abc', keys: { p256dh: 'x', auth: 'y' } },
     };
     const reg = await a.request(jsonRequest('/v1/push/subscriptions', 'POST', sub));
+    expect(reg.status).toBe(401);
+    const del = await a.request(
+      jsonRequest('/v1/push/subscriptions', 'DELETE', { endpoint: sub.subscription.endpoint }),
+    );
+    expect(del.status).toBe(401);
+  });
+
+  it('registers and removes a push subscription for the owning user', async () => {
+    const { identity } = freshEventServices();
+    const { cookie } = await seedUserWithSession(identity);
+    const a = app();
+    const sub = {
+      subscription: { endpoint: 'https://push.example/abc', keys: { p256dh: 'x', auth: 'y' } },
+    };
+    const reg = await a.request(
+      new Request('http://local/v1/push/subscriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(sub),
+      }),
+    );
     expect(reg.status).toBe(201);
     expect(await reg.json()).toEqual({ ok: true });
 
     const del = await a.request(
-      jsonRequest('/v1/push/subscriptions', 'DELETE', { endpoint: sub.subscription.endpoint }),
+      new Request('http://local/v1/push/subscriptions', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ endpoint: sub.subscription.endpoint }),
+      }),
     );
     expect(await del.json()).toEqual({ ok: true });
+  });
+
+  it("does not let one user unsubscribe another user's endpoint (WS-D.1.4d)", async () => {
+    const { identity } = freshEventServices();
+    const alice = await seedUserWithSession(identity);
+    const mallory = await seedUserWithSession(identity);
+    const a = app();
+    const endpoint = 'https://push.example/alice';
+    const reg = await a.request(
+      new Request('http://local/v1/push/subscriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: alice.cookie },
+        body: JSON.stringify({ subscription: { endpoint, keys: { p256dh: 'x', auth: 'y' } } }),
+      }),
+    );
+    expect(reg.status).toBe(201);
+
+    // Mallory (a DIFFERENT authenticated user) cannot delete Alice's endpoint.
+    const attack = await a.request(
+      new Request('http://local/v1/push/subscriptions', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json', cookie: mallory.cookie },
+        body: JSON.stringify({ endpoint }),
+      }),
+    );
+    expect(await attack.json()).toEqual({ ok: false });
+
+    // Alice can still delete her own endpoint.
+    const own = await a.request(
+      new Request('http://local/v1/push/subscriptions', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json', cookie: alice.cookie },
+        body: JSON.stringify({ endpoint }),
+      }),
+    );
+    expect(await own.json()).toEqual({ ok: true });
   });
 
   it('returns default notification preferences then merges a patch', async () => {

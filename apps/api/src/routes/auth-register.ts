@@ -216,7 +216,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           personalizationSettings: defaultPersonalizationSettings(),
           roles: ['user'],
         });
-        const { code } = await startEmailVerification(services.otp, user.userId);
+        const { code } = await startEmailVerification(services.otp, user.userId, body.email);
         await services.mailer.sendCode(body.email, code, 'verify');
         // The account is active (reduced capability until the email is verified).
         const fin = await finalizeLogin(services, c, {
@@ -249,6 +249,16 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           if (!result.ok) return c.json(err('invalid_code', 'Invalid or expired code.'), 400);
           const now = new Date().toISOString();
           const pending = (await services.store.getAuth(auth.userId))?.pendingEmail ?? null;
+          // The consumed code is bound to the address it was delivered to.  A
+          // pending change is confirmed ONLY by a code sent to the pending
+          // address; confirming the on-file email requires a code sent to it.
+          // This blocks promoting a DIFFERENT address with a code that only
+          // proved control of the current one (WS-D.1.4b).
+          const confirmedAddress =
+            pending ?? (await services.store.getUser(auth.userId))?.email ?? null;
+          if (confirmedAddress === null || result.target !== confirmedAddress) {
+            return c.json(err('invalid_code', 'Invalid or expired code.'), 400);
+          }
           if (pending) {
             // Promote the staged address.  Re-check uniqueness at confirm time so a
             // concurrent claim of the same email can't be force-promoted past the
@@ -298,7 +308,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         if (!(await canResend(services.otp, accountRef))) {
           return c.json(err('cooldown', 'Please wait before requesting another code.'), 429);
         }
-        const { code } = await startEmailVerification(services.otp, auth.userId);
+        const { code } = await startEmailVerification(services.otp, auth.userId, user.email);
         await services.mailer.sendCode(user.email, code, 'verify');
         return c.json({ status: 'sent' as const });
       })
@@ -326,7 +336,7 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           // This keeps an email-only account from being stranded by a typo (the
           // last-verified-method invariant the removal endpoints already enforce).
           await services.store.setAuth(auth.userId, { pendingEmail: email });
-          const { code } = await startEmailVerification(services.otp, auth.userId);
+          const { code } = await startEmailVerification(services.otp, auth.userId, email);
           await services.mailer.sendCode(email, code, 'verify');
           return c.json({ status: 'sent' as const });
         },

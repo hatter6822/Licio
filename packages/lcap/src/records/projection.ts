@@ -85,9 +85,13 @@ function compareOptionalAsc(
   tieOnAbsent = false,
 ): number {
   if (a !== undefined && b !== undefined) return a - b;
+  // For a weak hint, a value present on only one side must NOT decide the order
+  // (it defers to the next ladder rung) — a spoofable phone-clock timestamp
+  // should never win by mere presence.  Strong hints keep present-before-absent.
+  if (tieOnAbsent) return 0;
   if (a !== undefined) return -1;
   if (b !== undefined) return 1;
-  return tieOnAbsent ? 0 : 0;
+  return 0;
 }
 
 /**

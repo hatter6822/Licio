@@ -147,6 +147,34 @@ describe('WS-I.2.4b balancing', () => {
     expect(result.applications.some((a) => a.constraint === 'lens_representation')).toBe(true);
   });
 
+  it('never lists a served item as demoted, even when a cap-demoted item is lens-promoted', () => {
+    // Source 900 fills the 2-slot page (cap 1/source), pushing the low-score
+    // lens-2 item (same source) out via the source cap.  The lens loop then
+    // promotes that lens-2 item back onto the page: it must NOT stay demoted,
+    // and the item it evicted must be recorded as the demotion.
+    const pool = [
+      balanceItem(1, 0.9, uuidOf(900), ['a'], 'lens-1'),
+      balanceItem(2, 0.8, uuidOf(900), ['b'], 'lens-1'),
+      balanceItem(3, 0.1, uuidOf(900), ['c'], 'lens-2'),
+    ];
+    const result = applyBalancing(pool, { ...CONFIG, pageSize: 2, maxSourceSharePct: 50 });
+
+    const pageIds = new Set(result.page.map((p) => p.itemId));
+    const demotedIds = new Set(result.demoted.map((d) => d.itemId));
+    // (a) page and demoted are disjoint — a served item is never also demoted.
+    for (const id of pageIds) expect(demotedIds.has(id)).toBe(false);
+    // (b) no served item carries a `demoted` application.
+    const demotedAppItems = new Set(
+      result.applications.filter((a) => a.action === 'demoted').map((a) => a.item_id),
+    );
+    for (const id of pageIds) expect(demotedAppItems.has(id)).toBe(false);
+    // (c) the promoted lens-2 item is served; the evicted item is the demotion.
+    expect(pageIds.has(uuidOf(3))).toBe(true);
+    expect(result.applications.some((a) => a.item_id === uuidOf(2) && a.action === 'demoted')).toBe(
+      true,
+    );
+  });
+
   it('is deterministic: identical input gives identical pages', () => {
     const pool = Array.from({ length: 20 }, (_, i) =>
       balanceItem(i + 1, 1 - i * 0.01, uuidOf(900 + (i % 4)), [`t${i % 3}`]),

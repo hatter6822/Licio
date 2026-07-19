@@ -117,8 +117,9 @@ export interface TotpVerifyResult {
 
 /**
  * Verify a presented TOTP code within ±`window` steps (default ±1, ~±30s drift).
- * Returns the matched step so the caller can reject a code REPLAYED within the
- * same step (replay prevention, WS-D.1.5b).  Comparison is constant-time.
+ * Returns the matched step so the caller can enforce forward-only step
+ * acceptance (replay prevention, WS-D.1.5b — see `isReplayedStep`).  Comparison
+ * is constant-time.
  */
 export function verifyTotp(
   secret: Buffer,
@@ -140,6 +141,20 @@ export function verifyTotp(
     }
   }
   return { valid: false, step: null };
+}
+
+/**
+ * Forward-only replay gate (WS-D.1.5b): a presented code's `step` is a replay if
+ * it is at or below the highest previously-accepted step.  Because verifyTotp
+ * accepts a ±1 window, up to three steps are valid simultaneously; remembering
+ * only the last-used step and rejecting on equality would let a newer
+ * verification clobber the memory and re-open replay of an older, still-in-window
+ * code.  Tracking the high-water mark and rejecting `step <= lastAcceptedStep`
+ * closes that window.  `lastAcceptedStep` is null when no code has been accepted
+ * yet (nothing to replay).
+ */
+export function isReplayedStep(lastAcceptedStep: number | null, step: number): boolean {
+  return lastAcceptedStep !== null && step <= lastAcceptedStep;
 }
 
 /** Build an `otpauth://totp/...` provisioning URI for QR display (issuer "Licio"). */

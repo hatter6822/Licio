@@ -58,7 +58,10 @@ export const V1_CONTRIBUTION_WEIGHTS: Readonly<Record<EventContributionType, num
 export function assertV1HierarchyOrder(
   weights: Readonly<Record<EventContributionType, number>> = V1_CONTRIBUTION_WEIGHTS,
 ): void {
-  const order: EventContributionType[] = ['correction', 'explanation'];
+  // The full strict chain: correction > explanation > low_info_reply.  Including
+  // low_info_reply here enforces explanation > 0 (a zero-weight explanation would
+  // otherwise pass while silently violating the documented hierarchy).
+  const order: EventContributionType[] = ['correction', 'explanation', 'low_info_reply'];
   for (let i = 1; i < order.length; i += 1) {
     const higher = order[i - 1];
     const lower = order[i];

@@ -104,6 +104,19 @@ function isCrossCommunity(candidate: Candidate, context: RankingRequestContext):
 }
 
 /**
+ * Whether an item is sensitive: it carries a non-`none` content sensitivity
+ * label, or one of its topics is in the (forward-compat) sensitive-topic set.
+ * The single source of truth for per-item AND request-level PHI sensitivity so
+ * the two never drift.
+ */
+function isSensitiveItem(features: FeatureVector, sensitiveTopicIds: ReadonlySet<string>): boolean {
+  return (
+    (features.sensitivity_labels?.some((label) => label !== 'none') ?? false) ||
+    features.topic_ids.some((topic) => sensitiveTopicIds.has(topic))
+  );
+}
+
+/**
  * Score one feasible item given its (single) constraint evaluation. Exposed
  * for unit tests; the pipeline applies it to every feasible candidate.
  */
@@ -123,9 +136,7 @@ export function scoreItem(
   // topic match against a slug set never fires per item). The topic-id set
   // stays a forward-compat hook for a deployment that marks specific catalog
   // topics sensitive. Either fires the conservative curve + the §11.5 penalty.
-  const sensitiveTopic =
-    (features.sensitivity_labels?.some((label) => label !== 'none') ?? false) ||
-    features.topic_ids.some((topic) => context.sensitiveTopicIds.has(topic));
+  const sensitiveTopic = isSensitiveItem(features, context.sensitiveTopicIds);
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
   const relevance = context.topicRelevanceByItem?.get(candidate.item_id);
@@ -185,8 +196,15 @@ export function rankFeasibleSet(
 ): RankedSelection {
   const applications: ConstraintApplication[] = [];
 
-  // PHI per-user diversification (the `holonomy_limits` constraint).
-  const phi = phiDiversification(context.userPhiRisk, profile, enforcement);
+  // PHI per-user diversification (the `holonomy_limits` constraint).  A request
+  // that surfaces ANY sensitive item is a sensitive journey, so the stricter
+  // (phi_sensitive_factor-scaled) holonomy threshold applies — derived here the
+  // same way scoreItem derives the per-item sensitivity flag.
+  const sensitiveContext = feasible.some((candidate) => {
+    const features = featuresById.get(candidate.item_id);
+    return features !== undefined && isSensitiveItem(features, context.sensitiveTopicIds);
+  });
+  const phi = phiDiversification(context.userPhiRisk, profile, enforcement, sensitiveContext);
   if (phi.application !== null) applications.push(phi.application);
 
   // Evaluate constraints ONCE per item; infeasible items leave the set.

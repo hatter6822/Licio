@@ -227,11 +227,12 @@ describe('WS-G.4.2d OWASP XSS vector suite (CI gate)', () => {
     expect(Object.keys(VECTORS).length).toBeGreaterThanOrEqual(9);
   });
 
-  it.each(
-    allVectors.map((v) => [`${v.family}: ${v.source}`, v.payload] as const),
-  )('renders safely — %s', (_name, payload) => {
-    auditSafety(payload);
-  });
+  it.each(allVectors.map((v) => [`${v.family}: ${v.source}`, v.payload] as const))(
+    'renders safely — %s',
+    (_name, payload) => {
+      auditSafety(payload);
+    },
+  );
 
   it('is idempotent under re-rendering (mutation stability)', () => {
     for (const { payload } of allVectors) {

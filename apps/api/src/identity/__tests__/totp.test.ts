@@ -7,6 +7,7 @@ import {
   generateTotpSecret,
   hashRecoveryCode,
   hotp,
+  isReplayedStep,
   otpauthUri,
   RECOVERY_CODE_COUNT,
   TOTP_SECRET_BYTES,
@@ -146,5 +147,22 @@ describe('recovery codes', () => {
     expect(hashRecoveryCode(code as string)).toBe(hash);
     // The hyphen is stripped on normalization, so a user omitting it still matches.
     expect(hashRecoveryCode((code as string).replace('-', ''))).toBe(hash);
+  });
+});
+
+describe('isReplayedStep (forward-only replay gate, WS-D.1.5b)', () => {
+  it('accepts the first code (no prior step) and rejects re-use of the same step', () => {
+    expect(isReplayedStep(null, 100)).toBe(false); // nothing used yet
+    expect(isReplayedStep(100, 100)).toBe(true); // exact re-use
+  });
+
+  it('rejects an OLDER still-in-window step after a NEWER one was accepted', () => {
+    // The vulnerability: accept step 100, then accept step 101 (a fresh code)
+    // — single-step equality memory would now hold 101 and wrongly re-accept a
+    // replay of the already-used step 100.  Forward-only rejects step <= 101.
+    const highWater = 101;
+    expect(isReplayedStep(highWater, 100)).toBe(true); // replay of the older code
+    expect(isReplayedStep(highWater, 101)).toBe(true); // replay of the newer code
+    expect(isReplayedStep(highWater, 102)).toBe(false); // genuinely newer code
   });
 });

@@ -10,15 +10,16 @@ import { checkA11y } from '../../test/axe.js';
 import { AiLabel, isMachineGenerated } from './AiLabel.js';
 
 describe('AiLabel', () => {
-  it.each(
-    AI_PROVENANCE_LABELS as readonly AiProvenanceLabel[],
-  )('renders a visible text badge for %s', (label) => {
-    const { container } = render(<AiLabel label={label} />);
-    // A text label is always present (colour/icon is never the sole signal).
-    expect(container.textContent?.trim().length ?? 0).toBeGreaterThan(0);
-    // An icon accompanies the text.
-    expect(container.querySelector('svg')).not.toBeNull();
-  });
+  it.each(AI_PROVENANCE_LABELS as readonly AiProvenanceLabel[])(
+    'renders a visible text badge for %s',
+    (label) => {
+      const { container } = render(<AiLabel label={label} />);
+      // A text label is always present (colour/icon is never the sole signal).
+      expect(container.textContent?.trim().length ?? 0).toBeGreaterThan(0);
+      // An icon accompanies the text.
+      expect(container.querySelector('svg')).not.toBeNull();
+    },
+  );
 
   it('renders machine-generated distinctly from steward-corrected', () => {
     const { container: machine } = render(<AiLabel label="machine-generated" />);

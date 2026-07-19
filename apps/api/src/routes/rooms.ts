@@ -581,7 +581,7 @@ export function createRoomsRoutes() {
           // WS-S §8: a p2p stub has no server-side join surface (joins bounce
           // invite_only, membership is MLS on the members' devices).
           const joinRoomRecord = await forum.rooms.getById(roomId);
-          if (!joinRoomRecord || joinRoomRecord.storageMode !== 'server') {
+          if (joinRoomRecord?.storageMode !== 'server') {
             return c.json(notFound, 404);
           }
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
@@ -620,7 +620,7 @@ export function createRoomsRoutes() {
           const identity = getIdentityServices();
           // WS-S §8: no server-side join surface for a p2p stub (see the list route).
           const decideRoomRecord = await forum.rooms.getById(roomId);
-          if (!decideRoomRecord || decideRoomRecord.storageMode !== 'server') {
+          if (decideRoomRecord?.storageMode !== 'server') {
             return c.json(notFound, 404);
           }
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {

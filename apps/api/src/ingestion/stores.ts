@@ -445,6 +445,9 @@ export interface SignatureStore {
   /** Upsert the signature + its LSH bands (one signature per story). */
   upsert(record: Omit<StorySignatureRecord, 'createdAt'>, bandHashes: Uint32Array): Promise<void>;
   getByStoryId(storyId: string): Promise<StorySignatureRecord | null>;
+  /** Batch signature read for a set of story ids (ONE query) — the near-dup
+   *  scan reads every surviving candidate's signature at once, not per-item. */
+  getByStoryIds(storyIds: readonly string[]): Promise<Map<string, StorySignatureRecord>>;
   /** Candidate story ids sharing ≥ 1 band bucket — O(bands) point lookups. */
   candidatesByBands(bandHashes: Uint32Array, excludeStoryId: string): Promise<string[]>;
   clear(): Promise<void>;
@@ -1157,6 +1160,15 @@ export class InMemorySignatureStore implements SignatureStore {
 
   async getByStoryId(storyId: string): Promise<StorySignatureRecord | null> {
     return this.#signatures.get(storyId) ?? null;
+  }
+
+  async getByStoryIds(storyIds: readonly string[]): Promise<Map<string, StorySignatureRecord>> {
+    const out = new Map<string, StorySignatureRecord>();
+    for (const id of storyIds) {
+      const record = this.#signatures.get(id);
+      if (record !== undefined) out.set(id, record);
+    }
+    return out;
   }
 
   async candidatesByBands(bandHashes: Uint32Array, excludeStoryId: string): Promise<string[]> {

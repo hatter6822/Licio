@@ -132,8 +132,10 @@ export function evaluateLinkSafety(
     reasons.push('blocklisted_domain');
   }
 
-  const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase();
-  if (CONTRACT_INTERACTION_PATTERNS.some((pattern) => pathAndQuery.includes(pattern))) {
+  // Include the fragment: hash-routed dApps (e.g. `/#/setApprovalForAll`) carry
+  // the contract action in `hash`, which a path+query-only scan would miss.
+  const target = `${parsed.pathname}${parsed.search}${parsed.hash}`.toLowerCase();
+  if (CONTRACT_INTERACTION_PATTERNS.some((pattern) => target.includes(pattern))) {
     reasons.push('contract_interaction');
   }
 

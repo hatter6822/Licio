@@ -742,6 +742,14 @@ export async function runPreflight(
   );
 
   const summary = buildHumanSummary(actionType, room.name, message);
+  // WS-L.2.6e — flag an at/above-threshold amount as requiring a FRESH step-up.
+  // Exact-decimal comparison (amounts are up to 78-digit minor-unit strings, so a
+  // JS numeric/lexicographic compare would be wrong); non-amount actions are never
+  // high-value.  The submit endpoint enforces the fresh assertion server-side.
+  const preflightAmount = message['amount'];
+  const highValueStepUpRequired =
+    typeof preflightAmount === 'string' &&
+    decCompare(preflightAmount, config.highValueThresholdMinorUnits) >= 0;
   const response: KnomosisPreflightResponse = {
     result: 'pass',
     action_type: actionType,
@@ -751,6 +759,7 @@ export async function runPreflight(
     typed_data_hash: verified.typedDataHash,
     summary_payload_hash: pairSummaryToPayload(summary, verified.typedDataHash),
     human_summary: summary,
+    high_value_step_up_required: highValueStepUpRequired,
     timestamp: nowIso,
   };
   return audited(response);

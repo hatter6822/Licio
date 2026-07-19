@@ -27,6 +27,7 @@ import {
   generateRecoveryCodes,
   generateTotpSecret,
   hashRecoveryCode,
+  isReplayedStep,
   otpauthUri,
   verifyTotp,
 } from '../identity/totp.js';
@@ -150,9 +151,14 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           const secret = services.secretBox.open(userAuth.mfaSecret);
           const result = verifyTotp(secret, code);
           if (result.valid && result.step !== null) {
-            // Replay prevention: reject a code reused within the same time step.
+            // Replay prevention (WS-D.1.5b): forward-only step acceptance against
+            // the highest previously-accepted step — see `isReplayedStep`.  (A
+            // ±1 window means several steps are valid at once, so single-step
+            // equality memory could be clobbered by a newer verify and re-open
+            // replay of an older, still-in-window code.)
             const usedRaw = await services.otp.get(usedStepKey(auth.userId));
-            if (usedRaw && Number(usedRaw) === result.step) {
+            const lastStep = usedRaw ? Number(usedRaw) : null;
+            if (isReplayedStep(lastStep, result.step)) {
               return c.json(err('replayed', 'Code already used.'), 400);
             }
             await services.otp.set(

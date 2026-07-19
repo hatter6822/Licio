@@ -14,7 +14,11 @@
 // device are the author's own (the founder's self-add, §12.1) — the one
 // self-authorizing op; every later op is capability-checked.
 
-import { CONTRIBUTION_BODY_LIMITS, type ContributionType } from '@licio/shared';
+import {
+  CONTRIBUTION_BODY_LIMITS,
+  type ContributionType,
+  MAX_CONTRIBUTION_DEPTH,
+} from '@licio/shared';
 import type { PrivateOpBody, PrivateRoomOp } from '../schemas/ops.js';
 import { capabilitiesForRole, OP_REQUIRED_CAPABILITY } from './capabilities.js';
 import { canonicalOpOrder } from './order.js';
@@ -239,12 +243,32 @@ function applyContributionCreate(
     reject(state, op.op_id, 'thread_missing');
     return;
   }
-  if (
-    body.parent_contribution_id !== undefined &&
-    !state.contributions.has(body.parent_contribution_id)
-  ) {
-    reject(state, op.op_id, 'parent_contribution_missing');
-    return;
+  if (body.parent_contribution_id !== undefined) {
+    const parent = state.contributions.get(body.parent_contribution_id);
+    if (parent === undefined) {
+      reject(state, op.op_id, 'parent_contribution_missing');
+      return;
+    }
+    // A reply must live in the SAME thread as its parent (WS-G.1.2d-1 parity):
+    // a cross-thread parent would orphan the node under another thread's tree.
+    if (parent.threadId !== body.thread_id) {
+      reject(state, op.op_id, 'parent_thread_mismatch');
+      return;
+    }
+    // Enforce the max nesting depth (roots are depth 0) by walking the ancestor
+    // chain.  `parentContributionId` is part of the converged state, so every
+    // device counts the same depth ⇒ the same accept/reject ⇒ convergence — no
+    // extra state field or commitment-format change is needed.
+    let depth = 1;
+    let ancestorId = parent.parentContributionId;
+    while (ancestorId !== undefined) {
+      depth += 1;
+      ancestorId = state.contributions.get(ancestorId)?.parentContributionId;
+    }
+    if (depth > MAX_CONTRIBUTION_DEPTH) {
+      reject(state, op.op_id, 'max_depth_exceeded');
+      return;
+    }
   }
   state.seenClientDrafts.add(draftKey);
   state.contributions.set(body.contribution_id, {

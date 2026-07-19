@@ -90,15 +90,18 @@ export async function findNearDuplicates(
 ): Promise<NearDuplicateHit[]> {
   const candidates = await signatures.candidatesByBands(bands, storyId);
   if (candidates.length === 0) return [];
-  // Scope the candidate set to live PUBLIC stories (one batch read).
+  // Scope the candidate set to live PUBLIC stories (one batch read), THEN read
+  // every survivor's signature in ONE batch — not one query per candidate.
   const candidateStories = await stories.getByIds(candidates);
+  const surviving = candidates.filter((id) => {
+    const story = candidateStories.get(id);
+    return story !== undefined && story.visibility === 'public' && story.hiddenState === null;
+  });
+  if (surviving.length === 0) return [];
+  const candidateSignatures = await signatures.getByStoryIds(surviving);
   const hits: NearDuplicateHit[] = [];
-  for (const candidateId of candidates) {
-    const story = candidateStories.get(candidateId);
-    if (story === undefined || story.visibility !== 'public' || story.hiddenState !== null) {
-      continue;
-    }
-    const candidate = await signatures.getByStoryId(candidateId);
+  for (const candidateId of surviving) {
+    const candidate = candidateSignatures.get(candidateId);
     if (!candidate || candidate.familyVersion !== MINHASH_FAMILY_VERSION) continue;
     const estimate = estimateJaccard(signature, candidate.minhash);
     if (estimate >= threshold) hits.push({ storyId: candidateId, estimatedJaccard: estimate });

@@ -66,6 +66,7 @@ export interface IntentDeps extends ProfileDeps {
     wsmIntentQuotedTtlMs: number;
     wsmIntentSignedTtlMs: number;
     wsmIntentMaxRetries: number;
+    wsmIntentReorgRecoveryMs: number;
     wsmEstimatedFeeMinorUnits: string;
   };
 }
@@ -860,6 +861,14 @@ function mapActionState(
       if (actionState === 'finalized') return 'finalized';
       if (actionState === 'reverted') return 'reorged';
       return null;
+    case 'reorged':
+      // A reorg can re-confirm on the canonical chain: recover reorged→pending so
+      // the walk re-attaches the receipt (pending→confirmed→finalized) in the same
+      // pass.  A STILL-reverted action is NOT abandoned here — that would collapse
+      // reorged→abandoned immediately and foreclose the recovery; reorged→abandoned
+      // is driven by the grace timeout in `abandonExpiredReorgs`.
+      if (actionState === 'settled' || actionState === 'finalized') return 'pending';
+      return null;
     default:
       return null;
   }
@@ -881,7 +890,9 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
   // `signed` rides along for the AUTO-ATTACH recovery below (W13).
   for (;;) {
     const candidates = await deps.intents.listByStates(
-      ['signed', 'submitted', 'pending', 'confirmed'],
+      // `reorged` rides along so a reorg that re-confirms on the canonical chain
+      // recovers (reorged→pending→…→finalized) instead of being stranded (W-M.3.1d).
+      ['signed', 'submitted', 'pending', 'confirmed', 'reorged'],
       pageSize,
       afterId,
     );
@@ -924,6 +935,13 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
         const next = mapActionState(current.executionState, action.submissionState);
         if (next === null) break;
         const patch: Parameters<PaymentIntentStore['transition']>[3] = {};
+        if (next === 'reorged') {
+          // Stamp the reorg-recovery deadline: `abandonExpiredReorgs` abandons the
+          // intent once this elapses with the action still reverted (WS-M.3.1d).
+          patch.expiresAt = new Date(
+            deps.now() + deps.wsmConfig().wsmIntentReorgRecoveryMs,
+          ).toISOString();
+        }
         if (next === 'finalized') {
           const receipt = await deps.receipts.getByAction(action.actionRecordId, 'public');
           // Finality REQUIRES the receipt: a finalized intent leaves the sweep's
@@ -1064,6 +1082,39 @@ export async function expireIntents(deps: IntentDeps, limit = 200): Promise<numb
 }
 
 /**
+ * Reorg-recovery grace sweep (WS-M.3.1d): a `reorged` intent whose action
+ * re-confirms on the canonical chain recovers via `reconcileIntents`
+ * (reorged→pending→…→finalized).  If its recovery window (`wsmIntentReorgRecoveryMs`,
+ * stamped as `expiresAt` when confirmed→reorged fired) elapses with the action
+ * STILL reverted, the intent is abandoned for a clean terminal audit trail — the
+ * ONLY driver of the SSOT's reorged→abandoned edge.  `reorged` is not a
+ * `listExpired` timed state, so this runs as a sibling of `expireIntents`.
+ */
+export async function abandonExpiredReorgs(deps: IntentDeps, limit = 200): Promise<number> {
+  const nowIso = new Date(deps.now()).toISOString();
+  let abandoned = 0;
+  let afterId: string | null = null;
+  for (;;) {
+    const candidates = await deps.intents.listByStates(['reorged'], limit, afterId);
+    if (candidates.length === 0) break;
+    afterId = candidates[candidates.length - 1]?.paymentIntentId ?? null;
+    for (const intent of candidates) {
+      if (intent.expiresAt > nowIso) continue; // still inside the recovery window
+      // Only abandon while the action is STILL reverted — if it re-confirmed, the
+      // reconcile sweep is recovering it (or already has), so leave it alone.
+      if (intent.actionRecordId !== null) {
+        const action = await deps.actions.getById(intent.actionRecordId);
+        if (action !== null && action.submissionState !== 'reverted') continue;
+      }
+      const updated = await transitionIntent(deps, intent, 'abandoned', {}, null);
+      if (updated !== null) abandoned += 1;
+    }
+    if (candidates.length < limit) break;
+  }
+  return abandoned;
+}
+
+/**
  * The durable action a signed intent's client minted but never attached — the
  * W13 recovery's evidence.  Found by the intent↔action link the submit stamps
  * onto the action record (`payment_intent_id`); actor-agnostic, so it recovers a
@@ -1097,6 +1148,30 @@ async function orphanActionFor(
     return await deps.actions.getLatestByPaymentIntentId(intent.paymentIntentId);
   }
   return null;
+}
+
+/**
+ * Post-finality dispute (WS-M.4.3d): the intent owner or a room steward flags a
+ * FINALIZED payment for review.  CAS finalized→disputed (the only edge out of
+ * `finalized`) via the audited transition — the caller (route) then opens a
+ * compliance review case carrying the dispute reason.  `disputed` is terminal:
+ * resolution updates the linked records, never the intent.
+ */
+export async function disputeIntent(
+  deps: IntentDeps,
+  paymentIntentId: string,
+  actorUserId: string,
+): Promise<TreasuryGovernanceError | { ok: true; intent: PaymentIntentRecord }> {
+  const intent = await deps.intents.getById(paymentIntentId);
+  if (intent === null) return tgErr(404, 'not_found', 'Resource not found');
+  if (intent.executionState !== 'finalized') {
+    return tgErr(409, 'not_disputable', 'Only a finalized payment intent can be disputed.');
+  }
+  const updated = await transitionIntent(deps, intent, 'disputed', {}, actorUserId);
+  if (updated === null) {
+    return tgErr(409, 'transition_failed', 'The intent could not be disputed.');
+  }
+  return { ok: true, intent: updated };
 }
 
 /** Bounded retry: `failed`/`reverted` → `created` (WS-M.3.1b, default 3). */

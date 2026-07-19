@@ -7,20 +7,12 @@ import { describe, expect, it } from 'vitest';
 import { classifyLowInfoReplyV0 } from '../pwatt/low-info-reply.js';
 
 describe('classifyLowInfoReplyV0 (WS-G, §5.3)', () => {
-  it.each([
-    '+1',
-    'this',
-    'lol',
-    'same',
-    'first',
-    'ok',
-    '👍',
-    '!!!',
-    'agreed',
-    '+1 same',
-  ])('classifies bare acknowledgment %j', (body) => {
-    expect(classifyLowInfoReplyV0(body, false)).toBe(true);
-  });
+  it.each(['+1', 'this', 'lol', 'same', 'first', 'ok', '👍', '!!!', 'agreed', '+1 same'])(
+    'classifies bare acknowledgment %j',
+    (body) => {
+      expect(classifyLowInfoReplyV0(body, false)).toBe(true);
+    },
+  );
 
   it('does not classify mixed tokens outside the lexicon ("nice one")', () => {
     // "one" is outside the closed lexicon — the conservative mandate says

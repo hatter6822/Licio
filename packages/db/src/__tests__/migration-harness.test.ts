@@ -360,20 +360,16 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
       directory: "'listed'",
       constraint: 'rooms_server_no_directory_mode',
     },
-  ])('§4.1 coherence CHECK rejects $label', async ({
-    storage,
-    authority,
-    visibility,
-    join,
-    directory,
-    constraint,
-  }) => {
-    const id = randomUUID();
-    await expect(
-      client.unsafe(
-        `INSERT INTO rooms (room_id, name, slug, room_type, visibility, join_model, posting_policy, storage_mode, authority_model, directory_mode)
+  ])(
+    '§4.1 coherence CHECK rejects $label',
+    async ({ storage, authority, visibility, join, directory, constraint }) => {
+      const id = randomUUID();
+      await expect(
+        client.unsafe(
+          `INSERT INTO rooms (room_id, name, slug, room_type, visibility, join_model, posting_policy, storage_mode, authority_model, directory_mode)
            VALUES ('${id}', 'X', 'x-${id.slice(0, 8)}', 'global_topic', '${visibility}', '${join}', 'all_members', '${storage}', '${authority}', ${directory})`,
-      ),
-    ).rejects.toThrow(new RegExp(constraint));
-  });
+        ),
+      ).rejects.toThrow(new RegExp(constraint));
+    },
+  );
 });

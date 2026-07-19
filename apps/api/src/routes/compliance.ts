@@ -244,7 +244,7 @@ interface HeldIntent {
 }
 
 /**
- * Who this intent's review is about — the same rule `reviewSubjectFor` applies
+ * Who this intent's review is about — the same rule `reviewSubjectForAction` applies
  * on the seam, read off the intent's own ownership.  A room-owned payout
  * belongs to the treasury, not to whichever steward authorized it, so the queue
  * can find its review knowing only the intent (it never learns the steward).

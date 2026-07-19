@@ -17,7 +17,7 @@ import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simp
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isLastMethodRemoval } from '../identity/auth-methods.js';
-import { canResend, startEmailVerification, verifyEmailFactor } from '../identity/email-otp.js';
+import { canResend, startEmailStepUp, verifyEmailStepUp } from '../identity/email-otp.js';
 import { authMethodInventory, type IdentityServices } from '../identity/services.js';
 import {
   buildSessionCookie,
@@ -328,7 +328,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
         if (!(await canResend(services.otp, `stepup:${auth.userId}`))) {
           return c.json(err('cooldown', 'Please wait before requesting another code.'), 429);
         }
-        const { code } = await startEmailVerification(services.otp, auth.userId);
+        const { code } = await startEmailStepUp(services.otp, auth.userId, user.email);
         await services.mailer.sendCode(user.email, code, 'verify');
         return c.json({ status: 'sent' as const });
       })
@@ -341,7 +341,7 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
           const services = resolve();
           const auth = c.get('auth');
           if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
-          const result = await verifyEmailFactor(
+          const result = await verifyEmailStepUp(
             services.otp,
             auth.userId,
             c.req.valid('json').code,

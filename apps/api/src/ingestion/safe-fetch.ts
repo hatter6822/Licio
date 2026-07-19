@@ -114,6 +114,7 @@ function requestOnce(
   return new Promise((resolve) => {
     const transport = url.protocol === 'https:' ? https : http;
     let settled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = (
       value:
         | { kind: 'response'; status: number; body: string; contentType: string | null }
@@ -122,6 +123,7 @@ function requestOnce(
     ) => {
       if (!settled) {
         settled = true;
+        if (hardTimer !== undefined) clearTimeout(hardTimer);
         resolve(value);
       }
     };
@@ -150,8 +152,12 @@ function requestOnce(
       (response) => {
         const status = response.statusCode ?? 0;
         if (status >= 300 && status < 400 && response.headers.location !== undefined) {
-          response.resume(); // drain
+          // The Location is captured; the redirect body is not needed.  Settle the
+          // redirect outcome, then tear the socket down — draining an
+          // attacker-controlled (possibly endless or huge) redirect body under NO
+          // byte cap would leak the connection and defeat the size limit.
           settle({ kind: 'redirect', location: response.headers.location, status });
+          request.destroy();
           return;
         }
         const chunks: Buffer[] = [];
@@ -181,6 +187,14 @@ function requestOnce(
         });
       },
     );
+    // Wall-clock hard cap on the whole request (connect + streaming body).
+    // Unlike the idle socket `timeout` above — which a slow-drip server resets
+    // on every byte — this fires after the remaining budget REGARDLESS of
+    // activity, enforcing the documented time-capped guarantee on the body read.
+    hardTimer = setTimeout(() => {
+      settle({ kind: 'error', result: { ok: false, reason: 'timeout' } });
+      request.destroy();
+    }, remaining);
     request.on('timeout', () => {
       request.destroy();
       settle({ kind: 'error', result: { ok: false, reason: 'timeout' } });

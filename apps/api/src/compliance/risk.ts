@@ -100,7 +100,7 @@ export function createFraudRisk(deps: FraudRiskDeps): CompliancePort['fraudRisk'
     // `null` as "an attempt was named" and hand it the cleared-review exit.
     const attempt = reviewRef ?? null;
     // `null` = a personal action, so the actor is the subject.  A room-treasury
-    // disbursement names the ROOM (see `reviewSubjectFor`).
+    // disbursement names the ROOM (see `reviewSubjectForAction`).
     const subject = reviewSubject ?? { kind: 'user' as const, ref: userId };
     const amount = amountMinorUnits ?? '0';
     if (!AMOUNT_RE.test(amount)) {

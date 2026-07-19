@@ -37,6 +37,9 @@ describe('WS-G.4.2c contract-interaction heuristics', () => {
     'https://site.example/tx?method=setApprovalForAll',
     'https://site.example/permit/sign',
     'https://site.example/?data=transferFrom(0xa,0xb,1)',
+    // Hash-routed dApps carry the action in the fragment (must be scanned too).
+    'https://drainer.example/#/setApprovalForAll',
+    'https://app.example/#/permit?spender=0xabc',
   ])('flags %s', (url) => {
     expect(evaluateLinkSafety(url, []).reasons).toContain('contract_interaction');
   });

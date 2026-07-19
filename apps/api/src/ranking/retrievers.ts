@@ -21,12 +21,20 @@ import { isSentinelTopicId } from '@licio/shared';
 import type { AggregationWindowRecord } from '../events/stores.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 
+/** A room's ranking-relevant axes, read together (WS-Q.4.1b / WS-S.1.4). */
+export interface RoomAxes {
+  visibility: 'public' | 'private';
+  storageMode: 'server' | 'p2p';
+}
+
 /** Read-only data ports for retrieval. NO financial port exists. */
 export interface CandidateDataPorts {
   recentStories(limit: number): Promise<StoryRecord[]>;
   storyById(storyId: string): Promise<StoryRecord | null>;
   threadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
-  storyIdByThreadId(threadId: string): Promise<string | null>;
+  /** Batch thread-shell read for a set of story ids (ONE query) — the catch-up
+   *  retriever resolves every seen story's room at once, not per-item. */
+  threadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
   /** Active room subscriptions of the requesting user ([] signed out). */
   subscribedRoomIds(userId: string): Promise<string[]>;
   /** Most recent threads of a room (newest first). */
@@ -34,14 +42,13 @@ export interface CandidateDataPorts {
   /** Public rooms with the `experts_and_stewards` posting policy (the WS-Q
    *  successor to legacy expert_led rooms on the public front page). */
   expertLedRoomIds(limit: number): Promise<string[]>;
-  /** WS-Q.4.1b — a room's visibility (`null` for an unknown room ⇒ fail-closed
-   *  to non-public). The global retrievers require a PUBLIC room. */
-  roomVisibility(roomId: string): Promise<'public' | 'private' | null>;
-  /** WS-S.1.4 — a room's storage mode (`null` for an unknown room ⇒ fail-closed
-   *  to non-server). EVERY retriever requires a SERVER-storage room: a Private
-   *  P2P room's content never lives on the server (PRIVATE_SPEC §8/§23.5), so it
-   *  can never enter a global/topic/room surface. */
-  roomStorageMode(roomId: string): Promise<'server' | 'p2p' | null>;
+  /** WS-Q.4.1b / WS-S.1.4 — a room's visibility + storage mode in ONE read
+   *  (`null` for an unknown room ⇒ fail-closed to non-public/non-server). The
+   *  global retrievers require a PUBLIC, SERVER-storage room: a room_only item or
+   *  a Private P2P room's content (which never lives on the server, PRIVATE_SPEC
+   *  §8/§23.5) can never enter a global/topic/room surface.  Memoized per serve
+   *  by `loadRoomAxes` so concurrent retrievers coalesce onto one read per room. */
+  roomAxes(roomId: string): Promise<RoomAxes | null>;
   /** storyId → last-seen ISO instant from the user's OWN attention rows. */
   userSeenStories(userId: string): Promise<Map<string, string>>;
   /** Latest PWAtt components for a story (null before coverage). */
@@ -65,6 +72,28 @@ export interface RetrieveContext {
   nowMs: number;
   /** Per-retriever output cap. */
   limit: number;
+  /** Per-SERVE room-axes memo (lazily created by `loadRoomAxes`): the same
+   *  context is passed to every retriever, so concurrent/repeated room reads
+   *  across all retrievers coalesce onto one in-flight read per distinct room. */
+  roomAxesCache?: Map<string, Promise<RoomAxes | null>>;
+}
+
+/** Read a room's axes through the per-serve memo (coalesces + dedupes reads). */
+function loadRoomAxes(
+  ports: CandidateDataPorts,
+  context: RetrieveContext,
+  roomId: string,
+): Promise<RoomAxes | null> {
+  let cache = context.roomAxesCache;
+  if (cache === undefined) {
+    cache = new Map();
+    context.roomAxesCache = cache;
+  }
+  const hit = cache.get(roomId);
+  if (hit !== undefined) return hit;
+  const pending = ports.roomAxes(roomId);
+  cache.set(roomId, pending);
+  return pending;
 }
 
 /** The WS-I.1.1a retriever interface. */
@@ -100,12 +129,14 @@ function retrievable(story: StoryRecord): boolean {
 async function globallyRetrievable(
   ports: CandidateDataPorts,
   story: StoryRecord,
+  context: RetrieveContext,
 ): Promise<boolean> {
   if (!retrievable(story)) return false;
   if (story.visibility !== 'public') return false;
-  // WS-S.1.4 — a P2P room never serves server-retrieved content (§23.5).
-  if ((await ports.roomStorageMode(story.roomId)) !== 'server') return false;
-  return (await ports.roomVisibility(story.roomId)) === 'public';
+  // ONE memoized read for both axes: a P2P room never serves server-retrieved
+  // content (§23.5), and only a public room enters a global surface.
+  const axes = await loadRoomAxes(ports, context, story.roomId);
+  return axes !== null && axes.storageMode === 'server' && axes.visibility === 'public';
 }
 
 function storyFreshnessIso(story: StoryRecord): string {
@@ -157,9 +188,8 @@ export class SubscribedRoomsRetriever implements CandidateRetriever {
     for (const roomId of roomIds) {
       const threads = await this.ports.threadsByRoom(roomId, perRoom);
       for (const thread of threads) {
-        const storyId = await this.ports.storyIdByThreadId(thread.threadId);
-        if (storyId === null) continue;
-        const story = await storyIfGloballyRetrievable(this.ports, storyId);
+        const storyId = thread.storyId; // ThreadShellRecord carries it (NOT NULL)
+        const story = await storyIfGloballyRetrievable(this.ports, storyId, context);
         if (story === null) continue;
         out.push(
           await storyToCandidate(
@@ -192,7 +222,7 @@ export class LocalNewsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
+      if (!(await globallyRetrievable(this.ports, story, context))) continue;
       const scope = story.locationScope;
       if (scope === null || scope.type === 'global') continue;
       // Coarse v1 match: country scope against the locale region subtag.
@@ -236,7 +266,7 @@ export class GlobalCandidatesRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
+      if (!(await globallyRetrievable(this.ports, story, context))) continue;
       const components = await this.ports.latestPwattComponents(story.storyId);
       const freshness = recencyScore(storyFreshnessIso(story), context.nowMs, 48);
       if (components !== null) {
@@ -280,7 +310,7 @@ export class EmergingDiscussionsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
+      if (!(await globallyRetrievable(this.ports, story, context))) continue;
       const window = await this.ports.latestDayWindow(story.storyId);
       if (window === null) continue;
       const counts = window.contributionCounts;
@@ -315,7 +345,7 @@ export class IndependentSourceAdditionsRetriever implements CandidateRetriever {
     const stories = await this.ports.recentStories(context.limit * 4);
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
+      if (!(await globallyRetrievable(this.ports, story, context))) continue;
       const lastSeen = seen.get(story.storyId);
       if (lastSeen === undefined) continue;
       if (story.lastMaterialUpdateAt <= lastSeen) continue;
@@ -349,10 +379,10 @@ export class ExpertExplanationsRetriever implements CandidateRetriever {
     const seen = new Set<string>();
     for (const roomId of expertRooms) {
       for (const thread of await this.ports.threadsByRoom(roomId, context.limit)) {
-        const storyId = await this.ports.storyIdByThreadId(thread.threadId);
-        if (storyId === null || seen.has(storyId)) continue;
+        const storyId = thread.storyId; // ThreadShellRecord carries it (NOT NULL)
+        if (seen.has(storyId)) continue;
         seen.add(storyId);
-        const story = await storyIfGloballyRetrievable(this.ports, storyId);
+        const story = await storyIfGloballyRetrievable(this.ports, storyId, context);
         if (story === null) continue;
         out.push(
           await storyToCandidate(
@@ -385,9 +415,10 @@ async function storyIfRetrievable(
 async function storyIfGloballyRetrievable(
   ports: CandidateDataPorts,
   storyId: string,
+  context: RetrieveContext,
 ): Promise<StoryRecord | null> {
   const story = await ports.storyById(storyId);
-  return story !== null && (await globallyRetrievable(ports, story)) ? story : null;
+  return story !== null && (await globallyRetrievable(ports, story, context)) ? story : null;
 }
 
 /** 7. Chronological catch-up: recent unseen items in time order, respecting
@@ -406,16 +437,18 @@ export class ChronologicalCatchUpRetriever implements CandidateRetriever {
     // Per-room last-seen: the newest instant the user saw ANY story of that
     // room; catch-up serves only items newer than that mark.
     const lastSeenByRoom = new Map<string, string>();
+    // ONE batch read for every seen story's room — the seen set is unbounded by
+    // the user's whole reading history, so a per-item lookup here does not scale.
+    const seenThreads = await this.ports.threadsByStoryIds([...seen.keys()]);
     for (const [storyId, seenAt] of seen) {
-      const thread = await this.ports.threadByStoryId(storyId);
-      const roomId = thread?.roomId ?? null;
+      const roomId = seenThreads.get(storyId)?.roomId ?? null;
       if (roomId === null) continue;
       const current = lastSeenByRoom.get(roomId);
       if (current === undefined || seenAt > current) lastSeenByRoom.set(roomId, seenAt);
     }
     const out: Candidate[] = [];
     for (const story of stories) {
-      if (!(await globallyRetrievable(this.ports, story))) continue;
+      if (!(await globallyRetrievable(this.ports, story, context))) continue;
       if (seen.has(story.storyId)) continue;
       const thread = await this.ports.threadByStoryId(story.storyId);
       const roomMark = thread?.roomId != null ? lastSeenByRoom.get(thread.roomId) : undefined;
@@ -454,11 +487,14 @@ export class RoomSurfaceRetriever implements CandidateRetriever {
     if (context.surface !== 'room' || context.surfaceRoomId === null) return [];
     // WS-S.1.4 — the room surface never serves a Private P2P room (§23.5); its
     // content lives only on member devices. Fail-closed on an unknown room.
-    if ((await this.ports.roomStorageMode(context.surfaceRoomId)) !== 'server') return [];
+    if (
+      (await loadRoomAxes(this.ports, context, context.surfaceRoomId))?.storageMode !== 'server'
+    ) {
+      return [];
+    }
     const out: Candidate[] = [];
     for (const thread of await this.ports.threadsByRoom(context.surfaceRoomId, context.limit)) {
-      const storyId = await this.ports.storyIdByThreadId(thread.threadId);
-      if (storyId === null) continue;
+      const storyId = thread.storyId; // ThreadShellRecord carries it (NOT NULL)
       // The room surface serves the room's FULL pool (public + room_only of
       // this room) — NOT the global predicate. The route enforced the read bar.
       const story = await storyIfRetrievable(this.ports, storyId);

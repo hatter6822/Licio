@@ -526,4 +526,70 @@ describe('email account recovery + pending email change', () => {
     expect((await services.store.getUser(userId))?.email).toBe('new@example.com');
     expect((await services.store.getAuth(userId))?.pendingEmail).toBeNull();
   });
+
+  it('does not promote a pending email change with a code delivered to the OLD address (WS-D.1.4b)', async () => {
+    const app = createApp();
+    const reg = await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'victim',
+        display_name: 'V',
+        email: 'a@example.com',
+        date_of_birth: '1990-01-01',
+      }),
+    });
+    let sid = cookie(reg, '__Host-sid');
+    const regCode = (services.mailer as RecordingMailer).codes
+      .filter((c) => c.to === 'a@example.com' && c.kind === 'verify')
+      .at(-1)?.code as string;
+    sid =
+      cookie(
+        await app.request('/v1/auth/email/verify', {
+          method: 'POST',
+          headers: headers(sid),
+          body: JSON.stringify({ code: regCode }),
+        }),
+        '__Host-sid',
+      ) || sid;
+    const userId = (await services.store.getUserByEmail('a@example.com'))?.userId as string;
+
+    // Stage a change to B (the fresh session satisfies step-up).
+    expect(
+      (
+        await app.request('/v1/auth/email/add', {
+          method: 'POST',
+          headers: headers(sid),
+          body: JSON.stringify({ email: 'b@example.com' }),
+        })
+      ).status,
+    ).toBe(200);
+    expect((await services.store.getAuth(userId))?.pendingEmail).toBe('b@example.com');
+
+    // Obtain a code delivered to the CURRENT address A via step-up start.  Before
+    // the fix, this code shared the /email/verify slot and could confirm B.
+    expect(
+      (
+        await app.request('/v1/auth/step-up/email/start', {
+          method: 'POST',
+          headers: headers(sid),
+          body: '{}',
+        })
+      ).status,
+    ).toBe(200);
+    const codeToA = (services.mailer as RecordingMailer).codes
+      .filter((c) => c.to === 'a@example.com' && c.kind === 'verify')
+      .at(-1)?.code as string;
+
+    // Submitting the A-delivered code to /email/verify must NOT promote B: the
+    // pending change is unchanged and the account email stays A.
+    const attack = await app.request('/v1/auth/email/verify', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: codeToA }),
+    });
+    expect(attack.status).toBe(400);
+    expect((await services.store.getUser(userId))?.email).toBe('a@example.com');
+    expect((await services.store.getAuth(userId))?.pendingEmail).toBe('b@example.com');
+  });
 });

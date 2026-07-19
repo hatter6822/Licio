@@ -11,7 +11,7 @@
 //  - treasury reconciliation (WS-M.5.2a): the zero-or-explained three-source
 //    snapshot per treasury (divergence alerts + the §28.3 expansion block).
 
-import { expireIntents, reconcileIntents } from './intents.js';
+import { abandonExpiredReorgs, expireIntents, reconcileIntents } from './intents.js';
 import { settleDueProposals } from './proposals.js';
 import type { TreasuryServices } from './services.js';
 import { reconcileTreasury } from './treasury-reconciliation.js';
@@ -19,6 +19,7 @@ import { reconcileTreasury } from './treasury-reconciliation.js';
 export type WsmSchedulerTask =
   | 'wsm_intent_expiry'
   | 'wsm_intent_reconcile'
+  | 'wsm_intent_reorg_recovery'
   | 'wsm_proposal_settle'
   | 'wsm_treasury_reconcile';
 
@@ -41,6 +42,14 @@ export async function runWsmTick(
     await expireIntents(services);
   } catch (error) {
     onError(error, 'wsm_intent_expiry');
+  }
+  try {
+    // A reorg that never re-confirms within its grace window is abandoned for a
+    // clean terminal audit trail (runs AFTER reconcile, so a re-confirmed reorg
+    // recovers first).
+    await abandonExpiredReorgs(services);
+  } catch (error) {
+    onError(error, 'wsm_intent_reorg_recovery');
   }
   try {
     // Every room with a governance profile is a candidate (production proposals
