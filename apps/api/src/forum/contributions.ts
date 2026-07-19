@@ -433,6 +433,17 @@ export async function createContribution(
       if (!upload || upload.ownerUserId !== userId) {
         return invalid('invalid_attachment', 'Attachments must be uploads you own.');
       }
+      // An upload binds to exactly ONE post (WS-Q.5.2c). Re-using one already
+      // bound to a story would re-point its ownerStoryId here — and if that
+      // story was taken down (which does NOT unbind the upload), the media would
+      // start serving again from a clean story. The submission path already
+      // rejects this (`upload_already_used`); the contribution path must too.
+      if (upload.ownerStoryId !== null) {
+        return invalid(
+          'attachment_already_used',
+          'That attachment is already attached to another post.',
+        );
+      }
       if (upload.scanState !== 'clear') {
         return invalid('attachment_not_cleared', 'Attachments must pass the safety scan first.');
       }
