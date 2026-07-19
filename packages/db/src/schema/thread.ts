@@ -61,9 +61,10 @@ export const threads = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    /** A story may host multiple thread branches (WS-G.1.1 acceptance). */
+    /** A story may host multiple thread branches (WS-G.1.1 acceptance).  Its
+     *  leading `story_id` column ALSO serves `WHERE story_id = ?` lookups, so no
+     *  separate story-only index is needed (a duplicate was removed). */
     uniqueIndex('threads_story_branch_uq').on(t.storyId, t.branchIndex),
-    index('threads_story_idx').on(t.storyId),
     index('threads_room_idx').on(t.roomId),
     index('threads_conversation_idx').on(t.conversationState),
     index('threads_safety_idx').on(t.safetyState),

@@ -18,7 +18,17 @@
 // shell id, and the rendezvous record is DELIBERATELY un-linkable to any room
 // (the server cannot map a blind id to a room/account/CID — §15.3.1).
 import { sql } from 'drizzle-orm';
-import { check, index, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  check,
+  index,
+  jsonb,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { roomDirectoryModeEnum, rooms } from './room.js';
 import { users } from './user.js';
 
@@ -80,8 +90,9 @@ export const privateRoomStubs = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    /** At most one stub per P2P room shell. */
-    index('private_room_stubs_room_idx').on(t.roomServerId),
+    /** At most one stub per P2P room shell — enforced STRUCTURALLY (unique),
+     *  not just by convention. */
+    uniqueIndex('private_room_stubs_room_uq').on(t.roomServerId),
     /** `detached` rooms store no stub (§8.2). */
     check('private_room_stubs_not_detached', sql`${t.directoryMode} <> 'detached'`),
     /** Display metadata exists only for `listed` rooms (unlisted leaks no name). */
