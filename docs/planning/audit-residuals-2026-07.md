@@ -95,9 +95,31 @@ wiring (do them WITH that UI, and add the missing storage/verification seams):
 
 ## Component wire-ups (SPEC affordances defined but never mounted)
 
-`OfflineState` (WS-B.2.5) is now mounted; dead wallet-api duplicates removed. See
-the separate "Wire up SPEC-required components" work for the rest (AiLabel,
-BlockMuteButtons, DisabledFeatureExplanation, ComposerAffordances,
-SwipeableStoryCard, SourceReader reader-mode, SectionEndpoint, FocusModeToggle
-dedup, ScrollArea/SafeArea, jargon, the i18n catalog wiring). Maintainer decision:
-wire them up, do NOT delete SPEC features.
+Maintainer decision: wire them up, do NOT delete SPEC features.
+
+DONE this pass:
+- **OfflineState** (WS-B.2.5) — mounted in the root shell via `useOnlineStatus`.
+- **i18n catalog wiring** (WS-B.2.14/WS-N.1.2b) — `LocalizedI18nProvider` resolves
+  `navigator.language` + lazily loads the catalog (German now reachable).
+- **SectionEndpoint** (WS-B.2.8a) — mounted at the front-page feed end.
+- **FocusModeToggle** (WS-B.2.8c) — profile now uses the component (inline dup removed).
+- Dead wallet-api duplicates + dead `setSessionCookie` removed.
+
+REMAINING (each needs more than a trivial mount — do as a focused follow-up):
+- **AiLabel** provenance badge (WS-K §24.1/§24.3): mount on AI artifacts. NOTE:
+  `AiLabel` is NOT i18n-aware, so swapping it into `TranslationDisclosure` (which
+  has a localized badge) would regress localization — either i18n-ify `AiLabel`
+  first (add `useT` + keys for all 7 labels), or mount it on the currently
+  un-badged debate `VerdictPanel` with an arena-state→provenance-label mapping.
+- **BlockMuteButtons** (WS-J.1.2): mount on the comment author-actions row (next
+  to Report) with a self-block guard; `lib/safety-api` createBlock/createMute
+  already exist. No new API, but needs UI placement + a self-target guard + tests.
+- **DisabledFeatureExplanation** (WS-N §17.10): needs the server to expose a
+  per-feature disable REASON (the feature-flags response carries booleans only)
+  before the component can replace the generic "wallet unavailable" RestrictedState.
+- **SwipeableStoryCard** + `useStoryCardSwipe` (WS-B.2.2 gestures), **SourceReader
+  reader-mode** (its sole caller passes no source HTML — needs the source-HTML
+  fetch), **VoiceDictation** (pick one of the two impls, mount in the composer),
+  **ComposerAffordances** (Attachment/CitationCapture/PrivacyWarning), and the
+  **ScrollArea/SafeArea** primitives + **jargon** plain-language audit — larger UI
+  integrations.
