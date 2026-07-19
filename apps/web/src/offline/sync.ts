@@ -313,7 +313,9 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
 export function initForegroundSync(options: SyncOptions = {}): () => void {
   if (typeof window === 'undefined') return () => undefined;
   const flush = (): void => {
-    void processPendingQueue(options);
+    // Fire-and-forget: swallow a rejection (e.g. openDb throwing where IndexedDB
+    // is unavailable) so a background drain never surfaces an unhandled rejection.
+    void processPendingQueue(options).catch(() => undefined);
   };
   const onVisible = (): void => {
     if (document.visibilityState === 'visible') flush();
@@ -326,7 +328,12 @@ export function initForegroundSync(options: SyncOptions = {}): () => void {
   window.addEventListener('online', flush);
   document.addEventListener('visibilitychange', onVisible);
   navigator.serviceWorker?.addEventListener('message', onMessage);
-  // Request a sync on startup in case a queue survived the last session.
+  // Drain a surviving queue on app open. requestBackgroundSync alone is not
+  // enough: Background Sync is unsupported on iOS Safari and Firefox, so there a
+  // queue that outlived the last session would sit until the next online/visible
+  // event. The foreground flush is reentrancy-guarded, so pairing it with the
+  // background request never double-sends.
+  if (navigator.onLine) flush();
   void requestBackgroundSync();
   return () => {
     window.removeEventListener('online', flush);

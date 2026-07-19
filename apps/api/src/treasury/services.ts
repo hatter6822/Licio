@@ -20,6 +20,7 @@ import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
+import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import { authMethodInventory } from '../identity/services.js';
 import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
@@ -267,6 +268,10 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
     alert: knomosis.alert,
     now: knomosis.now,
     uuid: knomosis.uuid,
+    // Non-reversible actor ref for the WS-M.4.3c hash chain (domain-separated
+    // so it never collides with any other accountRef use). The chain hashes
+    // THIS, never the erasable actor_user_id, so erasure never breaks verify.
+    opaqueRef: (id: string) => accountRef(knomosis.masterSecret, `governance-audit:${id}`),
   };
 }
 

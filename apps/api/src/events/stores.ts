@@ -777,22 +777,25 @@ export class InMemorySignalLedgerStore implements SignalLedgerStore {
     const sorted = [...this.#rows.values()]
       .filter((r) => r.ownerUserId === userId)
       .sort(
+        // Match the AUTHORITATIVE Drizzle order (recordedAt DESC, entryId DESC):
+        // the in-memory tie-break was entryId ASC, so the two adapters paginated
+        // same-millisecond rows in opposite order.
         (a, b) =>
-          Date.parse(b.recordedAt) - Date.parse(a.recordedAt) || a.entryId.localeCompare(b.entryId),
+          Date.parse(b.recordedAt) - Date.parse(a.recordedAt) || b.entryId.localeCompare(a.entryId),
       );
     let start = 0;
     if (cursor) {
       const [cursorRecordedAt, cursorEntryId] = cursor.split('|');
       // Keyset (range) resolution matching the Drizzle store: the first row that
-      // sorts strictly AFTER the cursor in the (recordedAt DESC, entryId ASC)
-      // order.  Resolving by range (not an exact row match) degrades gracefully
-      // if the cursor's row was purged — pagination resumes at the right place
-      // instead of resetting to page 1.
+      // sorts strictly AFTER the cursor in the (recordedAt DESC, entryId DESC)
+      // order (row-value `(recordedAt, entryId) < cursor`).  Resolving by range
+      // (not an exact row match) degrades gracefully if the cursor's row was
+      // purged — pagination resumes at the right place instead of resetting.
       const cursorMs = Date.parse(cursorRecordedAt ?? '');
       const found = sorted.findIndex(
         (r) =>
           Date.parse(r.recordedAt) < cursorMs ||
-          (r.recordedAt === cursorRecordedAt && r.entryId > (cursorEntryId ?? '')),
+          (r.recordedAt === cursorRecordedAt && r.entryId < (cursorEntryId ?? '')),
       );
       start = found === -1 ? sorted.length : found;
     }

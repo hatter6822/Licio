@@ -5,17 +5,22 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouteAnnouncer } from './components/a11y/index.js';
 import { ToastProvider } from './components/ui/Toast/index.js';
-import { I18nProvider } from './i18n/index.js';
+import { LocalizedI18nProvider } from './i18n/index.js';
 import { startRuntime } from './lib/bootstrap.js';
 import { createAppQueryClient } from './lib/query-client.js';
 import { registerServiceWorker } from './lib/sw-register.js';
 import { routeTree } from './routeTree.gen';
 import { initTrustedTypes } from './security/trusted-types.js';
+import { registerQueryCachePurge } from './stores/auth.js';
 import './styles/app.css';
 
 initTrustedTypes();
 
 const queryClient = createAppQueryClient();
+
+// Sign-out (local AND cross-tab) must drop the previous account's in-memory
+// query cache, not just the SW Cache Storage — see registerQueryCachePurge.
+registerQueryCachePurge(() => queryClient.clear());
 
 // The route tree is generated from the file-based routes (src/routes/) by the
 // TanStack Router plugin. The not-found component is set on the root route.
@@ -35,13 +40,13 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <I18nProvider>
+      <LocalizedI18nProvider>
         <RouteAnnouncer>
           <ToastProvider>
             <RouterProvider router={router} />
           </ToastProvider>
         </RouteAnnouncer>
-      </I18nProvider>
+      </LocalizedI18nProvider>
     </QueryClientProvider>
   </StrictMode>,
 );

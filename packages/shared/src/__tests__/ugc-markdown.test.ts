@@ -169,6 +169,24 @@ describe('WS-G.4.1 edge cases', () => {
     expect(toHtml('*')).toBe('<p>*</p>');
   });
 
+  it('parses a pathological delimiter run in bounded (non-quadratic) time', () => {
+    // Before the emphasis interiors were length-bounded, a long unterminated run
+    // of `*` re-scanned to end-of-line at EVERY delimiter → O(n²) (50KB blocked
+    // the main thread for ~4.8s). Linear parse is ~100-200ms; the generous
+    // ceiling catches a regression to quadratic without CI-timing flakiness.
+    const pathological = '*'.repeat(40_000);
+    const start = performance.now();
+    const html = toHtml(pathological);
+    const elapsed = performance.now() - start;
+    expect(html.startsWith('<p>')).toBe(true);
+    expect(elapsed).toBeLessThan(1500);
+  });
+
+  it('still parses in-bound emphasis normally after the length cap', () => {
+    const inner = 'a'.repeat(200);
+    expect(toHtml(`**${inner}**`)).toBe(`<p><strong>${inner}</strong></p>`);
+  });
+
   it('caps blockquote nesting (no recursion blow-up)', () => {
     const deep = `${'> '.repeat(64)}x`;
     expect(() => parseUgcMarkdown(deep)).not.toThrow();

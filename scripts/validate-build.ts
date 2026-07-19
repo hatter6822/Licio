@@ -6,33 +6,11 @@ import { parse } from 'node-html-parser';
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const INDEX_HTML = resolve(DIST_DIR, 'index.html');
 
-const EVENT_HANDLER_ATTRS = new Set([
-  'onclick',
-  'onload',
-  'onerror',
-  'onsubmit',
-  'onfocus',
-  'onblur',
-  'onchange',
-  'oninput',
-  'onkeydown',
-  'onkeyup',
-  'onkeypress',
-  'onmouseover',
-  'onmouseout',
-  'onmousedown',
-  'onmouseup',
-  'ondblclick',
-  'oncontextmenu',
-  'onwheel',
-  'ondrag',
-  'ondrop',
-  'onscroll',
-  'onresize',
-  'ontouchstart',
-  'ontouchend',
-  'ontouchmove',
-]);
+// Match ANY inline event-handler attribute (`on…`), not a fixed enumeration —
+// a hand-listed set silently misses newer handlers (onpointerdown, ontoggle,
+// onbeforetoggle, onanimationend, …). `on` + word chars covers every HTML on*
+// event attribute.
+const EVENT_HANDLER_ATTR = /^on[a-z]+$/;
 
 function validate(): void {
   if (!existsSync(INDEX_HTML)) {
@@ -64,7 +42,7 @@ function validate(): void {
     }
 
     for (const attr of Object.keys(el.attributes)) {
-      if (EVENT_HANDLER_ATTRS.has(attr.toLowerCase())) {
+      if (EVENT_HANDLER_ATTR.test(attr.toLowerCase())) {
         errors.push(
           `Event handler attribute on <${el.tagName.toLowerCase()}>: ${attr}="${el.getAttribute(attr)}"`,
         );

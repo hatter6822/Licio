@@ -145,11 +145,15 @@ function probeMp4(input: Uint8Array): VideoProbeResult {
   const bytes = input.slice(); // clone — never mutate the caller's buffer
   const state = { stripped: false, durationSeconds: null as number | null };
 
-  // `udta` (user data; the `©xyz` GPS box) and `meta` (item metadata) are
-  // droppable and can sit at the top level, under `moov`, or under a `moov/trak`.
-  // Neutralizing the whole box in place (→ `free`, payload zeroed) is
-  // length-preserving, so `stco`/`co64` sample offsets stay valid.
-  const dropTypes = new Set(['udta', 'meta']);
+  // `udta` (user data; the `©xyz` GPS box), `meta` (item metadata) and `uuid`
+  // (the ISO-BMFF user-extension box — Adobe/GCamera store XMP with GPS here, a
+  // standard device-metadata channel that a udta/meta-only strip leaves intact)
+  // are droppable and can sit at the top level, under `moov`, or under a
+  // `moov/trak`. `uuid` boxes are extension containers by definition (never core
+  // media samples), so dropping them is safe. Neutralizing the whole box in place
+  // (→ `free`, payload zeroed) is length-preserving, so `stco`/`co64` sample
+  // offsets stay valid.
+  const dropTypes = new Set(['udta', 'meta', 'uuid']);
   for (const box of top) {
     if (dropTypes.has(box.type)) {
       neutralizeMp4Box(bytes, box);
@@ -391,7 +395,12 @@ function probeWebm(input: Uint8Array): VideoProbeResult {
         durationSeconds = (rawDuration * timecodeScale) / 1_000_000_000;
       }
     }
-    if (child.id === ID_TAGS && !child.unknownSize) {
+    if (child.id === ID_TAGS) {
+      // Neutralize even an UNKNOWN-size Tags element: `walkSegmentChildren`
+      // resyncs past it to the next Level-1 header (or the segment end), so
+      // `child.end` bounds the span exactly and it can be rewritten as a Void of
+      // identical length. A `!unknownSize` guard here would leak a streamed
+      // file's tag metadata (title/device/location) verbatim.
       neutralizeEbmlElement(bytes, child);
       stripped = true;
     }

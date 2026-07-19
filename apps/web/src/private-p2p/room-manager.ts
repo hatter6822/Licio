@@ -956,8 +956,12 @@ export class PrivateRoomSession {
     }));
   }
 
-  /** Forget a room locally (delete its session + does not touch other members). */
+  /** Forget a room locally (does not touch other members).  Purges EVERY local
+   *  trace: the room's envelopes, media blocks, Tier-2 cap secrets, and
+   *  invite-use counters (deleteAllForRoom), then the session row — leaving no
+   *  orphaned ciphertext or secrets behind. */
   static async leave(roomId: string): Promise<void> {
+    await new IndexedDbPrivateRoomStorage(roomId).deleteAllForRoom();
     await deleteRoomSession(roomId);
   }
 
@@ -1239,9 +1243,15 @@ export class PrivateRoomSession {
     request: JoinRequest,
     options?: { readonly usesSoFar?: number; readonly now?: Date },
   ): Promise<AdmitResult> {
+    // Enforce the invite's §10.3 `max_uses` budget from the PERSISTED per-invite
+    // counter (this admin device) — the caller's explicit `usesSoFar` still wins
+    // when provided (tests / alternate drivers).  Without this a single-use invite
+    // verified fresh forever (nothing was ever charged against it).
+    const inviteStore = new IndexedDbPrivateRoomStorage(this.session.roomId);
+    const usesSoFar = options?.usesSoFar ?? (await inviteStore.getInviteUses(invite.invite_id));
     const verdict = await this.p2p.verifyJoinRequest(invite, request, {
       now: options?.now ?? new Date(),
-      ...(options?.usesSoFar === undefined ? {} : { usesSoFar: options.usesSoFar }),
+      usesSoFar,
     });
     if (!verdict.ok) return { verdict };
 
@@ -1368,6 +1378,10 @@ export class PrivateRoomSession {
         .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
       archive,
     };
+    // The admit fully succeeded — charge this join against the invite so a
+    // single-use invite cannot be replayed for a second member (persisted AFTER
+    // the session write, so a mid-admit failure never burns a use).
+    await inviteStore.incrementInviteUses(invite.invite_id);
     return { verdict, grant };
   }
 

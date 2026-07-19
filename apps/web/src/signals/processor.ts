@@ -310,6 +310,13 @@ export class SignalProcessor {
     const onVisibility = (): void => {
       if (typeof document === 'undefined') return;
       if (document.visibilityState === 'hidden') {
+        // Disengage BEFORE stopping the tick: the tick is what would otherwise
+        // mark dwell disengaged, so without this the open engaged interval stays
+        // open across the hidden period and the entire hidden gap is accrued as
+        // active dwell on the first tick after the tab reappears (WS-C.4.1a —
+        // dwell accrues ONLY while engaged). Closing it now stamps the interval
+        // at hide time, so hidden time contributes nothing.
+        this.dwell.setEngaged(false);
         void this.flushDurable();
         stopTimers();
       } else {

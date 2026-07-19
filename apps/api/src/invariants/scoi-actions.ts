@@ -95,6 +95,9 @@ export async function bridgeCandidatesFor(
   const collect = async (scopeThreadId: string): Promise<void> => {
     for (const contribution of await forum.contributions.listByThread(scopeThreadId, {
       limit: 500,
+      // The contract counts PUBLISHED contributions only (see the docstring);
+      // held/removed content must not create bridge candidates.
+      states: ['published'],
     })) {
       const lensId = contribution.metadata['lens_id'];
       if (typeof lensId !== 'string' || lensId.length === 0 || !contribution.userId) continue;

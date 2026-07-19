@@ -11,75 +11,40 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SupportRouteImport } from './routes/support'
-import { Route as SubmitRouteImport } from './routes/submit'
-import { Route as StyleguideRouteImport } from './routes/styleguide'
-import { Route as RoomsRouteImport } from './routes/rooms'
-import { Route as ProfileRouteImport } from './routes/profile'
-import { Route as PrivateRouteImport } from './routes/private'
-import { Route as ModerationRouteImport } from './routes/moderation'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as ComplianceConsoleRouteImport } from './routes/compliance-console'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as PrivateIndexRouteImport } from './routes/private.index'
-import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
-import { Route as StoriesStoryIdRouteImport } from './routes/stories.$storyId'
-import { Route as RoomsRoomIdRouteImport } from './routes/rooms_.$roomId'
-import { Route as ProfileWalletRouteImport } from './routes/profile_.wallet'
-import { Route as ProfileSignalLedgerRouteImport } from './routes/profile_.signal-ledger'
-import { Route as ProfileSettingsRouteImport } from './routes/profile_.settings'
-import { Route as ProfileSecurityRouteImport } from './routes/profile_.security'
-import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
-import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
-import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
-import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
-import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
-import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
-import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
-import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
+import { Route as ComplianceConsoleRouteImport } from './routes/compliance-console'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as ModerationRouteImport } from './routes/moderation'
+import { Route as PrivateRouteImport } from './routes/private'
+import { Route as ProfileRouteImport } from './routes/profile'
+import { Route as RoomsRouteImport } from './routes/rooms'
+import { Route as StyleguideRouteImport } from './routes/styleguide'
+import { Route as SubmitRouteImport } from './routes/submit'
+import { Route as SupportRouteImport } from './routes/support'
 import { Route as DevSimulatorRouteImport } from './routes/dev.simulator'
-import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
+import { Route as PrivateIndexRouteImport } from './routes/private.index'
+import { Route as PrivateMigrateRouteImport } from './routes/private.migrate'
+import { Route as PrivateRoomIdRouteImport } from './routes/private_.$roomId'
+import { Route as ProfileModeRouteImport } from './routes/profile_.mode'
+import { Route as ProfileNoticesRouteImport } from './routes/profile_.notices'
+import { Route as ProfileOfflineRouteImport } from './routes/profile_.offline'
+import { Route as ProfilePrivacyRouteImport } from './routes/profile_.privacy'
+import { Route as ProfileSafetyRouteImport } from './routes/profile_.safety'
+import { Route as ProfileSavedRouteImport } from './routes/profile_.saved'
+import { Route as ProfileSecurityRouteImport } from './routes/profile_.security'
+import { Route as ProfileSettingsRouteImport } from './routes/profile_.settings'
+import { Route as ProfileSignalLedgerRouteImport } from './routes/profile_.signal-ledger'
+import { Route as ProfileWalletRouteImport } from './routes/profile_.wallet'
+import { Route as RoomsRoomIdRouteImport } from './routes/rooms_.$roomId'
+import { Route as StoriesStoryIdRouteImport } from './routes/stories.$storyId'
+import { Route as ThreadsThreadIdRouteImport } from './routes/threads_.$threadId'
 import { Route as RoomsRoomIdGovernanceRouteImport } from './routes/rooms_.$roomId_.governance'
+import { Route as StoriesStoryIdCommentsRouteImport } from './routes/stories.$storyId_.comments'
 import { Route as StoriesStoryIdDebateDebateIdRouteImport } from './routes/stories.$storyId.debate.$debateId'
 
-const SupportRoute = SupportRouteImport.update({
-  id: '/support',
-  path: '/support',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SubmitRoute = SubmitRouteImport.update({
-  id: '/submit',
-  path: '/submit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const StyleguideRoute = StyleguideRouteImport.update({
-  id: '/styleguide',
-  path: '/styleguide',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RoomsRoute = RoomsRouteImport.update({
-  id: '/rooms',
-  path: '/rooms',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileRoute = ProfileRouteImport.update({
-  id: '/profile',
-  path: '/profile',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PrivateRoute = PrivateRouteImport.update({
-  id: '/private',
-  path: '/private',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ModerationRoute = ModerationRouteImport.update({
-  id: '/moderation',
-  path: '/moderation',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ComplianceConsoleRoute = ComplianceConsoleRouteImport.update({
@@ -87,9 +52,49 @@ const ComplianceConsoleRoute = ComplianceConsoleRouteImport.update({
   path: '/compliance-console',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModerationRoute = ModerationRouteImport.update({
+  id: '/moderation',
+  path: '/moderation',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivateRoute = PrivateRouteImport.update({
+  id: '/private',
+  path: '/private',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RoomsRoute = RoomsRouteImport.update({
+  id: '/rooms',
+  path: '/rooms',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StyleguideRoute = StyleguideRouteImport.update({
+  id: '/styleguide',
+  path: '/styleguide',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SubmitRoute = SubmitRouteImport.update({
+  id: '/submit',
+  path: '/submit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SupportRoute = SupportRouteImport.update({
+  id: '/support',
+  path: '/support',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DevSimulatorRoute = DevSimulatorRouteImport.update({
+  id: '/dev/simulator',
+  path: '/dev/simulator',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PrivateIndexRoute = PrivateIndexRouteImport.update({
@@ -97,64 +102,14 @@ const PrivateIndexRoute = PrivateIndexRouteImport.update({
   path: '/',
   getParentRoute: () => PrivateRoute,
 } as any)
-const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
-  id: '/threads_/$threadId',
-  path: '/threads/$threadId',
-  getParentRoute: () => rootRouteImport,
+const PrivateMigrateRoute = PrivateMigrateRouteImport.update({
+  id: '/migrate',
+  path: '/migrate',
+  getParentRoute: () => PrivateRoute,
 } as any)
-const StoriesStoryIdRoute = StoriesStoryIdRouteImport.update({
-  id: '/stories/$storyId',
-  path: '/stories/$storyId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RoomsRoomIdRoute = RoomsRoomIdRouteImport.update({
-  id: '/rooms_/$roomId',
-  path: '/rooms/$roomId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileWalletRoute = ProfileWalletRouteImport.update({
-  id: '/profile_/wallet',
-  path: '/profile/wallet',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileSignalLedgerRoute = ProfileSignalLedgerRouteImport.update({
-  id: '/profile_/signal-ledger',
-  path: '/profile/signal-ledger',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileSettingsRoute = ProfileSettingsRouteImport.update({
-  id: '/profile_/settings',
-  path: '/profile/settings',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileSecurityRoute = ProfileSecurityRouteImport.update({
-  id: '/profile_/security',
-  path: '/profile/security',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileSavedRoute = ProfileSavedRouteImport.update({
-  id: '/profile_/saved',
-  path: '/profile/saved',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileSafetyRoute = ProfileSafetyRouteImport.update({
-  id: '/profile_/safety',
-  path: '/profile/safety',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfilePrivacyRoute = ProfilePrivacyRouteImport.update({
-  id: '/profile_/privacy',
-  path: '/profile/privacy',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileOfflineRoute = ProfileOfflineRouteImport.update({
-  id: '/profile_/offline',
-  path: '/profile/offline',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
-  id: '/profile_/notices',
-  path: '/profile/notices',
+const PrivateRoomIdRoute = PrivateRoomIdRouteImport.update({
+  id: '/private_/$roomId',
+  path: '/private/$roomId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProfileModeRoute = ProfileModeRouteImport.update({
@@ -162,29 +117,74 @@ const ProfileModeRoute = ProfileModeRouteImport.update({
   path: '/profile/mode',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PrivateRoomIdRoute = PrivateRoomIdRouteImport.update({
-  id: '/private_/$roomId',
-  path: '/private/$roomId',
+const ProfileNoticesRoute = ProfileNoticesRouteImport.update({
+  id: '/profile_/notices',
+  path: '/profile/notices',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PrivateMigrateRoute = PrivateMigrateRouteImport.update({
-  id: '/migrate',
-  path: '/migrate',
-  getParentRoute: () => PrivateRoute,
-} as any)
-const DevSimulatorRoute = DevSimulatorRouteImport.update({
-  id: '/dev/simulator',
-  path: '/dev/simulator',
+const ProfileOfflineRoute = ProfileOfflineRouteImport.update({
+  id: '/profile_/offline',
+  path: '/profile/offline',
   getParentRoute: () => rootRouteImport,
 } as any)
-const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
-  id: '/stories/$storyId_/comments',
-  path: '/stories/$storyId/comments',
+const ProfilePrivacyRoute = ProfilePrivacyRouteImport.update({
+  id: '/profile_/privacy',
+  path: '/profile/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileSafetyRoute = ProfileSafetyRouteImport.update({
+  id: '/profile_/safety',
+  path: '/profile/safety',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileSavedRoute = ProfileSavedRouteImport.update({
+  id: '/profile_/saved',
+  path: '/profile/saved',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileSecurityRoute = ProfileSecurityRouteImport.update({
+  id: '/profile_/security',
+  path: '/profile/security',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileSettingsRoute = ProfileSettingsRouteImport.update({
+  id: '/profile_/settings',
+  path: '/profile/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileSignalLedgerRoute = ProfileSignalLedgerRouteImport.update({
+  id: '/profile_/signal-ledger',
+  path: '/profile/signal-ledger',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileWalletRoute = ProfileWalletRouteImport.update({
+  id: '/profile_/wallet',
+  path: '/profile/wallet',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RoomsRoomIdRoute = RoomsRoomIdRouteImport.update({
+  id: '/rooms_/$roomId',
+  path: '/rooms/$roomId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StoriesStoryIdRoute = StoriesStoryIdRouteImport.update({
+  id: '/stories/$storyId',
+  path: '/stories/$storyId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
+  id: '/threads_/$threadId',
+  path: '/threads/$threadId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RoomsRoomIdGovernanceRoute = RoomsRoomIdGovernanceRouteImport.update({
   id: '/rooms_/$roomId_/governance',
   path: '/rooms/$roomId/governance',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StoriesStoryIdCommentsRoute = StoriesStoryIdCommentsRouteImport.update({
+  id: '/stories/$storyId_/comments',
+  path: '/stories/$storyId/comments',
   getParentRoute: () => rootRouteImport,
 } as any)
 const StoriesStoryIdDebateDebateIdRoute =
@@ -420,60 +420,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/support': {
-      id: '/support'
-      path: '/support'
-      fullPath: '/support'
-      preLoaderRoute: typeof SupportRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/submit': {
-      id: '/submit'
-      path: '/submit'
-      fullPath: '/submit'
-      preLoaderRoute: typeof SubmitRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/styleguide': {
-      id: '/styleguide'
-      path: '/styleguide'
-      fullPath: '/styleguide'
-      preLoaderRoute: typeof StyleguideRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/rooms': {
-      id: '/rooms'
-      path: '/rooms'
-      fullPath: '/rooms'
-      preLoaderRoute: typeof RoomsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile': {
-      id: '/profile'
-      path: '/profile'
-      fullPath: '/profile'
-      preLoaderRoute: typeof ProfileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/private': {
-      id: '/private'
-      path: '/private'
-      fullPath: '/private'
-      preLoaderRoute: typeof PrivateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/moderation': {
-      id: '/moderation'
-      path: '/moderation'
-      fullPath: '/moderation'
-      preLoaderRoute: typeof ModerationRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/compliance-console': {
@@ -483,11 +434,67 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ComplianceConsoleRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/moderation': {
+      id: '/moderation'
+      path: '/moderation'
+      fullPath: '/moderation'
+      preLoaderRoute: typeof ModerationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/private': {
+      id: '/private'
+      path: '/private'
+      fullPath: '/private'
+      preLoaderRoute: typeof PrivateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/rooms': {
+      id: '/rooms'
+      path: '/rooms'
+      fullPath: '/rooms'
+      preLoaderRoute: typeof RoomsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/styleguide': {
+      id: '/styleguide'
+      path: '/styleguide'
+      fullPath: '/styleguide'
+      preLoaderRoute: typeof StyleguideRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/submit': {
+      id: '/submit'
+      path: '/submit'
+      fullPath: '/submit'
+      preLoaderRoute: typeof SubmitRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/support': {
+      id: '/support'
+      path: '/support'
+      fullPath: '/support'
+      preLoaderRoute: typeof SupportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dev/simulator': {
+      id: '/dev/simulator'
+      path: '/dev/simulator'
+      fullPath: '/dev/simulator'
+      preLoaderRoute: typeof DevSimulatorRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/private/': {
@@ -497,88 +504,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PrivateIndexRouteImport
       parentRoute: typeof PrivateRoute
     }
-    '/threads_/$threadId': {
-      id: '/threads_/$threadId'
-      path: '/threads/$threadId'
-      fullPath: '/threads/$threadId'
-      preLoaderRoute: typeof ThreadsThreadIdRouteImport
-      parentRoute: typeof rootRouteImport
+    '/private/migrate': {
+      id: '/private/migrate'
+      path: '/migrate'
+      fullPath: '/private/migrate'
+      preLoaderRoute: typeof PrivateMigrateRouteImport
+      parentRoute: typeof PrivateRoute
     }
-    '/stories/$storyId': {
-      id: '/stories/$storyId'
-      path: '/stories/$storyId'
-      fullPath: '/stories/$storyId'
-      preLoaderRoute: typeof StoriesStoryIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/rooms_/$roomId': {
-      id: '/rooms_/$roomId'
-      path: '/rooms/$roomId'
-      fullPath: '/rooms/$roomId'
-      preLoaderRoute: typeof RoomsRoomIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/wallet': {
-      id: '/profile_/wallet'
-      path: '/profile/wallet'
-      fullPath: '/profile/wallet'
-      preLoaderRoute: typeof ProfileWalletRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/signal-ledger': {
-      id: '/profile_/signal-ledger'
-      path: '/profile/signal-ledger'
-      fullPath: '/profile/signal-ledger'
-      preLoaderRoute: typeof ProfileSignalLedgerRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/settings': {
-      id: '/profile_/settings'
-      path: '/profile/settings'
-      fullPath: '/profile/settings'
-      preLoaderRoute: typeof ProfileSettingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/security': {
-      id: '/profile_/security'
-      path: '/profile/security'
-      fullPath: '/profile/security'
-      preLoaderRoute: typeof ProfileSecurityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/saved': {
-      id: '/profile_/saved'
-      path: '/profile/saved'
-      fullPath: '/profile/saved'
-      preLoaderRoute: typeof ProfileSavedRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/safety': {
-      id: '/profile_/safety'
-      path: '/profile/safety'
-      fullPath: '/profile/safety'
-      preLoaderRoute: typeof ProfileSafetyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/privacy': {
-      id: '/profile_/privacy'
-      path: '/profile/privacy'
-      fullPath: '/profile/privacy'
-      preLoaderRoute: typeof ProfilePrivacyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/offline': {
-      id: '/profile_/offline'
-      path: '/profile/offline'
-      fullPath: '/profile/offline'
-      preLoaderRoute: typeof ProfileOfflineRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile_/notices': {
-      id: '/profile_/notices'
-      path: '/profile/notices'
-      fullPath: '/profile/notices'
-      preLoaderRoute: typeof ProfileNoticesRouteImport
+    '/private_/$roomId': {
+      id: '/private_/$roomId'
+      path: '/private/$roomId'
+      fullPath: '/private/$roomId'
+      preLoaderRoute: typeof PrivateRoomIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/profile_/mode': {
@@ -588,32 +525,88 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileModeRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/private_/$roomId': {
-      id: '/private_/$roomId'
-      path: '/private/$roomId'
-      fullPath: '/private/$roomId'
-      preLoaderRoute: typeof PrivateRoomIdRouteImport
+    '/profile_/notices': {
+      id: '/profile_/notices'
+      path: '/profile/notices'
+      fullPath: '/profile/notices'
+      preLoaderRoute: typeof ProfileNoticesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/private/migrate': {
-      id: '/private/migrate'
-      path: '/migrate'
-      fullPath: '/private/migrate'
-      preLoaderRoute: typeof PrivateMigrateRouteImport
-      parentRoute: typeof PrivateRoute
-    }
-    '/dev/simulator': {
-      id: '/dev/simulator'
-      path: '/dev/simulator'
-      fullPath: '/dev/simulator'
-      preLoaderRoute: typeof DevSimulatorRouteImport
+    '/profile_/offline': {
+      id: '/profile_/offline'
+      path: '/profile/offline'
+      fullPath: '/profile/offline'
+      preLoaderRoute: typeof ProfileOfflineRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/stories/$storyId_/comments': {
-      id: '/stories/$storyId_/comments'
-      path: '/stories/$storyId/comments'
-      fullPath: '/stories/$storyId/comments'
-      preLoaderRoute: typeof StoriesStoryIdCommentsRouteImport
+    '/profile_/privacy': {
+      id: '/profile_/privacy'
+      path: '/profile/privacy'
+      fullPath: '/profile/privacy'
+      preLoaderRoute: typeof ProfilePrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/safety': {
+      id: '/profile_/safety'
+      path: '/profile/safety'
+      fullPath: '/profile/safety'
+      preLoaderRoute: typeof ProfileSafetyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/saved': {
+      id: '/profile_/saved'
+      path: '/profile/saved'
+      fullPath: '/profile/saved'
+      preLoaderRoute: typeof ProfileSavedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/security': {
+      id: '/profile_/security'
+      path: '/profile/security'
+      fullPath: '/profile/security'
+      preLoaderRoute: typeof ProfileSecurityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/settings': {
+      id: '/profile_/settings'
+      path: '/profile/settings'
+      fullPath: '/profile/settings'
+      preLoaderRoute: typeof ProfileSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/signal-ledger': {
+      id: '/profile_/signal-ledger'
+      path: '/profile/signal-ledger'
+      fullPath: '/profile/signal-ledger'
+      preLoaderRoute: typeof ProfileSignalLedgerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile_/wallet': {
+      id: '/profile_/wallet'
+      path: '/profile/wallet'
+      fullPath: '/profile/wallet'
+      preLoaderRoute: typeof ProfileWalletRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/rooms_/$roomId': {
+      id: '/rooms_/$roomId'
+      path: '/rooms/$roomId'
+      fullPath: '/rooms/$roomId'
+      preLoaderRoute: typeof RoomsRoomIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/stories/$storyId': {
+      id: '/stories/$storyId'
+      path: '/stories/$storyId'
+      fullPath: '/stories/$storyId'
+      preLoaderRoute: typeof StoriesStoryIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/threads_/$threadId': {
+      id: '/threads_/$threadId'
+      path: '/threads/$threadId'
+      fullPath: '/threads/$threadId'
+      preLoaderRoute: typeof ThreadsThreadIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/rooms_/$roomId_/governance': {
@@ -621,6 +614,13 @@ declare module '@tanstack/react-router' {
       path: '/rooms/$roomId/governance'
       fullPath: '/rooms/$roomId/governance'
       preLoaderRoute: typeof RoomsRoomIdGovernanceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/stories/$storyId_/comments': {
+      id: '/stories/$storyId_/comments'
+      path: '/stories/$storyId/comments'
+      fullPath: '/stories/$storyId/comments'
+      preLoaderRoute: typeof StoriesStoryIdCommentsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/stories/$storyId/debate/$debateId': {

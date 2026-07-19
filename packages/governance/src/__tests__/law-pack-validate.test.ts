@@ -429,6 +429,55 @@ describe('runLawPackFixtures (WS-M.1.3c harness)', () => {
     const result = runLawPackFixtures(pack, corpus());
     expect(result.failures.some((f) => f.actual.includes('no eligibility block'))).toBe(true);
   });
+
+  it('applies the role_class basis: quorum is measured over the multisig signer set', () => {
+    // Mirror the runtime — a role_class quorum's basis is the signer set, NOT the
+    // fixture eligibleCount, and only signer ballots count toward quorum.
+    const pack = fullPack();
+    pack.multisig = { signers: ['s1', 's2'], required: 2 };
+    pack.quorumRules = {
+      ...pack.quorumRules,
+      capped_grant: { basis: 'role_class', minFraction: 1 },
+    };
+
+    // Both SIGNERS vote → the signer-set quorum is met → passes, even though the
+    // (ignored) eligibleCount is deliberately wrong.
+    const signerCorpus = corpus();
+    signerCorpus.fixtures = signerCorpus.fixtures.map((f) =>
+      f.kind === 'proposal_tally' && f.proposalType === 'capped_grant'
+        ? {
+            ...f,
+            votes: [
+              { voterUserId: 's1', choice: 'approve' as const, weightSnapshot: 1 },
+              { voterUserId: 's2', choice: 'approve' as const, weightSnapshot: 1 },
+            ],
+            eligibleCount: 99,
+            expect: 'passed' as const,
+          }
+        : f,
+    );
+    expect(runLawPackFixtures(pack, signerCorpus).failures).toEqual([]);
+
+    // NON-signers cannot clear the signer-set quorum, whatever eligibleCount claims:
+    // the harness catches the wrong `expect` (quorum_not_met), NOT a false pass.
+    const nonSignerCorpus = corpus();
+    nonSignerCorpus.fixtures = nonSignerCorpus.fixtures.map((f) =>
+      f.kind === 'proposal_tally' && f.proposalType === 'capped_grant'
+        ? {
+            ...f,
+            votes: [
+              { voterUserId: 'x', choice: 'approve' as const, weightSnapshot: 1 },
+              { voterUserId: 'y', choice: 'approve' as const, weightSnapshot: 1 },
+            ],
+            eligibleCount: 2,
+            expect: 'passed' as const,
+          }
+        : f,
+    );
+    const result = runLawPackFixtures(pack, nonSignerCorpus);
+    expect(result.passed).toBe(false);
+    expect(result.failures).toContainEqual(expect.objectContaining({ actual: 'quorum_not_met' }));
+  });
 });
 
 describe('fixtureCoverageProblems (WS-M.1.3c coverage)', () => {

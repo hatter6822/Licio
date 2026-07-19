@@ -149,7 +149,12 @@ export class HttpEmbeddingProvider implements EmbeddingProvider {
           Array.isArray((payload.data[0] as { embedding?: unknown })?.embedding)
         ? ((payload.data[0] as { embedding: unknown[] }).embedding as unknown[])
         : null;
-    if (raw === null || raw.length !== this.dimension || raw.some((x) => typeof x !== 'number')) {
+    // Reject non-finite components too: `typeof NaN === 'number'` and
+    // `typeof Infinity === 'number'`, so a plain typeof gate would let a
+    // misbehaving service poison similarity space (NaN propagates through every
+    // pgvector distance). `Number.isFinite` is false for non-numbers AND for
+    // NaN/±Infinity, covering both in one check.
+    if (raw === null || raw.length !== this.dimension || raw.some((x) => !Number.isFinite(x))) {
       throw new Error('embedding service returned an invalid vector');
     }
     return Float32Array.from(raw as number[]);

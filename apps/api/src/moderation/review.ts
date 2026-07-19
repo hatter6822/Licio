@@ -463,7 +463,9 @@ export async function buildAppealQueue(
       rows.length > limit && last
         ? Buffer.from(`${last.slaDueAt}|${last.appealId}`, 'utf-8').toString('base64url')
         : null,
-    filtered_total: items.length,
+    // The TRUE count matching the filter, not the page length (which caps at
+    // `limit` and under-reported a queue deeper than one page).
+    filtered_total: await services.appeals.count(status ? { status } : {}),
   };
 }
 

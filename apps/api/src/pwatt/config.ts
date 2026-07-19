@@ -417,3 +417,18 @@ export async function loadPwattRuntimeConfig(
   validatePwattV1ComponentsConfig(config.v1);
   return config;
 }
+
+/**
+ * Read JUST the runtime `trigger_threshold` (validated), falling back to the
+ * compiled default on absence/invalid.  Shared by the full config load above and
+ * the realtime consumer's periodic refresh, so the early-aggregation volume
+ * trigger tracks live tuning WITHOUT a restart — the consumer caches this with a
+ * short TTL (it must never read per event).  The consumer runs on every instance,
+ * so each refreshes independently (the scheduler's config load is lease-gated and
+ * would only update one instance).
+ */
+export async function loadTriggerThreshold(events: EventPipelineServices): Promise<number> {
+  const trigger = await events.configStore.get('trigger_threshold');
+  const parsed = z.object({ value: z.number().int().min(1) }).safeParse(trigger);
+  return parsed.success ? parsed.data.value : DEFAULT_PWATT_RUNTIME_CONFIG.triggerThreshold;
+}

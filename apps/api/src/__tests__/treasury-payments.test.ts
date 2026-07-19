@@ -98,6 +98,8 @@ function buildDeps(): TestDeps & {
     wallets: new InMemoryFinancialWalletStore(),
     masterSecret: 'test-master-secret',
     governanceAudit: new InMemoryGovernanceAuditStore(),
+    // Test actor ref (deterministic, non-reversible-enough for the chain hash).
+    opaqueRef: (id: string) => `ref:${id}`,
     compliance: defaultCompliancePort,
     regionResolver: defaultRegionResolverPort,
     configStore: new InMemoryPwattConfigStore(),

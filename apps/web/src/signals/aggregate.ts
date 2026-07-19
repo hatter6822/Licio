@@ -20,10 +20,36 @@ import * as queue from '../offline/queue.js';
 import { attentionUploadsCoolingDown } from './attention-cooldown.js';
 import { assertNoRawEgress } from './privacy.js';
 
+let fallbackCounter = 0;
+
+/**
+ * A fresh RFC 4122 v4 UUID for every aggregate. The server dedupes on
+ * `aggregate_id` forever (WS-C.4.4), so a COLLIDING id silently drops every
+ * aggregate after the first — a constant fallback would do exactly that. Prefer
+ * `crypto.randomUUID` (secure context), then a v4 built from
+ * `crypto.getRandomValues` (available even in non-secure contexts), and only as
+ * a last resort — no Web Crypto at all, which never happens in a browser secure
+ * context — a per-call-unique (never constant) id derived from a clock+counter.
+ */
 function newId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
-  // Deterministic-enough fallback for environments without crypto.randomUUID.
-  return '00000000-0000-4000-8000-000000000000';
+  // `Partial<Crypto>` (not `Crypto`) so the optional-method guards below actually
+  // narrow at runtime: `Crypto` always declares `randomUUID`, which would make TS
+  // treat the getRandomValues fall-through as unreachable (`never`).
+  const c: Partial<Crypto> | undefined = typeof crypto !== 'undefined' ? crypto : undefined;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  if (typeof c?.getRandomValues === 'function') {
+    const b = c.getRandomValues(new Uint8Array(16));
+    b[6] = ((b[6] ?? 0) & 0x0f) | 0x40; // version 4
+    b[8] = ((b[8] ?? 0) & 0x3f) | 0x80; // variant 10
+    const hex = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  fallbackCounter += 1;
+  const unique = (Date.now() * 1000 + (fallbackCounter % 1000))
+    .toString(16)
+    .padStart(12, '0')
+    .slice(-12);
+  return `ffffffff-ffff-4fff-8fff-${unique}`;
 }
 
 export interface AggregateInput {

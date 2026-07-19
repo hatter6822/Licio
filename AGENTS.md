@@ -385,52 +385,17 @@ dependency:
 4. License — must be AGPL-3.0-or-later compatible (MIT, ISC, BSD, Apache-2.0)
 5. Web-API alternative — can a built-in browser/Node.js API replace it?
 
-**Pinned transitive override (`ws`).**  `pnpm.overrides` pins `ws` to
-`^8.21.0` (currently resolves 8.21.1).  `ws` reaches the tree only through
-`viem` (the WS-D SIWE / EIP-4361 verifier) → `isows`; historically `viem`
-pinned `ws@8.20.1` exactly, which carries GHSA-96hv-2xvq-fx4p (a
-WebSocket-server memory-exhaustion DoS).  The override forces the patched
-line tree-wide (8.20.1 → 8.21.x is an API-compatible patch; the
-`audit:advisories` gate is clean with it).  `ws` is viem's RPC WebSocket
-transport; Licio uses `viem` only for offline SIWE signature verification
-and runs no `ws` server, so exploitability is low regardless.  Re-evaluate
-(and drop) this override once a `viem`/`isows` release guarantees a patched
-`ws` on its own.
+**Pinned dependencies (`pnpm.overrides` + exact peers).**  A few versions are
+pinned to keep the `audit:advisories` gate clean or to satisfy an exact peer;
+drop each once upstream ships the fix (per-CVE rationale lives in the commit
+that added the pin, not here).
 
-**Pinned transitive override (`undici`).**  `pnpm.overrides` pins `undici`
-to `^7.28.0`.  `undici` reaches the tree only through `jsdom@29.1.1` (the
-Vitest jsdom test environment), which declares `undici@^7.25.0` and would
-otherwise resolve it to 7.27.2.  7.27.2 carries GHSA-vmh5-mc38-953g (high; a
-TLS certificate-validation bypass via dropped `requestTls` in the SOCKS5
-`ProxyAgent`) and GHSA-pr7r-676h-xcf6 (moderate; cross-user information
-disclosure), both patched in 7.28.0.  `jsdom@29.1.1` does not yet ship a
-release pinning a patched `undici`, so the override is the remediation
-(7.27.2 → 7.28.0 is the latest 7.x and within jsdom's `^7.25.0` range, so
-it is API-compatible; the `audit:advisories` gate is clean with it).
-`undici` is a test-only transitive dependency (jsdom's `fetch`
-implementation); it never reaches the production bundle, so exploitability
-is low regardless, but the `audit:advisories` CI gate flags it
-tree-wide.  Remove this override once `jsdom` ships a release pinning
-`undici >= 7.28.0`.
-
-**Pinned transitive override (`esbuild`).**  `pnpm.overrides` pins
-`esbuild` to `^0.28.1`.  `esbuild` reaches the tree through the Vite /
-Vitest / TanStack-router build toolchain (dev-only — the production bundle
-is Rolldown, not esbuild).  The override DEDUPES every transitive esbuild
-onto one current line (older versions carried the dev-server request-proxy
-advisory GHSA-67mh-4wv8-2f99, fixed in 0.25.0; 0.28.1 is well past it) so a
-single audited copy is installed rather than a fan of stale ones.  Bump it
-in step with the Vite major it underpins.
-
-**Pinned crypto peer (`@noble/curves` / `@noble/ciphers`).**
-`@licio/private-p2p` pins `@noble/curves` at `2.0.1` and `@noble/ciphers`
-at `2.1.1` **exactly** — NOT the latest 2.2.0 — because `ts-mls@1.6.2` (the
-WS-S MLS group-key library, the latest release) declares them as EXACT peer
-dependencies at those versions.  Bumping the two to 2.2.0 leaves `ts-mls`'s
-peer unmet (and it was validated against the pinned versions).  Raise these
-two only when a `ts-mls` release widens or advances its `@noble/*` peer
-range; the `@noble/*` KAT cross-checks in the private-p2p suite guard the
-pin.
+| Pin | Reason | Drop when |
+|-----|--------|-----------|
+| `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
+| `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |
+| `esbuild ^0.28.1` | dev-only toolchain; dedupes onto one audited line | bump with the Vite major |
+| `@noble/curves 2.0.1` + `@noble/ciphers 2.1.1` (EXACT) | `ts-mls@1.6.2` declares them as exact peers (KAT cross-checks guard the pin) | `ts-mls` widens its `@noble/*` peer range |
 
 ## Reading large files
 
@@ -715,7 +680,8 @@ Referrer-Policy: strict-origin-when-cross-origin
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Resource-Policy: same-origin
 Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(),
-  usb=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=()
+  usb=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=(),
+  serial=(), midi=()
 ```
 
 ### Rate limiting (identity-free, SPEC §19.1)
@@ -980,24 +946,26 @@ re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
-**Test counts.**  `pnpm test` is the canonical query (≈8081 tests pass
-at current state without the gated integration env; more with live
-Postgres/Redis).  Approximate file counts:
+**Test counts.**  `pnpm test` is the canonical query (≈8085 tests pass without
+the gated integration env; ≈8330 with live Postgres/Redis).  Only monotonic
+growth is enforced — no gate pins the count, and exact numbers drift, so this
+table is approximate; the per-suite breakdown lives in each per-workstream
+`docs/*/README.md`, not here.
 
 | Workspace | Test files | Environment | Canonical query |
 |-----------|-----------|-------------|-----------------|
-| apps/web | ~234 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop specs; incl. the WS-J report flow, the notice-inbox appeal affordance, safety controls, the moderation console panels incl. the appeal-review-before-decide gate, the WS-T comment-flow BFF spec — inline story comments + legacy thread redirect, the WS-K AI provenance-label component, the WS-R.11 client-store suites — `lcap_v2` schema, §23.2 durability layer, §21.2 eviction, §21.3 storage modes, §23.3 sync triggers, §21.4 replication — and the WS-S.7 private-room client suite — the IndexedDb storage adapter (room isolation + idempotent upsert) + `loadPrivateRoomEngine` + the `PrivateRoomSession` create/author/persist/reload manager + the `CreatePrivateRoomWizard`/`PrivateRoomView` UI suites over fake-indexeddb + axe — and the WS-M treasury surfaces: the 7-mode badge SSOT, the readiness checklist + blocked-transition unmet list, the mode-aware treasury panel, the exact-math deposit flow through the WS-L.2.6 preview, and the production proposal cards/create/vote/execute — and the WS-N compliance surfaces: the exhaustive feature×reason explanation matrix + the no-vague-language gate + German catalog completeness + axe, the region-declaration card, the disclosure-ack flow (incl. the DepositFlow `disclosure_ack_required` reveal), and the compliance console) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~223 (incl. WS-D identity + the `expert`/`admin` RBAC roles + WS-E pipeline + WS-F ingestion + WS-G forum + WS-H invariants + WS-I ranking/surfaces/neutrality + the WS-J trust-safety services/routes/stores/units + the gated WS-J Postgres adapters incl. the right-to-erasure path + the WS-K governance backbone/pipelines/routes/stores/coverage + the WS-Q E2E test-auth route + the WS-R in-memory LCAP ingestion engine (incl. server-computed §18.3 validation over registered identity state) + the §29 LCAP routes (content reads + the pack-import POST, with shared crypto fixtures) + the LcapServerStore contract over the in-memory + gated Drizzle adapters + the WS-S.6.6 server-blind rendezvous suite (TTL clamp, no-existence-oracle, signal queue/drain, CSRF-exempt mount) + the dev-seed showcase integration test + the RUN_PERF benchmarks + the WS-M treasury-governance suites — foundation (charters/law-packs/readiness/mode machine/freeze/audit chain), payments (intent lifecycle + limits + reconciliation), proposals (real viem EIP-712 voting, tally, challenges, kernel-routed execution), the mounted route surface, and the gated Drizzle treasury-store contract — and the WS-N compliance suites: foundations (region ladder/policy activation/config), the engine + coarse-verdict truth table, screening, exact-decimal velocity, the guarded case machine, the fail-closed matrix, the mounted `/v1/compliance` surface, the treasury compliance-hold arms, the no-key filter at the report edge, and the gated live-infrastructure contract (the Drizzle adapters against migration 0088's triggers/partial-uniques/GUC + the Redis exact-decimal velocity reserve/cache/invalidation)) | node | `pnpm --filter api test` |
-| packages/shared | ~36 (incl. WS-D–WS-H schemas, URL/lifecycle utils, the §5.6 rating-label SSOT, the UGC pipeline + XSS-vector suite, the WS-S.10 update-channel verify-before-unlock core — RFC 9162 Merkle inclusion + `verifyUpdateManifest`/`decideUpdateActivation` fail-closed matrix, the WS-M asset registry + exact human-amount parser, and the WS-N jurisdiction vocabulary + `validatePolicy` suite) | node | `pnpm --filter @licio/shared test` |
-| packages/db | ~4 (isolation + content denylist + gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics: matroid/fiber/GW/sheaf/holonomy/supporting property suites + the regression harness + the SPEC-purpose oracle suite) | node | `pnpm --filter @licio/invariants test` |
-| packages/ranking | ~7 (denylist + versioned-artifact pinning, strict schemas, §5.5 profile fuzzing + baseline weights, §5.4 arithmetic, penalties/constraints incl. tie enforcement, dedup/balancing, the prohibited-vocabulary artifact, pipeline determinism, replay diff) | node | `pnpm --filter @licio/ranking test` |
-| packages/ai-governance | ~13 (the prohibited-use guard + §24.5 matrix, the upgrade-only label ladder, the canonical inventory + risk assessments, the bias-audit math (two-proportion z-test + small-cohort), hallucination/safety/red-team, the harness selection/decision/reproducibility, the §24.3 summary-quality constraints + renderer, accuracy, canonical JSON, and the schema refinements) | node | `pnpm --filter @licio/ai-governance test` |
-| packages/governance | ~12 (WS-U AI-governed-rooms domain: the deterministic moderation-bound wrapper (escalate-to-review ceiling + capability clamp), the proof-carrying treasury kernel + investment bands, the capability model + derivation (floor-reserved structural disjointness), the quorum-gated fail-safe election tally, and the canonical-JSON content addressing; plus the WS-M pure math: voting weights + fail-closed eligibility, the deadline-driven tally, the payment-intent/mode lifecycle tables, law-pack validation + fixture execution, action budgets, and exact decimal arithmetic) | node | `pnpm --filter @licio/governance test` |
-| packages/lcap | ~33 (WS-R LCAP v0.2 pure-protocol core: the LDC deterministic-CBOR encoder/decoder + the §9.1.5 integer table + the full decode rejection matrix, CID construction (SHA-256 known-answer grounded) + RFC 4648 base32, ES256 low-S + the malleability-twin defense, COSE_Sign1 build/verify + the §10.2.4 six-step matrix, device-key/COSE_Key round-trip, suite agility/downgrade, strict closed-schema records/proofs + LDC codec pairing, the §18.3 identity-chain accept/quarantine/reject/revoke matrix, arrival-order-independent record projection + fork detection, blocks/chunk reassembly + compression-bomb abort, the packfile round-trip/cap/tamper matrix, the exhaustive RFC 9162 Merkle inclusion/consistency proofs, the `validate()` trust-projection staged matrix, liveness/receipts, conflict dispatch, the §16/§17 sync-decision plane (`minimalClosure` + scheduler integration, frontier diff, pulse build/apply, reconciliation order, monotonic budget shrinking, the interest privacy/leak matrix, wants + resume ranges, idempotency, exchange assembly + status, the §24.1 server-ingestion commit-stage decision, the §24.4 topological ingestion-order resolver, the §27.2 malicious-graph guard), the conformance-corpus replay, the P1/P2/P3 determinism properties, the §22.6 transport seam (server-anchor-last selection / fallback / public-only carriage gate), and the §32.3/§32.5 deterministic network simulator (seeded link model + pluggable adversaries over the REAL scheduler + closure; the C0-never-starved / fork-detection / transport-independence scenarios)) | node | `pnpm --filter @licio/lcap test` |
-| packages/lcap-p2p | ~3 (WS-R.15.6/15.7 optional transports: the server-blind AES-GCM signaling envelope (AAD-bound, opaque-fields), the §26.4 ICE/NAT-privacy policy (off-by-default / Stealth-force-off / relay-only-requires-TURN), the WebRTC data-channel transport over a fake channel + the ≤16 KiB SCTP datachannel fragmentation/reassembly fail-closed matrix; the `block_cid ⇄ CIDv1(raw,sha2-256)` mapping, the gateway bridge's re-verify-before-use + public-only publish gate + the `TakedownOracle` seam / `takedownInForce` / `republicationSet` halt rule) | node | `pnpm --filter @licio/lcap-p2p test` |
-| packages/private-p2p | ~33 (WS-S Private P2P rooms: the canonical DAG-CBOR + strict-schema + op-body suites; the **WS-S.3 crypto foundation** — RFC 5869 HKDF vectors, the two-layer AEAD (AAD-flip/epoch-replay/nonce-uniqueness), Ed25519 KATs cross-validated against `@noble/curves` + the RFC 9180 HPKE interop vector + RFC 7748 X25519 + RFC 4231 HMAC KATs, the MLS multi-device/epoch/manifest-fork suite, the four-tier key store + recovery kit + threshold recovery, the forward-secrecy + fuzz properties; the **WS-S.4.2/5** reducer suites — the CIDv1 multiformats/RFC-4648 pins, the Lamport/canonical-order tests, the reducer genesis/capability/§14.4-conflict matrix, the §14.3.3 25-shuffle determinism property, the structural pre-pass + the §14.2 stage-1 op-codec seal→open→reduce matrix, and the §14.5/§14.6/§13.7 snapshot/overlay/search suites; AND the **WS-S.6** sync suites — blind rendezvous derivation/authorization/mitigations, X25519 ECDH agreement, the transcript-bound channel-key separation, signaling seal/open + relay-only ICE filtering, the handshake success + reject matrix, head-sync reconciliation-to-closure + fetch-order, and the offline-archive re-validating import; the §10.4 device-blind derivation + the buildOpIntakeContext seal→open-against-state composition + the PrivateRoomEngine lifecycle + sync surface + two-engine archive convergence + the WS-S.7.1 room-lifecycle (createPrivateRoom/inviteDevice/joinRoom/buildMemberAddOp + MLS KeyPackage codec) with the full two-device invite→join→converge membership flow + content authoring + §10.9 removal-with-forward-secrecy + §13.6 chunked media + §10.3/§12.3 invite+join + §14.5 snapshots/compaction; AND the **WS-S.11 audit** legs — the 3+-peer convergence matrix (star/chain-relay/concurrent-author/out-of-order+duplicate, identical `roomStateCommitment`) + the pinned known-answer SAS (safety-number) vector — crypto + reducer + sync all ≳ 92% coverage) | node | `pnpm --filter @licio/private-p2p test` |
-| scripts | ~6 (incl. the seven WS-S.1.5 private-room CI gates proven to bite + the live-source marker regression catch + the WS-N jurisdiction-matrix↔schema drift gate) | node | via root `pnpm test` (policy project) |
+| apps/web | ~235 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop) | jsdom / Playwright | `pnpm --filter web test` |
+| apps/api | ~225 (identity/events/ingestion/forum/invariants/ranking/trust-safety/AI-gov/treasury/compliance/LCAP; gated Postgres+Redis adapters) | node | `pnpm --filter api test` |
+| packages/shared | ~36 (schemas SSOT, UGC pipeline + XSS suite, update-channel verifier, jurisdiction vocab) | node | `pnpm --filter @licio/shared test` |
+| packages/db | ~8 (isolation, content denylist, gated integration) | node | via root `pnpm test` (db project) |
+| packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics + SPEC-purpose oracle) | node | `pnpm --filter @licio/invariants test` |
+| packages/ranking | ~7 (denylist, §5.4 scoring, penalties/ties, dedup/balancing, determinism, replay) | node | `pnpm --filter @licio/ranking test` |
+| packages/ai-governance | ~13 (prohibited-use, label ladder, bias/hallucination/safety, harness, summary quality) | node | `pnpm --filter @licio/ai-governance test` |
+| packages/governance | ~12 (WS-U moderation wrapper/kernel/capabilities/elections + WS-M treasury math) | node | `pnpm --filter @licio/governance test` |
+| packages/lcap | ~33 (LCAP v0.2 core: CBOR/CID/COSE, identity chain, Merkle proofs, sync plane, simulator) | node | `pnpm --filter @licio/lcap test` |
+| packages/lcap-p2p | ~3 (signaling envelope, ICE policy, WebRTC transport, gateway bridge + takedown oracle) | node | `pnpm --filter @licio/lcap-p2p test` |
+| packages/private-p2p | ~33 (DAG-CBOR/schemas, crypto foundation, Lamport reducer, sync, membership, convergence + SAS) | node | `pnpm --filter @licio/private-p2p test` |
+| scripts | ~6 (the private-room CI gates + jurisdiction-matrix drift gate) | node | via root `pnpm test` (policy project) |
 
 WS-D, WS-E, WS-F, WS-G, WS-H, WS-I, WS-U, and WS-R (the LcapServerStore
 contract) add **gated** integration tests (Postgres + Redis) that run only
@@ -1009,8 +977,6 @@ pgvector-enabled Postgres (docker-compose ships `pgvector/pgvector:pg16`).
 See `docs/identity/README.md`, `docs/events/README.md`,
 `docs/ingestion/README.md`, `docs/forum/README.md`,
 `docs/invariants/README.md`, and `docs/ranking/README.md`.
-
-Only monotonic growth is enforced — no global gate pins the count.
 
 **E2E configuration.**  Playwright runs against Chromium, Firefox,
 and WebKit.  Base URL: `http://localhost:4173` (Vite preview).

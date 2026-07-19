@@ -77,6 +77,33 @@ describe('maintainConnection (§15.4 reconnect)', () => {
     expect(dials).toBe(dialsAtClose);
   });
 
+  it('close() DURING an in-flight dial closes the raced session and stays closed', async () => {
+    let dials = 0;
+    const closes: boolean[] = [];
+    const resolveRef: { current: ((s: DialedSession) => void) | null } = { current: null };
+    const dial = (): Promise<DialedSession> => {
+      dials += 1;
+      return new Promise<DialedSession>((resolve) => {
+        resolveRef.current = resolve;
+      });
+    };
+    const ctrl = maintainConnection(dial, { backoffMs: 1, sleep: () => Promise.resolve() });
+    await flush();
+    expect(dials).toBe(1);
+    // The dial has not resolved yet — `current` is still null.
+    expect(ctrl.status()).toBe('connecting');
+
+    // Close BEFORE the dial resolves: close() cannot reach the not-yet-dialed session.
+    ctrl.close();
+    expect(ctrl.status()).toBe('closed');
+
+    // The dial now resolves with a LIVE session; it must be closed here, not surfaced.
+    resolveRef.current?.({ close: (graceful = true) => closes.push(graceful) });
+    await flush();
+    expect(closes).toEqual([true]); // the raced session was closed
+    expect(ctrl.status()).toBe('closed'); // never flipped to 'connected'
+  });
+
   it('a successful reconnect RESETS the backoff window', async () => {
     let dials = 0;
     const onCloseRef: { current: ((graceful: boolean) => void) | null } = { current: null };

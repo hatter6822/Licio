@@ -158,7 +158,14 @@ async function runVerification(
   // Anti-rollback (§27.5): persist the trusted release sequence as the new floor (monotonic) so a
   // later validly-signed OLDER bundle is `stale` — RUNNING builds only (see the doc above).
   if (verdict.trusted && !pending) recordTrustedSequence(verdict.releaseSequence);
-  publish(verdictToState(verdict));
+  // Publish RUNNING verdicts only.  A PENDING (waiting-worker) verdict must NOT
+  // mutate the running gate state: `isPrivateBundleLocked()` / `useUpdateGate()` /
+  // the key-unlock chokepoint reflect the bundle the user is ACTUALLY running.
+  // A trusted pending build would otherwise mask a running lock, and an untrusted
+  // one would lock a still-valid running surface — the SW-activation caller
+  // consumes the RETURNED verdict directly (surfacing it via `onLocked`), so it
+  // needs no shared publish.
+  if (!pending) publish(verdictToState(verdict));
   return verdict;
 }
 

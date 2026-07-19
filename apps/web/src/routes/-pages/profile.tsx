@@ -13,7 +13,10 @@ import {
 } from '@licio/shared';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { type ReactNode, useEffect } from 'react';
-import { RegionDeclarationCard } from '../../components/compliance/index.js';
+import {
+  DisabledFeatureExplanation,
+  RegionDeclarationCard,
+} from '../../components/compliance/index.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import {
   type SignalKind,
@@ -29,6 +32,7 @@ import { Switch } from '../../components/ui/Switch/index.js';
 import { ThemeToggle } from '../../components/ui/ThemeToggle/index.js';
 import { useToast } from '../../components/ui/Toast/index.js';
 import { WalletManager } from '../../components/wallet/index.js';
+import { FocusModeToggle } from '../../components/wellbeing/FocusModeToggle/index.js';
 import { NotificationBudget } from '../../components/wellbeing/NotificationBudget/index.js';
 import { QuietHoursSetting } from '../../components/wellbeing/QuietHoursSetting/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
@@ -36,6 +40,7 @@ import { useT } from '../../i18n/index.js';
 import { revokeCurrentSession } from '../../lib/auth-api.js';
 import { cn } from '../../lib/cn.js';
 import {
+  useFeatureAvailabilityQuery,
   useNotificationBudgetQuery,
   useNotificationPreferencesQuery,
   useRoomsQuery,
@@ -478,12 +483,7 @@ export function SettingsPage(): React.ReactElement {
           <FeedModeSwitcher value={feedMode} onValueChange={applyFeedMode} />
         </Section>
         <Section title={t('settings.wellbeing', 'Wellbeing')}>
-          <Switch
-            label={t('settings.focusMode', 'Focus mode')}
-            description={t('settings.focusMode.desc', 'A calmer, distraction-reduced layout.')}
-            checked={focusMode}
-            onCheckedChange={setFocusMode}
-          />
+          <FocusModeToggle enabled={focusMode} onEnabledChange={setFocusMode} />
           {/* PHI-4 (WS-H.6.1c-2): reset/reduce personalization without
               touching the account or any contribution. */}
           <div className="flex flex-wrap items-center gap-2">
@@ -770,6 +770,12 @@ export function WalletPage(): React.ReactElement {
   usePageFocus(t('profile.wallet', 'Wallet'));
   const goBack = useProfileBack();
   const cryptoEnabled = useFeatureFlagStore(selectCryptoEnabled);
+  // The CONCRETE §17.10 disable reason (region_unsupported / policy_missing /
+  // unknown_region / …) so a locked wallet explains WHY + the next step, instead
+  // of a generic notice. Fetched only when the feature is actually off.
+  const availability = useFeatureAvailabilityQuery();
+  const walletDisable = availability.data?.features.wallet_connection.disable_reason ?? null;
+  const region = availability.data?.region ?? undefined;
   // Reaching a flag-gated page is a fail-closed restriction worth observing
   // (route PATTERN only, no PII) so accidental enablement/lockout is visible.
   useEffect(() => {
@@ -783,7 +789,15 @@ export function WalletPage(): React.ReactElement {
       <div className="mx-auto w-full max-w-2xl p-4">
         {cryptoEnabled ? (
           <WalletManager enabled={cryptoEnabled} />
+        ) : walletDisable !== null ? (
+          // The specific, jurisdiction-aware explanation once the reason resolves.
+          <DisabledFeatureExplanation
+            feature="wallet_connection"
+            reason={walletDisable}
+            {...(region ? { region } : {})}
+          />
         ) : (
+          // Fallback while availability loads, or when no concrete reason exists.
           <RestrictedState
             title={t('wallet.unavailable', 'Wallet unavailable')}
             reason={t('wallet.disabled', 'Wallet and crypto features are not enabled.')}

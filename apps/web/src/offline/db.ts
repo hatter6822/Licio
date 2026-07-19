@@ -96,8 +96,14 @@ export const MIGRATIONS: MigrationMap = {
     tx.objectStore(STORE.threadSnapshots).clear();
     tx.objectStore(STORE.signalLedger).clear();
     stampSchemaVersion(tx.objectStore(STORE.savedStories), 2);
-    stampSchemaVersion(tx.objectStore(STORE.draftContributions), 2);
-    stampSchemaVersion(tx.objectStore(STORE.pendingQueue), 2);
+    // draftContributions + pendingQueue are NOT stamped here: migration 5 remaps
+    // those same two stores, and a second cursor over a store already being
+    // cursored in THIS one upgrade transaction interleaves non-deterministically
+    // (one update clobbers the other — losing either the stamp or the remap, the
+    // latter quarantining the very draft the remap saves). Migration 5 stamps
+    // them in its single cursor pass instead. A client can only reach v4 by also
+    // running v5 (the app always targets the current version), so no record is
+    // left unstamped.
     if (db.objectStoreNames.contains(STORE.draftStories)) {
       stampSchemaVersion(tx.objectStore(STORE.draftStories), 2);
     }
@@ -131,12 +137,17 @@ function remapRetiredContributionTypes(store: IDBObjectStore): void {
     const cursor = request.result;
     if (!cursor) return;
     const value = cursor.value as Record<string, unknown>;
-    if (
+    // ONE cursor pass does BOTH the migration-4 schemaVersion stamp AND the
+    // retired-type remap, so this store is never cursored twice in one upgrade
+    // transaction (see the migration-4 note).
+    const retired =
       typeof value['contributionType'] === 'string' &&
-      !LIVE_CONTRIBUTION_TYPES.has(value['contributionType'])
-    ) {
-      cursor.update({ ...value, contributionType: 'comment' });
-    }
+      !LIVE_CONTRIBUTION_TYPES.has(value['contributionType']);
+    cursor.update({
+      ...value,
+      schemaVersion: 2,
+      ...(retired ? { contributionType: 'comment' } : {}),
+    });
     cursor.continue();
   };
 }
@@ -160,6 +171,8 @@ function remapRetiredQueuedContributions(store: IDBObjectStore): void {
     if (!cursor) return;
     const record = cursor.value as Record<string, unknown>;
     const payload = record['payload'];
+    // ONE cursor pass stamps schemaVersion AND rebuilds a retired payload, so
+    // this store is never cursored twice in one upgrade transaction.
     if (
       record['operationType'] === 'contribution' &&
       typeof payload === 'object' &&
@@ -172,7 +185,9 @@ function remapRetiredQueuedContributions(store: IDBObjectStore): void {
       for (const key of COMMENT_PAYLOAD_KEYS) {
         if (source[key] !== undefined) rebuilt[key] = source[key];
       }
-      cursor.update({ ...record, payload: rebuilt });
+      cursor.update({ ...record, schemaVersion: 2, payload: rebuilt });
+    } else {
+      cursor.update({ ...record, schemaVersion: 2 });
     }
     cursor.continue();
   };

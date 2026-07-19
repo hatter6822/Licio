@@ -61,16 +61,29 @@ export const ONLINE_ACCEPTANCE: AcceptancePolicy = { maxPastMs: 5 * 60_000, maxF
  * The offline-sync policy for the WS-C batch wire: the durable pending queue
  * replays batches when connectivity returns (possibly days later, SPEC §6.9).
  * Replay safety holds for the FULL window: the single-use replay nonce is sized
- * to this window (see `replayNonceTtlMs`), so a re-ingested aggregate is rejected
- * for all 7 days even after its durable event row is retention-purged (the
- * durable event_id uniqueness is the additional backstop while the row lives).
- * The window also bounds how stale an aggregate may still enter scoring (7 days =
- * the longest aggregation window and the attention_raw ceiling).
+ * to `MAX_INGEST_WINDOW_MS` (this 7-day ceiling — the same for every surface), so
+ * a re-ingested aggregate is rejected for all 7 days even after its durable event
+ * row is retention-purged (the durable event_id uniqueness is the additional
+ * backstop while the row lives).  The window also bounds how stale an aggregate
+ * may still enter scoring (7 days = the longest aggregation window and the
+ * attention_raw ceiling).
  */
 export const OFFLINE_SYNC_ACCEPTANCE: AcceptancePolicy = {
   maxPastMs: 7 * 86_400_000,
   maxFutureMs: 30_000,
 };
+
+/**
+ * The LONGEST acceptance window across ALL ingestion surfaces (the offline-sync
+ * 7-day window).  The replay nonce is sized to THIS — never the current request's
+ * policy — so an event first accepted ONLINE (5-min window ⇒ a ~10-min nonce)
+ * stays replay-blocked when the SAME event is re-submitted via the offline batch
+ * wire up to 7 days later.  A per-policy nonce would expire in ~10 min, and the
+ * durable event_id backstop is already purged for a `none`/short-retention user,
+ * so a policy-scoped nonce leaves a real CROSS-SURFACE replay hole.
+ */
+export const MAX_INGEST_WINDOW_MS =
+  OFFLINE_SYNC_ACCEPTANCE.maxPastMs + OFFLINE_SYNC_ACCEPTANCE.maxFutureMs;
 
 export type AttentionIngestEvent =
   | AttentionAggregateEvent
@@ -134,14 +147,14 @@ export async function ingestAttentionEvents(
     });
   }
   const userRef = accountRef(identity.config.masterSecret, sessionUserId);
-  // The replay nonce must outlive the WHOLE acceptance window: a replay is
-  // accepted only while its timestamp is still in-window, so the nonce must be
-  // remembered for at least `maxPastMs + maxFutureMs` after first ingest.  Sizing
-  // it to the policy (not a fixed 10min) makes the "single-use nonce rejects
-  // re-ingestion for the full window" guarantee hold even for `none`/shortened
-  // retention users, whose durable event row is purged before the window closes
-  // (WS-E.1.3b).  Online stays ~10min; the offline-sync path covers its 7 days.
-  const replayNonceTtlMs = Math.max(NONCE_TTL_MS, policy.maxPastMs + policy.maxFutureMs);
+  // The replay nonce is sized to the MAX window across ALL surfaces (not this
+  // request's policy): an event first ingested ONLINE can be re-submitted via the
+  // offline batch wire up to 7 days later, so a policy-scoped ~10-min online nonce
+  // would expire and let that cross-surface replay through once the durable
+  // event_id row is retention-purged (WS-E.1.3b).  Sizing every surface's nonce to
+  // the 7-day ceiling keeps "single-use nonce rejects re-ingestion for the full
+  // window" true regardless of which surface first saw the event.
+  const replayNonceTtlMs = Math.max(NONCE_TTL_MS, MAX_INGEST_WINDOW_MS);
 
   for (const event of batch) {
     // 1. Ownership: the event's user must be the authenticated session user
@@ -318,9 +331,19 @@ export async function ingestAttentionEvents(
     if (outcome !== 'accepted') events.metrics.increment(`events_attention_rejected_${outcome}`, 1);
   }
   if (accepted > 0) {
+    // Never pair a PSEUDONYMIZED (minimum-privacy, ownerUserId=null) event id
+    // with the real user id — that would re-link the de-linked rows in the log.
+    // Log only the already-linked ids beside the user; count the rest opaquely.
+    const linkableEventIds: string[] = [];
+    let pseudonymousCount = 0;
+    for (const row of toStore) {
+      if (row.ownerUserId === null) pseudonymousCount += 1;
+      else linkableEventIds.push(row.eventId);
+    }
     events.log('events.attention.accepted', {
       user_id: sessionUserId,
-      event_ids: toStore.map((row) => row.eventId),
+      event_ids: linkableEventIds,
+      pseudonymous_count: pseudonymousCount,
       count: accepted,
     });
   }

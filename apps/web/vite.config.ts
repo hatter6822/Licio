@@ -123,19 +123,26 @@ export default defineConfig({
             //     segment, and a FINANCIAL pipeline status must never replay
             //     stale from a cache anyway — a settled/failed action shown
             //     as pending misleads exactly when the network is flaky.
+            //   • /api/csrf-token: the double-submit token is SINGLE-USE (each
+            //     mutation fetches a fresh one). A NetworkFirst fallback would
+            //     replay a consumed token, silently 403-ing the next mutation;
+            //     a security token has no business in a durable cache anyway.
             urlPattern: ({ url }: { url: URL }) =>
               (url.pathname.startsWith('/v1') || url.pathname.startsWith('/api')) &&
               !url.pathname.startsWith('/v1/auth/') &&
               !url.pathname.startsWith('/v1/moderation') &&
               !url.pathname.startsWith('/v1/knomosis/actions') &&
+              !url.pathname.startsWith('/api/csrf-token') &&
               !url.pathname.includes('/admin'),
             handler: 'NetworkFirst',
             method: 'GET',
             options: {
               cacheName: 'licio-api',
               expiration: { maxEntries: 200, maxAgeSeconds: 86_400 },
-              // Do not cache opaque cross-origin responses (poisoning defense).
-              cacheableResponse: { statuses: [0, 200] },
+              // Cache ONLY same-origin 200s. Status 0 IS the opaque cross-origin
+              // response — including it would cache poisoned/opaque bodies, the
+              // exact opposite of the poisoning defense this line is meant to be.
+              cacheableResponse: { statuses: [200] },
             },
           },
           {

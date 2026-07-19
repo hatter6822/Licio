@@ -4,14 +4,16 @@
 // content half of DSAR export + account-purge anonymization).
 //
 //   • exportUserContent — a COMPLETE (§19.3 / GDPR Art. 15) listing of the
-//     user's own stories, contributions, room subscriptions, and uploads,
-//     keyset-paginated to exhaustion. Self-access is NOT bounded
+//     user's own stories, contributions, room subscriptions, uploads, and the
+//     WS-T debate-arena rebuttals they authored, keyset-paginated to
+//     exhaustion. Self-access is NOT bounded
 //     by distribution: `room_only` content and private-room subscriptions are
 //     exported, each tagged with its home room (`room_ref`) and visibility
 //     tier so the subject sees exactly where each item lives (WS-Q.3.5).
 //   • anonymizeUserContent — tombstones the author on every contribution /
 //     upload across BOTH tiers (bodies persist per §22.4; the tombstoned user
-//     row IS the anonymization) and REMOVES room memberships
+//     row IS the anonymization), detaches the subject from every debate arena
+//     they are a party to, and REMOVES room memberships
 //     and steward assignments (membership is personal data, incl. private
 //     rooms).
 //
@@ -106,6 +108,37 @@ export async function exportUserContent(
     });
   }
 
+  // WS-T debate arenas the subject is a PARTY to (§15.4): the rebuttal draft
+  // they authored plus the arena outcome that concerns them.  Only the
+  // subject's OWN side is exported (the opposing side is another person's data).
+  let debateAfter: { createdAt: string; debateId: string } | null = null;
+  for (;;) {
+    const page = await forum.debates.listByParty(userId, debateAfter, PAGE);
+    for (const arena of page) {
+      const role = arena.incumbentUserId === userId ? 'incumbent' : 'challenger';
+      const side = role === 'incumbent' ? arena.positions.incumbent : arena.positions.challenger;
+      out.push({
+        kind: 'debate',
+        debate_id: arena.debateId,
+        story_id: arena.storyId,
+        room_ref: arena.roomId,
+        role,
+        rebuttal: side.summary,
+        citations: side.citations,
+        rebuttal_updated_at: side.updatedAt,
+        state: arena.state,
+        verdict: arena.verdict,
+        winner: arena.winner,
+        decided_by: arena.decidedBy,
+        created_at: arena.createdAt,
+      });
+    }
+    if (page.length < PAGE) break;
+    const last = page[page.length - 1];
+    if (last === undefined) break;
+    debateAfter = { createdAt: last.createdAt, debateId: last.debateId };
+  }
+
   return out;
 }
 
@@ -113,6 +146,10 @@ export async function anonymizeUserContent(forum: ForumServices, userId: string)
   await forum.contributions.anonymizeUser(userId);
   await forum.uploads.anonymizeUser(userId);
   await forum.rooms.anonymizeUser(userId);
+  // WS-T: detach the subject from every debate arena they are a party to
+  // (incumbent / challenger / steward-override); the rebuttal text persists
+  // per §22.4, exactly like the tombstoned contribution bodies above.
+  await forum.debates.anonymizeParty(userId);
 }
 
 /**

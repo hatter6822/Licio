@@ -250,7 +250,6 @@ export function privateTreeFiles(): Array<{ path: string; content: string }> {
   const dirs = [
     resolve(ROOT, 'packages/private-p2p/src'),
     resolve(ROOT, 'apps/web/src/private-p2p'),
-    resolve(ROOT, 'apps/api/src/routes/private-rooms.ts'),
     resolve(ROOT, 'apps/api/src/routes/private-rendezvous.ts'),
   ];
   const files: string[] = [];

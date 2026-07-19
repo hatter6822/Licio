@@ -49,6 +49,13 @@ function onServiceWorkerMessage(event: { data?: unknown }): void {
     typeof data === 'object' &&
     (data as { type?: unknown }).type === 'lcap-sync'
   ) {
+    // Honour the §33 operational mode's backgroundSync posture here too: the
+    // orchestrator's conditions gate on the §23.3 PRIVACY mode, not the §33
+    // operational mode, so without this an lcap-sync message (e.g. from a
+    // background registration made before the mode tightened, or another tab)
+    // would run a background sync in Emergency/Stealth/minimal — modes whose
+    // backgroundSync is false. The `open` trigger path already checks this.
+    if (!backgroundSyncAllowed()) return;
     active?.trigger('background');
   }
 }

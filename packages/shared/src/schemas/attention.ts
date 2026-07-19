@@ -137,8 +137,10 @@ const attentionAggregateWireSchema = z.object({
   user_id_or_privacy_bucket: z.string().min(1).max(128),
   /** The item under attention. */
   story_id: uuidSchema,
-  /** Coarse session-window label (see {@link sessionBucket}). */
-  session_bucket: z.string().min(1),
+  /** Coarse session-window label (see {@link sessionBucket}). Bounded to 64 to
+   *  match the canonical event schema — an over-long value must be a 4xx wire
+   *  rejection here, not a 500 when the canonical conversion re-validates it. */
+  session_bucket: z.string().min(1).max(64),
   /** Capped, bucketed active dwell (SIG-ATT-DWELL + WS-C.4.1c cap). */
   active_dwell_bucket: dwellBucketSchema,
   /** Whether the original source was opened in a meaningful session (deduped). */

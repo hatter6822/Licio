@@ -201,6 +201,8 @@ function buildHarness(): TestHarness {
     receipts: new InMemoryKnomosisReceiptStore(),
     wallets: new InMemoryFinancialWalletStore(),
     governanceAudit: new InMemoryGovernanceAuditStore(),
+    // Test actor ref (deterministic, non-reversible-enough for the chain hash).
+    opaqueRef: (id: string) => `ref:${id}`,
     rooms,
     roomMode,
     membership,
@@ -308,19 +310,46 @@ function corpusFor(pack: Record<string, unknown>): Record<string, unknown> {
         };
   return {
     fixtures: [
-      ...allowed.map((type) => ({
-        kind: 'proposal_tally',
-        label: `${type} passes majority`,
-        proposalType: type,
-        votes: [
-          { voterUserId: 'a', choice: 'approve', weightSnapshot: 1 },
-          { voterUserId: 'b', choice: 'approve', weightSnapshot: 1 },
-          { voterUserId: 'c', choice: 'reject', weightSnapshot: 1 },
-        ],
-        eligibleCount: 3,
-        deadlinePassed: true,
-        expect: 'passed',
-      })),
+      ...allowed.map((type) => {
+        // The fixture must be tallied the way the RUNTIME (and now the validator)
+        // will for this type's quorum BASIS.  A `role_class` quorum is measured
+        // over the multisig signer set, so its `passes majority` fixture must have
+        // the SIGNERS as voters (every signer participating clears quorum even at
+        // minFraction 1; all approving clears the threshold).  An `eligible_voters`
+        // quorum keeps the room-wide a/b/c majority over an eligibleCount of 3.
+        const quorumRules = pack['quorumRules'] as
+          | Record<string, { basis?: string } | undefined>
+          | undefined;
+        if (quorumRules?.[type]?.basis === 'role_class') {
+          const signers = (pack['multisig'] as { signers?: string[] } | undefined)?.signers ?? [];
+          return {
+            kind: 'proposal_tally',
+            label: `${type} passes majority`,
+            proposalType: type,
+            votes: signers.map((voterUserId) => ({
+              voterUserId,
+              choice: 'approve',
+              weightSnapshot: 1,
+            })),
+            eligibleCount: signers.length,
+            deadlinePassed: true,
+            expect: 'passed',
+          };
+        }
+        return {
+          kind: 'proposal_tally',
+          label: `${type} passes majority`,
+          proposalType: type,
+          votes: [
+            { voterUserId: 'a', choice: 'approve', weightSnapshot: 1 },
+            { voterUserId: 'b', choice: 'approve', weightSnapshot: 1 },
+            { voterUserId: 'c', choice: 'reject', weightSnapshot: 1 },
+          ],
+          eligibleCount: 3,
+          deadlinePassed: true,
+          expect: 'passed',
+        };
+      }),
       ...caps.map((cap) => ({
         kind: 'treasury_action',
         label: `${cap.category} within caps accepts`,

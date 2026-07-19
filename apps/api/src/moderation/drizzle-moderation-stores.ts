@@ -1164,6 +1164,21 @@ export class DrizzleModerationAppealStore implements ModerationAppealStore {
     return rows.map(mapAppeal);
   }
 
+  async count(filter: Pick<AppealQueueFilter, 'status' | 'assignedReviewerId'>): Promise<number> {
+    const c: SQL[] = [];
+    if (filter.status && filter.status.length > 0) {
+      c.push(inArray(moderationAppeals.status, [...filter.status]));
+    }
+    if (filter.assignedReviewerId !== undefined && filter.assignedReviewerId !== null) {
+      c.push(eq(moderationAppeals.assignedReviewerId, filter.assignedReviewerId));
+    }
+    const rows = await this.#db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(moderationAppeals)
+      .where(c.length > 0 ? and(...c) : undefined);
+    return rows[0]?.count ?? 0;
+  }
+
   async countOpenByReviewer(userId: string): Promise<number> {
     const rows = await this.#db
       .select({ count: sql<number>`count(*)::int` })

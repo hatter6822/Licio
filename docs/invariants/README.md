@@ -448,7 +448,7 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   Helmholtz orthogonality, Chen-identity exactness, gauge invariance under
   random conjugation, the regression suite against pinned baselines (an
   intentional drift is flagged with its magnitude).
-- `packages/invariants/__tests__/invariant-purpose.test.ts`: the PURPOSE
+- `packages/invariants/src/__tests__/invariant-purpose.test.ts`: the PURPOSE
   suite — where the per-module suites prove the mathematics is correct, this
   proves each invariant fulfils its STATED SPEC purpose (and the adversarial
   cases a skeptic would use against it): MERI collapses ten near-identical

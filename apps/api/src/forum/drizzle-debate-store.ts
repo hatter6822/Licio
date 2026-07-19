@@ -17,7 +17,7 @@
 import type { DbExecutor } from '@licio/db';
 import { debateArenas as debateArenasTable } from '@licio/db';
 import type { Citation, DebateState } from '@licio/shared';
-import { and, asc, count, eq, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   DebateArenaRecord,
@@ -483,7 +483,10 @@ export class DrizzleDebateStore implements DebateStore {
         overrideReason: override.overrideReason,
         updatedAt: new Date(),
       })
-      .where(eq(debateArenasTable.debateId, debateId))
+      // State CAS (mirrors recordVerdict): only override a still-`judged` arena.
+      // Without it, an override racing the finalize sweep (judged→resolved) would
+      // corrupt a finalized outcome — the caller's state check is a TOCTOU.
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'judged')))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
@@ -635,6 +638,58 @@ export class DrizzleDebateStore implements DebateStore {
       .orderBy(asc(debateArenasTable.editDeadlineAt))
       .limit(Math.max(0, limit));
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listByParty(
+    userId: string,
+    after: { createdAt: string; debateId: string } | null,
+    limit: number,
+  ): Promise<DebateArenaRecord[]> {
+    const party = or(
+      eq(debateArenasTable.incumbentUserId, userId),
+      eq(debateArenasTable.challengerUserId, userId),
+    );
+    // Keyset: strictly after (createdAt, debateId) in lexicographic tuple order.
+    const keyset =
+      after === null
+        ? undefined
+        : or(
+            gt(debateArenasTable.createdAt, new Date(after.createdAt)),
+            and(
+              eq(debateArenasTable.createdAt, new Date(after.createdAt)),
+              gt(debateArenasTable.debateId, after.debateId),
+            ),
+          );
+    const rows = await this.#db
+      .select()
+      .from(debateArenasTable)
+      .where(keyset === undefined ? party : and(party, keyset))
+      .orderBy(asc(debateArenasTable.createdAt), asc(debateArenasTable.debateId))
+      .limit(Math.max(0, limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
+  async anonymizeParty(userId: string): Promise<number> {
+    // One statement, CASE per column: an arena where the user is incumbent AND
+    // steward-override (or any combination) is NULLed everywhere and counted
+    // once.  The rebuttal text in `positions` persists per §22.4.
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({
+        incumbentUserId: sql`CASE WHEN ${debateArenasTable.incumbentUserId} = ${userId} THEN NULL ELSE ${debateArenasTable.incumbentUserId} END`,
+        challengerUserId: sql`CASE WHEN ${debateArenasTable.challengerUserId} = ${userId} THEN NULL ELSE ${debateArenasTable.challengerUserId} END`,
+        overriddenByUserId: sql`CASE WHEN ${debateArenasTable.overriddenByUserId} = ${userId} THEN NULL ELSE ${debateArenasTable.overriddenByUserId} END`,
+        updatedAt: new Date(),
+      })
+      .where(
+        or(
+          eq(debateArenasTable.incumbentUserId, userId),
+          eq(debateArenasTable.challengerUserId, userId),
+          eq(debateArenasTable.overriddenByUserId, userId),
+        ),
+      )
+      .returning({ id: debateArenasTable.debateId });
+    return rows.length;
   }
 
   async shiftDeadlines(

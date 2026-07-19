@@ -611,7 +611,17 @@ export function maintainConnection(
     if (stopping) return;
     setStatus(attempt === 0 ? 'connecting' : 'reconnecting');
     try {
-      current = await dial(onClose);
+      const session = await dial(onClose);
+      if (stopping) {
+        // `close()` ran while this dial was in flight: `current` was still null
+        // then, so `close()` could not reach the just-dialed session. Close it
+        // here and stay closed — never surface a raced session as 'connected'
+        // (mirrors the maintainMesh fill() guard).
+        session.close(true);
+        current = null;
+        return;
+      }
+      current = session;
       attempt = 0; // a successful (re)connect resets the backoff window
       setStatus('connected');
     } catch {

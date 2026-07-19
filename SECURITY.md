@@ -47,7 +47,7 @@ regardless of CVSS score.
 
 | Version | Supported |
 |---------|-----------|
-| 0.6.x   | Yes       |
+| 0.8.x   | Yes       |
 
 ## Security Architecture
 

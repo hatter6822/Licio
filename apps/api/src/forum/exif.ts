@@ -90,24 +90,73 @@ function readU32LE(bytes: Uint8Array, at: number): number {
   );
 }
 
-/** JPEG: drop APP1–APP15 and COM segments (see module header). */
+/**
+ * From the start of an entropy-coded segment, find the index of the next real
+ * JPEG marker (`0xFF` NOT followed by stuffing `0x00`, a restart `0xD0–0xD7`, or
+ * a fill `0xFF`). Returns -1 if the stream ends with no further marker.
+ */
+function nextJpegMarker(bytes: Uint8Array, from: number): number {
+  let i = from;
+  while (i + 1 < bytes.length) {
+    if (bytes[i] === 0xff) {
+      const b = bytes[i + 1] ?? 0;
+      if (b === 0x00 || (b >= 0xd0 && b <= 0xd7) || b === 0xff) {
+        i += b === 0xff ? 1 : 2; // fill byte: advance one; stuffing/restart: two
+        continue;
+      }
+      return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * JPEG: drop APP1–APP15 and COM segments (see module header) AND any trailer
+ * after the End-Of-Image marker. A trailer is a standard carrier for location
+ * metadata — Samsung/Google "motion photos" append a full MP4 video (with its
+ * own GPS) after EOI, and appended XMP rides there too — so copying "verbatim to
+ * the end" from SOS (the old behaviour) silently defeated the privacy promise.
+ * The scan walks each entropy segment to the next marker (so progressive JPEGs
+ * with multiple scans are handled) and stops AT the EOI, dropping the trailer.
+ */
 export function stripJpeg(bytes: Uint8Array): StripOutcome {
+  if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return { ok: false, reason: 'malformed' };
+  }
   const out: Uint8Array[] = [bytes.subarray(0, 2)]; // SOI
   let at = 2;
   let stripped = false;
-  while (at + 4 <= bytes.length) {
+  while (at + 2 <= bytes.length) {
     if (bytes[at] !== 0xff) return { ok: false, reason: 'malformed' };
     const marker = bytes[at + 1] ?? 0;
     if (marker === 0xd9) {
-      // EOI without SOS — degenerate but valid; copy the rest.
-      out.push(bytes.subarray(at));
+      // EOI: the image ends here. Copy the 2-byte marker and DROP everything
+      // after it (the trailer) — that is the metadata surgery this fix adds.
+      out.push(bytes.subarray(at, at + 2));
+      if (at + 2 < bytes.length) stripped = true; // a trailer was present + dropped
       return { ok: true, bytes: concat(out), stripped };
     }
     if (marker === 0xda) {
-      // SOS: entropy-coded data follows; copy verbatim to the end.
-      out.push(bytes.subarray(at));
-      return { ok: true, bytes: concat(out), stripped };
+      // SOS: a scan header (2-byte length) then entropy-coded data with NO length
+      // prefix. Keep the header + entropy up to the next real marker, then keep
+      // walking (do not bail to end-of-file).
+      if (at + 4 > bytes.length) return { ok: false, reason: 'malformed' };
+      const headerLen = readU16BE(bytes, at + 2);
+      if (headerLen < 2 || at + 2 + headerLen > bytes.length) {
+        return { ok: false, reason: 'malformed' };
+      }
+      const next = nextJpegMarker(bytes, at + 2 + headerLen);
+      if (next === -1) {
+        // Truncated scan with no terminating marker — keep what remains.
+        out.push(bytes.subarray(at));
+        return { ok: true, bytes: concat(out), stripped };
+      }
+      out.push(bytes.subarray(at, next));
+      at = next;
+      continue;
     }
+    if (at + 4 > bytes.length) return { ok: false, reason: 'malformed' };
     const length = readU16BE(bytes, at + 2);
     if (length < 2 || at + 2 + length > bytes.length) return { ok: false, reason: 'malformed' };
     const isApp1ToApp15 = marker >= 0xe1 && marker <= 0xef;

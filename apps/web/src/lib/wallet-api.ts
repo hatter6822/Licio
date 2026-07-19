@@ -12,9 +12,7 @@ import {
   type ComprehensionSubmitResponse,
   comprehensionQuizResponseSchema,
   comprehensionSubmitResponseSchema,
-  type GovernanceProposalListResponse,
   type GovernanceTabWithProduction,
-  governanceProposalListResponseSchema,
   governanceTabWithProductionSchema,
   type KnomosisDeploymentListResponse,
   type KnomosisManifestResponse,
@@ -26,8 +24,6 @@ import {
   knomosisManifestResponseSchema,
   knomosisPreflightResponseSchema,
   knomosisSubmitResponseSchema,
-  type RoomReadinessResponse,
-  roomReadinessResponseSchema,
   type WalletLinkResponse,
   type WalletListResponse,
   type WalletNonceResponse,
@@ -135,15 +131,6 @@ export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabW
   return parseResponse(response, governanceTabWithProductionSchema);
 }
 
-export async function fetchGovernanceProposals(
-  roomId: string,
-): Promise<GovernanceProposalListResponse> {
-  const response = await client.v1.rooms[':roomId'].governance.proposals.$get({
-    param: { roomId },
-  });
-  return parseResponse(response, governanceProposalListResponseSchema);
-}
-
 export async function fetchComprehensionQuiz(roomId: string): Promise<ComprehensionQuizResponse> {
   const response = await client.v1.rooms[':roomId'].governance.comprehension.$get({
     param: { roomId },
@@ -160,12 +147,4 @@ export async function submitComprehensionQuiz(
     json: input,
   });
   return parseResponse(response, comprehensionSubmitResponseSchema);
-}
-
-export async function fetchRoomReadiness(roomId: string): Promise<RoomReadinessResponse> {
-  const response = await client.v1.rooms[':roomId'].governance.readiness.$get({
-    param: { roomId },
-    query: {},
-  });
-  return parseResponse(response, roomReadinessResponseSchema);
 }

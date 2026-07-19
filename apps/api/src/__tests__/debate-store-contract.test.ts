@@ -94,6 +94,28 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.getActiveForComment(ctx.targetId))?.debateId).toBe(arena?.debateId);
   });
 
+  it('lists arenas by party and anonymizes the party out (DSAR §19.3)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const party = ctx.challengerUser;
+    if (party === null) return; // party ids are required for this contract
+    const arena = await store.open(makeArena(ctx));
+    expect(arena).not.toBeNull();
+
+    // listByParty finds an arena the user is a party to.
+    const listed = await store.listByParty(party, null, 10);
+    expect(listed.map((r) => r.debateId)).toContain(arena?.debateId);
+
+    // anonymizeParty detaches the party, NULLing the identity link while the
+    // rebuttal text persists (§22.4) — exactly like contribution anonymize.
+    const touched = await store.anonymizeParty(party);
+    expect(touched).toBeGreaterThanOrEqual(1);
+    expect(await store.listByParty(party, null, 10)).toHaveLength(0);
+    const row = await store.getById(arena?.debateId ?? '');
+    expect(row?.challengerUserId).toBeNull();
+    expect(row?.positions.challenger.summary).toBe('wrong');
+  });
+
   it('recordVerdict is STATE-CONDITIONAL: a stale second verdict never clobbers the first or an override', async () => {
     const store = makeStore();
     const ctx = await freshCtx();

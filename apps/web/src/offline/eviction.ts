@@ -15,11 +15,23 @@ import { signalLedger } from './store.js';
 
 const SNAPSHOT_KEY = 'licio:storage-snapshot';
 
+// A fresh id per page load. `acknowledgedRemovalCount()` is an IN-MEMORY counter
+// that resets to 0 each session, but the snapshot persists across sessions — so
+// the acked-removal DELTA is only meaningful when the snapshot was written in
+// THIS session. Stamping the epoch lets the probe tell same-session from a
+// prior-session snapshot and pick the right baseline.
+const SESSION_EPOCH: string =
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}.${Math.trunc(Math.random() * 1e9)}`;
+
 interface StorageSnapshot {
   pending: number;
   ledger: number;
   /** Acked-removal count at snapshot time, to discount legitimate drains. */
   removed: number;
+  /** The session that wrote this snapshot (see SESSION_EPOCH). */
+  epoch: string;
   at: number;
 }
 
@@ -45,6 +57,7 @@ function readSnapshot(): StorageSnapshot | null {
       pending: parsed.pending,
       ledger: parsed.ledger,
       removed: typeof parsed.removed === 'number' ? parsed.removed : 0,
+      epoch: typeof parsed.epoch === 'string' ? parsed.epoch : '',
       at: parsed.at ?? 0,
     };
   } catch {
@@ -68,7 +81,12 @@ async function currentCounts(): Promise<{ pending: number; ledger: number }> {
 /** Snapshot current counts. Call when the app is backgrounded (visibility hidden). */
 export async function snapshotStorage(): Promise<void> {
   const counts = await currentCounts();
-  writeSnapshot({ ...counts, removed: queue.acknowledgedRemovalCount(), at: Date.now() });
+  writeSnapshot({
+    ...counts,
+    removed: queue.acknowledgedRemovalCount(),
+    epoch: SESSION_EPOCH,
+    at: Date.now(),
+  });
 }
 
 async function estimateBytes(): Promise<number | null> {
@@ -93,12 +111,26 @@ export async function probeStorageIntegrity(): Promise<ProbeResult> {
   // A pending-queue drop is eviction ONLY beyond what was legitimately acked-and-
   // removed since the snapshot (a background-sync flush while hidden drains the
   // queue but is not data loss). New enqueues raise the count and never trip this.
-  const removedDelta = Math.max(0, queue.acknowledgedRemovalCount() - snapshot.removed);
+  // The acked counter resets each session, so it only shares a baseline with the
+  // snapshot when the snapshot is from THIS session; across a session boundary
+  // EVERY current-session ack happened after the (prior-session) snapshot, so it
+  // all counts as a legitimate drain (else an early new-session drain reads as
+  // eviction).
+  const ackedThisSession = queue.acknowledgedRemovalCount();
+  const removedDelta =
+    snapshot.epoch === SESSION_EPOCH
+      ? Math.max(0, ackedThisSession - snapshot.removed)
+      : ackedThisSession;
   const lostPending = counts.pending < snapshot.pending - removedDelta;
   const lostLedger = counts.ledger < snapshot.ledger;
   const evicted = lostPending || lostLedger;
   // Re-baseline so a single eviction is not re-reported on the next resume.
-  writeSnapshot({ ...counts, removed: queue.acknowledgedRemovalCount(), at: Date.now() });
+  writeSnapshot({
+    ...counts,
+    removed: queue.acknowledgedRemovalCount(),
+    epoch: SESSION_EPOCH,
+    at: Date.now(),
+  });
   return {
     verdict: evicted ? 'evicted' : 'ok',
     lostPending,

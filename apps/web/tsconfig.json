@@ -18,6 +18,8 @@
       "@licio/lcap/*": ["../../packages/lcap/src/*"],
       "@licio/lcap-p2p": ["../../packages/lcap-p2p/src"],
       "@licio/lcap-p2p/*": ["../../packages/lcap-p2p/src/*"],
+      "@licio/private-p2p": ["../../packages/private-p2p/src"],
+      "@licio/private-p2p/*": ["../../packages/private-p2p/src/*"],
       "api": ["../api/src/app.ts"]
     }
   },
@@ -28,6 +30,7 @@
     { "path": "../../packages/ai-governance" },
     { "path": "../../packages/lcap" },
     { "path": "../../packages/lcap-p2p" },
+    { "path": "../../packages/private-p2p" },
     { "path": "../api" }
   ]
 }

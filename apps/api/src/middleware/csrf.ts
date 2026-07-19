@@ -2,6 +2,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
+import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import { validateSession } from '../identity/sessions.js';
 import { createLogger } from '../lib/logger.js';
 import { getAllowedOrigins } from './cors.js';
 
@@ -240,10 +242,28 @@ function originMismatch(c: { req: { header: (k: string) => string | undefined } 
   return false; // neither header present → not a browser-driven CSRF vector
 }
 
-export function csrfTokenRoute(): MiddlewareHandler {
+export function csrfTokenRoute(
+  resolveIdentity: () => IdentityServices = getIdentityServices,
+): MiddlewareHandler {
   return async (c) => {
     const sessionId = getSessionId(c.req.header('cookie'));
     if (!sessionId) {
+      return c.json({ error: 'No session' }, 401);
+    }
+
+    // Mint a token ONLY for a session that actually exists.  Without this a
+    // forged/expired cookie mints a fresh TTL-bounded store entry per request, so
+    // an attacker cycling ids could grow the token store unbounded (the entries
+    // are worthless to them — they can't ride a real session — but the store
+    // still grows).  A validation-store outage degrades to 503, never an open
+    // mint (fail closed).
+    let valid: boolean;
+    try {
+      valid = (await validateSession(resolveIdentity().sessions, sessionId)) !== null;
+    } catch {
+      return c.json({ error: 'Session validation unavailable' }, 503);
+    }
+    if (!valid) {
       return c.json({ error: 'No session' }, 401);
     }
 
@@ -323,9 +343,4 @@ export function csrfMiddleware(): MiddlewareHandler {
 
     await next();
   };
-}
-
-export function setSessionCookie(sessionId: string): string {
-  const maxAge = 86400;
-  return `__Host-session=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
 }

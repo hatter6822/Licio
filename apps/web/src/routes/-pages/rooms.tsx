@@ -242,15 +242,12 @@ export function RoomDetailBody({
         }
       />
 
-      {room.governance !== null ? (
-        <Link
-          to="/rooms/$roomId/governance"
-          params={{ roomId }}
-          className="text-primary-on-soft text-sm underline"
-        >
-          {t('room.governance.link', 'Room governance')}
-        </Link>
-      ) : null}
+      {/* The governance surface is reached through the compact `governanceButton`
+          in the membership action row above (it opens the modal directly).  A
+          separate `/rooms/:id/governance` text link was removed: it duplicated
+          that button for members and was a silent no-op for non-members (the modal
+          is content-visibility-gated, so the legacy-redirect only changed the URL).
+          The legacy route itself still 301s to `?governance=` for bookmarked URLs. */}
 
       {/* WS-U §24.6/§16.6 — the governance modal (opened by the compact button
           above). Tabs separate the "governed by" transparency view, the steward's

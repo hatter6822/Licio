@@ -70,7 +70,11 @@ export type GovernanceLlmFailureCode =
   | 'refusal'
   | 'truncated'
   | 'invalid_output'
-  | 'quality';
+  | 'quality'
+  // The output-record store faulted AFTER a valid completion — counted toward
+  // the breaker (like the moderation/debate legs) so a record-store outage
+  // trips it instead of spending a full completion on every retry forever.
+  | 'record_failed';
 
 /** Typed failure the GovernanceService catches to fall back deterministically. */
 export class GovernanceLlmError extends Error {
@@ -310,17 +314,27 @@ export function createGovernanceLlmNlProvider(
         });
       }
 
+      // Persist the output record BEFORE marking the breaker healthy: a
+      // record-store fault must count toward the breaker (like the moderation +
+      // debate legs), or a store outage spends a full LLM completion on every
+      // deferred retry with the breaker pinned open. recordSuccess only after.
+      try {
+        await recordAiOutput(services.outputRecords, {
+          modelName: identity.name,
+          modelVersion: identity.version,
+          promptTemplateId: identity.promptTemplateId,
+          config: identity.config,
+          inputRefs: [`room:${request.roomId}`, `proposal:${request.proposal.proposalId}`],
+          outputRef: `lawmaking-summary:${request.roomId}:${request.proposal.proposalId}`,
+          useCaseId: identity.useCaseId,
+          nowIso: new Date(services.now()).toISOString(),
+        });
+      } catch {
+        breaker.recordFailure(services.now());
+        services.metrics.increment('ai.governance.llm.summary.record_failed');
+        throw fail('record_failed', 'output-record store unavailable', meta);
+      }
       breaker.recordSuccess();
-      await recordAiOutput(services.outputRecords, {
-        modelName: identity.name,
-        modelVersion: identity.version,
-        promptTemplateId: identity.promptTemplateId,
-        config: identity.config,
-        inputRefs: [`room:${request.roomId}`, `proposal:${request.proposal.proposalId}`],
-        outputRef: `lawmaking-summary:${request.roomId}:${request.proposal.proposalId}`,
-        useCaseId: identity.useCaseId,
-        nowIso: new Date(services.now()).toISOString(),
-      });
       services.metrics.increment('ai.governance.llm.summary.generated');
       services.log('ai.llm.summary.generated', { ...meta, model_id: settings.modelId });
 

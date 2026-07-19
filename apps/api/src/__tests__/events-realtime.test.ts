@@ -201,4 +201,40 @@ describe('real-time counters (WS-E.3.2)', () => {
     }
     expect(triggered).toEqual([storyId]); // debounced: once, not thrice
   });
+
+  it('picks up a runtime-tuned trigger threshold via readTriggerThreshold (no restart)', async () => {
+    const triggered: string[] = [];
+    let liveThreshold = 1000; // start high — no trigger
+    fixture = freshEventServices();
+    registerDefaultConsumers(fixture.events, {
+      triggerThreshold: liveThreshold,
+      readTriggerThreshold: () => Promise.resolve(liveThreshold),
+      thresholdRefreshMs: 0, // refresh on every event (test)
+      onVolumeTrigger: (itemId) => triggered.push(itemId),
+    });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    for (let i = 0; i < 2; i += 1) {
+      await ingestAttentionEvents(
+        fixture.events,
+        fixture.identity,
+        userId,
+        [attentionEvent(userId, { storyId })],
+        ONLINE_ACCEPTANCE,
+      );
+    }
+    expect(triggered).toEqual([]); // eventCount 2 < 1000
+
+    // An operator lowers the threshold at runtime; the next event picks it up
+    // WITHOUT a restart (previously the boot-captured value would never change).
+    liveThreshold = 2;
+    await ingestAttentionEvents(
+      fixture.events,
+      fixture.identity,
+      userId,
+      [attentionEvent(userId, { storyId })],
+      ONLINE_ACCEPTANCE,
+    );
+    expect(triggered).toEqual([storyId]); // eventCount 3 >= the new threshold 2
+  });
 });

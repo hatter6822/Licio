@@ -88,6 +88,40 @@ describe('WP-1 §12.3 completeJoin (finding 2)', () => {
     );
   });
 
+  it('enforces single-use max_uses across admits (§10.3): a second admit is exhausted', async () => {
+    const mkStore = await storeFactory();
+    const founder = await PrivateRoomSession.create({
+      roomName: 'One-shot Room',
+      roomType: 'global_topic',
+      founderMemberId: 'me',
+      founderDeviceId: 'my-dev',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    const prep = await PrivateRoomSession.prepareJoinRequest({
+      proposedDisplayName: 'Bob',
+      createStorage: mkStore as (roomId: string) => never,
+    });
+    // Default max_uses = 1 (single-use).
+    const { invite, inviteUrl } = await founder.createInvite({
+      inviteePublicKey: prep.inviteePublicKey,
+      expiresAt: FUTURE,
+    });
+    const fragment = inviteUrl.slice(inviteUrl.indexOf('#invite=') + '#invite='.length);
+    const { request } = await prep.complete(fragment);
+
+    // First admit charges the invite (persisted counter → 1).
+    const first = await founder.admitJoinRequest(invite, request);
+    expect(first.verdict.ok).toBe(true);
+
+    // The SAME single-use invite cannot admit again — the counter now reads its
+    // max_uses, so verification fails closed with `exhausted` (before any state
+    // mutation), NOT a fresh success.
+    const second = await founder.admitJoinRequest(invite, request);
+    expect(second.verdict.ok).toBe(false);
+    if (second.verdict.ok) throw new Error('unreachable: expected an exhausted verdict');
+    expect(second.verdict.reason).toBe('exhausted');
+  });
+
   it('removeMember rotates the epoch — the evicted device cannot read post-removal content (§10.9)', async () => {
     const mkStore = await storeFactory();
     const founder = await PrivateRoomSession.create({

@@ -23,5 +23,6 @@ export {
   useI18n,
   useT,
 } from './I18nProvider.js';
+export { LocalizedI18nProvider, resolvePreferredLocale } from './LocalizedI18nProvider.js';
 export { formatMessage, type MessageFormatOptions, type MessageParams } from './message.js';
 export { isPseudoLocale, PSEUDO_LOCALE, pseudoFormat } from './pseudo.js';

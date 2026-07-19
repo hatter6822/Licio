@@ -189,9 +189,11 @@ export function applyBalancing(
       }
       admit(candidate);
     }
-    // Keep the page score-ordered after lens promotion (stable, deterministic).
-    page.sort((a, b) => b.score - a.score || a.itemId.localeCompare(b.itemId));
   }
 
+  // Keep the served page score-ordered on EVERY path (stable, deterministic) —
+  // the graceful-degradation fill and non-lens surfaces skip the lens-promotion
+  // block above, so sorting only there left those pages out of score order.
+  page.sort((a, b) => b.score - a.score || a.itemId.localeCompare(b.itemId));
   return { page, demoted, applications, degraded };
 }

@@ -18,7 +18,7 @@
   </a>
   <img alt="Version" src="https://img.shields.io/github/package-json/v/hatter6822/Licio?label=version&color=blue" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933" />
-  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6.0-3178c6" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-7.0-3178c6" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-informational" />
 </p>
 
@@ -341,7 +341,7 @@ public paths.
 | Workspace | Role | Internal dependencies |
 | --- | --- | --- |
 | `apps/web` | React PWA: routes, design system, offline store, signals, push, comments, rooms, LCAP/private clients | `shared`, `invariants`, `ai-governance`, `lcap`, `lcap-p2p`, `private-p2p` |
-| `apps/api` | Hono BFF: auth, events, ingestion, forum/rooms, ranking, governance, safety, LCAP/rendezvous routes, schedulers | `shared`, `db`, `invariants`, `ranking`, `ai-governance`, `governance`, `lcap`, `lcap-p2p`, `private-p2p` |
+| `apps/api` | Hono BFF: auth, events, ingestion, forum/rooms, ranking, governance, safety, LCAP/rendezvous routes, schedulers | `shared`, `db`, `invariants`, `ranking`, `ai-governance`, `governance`, `lcap`, `lcap-p2p` |
 | `apps/courier` | Capacitor Android courier shell serving the web build without a web fork | none |
 | `packages/shared` | Wire schemas, zod validators, enums, constants, shared types | none |
 | `packages/db` | Drizzle schema, migrations, and database helpers | `shared` |

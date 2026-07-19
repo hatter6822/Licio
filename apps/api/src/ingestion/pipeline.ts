@@ -162,6 +162,11 @@ function retryNotBefore(nowMs: number, attempt: number): string {
   return new Date(nowMs + minutes * 60_000).toISOString();
 }
 
+/** Terminal retry bound: after this many fetch-failure attempts a link is
+ *  treated as permanently unfetchable and degraded to a link-only story rather
+ *  than retried forever (which would drain the bounded hourly retry budget). */
+const MAX_EXTRACTION_ATTEMPTS = 8;
+
 interface PipelineOutputs {
   sourceId: string | null;
   language: string;
@@ -497,6 +502,21 @@ export async function processSubmittedStory(
         config.nearDuplicateThreshold,
         null,
       );
+    }
+    if (attempt >= MAX_EXTRACTION_ATTEMPTS) {
+      // Terminal: stop retrying a permanently-unfetchable link and degrade it to
+      // a link-only story from local submission text (the same finalization as a
+      // robots-disallowed link) so it still enters the feed and never re-enters
+      // the retry budget.
+      await emitLinkOnlyClassified(
+        ingestion,
+        events,
+        story,
+        config,
+        'pipeline.extraction_exhausted',
+      );
+      ingestion.metrics.increment('pipeline.extraction_exhausted');
+      return;
     }
     await ingestion.reviewQueue.insert({
       kind: 'extraction_failure',

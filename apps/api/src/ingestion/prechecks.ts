@@ -97,8 +97,14 @@ export class LocalDenylistUrlSafety implements UrlSafetyProvider {
 
   async check(canonicalDomain: string): Promise<UrlSafetyVerdict> {
     const denied = new Set(this.#domains().map((d) => d.toLowerCase()));
-    const labels = canonicalDomain.toLowerCase().split('.');
-    for (let i = 0; i < labels.length - 1; i += 1) {
+    const normalized = canonicalDomain.toLowerCase();
+    // The exact input domain always matches (a single-label host like `localhost`
+    // has no parent suffix, so the suffix loop below — which stops before the last
+    // label to avoid matching a bare public suffix like `com` — would never see
+    // it). Then match every PARENT suffix except the final label.
+    if (denied.has(normalized)) return 'malicious';
+    const labels = normalized.split('.');
+    for (let i = 1; i < labels.length - 1; i += 1) {
       if (denied.has(labels.slice(i).join('.'))) return 'malicious';
     }
     return 'safe';

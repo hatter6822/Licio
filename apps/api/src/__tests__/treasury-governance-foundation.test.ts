@@ -208,6 +208,8 @@ function buildDeps(overrides: Partial<WsmReadinessDeps> = {}): WsmReadinessDeps 
     models: new InMemoryModelStore(),
     comprehension: new InMemoryComprehensionStore(),
     governanceAudit: new InMemoryGovernanceAuditStore(),
+    // Test actor ref (deterministic, non-reversible-enough for the chain hash).
+    opaqueRef: (id: string) => `ref:${id}`,
     compliance: defaultCompliancePort,
     regionResolver: defaultRegionResolverPort,
     roomMode,
@@ -287,6 +289,33 @@ describe('audit chain (WS-M.4.3c)', () => {
     expect(second.prevHash).toBe(first.integrityHash);
     const verification = await verifyAuditChain(deps, ROOM);
     expect(verification).toMatchObject({ valid: true, chainedEntries: 2 });
+  });
+
+  it('stays verifiable after right-to-erasure NULLs the actor (WS-M.4.3c erasure-safety)', async () => {
+    const deps = buildDeps();
+    await appendChainedAudit(deps, {
+      roomId: ROOM,
+      actionType: 'charter_version_created',
+      actorUserId: STEWARD,
+      details: { version: 1 },
+    });
+    await appendChainedAudit(deps, {
+      roomId: ROOM,
+      actionType: 'law_pack_registered',
+      actorUserId: STEWARD,
+      details: { version: '1.0.0' },
+    });
+    // Right-to-erasure NULLs the DISPLAY actor_user_id on every row.
+    const scrubbed = await deps.governanceAudit.anonymizeActor(STEWARD);
+    expect(scrubbed).toBe(2);
+    // The chain hashes the frozen actor_ref, not the erased id, so it still
+    // verifies — no false tamper alarm (the bug this fix closes).
+    const after = await verifyAuditChain(deps, ROOM);
+    expect(after).toMatchObject({ valid: true, chainedEntries: 2 });
+    for (const entry of await deps.governanceAudit.listChainedByRoom(ROOM)) {
+      expect(entry.actorUserId).toBeNull(); // display attribution erased
+      expect(entry.actorRef).toBeTruthy(); // non-reversible ref survives
+    }
   });
 
   it('hashes are deterministic, tamper-evident, and BIND the attribution (W13)', async () => {

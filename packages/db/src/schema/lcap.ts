@@ -139,8 +139,9 @@ export const lcapBlockProvenance = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.blockCid, t.targetType, t.targetId] }),
-    // The oracle's hot path: resolve a block CID to its targets, then join the takedowns.
-    index('lcap_block_provenance_block_idx').on(t.blockCid),
+    // The oracle's hot path (resolve a block CID to its targets) is served by the
+    // PK's leading `block_cid` column, so no separate block_cid index is needed
+    // (a duplicate was removed).
     // The reverse direction: when a takedown is actioned, find every block it taints.
     index('lcap_block_provenance_target_idx').on(t.targetType, t.targetId),
   ],

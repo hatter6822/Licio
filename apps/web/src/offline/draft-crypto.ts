@@ -92,10 +92,23 @@ async function loadOrCreateKey(): Promise<CryptoKey | null> {
       'encrypt',
       'decrypt',
     ]);
-    await idbRequest(
-      db.transaction(KEY_STORE, 'readwrite').objectStore(KEY_STORE).put({ id: KEY_ID, key }),
-    );
-    return key;
+    // First-run persistence is a check-then-act race across tabs: two tabs both
+    // read no key, both generate, and a `put` (upsert) lets the second overwrite
+    // the first — the losing tab's already-encrypted drafts become permanently
+    // undecryptable after reload. `add` is insert-ONLY: exactly one tab wins the
+    // (id) uniqueness constraint; every other tab's `add` throws, and it re-reads
+    // the winner so all tabs converge on ONE key before encrypting anything.
+    try {
+      await idbRequest(
+        db.transaction(KEY_STORE, 'readwrite').objectStore(KEY_STORE).add({ id: KEY_ID, key }),
+      );
+      return key;
+    } catch {
+      const winner = await idbRequest<StoredKey | undefined>(
+        db.transaction(KEY_STORE, 'readonly').objectStore(KEY_STORE).get(KEY_ID),
+      );
+      return winner?.key instanceof CryptoKey ? winner.key : null;
+    }
   } catch {
     return null;
   } finally {

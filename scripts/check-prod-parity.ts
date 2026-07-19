@@ -386,6 +386,13 @@ export function checkEnvKeys(
 // ---------------------------------------------------------------------------
 
 const PRODUCTION_ADAPTER_FILE = /^(?:drizzle|redis)-[\w-]*\.ts$/;
+// The full set of production-adapter class prefixes (CLAUDE.md store-adapter
+// convention).  S3/Ses/Http/Postgres adapters live in conventionally-NAMED
+// files (object-store-s3.ts, mailer-ses.ts, embeddings.ts, gateway.ts, …) that
+// PRODUCTION_ADAPTER_FILE does not match, so they are scanned class-scoped
+// instead — otherwise their in-memory state would escape the purity gate.
+const PRODUCTION_ADAPTER_CLASS =
+  /^\s*(?:export\s+)?(?:abstract\s+)?class\s+(?:Drizzle|Redis|Postgres|S3|Ses|Http)[A-Z]\w*/;
 /** Long-lived in-memory state inside a production adapter: an in-memory
  *  adapter composed anywhere, or a Map/Set held as a CLASS FIELD (per-call
  *  locals — `const out = new Map(...)` working structures — are fine). */
@@ -401,9 +408,26 @@ export function checkAdapterPurity(
   const issues: string[] = [];
   const usedAllowlist = new Set<number>();
   for (const [file, raw] of files) {
-    if (!PRODUCTION_ADAPTER_FILE.test(basename(file))) continue;
     const source = stripComments(raw);
+    // drizzle-*/redis-* files are production-only (no in-memory classes), so the
+    // whole file is scanned.  Any OTHER file is scanned ONLY inside a production-
+    // adapter class body — a file that co-locates an in-memory adapter with a
+    // production one (e.g. knomosis/gateway.ts) must not have the in-memory
+    // class's legitimate Map/Set fields flagged.
+    const isPrefixFile = PRODUCTION_ADAPTER_FILE.test(basename(file));
+    // Brace-depth tracking scopes the scan to a production-adapter class BODY, so
+    // top-level dev-default factories after the class (`getTokenStore()` →
+    // `new MemoryTokenStore()`) and co-located in-memory classes are not flagged.
+    let depth = 0;
+    let classDepth = -1; // brace depth at which the current production class opened
     for (const [index, line] of source.split('\n').entries()) {
+      const enteringProd = !isPrefixFile && classDepth < 0 && PRODUCTION_ADAPTER_CLASS.test(line);
+      const inRegion = isPrefixFile || classDepth >= 0 || enteringProd;
+      if (enteringProd) classDepth = depth;
+      depth += (line.match(/{/g)?.length ?? 0) - (line.match(/}/g)?.length ?? 0);
+      const wasInRegion = inRegion;
+      if (classDepth >= 0 && depth <= classDepth) classDepth = -1; // class body closed
+      if (!wasInRegion) continue;
       if (!IN_MEMORY_STATE.some((pattern) => pattern.test(line))) continue;
       const allowed = allowlist.findIndex(
         (entry) => file.endsWith(entry.file) && line.includes(entry.needle),

@@ -30,6 +30,7 @@ import {
   usePostDebatePositionMutation,
 } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
+import { AiLabel } from '../ai/index.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
@@ -389,7 +390,15 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
           {arena.confidence !== null ? ` · ${Math.round(arena.confidence * 100)}% confidence` : ''}
         </span>
       </div>
-      {arena.rationale ? <p className="text-sm text-ink">{arena.rationale}</p> : null}
+      {arena.rationale ? (
+        <div className="flex flex-col items-start gap-1">
+          {/* The adjudicator's rationale is an AI-produced artifact (WS-K §24.1)
+              — carry the provenance badge.  A `concession` rationale is the
+              incumbent's own words, not AI, so it carries none. */}
+          {arena.decided_by !== 'concession' ? <AiLabel label="machine-generated" /> : null}
+          <p className="text-sm text-ink">{arena.rationale}</p>
+        </div>
+      ) : null}
       {arena.overridden_by_handle ? (
         <p className="text-sm text-ink-muted">
           Overruled by steward {arena.overridden_by_handle}

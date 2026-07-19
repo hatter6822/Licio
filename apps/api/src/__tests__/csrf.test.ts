@@ -1,13 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { getIdentityServices } from '../identity/services.js';
+import { createSession } from '../identity/sessions.js';
 import {
   getTokenStore,
   RedisTokenStore,
-  setSessionCookie,
   setTokenStore,
   type TokenStore,
 } from '../middleware/csrf.js';
+
+/** Create a REAL session in the singleton (test-mode) identity store and return
+ *  its `__Host-sid` cookie — the CSRF token route now mints only for a session
+ *  that actually exists, so a forged cookie no longer works. */
+async function sessionCookie(): Promise<string> {
+  const { token } = await createSession(getIdentityServices().sessions, {
+    userId: randomUUID(),
+    authMethod: 'email_otp',
+    deviceLabel: 'test',
+    rememberMe: false,
+  });
+  return `__Host-sid=${token}`;
+}
 
 describe('CSRF protection', () => {
   afterEach(async () => {
@@ -47,10 +62,11 @@ describe('CSRF protection', () => {
 
   it('issues and accepts a valid CSRF token', async () => {
     const app = createApp();
+    const cookie = await sessionCookie();
 
     const tokenRes = await app.request('/api/csrf-token', {
       method: 'GET',
-      headers: { Cookie: '__Host-session=session-abc' },
+      headers: { Cookie: cookie },
     });
     expect(tokenRes.status).toBe(200);
     const { token } = (await tokenRes.json()) as { token: string };
@@ -61,7 +77,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-abc',
+        Cookie: cookie,
         'X-CSRF-Token': token,
       },
       body: '{}',
@@ -69,12 +85,27 @@ describe('CSRF protection', () => {
     expect(postRes.status).not.toBe(403);
   });
 
+  it('does NOT mint a token for a forged (non-existent) session', async () => {
+    const app = createApp();
+    const res = await app.request('/api/csrf-token', {
+      method: 'GET',
+      headers: { Cookie: '__Host-sid=forged-never-issued' },
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('No session');
+    // No store entry was created for the forged id (the unbounded-growth fix).
+    expect(await getTokenStore().get('forged-never-issued')).toBeUndefined();
+  });
+
   it('rejects a token from a different session', async () => {
     const app = createApp();
+    const cookieOne = await sessionCookie();
+    const cookieTwo = await sessionCookie();
 
     const tokenRes = await app.request('/api/csrf-token', {
       method: 'GET',
-      headers: { Cookie: '__Host-session=session-one' },
+      headers: { Cookie: cookieOne },
     });
     const { token } = (await tokenRes.json()) as { token: string };
 
@@ -82,7 +113,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-two',
+        Cookie: cookieTwo,
         'X-CSRF-Token': token,
       },
       body: '{}',
@@ -94,17 +125,18 @@ describe('CSRF protection', () => {
 
   it('rejects an invalid CSRF token', async () => {
     const app = createApp();
+    const cookie = await sessionCookie();
 
     await app.request('/api/csrf-token', {
       method: 'GET',
-      headers: { Cookie: '__Host-session=session-xyz' },
+      headers: { Cookie: cookie },
     });
 
     const postRes = await app.request('/api/csrf-token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-xyz',
+        Cookie: cookie,
         'X-CSRF-Token': 'a'.repeat(64),
       },
       body: '{}',
@@ -132,10 +164,11 @@ describe('CSRF protection', () => {
 
   it('consumes tokens after use (single-use)', async () => {
     const app = createApp();
+    const cookie = await sessionCookie();
 
     const tokenRes = await app.request('/api/csrf-token', {
       method: 'GET',
-      headers: { Cookie: '__Host-session=session-reuse' },
+      headers: { Cookie: cookie },
     });
     const { token } = (await tokenRes.json()) as { token: string };
 
@@ -143,7 +176,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-reuse',
+        Cookie: cookie,
         'X-CSRF-Token': token,
       },
       body: '{}',
@@ -153,22 +186,12 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-reuse',
+        Cookie: cookie,
         'X-CSRF-Token': token,
       },
       body: '{}',
     });
     expect(replayRes.status).toBe(403);
-  });
-
-  it('generates the correct session cookie attributes', () => {
-    const cookie = setSessionCookie('abc123');
-    expect(cookie).toContain('__Host-session=abc123');
-    expect(cookie).toContain('HttpOnly');
-    expect(cookie).toContain('Secure');
-    expect(cookie).toContain('SameSite=Strict');
-    expect(cookie).toContain('Path=/');
-    expect(cookie).toContain('Max-Age=');
   });
 
   it('rejects GET to csrf-token without a session', async () => {

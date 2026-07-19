@@ -8,13 +8,14 @@ import { TranslationDisclosure } from './TranslationDisclosure.js';
 describe('TranslationDisclosure (WS-B.2.14)', () => {
   it('labels machine-translated content and toggles to the original (with its lang)', async () => {
     const user = userEvent.setup();
-    render(
+    const { container } = render(
       <TranslationDisclosure original={<span>Texto original en español</span>} originalLang="es">
         <span>Original text in Spanish</span>
       </TranslationDisclosure>,
     );
 
-    expect(screen.getByText('Machine-translated')).toBeInTheDocument();
+    // The SSOT AI-provenance badge (AiLabel) labels the machine translation.
+    expect(container.textContent).toContain('AI-translated');
     expect(screen.getByText('Original text in Spanish')).toBeInTheDocument();
 
     const toggle = screen.getByRole('button', { name: 'View original' });
@@ -32,13 +33,13 @@ describe('TranslationDisclosure (WS-B.2.14)', () => {
   });
 
   it('renders content plainly with no badge when not translated', () => {
-    render(
+    const { container } = render(
       <TranslationDisclosure original={<span>orig</span>} originalLang="es" translated={false}>
         <span>Authored content</span>
       </TranslationDisclosure>,
     );
     expect(screen.getByText('Authored content')).toBeInTheDocument();
-    expect(screen.queryByText('Machine-translated')).toBeNull();
+    expect(container.textContent).not.toContain('AI-translated');
     expect(screen.queryByRole('button', { name: /original/i })).toBeNull();
   });
 

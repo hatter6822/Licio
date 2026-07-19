@@ -152,11 +152,28 @@ describe('create-guard edges', () => {
       },
       new Uint8Array([1]),
     );
+    // An upload already bound to ANOTHER story (its ownerStoryId is set) must not
+    // be re-attachable — re-pointing it here would resurrect taken-down media.
+    const alreadyUsed = await fixture.forum.uploads.put(
+      {
+        uploadId: randomUUID(),
+        ownerUserId: userId,
+        contentType: 'image/png',
+        byteSize: 10,
+        altText: 'x',
+        storageRef: 'uploads/used',
+        metadataStripped: true,
+        scanState: 'clear',
+        ownerStoryId: randomUUID(),
+      },
+      new Uint8Array([1]),
+    );
     for (const [uploadId, code] of [
       [randomUUID(), 'invalid_attachment'],
       [foreign.uploadId, 'invalid_attachment'],
       [pending.uploadId, 'attachment_not_cleared'],
       [altless.uploadId, 'attachment_alt_required'],
+      [alreadyUsed.uploadId, 'attachment_already_used'],
     ] as const) {
       const outcome = await createContribution(bundle(), userId, `ref-${userId}`, {
         ...contributionBody('comment', threadId),

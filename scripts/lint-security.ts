@@ -10,6 +10,15 @@ const SOURCE_DIRS = [
   resolve(ROOT, 'packages/shared/src'),
   resolve(ROOT, 'packages/db/src'),
   resolve(ROOT, 'packages/invariants/src'),
+  // The remaining workspaces are browser- and server-shipped too, so the same
+  // dangerous-sink ban applies (a stray eval/innerHTML in ranking, governance,
+  // or a P2P/crypto package must fail CI exactly as it would in web/api).
+  resolve(ROOT, 'packages/ranking/src'),
+  resolve(ROOT, 'packages/ai-governance/src'),
+  resolve(ROOT, 'packages/governance/src'),
+  resolve(ROOT, 'packages/lcap/src'),
+  resolve(ROOT, 'packages/lcap-p2p/src'),
+  resolve(ROOT, 'packages/private-p2p/src'),
 ];
 
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
@@ -22,6 +31,12 @@ const BLOCKED_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
     message: 'javascript: URL (XSS vector)',
   },
   { pattern: /new\s+Function\s*\(/, message: 'new Function() (equivalent to eval)' },
+  // Bare global eval(). The lookbehind excludes a member/private access
+  // (`.eval(`, `#eval(` — e.g. a Redis Lua wrapper method), a `$eval(` helper,
+  // and word-suffix false positives (`retrieval(`, `medieval(`); only the
+  // dangerous global call is flagged. (CLAUDE.md documents this gate as the
+  // mechanical check for eval() — Biome 2.x cannot block it at the AST level.)
+  { pattern: /(?<![.\w$#])eval\s*\(/, message: 'eval() call' },
 ];
 
 const ALLOWLIST_PATHS = [/trusted-types\.ts$/, /\.test\.ts$/, /\.test\.tsx$/, /\.spec\.ts$/];

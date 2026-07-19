@@ -11,6 +11,7 @@ import type {
   FeedMode,
   LensCreateRequest,
   NotificationPreferences,
+  PaymentIntentState,
   RoomCreateRequest,
   RoomJoinModel,
   RoomPostingPolicy,
@@ -25,6 +26,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
@@ -37,8 +39,10 @@ import {
 } from '../offline/read-through.js';
 import { getSignalProcessor } from '../signals/runtime.js';
 import { selectCollectionUserId, useAuthStore } from '../stores/auth.js';
+import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
+import { fetchFeatureAvailability } from './compliance-api.js';
 import * as governanceApi from './governance-api.js';
 import {
   fetchDeletionStatus,
@@ -67,6 +71,44 @@ export function useFeedQuery(mode?: FeedMode) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     ...cachePolicy.feed,
+  });
+}
+
+/**
+ * Keep the feature-flag store fresh (§21.3 jurisdiction disable). An always-fresh
+ * query (`cachePolicy.featureFlags`: staleTime 0 ⇒ refetch on mount + window focus
+ * + reconnect) re-hydrates the store, so a SERVER-SIDE disable — e.g. a region
+ * turning crypto/governance off mid-session — takes effect WITHOUT a full reload.
+ * Fail-closed: `hydrate` resets to the OFF defaults on any garbled/failed
+ * response. Mount once at the app root (the bootstrap hydration seeds the store
+ * before first paint; this keeps it current thereafter).
+ */
+export function useFeatureFlagsRefresh(): void {
+  const query = useQuery({
+    queryKey: queryKeys.featureFlags(),
+    queryFn: () => api.fetchFeatureFlags(),
+    ...cachePolicy.featureFlags,
+  });
+  const data = query.data;
+  const isError = query.isError;
+  useEffect(() => {
+    if (data !== undefined) useFeatureFlagStore.getState().hydrate(data);
+    // A failed refresh must never leave stale-enabled flags standing: fail closed.
+    else if (isError) useFeatureFlagStore.getState().hydrate(null);
+  }, [data, isError]);
+}
+
+/**
+ * The §17.10 per-feature availability (region + the concrete disable REASON per
+ * crypto/governance feature). Always-fresh (a jurisdiction change or kill switch
+ * must surface promptly), so it powers the wallet page's DisabledFeatureExplanation
+ * with the real reason a feature is off rather than a generic notice.
+ */
+export function useFeatureAvailabilityQuery() {
+  return useQuery({
+    queryKey: queryKeys.featureAvailability(),
+    queryFn: () => fetchFeatureAvailability(),
+    ...cachePolicy.featureFlags,
   });
 }
 
@@ -900,13 +942,29 @@ export function useRoomGrantsQuery(roomId: string, enabled: boolean) {
   });
 }
 
-/** WS-M.3.1 — one payment intent, polled while it is in flight. */
+// Once an intent reaches one of these, the reconcile sweep will never advance it
+// (finalized = done; failed/reverted await a USER retry; abandoned/disputed are
+// dead-ends), so polling it forever just burns requests + battery. A user retry
+// invalidates this query and resumes polling from the fresh in-flight state.
+const PAYMENT_POLL_SETTLED: ReadonlySet<PaymentIntentState> = new Set([
+  'finalized',
+  'failed',
+  'reverted',
+  'abandoned',
+  'disputed',
+]);
+
+/** WS-M.3.1 — one payment intent, polled while it is in flight (stops at rest). */
 export function usePaymentIntentQuery(roomId: string, intentId: string | null) {
   return useQuery({
     queryKey: queryKeys.paymentIntent(roomId, intentId ?? 'none'),
     queryFn: () => treasuryApi.fetchPaymentIntent(roomId, intentId as string),
-    // In-flight intents settle via the reconcile sweep; poll until terminal.
-    refetchInterval: 15_000,
+    // In-flight intents settle via the reconcile sweep; poll UNTIL terminal, then
+    // stop — a constant interval polled settled intents forever (the old bug).
+    refetchInterval: (query) => {
+      const state = query.state.data?.execution_state;
+      return state && PAYMENT_POLL_SETTLED.has(state) ? false : 15_000;
+    },
     enabled: intentId !== null,
   });
 }
