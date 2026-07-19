@@ -4,8 +4,10 @@
 // model's downloadable bundle artifact. This is the accountability core: any
 // member can pull the exact, content-addressed policy bundle and verify its
 // digest offline. Same-origin Blob + object URL; no network beyond the
-// already-fetched payload, and the temporary URL is revoked immediately.
+// already-fetched payload, and the temporary object URL is revoked on the next
+// tick (via the shared saveBlob helper) so the click's download can begin first.
 import type { GovernanceModelDownloadResponse } from '@licio/shared';
+import { saveBlob } from './privacy-api.js';
 
 /**
  * Recursively key-sorted, whitespace-free JSON — byte-identical to the
@@ -31,10 +33,5 @@ export function canonicalBundleBytes(bundle: unknown): string {
 
 export function downloadModelBundle(model: GovernanceModelDownloadResponse): void {
   const blob = new Blob([canonicalBundleBytes(model.bundle)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `governance-model-${model.artifact_digest.slice(0, 12)}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  saveBlob(blob, `governance-model-${model.artifact_digest.slice(0, 12)}.json`);
 }

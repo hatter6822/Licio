@@ -318,9 +318,19 @@ export async function ingestAttentionEvents(
     if (outcome !== 'accepted') events.metrics.increment(`events_attention_rejected_${outcome}`, 1);
   }
   if (accepted > 0) {
+    // Never pair a PSEUDONYMIZED (minimum-privacy, ownerUserId=null) event id
+    // with the real user id — that would re-link the de-linked rows in the log.
+    // Log only the already-linked ids beside the user; count the rest opaquely.
+    const linkableEventIds: string[] = [];
+    let pseudonymousCount = 0;
+    for (const row of toStore) {
+      if (row.ownerUserId === null) pseudonymousCount += 1;
+      else linkableEventIds.push(row.eventId);
+    }
     events.log('events.attention.accepted', {
       user_id: sessionUserId,
-      event_ids: toStore.map((row) => row.eventId),
+      event_ids: linkableEventIds,
+      pseudonymous_count: pseudonymousCount,
       count: accepted,
     });
   }

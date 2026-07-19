@@ -483,7 +483,10 @@ export class DrizzleDebateStore implements DebateStore {
         overrideReason: override.overrideReason,
         updatedAt: new Date(),
       })
-      .where(eq(debateArenasTable.debateId, debateId))
+      // State CAS (mirrors recordVerdict): only override a still-`judged` arena.
+      // Without it, an override racing the finalize sweep (judged→resolved) would
+      // corrupt a finalized outcome — the caller's state check is a TOCTOU.
+      .where(and(eq(debateArenasTable.debateId, debateId), eq(debateArenasTable.state, 'judged')))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
