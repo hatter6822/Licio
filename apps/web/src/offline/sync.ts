@@ -313,7 +313,9 @@ export async function processPendingQueue(options: SyncOptions = {}): Promise<Sy
 export function initForegroundSync(options: SyncOptions = {}): () => void {
   if (typeof window === 'undefined') return () => undefined;
   const flush = (): void => {
-    void processPendingQueue(options);
+    // Fire-and-forget: swallow a rejection (e.g. openDb throwing where IndexedDB
+    // is unavailable) so a background drain never surfaces an unhandled rejection.
+    void processPendingQueue(options).catch(() => undefined);
   };
   const onVisible = (): void => {
     if (document.visibilityState === 'visible') flush();

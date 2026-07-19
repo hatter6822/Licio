@@ -52,6 +52,16 @@ wiring (do them WITH that UI, and add the missing storage/verification seams):
 
 ## Deferred — need an architecture/maintainer decision
 
+- **Law-pack fixture role_class basis** (`governance/law-pack-validate.ts`): the
+  `proposal_tally` fixture harness always tallies over `fixture.eligibleCount`
+  rather than recomputing the role_class basis (signer set) like the runtime. A
+  direct runtime-mirror was attempted and REVERTED — the existing fixture corpus
+  encodes the basis population IN `eligibleCount` (and counts non-signer votes
+  toward quorum), so mirroring the runtime broke passing fixtures
+  (`capped_grant passes majority` → quorum_not_met). A proper fix must reconcile
+  the fixture-authoring convention with the runtime basis (likely a fixture-schema
+  change), not just the harness.
+
 - **`/api/csrf-token` unbounded store writes** (`middleware/csrf.ts`): forged
   session cookies mint TTL-bounded token entries. A clean app-level fix needs
   session validation wired into the base-app CSRF route (layering) or a global
