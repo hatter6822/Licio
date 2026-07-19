@@ -250,14 +250,27 @@ export function registerInvariantConsumers(
   invariants: InvariantPlatformServices,
 ): void {
   // WS-E seam closure: MERI redundancy for the PWAtt redundancy penalty.
+  // Bounded LRU: the cache would otherwise grow one entry per distinct item ever
+  // scored, leaking memory on a long-running server. Map preserves insertion
+  // order, so re-inserting on write keeps hot items recent and evicting the first
+  // key drops the least-recently-refreshed once the cap is exceeded.
+  const REDUNDANCY_CACHE_CAP = 5_000;
   const redundancyCache = new Map<string, number>();
+  const cacheRedundancy = (itemId: string, value: number): void => {
+    redundancyCache.delete(itemId);
+    redundancyCache.set(itemId, value);
+    if (redundancyCache.size > REDUNDANCY_CACHE_CAP) {
+      const oldest = redundancyCache.keys().next().value;
+      if (oldest !== undefined) redundancyCache.delete(oldest);
+    }
+  };
   events.hooks.redundancy = (itemId: string): number => {
     // The hook is synchronous (WS-E contract); serve the latest computed
     // value and refresh the cache in the background.
     const cached = redundancyCache.get(itemId) ?? 0;
     void invariants.meri
       .redundancyOf(itemId)
-      .then((value) => redundancyCache.set(itemId, value))
+      .then((value) => cacheRedundancy(itemId, value))
       .catch(() => {});
     return cached;
   };

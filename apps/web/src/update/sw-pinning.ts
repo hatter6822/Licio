@@ -43,6 +43,12 @@ export type UpdateActivationGate =
 export async function gateServiceWorkerActivation(
   deps: AssertTrustedDeps = {},
 ): Promise<UpdateActivationGate> {
+  // NOTE: unlike the room-manager key-unlock chokepoint (which skips gating when
+  // the channel is unconfigured), the SW-activation gate is INTENTIONALLY strict
+  // — it locks even on an unconfigured channel (see sw-pinning.test.ts "empty
+  // signer set ⇒ lock"), because a malicious SW controls the whole origin. Do
+  // not add an isUpdateChannelConfigured() fast-path here without a maintainer
+  // security decision.
   // Re-verify the PENDING (waiting-worker) bundle — the build a `SKIP_WAITING` would actually
   // activate — NOT the already-running chunk.  Hashing the running build would let a trusted
   // current bundle wave through an unverified update (and falsely lock a valid one once the

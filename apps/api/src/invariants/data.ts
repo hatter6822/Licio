@@ -629,7 +629,13 @@ export async function assembleScoiStructure(
     return { structure: { lenses: [], overlaps: [] }, lensesWithData: 0, lensesTotal: 0 };
   const roomId = thread.roomId;
   const lenses = roomId ? await forum.lenses.listByRoom(roomId) : [];
-  const contributions = await forum.contributions.listByThread(thread.threadId, { limit: 500 });
+  // Only PUBLISHED contributions shape the sheaf: held (under_review) and removed
+  // content is not part of the visible conversation and must not distort the
+  // lens-interpretation vectors or overlaps.
+  const contributions = await forum.contributions.listByThread(thread.threadId, {
+    limit: 500,
+    states: ['published'],
+  });
 
   const identityMap = Array.from({ length: comparisonDim }, (_, r) =>
     Array.from({ length: comparisonDim }, (_, c) => (r === c ? 1 : 0)),
@@ -680,7 +686,12 @@ export async function assembleConversationInteractions(
   forum: ForumServices,
   threadId: string,
 ): Promise<{ interactions: Interaction[]; total: number; resolvable: number }> {
-  const contributions = await forum.contributions.listByThread(threadId, { limit: 1_000 });
+  // Published only: held/removed replies are not part of the conversation flow
+  // the Hodge interaction structure models.
+  const contributions = await forum.contributions.listByThread(threadId, {
+    limit: 1_000,
+    states: ['published'],
+  });
   const authorOf = new Map(contributions.map((c) => [c.contributionId, c.userId]));
   const interactions: Interaction[] = [];
   let resolvable = 0;
