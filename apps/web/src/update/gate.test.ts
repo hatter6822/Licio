@@ -17,6 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { UpdateChannelConfig } from './config.js';
 import {
+  assertPendingBundleTrusted,
   assertPrivateBundleTrusted,
   isPrivateBundleLocked,
   resetPrivateBundleGate,
@@ -189,5 +190,29 @@ describe('assertPrivateBundleTrusted (client gate)', () => {
     });
     expect(verdict.trusted).toBe(false);
     expect(isPrivateBundleLocked()).toBe(true);
+  });
+});
+
+describe('assertPendingBundleTrusted (SW-activation gate)', () => {
+  it('does NOT mutate the RUNNING gate state (an untrusted pending build never locks a valid run)', async () => {
+    // The running bundle verifies as trusted → the surface unlocks.
+    const running = await assertPrivateBundleTrusted({
+      config,
+      fetchImpl: makeFetch(built.manifest),
+      resolveBundleUrl: () => BUNDLE_URL,
+    });
+    expect(running.trusted).toBe(true);
+    expect(isPrivateBundleLocked()).toBe(false);
+
+    // A PENDING (waiting-worker) verification of an UNTRUSTED build returns an
+    // untrusted verdict but must leave the running surface UNLOCKED.
+    const pending = await assertPendingBundleTrusted({
+      config: { trustedSignerPublicKeys: [], logPublicKey: '' },
+      fetchImpl: makeFetch(built.manifest),
+      resolvePendingBundleUrl: () => Promise.resolve(BUNDLE_URL),
+    });
+    expect(pending.trusted).toBe(false);
+    // The load-bearing assertion: the running gate is untouched by the pending check.
+    expect(isPrivateBundleLocked()).toBe(false);
   });
 });

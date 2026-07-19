@@ -19,11 +19,7 @@
 // this gate decides WHETHER that call is allowed for a private-room user.
 
 import type { TrustedBundleVerdict } from '@licio/shared';
-import {
-  type AssertTrustedDeps,
-  assertPendingBundleTrusted,
-  resetPrivateBundleGate,
-} from './gate.js';
+import { type AssertTrustedDeps, assertPendingBundleTrusted } from './gate.js';
 
 /** The decision for a pending SW activation. */
 export type UpdateActivationGate =
@@ -34,8 +30,11 @@ export type UpdateActivationGate =
  * Decide whether a waiting service worker may activate for a user with private
  * rooms.  Re-verifies the (incoming) private-mode bundle against the
  * transparency log; allows activation only on a trusted verdict.  On an
- * untrusted verdict the gate state is already LOCKED (set by
- * `assertPrivateBundleTrusted`) and activation is refused.
+ * untrusted verdict activation is refused and the untrusted verdict is RETURNED
+ * — the caller surfaces the §20.6 lock via `onLocked`.  This gate does NOT
+ * mutate the RUNNING private-bundle gate state: the pending (waiting-worker)
+ * verdict must never lock a still-valid running surface, nor mask its lock (see
+ * the `!pending` publish guard in `gate.ts::runVerification`).
  *
  * For a user WITHOUT private rooms, the caller may skip this gate entirely — the
  * lock only governs the private surface, never public Licio.
@@ -52,8 +51,8 @@ export async function gateServiceWorkerActivation(
   // Re-verify the PENDING (waiting-worker) bundle — the build a `SKIP_WAITING` would actually
   // activate — NOT the already-running chunk.  Hashing the running build would let a trusted
   // current bundle wave through an unverified update (and falsely lock a valid one once the
-  // signed manifest has advanced).
-  resetPrivateBundleGate();
+  // signed manifest has advanced).  The pending verdict is consumed directly here; it is
+  // deliberately NOT published into the running gate state.
   const verdict = await assertPendingBundleTrusted(deps);
   if (verdict.trusted) return { allowActivate: true };
   return { allowActivate: false, verdict };
