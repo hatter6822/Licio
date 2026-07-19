@@ -554,7 +554,7 @@ export class InMemoryDebateStore implements DebateStore {
     // State CAS (mirrors the Drizzle adapter + recordVerdict): only a still-
     // `judged` arena may be overridden, so an override racing the finalize sweep
     // cannot corrupt a finalized outcome.
-    if (!row || row.state !== 'judged') return null;
+    if (row?.state !== 'judged') return null;
     row.verdict = override.verdict;
     row.winner = override.winner;
     row.decidedBy = 'steward';
