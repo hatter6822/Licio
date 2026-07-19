@@ -248,6 +248,22 @@ export interface DebateStore {
    *  ordered by their edit deadline (soonest first): the story-level "active
    *  debates" discovery list.  Bounded by `limit`. */
   listActiveForStory(storyId: string, limit: number): Promise<DebateArenaRecord[]>;
+  /** DSAR (§19.3 / GDPR Art. 15) content half: every arena the user is a PARTY
+   *  to — incumbent (target author) OR challenger (correction author) — so the
+   *  account export carries their rebuttal drafts and the arena outcome that
+   *  concerns them.  Keyset-paginated by `(createdAt, debateId)` ascending, like
+   *  the other exhaustive listings. */
+  listByParty(
+    userId: string,
+    after: { createdAt: string; debateId: string } | null,
+    limit: number,
+  ): Promise<DebateArenaRecord[]>;
+  /** DSAR account-purge: detach `userId` from every arena they touch — NULLing
+   *  the identity link on the incumbent / challenger / steward-override columns
+   *  — while the rebuttal text persists per §22.4 (mirrors contribution
+   *  anonymize: the tombstoned user row IS the anonymization).  Returns the
+   *  number of arenas touched. */
+  anonymizeParty(userId: string): Promise<number>;
   /** DEV/TEST seam (the simulator's fast-forward control): shift an arena's
    *  deadlines so the lifecycle sweeps pick it up immediately.  Production
    *  never calls this. */
@@ -660,6 +676,54 @@ export class InMemoryDebateStore implements DebateStore {
     }
     rows.sort((a, b) => Date.parse(a.editDeadlineAt) - Date.parse(b.editDeadlineAt));
     return rows.slice(0, Math.max(0, limit));
+  }
+
+  async listByParty(
+    userId: string,
+    after: { createdAt: string; debateId: string } | null,
+    limit: number,
+  ): Promise<DebateArenaRecord[]> {
+    const rows = [...this.#rows.values()]
+      .filter((row) => row.incumbentUserId === userId || row.challengerUserId === userId)
+      .sort(
+        (a, b) => a.createdAt.localeCompare(b.createdAt) || a.debateId.localeCompare(b.debateId),
+      );
+    // Keyset: strictly after (createdAt, debateId) — the same lexicographic
+    // tuple order the Drizzle adapter's WHERE encodes.
+    const start =
+      after === null
+        ? 0
+        : rows.findIndex(
+            (row) =>
+              row.createdAt > after.createdAt ||
+              (row.createdAt === after.createdAt && row.debateId > after.debateId),
+          );
+    if (start < 0) return [];
+    return rows.slice(start, start + Math.max(0, limit));
+  }
+
+  async anonymizeParty(userId: string): Promise<number> {
+    let touched = 0;
+    for (const row of this.#rows.values()) {
+      let hit = false;
+      if (row.incumbentUserId === userId) {
+        row.incumbentUserId = null;
+        hit = true;
+      }
+      if (row.challengerUserId === userId) {
+        row.challengerUserId = null;
+        hit = true;
+      }
+      if (row.overriddenByUserId === userId) {
+        row.overriddenByUserId = null;
+        hit = true;
+      }
+      if (hit) {
+        row.updatedAt = this.#iso();
+        touched += 1;
+      }
+    }
+    return touched;
   }
 
   async shiftDeadlines(

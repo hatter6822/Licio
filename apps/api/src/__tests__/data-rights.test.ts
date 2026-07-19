@@ -51,6 +51,45 @@ function activeSubscription(roomId: string, userId: string) {
   };
 }
 
+/** A minimal `open` debate arena; `over` overrides the party ids / positions. */
+function openArena(over: Record<string, unknown> = {}) {
+  const now = new Date().toISOString();
+  return {
+    debateId: randomUUID(),
+    storyId: randomUUID(),
+    threadId: null,
+    roomId: null,
+    targetType: 'comment' as const,
+    targetContributionId: randomUUID(),
+    challengerContributionId: randomUUID(),
+    incumbentUserId: null as string | null,
+    challengerUserId: null as string | null,
+    state: 'open' as const,
+    positions: {
+      incumbent: { summary: '', citations: [], updatedAt: null },
+      challenger: { summary: '', citations: [], updatedAt: null },
+    },
+    editDeadlineAt: now,
+    resolveDueAt: now,
+    lockedAt: null,
+    lockedContent: null,
+    incumbentLastActiveAt: now,
+    challengerLastActiveAt: now,
+    verdict: null,
+    winner: null,
+    decidedBy: null,
+    rationale: null,
+    confidence: null,
+    aiOutputId: null,
+    verdictAt: null,
+    overrideDeadlineAt: null,
+    overriddenByUserId: null as string | null,
+    overrideReason: null,
+    resolvedAt: null,
+    ...over,
+  };
+}
+
 describe('WS-Q.3.5 — data-rights export across tiers', () => {
   it('exports public and room_only stories, each tagged with room_ref + visibility', async () => {
     const userId = randomUUID();
@@ -129,5 +168,82 @@ describe('WS-Q.3.5 — data-rights export across tiers', () => {
     // …and the room_only-thread contribution is tombstoned (author cleared).
     const remaining = await fixture.forum.contributions.listByUser(userId, null, 100);
     expect(remaining).toHaveLength(0);
+  });
+});
+
+describe('WS-T — data-rights covers debate-arena rebuttals', () => {
+  it('exports only the subject OWN side of arenas they are a party to', async () => {
+    const userId = randomUUID();
+    await fixture.forum.debates.open(
+      openArena({
+        challengerUserId: userId,
+        incumbentUserId: randomUUID(),
+        positions: {
+          incumbent: { summary: 'the opposing side text', citations: [], updatedAt: null },
+          challenger: {
+            summary: 'My sourced rebuttal draft.',
+            citations: [],
+            updatedAt: '2026-07-01T00:00:00.000Z',
+          },
+        },
+      }),
+    );
+
+    const archive = await exportUserContent(fixture.ingestion, fixture.forum, userId);
+    const debates = archive.filter((e) => e['kind'] === 'debate');
+    expect(debates).toHaveLength(1);
+    expect(debates[0]).toMatchObject({
+      role: 'challenger',
+      rebuttal: 'My sourced rebuttal draft.',
+      rebuttal_updated_at: '2026-07-01T00:00:00.000Z',
+    });
+    // The OPPOSING side's text is another person's data — it must not leak.
+    expect(JSON.stringify(debates[0])).not.toContain('the opposing side text');
+  });
+
+  it('anonymize detaches the subject from every arena role (party + steward override)', async () => {
+    const userId = randomUUID();
+    // The subject as a challenger party…
+    await fixture.forum.debates.open(
+      openArena({ challengerUserId: userId, incumbentUserId: randomUUID() }),
+    );
+    // …and as the steward who overrode a separate, judged arena.
+    const overridden = openArena({
+      state: 'judged',
+      incumbentUserId: randomUUID(),
+      challengerUserId: randomUUID(),
+      overriddenByUserId: userId,
+    });
+    await fixture.forum.debates.open(overridden);
+
+    await anonymizeUserContent(fixture.forum, userId);
+
+    // No arena still lists the subject as a party…
+    expect(await fixture.forum.debates.listByParty(userId, null, 100)).toHaveLength(0);
+    // …and the steward-override identity link is cleared too.
+    const row = await fixture.forum.debates.getById(overridden.debateId);
+    expect(row?.overriddenByUserId).toBeNull();
+  });
+
+  it('listByParty keyset-paginates a party across pages', async () => {
+    const userId = randomUUID();
+    for (let i = 0; i < 3; i += 1) {
+      await fixture.forum.debates.open(
+        openArena({ incumbentUserId: userId, challengerUserId: randomUUID() }),
+      );
+    }
+    const first = await fixture.forum.debates.listByParty(userId, null, 2);
+    expect(first).toHaveLength(2);
+    const lastRow = first[first.length - 1];
+    if (lastRow === undefined) throw new Error('expected a first-page row');
+    const next = await fixture.forum.debates.listByParty(
+      userId,
+      { createdAt: lastRow.createdAt, debateId: lastRow.debateId },
+      2,
+    );
+    expect(next).toHaveLength(1);
+    // No overlap between pages.
+    const ids = new Set([...first, ...next].map((r) => r.debateId));
+    expect(ids.size).toBe(3);
   });
 });
