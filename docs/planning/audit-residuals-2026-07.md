@@ -82,15 +82,16 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   Per the maintainer, the `Math.max` pin is intentional/conservative; the
   attribution question needs the MFCI spec definition to adjudicate.
 
-## Low — redundancy / feature completeness
+## Low — redundancy / feature completeness (FIXED)
 
-- **Feature-flags jurisdiction-disable** (`stores/feature-flags.ts`,
-  `lib/query-client.ts`): the documented §21.3 jurisdiction-disable actions are
-  never dispatched and the `featureFlags` cache policy/queryKey are unused (no
-  always-fresh flags query). Wire the flags query or remove the dead policy.
-- **Room-governance link** (`routes/-pages/rooms.tsx`): the link routes through the
-  legacy redirect and is a silent no-op for non-members — route it to the room
-  governance deep link (or hide it for non-members).
+- **Feature-flags jurisdiction-disable** — DONE. `useFeatureFlagsRefresh` (mounted
+  at the app root) runs an always-fresh flags query (`cachePolicy.featureFlags`,
+  refetch on focus/reconnect) that re-hydrates the store, so a §21.3 server-side
+  disable takes effect without a reload; it fails closed on error.
+- **Room-governance link** — DONE. The broken standalone `/rooms/:id/governance`
+  text link (a member-duplicate of the governance button, a no-op for non-members)
+  was removed; the compact governance button in the membership row is the single
+  entry point, and the legacy route still redirects for bookmarked URLs.
 
 ## Component wire-ups (SPEC affordances defined but never mounted)
 

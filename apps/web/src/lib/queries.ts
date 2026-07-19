@@ -26,6 +26,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { readNotificationsUsedToday } from '../offline/notification-meter.js';
 import {
   cacheSignalLedger,
@@ -38,6 +39,7 @@ import {
 } from '../offline/read-through.js';
 import { getSignalProcessor } from '../signals/runtime.js';
 import { selectCollectionUserId, useAuthStore } from '../stores/auth.js';
+import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
 import * as governanceApi from './governance-api.js';
@@ -69,6 +71,30 @@ export function useFeedQuery(mode?: FeedMode) {
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     ...cachePolicy.feed,
   });
+}
+
+/**
+ * Keep the feature-flag store fresh (§21.3 jurisdiction disable). An always-fresh
+ * query (`cachePolicy.featureFlags`: staleTime 0 ⇒ refetch on mount + window focus
+ * + reconnect) re-hydrates the store, so a SERVER-SIDE disable — e.g. a region
+ * turning crypto/governance off mid-session — takes effect WITHOUT a full reload.
+ * Fail-closed: `hydrate` resets to the OFF defaults on any garbled/failed
+ * response. Mount once at the app root (the bootstrap hydration seeds the store
+ * before first paint; this keeps it current thereafter).
+ */
+export function useFeatureFlagsRefresh(): void {
+  const query = useQuery({
+    queryKey: queryKeys.featureFlags(),
+    queryFn: () => api.fetchFeatureFlags(),
+    ...cachePolicy.featureFlags,
+  });
+  const data = query.data;
+  const isError = query.isError;
+  useEffect(() => {
+    if (data !== undefined) useFeatureFlagStore.getState().hydrate(data);
+    // A failed refresh must never leave stale-enabled flags standing: fail closed.
+    else if (isError) useFeatureFlagStore.getState().hydrate(null);
+  }, [data, isError]);
 }
 
 export function useStoryQuery(storyId: string) {

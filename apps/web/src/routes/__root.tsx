@@ -16,6 +16,7 @@ import { useToast } from '../components/ui/Toast/index.js';
 import { useOnlineStatus } from '../hooks/useOnlineStatus.js';
 import { useT } from '../i18n/index.js';
 import { EVICTION_EVENT } from '../lib/bootstrap.js';
+import { useFeatureFlagsRefresh } from '../lib/queries.js';
 import { SW_UPDATE_EVENT } from '../lib/sw-register.js';
 import { track } from '../lib/telemetry.js';
 import type { ProbeResult } from '../offline/eviction.js';
@@ -112,6 +113,9 @@ function activeTabId(pathname: string): string {
 function RootLayout(): React.ReactElement {
   const t = useT();
   useRuntimeToasts();
+  // Keep feature flags fresh app-wide so a §21.3 jurisdiction disable
+  // (crypto/governance off for a region) takes effect without a full reload.
+  useFeatureFlagsRefresh();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   // The deepest match's routeId is the route PATTERN (e.g. /stories/$storyId) —
   // never a concrete path. Fall back to a constant, NOT `pathname`, so a transient
