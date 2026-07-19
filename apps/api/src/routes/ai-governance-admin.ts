@@ -142,6 +142,16 @@ const correctionBodySchema = z
   .strict();
 
 const configBodySchema = z.object({ key: z.string().min(1), value: z.unknown() }).strict();
+// The deprecate + review-resolve writes were parsing raw JSON; validate them at
+// the trust boundary too (the file's "every write is validated" contract). Both
+// tolerate an absent body (the fields default), so parse leniently then refine.
+const deprecateBodySchema = z
+  .object({
+    reason: z.string().max(1000).optional(),
+    recommended_replacement: z.string().max(200).optional(),
+  })
+  .strict();
+const reviewResolveBodySchema = z.object({ resolution: z.string().max(1000).optional() }).strict();
 
 export function createAiGovernanceAdminRoutes() {
   return (
@@ -245,10 +255,10 @@ export function createAiGovernanceAdminRoutes() {
       })
       .post('/models/:name/:version/deprecate', requireAiTeam(), async (c) => {
         const ai = getAiGovernanceServices();
-        const body = await c.req.json().catch(() => ({}));
-        const reason = typeof body.reason === 'string' ? body.reason : 'deprecated';
-        const replacement =
-          typeof body.recommended_replacement === 'string' ? body.recommended_replacement : null;
+        const parsed = deprecateBodySchema.safeParse(await c.req.json().catch(() => ({})));
+        if (!parsed.success) return c.json(deny('invalid_body', 'Malformed request body'), 422);
+        const reason = parsed.data.reason ?? 'deprecated';
+        const replacement = parsed.data.recommended_replacement ?? null;
         const result = await deprecateModel(
           buildRegistryDeps(ai),
           c.req.param('name'),
@@ -315,8 +325,9 @@ export function createAiGovernanceAdminRoutes() {
         const ai = getAiGovernanceServices();
         const auth = getAuth(c);
         if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-        const body = await c.req.json().catch(() => ({}));
-        const resolution = typeof body.resolution === 'string' ? body.resolution : 'reviewed';
+        const parsed = reviewResolveBodySchema.safeParse(await c.req.json().catch(() => ({})));
+        if (!parsed.success) return c.json(deny('invalid_body', 'Malformed request body'), 422);
+        const resolution = parsed.data.resolution ?? 'reviewed';
         const item = await ai.reviewQueue.resolve(
           c.req.param('id'),
           resolution,

@@ -5,6 +5,7 @@
 // and is bound to the initiating browser via a `login_attempt_id` (so a code
 // phished/forwarded to another device cannot complete a sign-in there).  Only
 // sha256(code) is ever stored — a store read yields nothing replayable.
+import { z } from 'zod';
 import { generateOneTimeCode, hashOneTimeCode, verifyOneTimeCode } from './codes.js';
 import type { EphemeralStore } from './ephemeral-store.js';
 
@@ -33,6 +34,16 @@ interface OtpRecord {
   /** Absolute expiry (epoch ms) — preserved across re-store so attempts never extend it. */
   expiresAt: number;
 }
+
+/** Trust-boundary guard for records read back from the ephemeral store: a
+ *  corrupted/legacy entry validates to a miss rather than an unsafe `as` cast. */
+const otpRecordSchema = z.object({
+  userId: z.string(),
+  target: z.string(),
+  codeHash: z.string(),
+  attempts: z.number(),
+  expiresAt: z.number(),
+});
 
 export type OtpVerifyResult =
   | { ok: true; userId: string; target: string }
@@ -105,7 +116,8 @@ export async function peekEmailLoginUserId(
   const raw = await store.get(loginKey(attemptId));
   if (!raw) return null;
   try {
-    return (JSON.parse(raw) as OtpRecord).userId;
+    const parsed = otpRecordSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data.userId : null;
   } catch {
     return null;
   }
@@ -150,13 +162,19 @@ async function consumeCode(
   const raw = await store.get(key);
   if (!raw) return { ok: false, reason: 'no_code' };
 
-  let record: OtpRecord;
+  let parsed: OtpRecord;
   try {
-    record = JSON.parse(raw) as OtpRecord;
+    const result = otpRecordSchema.safeParse(JSON.parse(raw));
+    if (!result.success) {
+      await store.delete(key);
+      return { ok: false, reason: 'no_code' };
+    }
+    parsed = result.data;
   } catch {
     await store.delete(key);
     return { ok: false, reason: 'no_code' };
   }
+  const record = parsed;
 
   if (now >= record.expiresAt) {
     await store.delete(key);

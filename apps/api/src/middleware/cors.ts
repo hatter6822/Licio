@@ -6,7 +6,16 @@ export function getAllowedOrigins(): Set<string> {
 
   const corsOrigin = process.env['CORS_ORIGIN'];
   if (corsOrigin) {
-    origins.add(corsOrigin);
+    // Normalize to a bare ORIGIN (scheme://host[:port]) so a configured value
+    // with a trailing slash or path still matches the browser's `Origin` header
+    // (which never carries a path) — otherwise every cross-origin mutation is
+    // silently blocked. Falls back to the trimmed raw value if it is not a valid
+    // absolute URL.
+    try {
+      origins.add(new URL(corsOrigin).origin);
+    } catch {
+      origins.add(corsOrigin.trim());
+    }
   }
 
   if (process.env['NODE_ENV'] === 'development') {
@@ -24,7 +33,7 @@ export function corsMiddleware(): MiddlewareHandler {
     if (origin && allowedOrigins.has(origin)) {
       c.res.headers.set('Access-Control-Allow-Origin', origin);
       c.res.headers.set('Access-Control-Allow-Credentials', 'true');
-      c.res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      c.res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       c.res.headers.set(
         'Access-Control-Allow-Headers',
         'Content-Type, Authorization, X-Request-ID, X-CSRF-Token',
