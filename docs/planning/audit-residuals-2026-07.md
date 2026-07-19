@@ -125,9 +125,28 @@ REMAINING (each needs more than a trivial mount — do as a focused follow-up):
   block time, storing the stable id) so no user-id is leaked on every comment;
   that is a block-model design decision (mutable-handle semantics), NOT a trivial
   mount. Block/mute remain reachable via the safety settings page meanwhile.
-- **SwipeableStoryCard** + `useStoryCardSwipe` (WS-B.2.2 gestures), **SourceReader
-  reader-mode** (its sole caller passes no source HTML — needs the source-HTML
-  fetch), **VoiceDictation** (pick one of the two impls, mount in the composer),
-  **ComposerAffordances** (Attachment/CitationCapture/PrivacyWarning), and the
-  **ScrollArea/SafeArea** primitives + **jargon** plain-language audit — larger UI
-  integrations.
+- **VoiceDictation** — DONE. The canonical `ComposerAffordances/VoiceDictation`
+  is mounted under the brief-mode MarkdownEditor (appends transcript chunks to the
+  body). The legacy root-level `composer/VoiceDictation.tsx` duplicate can be
+  removed in a follow-up (it is exported by no barrel).
+
+REMAINING — each blocked on a server change, a design pass, or a content audit
+(NOT a client mount), so tracked with its closure path:
+- **SourceReader reader-mode**: needs a SERVER change — the story payload carries
+  no extracted source HTML, so reader/readability mode can't be enabled from the
+  client. Closure: expose the ingestion-extracted readability HTML (already
+  produced in WS-F extraction) on the story detail, then pass it to `SourceReader`.
+- **ComposerAffordances (Attachment / CitationCapture / PrivacyWarning)**: the
+  story composer uses dedicated image/video MODES (not inline attachments), and
+  the comment composer (`comments/CommentParts`) already has its own citation
+  capture. Wiring these is a UI-consistency REFACTOR of the existing citation flow
+  + a composer attachment data-model, not a mount. Closure: unify the comment
+  composer onto `CitationCapture` in a dedicated PR with the citation-flow tests.
+- **SwipeableStoryCard** + `useStoryCardSwipe` (WS-B.2.2): a touch-gesture layer
+  over the primary feed card; needs `onSave`/`onOpenContext`/`onMore` handlers
+  wired at `StoryFeedLink` and is gesture-only (not unit-testable via RTL).
+  Closure: a focused PR with Playwright touch-emulation coverage.
+- **ScrollArea / SafeArea** primitives: layout primitives with no single obvious
+  mount — placing them (app shell insets, modal scroll regions) is a design pass.
+- **jargon** plain-language audit: a copy review (find/replace jargon), not a
+  component wire-up.
