@@ -40,6 +40,7 @@ import { MultiSelect, type MultiSelectOption } from '../../ui/MultiSelect/index.
 import { RadioGroup } from '../../ui/RadioGroup/index.js';
 import { Select } from '../../ui/Select/index.js';
 import { TextArea } from '../../ui/TextArea/index.js';
+import { VoiceDictation } from '../ComposerAffordances/index.js';
 import { MarkdownEditor } from '../MarkdownEditor/index.js';
 
 /** The composer modes are exactly the persisted story-draft modes (one SSOT). */
@@ -625,18 +626,26 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       ) : null}
 
       {mode === 'original_brief' ? (
-        <MarkdownEditor
-          label={t('storyComposer.body.label', 'Text')}
-          value={body}
-          onChange={setBody}
-          required
-          maxLength={20_000}
-          helperText={t(
-            'storyComposer.body.help',
-            'Use the toolbar or Markdown syntax to format. Preview shows exactly how it will read.',
-          )}
-          {...(errors['body'] ? { error: errors['body'] } : {})}
-        />
+        <div className="flex flex-col gap-2">
+          <MarkdownEditor
+            label={t('storyComposer.body.label', 'Text')}
+            value={body}
+            onChange={setBody}
+            required
+            maxLength={20_000}
+            helperText={t(
+              'storyComposer.body.help',
+              'Use the toolbar or Markdown syntax to format. Preview shows exactly how it will read.',
+            )}
+            {...(errors['body'] ? { error: errors['body'] } : {})}
+          />
+          {/* WS-B.2.11 — optional voice dictation: appends each finalized
+              transcript chunk to the body. Renders a disabled note (never a
+              silent no-op) where the Web Speech API is unavailable. */}
+          <VoiceDictation
+            onTranscript={(text) => setBody((prev) => (prev.length > 0 ? `${prev} ${text}` : text))}
+          />
+        </div>
       ) : null}
 
       {isMedia ? (
