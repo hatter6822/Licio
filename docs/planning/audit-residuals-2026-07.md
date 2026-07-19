@@ -47,6 +47,24 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   debate-store `listByParty(userId)` query (the store has incumbent/challenger
   user ids but no by-user index yet), then wire it into the export + anonymize.
 
+## Server-side items — now FIXED (kept as a record)
+
+- **Cross-surface replay nonce** (`events/ingest.ts`) — DONE. The replay nonce is
+  sized to `MAX_INGEST_WINDOW_MS` (the 7-day offline ceiling) for EVERY surface,
+  not the per-request policy, closing the online-then-offline replay hole for
+  short-retention users.
+- **Live volume-trigger threshold** (`events/consumers.ts`) — DONE. The realtime
+  consumer refreshes the runtime `trigger_threshold` via a shared
+  `loadTriggerThreshold()` reader (≤ once/min, per-instance), so tuning applies
+  without a restart.
+- **`/api/csrf-token` unbounded writes** (`middleware/csrf.ts`) — DONE. The mint
+  route now validates the session exists (via `validateSession`) before minting,
+  so a forged cookie cannot grow the token store; a validation outage fails closed
+  (503).
+- **ioredis connection consolidation** (`index.ts`) — DONE. One shared command
+  client backs every command consumer; only the two pub/sub subscribers stay
+  dedicated (8 → 3 connections).
+
 ## Deferred — need an architecture/maintainer decision
 
 - **Law-pack fixture role_class basis** (`governance/law-pack-validate.ts`): the
@@ -59,22 +77,6 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   the fixture-authoring convention with the runtime basis (likely a fixture-schema
   change), not just the harness.
 
-- **`/api/csrf-token` unbounded store writes** (`middleware/csrf.ts`): forged
-  session cookies mint TTL-bounded token entries. A clean app-level fix needs
-  session validation wired into the base-app CSRF route (layering) or a global
-  rate limit (would throttle legit high-frequency token fetches); the doctrine
-  delegates connection-level flooding to the edge, and the tokens are worthless to
-  the attacker. Decide the approach.
-- **Live volume-trigger threshold** (`events/consumers.ts`): the runtime-tunable
-  `trigger_threshold` is captured at boot, so live tuning needs a restart. A live
-  fix needs a shared config cache between the pwatt scheduler and the consumer.
-- **Cross-surface replay nonce TTL** (`events/ingest.ts`): the replay nonce TTL is
-  sized to the CURRENT request's policy, so an online-ingested event's short nonce
-  can expire before an offline 7-day-window re-ingest. Size the nonce to the MAX
-  window across surfaces (needs a max-window constant / policy review).
-- **ioredis connection consolidation** (`index.ts`): the prod boot opens ~8
-  connections where one shared client + dedicated subscribers suffice — a boot
-  refactor.
 - **MFCI cheap-intake attribution** (`invariants/services.ts`): the window-global
   concentration statistic is attributed to the flagged item and pinned at `high`.
   Per the maintainer, the `Math.max` pin is intentional/conservative; the

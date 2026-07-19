@@ -359,10 +359,20 @@ if (!env.DATABASE_URL || !env.REDIS_URL) {
 // readiness reflects exactly what THIS boot depends on (an in-memory boot has
 // no external dependencies and is trivially ready).
 const readinessProbes: ReadinessProbe[] = [];
+// ONE shared ioredis COMMAND client for every command consumer (identity, CSRF,
+// events, ingestion/forum limiters, PHI sequences, wallet abuse, compliance
+// stores + pub/sub PUBLISH).  Pub/sub SUBSCRIBERS keep their OWN connections: a
+// connection in subscriber mode cannot issue ordinary commands, so the forum
+// fan-out and compliance-invalidation subscribers below stay dedicated.  Sharing
+// the command client collapses ~6 duplicate connections into one (8 → 3).
+let sharedRedis: import('ioredis').default | undefined;
 if (env.REDIS_URL !== undefined) {
   const IORedis = (await import('ioredis')).default;
   const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
-  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (identity stores)'));
+  redis.on('error', (err) =>
+    logger.warn({ err }, 'Redis connection error (shared command client)'),
+  );
+  sharedRedis = redis;
   readinessProbes.push({ name: 'redis', check: () => redis.ping() });
   identityServices.sessions = new RedisSessionStore(redis);
   identityServices.challenges = new RedisEphemeralStore(redis, 'wachal:');
@@ -481,10 +491,8 @@ const ingestionServices = createInMemoryIngestionServices({
   ...(simulatorFetchDocument !== undefined ? { fetchDocument: simulatorFetchDocument } : {}),
   log: (event, meta) => logger.info(meta, event),
 });
-if (env.REDIS_URL !== undefined) {
-  const IORedis = (await import('ioredis')).default;
-  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
-  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (ingestion limiter)'));
+if (env.REDIS_URL !== undefined && sharedRedis) {
+  const redis = sharedRedis;
   ingestionServices.submissionLimiter = new SubmissionRateLimiter(
     new RedisSlidingWindowStore(redis),
   );
@@ -512,17 +520,18 @@ const forumServices = createInMemoryForumServices({
   ingestion: ingestionServices,
   log: (event, meta) => logger.info(meta, event),
 });
-if (env.REDIS_URL !== undefined) {
+if (env.REDIS_URL !== undefined && sharedRedis) {
   const IORedis = (await import('ioredis')).default;
-  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
-  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum limiter)'));
+  const redis = sharedRedis;
   forumServices.contributionLimiter = new ContributionRateLimiter(
     new RedisSlidingWindowStore(redis),
   );
   // Live fan-out over Redis pub/sub (multi-instance): a comment or debate
   // frame published on one instance reaches SSE subscribers held by every
   // other.  A subscriber-mode connection cannot issue other commands, so the
-  // two broadcasters share one dedicated subscriber alongside the publisher.
+  // two broadcasters share one DEDICATED subscriber alongside the shared
+  // command client (which does the PUBLISH — publishing does not enter
+  // subscriber mode).
   const redisSub = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
   redisSub.on('error', (err) => logger.warn({ err }, 'Redis connection error (forum fan-out)'));
   const fanoutSubscriber = new RefCountedSubscriber(redisSub, (err) =>
@@ -580,11 +589,8 @@ if (db) {
 // Redis, never Postgres, is their durable-enough production home: attention
 // events landing on different instances now append to ONE shared sequence,
 // and the batch holonomy tier sees every instance's sessions.
-if (env.REDIS_URL !== undefined) {
-  const IORedis = (await import('ioredis')).default;
-  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
-  redis.on('error', (err) => logger.warn({ err }, 'Redis connection error (PHI sessions)'));
-  invariantServices.sessions = new RedisSessionTopicSequenceStore(redis);
+if (env.REDIS_URL !== undefined && sharedRedis) {
+  invariantServices.sessions = new RedisSessionTopicSequenceStore(sharedRedis);
 }
 await invariantServices.reloadConfig();
 setInvariantServices(invariantServices);
@@ -1198,13 +1204,8 @@ if (db) {
 // REDIS_URL is set, so the per-endpoint link/unlink limits hold across pods (the
 // default in-memory limiter is per-process and multipliable on a multi-instance
 // deployment).
-if (env.REDIS_URL !== undefined) {
-  const IORedis = (await import('ioredis')).default;
-  const redis = new IORedis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 3 });
-  redis.on('error', (err) =>
-    logger.warn({ err }, 'Redis connection error (knomosis abuse limiter)'),
-  );
-  knomosisServices.abuse = new RedisWalletAbuseLimiter(redis, knomosisServices.now);
+if (env.REDIS_URL !== undefined && sharedRedis) {
+  knomosisServices.abuse = new RedisWalletAbuseLimiter(sharedRedis, knomosisServices.now);
 }
 // WS-L data-rights: fold the financial wallet footprint into the WS-D DSAR
 // export + hard-deletion lifecycle (truncated address only on export; wallets +
@@ -1313,13 +1314,12 @@ const complianceServices = createInMemoryComplianceServices({
 if (db) {
   Object.assign(complianceServices, createDrizzleComplianceStores(db));
 }
-if (env.REDIS_URL !== undefined) {
+if (env.REDIS_URL !== undefined && sharedRedis) {
   const IORedis = (await import('ioredis')).default;
-  const complianceRedis = new IORedis(env.REDIS_URL, {
-    lazyConnect: true,
-    maxRetriesPerRequest: 3,
-  });
-  complianceRedis.on('error', (err) => logger.warn({ err }, 'Redis connection error (compliance)'));
+  // Command traffic (velocity + screening cache + policy-invalidation PUBLISH)
+  // rides the shared command client; only the invalidation SUBSCRIBER below is a
+  // dedicated connection.
+  const complianceRedis = sharedRedis;
   // The invalidation channel needs a DEDICATED subscriber connection.
   const complianceSubscriber = new IORedis(env.REDIS_URL, {
     lazyConnect: true,
