@@ -92,6 +92,11 @@ const ALLOWANCE_STATES: ReadonlySet<PaymentIntentState> = new Set([
   'pending',
   'confirmed',
   'finalized',
+  // A `reorged` deposit can still recover (reorged→pending→finalized) within its
+  // grace window, so it MUST keep consuming the per-user/per-room allowance until
+  // it is abandoned — else its released headroom funds a replacement deposit and,
+  // if the original re-confirms, both are live with no cap recheck (WS-M.3.1d).
+  'reorged',
 ]);
 
 export interface CreateIntentInput {

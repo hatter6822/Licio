@@ -14,6 +14,7 @@
 import { zValidator } from '@hono/zod-validator';
 import {
   decCompare,
+  isValidDecimal,
   PAYMENT_INTENT_TIMED_STATES,
   type PaymentIntentState,
 } from '@licio/governance';
@@ -564,10 +565,13 @@ export function createKnomosisRoutes() {
             // general 5-min window (already enforced by requireStepUp) is not
             // enough.  The amount is only known here in the signed message, so
             // this cannot live in the route-level middleware.  Exact-decimal
-            // comparison (amounts are up to 78-digit minor-unit strings).
+            // comparison (amounts are up to 78-digit minor-unit strings); a
+            // MALFORMED amount is left for `submitAction`'s typed-data validation
+            // to reject (400), never crashing the comparator into a 500.
             const submitAmount = body.typed_data_message['amount'];
             if (
               typeof submitAmount === 'string' &&
+              isValidDecimal(submitAmount) &&
               decCompare(submitAmount, services.config().highValueThresholdMinorUnits) >= 0 &&
               Date.now() - Date.parse(auth.authAssurance.last_verified_at) >
                 HIGH_VALUE_STEP_UP_WINDOW_MS

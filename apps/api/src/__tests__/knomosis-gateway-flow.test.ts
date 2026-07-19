@@ -215,6 +215,34 @@ describe('WS-L.3.1 preflight pipeline', () => {
     if (above.result === 'pass') expect(above.high_value_step_up_required).toBe(true);
   });
 
+  it('handles a malformed amount gracefully — a clean fail, never a 500 (WS-L.3.1)', async () => {
+    const fixture = await freshKnomosisServices({ rooms: { members: new Set() } });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    fixture.knomosis.rooms = {
+      roomGovernance: async () => ({ mode: 'testnet', name: 'Test Room' }),
+      isMember: async () => true,
+      isSteward: async () => false,
+      contentVisibleToUser: async () => true,
+    };
+    const walletAccountId = await linkWalletDirectly(fixture, userId);
+    // The wire schema permits any string amount; a non-decimal must never throw
+    // the exact-decimal comparator (or the typed-data hasher) into a 500.  A real
+    // signer cannot sign a non-numeric amount, so this uses a syntactically-valid
+    // stand-in signature — the request is rejected as a clean fail, not a crash.
+    const message = { ...depositMessage('42'), amount: 'not-a-number' };
+    const req: PreflightRequestInput = {
+      userId,
+      actionType: 'treasury_deposit',
+      roomId: ROOM,
+      deploymentId: DEPLOYMENT,
+      walletAccountId,
+      typedDataMessage: message,
+      signature: `0x${'ab'.repeat(65)}`,
+    };
+    const result = await runPreflight(preflightDeps(fixture), req);
+    expect(result.result).toBe('fail');
+  });
+
   it('blocks a fund transfer from a pending-risk (unassessed) wallet (RISK_BLOCKED)', async () => {
     const fixture = await freshKnomosisServices({ rooms: {} });
     const { userId } = await seedUserWithSession(fixture.identity);

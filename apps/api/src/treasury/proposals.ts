@@ -860,25 +860,32 @@ export async function signProposal(
   // A delegator who already cast their OWN ballot on this proposal keeps it —
   // their weight must not also ride the delegate's signature (double-count).
   const priorSignatures = await deps.proposalSignatures.listByProposal(input.proposalId);
-  const alreadyVoted = new Set(
-    priorSignatures
-      .filter((s) => s.purpose === 'vote' && s.weightSnapshot != null)
-      .map((s) => s.userId),
-  );
+  // The EARLIEST weight-resolved vote instant per voter: a delegate's
+  // `weightSnapshot` was fixed WHEN they voted, so only delegations that existed
+  // by then are inside it.
+  const voteTimeByUser = new Map<string, string>();
+  for (const s of priorSignatures) {
+    if (s.purpose !== 'vote' || s.weightSnapshot == null) continue;
+    const existing = voteTimeByUser.get(s.userId);
+    if (existing === undefined || s.createdAt < existing) voteTimeByUser.set(s.userId, s.createdAt);
+  }
+  const alreadyVoted = new Set(voteTimeByUser.keys());
   // The SYMMETRIC mitigation (WS-M.4.2c-1): the incoming-side guard above stops a
   // delegator-first double-count, but if the DELEGATE signed first, the
   // delegator's weight is already inside the delegate's snapshot — a later DIRECT
   // ballot by the delegator would count that unit twice.  Refuse the direct vote
-  // while an active outgoing delegation's delegate has already voted.
+  // ONLY when the delegation was created at/before the delegate's ballot (so it
+  // was actually in that snapshot); a delegation created AFTER the delegate voted
+  // was never counted, so the delegator's direct vote stands.
   if (model === 'delegated' && input.purpose === 'vote') {
     const outgoing = await deps.delegations.listActiveByDelegator(input.roomId, input.userId);
-    const delegateAlreadyVoted = outgoing.some(
-      (d) =>
-        d.delegateUserId !== null &&
-        (d.scopeKey === 'all' || d.scopeKey === `type:${proposal.proposalType}`) &&
-        alreadyVoted.has(d.delegateUserId),
-    );
-    if (delegateAlreadyVoted) {
+    const delegateSnapshotIncludesMe = outgoing.some((d) => {
+      if (d.delegateUserId === null) return false;
+      if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposal.proposalType}`) return false;
+      const voteTime = voteTimeByUser.get(d.delegateUserId);
+      return voteTime !== undefined && d.createdAt <= voteTime;
+    });
+    if (delegateSnapshotIncludesMe) {
       return tgErr(
         409,
         'delegated_weight_already_cast',

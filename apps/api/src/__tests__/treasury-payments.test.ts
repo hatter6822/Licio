@@ -856,6 +856,17 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
     expect((await deps.intents.getById(id))?.executionState).toBe('abandoned');
   });
 
+  it('a reorged deposit keeps consuming the deposit allowance until abandoned (WS-M.3.1d)', async () => {
+    const deps = buildDeps();
+    const { id } = await driveToReorged(deps); // a USDC-100 deposit, now reorged
+    expect((await deps.intents.getById(id))?.executionState).toBe('reorged');
+    // Because a reorg can recover (reorged→pending→finalized), its amount MUST
+    // still consume the allowance — else the released headroom funds a
+    // replacement deposit and both go live if the original re-confirms.
+    const allowance = await depositAllowance(deps, ROOM, USER, 'USDC');
+    expect(allowance?.userRemaining).toBe('900'); // 1000 − 100 (still consumed)
+  });
+
   it('disputes a finalized intent → disputed, recording the transition on-chain (WS-M.4.3d)', async () => {
     const deps = buildDeps();
     const id = await driveToFinalized(deps);

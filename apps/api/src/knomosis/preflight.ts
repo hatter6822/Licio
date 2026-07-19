@@ -13,7 +13,7 @@
 // (real funds), or an un-allowlisted contract all REJECT.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { decCompare, type TreasuryBounds } from '@licio/governance';
+import { decCompare, isValidDecimal, type TreasuryBounds } from '@licio/governance';
 import {
   featureCellForAction,
   formatMinorUnits,
@@ -499,7 +499,14 @@ export async function runPreflight(
       );
     }
     const cap = bounds.caps.find((c) => c.category === capCategory);
-    if (!cap || amount === undefined || decCompare(amount, cap.perActionMax) > 0) {
+    // A malformed amount (the wire schema permits any string) is rejected here
+    // rather than thrown into a 500 by `decCompare` — it can never be under a cap.
+    if (
+      !cap ||
+      amount === undefined ||
+      !isValidDecimal(amount) ||
+      decCompare(amount, cap.perActionMax) > 0
+    ) {
       return audited(
         fail(
           'caps',
@@ -749,6 +756,7 @@ export async function runPreflight(
   const preflightAmount = message['amount'];
   const highValueStepUpRequired =
     typeof preflightAmount === 'string' &&
+    isValidDecimal(preflightAmount) &&
     decCompare(preflightAmount, config.highValueThresholdMinorUnits) >= 0;
   const response: KnomosisPreflightResponse = {
     result: 'pass',
