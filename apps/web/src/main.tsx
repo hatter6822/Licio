@@ -5,7 +5,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouteAnnouncer } from './components/a11y/index.js';
 import { ToastProvider } from './components/ui/Toast/index.js';
-import { I18nProvider } from './i18n/index.js';
+import { LocalizedI18nProvider } from './i18n/index.js';
 import { startRuntime } from './lib/bootstrap.js';
 import { createAppQueryClient } from './lib/query-client.js';
 import { registerServiceWorker } from './lib/sw-register.js';
@@ -40,13 +40,13 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <I18nProvider>
+      <LocalizedI18nProvider>
         <RouteAnnouncer>
           <ToastProvider>
             <RouterProvider router={router} />
           </ToastProvider>
         </RouteAnnouncer>
-      </I18nProvider>
+      </LocalizedI18nProvider>
     </QueryClientProvider>
   </StrictMode>,
 );
