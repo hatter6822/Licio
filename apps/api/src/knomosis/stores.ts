@@ -238,7 +238,13 @@ export interface GovernanceAuditRecord {
   entryId: string;
   roomId: string;
   actionType: GovernanceAuditActionType;
+  /** Display attribution only — right-to-erasure NULLs this (the chain never
+   *  hashes it, so erasure does not break verification). */
   actorUserId: string | null;
+  /** Non-reversible actor ref (HMAC of the user id).  This is what the WS-M.4.3c
+   *  hash chain covers; it is FROZEN (append-only) and survives erasure so the
+   *  chain verifies forever.  Null on non-chained (WS-L.4) rows and system rows. */
+  actorRef?: string | null;
   actionDetails: Record<string, unknown>;
   simulationMode: boolean;
   createdAt: string;

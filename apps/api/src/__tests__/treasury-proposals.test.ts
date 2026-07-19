@@ -201,6 +201,8 @@ function buildHarness(): TestHarness {
     receipts: new InMemoryKnomosisReceiptStore(),
     wallets: new InMemoryFinancialWalletStore(),
     governanceAudit: new InMemoryGovernanceAuditStore(),
+    // Test actor ref (deterministic, non-reversible-enough for the chain hash).
+    opaqueRef: (id: string) => `ref:${id}`,
     rooms,
     roomMode,
     membership,

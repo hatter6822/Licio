@@ -26,6 +26,11 @@ export interface AuditChainDeps {
   governanceAudit: GovernanceAuditStore;
   now: () => number;
   uuid: () => string;
+  /** Non-reversible actor ref (e.g. `accountRef(masterSecret, id)`).  The chain
+   *  hashes THIS, never the raw actor id, so right-to-erasure (which NULLs the
+   *  display `actorUserId`) leaves the frozen preimage intact and the chain
+   *  verifies forever — symmetric with the WS-N compliance chains (audit.ts). */
+  opaqueRef: (userId: string) => string;
 }
 
 export interface ChainedAuditInput {
@@ -38,23 +43,26 @@ export interface ChainedAuditInput {
   treasuryId?: string | null;
 }
 
-/** The deterministic entry hash (verifiable by anyone with the row).  The
- *  hash covers the ATTRIBUTION fields too — actor + proposal/treasury refs —
- *  or a row could be re-attributed to a different actor/target while the
- *  chain still verified (W13). */
+/** The deterministic entry hash (verifiable by anyone with the row).  The hash
+ *  covers the ATTRIBUTION fields too — the NON-REVERSIBLE actor ref + proposal/
+ *  treasury refs — or a row could be re-attributed to a different actor/target
+ *  while the chain still verified (W13).  It hashes `actorRef` (an opaque HMAC of
+ *  the user id) and NOT the raw `actorUserId`: the latter is a display column that
+ *  right-to-erasure NULLs, which would otherwise permanently break verification
+ *  (a false tamper alarm that also masks real tampering). */
 export function computeEntryHash(
   prevHash: string | null,
   actionType: string,
   details: Record<string, unknown>,
   createdAt: string,
   roomId: string,
-  actorUserId: string | null,
+  actorRef: string | null,
   proposalId: string | null,
   treasuryId: string | null,
 ): string {
   const digest = createHash('sha256')
     .update(
-      `${prevHash ?? 'genesis'}\n${actionType}\n${canonicalize(details)}\n${createdAt}\n${roomId}\n${actorUserId ?? '-'}\n${proposalId ?? '-'}\n${treasuryId ?? '-'}`,
+      `${prevHash ?? 'genesis'}\n${actionType}\n${canonicalize(details)}\n${createdAt}\n${roomId}\n${actorRef ?? '-'}\n${proposalId ?? '-'}\n${treasuryId ?? '-'}`,
       'utf8',
     )
     .digest('hex');
@@ -83,11 +91,15 @@ export async function appendChainedAudit(
       // The version must advance even under a static test clock so two same-ms
       // appends still hash distinctly through their parent linkage.
       const createdAt = new Date(deps.now()).toISOString();
+      // The frozen, non-reversible actor ref the chain hashes; the raw
+      // actorUserId is kept only as an erasure-NULLable display column.
+      const actorRef = input.actorUserId === null ? null : deps.opaqueRef(input.actorUserId);
       return {
         entryId: deps.uuid(),
         roomId: input.roomId,
         actionType: input.actionType,
         actorUserId: input.actorUserId,
+        actorRef,
         actionDetails: input.details,
         simulationMode: false,
         createdAt,
@@ -98,7 +110,7 @@ export async function appendChainedAudit(
           input.details,
           createdAt,
           input.roomId,
-          input.actorUserId,
+          actorRef,
           input.proposalId ?? null,
           input.treasuryId ?? null,
         ),
@@ -130,7 +142,9 @@ export async function verifyAuditChain(
         entry.actionDetails,
         entry.createdAt,
         entry.roomId,
-        entry.actorUserId ?? null,
+        // The frozen actorRef, NOT the erasable actorUserId — so a row whose
+        // actorUserId was NULLed by right-to-erasure still recomputes.
+        entry.actorRef ?? null,
         entry.proposalId ?? null,
         entry.treasuryId ?? null,
       ),

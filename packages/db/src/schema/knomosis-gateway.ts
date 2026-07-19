@@ -495,6 +495,10 @@ export const governanceAuditLogs = knomosisSchema.table(
     roomId: uuid('room_id').notNull(), // soft ref
     actionType: text('action_type').notNull(),
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
+    /** WS-M.4.3c: the NON-REVERSIBLE actor ref the hash chain covers (frozen).
+     *  `actor_user_id` above is display-only and NULLable by right-to-erasure;
+     *  hashing this instead keeps the chain verifiable after erasure. */
+    actorRef: text('actor_ref'),
     actionDetails: jsonb('action_details').notNull(),
     simulationMode: boolean('simulation_mode').notNull(),
     createdAt: tz('created_at').notNull().defaultNow(),
