@@ -105,6 +105,14 @@ export function normalizeUgcLink(rawHref: string): string | null {
 // substring slicing, so inline parsing stays O(n) on the 50KB input bound.
 // `lastIndex` is set immediately before every exec (single-threaded, no
 // awaits between set and exec), so module-level instances are safe.
+//
+// Emphasis interiors are LENGTH-BOUNDED (`{0,EMPHASIS_MAX}?`, not `*?`). An
+// unbounded lazy interior lets a single failed match walk to end-of-line, and
+// `NEXT_SPECIAL_G` retries at EVERY delimiter, so a crafted run of `*`
+// characters was O(n²) (50KB blocked the main thread for ~4.8s). The bound caps
+// per-position work at a constant, restoring true O(n); emphasis never spans
+// more than EMPHASIS_MAX chars, well beyond any real span (matches the 2048-char
+// link/URL caps below).
 const CODE_Y = /`([^`\n]+)`/y;
 // Destination allows ONE level of balanced parens (Wikipedia-style URLs and
 // script-scheme `alert(1)` payloads both parse as destinations — the latter
@@ -116,9 +124,9 @@ const BARE_URL_Y = /https?:\/\/[^\s<>"'`]{1,2048}/iy;
 // followed by another delimiter of the same kind, so `**bold *em***` closes
 // at the outermost run (nested emphasis parses) while `**a** and **b**` still
 // closes at the first candidate.
-const STRONG_Y = /\*\*(\S(?:[^\n]*?\S)?)\*\*(?!\*)/y;
-const EM_STAR_Y = /\*(\S(?:[^*\n]*?\S)?)\*(?!\*)/y;
-const EM_UNDERSCORE_Y = /_(\S(?:[^_\n]*?\S)?)_(?!\w)/y;
+const STRONG_Y = /\*\*(\S(?:[^\n]{0,2048}?\S)?)\*\*(?!\*)/y;
+const EM_STAR_Y = /\*(\S(?:[^*\n]{0,2048}?\S)?)\*(?!\*)/y;
+const EM_UNDERSCORE_Y = /_(\S(?:[^_\n]{0,2048}?\S)?)_(?!\w)/y;
 /** Finds the next character that could begin a structured inline construct. */
 const NEXT_SPECIAL_G = /[`[<*_]|https?:\/\//gi;
 
