@@ -417,6 +417,10 @@ export interface ModerationAppealStore {
     patch: Partial<ModerationAppealRecord>,
   ): Promise<ModerationAppealRecord | null>;
   list(filter: AppealQueueFilter): Promise<ModerationAppealRecord[]>;
+  /** True count of appeals matching the active filter (for the queue's
+   *  filtered_total — the page length under-reports once the queue exceeds one
+   *  page). Mirrors ModerationCaseStore.count. */
+  count(filter: Pick<AppealQueueFilter, 'status' | 'assignedReviewerId'>): Promise<number>;
   countOpenByReviewer(userId: string): Promise<number>;
   clear(): Promise<void>;
 }
@@ -1087,6 +1091,19 @@ export class InMemoryModerationAppealStore implements ModerationAppealStore {
         .slice(0, filter.limit)
         .map((r) => ({ ...r }))
     );
+  }
+  async count(filter: Pick<AppealQueueFilter, 'status' | 'assignedReviewerId'>): Promise<number> {
+    return [...this.#rows.values()].filter((r) => {
+      if (filter.status && !filter.status.includes(r.status)) return false;
+      if (
+        filter.assignedReviewerId !== undefined &&
+        filter.assignedReviewerId !== null &&
+        r.assignedReviewerId !== filter.assignedReviewerId
+      ) {
+        return false;
+      }
+      return true;
+    }).length;
   }
   async countOpenByReviewer(userId: string): Promise<number> {
     return [...this.#rows.values()].filter(
