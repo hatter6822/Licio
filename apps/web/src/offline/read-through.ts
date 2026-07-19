@@ -181,7 +181,9 @@ export async function saveStory(story: StoryDetail): Promise<void> {
       title: story.title,
       source: story.source,
       url: story.url ?? null,
-      roomId: null,
+      // Persist the real room so the savedStories `roomId` index is populated
+      // (it was hardcoded null, leaving the index permanently empty).
+      roomId: story.room_id ?? null,
       savedAt: Date.now(),
     }),
   );
