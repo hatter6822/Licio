@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "sync": "cap sync android",
-    "build:apk": "cap sync android && cd android && ./gradlew --offline assembleDebug || (cd android && ./gradlew assembleDebug)",
+    "build:apk": "cap sync android && cd android && (./gradlew --offline assembleDebug || ./gradlew assembleDebug)",
     "build": "node ./scripts/check-no-fork.mjs && cap sync android && node ./scripts/check-no-fork.mjs --assets && cd android && ./gradlew assembleDebug",
     "test:unit": "cd android && ./gradlew :app:testDebugUnitTest",
     "verify:no-fork": "node ./scripts/check-no-fork.mjs"

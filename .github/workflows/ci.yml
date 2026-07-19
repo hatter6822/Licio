@@ -50,6 +50,9 @@ jobs:
       # half (no build needed); the build job additionally verifies the PRODUCED
       # + signed + logged manifest cryptographically.
       - run: pnpm check:update-channel
+      # WS-L.1.1a — every non-local Knomosis deployment must pin real finality
+      # values (a sentinel commit/manifest is rejected outside `local`).
+      - run: pnpm check:knomosis-pins
 
   typecheck:
     name: Type Check
