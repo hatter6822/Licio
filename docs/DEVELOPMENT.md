@@ -147,7 +147,8 @@ courier is an Android build target (Section 17.9).
 @licio/private-p2p   → shared                     (NEVER db, NEVER lcap; E2EE room plane)
 apps/web             → shared, invariants, ai-governance, lcap, lcap-p2p, private-p2p (NEVER db)
 apps/api             → shared, db, invariants, ranking, ai-governance, governance,
-                       lcap, lcap-p2p, private-p2p
+                       lcap, lcap-p2p        (NOT private-p2p — the Tier-2 cap
+                       verify was removed per PRIV-API-RENDEZVOUS-1)
 apps/courier         → (none — serves the apps/web build unchanged)
 ```
 
@@ -608,9 +609,10 @@ This runs the `web` and `api` dev servers in parallel:
 - **API** (Hono, `tsx watch` — restarts on change): <http://localhost:3001>
 
 On a healthy boot the API logs the startup sequence — service wiring,
-event-pipeline recovery, the thirteen lease-guarded schedulers (privacy,
+event-pipeline recovery, the fourteen lease-guarded schedulers (privacy,
 ingestion, invariants, event pipeline, ranking, debate, moderation,
-AI-governance, governance elections, Knomosis, LCAP, rendezvous, telemetry) —
+AI-governance, governance elections, Knomosis, compliance, LCAP, rendezvous,
+telemetry) —
 and finishes with `Server started`. The PWA renders **demo feed fixtures** immediately,
 so you see real end-to-end pages before submitting anything; content you
 create through the UI then flows through the same production read paths.
@@ -757,8 +759,9 @@ reader-facing surface has something meaningful to render:
 - A non-empty moderation queue and a WS-J report case so steward/admin review
   surfaces render real queue, review-panel, action-palette, and audit-log data
   on first boot — plus one ROLE_EVIDENCE showcase decision (a citation marked
-  as a primary source), so the console's Evidence tab and its
-  recent-decisions trail render real reviewed metadata.
+  as a primary source), so the console's Sources tab (the ROLE_EVIDENCE surface
+  presents as "Sources" — sourcing is comment-centric) and its recent-decisions
+  trail render real reviewed metadata.
 
 When using Postgres-backed dev data, the seed is transactional and idempotent.
 If you need to discard old seeded data completely, reset the local stack with
