@@ -38,6 +38,7 @@ export const queryKeys = {
   signalLedger: () => ['signal-ledger'] as const,
   savedStories: () => ['saved-stories'] as const,
   featureFlags: () => ['feature-flags'] as const,
+  featureAvailability: () => ['feature-availability'] as const,
   notificationPreferences: () => ['notification-preferences'] as const,
   notificationBudget: () => ['notification-budget'] as const,
   authSessions: () => ['auth-sessions'] as const,

@@ -42,6 +42,7 @@ import { selectCollectionUserId, useAuthStore } from '../stores/auth.js';
 import { useFeatureFlagStore } from '../stores/feature-flags.js';
 import * as api from './api.js';
 import { fetchCredentials, fetchSecurityActivity, fetchSessions } from './auth-api.js';
+import { fetchFeatureAvailability } from './compliance-api.js';
 import * as governanceApi from './governance-api.js';
 import {
   fetchDeletionStatus,
@@ -95,6 +96,20 @@ export function useFeatureFlagsRefresh(): void {
     // A failed refresh must never leave stale-enabled flags standing: fail closed.
     else if (isError) useFeatureFlagStore.getState().hydrate(null);
   }, [data, isError]);
+}
+
+/**
+ * The §17.10 per-feature availability (region + the concrete disable REASON per
+ * crypto/governance feature). Always-fresh (a jurisdiction change or kill switch
+ * must surface promptly), so it powers the wallet page's DisabledFeatureExplanation
+ * with the real reason a feature is off rather than a generic notice.
+ */
+export function useFeatureAvailabilityQuery() {
+  return useQuery({
+    queryKey: queryKeys.featureAvailability(),
+    queryFn: () => fetchFeatureAvailability(),
+    ...cachePolicy.featureFlags,
+  });
 }
 
 export function useStoryQuery(storyId: string) {
