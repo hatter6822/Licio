@@ -25,6 +25,7 @@ import {
   spacingScale,
   touchTarget,
   typeScale,
+  zIndexScale,
 } from './tokens.js';
 
 /**
@@ -124,12 +125,11 @@ function scaleVars(indent: string): string {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
   }
 
-  lines.push(`${indent}--licio-z-base: 0;`);
-  lines.push(`${indent}--licio-z-dropdown: 100;`);
-  lines.push(`${indent}--licio-z-sticky: 200;`);
-  lines.push(`${indent}--licio-z-overlay: 300;`);
-  lines.push(`${indent}--licio-z-modal: 400;`);
-  lines.push(`${indent}--licio-z-toast: 500;`);
+  // Derived from the zIndexScale SSOT (never hardcoded) so the stacking scale
+  // and its CSS variables can never drift (WS-B.1.1c).
+  for (const [key, value] of Object.entries(zIndexScale)) {
+    lines.push(`${indent}--licio-z-${key}: ${value};`);
+  }
 
   lines.push(`${indent}/* Motion (WS-B.1.1d) */`);
   for (const [key, value] of Object.entries(motionDurations)) {
