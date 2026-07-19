@@ -324,8 +324,3 @@ export function csrfMiddleware(): MiddlewareHandler {
     await next();
   };
 }
-
-export function setSessionCookie(sessionId: string): string {
-  const maxAge = 86400;
-  return `__Host-session=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
-}

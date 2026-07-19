@@ -683,8 +683,9 @@ export function createV1Routes() {
 
       // --- Telemetry / RUM ingest (WS-C observability; CSRF-exempt beacon) ---
       // CSRF-exempt + unauthenticated (sendBeacon), so it carries its own DoS
-      // bounds like the CSP-report endpoint: a per-IP rate limit and a small body
-      // cap, in addition to the ≤100-event schema bound.
+      // bounds like the CSP-report endpoint: a GLOBAL fixed-window rate limit
+      // (§19.1 forbids per-IP state — this budget is identity-free) and a small
+      // body cap, in addition to the ≤100-event schema bound.
       .post(
         '/telemetry',
         rateLimit({ limit: 120, windowMs: 60_000 }),

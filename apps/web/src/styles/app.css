@@ -68,6 +68,17 @@
 .ugc-body a:hover {
   text-decoration-thickness: 2px;
 }
+/* Compact UGC typography (WS-G.4.2b) for nested/inline contexts (e.g. a comment
+ * preview): smaller text, tighter leading, and reduced block spacing so a nested
+ * body reads denser than a top-level post. The `compact` prop set the class but
+ * no rule existed, so it was a no-op. */
+.ugc-body-compact {
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+.ugc-body-compact :where(p, ul, ol, blockquote, pre, h1, h2, h3) {
+  margin-block: 0.5em;
+}
 
 /* ===================================================================== *
  * Named z-index utilities — the z-index scale is the ONLY source of

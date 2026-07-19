@@ -4,7 +4,6 @@ import { createApp } from '../app.js';
 import {
   getTokenStore,
   RedisTokenStore,
-  setSessionCookie,
   setTokenStore,
   type TokenStore,
 } from '../middleware/csrf.js';
@@ -159,16 +158,6 @@ describe('CSRF protection', () => {
       body: '{}',
     });
     expect(replayRes.status).toBe(403);
-  });
-
-  it('generates the correct session cookie attributes', () => {
-    const cookie = setSessionCookie('abc123');
-    expect(cookie).toContain('__Host-session=abc123');
-    expect(cookie).toContain('HttpOnly');
-    expect(cookie).toContain('Secure');
-    expect(cookie).toContain('SameSite=Strict');
-    expect(cookie).toContain('Path=/');
-    expect(cookie).toContain('Max-Age=');
   });
 
   it('rejects GET to csrf-token without a session', async () => {
