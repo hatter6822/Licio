@@ -20,12 +20,15 @@ export const PRIVATE_P2P_DB_NAME = 'licio_private_p2p';
  *  `blocks` store: CID-addressed §13.6 attachment manifest + media-chunk ciphertext,
  *  fetched lazily over the §15.7 block exchange.  v4 adds `cap_secrets`: the Tier-2
  *  rendezvous-cap `nid` + issuer seed — device-local secrets held at the SAME trust
- *  boundary as the room epoch keys (off origin-wide localStorage). */
-export const PRIVATE_P2P_DB_VERSION = 4;
+ *  boundary as the room epoch keys (off origin-wide localStorage).  v5 adds
+ *  `invite_uses`: the admin-device-local per-invite acceptance counter that makes
+ *  §10.3 `max_uses` (incl. single-use) actually enforceable across admits. */
+export const PRIVATE_P2P_DB_VERSION = 5;
 const ENVELOPE_STORE = 'envelopes';
 export const ROOM_SESSION_STORE = 'room_sessions';
 const BLOCK_STORE = 'blocks';
 const CAP_SECRET_STORE = 'cap_secrets';
+const INVITE_USES_STORE = 'invite_uses';
 const ROOM_INDEX = 'by_room';
 
 interface StoredRow {
@@ -44,6 +47,12 @@ interface StoredCapSecretRow {
   readonly roomId: string;
   readonly field: string;
   readonly bytes: Uint8Array;
+}
+
+interface StoredInviteUseRow {
+  readonly roomId: string;
+  readonly inviteId: string;
+  readonly uses: number;
 }
 
 export function promisify<T>(request: IDBRequest<T>): Promise<T> {
@@ -88,6 +97,11 @@ export function openPrivateP2pDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(CAP_SECRET_STORE)) {
         // One row per (roomId, field) — the Tier-2 cap `nid` + issuer seed.
         db.createObjectStore(CAP_SECRET_STORE, { keyPath: ['roomId', 'field'] });
+      }
+      if (!db.objectStoreNames.contains(INVITE_USES_STORE)) {
+        // One row per (roomId, inviteId) — the admin-device-local acceptance
+        // counter that enforces the invite's §10.3 `max_uses` budget.
+        db.createObjectStore(INVITE_USES_STORE, { keyPath: ['roomId', 'inviteId'] });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -205,6 +219,60 @@ export class IndexedDbPrivateRoomStorage implements PrivateRoomStorage {
       const tx = db.transaction(CAP_SECRET_STORE, 'readwrite');
       const row: StoredCapSecretRow = { roomId: this.roomId, field, bytes };
       tx.objectStore(CAP_SECRET_STORE).put(row);
+      await txDone(tx);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** How many joins this invite has already been charged for on this admin device
+   *  (0 if never used) — the base for the §10.3 `max_uses` budget check. */
+  async getInviteUses(inviteId: string): Promise<number> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(INVITE_USES_STORE, 'readonly');
+      const row = (await promisify(
+        tx.objectStore(INVITE_USES_STORE).get([this.roomId, inviteId]),
+      )) as StoredInviteUseRow | undefined;
+      return row?.uses ?? 0;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Charge one accepted join against this invite and return the NEW total.  The
+   *  read-modify-write runs in ONE readwrite transaction so concurrent admits
+   *  cannot double-spend a single-use invite (admits are also op-lock-serialized). */
+  async incrementInviteUses(inviteId: string): Promise<number> {
+    const db = await openPrivateP2pDb();
+    try {
+      const tx = db.transaction(INVITE_USES_STORE, 'readwrite');
+      const store = tx.objectStore(INVITE_USES_STORE);
+      const existing = (await promisify(store.get([this.roomId, inviteId]))) as
+        | StoredInviteUseRow
+        | undefined;
+      const uses = (existing?.uses ?? 0) + 1;
+      store.put({ roomId: this.roomId, inviteId, uses } satisfies StoredInviteUseRow);
+      await txDone(tx);
+      return uses;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Purge EVERY row this adapter owns for its room — envelopes, blocks, cap
+   *  secrets, and invite-use counters — in one atomic transaction.  Called from
+   *  `leave()` so forgetting a room leaves no orphaned ciphertext/media/secrets
+   *  behind.  Every store is compound-keyed `[roomId, …]`, so a single
+   *  `[roomId] … [roomId, []]` range covers all of a room's rows (the empty array
+   *  sorts after any scalar sub-key in IndexedDB key order). */
+  async deleteAllForRoom(): Promise<void> {
+    const db = await openPrivateP2pDb();
+    try {
+      const stores = [ENVELOPE_STORE, BLOCK_STORE, CAP_SECRET_STORE, INVITE_USES_STORE];
+      const tx = db.transaction(stores, 'readwrite');
+      const range = IDBKeyRange.bound([this.roomId], [this.roomId, []]);
+      for (const name of stores) tx.objectStore(name).delete(range);
       await txDone(tx);
     } finally {
       db.close();

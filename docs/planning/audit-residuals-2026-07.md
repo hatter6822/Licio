@@ -13,27 +13,24 @@ href is a validated same-origin path), `ranking/service` topic slug→UUID (the
 resolution IS applied), and `DrizzleStoryStore.update` `updated_at` (it is
 bumped). They need no action.
 
-## WS-S Private-P2P plane — feature-completion (not reachable-code bugs)
+## WS-S Private-P2P plane — feature-completion
 
-The E2EE private-rooms plane is partially wired: the engine/session methods exist
-but the private-rooms UI that drives them is not yet mounted, so several methods
-have no reachable caller. These are feature-completion items for the WS-S UI
-wiring (do them WITH that UI, and add the missing storage/verification seams):
+All four items below are now FIXED (see the branch history). Kept here as a record:
 
-- **Invite `max_uses` enforcement** (`private-p2p/room-manager.ts` admitJoinRequest):
-  the API forwards `usesSoFar` to `verifyJoinRequest`, but nothing tracks/persists
-  per-invite use counts, so single-use invites verify fresh forever once a caller
-  exists. Needs a persisted invite-use counter fed to `admitJoinRequest`.
-- **`leave()` cleanup** (`room-manager.ts` leave): deletes only the session row,
-  orphaning the room's envelopes, media blocks, and Tier-2 cap secrets. Add a
-  `deleteAllForRoom()` purge to `IndexedDbPrivateRoomStorage` (cursor the
-  ENVELOPE_STORE by_room index + BLOCK_STORE by roomId) + a cap-secret purge, and
-  call them from `leave()`.
-- **sync-session dial/close race** (`private-p2p/sync-session.ts` maintainConnection):
-  a live session can leak when `close()` races an in-flight dial. Track the
-  in-flight dial and abort/close it on teardown.
-- **Pending-bundle verdict vs running-bundle gate state** (`update/gate.ts`): verify
-  the pending-bundle verdict is not published into the RUNNING-bundle gate state.
+- **Invite `max_uses` enforcement** — DONE. `IndexedDbPrivateRoomStorage` gained a
+  v5 `invite_uses` store + `getInviteUses`/`incrementInviteUses`;
+  `admitJoinRequestImpl` reads the persisted count into `verifyJoinRequest` and
+  charges one use on success, so a single-use invite is `exhausted` on re-admit.
+- **`leave()` cleanup** — DONE. `deleteAllForRoom()` atomically purges every
+  compound-keyed store (envelopes, blocks, cap secrets, invite counters) for the
+  room in one transaction; `leave()` calls it before deleting the session row.
+- **sync-session dial/close race** — DONE. `maintainConnection` re-checks
+  `stopping` after the awaited dial and closes the raced session (mirrors
+  `maintainMesh`), never surfacing it as `connected`.
+- **Pending-bundle verdict vs running-bundle gate state** — DONE. `runVerification`
+  now publishes only RUNNING verdicts (`!pending` guard); the SW-activation caller
+  consumes the returned verdict, and the `resetPrivateBundleGate()` clobber was
+  removed.
 - NOT bugs (intended boundaries, verified): the cross-plane bridge + parseInvite/
   parseJoinRequest dynamic-import `@licio/private-p2p` WITHOUT the §20.6 gate —
   that gate guards KEY UNLOCK (applied at `loadPrivateRoomEngine` →
