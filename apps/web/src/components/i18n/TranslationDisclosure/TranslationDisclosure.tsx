@@ -2,8 +2,8 @@
 import { type ReactNode, useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
+import { AiLabel } from '../../ai/index.js';
 import { Button } from '../../ui/Button/index.js';
-import { Icon } from '../../ui/Icon/index.js';
 
 export interface TranslationDisclosureProps {
   /** The (possibly machine-translated) content shown by default. */
@@ -43,10 +43,10 @@ export function TranslationDisclosure({
   return (
     <div className={cn('flex flex-col gap-2', className)}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1 rounded-full bg-info-soft px-2 py-0.5 text-xs font-medium text-info-on-soft">
-          <Icon name="globe" className="size-3.5" />
-          <span>{t('translation.badge', 'Machine-translated')}</span>
-        </span>
+        {/* The SSOT AI-provenance badge (WS-K §24.1) — a machine-translated
+            artifact carries the same `AI-translated` label as every other AI
+            output, and it is i18n-resolved via the shared `ai.label.*` keys. */}
+        <AiLabel label="AI-translated" />
         <Button
           variant="ghost"
           aria-pressed={showingOriginal}
