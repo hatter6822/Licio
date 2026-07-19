@@ -11,7 +11,9 @@ import { useEffect } from 'react';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { BottomNav, defaultNavItems } from '../components/ui/BottomNav/index.js';
 import { BrandLogo } from '../components/ui/BrandLogo/index.js';
+import { OfflineState } from '../components/ui/OfflineState/index.js';
 import { useToast } from '../components/ui/Toast/index.js';
+import { useOnlineStatus } from '../hooks/useOnlineStatus.js';
 import { useT } from '../i18n/index.js';
 import { EVICTION_EVENT } from '../lib/bootstrap.js';
 import { SW_UPDATE_EVENT } from '../lib/sw-register.js';
@@ -118,6 +120,7 @@ function RootLayout(): React.ReactElement {
     select: (state) => state.matches.at(-1)?.routeId ?? '__unmatched__',
   });
   useNavigationBreadcrumb(routeId);
+  const online = useOnlineStatus();
 
   // The component workbench renders its own AppShell; never double-wrap it.
   if (pathname.startsWith('/styleguide')) {
@@ -148,6 +151,9 @@ function RootLayout(): React.ReactElement {
         />
       }
     >
+      {/* WS-B.2.5: a calm, polite offline banner above the routed content while
+          the device is offline (the cache still serves what it has). */}
+      {!online && <OfflineState className="mb-4" headingLevel={2} />}
       <Outlet />
     </AppShell>
   );
