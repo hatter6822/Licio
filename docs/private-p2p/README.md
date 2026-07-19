@@ -334,6 +334,29 @@ slice is closed on the convergence side:
     the logic; the live 3-peer fan-out is part of the physical-radio field slice).
   - Mounting the grant-delivery + media affordances on the room UI beyond the copy-paste
     `InvitePanel`/`JoinPanel`.
+  - **Reducer contribution-tree parity (WS-S.5.3c).**  `contribution.create` now enforces the
+    same-thread-parent rule (`parent_thread_mismatch`) and the depth ≤ `MAX_CONTRIBUTION_DEPTH`
+    cap (`max_depth_exceeded`) that the WS-G server enforces, computed deterministically by
+    walking the converged `parentContributionId` chain (`reducer/reduce.ts`).  **Deferred (tracked
+    debt):** the `lens-in-room` clause named in `schemas/ops.ts` is NOT yet enforceable — the
+    private-room protocol has no lens op or lens registry state, so a `contribution.create`'s
+    optional `lens_id` cannot be validated against a room lens set.  **Closure target:** model
+    lenses in the private plane (a `lens.create` op + a `lenses` map in `RoomReducerState`, both
+    folded into `roomStateCommitment`) and validate `lens_id` membership in the reducer, mirroring
+    the WS-G.2.2 steward-lens surface.  Until then the reducer accepts any `lens_id`.
+  - **Threshold recovery M-of-N enforcement (WS-S.3.6c).**  `evaluateRecoveryThreshold`
+    (`reducer/recovery-threshold.ts`) is the COMPLETE, determinism-preserving decision function —
+    it counts distinct still-active `recover`-capable admins for a recovery request — but nothing
+    CONSUMES it to gate a re-admit yet.  **Deferred (tracked debt):** the reducer's `applyMemberAdd`
+    has neither the room-configured threshold M nor a linkage from `member.add` to the recovery
+    request whose authorizations it should check, so the §12.6.1 gate is NOT enforced.  **Closure
+    target:** (a) thread the manifest membership policy (`threshold.required`, `threshold.eligible_role`)
+    into the deterministic fold (seed it at genesis / pass the verified manifest into `reduceRoom`) so
+    every peer evaluates the same M; (b) add a recovery linkage to the re-admit op (a
+    `recovery_request_id` on `member.add` or a dedicated re-admit op); (c) reject the re-admit in
+    `applyMemberAdd` unless `evaluateRecoveryThreshold(...).authorized` AND the recovering member
+    matches; (d) widen the counting basis to the `admin` capability when `eligible_role === 'admin'`.
+    Until then WS-S.3.6c is NOT shipped-enforced.
 
 **WS-S.10 — the hardened update channel + WS-O substrate — is shipped:**
 - `packages/shared/src/update/` is the PURE, fail-closed verify-before-unlock core

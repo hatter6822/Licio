@@ -58,14 +58,10 @@ export function compareDisplayOrder(a: ThreadRecord, b: ThreadRecord): number {
   const byCheckpoint = compareOptionalAsc(a.checkpointIndex, b.checkpointIndex);
   if (byCheckpoint !== 0) return byCheckpoint;
 
-  const byClaim = compareOptionalAsc(
-    a.record.created_at_claim_ms,
-    b.record.created_at_claim_ms,
-    true,
-  );
+  const byClaim = compareOptionalAsc(a.record.created_at_claim_ms, b.record.created_at_claim_ms);
   if (byClaim !== 0) return byClaim;
 
-  const byReceipt = compareOptionalAsc(a.receiptMs, b.receiptMs, true);
+  const byReceipt = compareOptionalAsc(a.receiptMs, b.receiptMs);
   if (byReceipt !== 0) return byReceipt;
 
   if (a.recordCid < b.recordCid) return -1;
@@ -74,20 +70,20 @@ export function compareDisplayOrder(a: ThreadRecord, b: ThreadRecord): number {
 }
 
 /**
- * Compare two optional numbers ascending.  A present value sorts before an
- * absent one (a record with a known sequence/checkpoint is canonical), UNLESS
- * `tieOnAbsent` is set — for weak hints (timestamps), two absent values simply
- * tie so the next ladder rung decides.
+ * Compare two optional numbers ascending: the numeric compare when both are
+ * present, else present-before-absent.  This MUST remain a TOTAL order (a
+ * missing value maps to one consistent position) — treating a one-sided value
+ * as a tie and deferring to a later rung would make the comparator
+ * non-transitive (A>B and B>C by CID while A<C by value) and break
+ * `displayOrder`'s deterministic, input-order-independent guarantee.  A weak
+ * hint present on one side thus still breaks the tie; the final `record_cid`
+ * rung is the ultimate deterministic tiebreak below it.
  */
-function compareOptionalAsc(
-  a: number | undefined,
-  b: number | undefined,
-  tieOnAbsent = false,
-): number {
+function compareOptionalAsc(a: number | undefined, b: number | undefined): number {
   if (a !== undefined && b !== undefined) return a - b;
   if (a !== undefined) return -1;
   if (b !== undefined) return 1;
-  return tieOnAbsent ? 0 : 0;
+  return 0;
 }
 
 /**

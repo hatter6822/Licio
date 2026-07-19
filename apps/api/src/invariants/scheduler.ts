@@ -542,8 +542,9 @@ export async function runBatchTier(
  * envelope (TIMEOUT) and ranking proceeds with the feature ABSENT. Health
  * is observed on the same per-invariant recorder as the batch tier.
  * Batch-only invariants answer through their honest degraded default.
- * (WS-I consumes this at the ranking boundary; until then it serves the
- * admin surface and tests.)
+ * (WS-I consumes this at the ranking boundary; the steward-gated
+ * `POST /v1/invariants/admin/realtime-preview` surface and tests exercise it
+ * directly.)
  */
 export async function runRealtimeTier(
   invariants: InvariantPlatformServices,

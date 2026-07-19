@@ -169,18 +169,18 @@ describe('sendWebPush', () => {
     expect(result).toEqual({ ok: true, statusCode: 201, gone: false });
   });
 
-  it.each([
-    'error',
-    'aborted',
-  ] as const)('the guarded transport settles (no crash) when the response emits %s mid-body', async (terminal) => {
-    // A client-registered host that resets after headers emits `%s` on the
-    // RESPONSE — unhandled, that would crash the API during delivery. The
-    // transport must settle to a failed (non-pruning) result instead.
-    const result = await sendWebPush(
-      { endpoint: 'https://push.example/hostname/2', keys: { p256dh: 'x', auth: 'y' } },
-      config(),
-      { requestImpl: fakeGuardedTransport(200, terminal) },
-    );
-    expect(result).toEqual({ ok: false, statusCode: 0, gone: false });
-  });
+  it.each(['error', 'aborted'] as const)(
+    'the guarded transport settles (no crash) when the response emits %s mid-body',
+    async (terminal) => {
+      // A client-registered host that resets after headers emits `%s` on the
+      // RESPONSE — unhandled, that would crash the API during delivery. The
+      // transport must settle to a failed (non-pruning) result instead.
+      const result = await sendWebPush(
+        { endpoint: 'https://push.example/hostname/2', keys: { p256dh: 'x', auth: 'y' } },
+        config(),
+        { requestImpl: fakeGuardedTransport(200, terminal) },
+      );
+      expect(result).toEqual({ ok: false, statusCode: 0, gone: false });
+    },
+  );
 });

@@ -12,7 +12,12 @@
 // incident — WS-L.3.5c — so users can see WHY an action would fail).
 
 import { zValidator } from '@hono/zod-validator';
-import { PAYMENT_INTENT_TIMED_STATES, type PaymentIntentState } from '@licio/governance';
+import {
+  decCompare,
+  isValidDecimal,
+  PAYMENT_INTENT_TIMED_STATES,
+  type PaymentIntentState,
+} from '@licio/governance';
 import {
   ACTION_TYPE_FOR_PAYMENT_TARGET,
   KILL_SWITCH_IDS,
@@ -70,6 +75,12 @@ import { getTreasuryServices, treasuryServicesConfigured } from '../treasury/ser
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
+
+/** WS-L.2.6e — a high-value transfer requires a step-up assertion FRESHER than
+ *  this window (much tighter than the general 5-minute step-up window), forcing
+ *  re-authentication for a large amount even inside the general window. */
+const HIGH_VALUE_STEP_UP_WINDOW_MS = 60_000;
+const STEP_UP_METHODS = ['webauthn', 'email_otp', 'wallet'] as const;
 
 /**
  * A client-named `payment_intent_id` is a CLAIM, not a fact — and it buys the
@@ -549,6 +560,23 @@ export function createKnomosisRoutes() {
                   503,
                 );
               }
+            }
+            // WS-L.2.6e — a HIGH-VALUE amount requires a FRESH step-up: the
+            // general 5-min window (already enforced by requireStepUp) is not
+            // enough.  The amount is only known here in the signed message, so
+            // this cannot live in the route-level middleware.  Exact-decimal
+            // comparison (amounts are up to 78-digit minor-unit strings); a
+            // MALFORMED amount is left for `submitAction`'s typed-data validation
+            // to reject (400), never crashing the comparator into a 500.
+            const submitAmount = body.typed_data_message['amount'];
+            if (
+              typeof submitAmount === 'string' &&
+              isValidDecimal(submitAmount) &&
+              decCompare(submitAmount, services.config().highValueThresholdMinorUnits) >= 0 &&
+              Date.now() - Date.parse(auth.authAssurance.last_verified_at) >
+                HIGH_VALUE_STEP_UP_WINDOW_MS
+            ) {
+              return c.json({ status: 'step_up_required' as const, methods: STEP_UP_METHODS }, 401);
             }
           }
           const subDeps = submissionDeps(services);

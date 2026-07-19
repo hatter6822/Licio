@@ -13,7 +13,7 @@
 // (real funds), or an un-allowlisted contract all REJECT.
 
 import { createHash, randomBytes } from 'node:crypto';
-import { decCompare, type TreasuryBounds } from '@licio/governance';
+import { decCompare, isValidDecimal, type TreasuryBounds } from '@licio/governance';
 import {
   featureCellForAction,
   formatMinorUnits,
@@ -499,7 +499,14 @@ export async function runPreflight(
       );
     }
     const cap = bounds.caps.find((c) => c.category === capCategory);
-    if (!cap || amount === undefined || decCompare(amount, cap.perActionMax) > 0) {
+    // A malformed amount (the wire schema permits any string) is rejected here
+    // rather than thrown into a 500 by `decCompare` — it can never be under a cap.
+    if (
+      !cap ||
+      amount === undefined ||
+      !isValidDecimal(amount) ||
+      decCompare(amount, cap.perActionMax) > 0
+    ) {
       return audited(
         fail(
           'caps',
@@ -742,6 +749,15 @@ export async function runPreflight(
   );
 
   const summary = buildHumanSummary(actionType, room.name, message);
+  // WS-L.2.6e — flag an at/above-threshold amount as requiring a FRESH step-up.
+  // Exact-decimal comparison (amounts are up to 78-digit minor-unit strings, so a
+  // JS numeric/lexicographic compare would be wrong); non-amount actions are never
+  // high-value.  The submit endpoint enforces the fresh assertion server-side.
+  const preflightAmount = message['amount'];
+  const highValueStepUpRequired =
+    typeof preflightAmount === 'string' &&
+    isValidDecimal(preflightAmount) &&
+    decCompare(preflightAmount, config.highValueThresholdMinorUnits) >= 0;
   const response: KnomosisPreflightResponse = {
     result: 'pass',
     action_type: actionType,
@@ -751,6 +767,7 @@ export async function runPreflight(
     typed_data_hash: verified.typedDataHash,
     summary_payload_hash: pairSummaryToPayload(summary, verified.typedDataHash),
     human_summary: summary,
+    high_value_step_up_required: highValueStepUpRequired,
     timestamp: nowIso,
   };
   return audited(response);

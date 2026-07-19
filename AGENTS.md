@@ -120,8 +120,8 @@ pnpm --filter courier test:unit     # courier Layer-1+2 JVM unit tests (pure fra
 every build command; consult it before adding new scripts.
 
 **Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 9.15.4 (pinned
-in `package.json` `packageManager`), TypeScript 7.0.2, Vite 8.0.16,
-Biome 2.5.3.
+in `package.json` `packageManager`), TypeScript 7.0.2, Vite 8.1.5,
+Biome 2.5.4.
 
 ## Pre-commit verification (mandatory)
 
@@ -177,826 +177,106 @@ CI (`.github/workflows/ci.yml`) runs all of the above on every PR.
 
 ## Source layout
 
+A directory-level map for orientation — **per-file purpose lives in each
+file's leading comment block, not duplicated here**.  Directories map to
+workstreams via `docs/planning/00-index.md`; the per-workstream
+`docs/*/README.md` files are the implementation references.
+
 ```
 licio/
-├── package.json                 -- monorepo root (scripts, workspace config)
-├── pnpm-workspace.yaml          -- pnpm workspace definition
-├── tsconfig.json                -- root TypeScript config
-├── tsconfig.base.json           -- base TypeScript config (shared settings)
-├── vitest.config.ts             -- Vitest root run + cross-workspace coverage gate
-├── vitest.shared.ts             -- per-project test settings SSOT (root + per-workspace)
-├── biome.json                   -- Biome linter/formatter (2.5.3)
-├── lefthook.yml                 -- Git hooks
-├── docker-compose.yml           -- local dev services (pgvector-enabled PostgreSQL, Redis;
-│                                   opt-in `llm` profile: loopback-only Ollama runtime)
-├── .nvmrc                       -- Node 22 pin
-├── CLAUDE.md                    -- this file
-├── README.md                    -- project entry point
-├── SECURITY.md                  -- vulnerability disclosure policy
-├── CONTRIBUTING.md              -- contribution guidelines
-├── CODE_OF_CONDUCT.md           -- community standards
+├── package.json, pnpm-workspace.yaml, tsconfig*.json, vitest*.ts,
+│   biome.json, lefthook.yml, docker-compose.yml, .nvmrc    -- root config
+├── CLAUDE.md / AGENTS.md (byte-identical), README.md, SECURITY.md,
+│   CONTRIBUTING.md, CODE_OF_CONDUCT.md                     -- top-level docs
 ├── apps/
-│   ├── web/                     -- React 19 PWA (Vite 8 / Rolldown)
-│   │   ├── vite.config.ts       --   build config, PWA manifest, CSP headers
-│   │   ├── playwright.config.ts --   E2E config (Chromium, Firefox, WebKit)
-│   │   ├── index.html           --   entry HTML (no inline scripts)
-│   │   ├── public/
-│   │   │   ├── sw-push.js       --   push + background-sync + share-target handler
-│   │   │   └── assets/          --   brand lockups: light_/dark_ {192,512}.png
-│   │   │                              (theme-adaptive logo, favicons, PWA icons)
+│   ├── web/                 -- React 19 PWA (Vite 8 / Rolldown).  vite.config.ts
+│   │   │                       owns the PWA manifest + CSP, playwright.config.ts
+│   │   │                       the E2E matrix, public/sw-push.js the service worker
 │   │   └── src/
-│   │       ├── main.tsx                 -- app entry point
-│   │       ├── routeTree.gen.ts         -- auto-generated route tree
-│   │       ├── components/
-│   │       │   ├── ui/                  -- 33 reusable UI primitives (incl. BrandLogo)
-│   │       │   ├── ai/                  -- AiLabel provenance badge (WS-K, machine-generated/
-│   │       │   │                           AI-classified/AI-draft/AI-translated + revisions)
-│   │       │   ├── a11y/                -- RouteAnnouncer, SkipToContent, useSpaFocus
-│   │       │   ├── cognitive/           -- DefinedTerm, ProgressiveDisclosure, jargon
-│   │       │   ├── dev/                 -- DEV-ONLY SimulatorPanel (traffic-simulator control;
-│   │       │   │                           import.meta.env.DEV-gated, tree-shaken in production)
-│   │       │   ├── composer/            -- StoryComposer (author topic picker) + shared affordances (Attachment,
-│   │       │   │                           CitationCapture, PrivacyWarning, VoiceDictation)
-│   │       │   ├── comments/            -- Inline CommentSection + comment composer/media +
-│   │       │   │                           the ONE "view" control (sort: new/old/participation +
-│   │       │   │                           lens READING filter only; button→modal Sheet) (WS-T,
-│   │       │   │                           WS-G.2.2); composer posts the member's lens, not the view
-│   │       │   ├── feed/                -- FeedModeSwitcher, DiminishingReturnsPrompt
-│   │       │   ├── rooms/               -- RoomCreateForm + RoomSettingsForm (+ LensManager,
-│   │       │   │                           WS-G.2.2 steward lens create/list) + RoomLensControl
-│   │       │   │                           (WS-G.2.2 member POSTING-lens button + modal, between
-│   │       │   │                           join + governance; default "Undecided") + RoomMembership
-│   │       │   │                           (WS-Q.5.3c; join/leave ⇒ governance membership; picks
-│   │       │   │                           the posting lens on join)
-│   │       │   ├── story/               -- StoryCard, StorySignals (§5.6 signal
-│   │       │   │                           row: sources count + corrections tally +
-│   │       │   │                           safety chip), DisputeBadge, TopicRepeatsButton,
-│   │       │   │                           WhereInterpretationsDiffer (WS-H), StoryMedia +
-│   │       │   │                           AuthorVisibilityControl + feed-card (WS-Q.5)
-│   │       │   ├── safety/              -- ReportButton/ReportSheet (two-tap report),
-│   │       │   │                           block/mute controls, notice inbox + appeal (WS-J.1)
-│   │       │   ├── moderation/          -- ModerationConsole (queue/review/palette/appeals/
-│   │       │   │                           integrity/sources/audit — the Sources tab is the
-│   │       │   │                           ROLE_EVIDENCE citation-review surface; server-side
-│   │       │   │                           authorized; ?tab= deep-links a section) (WS-J.2)
-│   │       │   ├── ugc/                 -- UgcBody (THE sanctioned UGC sink, WS-G.4.2b)
-│   │       │   │                           + LinkInterstitial (WS-G.4.2c)
-│   │       │   ├── reader/              -- SourceReader + readability worker
-│   │       │   ├── profile/             -- SignalLedger
-│   │       │   ├── governance/          -- WS-U room-governance modal (overview/models/
-│   │       │   │                           settings tabs), GovernedByPanel, steward
-│   │       │   │                           model manager + member ratification voting
-│   │       │   ├── treasury/            -- WS-M tabs: GovernanceModeBadge (7-mode SSOT,
-│   │       │   │                           SR-announced changes), ReadinessChecklist +
-│   │       │   │                           mode transitions, GovernanceLifecyclePanel
-│   │       │   │                           (freeze + audit-chain verify), TreasuryPanel +
-│   │       │   │                           DepositFlow (intent → preview → EIP-712 sign →
-│   │       │   │                           WS-L submit), ProposalsPanel (create/vote/
-│   │       │   │                           challenge/execute)
-│   │       │   ├── wallet/              -- WS-L.2 WalletManager (EIP-6963 + SIWE link) +
-│   │       │   │                           the full-disclosure TransactionPreview card
-│   │       │   ├── compliance/          -- WS-N surfaces: DisabledFeatureExplanation
-│   │       │   │                           (specific, localizable, never "coming soon"),
-│   │       │   │                           RegionDeclarationCard (§19.1 declared-never-
-│   │       │   │                           detected), RiskDisclosures (ack flow behind the
-│   │       │   │                           intent-create gate), ComplianceConsole
-│   │       │   │                           (/compliance-console: cases + fraud queue +
-│   │       │   │                           declaration verification; server-authorized)
-│   │       │   ├── security/            -- StepUpDialog + step-up retry gate
-│   │       │   ├── i18n/                -- TranslationDisclosure
-│   │       │   └── wellbeing/           -- FocusModeToggle, NotificationBudget,
-│   │       │                               QuietHoursSetting
-│   │       ├── stores/                  -- Zustand state (3 stores)
-│   │       │   ├── auth.ts              --   session + cross-tab logout
-│   │       │   ├── ui.ts                --   theme, motion, feed mode, focus
-│   │       │   ├── feature-flags.ts     --   fail-closed feature gates
-│   │       │   ├── persist.ts           --   zod-validated localStorage
-│   │       │   └── dom-sync.ts          --   DOM synchronization
-│   │       ├── lib/                     -- core utilities
-│   │       │   ├── api.ts               --   typed RPC client + CSRF serialization
-│   │       │   ├── auth-api.ts          --   WS-D auth flows (passkey/email login, signup)
-│   │       │   ├── webauthn.ts          --   WebAuthn JSON↔ArrayBuffer plumbing
-│   │       │   ├── privacy-api.ts       --   WS-D data-rights flows (export, deletion)
-│   │       │   ├── link-safety.ts       --   WS-G external-link verdicts (shared heuristics)
-│   │       │   ├── blob-url.ts          --   WS-Q.5.2c object-URL sanitizer (local media preview)
-│   │       │   ├── wallet-api.ts        --   WS-L wallet/knomosis flows (SIWE link, deployments,
-│   │       │   │                             action preflight/submit, governance sim reads)
-│   │       │   ├── treasury-api.ts      --   WS-M flows (profile, readiness, mode, treasury,
-│   │       │   │                             intents, proposals, challenges, audit-chain)
-│   │       │   ├── compliance-api.ts    --   WS-N flows (availability, region declaration,
-│   │       │   │                             disclosures + acks, the console reads/actions)
-│   │       │   ├── wallet-signing.ts    --   eth_signTypedData_v4 over the SHARED EIP-712
-│   │       │   │                             registry (EIP-6963 discovery; no parallel schema)
-│   │       │   ├── queries.ts           --   TanStack Query hooks
-│   │       │   ├── query-keys.ts        --   query-key factory
-│   │       │   ├── query-client.ts      --   SWR defaults (30s stale, 5min gc)
-│   │       │   ├── bootstrap.ts         --   app initialization
-│   │       │   ├── sw-register.ts       --   service-worker registration
-│   │       │   ├── telemetry.ts         --   privacy-safe RUM (sendBeacon)
-│   │       │   ├── time.ts              --   time utilities
-│   │       │   └── cn.ts               --   class-name merger
-│   │       ├── offline/                 -- offline-first (IndexedDB)
-│   │       │   ├── db.ts                --   6 object stores, versioned migrations
-│   │       │   ├── store.ts             --   zod-validated integrity layer
-│   │       │   ├── queue.ts             --   pending-operation sync queue
-│   │       │   ├── sync.ts              --   sync engine
-│   │       │   ├── drafts.ts            --   contribution + story draft management
-│   │       │   ├── draft-crypto.ts      --   AES-256-GCM (non-extractable key)
-│   │       │   ├── read-through.ts      --   cache read-through mapping
-│   │       │   ├── schemas.ts           --   offline record schemas
-│   │       │   ├── notification-meter.ts--   per-day notification budget
-│   │       │   └── eviction.ts          --   iOS eviction detection + reconciliation
-│   │       ├── lcap/                    -- WS-R LCAP client offline store (separate from `licio`)
-│   │       │   ├── db.ts                --   the `lcap_v2` IndexedDB schema: the 12 §23.1
-│   │       │   │                             stores + indexes + versioned migration (WS-R.11.3a)
-│   │       │   ├── store.ts             --   §23.2 durability layer: cursor-only streaming,
-│   │       │   │                             blob↔metadata separation, atomic verified-record
-│   │       │   │                             commit, capped txns, quota retry (WS-R.11.3b)
-│   │       │   ├── gc.ts                --   §21.2 pinning classes + eviction order (WS-R.11.1)
-│   │       │   ├── storage-modes.ts     --   §21.3 storage modes + persistence + pressure
-│   │       │   │                             degradation (WS-R.11.2)
-│   │       │   ├── sync-triggers.ts     --   §23.3 C0-first sync orchestration (WS-R.11.4)
-│   │       │   └── replication.ts       --   §21.4 privacy-aware replication eligibility (WS-R.11.5)
-│   │       ├── signals/                 -- attention signal pipeline
-│   │       │   ├── processor.ts         --   main signal processor
-│   │       │   ├── aggregate.ts         --   bucketed aggregate builder
-│   │       │   ├── privacy.ts           --   assertNoRawEgress guard
-│   │       │   ├── dwell.ts             --   active-dwell accumulator
-│   │       │   ├── visibility.ts        --   visibility tracking
-│   │       │   ├── visibility-cadence.ts--   visibility sampling
-│   │       │   ├── cadence.ts           --   signal emission cadence
-│   │       │   ├── return-tracker.ts    --   return-visit + rage-loop dampening
-│   │       │   ├── return-store.ts      --   LRU return persistence
-│   │       │   ├── source-tracker.ts    --   source-open tracking
-│   │       │   ├── caps.ts              --   per-item dwell caps
-│   │       │   ├── topic-loops.ts       --   PHI v0 session topic-loop tracker (WS-H)
-│   │       │   ├── topic-dampening.ts   --   PHI v0 client topic-frequency dampener (WS-H.6.1c)
-│   │       │   └── runtime.ts           --   runtime signal management
-│   │       ├── security/
-│   │       │   └── trusted-types.ts     --   TT policies (origin comparison)
-│   │       ├── routing/                 -- route guards + search
-│   │       ├── routes/                  -- TanStack Router file-based routes
-│   │       │   ├── __root.tsx           --   root layout, AppShell, BottomNav
-│   │       │   ├── index.tsx            --   front page
-│   │       │   ├── stories.$storyId.tsx --   story detail
-│   │       │   ├── threads_.$threadId.tsx -- legacy thread→story#comments redirect
-│   │       │   ├── rooms*.tsx           --   room views + governance
-│   │       │   ├── profile*.tsx         --   profile, settings, privacy, security, saved
-│   │       │   ├── submit.tsx           --   content submission (auth-guarded)
-│   │       │   └── -pages/              --   internal page components
-│   │       ├── design-system/           -- design-token SSOT
-│   │       │   ├── tokens.ts            --   color tokens (neumorphic fabric
-│   │       │   │                              surfaces), neu soft-UI shadows,
-│   │       │   │                              light/dark
-│   │       │   ├── css.ts               --   CSS utility generation
-│   │       │   └── contrast.ts          --   WCAG contrast validation
-│   │       ├── i18n/                    -- internationalization
-│   │       │   ├── catalog.ts           --   translation catalog + lazy locale registry
-│   │       │   ├── catalogs/de.ts       --   German catalog (the WS-N disabled-state set)
-│   │       │   ├── message.ts           --   message formatting + pluralization
-│   │       │   ├── format.ts            --   number/date formatting
-│   │       │   ├── pseudo.ts            --   pseudo-localization (testing)
-│   │       │   └── I18nProvider.tsx      --   context provider
-│   │       ├── hooks/                   -- reusable React hooks
-│   │       ├── perf/                    -- Web Vitals + performance marks
-│   │       ├── push/                    -- push subscription + usePushControls
-│   │       ├── styles/                  -- app.css + tokens.generated.css
-│   │       ├── styleguide/              -- component browser
-│   │       ├── test/                    -- test utilities + setup
-│   │       └── e2e/                     -- Playwright E2E specs
-│   ├── api/                     -- Hono BFF server
-│       └── src/
-│           ├── app.ts                   -- Hono app (middleware stack)
-│           ├── index.ts                 -- server entry point (Postgres/Redis)
-│           ├── e2e-server.ts            -- in-memory BFF for the E2E harness (gated)
-│           ├── routes/
-│           │   ├── v1.ts                --   /v1/* API routes
-│           │   ├── test-auth.ts         --   test-ONLY login (e2e-server only, gated)
-│           │   ├── auth.ts              --   /v1/auth/* (WS-D auth surface)
-│           │   ├── privacy.ts           --   /v1/privacy/* (WS-D privacy controls)
-│           │   ├── events.ts            --   POST /v1/events/attention (WS-E.1.3)
-│           │   ├── stories.ts           --   POST /v1/stories, search, takedowns, reads (WS-F)
-│           │   ├── ingestion-admin.ts   --   /v1/ingestion/admin/* steward surface (WS-F)
-│           │   ├── invariants-admin.ts  --   /v1/invariants/admin/* analyst surface (WS-H)
-│           │   ├── invariants-public.ts --   public SCOI/MERI story reads (WS-H)
-│           │   ├── ranking-admin.ts     --   /v1/ranking/admin/* steward surface (WS-I)
-│           │   ├── forum.ts             --   /v1/contributions, story comments/SSE,
-│           │   │                             thread redirect reads, uploads, flags
-│           │   ├── rooms.ts             --   /v1/rooms/* + lenses + governance (WS-G)
-│           │   ├── trust-safety.ts      --   reports, blocks, mutes, appeals, support,
-│           │   │                             notice inbox (WS-J.1)
-│           │   ├── moderation-console.ts --  role-gated console: queue, review, action
-│           │   │                             palette, appeals, incidents, audit (WS-J.2)
-│           │   ├── ai-governance-admin.ts --  /v1/ai/admin/* AI-team model lifecycle +
-│           │   │                             deploy gate + steward review (WS-K)
-│           │   ├── ai-governance-public.ts -- model-card lookup, translation,
-│           │   │                             summary/translation reports (WS-K)
-│           │   ├── wallet.ts            --   /v1/wallet/* + /v1/wallets (WS-L.2 SIWE
-│           │   │                             link/unlink, risk state, standing reads)
-│           │   ├── knomosis.ts          --   /v1/knomosis/* deployments/manifest + action
-│           │   │                             preflight/submit/status (WS-L.1/3)
-│           │   ├── governance.ts        --   WS-U room governance: steward seat/elections,
-│           │   │                             model propose/ratify/download, governed-by view
-│           │   ├── room-governance.ts   --   WS-L.4 + WS-M MODE-AWARE room governance: tab
-│           │   │                             bundle, proposals (sim AND production), treasury
-│           │   │                             read, audit log, comprehension, readiness
-│           │   │                             (?target_mode checklist) + the full mode machine
-│           │   ├── treasury-governance.ts -- WS-M production surface: profile, charters,
-│           │   │                             law-packs, attestations, freeze/pause, treasury +
-│           │   │                             payment intents, grants, proposal sign/challenge,
-│           │   │                             delegations, accounting export, audit-chain verify
-│           │   ├── compliance.ts        --   /v1/compliance/*: user surface (availability,
-│           │   │                             region declaration, disclosures) + the
-│           │   │                             compliance-role console (cases, fraud queue,
-│           │   │                             policies) + counsel (SAR, lawful access) (WS-N)
-│           │   ├── health.ts            --   /health liveness + /health/ready readiness probes
-│           │   └── csp-report.ts        --   CSP violation ingest
-│           ├── middleware/
-│           │   ├── security-headers.ts  --   CSP, HSTS, Permissions-Policy
-│           │   ├── csrf.ts              --   single-use nonce + timingSafeEqual
-│           │   ├── cors.ts              --   exact-match origin validation
-│           │   ├── auth.ts              --   session validation + capability guards (WS-D.1.6a)
-│           │   └── logger.ts            --   pino request logging
-│           ├── identity/                -- WS-D identity layer (primitives + services)
-│           │   ├── crypto.ts            --   HKDF keyed hashing, token hashing, constant-time
-│           │   ├── codes.ts             --   Crockford-base32 one-time codes
-│           │   ├── totp.ts              --   RFC 6238 TOTP + recovery codes
-│           │   ├── auth-methods.ts      --   countAuthMethods last-method guard
-│           │   ├── rbac.ts              --   role policy + object-level authz
-│           │   ├── audit.ts             --   append-only audit store + redactor
-│           │   ├── rate-limit-auth.ts   --   per-account + global limiter (no IP, §19.1)
-│           │   ├── sessions.ts          --   session lifecycle, rotation, step-up, cookie
-│           │   ├── ephemeral-store.ts   --   TTL'd single-use store (take = get+delete)
-│           │   ├── webauthn.ts          --   @simplewebauthn ceremonies
-│           │   ├── siwe.ts              --   viem EIP-4361 verification
-│           │   ├── email-otp.ts         --   passwordless email login/factor
-│           │   ├── security-alerts.ts   --   suspicious-login + multi-channel alerts
-│           │   ├── secrets.ts           --   AES-256-GCM SecretBox (encrypt-at-rest)
-│           │   ├── object-store.ts      --   encrypted DSAR archive store + signed URL tokens
-│           │   ├── privacy-jobs.ts      --   DSAR export assembly + deletion-purge/sweep jobs
-│           │   ├── store.ts             --   in-memory identity data store
-│           │   ├── services.ts          --   injectable service container + config
-│           │   ├── job-lease.ts         --   distributed scheduler window claim
-│           │   ├── sigv4.ts             --   AWS SigV4 signer (node:crypto, no SDK)
-│           │   ├── object-store-s3.ts   --   S3-compatible export-archive store
-│           │   ├── mailer-ses.ts        --   production SES mailer (SigV4 over fetch)
-│           │   ├── redis-stores.ts      --   production Redis adapters (gated)
-│           │   └── drizzle-store.ts     --   production Postgres identity/audit/lease adapters (gated)
-│           ├── events/                  -- WS-E event pipeline
-│           │   ├── stores.ts            --   store interfaces + in-memory adapters
-│           │   ├── ingest.ts            --   shared attention-ingestion pipeline (both routes)
-│           │   ├── privacy-gate.ts      --   server-side privacy enforcement (WS-E.1.3d)
-│           │   ├── replay.ts            --   single-use nonce store (WS-E.1.3b)
-│           │   ├── ingest-limiter.ts    --   sliding-window rate limiter, fail-closed fallback
-│           │   ├── router.ts            --   consumer router + pay-to-rank firewall (WS-E.1.5)
-│           │   ├── consumers.ts         --   default consumers (realtime, integrity intake)
-│           │   ├── realtime.ts          --   1h real-time aggregation layer (WS-E.3.2)
-│           │   ├── hll.ts               --   HyperLogLog (bias-corrected, ~0.81% error)
-│           │   ├── retention.ts         --   retention/anonymization sweeps + compliance query
-│           │   ├── metrics.ts           --   in-process counters/latency (no attention values)
-│           │   ├── services.ts          --   injectable WS-E service container
-│           │   ├── redis-event-stores.ts --  production Redis adapters (gated)
-│           │   └── drizzle-event-stores.ts -- production Postgres adapters (gated)
-│           ├── pwatt/                   -- WS-E PWAtt scoring services
-│           │   ├── aggregation.ts       --   per-item/window fold with per-user dedup (WS-E.2.1a)
-│           │   ├── anti-signals.ts      --   burst + cascade detectors (WS-E.2.2a/c)
-│           │   ├── config.ts            --   tunable runtime config (fail-closed loader)
-│           │   ├── scoring.ts           --   window scoring job (v0+v1, ledger, freezes)
-│           │   ├── shadow.ts            --   FALLBACK-boundary guard (score-blind, WS-E.2.1e)
-│           │   ├── ranking-v0.ts        --   freshness-only ordering (the safe fallback)
-│           │   └── scheduler.ts         --   lease-guarded hourly tick
-│           ├── invariants/              -- WS-H invariant platform + services
-│           │   ├── stores.ts            --   promotions/calibrations/runs/cases/sessions
-│           │   ├── config.ts            --   fail-closed invariants.* runtime config
-│           │   ├── cards.ts             --   the eleven validated invariant cards
-│           │   ├── runner.ts            --   fallback wrapper, tiers, health, persistence
-│           │   ├── promotion.ts         --   the WS-H.1.2e shadow-status gate
-│           │   ├── data.ts              --   input assembly from WS-D/E/F/G stores
-│           │   ├── services-impl.ts     --   the eleven InvariantService implementations
-│           │   ├── services.ts          --   container + consumers + WS-E hook closures
-│           │   ├── scheduler.ts         --   lease-guarded batch tier + nightly drift
-│           │   ├── redis-session-store.ts -- Redis PHI session sequences (multi-instance; gated)
-│           │   └── drizzle-invariant-stores.ts -- production Postgres adapters (gated)
-│           ├── ranking/                 -- WS-I ranking and distribution
-│           │   ├── stores.ts            --   feature store + decision logs (in-memory)
-│           │   ├── retrievers.ts        --   the seven organic candidate retrievers
-│           │   │                             (WS-I.1.1a) + the room-surface scoper
-│           │   ├── quotas.ts            --   diversity quotas (WS-I.1.1b, ceil-reserved)
-│           │   ├── orchestrator.ts      --   candidate merge/dedup/budget (WS-I.1.1d)
-│           │   ├── features.ts          --   feature assembly + population (WS-I.2.1d)
-│           │   ├── safety-filter.ts     --   non-overridable policy filter (WS-J seam)
-│           │   ├── service.ts           --   the eight-stage feed service + replay
-│           │   ├── killswitch.ts        --   runtime kill switch (WS-I.4.1a, fail-closed)
-│           │   ├── config.ts            --   fail-closed ranking.* runtime config
-│           │   ├── scheduler.ts         --   lease-guarded hourly maintenance tick
-│           │   ├── services.ts          --   injectable container + consumer registration
-│           │   └── drizzle-ranking-stores.ts -- production Postgres adapters (gated)
-│           ├── ingestion/               -- WS-F ingestion, source model, search
-│           │   ├── stores.ts            --   store interfaces + in-memory adapters
-│           │   ├── services.ts          --   injectable container + WS-E router consumers
-│           │   ├── submission.ts        --   POST /v1/stories orchestration (room/posting
-│           │   │                             guards + visibility derivation + tier dedup, WS-Q)
-│           │   ├── visibility.ts        --   WS-Q.2.4 author narrow/widen visibility transitions
-│           │   ├── content-flags.ts     --   WS-Q.6.2 fail-closed content rollout flags
-│           │   ├── pipeline.ts          --   §14.2 extraction worker + content.normalized
-│           │   ├── prechecks.ts         --   submission limits, spam patterns, URL safety
-│           │   ├── safe-fetch.ts        --   SSRF-hardened fetcher (per-resolution gate)
-│           │   ├── robots.ts            --   RFC 9309 parser/matcher + fail-closed cache
-│           │   ├── extraction.ts        --   HTML scanning, metadata, language, sensitivity
-│           │   ├── dedup.ts             --   MinHash/LSH near-dup + syndication classification
-│           │   ├── claims.ts            --   heuristic candidate-claim extractor (WS-K seam)
-│           │   ├── embeddings.ts        --   providers, registry record, backfill/cutover
-│           │   ├── search.ts            --   SearchIndex interface + in-memory FTS semantics
-│           │   ├── lifecycle.ts         --   §14.4 transitions service + audit + sweep
-│           │   ├── freshness.ts         --   topic-cadence baseline service (WS-I input)
-│           │   ├── config.ts            --   fail-closed runtime config (ingestion.* keys)
-│           │   ├── scheduler.ts         --   lease-guarded hourly maintenance tick
-│           │   └── drizzle-ingestion-stores.ts -- production Postgres adapters + FTS (gated)
-│           ├── forum/                   -- WS-G/WS-T forum, comments, rooms, lenses
-│           │   ├── stores.ts            --   store interfaces + in-memory adapters
-│           │   ├── services.ts          --   injectable container + metrics + boot wiring
-│           │   ├── contributions.ts     --   create/edit/remove guard chain + live fan-out
-│           │   ├── comments.ts          --   story comment pages, reply previews, media projection
-│           │   ├── comment-broadcaster.ts -- same-origin live comment broadcaster port
-│           │   ├── redis-broadcasters.ts --   Redis pub/sub comment + debate fan-out (multi-instance;
-│           │   │                             zod-validated on BOTH sides of the wire)
-│           │   ├── threads.ts           --   overview/anchor/subtree compatibility reads
-│           │   ├── tree.ts              --   materialized-path math + depth-first ordering
-│           │   ├── rooms.ts             --   rooms/lenses/stewards/joins + the binary
-│           │   │                             read bar / userMayPostTopLevel / Commons (WS-Q)
-│           │   ├── room-visibility.ts   --   WS-Q.3.3b/3.4 governance settings + visibility cascade
-│           │   ├── video.ts             --   WS-Q.2.3d validate-only MP4/WebM sniff + metadata strip
-│           │   ├── data-rights.ts       --   WS-Q.3.5 DSAR export + anonymize across both tiers
-│           │   ├── transitions.ts       --   audited §15.4 state machines → thread.state.changed
-│           │   ├── safety.ts            --   heuristic contribution pre-screen (WS-J/K seam)
-│           │   ├── exif.ts              --   byte-level image metadata stripping (WS-G.4.4)
-│           │   ├── config.ts            --   fail-closed runtime config (forum.* keys)
-│           │   └── drizzle-forum-stores.ts -- production Postgres adapters (gated)
-│           ├── moderation/               -- WS-J trust, safety, and abuse operations
-│           │   ├── stores.ts            --   ten store interfaces + in-memory adapters
-│           │   ├── drizzle-moderation-stores.ts -- production Postgres adapters (gated)
-│           │   ├── reports.ts           --   submission + idempotency + rate limits +
-│           │   │                             routing + coordinated-report detection (WS-J.1.1/2.6e)
-│           │   ├── relations.ts         --   block/mute CRUD + the RelationshipReader seam
-│           │   ├── appeals.ts           --   eligibility + independent assignment + decision
-│           │   ├── actions.ts           --   action palette + reversal-integrity revert + MFCI-2 gate
-│           │   ├── incidents.ts         --   ROLE_INTEGRITY coordinated-report incident review
-│           │   ├── audit.ts             --   append-only writer + suppressed transparency export
-│           │   ├── evidence.ts          --   ROLE_EVIDENCE surface: the derived evidence queue +
-│           │   │                             mark-primary-source/flag-citation decisions (audited
-│           │   │                             evidence metadata; console-surfaced)
-│           │   ├── notices.ts           --   statement-of-reasons + appeal-outcome inbox
-│           │   ├── review.ts            --   queue + full-context review + appeal projections
-│           │   ├── prechecks.ts         --   WS-J.2.6 detection math (spam/malware/flood/policy-risk)
-│           │   ├── forum-integration.ts --   the WS-J.2.6 contribution-safety classifier + sink
-│           │   ├── malware-fetch.ts     --   WS-J.2.6b redirect-chain malware verdict (SSRF-safe)
-│           │   ├── assignment.ts        --   load-balanced assignment (reports + appeals)
-│           │   ├── authz.ts             --   doctrine-role authorization (MFA + senior + integrity)
-│           │   ├── ports.ts             --   content/user/invariant/event/alert seams (safe defaults)
-│           │   ├── production-ports.ts  --   the REAL ports over WS-D/E/F/G/H
-│           │   ├── support.ts           --   the unauthenticated published support contact
-│           │   ├── config.ts            --   fail-closed runtime config (moderation.* keys)
-│           │   ├── scheduler.ts         --   lease-guarded sweeps (mute expiry, queue gauges)
-│           │   └── services.ts          --   injectable container + singleton + boot wiring
-│           ├── ai-governance/            -- WS-K AI and model governance
-│           │   ├── stores.ts            --   store interfaces + in-memory adapters (registry,
-│           │   │                             lineage, output records, review queue, …)
-│           │   ├── drizzle-ai-governance-stores.ts -- production Postgres adapters for all
-│           │   │                             fourteen WS-K stores (gated; the guard is rebuilt
-│           │   │                             over the durable blocked-invocation store at boot)
-│           │   ├── registry.ts          --   model registry + the deployment GATE (WS-K.1.1b)
-│           │   ├── guard.ts             --   the pre-execution ProhibitedUseGuard + audit (WS-K.1.1d)
-│           │   ├── harness.ts           --   evaluation-harness orchestrator + decision (WS-K.1.2e)
-│           │   ├── output-records.ts    --   immutable AIOutputRecord writer + config hash (WS-K.1.1f)
-│           │   ├── lineage.ts           --   data lineage + privacy-review precondition (WS-K.1.1e)
-│           │   ├── models.ts            --   governed deterministic models + classifier + translator
-│           │   ├── debate.ts            --   the governed WS-T debate-adjudication shell (guard →
-│           │   │                             LLM leg (if wired) → deterministic MLP fallback →
-│           │   │                             AIOutputRecord)
-│           │   ├── llm/                 --   WS-U ADR-9 LLM-backed governance models (fail-closed;
-│           │   │                             production DEFAULTS to the loopback-local backend, dev
-│           │   │                             auto-wires the simulated runtime, `deterministic` opts
-│           │   │                             out, `anthropic` is an explicit opt-in): config
-│           │   │                             (decision + the default local URL/model), provider
-│           │   │                             (lawmaking summariser: guard→completion→zod→quality gate→
-│           │   │                             AIOutputRecord + budget/breaker; Anthropic SDK), moderation
-│           │   │                             (the in-room moderation MODEL — a toxicity_safety_triage
-│           │   │                             classifier the deterministic wrapper bounds), debate
-│           │   │                             (the WS-T debate adjudicator — probabilities only; the
-│           │   │                             deterministic shell maps the outcome, MLP fallback),
-│           │   │                             local (loopback-only OpenAI-compatible runtime),
-│           │   │                             quality, registration
-│           │   ├── seed.ts              --   register + DEPLOY models through the gate; inventory
-│           │   │                             (runs on EVERY boot, production included — idempotent,
-│           │   │                             lease-serialized across replicas)
-│           │   ├── pipelines.ts         --   topic classification + claim extraction (WS-K.1.3a/b)
-│           │   ├── summaries.ts         --   AI summary eval: §24.3 quality/grounding gate (WS-K.1.4; eval-only, no thread Overview)
-│           │   ├── translation.ts       --   translation + consistency check (WS-K.2.1a)
-│           │   ├── correction.ts        --   human-in-the-loop correction + accuracy (WS-K.1.3c)
-│           │   ├── governance-ai.ts     --   §24.5 proposal summaries + advisories (WS-K.2.2a)
-│           │   ├── runtime-monitor.ts   --   drift/report-rate alerts + rollback rec (WS-K.1.2f)
-│           │   ├── config.ts            --   fail-closed runtime config (ai.* keys)
-│           │   ├── metrics.ts           --   observability counters/gauges
-│           │   ├── scheduler.ts         --   lease-guarded hourly tick
-│           │   ├── wiring.ts            --   deps-builders + the durable classification consumer
-│           │   └── services.ts          --   injectable container + singleton
-│           ├── lcap/                     -- WS-R server-side LCAP I/O binding
-│           │   ├── server-ingest.ts      --   ingestion engine over the pure ingestRecord +
-│           │   │                             validate(): CID-verified commit, idempotency + fork
-│           │   │                             detection (WS-R.12.1a/c), server-computed §18.3
-│           │   │                             validation over registered identity state (R.12.1b),
-│           │   │                             commitBatch (§24.4 ordered, §27.2 graph-guarded);
-│           │   │                             durable state via the LcapServerStore boundary
-│           │   ├── store.ts              --   the LcapServerStore boundary (WS-R.12.2): async CAS +
-│           │   │                             acceptance log + device-seq + fork evidence; the
-│           │   │                             in-memory adapter (CID-opaque, ordered acceptance log)
-│           │   ├── drizzle-store.ts      --   the gated Postgres adapter for LcapServerStore (WS-R.12.2)
-│           │   ├── routes.ts             --   §29 routes: content-read GETs by CID + the
-│           │   │                             pack-import POST /packs (CSRF-exempt, rate-limited;
-│           │   │                             §22.1.1 status), mounted at /api/lcap/v2 (WS-R.12.4)
-│           │   └── service.ts            --   the process-wide ingestion-server singleton
-│           ├── knomosis/                 -- WS-L gateway, wallets, and receipts: the pinned
-│           │                                  deployment manifest, the preflight→submit→
-│           │                                  reconcile pipeline, kill switches, the WS-L.4
-│           │                                  governance simulation + readiness, all behind the
-│           │                                  fail-closed cryptoEnabled/governanceEnabled config
-│           ├── governance/               -- WS-U AI-governed-rooms runtime: elections, model
-│           │                                  proposal/ratification, capability derivation, the
-│           │                                  fail-closed executeTreasuryAction kernel executor,
-│           │                                  lawmaking facilitation + the LLM provider seam
-│           ├── treasury/                 -- WS-M treasury-and-governance production layer:
-│           │                                  governance profiles/charters/law-packs, the
-│           │                                  WS-M.1.1b mode machine + live readiness, the
-│           │                                  real-asset treasury + 13-state payment intents +
-│           │                                  three-source reconciliation, deadline-driven
-│           │                                  proposals (wallet-signed voting, challenges,
-│           │                                  kernel-routed execution), grants/delegations/
-│           │                                  budgets, the hash-chained audit log, accounting
-│           │                                  export, gated Drizzle adapters + scheduler sweeps
-│           ├── compliance/               -- WS-N financial-compliance layer (identity-free,
-│           │                                  fail-closed): the §19.1 declared-region ladder
-│           │                                  (verified_declaration → locale_subtag → unknown),
-│           │                                  per-region jurisdiction policies over the ratified
-│           │                                  six-value cell vocabulary, the CompliancePort
-│           │                                  engine (coarse verdict/sanctions screening/
-│           │                                  velocity+high-value fraud/wallet risk), the
-│           │                                  guarded case system + fraud queue, hash-chained
-│           │                                  erasure-safe audit, SAR/STR (counsel-only READ),
-│           │                                  lawful access, versioned risk disclosures + the
-│           │                                  intent-create ack gate, retention sweeps, the
-│           │                                  WS-N.2.3e no-key filter (BIP-39 + bare-hex),
-│           │                                  gated Drizzle/Redis adapters + scheduler
-│           ├── private-rendezvous/       -- WS-S.6.6 server-blind Private P2P rendezvous
-│           ├── simulator/                -- DEV-ONLY traffic simulator (NEVER in production):
-│           │   ├── prng.ts               --   deterministic mulberry32 seeded PRNG
-│           │   ├── personas.ts           --   behavioural archetypes + synthetic-user roster +
-│           │   │                              per-archetype lens vantage (WS-G.2.2)
-│           │   ├── content.ts            --   deterministic story/comment/citation generators
-│           │   ├── scenarios.ts          --   the seven scenario presets (steady…challenge_wave)
-│           │   ├── engine.ts             --   pure planTick(scenario, world, prng) → SimAction[]
-│           │   │                              (tags root comments with the author's vantage lens)
-│           │   ├── link-fixtures.ts      --   dev fetchDocument for reserved `.example` hosts
-│           │   ├── governance-llm.ts     --   DEV-ONLY simulated local governance-LLM runtime: a
-│           │   │                              deterministic loopback OpenAI-compatible server the dev
-│           │   │                              boot wires through the UNCHANGED WS-U `local` backend
-│           │   │                              seam (LICIO_LLM_SIM=off disables; deterministic
-│           │   │                              failure-injection markers; never in production)
-│           │   ├── runtime.ts            --   DevTrafficSimulator: the ONLY app-driving I/O module —
-│           │   │                              drives the REAL submission/contribution/attention/
-│           │   │                              report paths + on-demand PWAtt/WS-H/feature scoring +
-│           │   │                              the WS-T correction→debate→adjudication loop at
-│           │   │                              shortened arena windows (throughput pulse); tick loop
-│           │   └── routes.ts             --   dev control routes (mounted in front of createApp,
-│           │                                  never in the production AppType; header-guarded)
-│           ├── telemetry/            -- WS-P.1.1d Core Web Vitals RUM sink: stores (in-memory +
-│           │                                  Drizzle), nearest-rank p75 aggregation + regression
-│           │                                  alerts, the lease-guarded hourly scheduler, and the
-│           │                                  ingest service behind POST /v1/telemetry
-│           ├── lib/
-│           │   ├── concurrency.ts       --   mapBounded: order-preserving bounded fan-out with
-│           │   │                             per-item failure isolation (the LLM fan-outs:
-│           │   │                             debate lifecycle, admission sampling, re-moderation sweep)
-│           │   ├── hash-chain.ts        --   generic hash-chain engine (append-with-retry +
-│           │   │                             verify; the WS-M treasury chain delegates to it,
-│           │   │                             the WS-N compliance chains build on it)
-│           │   ├── rate-limit.ts        --   global fixed-window budget (no client keying)
-│           │   ├── push-service.ts      --   VAPID push behind the PushStateStore boundary
-│           │   │                             (session-scoped delete; hashed at-rest refs)
-│           │   ├── drizzle-push-store.ts --   production Postgres push subscriptions/preferences (gated)
-│           │   ├── vapid.ts             --   VAPID key management
-│           │   ├── logger.ts            --   pino logger setup
-│           │   ├── story-media.ts       --   WS-Q.5.2c story→feed media projection
-│           │   ├── media-urls.ts        --   WS-Q.5.2c signed media read URLs (mint/verify)
-│           │   ├── parity-guard.ts      --   RUNTIME production-parity assert: a production boot
-│           │   │                             refuses to serve with an un-allowlisted in-memory
-│           │   │                             adapter wired (belt-and-braces for check:prod-parity)
-│           │   ├── reply-notifications.ts + drizzle-reply-notification-store.ts -- WS-T.6 inbox
-│           │   │                             behind a durable store boundary (Drizzle in production)
-│           │   ├── user-settings.ts + drizzle-settings-store.ts -- WS-C settings sync, USER-keyed
-│           │   │                             when signed in (hashed at-rest refs; Drizzle in production)
-│           │   ├── demo-data.ts         --   demo feed fixtures + stable demo ids
-│           │   └── demo-seed.ts         --   rich dev seed: dev test accounts
-│           │                                  (admin/steward/expert), rooms/stories across
-│           │                                  every lifecycle state, sourced comments + divergent
-│           │                                  lenses + signatures + a native image post +
-│           │                                  a moderation review queue; seedOperationalSignals
-│           │                                  COMPUTES the invariant outputs (real WS-H batch)
-│           │                                  and PRODUCES the Signal Ledger (real WS-E PWAtt
-│           │                                  scorer); runs on non-prod boot
-│           └── __tests__/               -- route/middleware/service tests (WS-C – WS-G)
-│   └── courier/                 -- WS-R.15.4a native Android courier (Capacitor 8 shell)
-│       ├── capacitor.config.json --  webDir → apps/web/dist (no courier-only web fork);
-│       │                              androidScheme https → secure-context WebView
-│       │                              (static JSON: the Capacitor CLI's TS-config
-│       │                              loader needs the legacy typescript JS API,
-│       │                              which the TS 7 native compiler dropped)
-│       ├── scripts/
-│       │   └── check-no-fork.mjs --   byte-identity gate (web build ≡ synced WebView assets)
-│       └── android/             --   generated Capacitor Android project; `pnpm --filter
-│                                      courier build` produces the debug APK (Gradle + SDK)
+│   │       ├── components/      -- UI primitives + feature components (ai, a11y,
+│   │       │                       composer, comments, feed, rooms, story, safety,
+│   │       │                       moderation, ugc, reader, profile, governance,
+│   │       │                       treasury, wallet, compliance, security, i18n,
+│   │       │                       wellbeing, migration, DEV-only simulator panel)
+│   │       ├── routes/          -- TanStack Router file-based routes (+ -pages/)
+│   │       ├── stores/          -- Zustand state (auth, ui, feature-flags) + zod persist
+│   │       ├── lib/             -- typed RPC client, per-WS API modules, queries,
+│   │       │                       telemetry, wallet-signing, link-safety
+│   │       ├── offline/         -- IndexedDB offline-first: db, store, queue, sync,
+│   │       │                       drafts, AES-256-GCM draft-crypto, eviction
+│   │       ├── lcap/            -- WS-R LCAP client store (lcap_v2 IDB, GC, storage
+│   │       │                       modes, sync triggers, replication)
+│   │       ├── private-p2p/     -- WS-S private-room client (IndexedDb adapter +
+│   │       │                       dynamic-import room manager)
+│   │       ├── signals/         -- attention pipeline (in-browser; only bucketed
+│   │       │                       aggregates egress) + assertNoRawEgress guard
+│   │       ├── security/        -- Trusted Types policies
+│   │       ├── design-system/   -- design-token SSOT + WCAG contrast validation
+│   │       ├── i18n/, hooks/, perf/, push/, routing/, styles/, styleguide/
+│   │       └── test/, e2e/      -- Vitest utils + Playwright specs
+│   ├── api/                 -- Hono BFF (app.ts middleware stack, index.ts prod boot,
+│   │   │                       e2e-server.ts gated in-memory harness)
+│   │   └── src/
+│   │       ├── routes/          -- /v1/* surfaces (auth, privacy, events, stories,
+│   │       │                       forum, rooms, moderation, ai, wallet, knomosis,
+│   │       │                       governance, treasury, compliance, health, csp)
+│   │       ├── middleware/      -- security-headers (CSP/HSTS), csrf, cors, auth, logger
+│   │       ├── identity/        -- WS-D: crypto, sessions, rbac, webauthn, siwe, totp,
+│   │       │                       email-otp, secrets, rate-limit; gated Drizzle/Redis/S3
+│   │       ├── events/          -- WS-E pipeline: ingest, privacy-gate, replay, router
+│   │       │                       (pay-to-rank firewall), realtime (HLL), retention
+│   │       ├── pwatt/           -- WS-E PWAtt scoring: aggregation, anti-signals,
+│   │       │                       scoring, shadow boundary, ranking-v0, scheduler
+│   │       ├── invariants/      -- WS-H platform: the 11 invariant services, runner,
+│   │       │                       promotion gate, scheduler
+│   │       ├── ranking/         -- WS-I: retrievers, quotas, orchestrator, features,
+│   │       │                       safety-filter, killswitch, the 8-stage service
+│   │       ├── ingestion/       -- WS-F: submission, SSRF-safe fetch, robots, extraction,
+│   │       │                       MinHash dedup, embeddings, search, lifecycle
+│   │       ├── forum/           -- WS-G/T: contributions, comments, rooms, lenses,
+│   │       │                       visibility, video, data-rights, EXIF strip
+│   │       ├── moderation/      -- WS-J: reports, relations, appeals, actions, incidents,
+│   │       │                       evidence, notices, prechecks, authz, production-ports
+│   │       ├── ai-governance/   -- WS-K: registry + deploy gate, prohibited-use guard,
+│   │       │                       harness, output-records, models, debate, llm/
+│   │       ├── lcap/            -- WS-R server I/O: server-ingest, store, §29 routes
+│   │       ├── knomosis/        -- WS-L gateway: manifest, preflight/submit, kill switches
+│   │       ├── governance/      -- WS-U runtime: elections, model ratification, kernel
+│   │       ├── treasury/        -- WS-M: mode machine, treasury, payment intents,
+│   │       │                       proposals, grants, delegations, hash-chained audit
+│   │       ├── compliance/      -- WS-N: §19.1 region ladder, CompliancePort, cases,
+│   │       │                       SAR/lawful-access, no-key filter, hash-chained audit
+│   │       ├── private-rendezvous/ -- WS-S.6.6 server-blind rendezvous
+│   │       ├── simulator/       -- DEV-ONLY traffic simulator + governance-LLM sim
+│   │       ├── telemetry/       -- WS-P Web-Vitals RUM sink
+│   │       ├── lib/             -- concurrency, hash-chain, rate-limit, push, media-urls,
+│   │       │                       parity-guard, demo-seed
+│   │       └── __tests__/       -- route/middleware/service suites
+│   └── courier/             -- WS-R.15.4a native Android courier (Capacitor 8 shell;
+│                               webDir → apps/web/dist, byte-identity no-fork gate)
 ├── packages/
-│   ├── shared/                  -- shared schemas, types, constants (leaf)
-│   │   └── src/
-│   │       ├── schemas/
-│   │       │   ├── common.ts            --   UUID, timestamp, httpUrlSchema, cursor
-│   │       │   ├── attention.ts         --   AttentionAggregate, bucketing fns
-│   │       │   ├── thread.ts            --   ThreadDetail + §15.4 conversation/safety
-│   │       │   │                             state machines (WS-G)
-│   │       │   ├── room.ts              --   rooms, lenses, stewards, join models,
-│   │       │   │                             governance settings (WS-G)
-│   │       │   ├── feed.ts              --   FeedItem
-│   │       │   ├── profile.ts           --   UserProfile
-│   │       │   ├── contribution.ts      --   11-type create union + body limits +
-│   │       │   │                             citations + depth cap (WS-G §15.2)
-│   │       │   ├── forum-api.ts         --   forum endpoint wire contracts (WS-G)
-│   │       │   ├── steward-roles.ts     --   the five doctrine roles + capability/queue
-│   │       │   │                             policy + appeal-eligibility matrix (WS-J)
-│   │       │   ├── moderation-api.ts    --   user-facing trust & safety contracts (WS-J)
-│   │       │   ├── moderation-console-api.ts -- steward console contracts (WS-J)
-│   │       │   ├── signal-ledger.ts     --   SignalLedgerEntry
-│   │       │   ├── notifications.ts     --   Notification schemas
-│   │       │   ├── telemetry.ts         --   telemetryBatchSchema
-│   │       │   ├── feature-flags.ts     --   FeatureFlagSet
-│   │       │   ├── user.ts              --   User entity + age-gate (WS-D.1.1/1.7)
-│   │       │   ├── privacy-settings.ts  --   PrivacySettings + teen-floor clamp
-│   │       │   ├── identity-records.ts  --   session/credential/wallet zod mirrors
-│   │       │   ├── auth-api.ts          --   auth endpoint wire contracts
-│   │       │   ├── privacy-api.ts       --   privacy endpoint wire contracts
-│   │       │   ├── knomosis-api.ts      --   WS-L wire contracts (deployments/manifest,
-│   │       │   │                             preflight/submit, sim governance, readiness
-│   │       │   │                             + the WS-M per-item checklist extension)
-│   │       │   ├── treasury-governance-api.ts -- WS-M wire contracts (~30 strict schemas:
-│   │       │   │                             profile, charters, law-packs, treasury,
-│   │       │   │                             payment intents, production proposals +
-│   │       │   │                             tallies, challenges, grants, delegations,
-│   │       │   │                             freeze/pause, accounting export)
-│   │       │   ├── jurisdiction.ts      --   WS-N: the ratified six-value cell vocabulary
-│   │       │   │                             over the five crypto feature cells, region
-│   │       │   │                             codes, jurisdiction policies + validatePolicy
-│   │       │   │                             (enabled ⇒ legal_approval_ref), resolution
-│   │       │   │                             bases, the seven disable reasons
-│   │       │   ├── compliance-api.ts    --   WS-N wire contracts (availability, region
-│   │       │   │                             declaration, disclosures, cases, fraud queue,
-│   │       │   │                             SAR, lawful access)
-│   │       │   ├── audit.ts             --   audit event taxonomy
-│   │       │   └── events/              --   WS-E event schemas (envelope, retention
-│   │       │                                 tiers, 15 core topic schemas, topic
-│   │       │                                 registry SSOT, knomosis/ bounded context)
-│   │       ├── knomosis/                --   WS-L/WS-M pure client+server SSOTs: the EIP-712
-│   │       │                                 typed-data registry, transaction-preview
-│   │       │                                 assembly, and the asset-decimals registry +
-│   │       │                                 exact human-amount parser (no floats)
-│   │       ├── ugc/                     --   WS-G.4 UGC pipeline: Markdown-lite AST
-│   │       │                                 (no raw-HTML node), constrained serializer,
-│   │       │                                 DOMPurify `licio-ugc` policy, renderUGC,
-│   │       │                                 link-safety heuristics
-│   │       ├── types/                   --   TypeScript type exports
-│   │       ├── enums/                   --   enumeration constants
-│   │       ├── constants/               --   shared constants (incl. the 51 ratified
-│   │       │                                 WS-A moderation reason codes + the
-│   │       │                                 canonical story-topic catalog)
-│   │       └── env/                     --   environment variable validation
-│   ├── db/                      -- Drizzle ORM schema + migrations
-│   │   ├── drizzle/                     --   generated SQL migrations (WS-D – WS-K)
-│   │   └── src/
-│   │       ├── schema/                  --   PostgreSQL table definitions
-│   │       │   ├── ai-governance.ts     --     WS-K: model cards/registry, risk assessments,
-│   │       │   │                               inventory, lineage, output records, evaluations,
-│   │       │   │                               corrections, blocked-invocation audit, summaries/
-│   │       │   │                               translations + reports, runtime metrics/alerts
-│   │       │   ├── user.ts              --     users + JSONB + indexes/CHECK (WS-D.1.1)
-│   │       │   ├── session.ts           --     sessions, user_auth (no password), recovery codes
-│   │       │   ├── webauthn-credential.ts --   WebAuthn credentials
-│   │       │   ├── wallet-auth-credential.ts -- auth-wallet (identity context)
-│   │       │   ├── audit-log.ts         --     append-only audit log
-│   │       │   ├── privacy.ts           --     export_jobs, deletion_requests
-│   │       │   ├── invariants.ts        --     WS-H: promotions (append-only shadow
-│   │       │   │                               status), calibrations, run metadata,
-│   │       │   │                               mfci_cases (analyst queue)
-│   │       │   ├── events.ts            --     WS-E: events (LIST-partitioned by tier),
-│   │       │   │                               attention_aggregates (§22.1), windows,
-│   │       │   │                               invariant_outputs (+shadow), signal ledger,
-│   │       │   │                               safety states, pwatt_config, DLQ, checkpoints
-│   │       │   ├── story.ts, source.ts, claim.ts,
-│   │       │   │   takedown.ts, embedding.ts,
-│   │       │   │   ingestion-review.ts  --     WS-F content tables (stories, sources,
-│   │       │   │                               claims,
-│   │       │   │                               syndication, takedowns, pgvector, queue; topic_ids trusted +
-│   │       │   │                               proposed_topic_ids)
-│   │       │   ├── thread.ts            --     WS-G threads (conversation/safety states,
-│   │       │   │                               per-story branch uniqueness)
-│   │       │   ├── contribution.ts      --     WS-G contributions (materialized path JSONB,
-│   │       │   │                               depth/parent CHECKs, client-draft dedup,
-│   │       │   │                               edit history, tombstones)
-│   │       │   ├── room.ts              --     WS-G rooms, stewards, subscriptions, lenses
-│   │       │   ├── upload.ts            --     WS-G uploads (EXIF-stripped, scan-gated; bytes in
-│   │       │   │                               S3 or the durable upload_blobs Postgres fallback)
-│   │       │   ├── ranking.ts           --     WS-I feature-vector revisions + decision
-│   │       │   │                               logs (privacy-bucket CHECK, §22.4 retention)
-│   │       │   ├── moderation.ts        --     WS-J cases, reports, actions, append-only
-│   │       │   │                               audit (right-to-erasure-safe trigger), blocks,
-│   │       │   │                               mutes, appeals, notices, incidents, evidence
-│   │       │   │                               decisions (+steward_roles)
-│   │       │   ├── lcap.ts              --     WS-R.12.2 LCAP server state: content store,
-│   │       │   │                               per-room acceptance log, device-seq index,
-│   │       │   │                               fork evidence (no FK edges; CID-addressed)
-│   │       │   ├── room.ts (+ axes)     --     WS-S.1.1 room storage/authority/directory axes
-│   │       │   │                               + the six §23.2 coherence CHECKs (migration 0043)
-│   │       │   ├── private-room.ts      --     WS-S.1.2 private_room_stubs + private_rendezvous
-│   │       │   │                               _records: the §8.2 column allowlist (migration 0044)
-│   │       │   ├── knomosis-gateway.ts  --     WS-L `knomosis` bounded context: deployments,
-│   │       │   │                               signed actions, receipts, indexed events,
-│   │       │   │                               reconciliation (soft room refs; no ranking FK)
-│   │       │   ├── governance.ts        --     WS-U steward seats/elections, governance models,
-│   │       │   │                               ratifications, law-packs, agent action log
-│   │       │   ├── treasury-governance.ts --   WS-M: governance profiles, charter versions, room
-│   │       │   │                               treasuries, reservations, the 13-state payment
-│   │       │   │                               intents, grants, action budgets, delegations,
-│   │       │   │                               challenges, reconciliation snapshots, attestations
-│   │       │   │                               (CHECKs + partial uniques + append-only triggers;
-│   │       │   │                               migration 0082)
-│   │       │   ├── compliance.ts        --     WS-N `compliance` schema: jurisdiction policies +
-│   │       │   │                               hash-chained policy/case audits (fork-proof
-│   │       │   │                               partial uniques; GUC-gated retention DELETE),
-│   │       │   │                               financial-compliance cases, region declarations,
-│   │       │   │                               disclosure versions + acknowledgments, wallet
-│   │       │   │                               risk pins, SARs, lawful-access requests
-│   │       │   │                               (migration 0088)
-│   │       │   └── wallet/wallet-account.ts -- isolated financial WalletAccount
-│   │       ├── isolation.ts             --   wallet↔ranking BFS isolation (WS-D.3.2)
-│   │       ├── private-room-guard.ts    --   WS-S.1.2 checkPrivateServerTables (§8.1 column denylist)
-│   │       ├── client.ts                --   database client initialization
-│   │       └── drizzle.config.ts        --   Drizzle configuration
-│   ├── invariants/              -- invariant computation modules
-│   │   └── src/
-│   │       ├── types.ts                 --   type-level invariants
-│   │       ├── pwatt/                   --   WS-E PWAtt pure math (v0/v1 scoring,
-│   │       │                                 saturation curves, ranking profiles,
-│   │       │                                 penalties, safety-state machine,
-│   │       │                                 accusation + low-info-reply classifiers,
-│   │       │                                 ledger summaries)
-│   │       ├── text/                    --   WS-F MinHash/LSH (pinned hash family)
-│   │       ├── freshness/               --   WS-F freshness baseline math
-│   │       └── __tests__/               --   invariant + deterministic property tests
-│   └── ranking/                 -- WS-I pure ranking domain logic (no I/O)
-│       └── src/
-│           ├── denylist.ts              --   WS-I.2.1b financial denylist + typed error
-│           ├── denylist.config.json     --   the VERSIONED denylist artifact (pinned to
-│           │                                 the shared doctrine list at module load)
-│           ├── schemas/                 --   strict stage-boundary zod schemas
-│           │                                 (candidate, feature vector, profile,
-│           │                                 scored item, decision log)
-│           ├── scoring/                 --   §5.4 baseline/positive/penalties/constraints
-│           ├── diversify/               --   matroid dedup + source/topic/lens balancing
-│           ├── prohibited-language.ts   --   the §13.6/§30.6 prohibited ranking
-│           │                                 vocabulary (the neutrality-test-9 artifact)
-│           ├── pipeline.ts              --   the deterministic constrained-optimization
-│           │                                 core (serving AND replay execute this)
-│           └── __tests__/               --   ~120 deterministic unit/property tests
-│   ├── ai-governance/           -- WS-K pure AI-governance domain (no I/O; browser-safe)
-│       └── src/
-│           ├── schemas/                 --   model card, registry, NIST/ISO risk assessment,
-│           │                                 inventory, prohibited-use, data lineage, output
-│           │                                 record, evaluation results, pipelines, summary +
-│           │                                 quality, translation, correction, governance,
-│           │                                 provenance labels (all zod + co-located types)
-│           ├── prohibited-use.ts        --   the guard core + the §24.5 capability matrix
-│           ├── bias-audit.ts            --   two-proportion z-test + disparity gating
-│           ├── hallucination.ts         --   source grounding + consistency + attribution
-│           ├── safety-suite.ts          --   PII/harmful/minimization/disclaimer checks
-│           ├── red-team.ts              --   coverage + critical-finding gate
-│           ├── harness.ts               --   eval-set selection + aggregation + decision
-│           ├── summary-quality.ts       --   the five §24.3 quality constraints
-│           ├── inventory.ts             --   the canonical 8 use cases + risk assessments
-│           ├── labels.ts                --   the upgrade-only provenance label ladder
-│           ├── canonical-json.ts        --   deterministic config-hash serialization
-│           └── __tests__/               --   ~13 deterministic unit/property suites
-│   └── lcap/                    -- WS-R LCAP v0.2 protocol core (no I/O; zero npm deps in
-│       └── src/                 --   the codec/CID/COSE core; browser-safe; NEVER @licio/db)
-│           ├── runtime.ts              --   WebCrypto adapter + BufferSource helper (no node: leak)
-│           ├── priority.ts             --   §15.1.1 priority ↔ class ↔ lane SSOT
-│           ├── cbor/                   --   LDC deterministic CBOR (encode/decode/errors/types)
-│           ├── cid/                    --   §9.2 CID construction + RFC 4648 base32 + sha256
-│           ├── cose/                   --   aad, ecdsa (low-S), keys, suites, sign1 (COSE_Sign1)
-│           ├── schemas/                --   strict zod records/proofs/pack/checkpoint/receipt + LDC codec
-│           ├── identity/               --   cert, capability, sequence chain, revocation, chain validator
-│           ├── limits/                  --   §27.2 malicious-dependency-graph guard (cycle/fan-out/
-│           │                                depth/dup-dep/private-in-public/unknown-field detectors)
-│           ├── records/                --   contribution mapping, edit/tombstone projection, fork detection
-│           ├── block/                  --   descriptor, fixed-size chunking, attachment split, compression
-│           ├── pack/                   --   uvarint, streaming writer/reader, partial import, manifest
-│           ├── scheduler/              --   reservations, candidate closure, DRR allocator, clamped score
-│           ├── sync/                   --   §16/§17 sync-decision plane: closure, frontiers, pulse,
-│           │                                reconcile, budgets, interests, wants/resume, exchange,
-│           │                                server-ingest (§24.1 commit-stage decision),
-│           │                                ingest-order (§24.4 topological validation order)
-│           ├── checkpoint/             --   RFC 9162 merkle, room log, inclusion/consistency, witness
-│           ├── validate/               --   §18 trust-state lattice + the single validate() entry point
-│           ├── liveness/               --   liveness state machine, receipts, durable-outbox logic
-│           ├── conflict/               --   §25.1 conflict dispatch + visible-thread projection
-│           ├── test-vectors/           --   normative golden corpus (cbor/cid/sign1 .json)
-│           └── __tests__/              --   unit + conformance-replay + determinism properties
-│   └── private-p2p/             -- WS-S Private P2P rooms domain (no I/O; browser-safe;
-│       └── src/                 --   NEVER @licio/db, NEVER @licio/lcap — a separate plane)
-│           ├── crypto/                 --   canonical.ts: the ONE DAG-CBOR deterministic
-│           │                                profile (WS-S.2.2; later: MLS/HPKE/AEAD/KDF/Ed25519)
-│           ├── schemas/                --   strict §10/§12/§13/§19 records (envelope + AAD
-│           │                                alignment, manifest, op bodies w/ WS-G parity,
-│           │                                invite/join, attachment, search shard, report)
-│           └── __tests__/              --   canonical determinism/reject/bomb + schema + op suites
-├── scripts/                     -- build validation and security gates
-│   ├── validate-build.ts        --   post-build orchestrator
-│   ├── check-bundle-size.ts     --   initial JS < 200 KB gz (total < 320 KB), CSS < 50 KB gz
-│   ├── check-sw-security.ts     --   no remote importScripts/eval/new Function
-│   ├── inject-sw-trusted-types.ts --  prepend TT default policy to built sw.js
-│   ├── check-no-applause.ts     --   no like/vote/karma/reaction affordances
-│   ├── check-no-raw-egress.ts   --   no raw attention traces in signals layer
-│   ├── check-dep-budget.ts      --   dependency count enforcement
-│   ├── check-workspace-deps.ts  --   workspace boundary enforcement
-│   ├── check-lockfile.ts        --   lockfile integrity
-│   ├── check-policy.ts          --   doctrine/policy document validation
-│   ├── check-prod-parity.ts     --   the dev↔prod parity gate (adapter coverage over the
-│   │                                  production boot import closure, env-schema validation,
-│   │                                  production-adapter purity; reasoned allowlists that
-│   │                                  fail when stale)
-│   ├── private-p2p-gates.ts     --   WS-S.1.5 shared assertions for the 7 private-room gates
-│   ├── check-no-p2p-server-content.ts  --  WS-S.1.5 umbrella server-non-storage gate
-│   ├── check-no-private-cid-egress.ts  --  WS-S.1.5 no public-gateway for a private CID
-│   ├── check-private-rendezvous-schema.ts -- WS-S.1.5 §8.1 stub/rendezvous column denylist
-│   ├── check-private-bundle-transparency.ts -- WS-S.1.5 no dynamic remote private code
-│   ├── check-p2p-{endpoint-rejections,ranking-exclusion,search-exclusion}.ts -- WS-S.1.5
-│   ├── setup-local-llm.ts       --   `pnpm setup:llm`: provision + verify the local governance-LLM
-│   │                                  runtime (resolves the REAL boot decision, optional --docker
-│   │                                  Compose start, Ollama model pull, verification through the
-│   │                                  REAL completion seam incl. parameter negotiation)
-│   ├── bench-local-llm.ts       --   `pnpm bench:llm`: race local models through the REAL governed
-│   │                                  surfaces (moderation/debate/summary executors; latency +
-│   │                                  validity + parallel burst; native-probe diagnosis + remedy
-│   │                                  for broken runtime/model pairings)
-│   ├── lint-security.ts         --   supplementary security lint
-│   ├── generate-sri.ts          --   subresource integrity hashes
-│   ├── generate-sbom.ts         --   CycloneDX SBOM generation
-│   └── policy/                  --   policy validation utilities + tests
-├── docs/
-│   ├── SPEC.md                  -- canonical design specification
-│   ├── OFFLINE_SPEC.md          -- LCAP v0.2 delay-tolerant sync (WS-R extension spec)
-│   ├── PRIVATE_SPEC.md          -- E2EE private P2P rooms (WS-S extension spec)
-│   ├── planning/                -- per-workstream planning documents
-│   │   ├── 00-index.md          --   master index (~994 atomic tasks)
-│   │   ├── 01-repository-foundation.md  -- WS-0
-│   │   ├── 02-doctrine-and-policy.md    -- WS-A
-│   │   ├── 03-design-system.md          -- WS-B
-│   │   ├── 04-pwa-client.md             -- WS-C
-│   │   ├── 05–17-*.md                   -- WS-D through WS-P
-│   │   ├── 18-content-and-room-model.md -- WS-Q (room-owned content + visibility)
-│   │   └── 19-decentralized-data-plane.md -- WS-R (LCAP v0.2) + WS-S (E2EE P2P rooms): the
-│   │                                          Decentralized Data Plane (supersedes 19/20;
-│   │                                          ext of OFFLINE_SPEC.md + PRIVATE_SPEC.md)
-│   ├── design-system/           -- design system documentation
-│   ├── pwa-client/              -- PWA implementation documentation
-│   ├── identity/                -- WS-D implementation reference
-│   ├── events/                  -- WS-E implementation reference
-│   ├── ingestion/               -- WS-F implementation reference
-│   ├── forum/                   -- WS-G implementation reference
-│   ├── invariants/              -- WS-H implementation reference
-│   ├── ranking/                 -- WS-I implementation reference
-│   ├── trust-safety/            -- WS-J implementation reference
-│   ├── compliance/              -- WS-N implementation reference
-│   ├── private-p2p/             -- WS-S implementation reference (foundation shipped)
-│   └── policy/                  -- 9 policy documents (moderation, signals,
-│                                   privacy, crypto, jurisdiction, transparency)
-└── .github/
-    └── workflows/
-        ├── ci.yml               -- main CI (9 jobs: lint, typecheck, lockfile,
-        │                           deps, test+coverage, build+size, E2E, security,
-        │                           courier APK)
-        ├── codeql.yml           -- CodeQL security scanning (JS/TS)
-        ├── dependabot-auto-merge.yml -- dependency update automation
-        └── dependabot.yml       -- Dependabot configuration
+│   ├── shared/              -- schemas/types/constants SSOT (leaf): zod schemas, the
+│   │                           UGC pipeline (Markdown-lite AST + DOMPurify), the EIP-712
+│   │                           registry, the jurisdiction vocabulary, env validation
+│   ├── db/                  -- Drizzle schema + migrations (+ isolation BFS, private-room
+│   │                           guard); depends on @licio/shared only
+│   ├── invariants/          -- PWAtt/MinHash/freshness pure math + type-level invariants
+│   ├── ranking/             -- WS-I pure ranking (denylist, scoring, diversify, the
+│   │                           deterministic pipeline); NEVER @licio/db
+│   ├── ai-governance/       -- WS-K pure domain (prohibited-use, bias/hallucination,
+│   │                           harness, summary-quality); browser-safe, NEVER @licio/db
+│   ├── governance/          -- WS-U + WS-M pure math (moderation wrapper, kernel,
+│   │                           voting/tally, payment-intent lifecycle, exact decimals)
+│   ├── lcap/                -- WS-R LCAP v0.2 core: deterministic CBOR, CIDs, COSE,
+│   │                           identity chain, sync plane, checkpoints, validate()
+│   ├── lcap-p2p/            -- WS-R optional WebRTC/IPFS transports (code-split)
+│   └── private-p2p/         -- WS-S private-room plane: canonical DAG-CBOR, schemas,
+│                               MLS/HPKE/AEAD crypto, Lamport reducer, sync
+├── scripts/                -- build validation + CI static gates (check-*, validate-build)
+├── docs/                   -- SPEC.md, OFFLINE_SPEC.md, PRIVATE_SPEC.md, planning/
+│                               (00-index.md), per-workstream + policy references
+└── .github/workflows/      -- ci.yml (9 jobs), codeql.yml, dependabot
 ```
-
-Per-file purpose lives in each file's leading comment block, not
-duplicated here.
 
 ## Workspace dependency graph
 
@@ -1106,15 +386,16 @@ dependency:
 5. Web-API alternative — can a built-in browser/Node.js API replace it?
 
 **Pinned transitive override (`ws`).**  `pnpm.overrides` pins `ws` to
-`^8.21.0`.  `viem` (the WS-D SIWE / EIP-4361 verifier) pins `ws@8.20.1`
-*exactly*, which carries GHSA-96hv-2xvq-fx4p (a WebSocket-server
-memory-exhaustion DoS).  `viem@2.52.2` is the latest release and no `viem`
-version yet pins a patched `ws`, so the override is the only remediation
-(8.20.1 → 8.21.0 is an API-compatible patch; the `audit:advisories` gate
-is clean with it).  `ws` is viem's RPC WebSocket transport; Licio uses
-`viem` only for offline SIWE signature verification and runs no `ws`
-server, so exploitability is low regardless.  Remove this override once
-`viem` ships a release pinning `ws >= 8.21.0`.
+`^8.21.0` (currently resolves 8.21.1).  `ws` reaches the tree only through
+`viem` (the WS-D SIWE / EIP-4361 verifier) → `isows`; historically `viem`
+pinned `ws@8.20.1` exactly, which carries GHSA-96hv-2xvq-fx4p (a
+WebSocket-server memory-exhaustion DoS).  The override forces the patched
+line tree-wide (8.20.1 → 8.21.x is an API-compatible patch; the
+`audit:advisories` gate is clean with it).  `ws` is viem's RPC WebSocket
+transport; Licio uses `viem` only for offline SIWE signature verification
+and runs no `ws` server, so exploitability is low regardless.  Re-evaluate
+(and drop) this override once a `viem`/`isows` release guarantees a patched
+`ws` on its own.
 
 **Pinned transitive override (`undici`).**  `pnpm.overrides` pins `undici`
 to `^7.28.0`.  `undici` reaches the tree only through `jsdom@29.1.1` (the
@@ -1131,6 +412,25 @@ implementation); it never reaches the production bundle, so exploitability
 is low regardless, but the `audit:advisories` CI gate flags it
 tree-wide.  Remove this override once `jsdom` ships a release pinning
 `undici >= 7.28.0`.
+
+**Pinned transitive override (`esbuild`).**  `pnpm.overrides` pins
+`esbuild` to `^0.28.1`.  `esbuild` reaches the tree through the Vite /
+Vitest / TanStack-router build toolchain (dev-only — the production bundle
+is Rolldown, not esbuild).  The override DEDUPES every transitive esbuild
+onto one current line (older versions carried the dev-server request-proxy
+advisory GHSA-67mh-4wv8-2f99, fixed in 0.25.0; 0.28.1 is well past it) so a
+single audited copy is installed rather than a fan of stale ones.  Bump it
+in step with the Vite major it underpins.
+
+**Pinned crypto peer (`@noble/curves` / `@noble/ciphers`).**
+`@licio/private-p2p` pins `@noble/curves` at `2.0.1` and `@noble/ciphers`
+at `2.1.1` **exactly** — NOT the latest 2.2.0 — because `ts-mls@1.6.2` (the
+WS-S MLS group-key library, the latest release) declares them as EXACT peer
+dependencies at those versions.  Bumping the two to 2.2.0 leaves `ts-mls`'s
+peer unmet (and it was validated against the pinned versions).  Raise these
+two only when a `ts-mls` release widens or advances its `@noble/*` peer
+range; the `@noble/*` KAT cross-checks in the private-p2p suite guard the
+pin.
 
 ## Reading large files
 
@@ -1680,8 +980,8 @@ re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
-**Test counts.**  `pnpm test` is the canonical query (≈7417 tests pass
-at current state without the gated integration env; ≈7620 with live
+**Test counts.**  `pnpm test` is the canonical query (≈8081 tests pass
+at current state without the gated integration env; more with live
 Postgres/Redis).  Approximate file counts:
 
 | Workspace | Test files | Environment | Canonical query |

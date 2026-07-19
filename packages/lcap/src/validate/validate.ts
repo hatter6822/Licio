@@ -237,12 +237,19 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
     }
 
     if (consensus?.consistency) {
-      const consistent = await verifyConsistencyProof(
-        consensus.consistency.proof,
-        consensus.consistency.oldCheckpoint,
-        consensus.consistency.newCheckpoint,
-      );
-      if (!consistent.ok) conflict = 'checkpoint_fork';
+      // Bind the consistency proof's checkpoints to THIS record's room before
+      // treating a failure as equivocation: an inconsistency between checkpoints
+      // of some OTHER room must not force this record into `conflicting`
+      // (mirrors the inclusion binding above; a consistency proof is about a
+      // room's log, not a specific record).
+      const { proof, oldCheckpoint, newCheckpoint } = consensus.consistency;
+      const boundToRoom =
+        facts.roomId === undefined ||
+        (oldCheckpoint.room_id === facts.roomId && newCheckpoint.room_id === facts.roomId);
+      if (boundToRoom) {
+        const consistent = await verifyConsistencyProof(proof, oldCheckpoint, newCheckpoint);
+        if (!consistent.ok) conflict = 'checkpoint_fork';
+      }
     }
 
     if (consensus?.witnessVerified) achieved = maxPositive(achieved, 'witnessed');

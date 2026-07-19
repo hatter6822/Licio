@@ -27,7 +27,12 @@
 //     (WS-H.1.2d-2).
 
 import { zValidator } from '@hono/zod-validator';
-import { INVARIANT_TYPE_NAMES, nextRiskState, runRegressionSuite } from '@licio/invariants';
+import {
+  INVARIANT_TARGET_TYPES,
+  INVARIANT_TYPE_NAMES,
+  nextRiskState,
+  runRegressionSuite,
+} from '@licio/invariants';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
@@ -39,6 +44,7 @@ import {
   storeInvariantsConfigValue,
   validateInvariantsConfigValue,
 } from '../invariants/config.js';
+import { runRealtimeTier } from '../invariants/scheduler.js';
 import {
   bridgeCandidatesFor,
   latestScoiFor,
@@ -82,376 +88,407 @@ export function createInvariantsAdminRoutes(
   resolveForum: () => ForumServices = getForumServices,
   resolveIngestion: () => IngestionServices = getIngestionServices,
 ) {
-  return new Hono<AuthEnv>()
-    .use('*', authMiddleware(resolveIdentity))
-    .use('*', requireSteward())
+  return (
+    new Hono<AuthEnv>()
+      .use('*', authMiddleware(resolveIdentity))
+      .use('*', requireSteward())
 
-    .get('/health', async (c) => {
-      const invariants = resolveInvariants();
-      const entries = await Promise.all(
-        invariants.all().map(async (service) => ({
-          invariant_type: service.invariantType,
-          shadow_status: await invariants.promotionService.statusOf(service.invariantType),
-          tiers: service.tiers,
-          health: service.getHealthMetrics(),
-          recent_runs: await invariants.runMetadata.listRecent(service.invariantType, 5),
-          card: service.getCard(),
-        })),
-      );
-      return c.json({ invariants: entries });
-    })
-
-    .get('/outputs', async (c) => {
-      const targetId = c.req.query('target_id');
-      if (!targetId || !z.string().uuid().safeParse(targetId).success) {
-        return c.json(deny('invalid_target', 'target_id must be a UUID'), 422);
-      }
-      const reasonCode = c.req.query('reason_code');
-      const rows = (await resolveEvents().invariantStore.listForTarget(targetId)).filter(
-        (row) => !reasonCode || row.reasonCodes.includes(reasonCode),
-      );
-      return c.json({ outputs: rows });
-    })
-
-    .get('/compare', async (c) => {
-      const parsed = z
-        .object({
-          invariant_type: invariantTypeSchema,
-          version_a: z.string().min(1).max(32),
-          version_b: z.string().min(1).max(32),
-          from: z.string().datetime().optional(),
-          to: z.string().datetime().optional(),
-        })
-        .safeParse({
-          invariant_type: c.req.query('invariant_type'),
-          version_a: c.req.query('version_a'),
-          version_b: c.req.query('version_b'),
-          from: c.req.query('from'),
-          to: c.req.query('to'),
-        });
-      if (!parsed.success) {
-        return c.json(deny('invalid_query', parsed.error.issues[0]?.message ?? 'invalid'), 422);
-      }
-      const { invariant_type, version_a, version_b, from, to } = parsed.data;
-      const rows = await resolveEvents().invariantStore.listForVersionComparison(
-        invariant_type,
-        version_a,
-        version_b,
-        from && to ? { start: from, end: to } : undefined,
-      );
-      return c.json({ outputs: rows });
-    })
-
-    .get('/mfci/dashboard', async (c) => {
-      const invariants = resolveInvariants();
-      const events = resolveEvents();
-      const cases = await invariants.mfciCases.listOpen(50);
-      const calibration = await invariants.calibrations.get('mfci:target_concentration');
-      const outputs = (await events.invariantStore.listAll())
-        .filter((row) => row.invariantType === 'MFCI')
-        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-        .slice(0, 100);
-      return c.json({ open_cases: cases, calibration, recent_outputs: outputs });
-    })
-
-    .post('/mfci/cases/:caseId/resolve', zValidator('json', resolveBodySchema), async (c) => {
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-      const invariants = resolveInvariants();
-      const identity = resolveIdentity();
-      const { action } = c.req.valid('json');
-      const caseId = c.req.param('caseId');
-      if (!z.string().uuid().safeParse(caseId).success) {
-        return c.json(deny('invalid_case', 'caseId must be a UUID'), 422);
-      }
-      const resolved = await invariants.mfciCases.resolve(
-        caseId,
-        action,
-        `steward:${auth.userId}`,
-        new Date(invariants.now()).toISOString(),
-      );
-      if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
-      // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
-      // AND releases the held risk state through the analyst-override
-      // evidence path (WS-H.3.4a: downward needs clearing or an override).
-      if (action === 'cleared') {
-        await resolveItemSafetyState(
-          resolveEvents(),
-          identity,
-          resolved.targetId,
-          'clear',
-          `steward:${auth.userId}`,
-        );
-        const current = (await invariants.mfciRiskStates.get(resolved.targetId))?.state ?? 'normal';
-        const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
-          analystOverride: true,
-        });
-        await invariants.mfciRiskStates.set({
-          targetId: resolved.targetId,
-          state: transition.to,
-          score: 0,
-          reason: transition.reason,
-          updatedAt: new Date(invariants.now()).toISOString(),
-        });
-      }
-      await identity.audit.append({
-        actorUserId: auth.userId,
-        eventType: 'mfci_case_action',
-        targetRef: caseId,
-        context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
-      });
-      return c.json({ case: resolved });
-    })
-
-    .get('/mfci/margins/:marginsRef', async (c) => {
-      // MFCI-4: dereference a fixed_margins_ref to the persisted
-      // conditioning record (axes, 1-way margins, table total).
-      const record = await resolveInvariants().mfciMargins.get(c.req.param('marginsRef'));
-      if (!record) return c.json(deny('not_found', 'No margins record with that ref'), 404);
-      return c.json({ margins: record });
-    })
-
-    .get('/gwei/dashboard', async (c) => {
-      const rows = (await resolveEvents().invariantStore.listAll())
-        .filter((row) => row.invariantType === 'GWEI')
-        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-        .slice(0, 100);
-      return c.json({ comparisons: rows });
-    })
-
-    .get('/gwei/transparency', async (c) => {
-      // Public-safe aggregate parity statements (WS-H.5.2d): no cohort
-      // metrics, no suppressed-cell detail — parity vs under-review only.
-      const rows = (await resolveEvents().invariantStore.listAll()).filter(
-        (row) => row.invariantType === 'GWEI',
-      );
-      const threshold = 0.5;
-      const statements = rows.map((row) => {
-        const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
-        const gw2 = typeof row.scoreVector['gw2'] === 'number' ? row.scoreVector['gw2'] : null;
-        return {
-          window: row.timeWindow,
-          status: suppressed
-            ? 'withheld_small_cohort'
-            : gw2 !== null && gw2 <= threshold
-              ? 'parity_within_threshold'
-              : 'degradation_under_review',
-        };
-      });
-      return c.json({ generated_at: new Date().toISOString(), statements });
-    })
-
-    .get('/scoi/reports/:roomId', async (c) => {
-      // WS-H.4.1c steward reports — scoped to the room's OWN stewards
-      // (404-over-403: an out-of-scope steward learns nothing).
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-      const roomId = c.req.param('roomId');
-      if (!z.string().uuid().safeParse(roomId).success) {
-        return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
-      }
-      const forum = resolveForum();
-      // The room must EXIST — and be SERVER-hosted — before any authorization
-      // arm: the grants check used to 404 nonexistent rooms incidentally (no
-      // grants on a phantom), but the admin bypass would turn a typo/deleted
-      // room into a plausible 200 with zero findings, and a member-hosted
-      // (p2p) stub has no server-side SCOI surface at all — a 200 empty
-      // report would misrepresent it as a clean server room (codex).
-      const reportRoom = await forum.rooms.getById(roomId);
-      if (reportRoom === null || reportRoom.storageMode !== 'server') {
-        return c.json(deny('not_found', 'No such report'), 404);
-      }
-      // The room's own stewards, or the platform ADMIN (2026-07 final-line-of-
-      // defense decision; the outer surface is already requireSteward+MFA).
-      const roles = await forum.rooms.stewardRolesFor(roomId, auth.userId);
-      if (roles.length === 0 && !auth.roles.includes('admin')) {
-        return c.json(deny('not_found', 'No such report'), 404);
-      }
-      const ingestion = resolveIngestion();
-      const events = resolveEvents();
-      const invariants = resolveInvariants();
-      const lenses = await forum.lenses.listByRoom(roomId);
-      const lensNames = new Map(lenses.map((lens) => [lens.lensId, lens.name]));
-      const entries = [];
-      for (const story of await ingestion.stories.listRecent(200)) {
-        const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
-        if (!thread || thread.roomId !== roomId) continue;
-        const scoi = await latestScoiFor(events, story.storyId);
-        if (!scoi) continue;
-        // Per-lens interpretation summaries: tagged contribution counts.
-        const contributions = await forum.contributions.listByThread(thread.threadId, {
-          limit: 500,
-        });
-        const perLens = new Map<string, number>();
-        for (const contribution of contributions) {
-          const lensId = contribution.metadata['lens_id'];
-          if (typeof lensId !== 'string') continue;
-          perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
-        }
-        entries.push({
-          story_id: story.storyId,
-          thread_id: thread.threadId,
-          title: story.title,
-          context_state: scoi.contextState,
-          scoi: scoi.scoi,
-          lenses: [...perLens.entries()].map(([lensId, count]) => ({
-            lens_id: lensId,
-            name: lensNames.get(lensId) ?? lensId,
-            contribution_count: count,
+      .get('/health', async (c) => {
+        const invariants = resolveInvariants();
+        const entries = await Promise.all(
+          invariants.all().map(async (service) => ({
+            invariant_type: service.invariantType,
+            shadow_status: await invariants.promotionService.statusOf(service.invariantType),
+            tiers: service.tiers,
+            health: service.getHealthMetrics(),
+            recent_runs: await invariants.runMetadata.listRecent(service.invariantType, 5),
+            card: service.getCard(),
           })),
-          // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
-          bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
-        });
-      }
-      return c.json({ room_id: roomId, reports: entries });
-    })
+        );
+        return c.json({ invariants: entries });
+      })
 
-    .post('/scoi/threads/:threadId/bridge-requests', async (c) => {
-      // WS-H.4.2d bridge routing: identify multi-lens participants and open
-      // a bridge request with the SCOI baseline. Records only — credit is
-      // decided by the durable consumer when a contribution measurably
-      // reduces the obstruction.
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-      const threadId = c.req.param('threadId');
-      if (!z.string().uuid().safeParse(threadId).success) {
-        return c.json(deny('invalid_thread', 'threadId must be a UUID'), 422);
-      }
-      const forum = resolveForum();
-      const ingestion = resolveIngestion();
-      const thread = await ingestion.stories.getThreadById(threadId);
-      if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
-      // Bridge requests are ROOM-scoped: a roomless (global) thread has no
-      // steward surface at all, for admin included — without this the admin
-      // arm would open a bridge request the grants check made unreachable.
-      // The room must also still EXIST and be SERVER-hosted (codex: an
-      // orphaned/migration-drift thread whose room row is gone — or points at
-      // a member-hosted p2p stub — has no steward or report surface;
-      // mirroring the reports route's guard).
-      const bridgeRoom = thread.roomId === null ? null : await forum.rooms.getById(thread.roomId);
-      if (bridgeRoom === null || bridgeRoom.storageMode !== 'server') {
-        return c.json(deny('not_found', 'No such thread'), 404);
-      }
-      const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
-      // Same admin arm as the room SCOI reports above.
-      if (roles.length === 0 && !auth.roles.includes('admin')) {
-        return c.json(deny('not_found', 'No such thread'), 404);
-      }
-      const events = resolveEvents();
-      const invariants = resolveInvariants();
-      const existing = await invariants.bridgeAttempts.openForThread(threadId);
-      if (existing) {
-        return c.json(deny('already_open', 'A bridge request is already open'), 409);
-      }
-      const baseline =
-        (await latestScoiFor(events, thread.storyId)) ??
-        (await recomputeScoiFor(invariants, events, thread.storyId));
-      if (!baseline) {
-        return c.json(deny('no_scoi', 'No SCOI measurement available to baseline against'), 422);
-      }
-      const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
-      const attemptId = crypto.randomUUID();
-      await invariants.bridgeAttempts.insert({
-        attemptId,
-        threadId,
-        storyId: thread.storyId,
-        status: 'requested',
-        requestedBy: `steward:${auth.userId}`,
-        candidateUserIds: candidates,
-        contributionId: null,
-        bridgeUserId: null,
-        scoiBaseline: baseline.scoi,
-        scoiAfter: null,
-        createdAt: new Date(invariants.now()).toISOString(),
-        resolvedAt: null,
-      });
-      const identity = resolveIdentity();
-      await identity.audit.append({
-        actorUserId: auth.userId,
-        eventType: 'bridge_request',
-        targetRef: threadId,
-        context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
-      });
-      return c.json({
-        attempt_id: attemptId,
-        scoi_baseline: baseline.scoi,
-        candidates,
-      });
-    })
+      .get('/outputs', async (c) => {
+        const targetId = c.req.query('target_id');
+        if (!targetId || !z.string().uuid().safeParse(targetId).success) {
+          return c.json(deny('invalid_target', 'target_id must be a UUID'), 422);
+        }
+        const reasonCode = c.req.query('reason_code');
+        const rows = (await resolveEvents().invariantStore.listForTarget(targetId)).filter(
+          (row) => !reasonCode || row.reasonCodes.includes(reasonCode),
+        );
+        return c.json({ outputs: rows });
+      })
 
-    .get('/promotions/:invariantType', async (c) => {
-      const parsed = invariantTypeSchema.safeParse(c.req.param('invariantType'));
-      if (!parsed.success) return c.json(deny('invalid_type', 'unknown invariant type'), 422);
-      const invariants = resolveInvariants();
-      return c.json({
-        invariant_type: parsed.data,
-        shadow_status: await invariants.promotionService.statusOf(parsed.data),
-        history: await invariants.promotionService.history(parsed.data),
-      });
-    })
-
-    .post('/promotions', zValidator('json', promotionBodySchema), async (c) => {
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-      const invariants = resolveInvariants();
-      const identity = resolveIdentity();
-      const body = c.req.valid('json');
-      const problem = await invariants.promotionService.apply(
-        {
-          invariantType: body.invariant_type,
-          fromStatus: body.from_status,
-          toStatus: body.to_status,
-          evidence: {
-            shadowDurationDays: body.evidence.shadow_duration_days,
-            driftReportRef: body.evidence.drift_report_ref,
-            observedCoverage: body.evidence.observed_coverage,
-            observedConfidence: body.evidence.observed_confidence,
-          },
-          owner: body.owner,
-          createdAt: new Date(invariants.now()).toISOString(),
+      // WS-H.1.2f — analyst realtime-tier PREVIEW: run one realtime-capable
+      // invariant for a target under the configured latency budget and return the
+      // { ok, output | reasonCodes } envelope (the same realtime path WS-I consumes
+      // at the ranking boundary; this is its steward-gated inspection surface).
+      .post(
+        '/realtime-preview',
+        zValidator(
+          'json',
+          z
+            .object({
+              invariant_type: invariantTypeSchema,
+              target_type: z.enum(INVARIANT_TARGET_TYPES),
+              target_id: z.string().uuid(),
+            })
+            .strict(),
+        ),
+        async (c) => {
+          const body = c.req.valid('json');
+          const result = await runRealtimeTier(
+            resolveInvariants(),
+            resolveEvents(),
+            body.invariant_type,
+            { targetType: body.target_type, targetId: body.target_id },
+          );
+          return c.json(result);
         },
-        invariants.config().promotionMinShadowDays,
-      );
-      if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
-      await identity.audit.append({
-        actorUserId: auth.userId,
-        eventType: 'invariant_promotion_change',
-        targetRef: body.invariant_type,
-        context: { from: body.from_status, to: body.to_status, owner: body.owner },
-      });
-      return c.json({
-        invariant_type: body.invariant_type,
-        shadow_status: await invariants.promotionService.statusOf(body.invariant_type),
-      });
-    })
+      )
 
-    .put('/config', zValidator('json', configBodySchema), async (c) => {
-      const auth = getAuth(c);
-      if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-      const { key, value } = c.req.valid('json');
-      if (!INVARIANTS_CONFIG_KEYS.includes(key)) {
-        return c.json(deny('unknown_key', `unknown invariants config key '${key}'`), 422);
-      }
-      const problem = validateInvariantsConfigValue(key, value);
-      if (problem !== null) return c.json(deny('invalid_value', problem), 422);
-      const invariants = resolveInvariants();
-      await storeInvariantsConfigValue(resolveEvents().configStore, key, value);
-      await invariants.reloadConfig();
-      await resolveIdentity().audit.append({
-        actorUserId: auth.userId,
-        eventType: 'invariant_config_change',
-        targetRef: key,
-        context: { key },
-      });
-      return c.json({ ok: true, key });
-    })
+      .get('/compare', async (c) => {
+        const parsed = z
+          .object({
+            invariant_type: invariantTypeSchema,
+            version_a: z.string().min(1).max(32),
+            version_b: z.string().min(1).max(32),
+            from: z.string().datetime().optional(),
+            to: z.string().datetime().optional(),
+          })
+          .safeParse({
+            invariant_type: c.req.query('invariant_type'),
+            version_a: c.req.query('version_a'),
+            version_b: c.req.query('version_b'),
+            from: c.req.query('from'),
+            to: c.req.query('to'),
+          });
+        if (!parsed.success) {
+          return c.json(deny('invalid_query', parsed.error.issues[0]?.message ?? 'invalid'), 422);
+        }
+        const { invariant_type, version_a, version_b, from, to } = parsed.data;
+        const rows = await resolveEvents().invariantStore.listForVersionComparison(
+          invariant_type,
+          version_a,
+          version_b,
+          from && to ? { start: from, end: to } : undefined,
+        );
+        return c.json({ outputs: rows });
+      })
 
-    .get('/regression', (c) => {
-      const report = runRegressionSuite();
-      return c.json({
-        pass: report.pass,
-        checks: report.checks.length,
-        failures: report.failures,
-      });
-    });
+      .get('/mfci/dashboard', async (c) => {
+        const invariants = resolveInvariants();
+        const events = resolveEvents();
+        const cases = await invariants.mfciCases.listOpen(50);
+        const calibration = await invariants.calibrations.get('mfci:target_concentration');
+        const outputs = (await events.invariantStore.listAll())
+          .filter((row) => row.invariantType === 'MFCI')
+          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+          .slice(0, 100);
+        return c.json({ open_cases: cases, calibration, recent_outputs: outputs });
+      })
+
+      .post('/mfci/cases/:caseId/resolve', zValidator('json', resolveBodySchema), async (c) => {
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const invariants = resolveInvariants();
+        const identity = resolveIdentity();
+        const { action } = c.req.valid('json');
+        const caseId = c.req.param('caseId');
+        if (!z.string().uuid().safeParse(caseId).success) {
+          return c.json(deny('invalid_case', 'caseId must be a UUID'), 422);
+        }
+        const resolved = await invariants.mfciCases.resolve(
+          caseId,
+          action,
+          `steward:${auth.userId}`,
+          new Date(invariants.now()).toISOString(),
+        );
+        if (!resolved) return c.json(deny('not_found', 'No open case with that id'), 404);
+        // Fiber-test/analyst clearing lifts the safety freeze (WS-H.3.3d)
+        // AND releases the held risk state through the analyst-override
+        // evidence path (WS-H.3.4a: downward needs clearing or an override).
+        if (action === 'cleared') {
+          await resolveItemSafetyState(
+            resolveEvents(),
+            identity,
+            resolved.targetId,
+            'clear',
+            `steward:${auth.userId}`,
+          );
+          const current =
+            (await invariants.mfciRiskStates.get(resolved.targetId))?.state ?? 'normal';
+          const transition = nextRiskState(current, 0, invariants.config().mfciRiskThresholds, {
+            analystOverride: true,
+          });
+          await invariants.mfciRiskStates.set({
+            targetId: resolved.targetId,
+            state: transition.to,
+            score: 0,
+            reason: transition.reason,
+            updatedAt: new Date(invariants.now()).toISOString(),
+          });
+        }
+        await identity.audit.append({
+          actorUserId: auth.userId,
+          eventType: 'mfci_case_action',
+          targetRef: caseId,
+          context: { action, target_id: resolved.targetId, risk_state: resolved.riskState },
+        });
+        return c.json({ case: resolved });
+      })
+
+      .get('/mfci/margins/:marginsRef', async (c) => {
+        // MFCI-4: dereference a fixed_margins_ref to the persisted
+        // conditioning record (axes, 1-way margins, table total).
+        const record = await resolveInvariants().mfciMargins.get(c.req.param('marginsRef'));
+        if (!record) return c.json(deny('not_found', 'No margins record with that ref'), 404);
+        return c.json({ margins: record });
+      })
+
+      .get('/gwei/dashboard', async (c) => {
+        const rows = (await resolveEvents().invariantStore.listAll())
+          .filter((row) => row.invariantType === 'GWEI')
+          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+          .slice(0, 100);
+        return c.json({ comparisons: rows });
+      })
+
+      .get('/gwei/transparency', async (c) => {
+        // Public-safe aggregate parity statements (WS-H.5.2d): no cohort
+        // metrics, no suppressed-cell detail — parity vs under-review only.
+        const rows = (await resolveEvents().invariantStore.listAll()).filter(
+          (row) => row.invariantType === 'GWEI',
+        );
+        const threshold = 0.5;
+        const statements = rows.map((row) => {
+          const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
+          const gw2 = typeof row.scoreVector['gw2'] === 'number' ? row.scoreVector['gw2'] : null;
+          return {
+            window: row.timeWindow,
+            status: suppressed
+              ? 'withheld_small_cohort'
+              : gw2 !== null && gw2 <= threshold
+                ? 'parity_within_threshold'
+                : 'degradation_under_review',
+          };
+        });
+        return c.json({ generated_at: new Date().toISOString(), statements });
+      })
+
+      .get('/scoi/reports/:roomId', async (c) => {
+        // WS-H.4.1c steward reports — scoped to the room's OWN stewards
+        // (404-over-403: an out-of-scope steward learns nothing).
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const roomId = c.req.param('roomId');
+        if (!z.string().uuid().safeParse(roomId).success) {
+          return c.json(deny('invalid_room', 'roomId must be a UUID'), 422);
+        }
+        const forum = resolveForum();
+        // The room must EXIST — and be SERVER-hosted — before any authorization
+        // arm: the grants check used to 404 nonexistent rooms incidentally (no
+        // grants on a phantom), but the admin bypass would turn a typo/deleted
+        // room into a plausible 200 with zero findings, and a member-hosted
+        // (p2p) stub has no server-side SCOI surface at all — a 200 empty
+        // report would misrepresent it as a clean server room (codex).
+        const reportRoom = await forum.rooms.getById(roomId);
+        if (reportRoom === null || reportRoom.storageMode !== 'server') {
+          return c.json(deny('not_found', 'No such report'), 404);
+        }
+        // The room's own stewards, or the platform ADMIN (2026-07 final-line-of-
+        // defense decision; the outer surface is already requireSteward+MFA).
+        const roles = await forum.rooms.stewardRolesFor(roomId, auth.userId);
+        if (roles.length === 0 && !auth.roles.includes('admin')) {
+          return c.json(deny('not_found', 'No such report'), 404);
+        }
+        const ingestion = resolveIngestion();
+        const events = resolveEvents();
+        const invariants = resolveInvariants();
+        const lenses = await forum.lenses.listByRoom(roomId);
+        const lensNames = new Map(lenses.map((lens) => [lens.lensId, lens.name]));
+        const entries = [];
+        for (const story of await ingestion.stories.listRecent(200)) {
+          const thread = await ingestion.stories.getThreadByStoryId(story.storyId);
+          if (!thread || thread.roomId !== roomId) continue;
+          const scoi = await latestScoiFor(events, story.storyId);
+          if (!scoi) continue;
+          // Per-lens interpretation summaries: tagged contribution counts.
+          const contributions = await forum.contributions.listByThread(thread.threadId, {
+            limit: 500,
+          });
+          const perLens = new Map<string, number>();
+          for (const contribution of contributions) {
+            const lensId = contribution.metadata['lens_id'];
+            if (typeof lensId !== 'string') continue;
+            perLens.set(lensId, (perLens.get(lensId) ?? 0) + 1);
+          }
+          entries.push({
+            story_id: story.storyId,
+            thread_id: thread.threadId,
+            title: story.title,
+            context_state: scoi.contextState,
+            scoi: scoi.scoi,
+            lenses: [...perLens.entries()].map(([lensId, count]) => ({
+              lens_id: lensId,
+              name: lensNames.get(lensId) ?? lensId,
+              contribution_count: count,
+            })),
+            // The §10.5 "Bridge attempts" branch (the WS-H.4.2d credit surface).
+            bridge_attempts: await invariants.bridgeAttempts.listForThread(thread.threadId, 10),
+          });
+        }
+        return c.json({ room_id: roomId, reports: entries });
+      })
+
+      .post('/scoi/threads/:threadId/bridge-requests', async (c) => {
+        // WS-H.4.2d bridge routing: identify multi-lens participants and open
+        // a bridge request with the SCOI baseline. Records only — credit is
+        // decided by the durable consumer when a contribution measurably
+        // reduces the obstruction.
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const threadId = c.req.param('threadId');
+        if (!z.string().uuid().safeParse(threadId).success) {
+          return c.json(deny('invalid_thread', 'threadId must be a UUID'), 422);
+        }
+        const forum = resolveForum();
+        const ingestion = resolveIngestion();
+        const thread = await ingestion.stories.getThreadById(threadId);
+        if (!thread) return c.json(deny('not_found', 'No such thread'), 404);
+        // Bridge requests are ROOM-scoped: a roomless (global) thread has no
+        // steward surface at all, for admin included — without this the admin
+        // arm would open a bridge request the grants check made unreachable.
+        // The room must also still EXIST and be SERVER-hosted (codex: an
+        // orphaned/migration-drift thread whose room row is gone — or points at
+        // a member-hosted p2p stub — has no steward or report surface;
+        // mirroring the reports route's guard).
+        const bridgeRoom = thread.roomId === null ? null : await forum.rooms.getById(thread.roomId);
+        if (bridgeRoom === null || bridgeRoom.storageMode !== 'server') {
+          return c.json(deny('not_found', 'No such thread'), 404);
+        }
+        const roles = await forum.rooms.stewardRolesFor(thread.roomId, auth.userId);
+        // Same admin arm as the room SCOI reports above.
+        if (roles.length === 0 && !auth.roles.includes('admin')) {
+          return c.json(deny('not_found', 'No such thread'), 404);
+        }
+        const events = resolveEvents();
+        const invariants = resolveInvariants();
+        const existing = await invariants.bridgeAttempts.openForThread(threadId);
+        if (existing) {
+          return c.json(deny('already_open', 'A bridge request is already open'), 409);
+        }
+        const baseline =
+          (await latestScoiFor(events, thread.storyId)) ??
+          (await recomputeScoiFor(invariants, events, thread.storyId));
+        if (!baseline) {
+          return c.json(deny('no_scoi', 'No SCOI measurement available to baseline against'), 422);
+        }
+        const candidates = await bridgeCandidatesFor(forum, ingestion, threadId);
+        const attemptId = crypto.randomUUID();
+        await invariants.bridgeAttempts.insert({
+          attemptId,
+          threadId,
+          storyId: thread.storyId,
+          status: 'requested',
+          requestedBy: `steward:${auth.userId}`,
+          candidateUserIds: candidates,
+          contributionId: null,
+          bridgeUserId: null,
+          scoiBaseline: baseline.scoi,
+          scoiAfter: null,
+          createdAt: new Date(invariants.now()).toISOString(),
+          resolvedAt: null,
+        });
+        const identity = resolveIdentity();
+        await identity.audit.append({
+          actorUserId: auth.userId,
+          eventType: 'bridge_request',
+          targetRef: threadId,
+          context: { candidate_count: candidates.length, scoi_baseline: baseline.scoi },
+        });
+        return c.json({
+          attempt_id: attemptId,
+          scoi_baseline: baseline.scoi,
+          candidates,
+        });
+      })
+
+      .get('/promotions/:invariantType', async (c) => {
+        const parsed = invariantTypeSchema.safeParse(c.req.param('invariantType'));
+        if (!parsed.success) return c.json(deny('invalid_type', 'unknown invariant type'), 422);
+        const invariants = resolveInvariants();
+        return c.json({
+          invariant_type: parsed.data,
+          shadow_status: await invariants.promotionService.statusOf(parsed.data),
+          history: await invariants.promotionService.history(parsed.data),
+        });
+      })
+
+      .post('/promotions', zValidator('json', promotionBodySchema), async (c) => {
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const invariants = resolveInvariants();
+        const identity = resolveIdentity();
+        const body = c.req.valid('json');
+        const problem = await invariants.promotionService.apply(
+          {
+            invariantType: body.invariant_type,
+            fromStatus: body.from_status,
+            toStatus: body.to_status,
+            evidence: {
+              shadowDurationDays: body.evidence.shadow_duration_days,
+              driftReportRef: body.evidence.drift_report_ref,
+              observedCoverage: body.evidence.observed_coverage,
+              observedConfidence: body.evidence.observed_confidence,
+            },
+            owner: body.owner,
+            createdAt: new Date(invariants.now()).toISOString(),
+          },
+          invariants.config().promotionMinShadowDays,
+        );
+        if (problem !== null) return c.json(deny('promotion_rejected', problem), 422);
+        await identity.audit.append({
+          actorUserId: auth.userId,
+          eventType: 'invariant_promotion_change',
+          targetRef: body.invariant_type,
+          context: { from: body.from_status, to: body.to_status, owner: body.owner },
+        });
+        return c.json({
+          invariant_type: body.invariant_type,
+          shadow_status: await invariants.promotionService.statusOf(body.invariant_type),
+        });
+      })
+
+      .put('/config', zValidator('json', configBodySchema), async (c) => {
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const { key, value } = c.req.valid('json');
+        if (!INVARIANTS_CONFIG_KEYS.includes(key)) {
+          return c.json(deny('unknown_key', `unknown invariants config key '${key}'`), 422);
+        }
+        const problem = validateInvariantsConfigValue(key, value);
+        if (problem !== null) return c.json(deny('invalid_value', problem), 422);
+        const invariants = resolveInvariants();
+        await storeInvariantsConfigValue(resolveEvents().configStore, key, value);
+        await invariants.reloadConfig();
+        await resolveIdentity().audit.append({
+          actorUserId: auth.userId,
+          eventType: 'invariant_config_change',
+          targetRef: key,
+          context: { key },
+        });
+        return c.json({ ok: true, key });
+      })
+
+      .get('/regression', (c) => {
+        const report = runRegressionSuite();
+        return c.json({
+          pass: report.pass,
+          checks: report.checks.length,
+          failures: report.failures,
+        });
+      })
+  );
 }

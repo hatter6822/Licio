@@ -800,7 +800,11 @@ export class DrizzleSignalLedgerStore implements SignalLedgerStore {
             antiSignals: sql`excluded.anti_signals`,
             pwattScore: sql`excluded.pwatt_score`,
             summary: sql`excluded.summary`,
-            recordedAt: sql`excluded.recorded_at`,
+            // entryId (the PK) and recordedAt are DELIBERATELY not updated on
+            // conflict: an idempotent re-score of the same (owner,item,window)
+            // must keep the ORIGINAL entry id + record time so the keyset cursor
+            // (recordedAt, entryId) stays valid and re-scored rows do not jump to
+            // the top of the ledger (WS-E.2.1d convergence).
             purgeAfter: sql`excluded.purge_after`,
           },
         });

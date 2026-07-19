@@ -193,6 +193,11 @@ export const knomosisPreflightPassSchema = z
     summary_payload_hash: hash32Schema,
     /** The plain-language summary the hash covers. */
     human_summary: z.string().min(1).max(2_000),
+    /** WS-L.2.6e — the signed amount is at/above the high-value threshold, so the
+     *  submission requires a FRESH step-up assertion (not merely a session inside
+     *  the general step-up window).  Clients gate `TransactionPreview` on it; the
+     *  submit endpoint enforces it server-side. */
+    high_value_step_up_required: z.boolean().default(false),
     timestamp: isoTimestampSchema,
   })
   .strict();

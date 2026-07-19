@@ -60,11 +60,12 @@ export const ONLINE_ACCEPTANCE: AcceptancePolicy = { maxPastMs: 5 * 60_000, maxF
 /**
  * The offline-sync policy for the WS-C batch wire: the durable pending queue
  * replays batches when connectivity returns (possibly days later, SPEC §6.9).
- * Replay safety does NOT depend on this window — every aggregate_id is a
- * single-use nonce AND the durable event_id uniqueness rejects re-ingestion
- * forever — so the window only bounds how stale an aggregate may still enter
- * scoring (7 days = the longest aggregation window and the attention_raw
- * ceiling).
+ * Replay safety holds for the FULL window: the single-use replay nonce is sized
+ * to this window (see `replayNonceTtlMs`), so a re-ingested aggregate is rejected
+ * for all 7 days even after its durable event row is retention-purged (the
+ * durable event_id uniqueness is the additional backstop while the row lives).
+ * The window also bounds how stale an aggregate may still enter scoring (7 days =
+ * the longest aggregation window and the attention_raw ceiling).
  */
 export const OFFLINE_SYNC_ACCEPTANCE: AcceptancePolicy = {
   maxPastMs: 7 * 86_400_000,
@@ -133,6 +134,14 @@ export async function ingestAttentionEvents(
     });
   }
   const userRef = accountRef(identity.config.masterSecret, sessionUserId);
+  // The replay nonce must outlive the WHOLE acceptance window: a replay is
+  // accepted only while its timestamp is still in-window, so the nonce must be
+  // remembered for at least `maxPastMs + maxFutureMs` after first ingest.  Sizing
+  // it to the policy (not a fixed 10min) makes the "single-use nonce rejects
+  // re-ingestion for the full window" guarantee hold even for `none`/shortened
+  // retention users, whose durable event row is purged before the window closes
+  // (WS-E.1.3b).  Online stays ~10min; the offline-sync path covers its 7 days.
+  const replayNonceTtlMs = Math.max(NONCE_TTL_MS, policy.maxPastMs + policy.maxFutureMs);
 
   for (const event of batch) {
     // 1. Ownership: the event's user must be the authenticated session user
@@ -151,10 +160,12 @@ export async function ingestAttentionEvents(
       outcomes.push('future_timestamp');
       continue;
     }
-    // 3. Replay nonce — fast layer (user-scoped key; non-reversible ref).
+    // 3. Replay nonce — fast layer (user-scoped key; non-reversible ref),
+    //    sized to the acceptance window so it rejects a replay for the FULL
+    //    window even after the durable event row is retention-purged.
     const fresh = await events.replay.putIfAbsent(
       `evnonce:${userRef}:${event.nonce}`,
-      NONCE_TTL_MS,
+      replayNonceTtlMs,
       now,
     );
     if (!fresh) {

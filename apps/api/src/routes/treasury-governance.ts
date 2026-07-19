@@ -41,13 +41,16 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { createCase } from '../compliance/cases.js';
 import { disclosureGate } from '../compliance/disclosures.js';
 import {
+  buildCaseDeps,
   buildDisclosureDeps,
   complianceServicesConfigured,
   getComplianceServices,
 } from '../compliance/services.js';
 import { getKnomosisServices } from '../knomosis/services.js';
+import { createLogger } from '../lib/logger.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -64,6 +67,7 @@ import { markGrantClawedBack, setGrantReview, updateGrantMilestone } from '../tr
 import {
   attachIntentSubmission,
   createPaymentIntent,
+  disputeIntent,
   markIntentSigned,
   preflightIntent,
   quoteIntent,
@@ -82,6 +86,7 @@ import { recordReadinessAttestation } from '../treasury/readiness.js';
 import { getTreasuryServices } from '../treasury/services.js';
 import { createTreasury, treasuryDashboard } from '../treasury/treasury.js';
 
+const log = createLogger();
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
 
@@ -706,6 +711,65 @@ export function createTreasuryGovernanceRoutes() {
             execution_state: result.intent.executionState,
             quote: result.intent.quoteRef ?? null,
           });
+        },
+      )
+      .post(
+        // WS-M.4.3d post-finality dispute: the owner or a steward flags a
+        // FINALIZED payment for review — the only edge out of `finalized`.
+        '/rooms/:roomId/treasury/payment-intents/:paymentIntentId/dispute',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator('param', z.object({ roomId: uuidSchema, paymentIntentId: uuidSchema })),
+        zValidator('json', z.object({ reason: z.string().trim().min(1).max(2000) }).strict()),
+        async (c) => {
+          const auth = requireAuth(c);
+          const gate = flagGate('governance');
+          if (gate) return c.json(deny(gate.code, gate.message), 503);
+          const services = getTreasuryServices();
+          const { roomId, paymentIntentId } = c.req.valid('param');
+          const { reason } = c.req.valid('json');
+          // Authorization FIRST: owner or steward, room match (an intent id is
+          // never authorization — mirrors the advance/read handlers above).
+          const target = await services.intents.getById(paymentIntentId);
+          if (target === null || target.roomId !== roomId) return c.json(notFound, 404);
+          if (
+            target.userId !== auth.userId &&
+            !(await services.rooms.isSteward(roomId, auth.userId))
+          ) {
+            return c.json(notFound, 404);
+          }
+          const result = await disputeIntent(services, paymentIntentId, auth.userId);
+          if ('code' in result) return tgError(c, result);
+          // Open a human-initiated compliance review carrying the reason.  The
+          // dispute is already committed + audited on-chain, so a case-open
+          // failure must NOT fail the request (the case is a secondary artifact).
+          if (complianceServicesConfigured()) {
+            const subject =
+              target.userId !== null
+                ? { kind: 'user' as const, ref: target.userId }
+                : { kind: 'room' as const, ref: target.roomId };
+            // The dispute is already committed + audited; the review case is a
+            // SECONDARY artifact.  A store failure here (e.g. a transient DB
+            // outage) must NOT 500 the request — the intent is terminal, so a
+            // retry would answer `not_disputable` and never re-open the case.
+            try {
+              await createCase(buildCaseDeps(getComplianceServices()), {
+                subjectKind: subject.kind,
+                subjectRef: subject.ref,
+                triggerType: 'manual',
+                riskLevel: 'medium',
+                note: `Finalized payment intent ${paymentIntentId} disputed: ${reason}`,
+                idempotencyKey: `intent-dispute:${paymentIntentId}`,
+                actorUserId: auth.userId,
+              });
+            } catch (error) {
+              log.warn(
+                { err: error, payment_intent_id: paymentIntentId },
+                'dispute committed but compliance-case open failed',
+              );
+            }
+          }
+          return c.json({ execution_state: result.intent.executionState });
         },
       )
 

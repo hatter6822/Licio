@@ -109,12 +109,6 @@ import { createTreasuryGovernanceRoutes } from './treasury-governance.js';
 import { createTrustSafetyRoutes } from './trust-safety.js';
 import { createWalletRoutes } from './wallet.js';
 
-/** Read the session id from the `__Host-session` cookie (or undefined). */
-function sessionIdOf(cookieHeader: string | undefined): string | undefined {
-  if (!cookieHeader) return undefined;
-  return cookieHeader.match(/(?:^|;\s*)__Host-session=([^;]+)/)?.[1];
-}
-
 /**
  * OPTIONAL session resolution for public-but-personalizable surfaces (the
  * feed): a valid `__Host-sid` session yields the user id; anything else —
@@ -133,20 +127,16 @@ async function resolveOptionalUserId(cookieHeader: string | undefined): Promise<
   }
 }
 
-/** A stable per-request key for in-memory user state (session or anonymous). */
-function stateKey(cookieHeader: string | undefined): string {
-  return sessionIdOf(cookieHeader) ?? 'anonymous';
-}
-
 /**
  * The settings-sync key (SPEC §23.2): the USER id when signed in — so settings
- * survive re-login and sync across devices — else the session id.  A
- * cookieless visitor gets `undefined` and is never persisted server-side (the
- * client's local persistence owns that state; the old shared 'anonymous'
- * fallback was a cross-user state bleed).
+ * survive re-login and sync across devices — else the raw session token (the
+ * degraded path when a valid `__Host-sid` session cannot be resolved to a user,
+ * e.g. a transient store outage).  A cookieless visitor gets `undefined` and is
+ * never persisted server-side (the client's local persistence owns that state;
+ * the old shared 'anonymous' fallback was a cross-user state bleed).
  */
 async function settingsKey(cookieHeader: string | undefined): Promise<string | undefined> {
-  return (await resolveOptionalUserId(cookieHeader)) ?? sessionIdOf(cookieHeader);
+  return (await resolveOptionalUserId(cookieHeader)) ?? readSessionToken(cookieHeader);
 }
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;
@@ -733,22 +723,37 @@ export function createV1Routes() {
         return c.json(vapidPublicKeyResponseSchema.parse({ publicKey: config.publicKey }));
       })
       .post('/push/subscriptions', zValidator('json', pushRegisterRequestSchema), async (c) => {
+        // Push delivery is user-scoped (WS-D.1.4d security alerts, replies): an
+        // endpoint with no authenticated owner is never delivered to, so we
+        // require a session and scope BOTH register and remove to the user id.
+        // Using the shared 'anonymous' key here would let any signed-in user
+        // unsubscribe any endpoint they can name (the old cross-user bleed).
+        const userId = await resolveOptionalUserId(c.req.header('cookie'));
+        if (userId === null) {
+          return c.json(
+            { error: { code: 'unauthenticated', message: 'Authentication required' } },
+            401,
+          );
+        }
         const { subscription } = c.req.valid('json');
-        await registerSubscription(
-          subscription,
-          stateKey(c.req.header('cookie')),
-          await resolveOptionalUserId(c.req.header('cookie')),
-        );
+        await registerSubscription(subscription, userId, userId);
         return c.json(okAckSchema.parse({ ok: true }), 201);
       })
       .delete(
         '/push/subscriptions',
         zValidator('json', z.object({ endpoint: z.string().url() })),
         async (c) => {
-          // Scoped to the requesting session — a session cannot unsubscribe
-          // another user's endpoint (authorization, not just existence).
-          await removeSubscription(c.req.valid('json').endpoint, stateKey(c.req.header('cookie')));
-          return c.json(okAckSchema.parse({ ok: true }));
+          // Scoped to the requesting USER — a user cannot unsubscribe another
+          // user's endpoint (authorization, not just existence).
+          const userId = await resolveOptionalUserId(c.req.header('cookie'));
+          if (userId === null) {
+            return c.json(
+              { error: { code: 'unauthenticated', message: 'Authentication required' } },
+              401,
+            );
+          }
+          const removed = await removeSubscription(c.req.valid('json').endpoint, userId);
+          return c.json(okAckSchema.parse({ ok: removed }));
         },
       )
 

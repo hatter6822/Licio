@@ -1020,6 +1020,27 @@ export class DrizzleSignatureStore implements SignatureStore {
     };
   }
 
+  async getByStoryIds(storyIds: readonly string[]): Promise<Map<string, StorySignatureRecord>> {
+    const out = new Map<string, StorySignatureRecord>();
+    if (storyIds.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(storySignatures)
+      .where(inArray(storySignatures.storyId, [...storyIds]));
+    for (const row of rows) {
+      out.set(row.storyId, {
+        storyId: row.storyId,
+        minhash: unpackSignature(row.minhash),
+        shingleK: row.shingleK,
+        numHashes: row.numHashes,
+        familyVersion: row.familyVersion,
+        textSource: row.textSource,
+        createdAt: iso(row.createdAt),
+      });
+    }
+    return out;
+  }
+
   async candidatesByBands(bandHashes: Uint32Array, excludeStoryId: string): Promise<string[]> {
     // O(bands) point lookups against (band_index, band_hash) — one indexed
     // query with the 32 pairs, never a signature scan (WS-F.1.3c).

@@ -765,14 +765,10 @@ export class DrizzlePaymentIntentStore implements PaymentIntentStore {
       .where(
         and(
           eq(paymentIntents.userId, userId),
-          notInArray(paymentIntents.executionState, [
-            'finalized',
-            'abandoned',
-            'failed',
-            'reverted',
-            // A reorg is a reversal — it must not pin an unlink obligation (W14).
-            'reorged',
-          ]),
+          // Terminal intents pin no wallet-unlink obligation (incl. `reorged`
+          // reversals and post-finality `disputed`) — single source of truth so
+          // a new terminal state can never drift out of this filter (W14).
+          notInArray(paymentIntents.executionState, [...TERMINAL_INTENT_STATES]),
         ),
       )
       .limit(limit);

@@ -471,6 +471,19 @@ describe('WS-I.2.3c hard constraints', () => {
     expect(phiDiversification(null, PROFILE, { phi: true }).application).toBeNull();
   });
 
+  it('applies the stricter (phi_sensitive_factor-scaled) threshold on a sensitive journey', () => {
+    const base = PROFILE.constraints.phi_diversify_threshold;
+    const factor = PROFILE.constraints.phi_sensitive_factor;
+    const between = (base * factor + base) / 2; // below base, at/above base*factor
+    // Neutral journey: below the base threshold → NO diversification.
+    expect(phiDiversification(between, PROFILE, { phi: true }, false).diversify).toBe(false);
+    // Sensitive journey: the tightened threshold triggers diversification and the
+    // application records the tightened value, not the base.
+    const sensitive = phiDiversification(between, PROFILE, { phi: true }, true);
+    expect(sensitive.diversify).toBe(true);
+    expect(sensitive.application?.threshold).toBeCloseTo(base * factor);
+  });
+
   it('GWEI disparity above threshold blocks the profile (release gate)', () => {
     const over = PROFILE.constraints.gwei_max_disparity + 0.01;
     expect(gweiDeploymentGate(over, PROFILE, { gwei: true }).blocked).toBe(true);

@@ -80,7 +80,7 @@ export interface CompliancePort {
    * would open a separate review per steward for ONE payout, and leave that
    * review unfindable from the fraud queue — which knows the intent and its
    * room, never which steward pressed the button.  `null` = the actor is the
-   * subject (a personal pay-in).  Use `reviewSubjectFor` rather than deciding
+   * subject (a personal pay-in).  Use `reviewSubjectForAction` rather than deciding
    * per call site.
    *
    * `userId` stays the ACTOR, and it is the actor's REGION that resolves from

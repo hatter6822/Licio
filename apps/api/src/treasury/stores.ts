@@ -793,6 +793,10 @@ export const TERMINAL_INTENT_STATES: ReadonlySet<PaymentIntentState> = new Set([
   'failed',
   'reverted',
   'reorged',
+  // A dispute is post-finality REVIEW, not an in-flight payment — it has no
+  // outgoing transition, so like the other terminals it must not pin a
+  // wallet-unlink obligation or ride the compliance/fraud queues (WS-M.4.3d).
+  'disputed',
 ]);
 
 export class InMemoryPaymentIntentStore implements PaymentIntentStore {
@@ -924,17 +928,12 @@ export class InMemoryPaymentIntentStore implements PaymentIntentStore {
   }
 
   async listActiveByUser(userId: string, limit: number): Promise<PaymentIntentRecord[]> {
-    // `reorged` is a REVERSAL (the transfer un-happened) — it must not hold a
-    // wallet-unlink obligation open; a retry re-checks the wallet set (W14).
-    const terminal: PaymentIntentState[] = [
-      'finalized',
-      'abandoned',
-      'failed',
-      'reverted',
-      'reorged',
-    ];
+    // Terminal intents hold NO wallet-unlink obligation (incl. `reorged`
+    // reversals — the transfer un-happened — and post-finality `disputed`);
+    // a retry re-checks the wallet set (W14).  Single source of truth so the
+    // set never drifts from a new terminal state.
     return [...this.#rows.values()]
-      .filter((r) => r.userId === userId && !terminal.includes(r.executionState))
+      .filter((r) => r.userId === userId && !TERMINAL_INTENT_STATES.has(r.executionState))
       .slice(0, limit)
       .map(clone);
   }

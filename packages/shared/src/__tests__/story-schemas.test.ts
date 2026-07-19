@@ -43,30 +43,19 @@ function linkBody(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 describe('bcp47Schema (WS-F.1.1b)', () => {
-  it.each([
-    'en',
-    'pt-BR',
-    'zh-Hans',
-    'sr-Latn-RS',
-    'es-419',
-    'de-CH-1996',
-    'und',
-  ])('accepts %s', (tag) => {
-    expect(bcp47Schema.safeParse(tag).success).toBe(true);
-  });
+  it.each(['en', 'pt-BR', 'zh-Hans', 'sr-Latn-RS', 'es-419', 'de-CH-1996', 'und'])(
+    'accepts %s',
+    (tag) => {
+      expect(bcp47Schema.safeParse(tag).success).toBe(true);
+    },
+  );
 
-  it.each([
-    'english',
-    'en_US',
-    'e',
-    '1234',
-    '-en',
-    'en-',
-    'en--US',
-    'a'.repeat(40),
-  ])('rejects %s', (tag) => {
-    expect(bcp47Schema.safeParse(tag).success).toBe(false);
-  });
+  it.each(['english', 'en_US', 'e', '1234', '-en', 'en-', 'en--US', 'a'.repeat(40)])(
+    'rejects %s',
+    (tag) => {
+      expect(bcp47Schema.safeParse(tag).success).toBe(false);
+    },
+  );
 
   it('canonicalizes conventional casing (language lower, script Title, region UPPER)', () => {
     expect(canonicalizeBcp47('PT-br')).toBe('pt-BR');

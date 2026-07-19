@@ -309,6 +309,45 @@ describe('store edge cases (WS-E.3.1)', () => {
     expect(new Set(seen).size).toBe(5); // no duplicates, no gaps
   });
 
+  it('preserves entryId + recordedAt on an idempotent re-score (WS-E.2.1d)', async () => {
+    const store = new InMemorySignalLedgerStore();
+    const owner = randomUUID();
+    const itemId = randomUUID();
+    const base: SignalLedgerRecord = {
+      entryId: randomUUID(),
+      ownerUserId: owner,
+      itemId,
+      storyTitle: 'Story',
+      windowStart: new Date(T0).toISOString(),
+      windowSize: '1h',
+      signals: {},
+      antiSignals: [],
+      pwattScore: 0.1,
+      summary: 'first',
+      recordedAt: new Date(T0).toISOString(),
+      purgeAfter: new Date(T0 + 86_400_000).toISOString(),
+    };
+    await store.upsertMany([base]);
+    const first = (await store.listForUser(owner, 10)).entries[0];
+    // A re-score of the SAME (owner,item,window) with a fresh id / record time
+    // and an updated score — the store must keep the original id + record time.
+    await store.upsertMany([
+      {
+        ...base,
+        entryId: randomUUID(),
+        recordedAt: new Date(T0 + 3_600_000).toISOString(),
+        pwattScore: 0.9,
+        summary: 'rescored',
+      },
+    ]);
+    const after = (await store.listForUser(owner, 10)).entries;
+    expect(after).toHaveLength(1);
+    expect(after[0]?.entryId).toBe(first?.entryId); // id unchanged
+    expect(after[0]?.recordedAt).toBe(first?.recordedAt); // record time unchanged
+    expect(after[0]?.pwattScore).toBe(0.9); // but the score DID update
+    expect(after[0]?.summary).toBe('rescored');
+  });
+
   it('checkpoints and dead letters round-trip', async () => {
     const checkpoints = new InMemoryConsumerCheckpointStore();
     expect(await checkpoints.get('agg')).toBeNull();

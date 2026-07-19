@@ -763,3 +763,49 @@ describe('WS-H client wire surfaces (feed labels, lens names, co-group)', () => 
     expect(names.has('Water engineers')).toBe(true);
   });
 });
+
+describe('realtime-tier preview (WS-H.1.2f)', () => {
+  it('runs a realtime invariant for a target and returns the {ok,...} envelope', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const response = await adminRequest(fixture, steward.cookie, '/realtime-preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        invariant_type: 'MERI',
+        target_type: 'story',
+        target_id: '11111111-1111-4111-8111-111111111111',
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean };
+    expect(typeof body.ok).toBe('boolean');
+  });
+
+  it('rejects a malformed preview request (400)', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const bad = await adminRequest(fixture, steward.cookie, '/realtime-preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        invariant_type: 'NOPE',
+        target_type: 'story',
+        target_id: 'not-a-uuid',
+      }),
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  it('rejects a non-steward preview request', async () => {
+    const fixture = freshInvariantServices();
+    const user = await seedUserWithSession(fixture.identity);
+    const denied = await adminRequest(fixture, user.cookie, '/realtime-preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        invariant_type: 'MERI',
+        target_type: 'story',
+        target_id: '11111111-1111-4111-8111-111111111111',
+      }),
+    });
+    expect(denied.status).toBe(403);
+  });
+});

@@ -160,6 +160,23 @@ describe('aggregation per item/window (WS-E.2.1a)', () => {
     expect(row?.contributionCounts).toEqual({ explanation: 1, correction: 1, low_info_reply: 1 });
   });
 
+  it('counts a contribution-only actor as active, matching the realtime HLL (WS-E.3.2)', async () => {
+    const reader = await seedUserWithSession(fixture.identity, { handle: 'readerx' });
+    const commenter = await seedUserWithSession(fixture.identity, { handle: 'commenterx' });
+    const storyId = randomUUID();
+    await ingestAttention(reader.userId, storyId); // reader has attention
+    // The commenter ONLY comments — no attention event of their own.
+    await fixture.events.eventStore.insertMany([
+      contributionRow(storyId, commenter.userId, 'explanation'),
+    ]);
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    const row = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
+    // Both are active — the realtime HLL adds each commenter via recordContribution,
+    // so this durable tally must too (else comment-heavy windows flag false
+    // reconciliation discrepancies).
+    expect(row?.uniqueActiveUsers).toBe(2);
+  });
+
   it('folds the §5.3 "Save for later" signal, deduped per (actor, item)', async () => {
     const a = await seedUserWithSession(fixture.identity, { handle: 'saverone' });
     const b = await seedUserWithSession(fixture.identity, { handle: 'savertwo' });

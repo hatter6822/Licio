@@ -1322,6 +1322,78 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(chain.some((e) => e.actionType === 'delegation_revoked')).toBe(true);
   });
 
+  it('rejects a delegator’s direct ballot after their delegate already voted (WS-M.4.2c-1)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    // PROPOSER delegates to VOTER_2.
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // The DELEGATE votes FIRST: their snapshot already includes PROPOSER's unit.
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('2');
+    // PROPOSER (the delegator) now voting directly would double-count their unit —
+    // it must be refused (the symmetric mitigation to the delegator-first guard).
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
+  });
+
+  it('allows a delegator’s direct vote when the delegation POST-DATES the delegate’s ballot (WS-M.4.2c-1)', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    // The delegate votes FIRST — no delegation exists yet, so weight = own 1.
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('1');
+    // PROPOSER delegates AFTER the ballot (advance the clock so the delegation's
+    // createdAt is strictly later than the vote): it is NOT in VOTER_2's snapshot.
+    deps.clockAdvance(1000);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    // So PROPOSER's direct vote (their own weight 1) stands — no double-count.
+    const directVote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in directVote)) throw new Error(JSON.stringify(directVote));
+    expect(directVote.signature.weightSnapshot).toBe('1');
+  });
+
   it('excludes INELIGIBLE delegators from delegated weight (W3 review)', async () => {
     const deps = buildHarness();
     // Treasury votes need 30 membership days under this pack.

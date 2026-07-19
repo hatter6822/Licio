@@ -23,10 +23,12 @@ import {
 import { buildAccountingExport } from '../treasury/export.js';
 import { updateGrantMilestone } from '../treasury/grants.js';
 import {
+  abandonExpiredReorgs,
   abandonOpenIntent,
   attachIntentSubmission,
   createPaymentIntent,
   depositAllowance,
+  disputeIntent,
   expireIntents,
   type IntentDeps,
   markIntentSigned,
@@ -761,6 +763,147 @@ describe('payment-intent lifecycle (WS-M.3.1a-d)', () => {
       ok: false,
       code: 'retries_exhausted',
     });
+  });
+
+  // Drive a fresh deposit intent to `confirmed` (settled action attached).
+  async function driveToConfirmed(
+    deps: TestDeps,
+  ): Promise<{ id: string; action: KnomosisActionRecordEntity }> {
+    await provisionTreasury(deps);
+    const created = await create(deps);
+    if (!('intent' in created)) throw new Error('expected intent');
+    const id = created.intent.paymentIntentId;
+    const treasuryId = created.intent.treasuryId;
+    await preflightIntent(deps, id, USER);
+    await quoteIntent(deps, id, USER);
+    await markIntentSigned(deps, id, USER);
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'treasury_deposit' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'1'.repeat(64)}`,
+      typedDataHash: `0x${'2'.repeat(64)}`,
+      signedAction: { message: { amount: '100', asset: 'USDC', treasuryId }, signature: '0xsig' },
+      submissionState: 'submitted' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'pending',
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    await attachIntentSubmission(deps, id, action.actionRecordId, USER);
+    await deps.actions.update({ ...action, submissionState: 'settled' });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('confirmed');
+    return { id, action };
+  }
+
+  // …then revert its action so reconcile moves it to `reorged`.
+  async function driveToReorged(
+    deps: TestDeps,
+  ): Promise<{ id: string; action: KnomosisActionRecordEntity }> {
+    const { id, action } = await driveToConfirmed(deps);
+    await deps.actions.update({ ...action, submissionState: 'reverted' });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('reorged');
+    return { id, action };
+  }
+
+  // …or finalize it (with a public receipt) so reconcile reaches `finalized`.
+  async function driveToFinalized(deps: TestDeps): Promise<string> {
+    const { id, action } = await driveToConfirmed(deps);
+    await deps.actions.update({ ...action, submissionState: 'finalized' });
+    await deps.receipts.upsert({
+      receiptId: crypto.randomUUID(),
+      actionRecordId: action.actionRecordId,
+      kind: 'public',
+      payload: {},
+      summaryPayloadHash: `0x${'3'.repeat(64)}`,
+      ownerUserId: null,
+      finalState: 'finalized',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('finalized');
+    return id;
+  }
+
+  it('recovers a reorged intent when its action re-confirms (WS-M.3.1d)', async () => {
+    const deps = buildDeps();
+    const { id, action } = await driveToReorged(deps);
+    // The transaction re-confirms on the canonical chain → reconcile recovers it.
+    await deps.actions.update({ ...action, submissionState: 'settled' });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(id))?.executionState).toBe('confirmed');
+  });
+
+  it('abandons a reorged intent after the recovery window while still reverted (WS-M.3.1d)', async () => {
+    const deps = buildDeps();
+    const { id } = await driveToReorged(deps);
+    // Inside the grace window: NOT abandoned.
+    expect(await abandonExpiredReorgs(deps)).toBe(0);
+    expect((await deps.intents.getById(id))?.executionState).toBe('reorged');
+    // Past the window with the action still reverted: abandoned for a clean trail.
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmIntentReorgRecoveryMs + 1_000);
+    expect(await abandonExpiredReorgs(deps)).toBe(1);
+    expect((await deps.intents.getById(id))?.executionState).toBe('abandoned');
+  });
+
+  it('a reorged deposit keeps consuming the deposit allowance until abandoned (WS-M.3.1d)', async () => {
+    const deps = buildDeps();
+    const { id } = await driveToReorged(deps); // a USDC-100 deposit, now reorged
+    expect((await deps.intents.getById(id))?.executionState).toBe('reorged');
+    // Because a reorg can recover (reorged→pending→finalized), its amount MUST
+    // still consume the allowance — else the released headroom funds a
+    // replacement deposit and both go live if the original re-confirms.
+    const allowance = await depositAllowance(deps, ROOM, USER, 'USDC');
+    expect(allowance?.userRemaining).toBe('900'); // 1000 − 100 (still consumed)
+  });
+
+  it('disputes a finalized intent → disputed, recording the transition on-chain (WS-M.4.3d)', async () => {
+    const deps = buildDeps();
+    const id = await driveToFinalized(deps);
+    const result = await disputeIntent(deps, id, USER);
+    expect(result).toMatchObject({ ok: true });
+    expect((await deps.intents.getById(id))?.executionState).toBe('disputed');
+    const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+    expect(
+      chain.some(
+        (e) =>
+          e.actionType === 'payment_intent_transition' &&
+          (e.actionDetails as { to?: string } | null | undefined)?.to === 'disputed',
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses to dispute a non-finalized intent', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const created = await create(deps);
+    if (!('intent' in created)) throw new Error('expected intent');
+    // A freshly-created (not finalized) intent cannot be disputed.
+    expect(await disputeIntent(deps, created.intent.paymentIntentId, USER)).toMatchObject({
+      ok: false,
+      code: 'not_disputable',
+    });
+  });
+
+  it('a disputed intent is terminal — it holds no wallet-unlink obligation (WS-M.4.3d)', async () => {
+    const deps = buildDeps();
+    const id = await driveToFinalized(deps);
+    expect(await disputeIntent(deps, id, USER)).toMatchObject({ ok: true });
+    expect((await deps.intents.getById(id))?.executionState).toBe('disputed');
+    // `disputed` is terminal (post-finality review, not an in-flight payment),
+    // so it must NOT appear as an active intent for the wallet-unlink guard.
+    const active = await deps.intents.listActiveByUser(USER, 100);
+    expect(active.some((i) => i.paymentIntentId === id)).toBe(false);
   });
 
   it('expires timed states to abandoned on the sweep', async () => {

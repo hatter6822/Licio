@@ -144,7 +144,7 @@ export function createCandidateDataPorts(
     recentStories: (limit) => ingestion.stories.listRecent(limit),
     storyById: (storyId) => ingestion.stories.getById(storyId),
     threadByStoryId: (storyId) => ingestion.stories.getThreadByStoryId(storyId),
-    storyIdByThreadId: (threadId) => ingestion.stories.getStoryIdByThreadId(threadId),
+    threadsByStoryIds: (storyIds) => ingestion.stories.getThreadsByStoryIds(storyIds),
     async subscribedRoomIds(userId) {
       const subscriptions = await forum.rooms.listSubscriptionsByUser(userId);
       return subscriptions.filter((s) => s.status === 'active').map((s) => s.roomId);
@@ -161,13 +161,10 @@ export function createCandidateDataPorts(
         .slice(0, limit)
         .map((r) => r.roomId);
     },
-    async roomVisibility(roomId) {
+    async roomAxes(roomId) {
+      // ONE read for both axes (was two separate getById calls per story).
       const room = await forum.rooms.getById(roomId);
-      return room === null ? null : room.visibility;
-    },
-    async roomStorageMode(roomId) {
-      const room = await forum.rooms.getById(roomId);
-      return room === null ? null : room.storageMode;
+      return room === null ? null : { visibility: room.visibility, storageMode: room.storageMode };
     },
     async userSeenStories(userId) {
       // Bounded to the catch-up horizon (30d): seen-history serves the
