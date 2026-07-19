@@ -613,29 +613,42 @@ export async function uploadMedia(
   const form = new FormData();
   form.set('file', file);
   if (altText !== undefined && altText.length > 0) form.set('alt_text', altText);
-  const token = await fetchCsrfToken();
-  const raw = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE}/v1/uploads`);
-    xhr.withCredentials = true;
-    if (token) xhr.setRequestHeader('x-csrf-token', token);
-    if (onProgress) {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(e.loaded / e.total);
-      };
-    }
-    xhr.onload = () => {
-      let body: unknown;
-      try {
-        body = JSON.parse(xhr.responseText);
-      } catch {
-        body = null;
+  // Serialize through the SAME single-use-CSRF mutation queue as apiFetch: the
+  // nonce is one-per-session and a later token fetch clobbers the prior, so an
+  // upload racing another mutation would 403 one of the two. The queue is held
+  // for the WHOLE upload (the server consumes the nonce only after it finishes
+  // reading the body), so a token minted meanwhile cannot overwrite this one.
+  const run = mutationQueue.then(async () => {
+    const token = await fetchCsrfToken();
+    return new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE}/v1/uploads`);
+      xhr.withCredentials = true;
+      if (token) xhr.setRequestHeader('x-csrf-token', token);
+      if (onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(e.loaded / e.total);
+        };
       }
-      resolve({ status: xhr.status, body });
-    };
-    xhr.onerror = () => reject(new ApiClientError('network_error', 'Upload failed'));
-    xhr.send(form);
+      xhr.onload = () => {
+        let body: unknown;
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          body = null;
+        }
+        resolve({ status: xhr.status, body });
+      };
+      xhr.onerror = () => reject(new ApiClientError('network_error', 'Upload failed'));
+      xhr.send(form);
+    });
   });
+  // Keep the chain alive regardless of this upload's outcome.
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  const raw = await run;
   if (raw.status < 200 || raw.status >= 300) {
     const parsed = apiErrorSchema.safeParse(raw.body);
     throw parsed.success

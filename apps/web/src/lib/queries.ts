@@ -11,6 +11,7 @@ import type {
   FeedMode,
   LensCreateRequest,
   NotificationPreferences,
+  PaymentIntentState,
   RoomCreateRequest,
   RoomJoinModel,
   RoomPostingPolicy,
@@ -900,13 +901,29 @@ export function useRoomGrantsQuery(roomId: string, enabled: boolean) {
   });
 }
 
-/** WS-M.3.1 — one payment intent, polled while it is in flight. */
+// Once an intent reaches one of these, the reconcile sweep will never advance it
+// (finalized = done; failed/reverted await a USER retry; abandoned/disputed are
+// dead-ends), so polling it forever just burns requests + battery. A user retry
+// invalidates this query and resumes polling from the fresh in-flight state.
+const PAYMENT_POLL_SETTLED: ReadonlySet<PaymentIntentState> = new Set([
+  'finalized',
+  'failed',
+  'reverted',
+  'abandoned',
+  'disputed',
+]);
+
+/** WS-M.3.1 — one payment intent, polled while it is in flight (stops at rest). */
 export function usePaymentIntentQuery(roomId: string, intentId: string | null) {
   return useQuery({
     queryKey: queryKeys.paymentIntent(roomId, intentId ?? 'none'),
     queryFn: () => treasuryApi.fetchPaymentIntent(roomId, intentId as string),
-    // In-flight intents settle via the reconcile sweep; poll until terminal.
-    refetchInterval: 15_000,
+    // In-flight intents settle via the reconcile sweep; poll UNTIL terminal, then
+    // stop — a constant interval polled settled intents forever (the old bug).
+    refetchInterval: (query) => {
+      const state = query.state.data?.execution_state;
+      return state && PAYMENT_POLL_SETTLED.has(state) ? false : 15_000;
+    },
     enabled: intentId !== null,
   });
 }

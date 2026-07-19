@@ -694,6 +694,26 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     if (result.ok) expect(result.stripped).toBe(false);
   });
 
+  it('drops a post-EOI trailer (motion-photo embedded video / appended XMP)', () => {
+    // A minimal valid JPEG (SOI + APP0 + SOS + entropy + EOI) followed by a
+    // trailer that names a GPS field — a motion photo appends a whole MP4 here.
+    const jpeg = [
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x01, 0x02, 0xff, 0xda, 0x00, 0x04, 0x00, 0x00, 0x12,
+      0xff, 0xd9,
+    ];
+    const trailer = [...'GPSLatitude 51.5 embedded motion video'].map((ch) => ch.charCodeAt(0));
+    const result = stripJpeg(new Uint8Array([...jpeg, ...trailer]));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.stripped).toBe(true);
+    // The trailer is gone and the file ends exactly at EOI.
+    expect(Array.from(result.bytes, (b) => String.fromCharCode(b)).join('')).not.toContain(
+      'GPSLatitude',
+    );
+    expect([result.bytes.at(-2), result.bytes.at(-1)]).toEqual([0xff, 0xd9]);
+    expect(result.bytes.length).toBe(jpeg.length);
+  });
+
   it('rejects polyglots: declared type must match the magic', () => {
     const png = pngWithText();
     expect(matchesMagic('image/jpeg', png)).toBe(false);

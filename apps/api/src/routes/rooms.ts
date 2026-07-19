@@ -69,6 +69,7 @@ import {
   type AuthEnv,
   authMiddleware,
   getAuth,
+  requireUnrestricted,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
 
@@ -263,6 +264,11 @@ export function createRoomsRoutes() {
         '/rooms',
         authMiddleware(),
         requireVerifiedAccount(),
+        // WS-J restrict sanction: a restricted account may not create public
+        // content, and a public room is a public-facing artifact others post
+        // into. authorizeRoomCreate only gates by ROLE, so without this a
+        // restricted user could keep spinning up public rooms.
+        requireUnrestricted(),
         zValidator('json', roomCreateRequestSchema),
         async (c) => {
           const auth = getAuth(c);

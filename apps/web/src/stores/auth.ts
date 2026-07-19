@@ -66,6 +66,25 @@ function purgeApiCache(): void {
   void caches.delete('licio-api').catch(() => undefined);
 }
 
+// --- In-memory query-cache purge (WS-C.1.3a) ------------------------------
+// `purgeApiCache` clears the SW Cache Storage, but the previous account's
+// fetched data ALSO sits in the in-memory TanStack Query cache (profile,
+// treasury, compliance, private-room reads, …). On a shared browser the next
+// user — or any same-origin script — could read it back until GC/refetch. The
+// QueryClient is created at boot (main.tsx), not a module singleton, so the app
+// registers a purge here and BOTH sign-out paths (local + cross-tab) call it.
+let queryCachePurge: (() => void) | null = null;
+
+/** Register the app's TanStack Query cache purge (call once at boot). */
+export function registerQueryCachePurge(purge: () => void): void {
+  queryCachePurge = purge;
+}
+
+function purgeAllCaches(): void {
+  purgeApiCache();
+  queryCachePurge?.();
+}
+
 /**
  * Wire cross-tab auth sync. Call once at app startup. Returns a teardown so the
  * channel can be closed (tests, hot reload). A no-op where BroadcastChannel is
@@ -113,13 +132,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   expireSession: () => set({ status: 'session-expired' }),
   logout: () => {
     clearPersisted(PERSIST.key);
-    purgeApiCache();
+    purgeAllCaches();
     set({ status: 'unauthenticated', user: null });
     postLogout();
   },
   applyRemoteLogout: () => {
     clearPersisted(PERSIST.key);
-    purgeApiCache();
+    purgeAllCaches();
     set({ status: 'unauthenticated', user: null });
   },
 }));

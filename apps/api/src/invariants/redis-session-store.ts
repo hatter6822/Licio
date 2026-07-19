@@ -12,14 +12,18 @@ import type IORedis from 'ioredis';
 import { z } from 'zod';
 import { SESSION_SEQUENCE_TTL_MS, type SessionTopicSequenceStore } from './stores.js';
 
-/** Shape guard for the Redis round-trip: a corrupted entry reads as absent. */
+/** Shape guard for the Redis round-trip: a corrupted entry reads as absent.
+ *  Matches the REAL `TopicTransition` (phi/loops.ts) — the previous guard
+ *  validated a nonexistent `actionKind` and let the actual `kind`/`engagement`
+ *  fields through unchecked via `.passthrough()`, so it guarded nothing. */
 const transitionSchema = z
   .object({
     topicClusterId: z.string(),
     atMs: z.number(),
-    actionKind: z.string().optional(),
+    kind: z.enum(['read', 'open_source', 'open_context']).optional(),
+    engagement: z.number().optional(),
   })
-  .passthrough();
+  .strict();
 
 type TopicTransition = Parameters<SessionTopicSequenceStore['append']>[1];
 

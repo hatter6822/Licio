@@ -170,10 +170,12 @@ export async function verifySiwe(input: VerifySiweInput): Promise<SiweResult> {
   const now = input.now ?? Date.now();
 
   const validated = validateSiweFields(input.message, input.config, now);
-  if (!validated.ok && validated.reason === 'malformed') return validated;
 
-  // Consume the single-use nonce regardless (so a malformed/replayed attempt also
-  // burns it), then compare to the message nonce.
+  // Consume the single-use nonce on EVERY attempt (a malformed OR replayed
+  // message burns it too), BEFORE any early return — otherwise a malformed
+  // message leaves the nonce live for retry, contradicting the single-use
+  // contract. The stored nonce is keyed by attemptId, so it can be taken even
+  // when the message itself did not parse.
   const storedNonce = await input.store.take(nonceKey(input.attemptId));
   if (!validated.ok) return validated;
   if (!storedNonce || storedNonce !== validated.fields.nonce) {

@@ -11,11 +11,16 @@ import { createAppQueryClient } from './lib/query-client.js';
 import { registerServiceWorker } from './lib/sw-register.js';
 import { routeTree } from './routeTree.gen';
 import { initTrustedTypes } from './security/trusted-types.js';
+import { registerQueryCachePurge } from './stores/auth.js';
 import './styles/app.css';
 
 initTrustedTypes();
 
 const queryClient = createAppQueryClient();
+
+// Sign-out (local AND cross-tab) must drop the previous account's in-memory
+// query cache, not just the SW Cache Storage — see registerQueryCachePurge.
+registerQueryCachePurge(() => queryClient.clear());
 
 // The route tree is generated from the file-based routes (src/routes/) by the
 // TanStack Router plugin. The not-found component is set on the root route.

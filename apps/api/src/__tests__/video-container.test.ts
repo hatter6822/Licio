@@ -148,6 +148,26 @@ describe('WS-Q.2.3d — MP4 probe', () => {
     expect(textOf(probe.bytes)).not.toContain('+12.3000'); // per-track GPS stripped
     expect(textOf(probe.bytes)).toContain('TRACK-MEDIA-INTACT');
   });
+
+  it('neutralizes a top-level `uuid` box (the XMP/GPS extension channel)', () => {
+    const ftyp = mp4Box('ftyp', [...ascii('isom'), ...u32(0x200), ...ascii('isom')]);
+    const moov = mp4Box('moov', mp4Box('mvhd', mvhd(600, 1200)));
+    // `uuid` = 16-byte user-type (Adobe's XMP uuid, faked here) + an XMP packet.
+    const xmpUuid = mp4Box('uuid', [
+      ...new Array(16).fill(0x11),
+      ...ascii('<x:xmpmeta>GPSLatitude=51.5</x:xmpmeta>'),
+    ]);
+    const mdat = mp4Box('mdat', ascii('PIXELDATA-KEEP'));
+    const input = new Uint8Array([...ftyp, ...moov, ...xmpUuid, ...mdat]);
+    const probe = probeVideo('video/mp4', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.stripped).toBe(true);
+    expect(probe.bytes.length).toBe(input.length); // offset-preserving
+    expect(textOf(probe.bytes)).not.toContain('GPSLatitude'); // XMP GPS gone
+    expect(textOf(probe.bytes)).toContain('free'); // uuid retyped
+    expect(textOf(probe.bytes)).toContain('PIXELDATA-KEEP'); // media untouched
+  });
 });
 
 // --- WebM ------------------------------------------------------------------
@@ -204,6 +224,26 @@ describe('WS-Q.2.3d — WebM probe', () => {
     expect(probe.stripped).toBe(true); // resync found the trailing Tags
     expect(probe.bytes.length).toBe(input.length);
     expect(textOf(probe.bytes)).not.toContain('TRAILING-SECRET-TAG');
+  });
+
+  it('strips an UNKNOWN-SIZE (streamed) `Tags` element that is itself unbounded', () => {
+    const header = ebml(ID.ebml, ascii('webm'), 1);
+    const timecodeScale = ebml(ID.timecodeScale, [0x0f, 0x42, 0x40], 1);
+    const duration = ebml(ID.duration, f64(2000), 1);
+    const info = ebml(ID.info, [...timecodeScale, ...duration], 1);
+    // Tags with an unknown size (single 0xFF size vint) running to the segment
+    // end — `walkSegmentChildren` resyncs it to the segment end and it is still
+    // neutralized (a `!unknownSize` guard would leak the payload verbatim).
+    const tags = [...ID.tags, 0xff, ...ascii('STREAMED-SECRET-TAG-METADATA-XX')];
+    const segment = ebml(ID.segment, [...info, ...tags], 2);
+    const input = new Uint8Array([...header, ...segment]);
+    const probe = probeVideo('video/webm', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.stripped).toBe(true);
+    expect(probe.bytes.length).toBe(input.length);
+    expect(textOf(probe.bytes)).not.toContain('STREAMED-SECRET-TAG');
+    expect(probe.bytes).toContain(0xec); // a Void element id was written
   });
 });
 
