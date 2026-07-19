@@ -67,15 +67,15 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
 
 ## Deferred — need an architecture/maintainer decision
 
-- **Law-pack fixture role_class basis** (`governance/law-pack-validate.ts`): the
-  `proposal_tally` fixture harness always tallies over `fixture.eligibleCount`
-  rather than recomputing the role_class basis (signer set) like the runtime. A
-  direct runtime-mirror was attempted and REVERTED — the existing fixture corpus
-  encodes the basis population IN `eligibleCount` (and counts non-signer votes
-  toward quorum), so mirroring the runtime broke passing fixtures
-  (`capped_grant passes majority` → quorum_not_met). A proper fix must reconcile
-  the fixture-authoring convention with the runtime basis (likely a fixture-schema
-  change), not just the harness.
+- **Law-pack fixture role_class basis** — DONE. The `proposal_tally` harness now
+  mirrors the runtime CONDITIONALLY on `basis === 'role_class'`: it derives the
+  basis from the pack's multisig signer set (`eligibleCount = signers.size`,
+  `quorumParticipants` = signer ballots only), leaving `eligible_voters` fixtures
+  untouched. The reconciliation the earlier revert needed was a basis-AWARE
+  fixture corpus (`treasury-proposals.test.ts` `corpusFor` now emits signer votes
+  for a role_class type) — NOT an unconditional runtime-mirror. `eligibleCount` is
+  documented as ignored for a role_class fixture; a governance-package test locks
+  in that only signer ballots count toward the signer-set quorum.
 
 - **MFCI cheap-intake attribution** (`invariants/services.ts`): the window-global
   concentration statistic is attributed to the flagged item and pinned at `high`.

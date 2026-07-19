@@ -272,14 +272,30 @@ function runOneFixture(pack: LawPack, fixture: LawPackFixture): FixtureFailure |
           actual: `no quorum/threshold rule for proposal type "${fixture.proposalType}"`,
         };
       }
-      const result = tallyProposalVotes(
-        fixture.votes,
-        { quorum, threshold },
-        {
-          eligibleCount: fixture.eligibleCount,
-          deadlinePassed: fixture.deadlinePassed,
-        },
-      );
+      // Mirror the RUNTIME basis (apps/api treasury/proposals.ts) so a fixture is
+      // tallied exactly as production will.  A `role_class` quorum measures
+      // participation over the pack's multisig signer set — the population is the
+      // signers (`eligibleCount = signers.size`, NOT the fixture field) and only
+      // signer ballots count toward quorum (`quorumParticipants`).  Threshold
+      // arithmetic still uses every recorded vote.  For a `role_class` fixture the
+      // `eligibleCount` field is therefore IGNORED (the signer set is the basis);
+      // an `eligible_voters` fixture keeps the fixture-supplied count + all voters.
+      // A valid pack guarantees a multisig for a role_class basis (validated above).
+      const ctx =
+        quorum.basis === 'role_class'
+          ? (() => {
+              const signers = new Set(pack.multisig?.signers ?? []);
+              const signerVoters = new Set(
+                fixture.votes.filter((v) => signers.has(v.voterUserId)).map((v) => v.voterUserId),
+              );
+              return {
+                eligibleCount: signers.size,
+                deadlinePassed: fixture.deadlinePassed,
+                quorumParticipants: signerVoters.size,
+              };
+            })()
+          : { eligibleCount: fixture.eligibleCount, deadlinePassed: fixture.deadlinePassed };
+      const result = tallyProposalVotes(fixture.votes, { quorum, threshold }, ctx);
       return result.outcome === fixture.expect
         ? null
         : { label: fixture.label, expected: fixture.expect, actual: result.outcome };

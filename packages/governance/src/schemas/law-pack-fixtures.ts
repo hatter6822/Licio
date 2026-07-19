@@ -57,6 +57,10 @@ export const proposalTallyFixtureSchema = z.object({
   /** The proposal type whose quorum/threshold rules apply. */
   proposalType: z.string().min(1).max(64),
   votes: z.array(recordedVoteSchema).max(10_000),
+  /** The quorum basis population for an `eligible_voters` quorum.  IGNORED for a
+   *  `role_class` quorum: there the basis is the pack's multisig signer set, so
+   *  the validator derives the count from `multisig.signers` (mirroring the
+   *  runtime) and only signer ballots count toward quorum. */
   eligibleCount: z.number().int().min(0),
   deadlinePassed: z.boolean(),
   expect: proposalTallyOutcomeSchema,
