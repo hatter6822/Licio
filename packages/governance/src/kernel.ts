@@ -205,10 +205,15 @@ export function checkInvestmentBands(
     totals.set(a.asset, (totals.get(a.asset) ?? 0) + a.fraction);
   }
   // EVERY band must hold — including minimums for assets omitted from the proposal.
+  // Fractions are summed floats, so compare with the SAME epsilon tolerance the
+  // grand-total check below uses — otherwise a band-edge allocation (e.g.
+  // 0.1 + 0.2 = 0.30000000000000004) fails the exact per-band check while the
+  // grand total accepts it (an inconsistency that rejected valid proposals).
+  const EPSILON = 1e-9;
   let sum = 0;
   for (const band of policy.allocationBands) {
     const total = totals.get(band.asset) ?? 0;
-    if (total < band.minFraction || total > band.maxFraction) {
+    if (total < band.minFraction - EPSILON || total > band.maxFraction + EPSILON) {
       return {
         accepted: false,
         code: 'investment_band_violated',
@@ -217,7 +222,7 @@ export function checkInvestmentBands(
     }
   }
   for (const total of totals.values()) sum += total;
-  if (sum > 1 + 1e-9) {
+  if (sum > 1 + EPSILON) {
     return {
       accepted: false,
       code: 'investment_band_violated',

@@ -58,9 +58,13 @@ export const hexBytes32Schema = z
   .regex(/^0x[0-9a-fA-F]{64}$/, { message: 'must be a 0x-prefixed 32-byte hex value' });
 
 /** uint256 as a non-negative decimal integer string (fits any minor-unit amount). */
+const UINT256_MAX = (1n << 256n) - 1n;
 export const uint256StringSchema = z
   .string()
-  .regex(/^(0|[1-9]\d{0,77})$/, { message: 'must be a canonical uint256 decimal string' });
+  .regex(/^(0|[1-9]\d{0,77})$/, { message: 'must be a canonical uint256 decimal string' })
+  // 78 digits can EXCEED 2^256-1 (max uint256 is itself 78 digits), which a
+  // digit-count regex cannot reject — enforce the exact ceiling with BigInt.
+  .refine((s) => BigInt(s) <= UINT256_MAX, { message: 'exceeds the uint256 ceiling (2^256-1)' });
 
 const uuidStringSchema = z.string().uuid();
 const assetCodeSchema = z
