@@ -189,6 +189,10 @@ function useContributionDraft(args: {
     }
     latestBody.current = '';
     void deleteDraft(draftId.current).catch(() => undefined);
+    // Rotate the draft id: `client_draft_id` is the write's idempotency key, and the
+    // top-level composer stays mounted after a successful post — reusing the id would
+    // make the API's dedup path return the PRIOR contribution instead of the new one.
+    draftId.current = crypto.randomUUID();
   }, []);
 
   const queueIfTransient = useCallback(
@@ -203,15 +207,20 @@ function useContributionDraft(args: {
         debounceTimer.current = null;
       }
       latestBody.current = '';
+      // Capture the handed-off id: the queue OWNS this write under it (its dedup key),
+      // and the deferred delete below must target the SAME id even after we rotate.
+      const handedOff = draftId.current;
       // Drop the autosaved draft ONLY once the queue has durably taken the write —
       // otherwise a failed enqueue (quota exhaustion / unavailable storage) would
       // delete the ONLY copy while telling the reader it was saved for later. On an
       // enqueue failure the draft is preserved, so the recoverable-draft path
       // surfaces it on the next load.
       void queue
-        .enqueue('contribution', payload, draftId.current)
-        .then(() => deleteDraft(draftId.current).catch(() => undefined))
+        .enqueue('contribution', payload, handedOff)
+        .then(() => deleteDraft(handedOff).catch(() => undefined))
         .catch(() => undefined);
+      // The composer's next write is a NEW draft; the queued write keeps `handedOff`.
+      draftId.current = crypto.randomUUID();
       return true;
     },
     [],

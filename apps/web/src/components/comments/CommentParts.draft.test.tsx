@@ -113,6 +113,27 @@ describe('CommentComposer draft autosave + offline queue', () => {
     });
   });
 
+  it('rotates the client_draft_id after a successful post (still-mounted composer)', async () => {
+    // The idempotency key must change between posts, or the API dedup path returns
+    // the prior contribution for the second comment typed into the same composer.
+    const ids: string[] = [];
+    mutHolder.impl = (payload, opts) => {
+      ids.push((payload as { client_draft_id: string }).client_draft_id);
+      opts.onSuccess?.();
+    };
+    render(
+      <CommentComposer storyId={STORY_ID} threadId={THREAD_ID} parentContributionId={PARENT_ID} />,
+    );
+    const input = screen.getByLabelText('Write a reply');
+    fireEvent.change(input, { target: { value: 'first comment' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    await waitFor(() => expect(ids).toHaveLength(1));
+    fireEvent.change(input, { target: { value: 'second comment' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    await waitFor(() => expect(ids).toHaveLength(2));
+    expect(ids[0]).not.toBe(ids[1]); // rotated ⇒ no idempotency collision
+  });
+
   it('does NOT queue a terminal 4xx reject (validation / locked thread)', () => {
     mutHolder.impl = (_payload, opts) => {
       opts.onError?.(new ApiClientError('validation', 'Bad request', 422));

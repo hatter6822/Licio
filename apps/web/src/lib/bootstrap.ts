@@ -13,6 +13,7 @@ import {
   type ProbeResult,
   requestPersistentStorage,
 } from '../offline/eviction.js';
+import { expireOldSnapshots } from '../offline/read-through.js';
 import type { PendingOperationRecord } from '../offline/schemas.js';
 import { initForegroundSync, processPendingQueue } from '../offline/sync.js';
 import {
@@ -188,6 +189,10 @@ export function startRuntime(): () => void {
   const teardownLcapSync = startLcapSync();
   // WS-G.3.7c: drafts older than 30 days are cleaned up on app start.
   void expireOldDrafts().catch(() => undefined);
+  // The 14-day read-through snapshot expiry (unbounded-growth control): run it at
+  // app start alongside draft expiry so cached thread/comment snapshots age out
+  // instead of growing IndexedDB until quota pressure / eviction.
+  void expireOldSnapshots().catch(() => undefined);
   // Core Web Vitals RUM → privacy-safe telemetry. Each vital reports ONCE per
   // pageload at its FINAL value, flushed when the page is first hidden — so the
   // WS-P.1.1d p75 aggregation counts one sample per pageview instead of every
