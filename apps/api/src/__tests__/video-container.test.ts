@@ -218,6 +218,30 @@ describe('WS-Q.2.3d — WebM probe', () => {
     expect(probe.bytes).toContain(0xec); // Void element ids written in place
   });
 
+  it('strips metadata from an UNKNOWN-SIZE (streamed) Info element', () => {
+    const header = ebml(ID.ebml, ascii('webm'), 1);
+    const timecodeScale = ebml(ID.timecodeScale, [0x0f, 0x42, 0x40], 1);
+    const duration = ebml(ID.duration, f64(6000), 1);
+    const dateUtc = ebml(ID.dateUtc, ascii('DATEUTC-STREAMED-CLOCK'), 1);
+    const writingApp = ebml(ID.writingApp, ascii('WRITINGAPP-STREAMED-DEVICE'), 1);
+    // Info with an UNKNOWN size (single 0xFF size vint): `walkSegmentChildren` resyncs
+    // to the next Level-1 header (the Tags below), which bounds `child.end`.  Before
+    // the fix a `!unknownSize` guard skipped this branch and leaked the metadata.
+    const info = [...ID.info, 0xff, ...dateUtc, ...timecodeScale, ...duration, ...writingApp];
+    const tags = ebml(ID.tags, ascii('TRAILING-TAG'), 2);
+    const segment = ebml(ID.segment, [...info, ...tags], 2);
+    const input = new Uint8Array([...header, ...segment]);
+    const probe = probeVideo('video/webm', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.stripped).toBe(true);
+    expect(probe.bytes.length).toBe(input.length); // offset-preserving
+    expect(probe.durationSeconds).toBeCloseTo(6.0, 6); // Duration still parsed from the streamed Info
+    const out = textOf(probe.bytes);
+    expect(out).not.toContain('DATEUTC-STREAMED-CLOCK'); // timestamp voided (was leaking)
+    expect(out).not.toContain('WRITINGAPP-STREAMED-DEVICE'); // device string voided
+  });
+
   it('rejects non-EBML bytes declared WebM', () => {
     const probe = probeVideo('video/webm', new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]));
     expect(probe).toEqual({ ok: false, reason: 'type_mismatch' });

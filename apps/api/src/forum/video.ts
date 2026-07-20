@@ -399,7 +399,12 @@ function probeWebm(input: Uint8Array): VideoProbeResult {
   const segChildren = walkSegmentChildren(input, segment.dataStart, segment.end);
   if (segChildren === null) return { ok: false, reason: 'malformed' };
   for (const child of segChildren) {
-    if (child.id === ID_INFO && !child.unknownSize) {
+    if (child.id === ID_INFO) {
+      // Parse the Info children even for an UNKNOWN-size Info: `walkSegmentChildren`
+      // resyncs past it to the next Level-1 header (or the segment end), so `child.end`
+      // bounds the span exactly (the same mechanism used for Tags below). A
+      // `!unknownSize` guard here would let a streamed WebM's DateUTC/Title/muxer/
+      // SegmentUID bytes leak through verbatim in the returned upload.
       const infoChildren = readEbmlChildren(input, child.dataStart, child.end);
       if (infoChildren === null) return { ok: false, reason: 'malformed' };
       let timecodeScale = 1_000_000; // EBML default (ns per tick)
