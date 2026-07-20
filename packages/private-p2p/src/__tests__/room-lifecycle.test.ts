@@ -239,6 +239,48 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
 });
 
 describe('content authoring — buildRoomOp + engine metadata helpers', () => {
+  it('NFC-normalizes op-body text at authoring (so equal content converges to one CID)', async () => {
+    const room = await createPrivateRoom(baseParams());
+    const engine = await PrivateRoomEngine.load({
+      ...room.engineParams,
+      storage: new InMemoryPrivateRoomStorage(),
+    });
+    await engine.applyLocalOp(room.genesisOp, room.sealParams);
+    // Title typed as decomposed "e" + U+0301 combining acute; the built op must
+    // carry the composed NFC form (single U+00E9), so a peer that types the
+    // composed form produces byte-identical content.
+    const { op } = await buildRoomOp(
+      {
+        roomId: room.roomId,
+        roomIdCommitment: room.roomIdCommitment,
+        epochState: room.epochState,
+        author: {
+          memberId: 'founder',
+          deviceId: 'founder-dev',
+          signingKey: room.founder.signingKeyPair.privateKey,
+          seq: engine.nextAuthorSeq('founder-dev'),
+        },
+        parents: engine.heads(),
+        lamport: engine.nextLamport(),
+        createdAt: '2026-06-22T00:00:00Z',
+      },
+      {
+        type: 'story.create',
+        story_id: 's1',
+        thread_id: 't1',
+        title: 'Cafe\u0301', // decomposed: 'e' + U+0301 combining acute (5 code units)
+        submission_type: 'original_brief',
+        topic_ids: [],
+        submission_metadata: {},
+      },
+    );
+    expect(op.body.type).toBe('story.create');
+    if (op.body.type === 'story.create') {
+      expect(op.body.title).toBe('Caf\u00e9'); // composed NFC (single U+00E9)
+      expect(op.body.title.length).toBe(4); // composed = 4 units (was 5 decomposed)
+    }
+  });
+
   it('a founder authors a story + a comment that land in reduced state', async () => {
     const room = await createPrivateRoom(baseParams());
     const engine = await PrivateRoomEngine.load({

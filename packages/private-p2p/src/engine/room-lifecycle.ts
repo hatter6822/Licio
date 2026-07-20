@@ -59,6 +59,29 @@ import type { PrivateRoomEngineParams } from './room-engine.js';
  *  schema defaults (e.g. `citations`/`metadata`), which `buildRoomOp` parses in. */
 export type PrivateOpBodyInput = z.input<typeof privateRoomOpSchema>['body'];
 
+/**
+ * Deep NFC-normalize every string in an op body at the AUTHORING boundary, before
+ * the op is parsed/sealed/signed.  Two visually-identical strings in different
+ * Unicode normal forms (e.g. composed "é" vs. "e"+combining-acute) must converge
+ * to ONE canonical byte sequence, or otherwise-equal content would produce
+ * different CIDs/signatures and diverge across devices — and a homograph could be
+ * smuggled past a display/search check.  Done HERE (not in the schema) because the
+ * §14.3 wire boundary must keep rejecting non-canonical bytes verbatim, and the
+ * body carries `z.unknown()` passthrough fields a per-field schema transform can
+ * never reach.  ASCII (ids, base64url keys, CIDs) is NFC-invariant, so structural
+ * fields pass through unchanged; only human text is affected.
+ */
+function deepNormalizeNfc<T>(value: T): T {
+  if (typeof value === 'string') return value.normalize('NFC') as T;
+  if (Array.isArray(value)) return value.map((v) => deepNormalizeNfc(v)) as T;
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value)) out[key] = deepNormalizeNfc(v);
+    return out as T;
+  }
+  return value;
+}
+
 type PrivateRoomPolicy = z.infer<typeof privateRoomPolicySchema>;
 
 /** The §4.1 P2P-room policy defaults (the maintainer-private posture: unlisted,
@@ -262,7 +285,7 @@ export async function createPrivateRoom(
     created_at_bucket: createdAt.slice(0, 13),
     lamport: '1',
     parents: [],
-    body: {
+    body: deepNormalizeNfc({
       type: 'member.add',
       member_id: params.founderMemberId,
       device_id: params.founderDeviceId,
@@ -273,7 +296,7 @@ export async function createPrivateRoom(
       ...(params.founderDisplayName !== undefined
         ? { display_name: params.founderDisplayName }
         : {}),
-    },
+    }),
   } satisfies PrivateRoomOp);
 
   // The genesis capability commitment = the empty-log root (no prior capability state).
@@ -449,7 +472,7 @@ export async function buildRoomOp(
     created_at_bucket: createdAt.slice(0, 13),
     lamport: base.lamport,
     parents: [...base.parents],
-    body,
+    body: deepNormalizeNfc(body),
   } satisfies z.input<typeof privateRoomOpSchema>);
   const sealParams = await buildSealParams(
     base.epochState,
