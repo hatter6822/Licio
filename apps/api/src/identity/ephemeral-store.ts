@@ -13,6 +13,10 @@ export interface EphemeralStore {
   get(key: string): Promise<string | null>;
   /** Atomically read and delete — single-use consumption. */
   take(key: string): Promise<string | null>;
+  /** Set ONLY if the key is currently present (Redis `SET … XX`); returns whether
+   *  it wrote.  Used so an update to a single-use record cannot RESURRECT one a
+   *  concurrent `take` already consumed — the write no-ops when the key is gone. */
+  setIfExists(key: string, value: string, ttlMs: number): Promise<boolean>;
   delete(key: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -32,6 +36,18 @@ export class InMemoryEphemeralStore implements EphemeralStore {
 
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     this.#map.set(key, { value, expiresAt: this.#now() + ttlMs });
+  }
+
+  async setIfExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    // Read + conditional write with no intervening await: if the key was already
+    // consumed (taken/deleted/expired) this no-ops, so it can never resurrect it.
+    const entry = this.#map.get(key);
+    if (!entry || entry.expiresAt <= this.#now()) {
+      this.#map.delete(key);
+      return false;
+    }
+    this.#map.set(key, { value, expiresAt: this.#now() + ttlMs });
+    return true;
   }
 
   async get(key: string): Promise<string | null> {

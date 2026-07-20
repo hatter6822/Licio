@@ -24,6 +24,22 @@ describe('InMemoryEphemeralStore', () => {
     expect(await store.get('k')).toBeNull();
   });
 
+  it('setIfExists does not resurrect a consumed record (SET XX semantics)', async () => {
+    const store = new InMemoryEphemeralStore();
+    await store.set('k', 'v1', 1000);
+    // A valid verification consumes the single-use record via take (GETDEL).
+    expect(await store.take('k')).toBe('v1');
+    // A concurrent FAILED attempt then tries to re-store (increment attempts): it
+    // must NOT re-create the deleted key — otherwise the consumed OTP is redeemable
+    // again. setIfExists reports it did not write, and the key stays gone.
+    expect(await store.setIfExists('k', 'v2', 1000)).toBe(false);
+    expect(await store.get('k')).toBeNull();
+    // On a live key it DOES update (the normal failed-attempt increment path).
+    await store.set('k2', 'a', 1000);
+    expect(await store.setIfExists('k2', 'b', 1000)).toBe(true);
+    expect(await store.get('k2')).toBe('b');
+  });
+
   it('concurrent takes consume a single-use secret exactly once', async () => {
     const store = new InMemoryEphemeralStore();
     await store.set('k', 'N1', 1000);

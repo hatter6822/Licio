@@ -199,8 +199,11 @@ async function consumeCode(
     return { ok: false, reason: 'too_many_attempts' };
   }
   // Re-store with the incremented attempt count, preserving the ORIGINAL expiry
-  // (a wrong guess must never extend the code's lifetime).
-  await store.set(key, JSON.stringify({ ...record, attempts }), record.expiresAt - now);
+  // (a wrong guess must never extend the code's lifetime).  `setIfExists` (SET XX):
+  // if a CONCURRENT valid verification already consumed the code via `take`, this
+  // no-ops rather than RESURRECTING the deleted single-use record — closing the
+  // GET(valid),GET(invalid),GETDEL(valid),SET(invalid) resurrection race.
+  await store.setIfExists(key, JSON.stringify({ ...record, attempts }), record.expiresAt - now);
   return { ok: false, reason: 'mismatch' };
 }
 
