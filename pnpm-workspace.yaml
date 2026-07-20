@@ -2,8 +2,27 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# pnpm settings live in THIS file: pnpm >= 10 no longer reads its settings
+# from .npmrc or package.json's `pnpm` field (the former .npmrc keys were
+# migrated here when pnpm 11 silently stopped honoring them).
+autoInstallPeers: false
+strictPeerDependencies: true
+shamefullyHoist: false
+resolutionMode: highest
+preferFrozenLockfile: true
+enablePrePostScripts: false
+
+# Doctrine: dependency install scripts NEVER run (CLAUDE.md dependency
+# checklist).  These two dev-tool packages declare build scripts that this
+# project intentionally does not execute (esbuild's platform binary comes
+# from its optionalDependencies; lefthook is driven by the root `prepare`
+# script).  Declaring them ignored keeps that posture explicit — pnpm 11
+# hard-fails an install with undeclared ignored builds (ERR_PNPM_IGNORED_BUILDS).
+ignoredBuiltDependencies:
+  - esbuild
+  - lefthook
+
 # Security/peer pins (rationale + drop conditions: CLAUDE.md "Pinned dependencies").
-# pnpm >= 11 reads overrides from THIS file, not package.json's `pnpm` field.
 overrides:
   esbuild: ^0.28.1
   undici: ^7.28.0

@@ -313,6 +313,75 @@ export async function rawGetAll<T>(store: StoreName): Promise<T[]> {
   return result;
 }
 
+/** A raw record paired with its TRUE primary key (from `getAllKeys`, never
+ *  extracted from the untrusted record value). */
+export interface RawEntry<T> {
+  readonly key: IDBValidKey;
+  readonly value: T;
+}
+
+function zipEntries<T>(keys: IDBValidKey[], values: T[]): RawEntry<T>[] {
+  // `getAll` and `getAllKeys` over the same source in the same transaction
+  // return the same records in the same order (both sort by key, then by
+  // primary key for index duplicates), so positional pairing is sound.
+  return values.map((value, i) => ({ key: keys[i] as IDBValidKey, value }));
+}
+
+export async function rawGetAllWithKeys<T>(store: StoreName): Promise<RawEntry<T>[]> {
+  const db = await getDb();
+  const tx = db.transaction(store, 'readonly');
+  const objectStore = tx.objectStore(store);
+  const [values, keys] = await Promise.all([
+    promisifyRequest<T[]>(objectStore.getAll()),
+    promisifyRequest<IDBValidKey[]>(objectStore.getAllKeys()),
+  ]);
+  await txComplete(tx);
+  return zipEntries(keys, values);
+}
+
+export async function rawGetAllByIndexWithKeys<T>(
+  store: StoreName,
+  index: string,
+  query?: IDBValidKey | IDBKeyRange,
+): Promise<RawEntry<T>[]> {
+  const db = await getDb();
+  const tx = db.transaction(store, 'readonly');
+  const idx = tx.objectStore(store).index(index);
+  // IDBIndex.getAllKeys returns PRIMARY keys, which is exactly what a
+  // subsequent delete needs.
+  const [values, keys] = await Promise.all([
+    promisifyRequest<T[]>(query === undefined ? idx.getAll() : idx.getAll(query)),
+    promisifyRequest<IDBValidKey[]>(query === undefined ? idx.getAllKeys() : idx.getAllKeys(query)),
+  ]);
+  await txComplete(tx);
+  return zipEntries(keys, values);
+}
+
+/**
+ * Delete `key` only if the CURRENT value at that key satisfies `shouldDelete` —
+ * the read and the conditional delete share ONE readwrite transaction, so a
+ * concurrent writer (another tab's write-through refresh) cannot be clobbered:
+ * either its write commits first and the predicate sees the fresh value, or it
+ * queues behind this transaction and lands after. The predicate must be
+ * synchronous (it runs inside the transaction callback).
+ */
+export async function rawDeleteIf(
+  store: StoreName,
+  key: IDBValidKey,
+  shouldDelete: (current: unknown) => boolean,
+): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(store, 'readwrite');
+  const objectStore = tx.objectStore(store);
+  const request = objectStore.get(key);
+  request.onsuccess = () => {
+    if (request.result !== undefined && shouldDelete(request.result)) {
+      objectStore.delete(key);
+    }
+  };
+  await txComplete(tx);
+}
+
 export async function rawGetAllByIndex<T>(
   store: StoreName,
   index: string,

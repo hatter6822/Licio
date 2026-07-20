@@ -206,6 +206,19 @@ describe('snapshot expiry (unbounded-growth control)', () => {
       overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
       cachedAt: 1,
     });
+    // A second invalid row whose KEY FIELD itself is corrupted (a number is a
+    // valid IDB key but an invalid record value) — the sweep's index scan must
+    // still evict it, via the true primary key from getAllKeys.
+    await rawPut(STORE.storyComments, {
+      schemaVersion: 2,
+      cacheKey: 42,
+      storyId: STORY.story_id,
+      optionsKey: '{}',
+      comments: [],
+      nextCursor: null,
+      overview: { comment_count: 0, sources_count: 0, corrections_count: 0 },
+      cachedAt: 1,
+    });
 
     await expireOldSnapshots(Date.now() + SNAPSHOT_MAX_AGE_MS + 1_000);
     expect(await storyComments.count()).toBe(0);

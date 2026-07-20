@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DB_NAME, rawPut, resetDbConnection, STORE } from './db.js';
+import { DB_NAME, rawDeleteIf, rawPut, resetDbConnection, STORE } from './db.js';
 import type { SavedStoryRecord, StoryCommentsSnapshotRecord } from './schemas.js';
+import { storyCommentsSnapshotRecordSchema } from './schemas.js';
 import {
   drainRejectionDeltas,
   getRejectionCount,
@@ -140,9 +141,10 @@ describe('integrity store reads (evict on invalid — snapshot caches)', () => {
     expect(getRejectionCount(STORE.storyComments)).toBe(1);
   });
 
-  it('deletes an invalid record even when its key field is not extractable', async () => {
-    // A numeric primary key is a valid IDB key but fails the string-only key
-    // extraction — the keyed read still evicts via the key it was issued for.
+  it('deletes an invalid record even when its key field itself is corrupted', async () => {
+    // A numeric primary key is a valid IDB key while failing the record schema
+    // (cacheKey must be a string) — the keyed read evicts via the key it was
+    // issued for, never a value extracted from the untrusted record.
     await rawPut(STORE.storyComments, { cacheKey: 42, bogus: true });
     expect(await storyComments.get(42)).toBeUndefined();
     expect(await storyComments.count()).toBe(0);
@@ -162,5 +164,45 @@ describe('integrity store reads (evict on invalid — snapshot caches)', () => {
     // an immortal record the GC sweep cannot see.
     expect(await storyComments.count()).toBe(1);
     expect(getRejectionCount(STORE.storyComments)).toBe(1);
+  });
+
+  it('an index scan evicts a record whose key field is corrupted (true primary key)', async () => {
+    // cacheKey: 42 is a valid IDB key but an invalid record value, and the row
+    // still appears in the cachedAt index — the sweep path. The scan pairs
+    // values with getAllKeys, so eviction uses the TRUE primary key and the
+    // row cannot survive as an immortal telemetry-spamming record.
+    await rawPut(STORE.storyComments, { ...SNAPSHOT, cacheKey: 42 });
+
+    const scanned = await storyComments.getAllByIndex(
+      'cachedAt',
+      IDBKeyRange.upperBound(SNAPSHOT.cachedAt),
+    );
+    expect(scanned).toHaveLength(0);
+    expect(await storyComments.count()).toBe(0);
+    expect(getRejectionCount(STORE.storyComments)).toBe(1);
+  });
+
+  it('never deletes a fresh valid record that replaced the invalid one (conditional evict)', async () => {
+    // The eviction is a conditional delete inside one readwrite transaction:
+    // rawDeleteIf re-reads the CURRENT value and deletes only if it is still
+    // invalid. Simulate the cross-tab refresh race directly at that seam.
+    await storyComments.put(SNAPSHOT);
+    await rawDeleteIf(
+      STORE.storyComments,
+      SNAPSHOT.cacheKey,
+      // The store's predicate: delete only when the current value fails the
+      // schema — a fresh write-through snapshot passes it and must survive.
+      (current) => !storyCommentsSnapshotRecordSchema.safeParse(current).success,
+    );
+    expect(await storyComments.get(SNAPSHOT.cacheKey)).toEqual(SNAPSHOT);
+
+    // And the same conditional delete DOES remove a still-invalid value.
+    await rawPut(STORE.storyComments, { ...SNAPSHOT, cacheKey: 'still-bad', comments: 'bogus' });
+    await rawDeleteIf(
+      STORE.storyComments,
+      'still-bad',
+      (current) => !storyCommentsSnapshotRecordSchema.safeParse(current).success,
+    );
+    expect(await storyComments.count()).toBe(1); // only the valid snapshot remains
   });
 });

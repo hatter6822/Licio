@@ -13,12 +13,14 @@
 // re-counting) on every read until a same-key write-through overwrites it.
 import type { z } from 'zod';
 import {
+  type RawEntry,
   rawClear,
   rawCount,
   rawDelete,
+  rawDeleteIf,
   rawGet,
-  rawGetAll,
-  rawGetAllByIndex,
+  rawGetAllByIndexWithKeys,
+  rawGetAllWithKeys,
   rawPut,
   STORE,
   type StoreName,
@@ -91,12 +93,16 @@ export interface IntegrityStore<T> {
 /**
  * What happens to a record that fails read validation, after it is counted and
  * logged.  `quarantine` (user data) leaves it in place so a recovery path
- * exists.  `evict` (server-refetchable snapshot caches) deletes it best-effort
- * by its primary key — `keyPath` names the store's keyPath property — so the
- * next online read repopulates it and it can never become an immortal record
- * the GC sweep cannot see.
+ * exists.  `evict` (server-refetchable snapshot caches) deletes it so the next
+ * online read repopulates it and it can never become an immortal record the GC
+ * sweep cannot see.  Every read path knows the record's TRUE primary key (a
+ * keyed `get` was issued for it; scans pair values with `getAllKeys`), so even
+ * a record whose key field is corrupted is removable — and the delete is
+ * CONDITIONAL inside one readwrite transaction (`rawDeleteIf`), so a fresh
+ * valid record written concurrently (another tab's write-through refresh)
+ * between the read and the eviction is never clobbered.
  */
-type InvalidReadPolicy = { mode: 'quarantine' } | { mode: 'evict'; keyPath: string };
+type InvalidReadPolicy = { mode: 'quarantine' } | { mode: 'evict' };
 
 function createStore<T>(
   storeName: StoreName,
@@ -111,32 +117,33 @@ function createStore<T>(
     }
   };
 
-  // The invalid record's primary key, read from the raw value (untrusted, so
-  // only a non-empty string is accepted — every store here has a string keyPath).
-  const keyOf = (raw: unknown): IDBValidKey | undefined => {
-    if (policy.mode !== 'evict' || typeof raw !== 'object' || raw === null) return undefined;
-    const key = (raw as Record<string, unknown>)[policy.keyPath];
-    return typeof key === 'string' && key.length > 0 ? key : undefined;
-  };
-
-  const evict = async (key: IDBValidKey | undefined): Promise<void> => {
-    if (policy.mode !== 'evict' || key === undefined) return;
+  const evict = async (key: IDBValidKey): Promise<void> => {
+    if (policy.mode !== 'evict') return;
     try {
-      await rawDelete(storeName, key);
+      // Atomic re-check: delete ONLY if the value at the key is STILL invalid.
+      await rawDeleteIf(storeName, key, (current) => !schema.safeParse(current).success);
     } catch {
       // Best-effort: the record is already excluded from results either way.
     }
   };
 
   /** Validate one raw record; on failure count + log it and, under the evict
-   *  policy, delete it (`knownKey` — the key a keyed `get` was issued for —
-   *  beats extraction, so even a record with a corrupt keyPath field is removable). */
-  const validateRead = async (raw: unknown, knownKey?: IDBValidKey): Promise<T | null> => {
+   *  policy, conditionally delete it by its true primary key. */
+  const validateRead = async (raw: unknown, key: IDBValidKey): Promise<T | null> => {
     const parsed = schema.safeParse(raw);
     if (parsed.success) return parsed.data;
     recordRejection();
-    await evict(knownKey ?? keyOf(raw));
+    await evict(key);
     return null;
+  };
+
+  const validateScan = async (entries: RawEntry<unknown>[]): Promise<T[]> => {
+    const records: T[] = [];
+    for (const entry of entries) {
+      const record = await validateRead(entry.value, entry.key);
+      if (record !== null) records.push(record);
+    }
+    return records;
   };
 
   return {
@@ -149,22 +156,10 @@ function createStore<T>(
       return (await validateRead(raw, key)) ?? undefined;
     },
     async getAll() {
-      const raws = await rawGetAll<unknown>(storeName);
-      const records: T[] = [];
-      for (const raw of raws) {
-        const record = await validateRead(raw);
-        if (record !== null) records.push(record);
-      }
-      return records;
+      return validateScan(await rawGetAllWithKeys<unknown>(storeName));
     },
     async getAllByIndex(index, query) {
-      const raws = await rawGetAllByIndex<unknown>(storeName, index, query);
-      const records: T[] = [];
-      for (const raw of raws) {
-        const record = await validateRead(raw);
-        if (record !== null) records.push(record);
-      }
-      return records;
+      return validateScan(await rawGetAllByIndexWithKeys<unknown>(storeName, index, query));
     },
     delete: (key) => rawDelete(storeName, key),
     clear: () => rawClear(storeName),
@@ -193,15 +188,15 @@ export const draftStories: IntegrityStore<DraftStoryRecord> = createStore(
 export const threadSnapshots: IntegrityStore<ThreadSnapshotRecord> = createStore(
   STORE.threadSnapshots,
   threadSnapshotRecordSchema,
-  { mode: 'evict', keyPath: 'threadId' },
+  { mode: 'evict' },
 );
 export const storyComments: IntegrityStore<StoryCommentsSnapshotRecord> = createStore(
   STORE.storyComments,
   storyCommentsSnapshotRecordSchema,
-  { mode: 'evict', keyPath: 'cacheKey' },
+  { mode: 'evict' },
 );
 export const signalLedger: IntegrityStore<SignalLedgerRecord> = createStore(
   STORE.signalLedger,
   signalLedgerRecordSchema,
-  { mode: 'evict', keyPath: 'itemId' },
+  { mode: 'evict' },
 );
