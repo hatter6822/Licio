@@ -568,6 +568,39 @@ persistence + UI):
   multi-peer sync correctness matrix, the update-channel tests, and the external
   cryptography/storage/metadata/red-team reviews).
 
+### Deep-audit follow-ups (2026-07) — dedicated slices required
+
+Three confirmed findings from the 2026-07 deep audit are recorded here because
+each needs its own protocol-design slice with a convergence/behaviour test
+matrix; rushing them into a broad remediation would risk launch-blocking room
+convergence.  (The tractable sibling findings — op_id binding, genesis founder
+pin, NFC authoring normalization, base64url key-record pinning, the tier-3 PRF
+short-output guard — were fixed in that pass.)
+
+- **Snapshot-stability compaction (`reducer/reduce.ts`, §14.5).**  A late-arriving
+  op whose canonical Lamport position sorts INSIDE an already-compacted snapshot's
+  covered range is folded post-snapshot on a compacted device but in-position on an
+  uncompacted one → the two states diverge.  Fix direction: the engine must only
+  compact a STABLE prefix (a Lamport frontier every device has observed), so no
+  future op can sort before the snapshot boundary; alternatively the validator must
+  quarantine an op that sorts into a compacted range.
+- **Eviction frontier (`reducer/reduce.ts` + `schemas/ops.ts`, §12/§14).**  The
+  reducer rejects ops from a removed device via `device.removed`, but that flag is
+  set only when the removal op is folded; an evicted device can author a NEW op with
+  a Lamport BELOW its removal (and the next `author_seq`), so it sorts first and is
+  accepted.  Fix direction: `member.remove`/`device.remove` must capture the removed
+  device's seq/Lamport frontier (a schema addition) so any op beyond it is rejected
+  regardless of fold order.
+- **At-rest room-key protection (`crypto/key-store.ts`, `apps/web/.../session-store.ts`).**
+  The §10.8 tiered key-store + §12.6 recovery kit are implemented + tested but have
+  no runtime consumer; the session-store persists epoch secrets + MLS state as raw
+  bytes (asymmetric keys are already non-extractable CryptoKeys).  This is a
+  deliberate SPEC §6.9 availability-over-confidentiality default — wrapping the
+  symmetric material under a non-extractable key would trade room-loss-on-eviction
+  for disk-theft resistance.  The proper slice is the OPT-IN high-risk-room flow
+  (passphrase/passkey unlock UX + recovery-kit import), a maintainer decision on the
+  availability tradeoff — not a forced default change.
+
 The single composition seam with LCAP (WS-R.16.1 / WS-R.11.5 / WS-S.6.5) lands
 late and optionally; LCAP carries only WS-S ciphertext + opaque hints and never
 sees plaintext, keys, op-heads, or real private-room ids.  Where the two

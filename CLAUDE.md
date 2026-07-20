@@ -281,92 +281,35 @@ licio/
 ## Workspace dependency graph
 
 ```
-@licio/shared              (leaf; no workspace dependencies)
-
-@licio/db                  (depends on @licio/shared only)
-@licio/invariants          (depends on @licio/shared only)
-@licio/ranking             (depends on @licio/shared, @licio/invariants;
-                            NEVER @licio/db — the ranking math has no
-                            database access by construction)
-@licio/ai-governance       (depends on @licio/shared only; browser-safe,
-                            NEVER @licio/db — the WS-K governance domain has
-                            no database access by construction)
-@licio/governance          (depends on @licio/shared only; browser-safe,
-                            NEVER @licio/db — the WS-U AI-governed-rooms domain
-                            (the deterministic moderation-bound wrapper, kernel,
-                            capabilities, elections) PLUS the pure WS-M
-                            treasury-governance math (voting-weight resolver +
-                            eligibility, deadline-driven proposal tally, the
-                            payment-intent/mode lifecycle tables, law-pack
-                            validation + fixtures, action budgets, exact
-                            decimal arithmetic) has no database access by
-                            construction)
-@licio/lcap                (depends on @licio/shared, zod; browser-safe,
-                            NEVER @licio/db — the WS-R LCAP protocol core
-                            (deterministic CBOR, CIDs, COSE detached proofs,
-                            schemas, the transport seam) has no database access
-                            by construction; the codec/CID/COSE core carries
-                            zero npm imports — WebCrypto + a hand-rolled
-                            CBOR/COSE subset only)
-@licio/lcap-p2p            (depends on @licio/shared, @licio/lcap, zod;
-                            browser-safe, NEVER @licio/db — the WS-R.15.6/15.7
-                            OPTIONAL transports: the WebRTC data-channel carrier
-                            + server-blind signaling envelope, and the
-                            dependency-free IPFS gateway bridge.  No npm runtime
-                            dep beyond the shared zod baseline; the carriers use
-                            only browser WebRTC + fetch + WebCrypto.  Code-split:
-                            apps/web loads it by DYNAMIC import only)
-@licio/private-p2p         (depends on @licio/shared, zod; browser-safe,
-                            NEVER @licio/db, NEVER @licio/lcap — the WS-S Private
-                            P2P rooms confidentiality & authority plane (canonical
-                            DAG-CBOR encoding, the strict private schemas, and —
-                            in later slices — MLS/HPKE/AEAD/KDF/Ed25519 crypto,
-                            Helia/libp2p, the Lamport reducer, sync).  The two
-                            decentralization planes pin DIFFERENT crypto suites on
-                            purpose (Ed25519/MLS/HPKE here; ES256 in LCAP) and
-                            never share keys/code.  All heavy P2P/crypto deps are
-                            declared HERE + loaded only from a lazy code-split
-                            route chunk measured against its own bundle budget)
-
-apps/web                   (depends on @licio/shared, @licio/invariants,
-                            @licio/ai-governance, @licio/lcap, @licio/lcap-p2p,
-                            @licio/private-p2p; NEVER @licio/db — enforced by
-                            check:workspace-deps.  @licio/lcap is the WS-R.15.1
-                            bundle flows + the WS-R.15.2/15.4b/15.5 transports;
-                            @licio/lcap-p2p is the WebRTC/IPFS carriers;
-                            @licio/private-p2p is the WS-S.7 room engine
-                            (`apps/web/src/private-p2p/`: the IndexedDb storage
-                            adapter + the dynamic-import room manager).  All
-                            three load as lazy dynamic-import chunks —
-                            `check:lcap-p2p-split` + `check:private-p2p-split`
-                            assert NO static value import — so no protocol/crypto
-                            core enters the initial bundle)
-apps/api                   (depends on @licio/shared, @licio/db,
-                            @licio/invariants, @licio/ranking,
-                            @licio/ai-governance, @licio/governance,
-                            @licio/lcap, @licio/lcap-p2p;
-                            the lcap-p2p edge is the Gate-19 public-block
-                            (re)publisher
-                            (`apps/api/src/lcap/{takedown-oracle,publisher}.ts`)
-                            — the server-side DB binding of the `TakedownOracle`
-                            seam + `IpfsBridge` that `@licio/lcap-p2p` cannot
-                            carry itself (it must never import `@licio/db`).
-                            apps/api NO LONGER imports `@licio/private-p2p`: the WS-S Tier-2
-                            rendezvous-cap server verify (`cap-verifier.ts`) was
-                            REMOVED (PRIV-API-RENDEZVOUS-1 — the per-`(room,epoch)`
-                            issuer key the server would hold to verify is a stable
-                            cross-bucket linking handle that breaks §15.3
-                            unlinkability; the cap is now enforced PEER-SIDE only and
-                            the server runs the §27 Tier-1 sample-poll).  apps/api has
-                            no initial-bundle constraint, so the `check:lcap-p2p-split`
-                            code-split gate does not apply to it; the lcap-p2p edge is
-                            a static server-side value import, budget-exempt as a
-                            `workspace:*` dep)
+@licio/shared        leaf; no workspace deps
+@licio/db            → shared
+@licio/invariants    → shared
+@licio/ranking       → shared, invariants
+@licio/ai-governance → shared
+@licio/governance    → shared            (WS-U rooms domain + WS-M treasury math)
+@licio/lcap          → shared, zod       (WS-R LCAP core; codec/CID/COSE has zero npm deps)
+@licio/lcap-p2p      → shared, lcap, zod (WS-R optional WebRTC/IPFS transports)
+@licio/private-p2p   → shared, zod       (WS-S E2EE rooms; NEVER @licio/lcap)
+apps/web             → shared, invariants, ai-governance, lcap, lcap-p2p, private-p2p
+apps/api             → shared, db, invariants, ranking, ai-governance, governance, lcap, lcap-p2p
 ```
 
-`pnpm check:workspace-deps` enforces these boundaries by scanning both
-`package.json` declarations and source-level imports.  Violations block
-CI.
+Load-bearing boundaries (enforced by `check:workspace-deps`, `check:lcap-p2p-split`,
+`check:private-p2p-split`; violations block CI):
+
+- **Only `@licio/db` and `apps/api` touch the database.** Every other package is
+  `NEVER @licio/db` by construction — the ranking / invariant / governance / LCAP /
+  private-p2p math is browser-safe and DB-free.
+- **The two decentralization planes never share keys or code:** private-p2p pins
+  Ed25519/MLS/HPKE, LCAP pins ES256; `private-p2p` never imports `lcap`.
+- **`apps/web` loads `lcap`, `lcap-p2p`, and `private-p2p` by DYNAMIC import only**
+  (the split gates assert no static value import) so no protocol/crypto core enters
+  the initial bundle.
+- **`apps/api` does NOT import `@licio/private-p2p`** (PRIV-API-RENDEZVOUS-1: the
+  server holds no per-room issuer key — it would be a cross-bucket linking handle;
+  the rendezvous cap is peer-side only). Its `lcap-p2p` edge is the Gate-19 public
+  re-publisher (`apps/api/src/lcap/{takedown-oracle,publisher}.ts`) — the DB binding
+  `@licio/lcap-p2p` cannot carry itself.
 
 **Dependency budgets (SPEC Section 6.12.12):**
 
@@ -946,26 +889,11 @@ re-using the same settings so `pnpm --filter <ws> test` runs standalone.
 Coverage threshold: 80% minimum for lines, functions, branches,
 and statements.
 
-**Test counts.**  `pnpm test` is the canonical query (≈8085 tests pass without
-the gated integration env; ≈8330 with live Postgres/Redis).  Only monotonic
-growth is enforced — no gate pins the count, and exact numbers drift, so this
-table is approximate; the per-suite breakdown lives in each per-workstream
-`docs/*/README.md`, not here.
-
-| Workspace | Test files | Environment | Canonical query |
-|-----------|-----------|-------------|-----------------|
-| apps/web | ~235 unit + 8 E2E (6 frontend-only + 2 BFF-in-the-loop) | jsdom / Playwright | `pnpm --filter web test` |
-| apps/api | ~225 (identity/events/ingestion/forum/invariants/ranking/trust-safety/AI-gov/treasury/compliance/LCAP; gated Postgres+Redis adapters) | node | `pnpm --filter api test` |
-| packages/shared | ~36 (schemas SSOT, UGC pipeline + XSS suite, update-channel verifier, jurisdiction vocab) | node | `pnpm --filter @licio/shared test` |
-| packages/db | ~8 (isolation, content denylist, gated integration) | node | via root `pnpm test` (db project) |
-| packages/invariants | ~19 (PWAtt/MinHash/freshness + the WS-H invariant mathematics + SPEC-purpose oracle) | node | `pnpm --filter @licio/invariants test` |
-| packages/ranking | ~7 (denylist, §5.4 scoring, penalties/ties, dedup/balancing, determinism, replay) | node | `pnpm --filter @licio/ranking test` |
-| packages/ai-governance | ~13 (prohibited-use, label ladder, bias/hallucination/safety, harness, summary quality) | node | `pnpm --filter @licio/ai-governance test` |
-| packages/governance | ~12 (WS-U moderation wrapper/kernel/capabilities/elections + WS-M treasury math) | node | `pnpm --filter @licio/governance test` |
-| packages/lcap | ~33 (LCAP v0.2 core: CBOR/CID/COSE, identity chain, Merkle proofs, sync plane, simulator) | node | `pnpm --filter @licio/lcap test` |
-| packages/lcap-p2p | ~3 (signaling envelope, ICE policy, WebRTC transport, gateway bridge + takedown oracle) | node | `pnpm --filter @licio/lcap-p2p test` |
-| packages/private-p2p | ~33 (DAG-CBOR/schemas, crypto foundation, Lamport reducer, sync, membership, convergence + SAS) | node | `pnpm --filter @licio/private-p2p test` |
-| scripts | ~6 (the private-room CI gates + jurisdiction-matrix drift gate) | node | via root `pnpm test` (policy project) |
+**Test counts.**  `pnpm test` is the canonical query (≈8200 tests pass without
+the gated integration env; more with live Postgres/Redis).  Only monotonic
+growth is enforced — no gate pins the count and exact numbers drift, so the
+per-suite breakdown lives in each per-workstream `docs/*/README.md`, not here.
+Run one workspace with `pnpm --filter <ws> test`.
 
 WS-D, WS-E, WS-F, WS-G, WS-H, WS-I, WS-U, and WS-R (the LcapServerStore
 contract) add **gated** integration tests (Postgres + Redis) that run only
