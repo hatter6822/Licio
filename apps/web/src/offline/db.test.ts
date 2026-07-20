@@ -386,6 +386,51 @@ describe('migrations', () => {
     await deleteDatabase(name);
   });
 
+  it('the v6 bump evicts the pre-rework story-comments cache but keeps user data', async () => {
+    const name = `licio-v6-${Math.random().toString(36).slice(2)}`;
+    const v5 = await openDb(name, 5, MIGRATIONS);
+    await new Promise<void>((resolve, reject) => {
+      const tx = v5.transaction(
+        [STORE.storyComments, STORE.draftContributions, STORE.pendingQueue],
+        'readwrite',
+      );
+      // A snapshot cached before the WS-T rework: its comment carries a retired
+      // `type` and a removed strict-schema metadata key, so it would fail the
+      // live record schema on every read (and, quarantined, evade the GC sweep).
+      tx.objectStore(STORE.storyComments).put({
+        schemaVersion: 2,
+        cacheKey: '77777777-7777-4777-8777-777777777777:{}',
+        storyId: '77777777-7777-4777-8777-777777777777',
+        optionsKey: '{}',
+        comments: [{ type: 'evidence', metadata: { evidence_type: 'primary' } }],
+        nextCursor: null,
+        overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+        cachedAt: 1,
+      });
+      // User data must SURVIVE (a draft + a queued submission).
+      tx.objectStore(STORE.draftContributions).put({ draftId: 'd-keep', updatedAt: 1 });
+      tx.objectStore(STORE.pendingQueue).put({ operationId: 'op-keep', createdAt: 1 });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v5.close();
+
+    const v6 = await openDb(name, 6, MIGRATIONS);
+    const get = (store: string, key: string) =>
+      new Promise<unknown>((resolve, reject) => {
+        const req = v6.transaction(store, 'readonly').objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    expect(
+      await get(STORE.storyComments, '77777777-7777-4777-8777-777777777777:{}'),
+    ).toBeUndefined(); // evicted
+    expect(await get(STORE.draftContributions, 'd-keep')).toBeDefined(); // preserved
+    expect(await get(STORE.pendingQueue, 'op-keep')).toBeDefined(); // never dropped
+    v6.close();
+    await deleteDatabase(name);
+  });
+
   it('aborts atomically and keeps the old version when a migration throws', async () => {
     const name = `licio-fail-${Math.random().toString(36).slice(2)}`;
     const v1 = await openDb(name, 1);

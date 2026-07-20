@@ -254,14 +254,23 @@ Background-Sync `sync` event (wakes a client to run the validated queue replay).
 
 A thin typed Promise wrapper over **raw IndexedDB** (no `idb` dependency).
 
-- **Six object stores (2.2a):** `saved-stories`, `draft-contributions`,
-  `draft-stories`, `thread-snapshots`, `signal-ledger`, `pending-queue`, with the
-  documented indexes. Versioned migrations run inside the single `onupgradeneeded`
-  transaction, so a failed migration aborts atomically (never half-migrated). The
-  v3 bump adds `draft-stories` additively (user data preserved).
-- **Integrity layer (2.2c):** every read AND write is zod-validated. A record
-  that fails read validation is **quarantined** (counted, excluded, left in place
-  for recovery), never silently deleted.
+- **Seven object stores (2.2a):** `saved-stories`, `draft-contributions`,
+  `draft-stories`, `thread-snapshots`, `story-comments`, `signal-ledger`,
+  `pending-queue`, with the documented indexes. Versioned migrations run inside
+  the single `onupgradeneeded` transaction, so a failed migration aborts
+  atomically (never half-migrated). The v3 bump adds `draft-stories` additively
+  (user data preserved); v4 adds `story-comments` and evicts the reshaped read
+  caches; v5 remaps drafts + queued submissions onto the shrunk comment
+  taxonomy; v6 evicts the pre-rework `story-comments` cache the v5 remap left
+  behind (stale strict-schema shapes are refetched, never mis-parsed).
+- **Integrity layer (2.2c):** every read AND write is zod-validated; a record
+  that fails read validation is counted, logged, and excluded, then handled by a
+  per-store policy. **User data** (saves, drafts) is **quarantined** — left in
+  place so a recovery path exists, never silently deleted. **Server-refetchable
+  snapshot caches** (`thread-snapshots`, `story-comments`, `signal-ledger`) are
+  **evicted** — the server copy is authoritative, and a quarantined cache record
+  would otherwise be invisible to the GC sweep (which reads through the
+  validating layer) and re-log forever.
 - **Draft encryption (2.2c, §6.8):** composer drafts are encrypted at rest with
   AES-256-GCM (`offline/drafts.ts` + `offline/draft-crypto.ts`). The per-device key
   is a **non-extractable `CryptoKey` persisted directly** in a separate `licio-keys`

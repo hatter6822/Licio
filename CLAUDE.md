@@ -36,8 +36,8 @@ type level, runtime, and CI (the no-applause static gate).
 ## Build and run
 
 ```bash
-# Prerequisites: Node 22+ (pinned in .nvmrc), pnpm 9.15.4+.
-corepack enable && corepack prepare pnpm@9.15.4 --activate
+# Prerequisites: Node 22+ (pinned in .nvmrc), pnpm 11.15.1+.
+corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install
 
 # Daily commands.
@@ -81,6 +81,7 @@ pnpm check:private-bundle-transparency # WS-S.1.5: the private bundle loads no d
 pnpm check:p2p-endpoint-rejections  # WS-S.1.5: submission/contribution/feed reject p2p rooms
 pnpm check:p2p-ranking-exclusion    # WS-S.1.5: every retriever predicates storage_mode='server'
 pnpm check:p2p-search-exclusion     # WS-S.1.5: server search indexes/serves only server rooms
+pnpm check:p2p-mls-wrapper          # WS-S.3.1a: ts-mls is imported ONLY via the reviewed MLS wrapper
 pnpm check:update-channel           # WS-S.10.2b: the private-mode bundle is signature + transparency-log + digest verified BEFORE activation (untrusted ⇒ rooms locked)
 pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP + private-p2p
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP + private-p2p planes)
@@ -88,11 +89,14 @@ pnpm check:knomosis-pins            # WS-L.1.1a: every non-local Knomosis deploy
 pnpm check:sw                       # SW security scan (run after build)
 
 # Supply chain and build validation.
-pnpm sbom                           # CycloneDX SBOM (includes transitive deps)
+pnpm run sbom                       # CycloneDX SBOM (includes transitive deps; `run` is
+                                    #   required — pnpm 11's builtin `sbom` shadows the bare name)
 pnpm clean                          # remove build artifacts
 
-# Database (development).
-pnpm db:generate                    # generate Drizzle migrations
+# Database (development).  Migrations are HAND-AUTHORED (SQL + a
+# drizzle/meta/_journal.json entry — docs/DEVELOPMENT.md §15): the tracked
+# meta snapshots are far behind the chain, so db:generate would diff against
+# stale state and emit a garbage migration — do not run it here.
 pnpm db:migrate                     # run Drizzle migrations
 pnpm db:push                        # push schema directly (development only)
 
@@ -119,9 +123,14 @@ pnpm --filter courier test:unit     # courier Layer-1+2 JVM unit tests (pure fra
 `package.json` (root and per-workspace) is the source of truth for
 every build command; consult it before adding new scripts.
 
-**Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 9.15.4 (pinned
-in `package.json` `packageManager`), TypeScript 7.0.2, Vite 8.1.5,
-Biome 2.5.4.
+**Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 11.15.1 (pinned
+in `package.json` `packageManager`; engines require pnpm >= 11 — the
+security overrides live in `pnpm-workspace.yaml`, which pnpm 9 would
+silently ignore), TypeScript 7.0.2, Vite 8.1.5, Biome 2.5.4.  pnpm 11's
+default supply-chain gate (24h `minimumReleaseAge`) vets every
+resolution: a version published less than 24 hours ago is held back
+until it ages — do NOT weaken or bypass the gate to force a
+newer-than-24h version in.
 
 ## Pre-commit verification (mandatory)
 
@@ -328,10 +337,12 @@ dependency:
 4. License — must be AGPL-3.0-or-later compatible (MIT, ISC, BSD, Apache-2.0)
 5. Web-API alternative — can a built-in browser/Node.js API replace it?
 
-**Pinned dependencies (`pnpm.overrides` + exact peers).**  A few versions are
-pinned to keep the `audit:advisories` gate clean or to satisfy an exact peer;
-drop each once upstream ships the fix (per-CVE rationale lives in the commit
-that added the pin, not here).
+**Pinned dependencies (`pnpm-workspace.yaml` `overrides` + exact peers).**
+A few versions are pinned to keep the `audit:advisories` gate clean or to
+satisfy an exact peer; drop each once upstream ships the fix (per-CVE
+rationale lives in the commit that added the pin, not here).  The overrides
+live in `pnpm-workspace.yaml` — pnpm >= 10 no longer reads the `pnpm` field
+in `package.json`, so an override placed there is silently ignored.
 
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
