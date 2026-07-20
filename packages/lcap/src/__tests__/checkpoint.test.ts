@@ -103,6 +103,20 @@ describe('checkpoint record (WS-R.9.2b)', () => {
       ),
     ).toBe(false);
   });
+
+  it('rejects a genuine body/proof paired with a FORGED checkpoint (chosen merkle_root)', async () => {
+    // The authority proof covers `body`, not `bundle.checkpoint`.  Pair the genuine
+    // signed body + proof with a `checkpoint` carrying a chosen merkle_root: the proof
+    // still verifies, but the checkpoint must be bound to the signed bytes and rejected.
+    const forgedBundle = {
+      ...bundle5,
+      checkpoint: { ...bundle5.checkpoint, merkle_root: tamper(bundle5.checkpoint.merkle_root) },
+    };
+    expect(await verifyCheckpoint(forgedBundle, authority.publicKey, { networkId: NET })).toEqual({
+      ok: false,
+      status: 'rejected_checkpoint_body_mismatch',
+    });
+  });
 });
 
 describe('inclusion proof (WS-R.9.3a)', () => {

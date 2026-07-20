@@ -129,13 +129,23 @@ export function allocate(
   // lands.  A C0 object blocked by a dependency that can NEVER be placed — genuinely
   // absent (external), over budget, in an unservable lane, or part of a dependency
   // cycle — does NOT hold the gate (it can never be scheduled).
-  const schedulableC0Remaining = (): boolean =>
-    remaining.C0.some(
+  const laneHasSchedulable = (lane: LcapLane): boolean =>
+    remaining[lane].some(
       (candidate) =>
-        fitsBudget(candidate, 'C0') &&
+        fitsBudget(candidate, lane) &&
         (isEligible(candidate) ||
           candidate.requires.every((dep) => placed.has(dep) || everPlaceable(dep))),
     );
+  const schedulableC0Remaining = (): boolean => laneHasSchedulable('C0');
+  // B4 (bulk pre-fetch) is leftover-only: defer it until NO higher lane (C0/T1/E2/M3)
+  // has schedulable work that still fits, so a small bulk object can never consume
+  // budget a higher-priority head is still accumulating deficit for (§15.2: bulk is
+  // "applied after C0/T1/E2/M3 obligations").  M3 stays gated on C0 only.
+  const higherThanB4Remaining = (): boolean =>
+    schedulableC0Remaining() ||
+    laneHasSchedulable('T1') ||
+    laneHasSchedulable('E2') ||
+    laneHasSchedulable('M3');
 
   // Phase 1 — C0 minimum reservation (before any other lane is served).
   while (usedByLane.C0 < laneBudget.c0MinBytes && emitFromLane('C0', true)) {
@@ -149,8 +159,9 @@ export function allocate(
     let placedThisRound = false;
     for (const lane of LANE_ORDER) {
       if (laneBudget.weights[lane] <= 0) continue;
-      // §15.2: media/bulk waits for ALL schedulable C0.
-      if ((lane === 'M3' || lane === 'B4') && schedulableC0Remaining()) continue;
+      // §15.2: media/bulk waits for ALL schedulable C0; bulk (B4) ALSO waits for T1/E2/M3.
+      if (lane === 'M3' && schedulableC0Remaining()) continue;
+      if (lane === 'B4' && higherThanB4Remaining()) continue;
       deficit[lane] += laneBudget.weights[lane] * QUANTUM_UNIT;
       while (emitFromLane(lane, false)) placedThisRound = true;
     }
@@ -166,7 +177,8 @@ export function allocate(
     // (a single very large object no longer risks the maxRounds cutoff).
     for (const lane of LANE_ORDER) {
       if (laneBudget.weights[lane] <= 0) continue;
-      if ((lane === 'M3' || lane === 'B4') && schedulableC0Remaining()) continue;
+      if (lane === 'M3' && schedulableC0Remaining()) continue;
+      if (lane === 'B4' && higherThanB4Remaining()) continue;
       const head = laneHead(lane);
       if (head && head.bytes > deficit[lane]) {
         const quantum = laneBudget.weights[lane] * QUANTUM_UNIT;

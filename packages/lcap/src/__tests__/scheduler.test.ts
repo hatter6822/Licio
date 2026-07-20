@@ -169,6 +169,23 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     expect(on.order.some((c) => c.lane === 'B4')).toBe(true);
   });
 
+  it('defers B4 bulk behind a schedulable higher-lane (T1) candidate', () => {
+    // Bulk is leftover-only: even with bulkAllowed, a B4 object must not be emitted
+    // while a T1 head is still schedulable — otherwise it could consume budget the
+    // higher-priority candidate needs.
+    const t1 = cand({ cid: 't1', lane: 'T1', priority: 1, bytes: 50_000 });
+    const bulk = cand({ cid: 'b4', lane: 'B4', priority: 4, bytes: 1_000 });
+    const result = scheduleTransfer([bulk, t1], {
+      budgetBytes: 600 * 1024,
+      nowMs: 0,
+      bulkAllowed: true,
+    });
+    const t1Index = result.order.findIndex((c) => c.cid === 't1');
+    const b4Index = result.order.findIndex((c) => c.cid === 'b4');
+    expect(t1Index).toBeGreaterThanOrEqual(0);
+    expect(b4Index).toBeGreaterThan(t1Index); // B4 only after T1 is satisfied
+  });
+
   it('never places a dependent before its dependency', () => {
     const dependency = cand({ cid: 'cap', lane: 'C0', priority: 0, bytes: 50 });
     const dependent = cand({ cid: 'post', lane: 'T1', priority: 1, bytes: 100, requires: ['cap'] });

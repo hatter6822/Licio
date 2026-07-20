@@ -74,7 +74,10 @@ export async function signCheckpoint(params: {
   return { checkpoint: params.checkpoint, body, proof };
 }
 
-export type CheckpointVerifyStatus = 'rejected_wrong_proof_kind' | 'rejected_bad_authority_proof';
+export type CheckpointVerifyStatus =
+  | 'rejected_wrong_proof_kind'
+  | 'rejected_bad_authority_proof'
+  | 'rejected_checkpoint_body_mismatch';
 
 export type CheckpointVerification =
   | { readonly ok: true; readonly checkpoint: RoomCheckpointRecordV2 }
@@ -94,6 +97,14 @@ export async function verifyCheckpoint(
     expectedRecordKind: 'room_checkpoint',
   });
   if (!verified.ok) return { ok: false, status: 'rejected_bad_authority_proof' };
+  // BIND the parsed checkpoint to the SIGNED bytes: the authority proof covers
+  // `body`, not `bundle.checkpoint`.  Without this an attacker could pair a genuine
+  // proof+body from ANY real checkpoint with a forged `checkpoint` carrying a chosen
+  // `merkle_root`, then supply a self-consistent inclusion proof.  Re-encoding is
+  // deterministic + injective, so a mismatch means `checkpoint` is not what was signed.
+  if (!bytesEqual(encodeWithSchema(roomCheckpointRecordV2Schema, bundle.checkpoint), bundle.body)) {
+    return { ok: false, status: 'rejected_checkpoint_body_mismatch' };
+  }
   return { ok: true, checkpoint: bundle.checkpoint };
 }
 
