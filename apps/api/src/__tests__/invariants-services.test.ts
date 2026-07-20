@@ -216,13 +216,15 @@ describe('MFCI service (WS-H.3)', () => {
     expect(await fixture.invariants.mfciCases.listOpen(10)).toHaveLength(0);
   });
 
-  it('cheap-statistic intake fires the SYNCHRONY detector on cross-actor lockstep across distinct targets', async () => {
+  it('does NOT freeze an arbitrary target on DISTRIBUTED synchrony (cohort signal, not a per-story freeze)', async () => {
     const fixture = freshInvariantServices();
     const nowMs = Date.now();
-    // 20 DISTINCT actors act once each on 20 DISTINCT targets, all inside a
-    // ~1s cluster: synchrony (cross-actor temporal clustering) is maximal while
-    // target_concentration stays near zero (no single target is piled onto), so
-    // the case must attribute to synchrony — the statistic that actually tripped.
+    // 20 DISTINCT actors act once each on 20 DISTINCT targets, all inside a ~1s
+    // cluster: synchrony (cross-actor temporal clustering) is maximal while
+    // target_concentration stays near zero (no single target is piled onto). None
+    // of the per-target evidence identifies the caller-supplied `firstTarget` as
+    // anomalous, so it must NOT be frozen — distributed synchrony is a COHORT signal
+    // routed to the nightly tier, not an individual-target freeze.
     const targetIds = Array.from({ length: 20 }, () => randomUUID());
     const rows = targetIds.map((targetId, i) => ({
       eventId: randomUUID(),
@@ -240,14 +242,12 @@ describe('MFCI service (WS-H.3)', () => {
     await fixture.events.hooks.mfci?.({
       target_ids: [firstTarget],
     } as never);
-    const open = await fixture.invariants.mfciCases.listOpen(10);
-    expect(open).toHaveLength(1);
-    expect(open[0]?.targetId).toBe(firstTarget);
-    expect(open[0]?.statistic).toBe('synchrony');
-    // The rationale describes the synchrony detector + its time-bucket margin.
-    expect(open[0]?.summary).toContain('Statistic: synchrony');
-    expect(open[0]?.summary).toContain('time_bucket');
-    expect(open[0]?.fixedMarginsRef).toContain('cheap:');
+    // No per-story freeze case for the uninvolved target, and its risk state stays
+    // normal (only target-scoped evidence raises an individual target's state).
+    expect(await fixture.invariants.mfciCases.listOpen(10)).toHaveLength(0);
+    expect((await fixture.invariants.mfciRiskStates.get(firstTarget))?.state ?? 'normal').toBe(
+      'normal',
+    );
   });
 
   it('batch fiber test attributes per-target scores under one shared conditioning', async () => {

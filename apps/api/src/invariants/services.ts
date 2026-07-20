@@ -424,6 +424,17 @@ export function registerInvariantConsumers(
     const syncScore = synchronyScore(actions, syncCalibration, { nowMs });
     events.metrics.increment('invariants.mfci.cheap_checks');
     if (tcScore.score < config.mfciFreezeScore && syncScore.score < config.mfciFreezeScore) return;
+    // Distributed synchrony WITHOUT target-concentration for `itemId` is a COHORT
+    // signal — many actors hitting DISTINCT targets in lockstep — NOT evidence that
+    // THIS caller-supplied story is itself anomalous.  Freezing the arbitrary
+    // `itemId` would penalize an uninvolved target, so record the cohort signal for
+    // the nightly synchrony/anti-poisoning tier (scheduler.ts) and return.  Only
+    // target-scoped evidence (target_concentration crossing the freeze score) raises
+    // an INDIVIDUAL story's risk state below.
+    if (syncScore.score >= config.mfciFreezeScore && tcScore.score < config.mfciFreezeScore) {
+      events.metrics.increment('invariants.mfci.distributed_synchrony');
+      return;
+    }
     // Pick the firing statistic: whichever clears the freeze threshold,
     // preferring the higher score when both clear, so the case describes the
     // detector that actually tripped.

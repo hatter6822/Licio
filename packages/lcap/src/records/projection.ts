@@ -105,7 +105,20 @@ export function displayOrder(records: readonly ThreadRecord[]): ThreadRecord[] {
     // prev_device_record_cid that is also a content parent is not counted twice.
     const parents = new Set(r.record.parent_record_cids ?? []);
     if (r.record.prev_device_record_cid !== undefined) {
-      parents.add(r.record.prev_device_record_cid);
+      // Honor prev_device_record_cid as a causal ordering edge ONLY when it is a
+      // VERIFIED same-device immediate predecessor: the SAME device key AND
+      // device_seq - 1. `prev_device_record_cid` is an author-supplied optional CID;
+      // unverified, an author could point it at an arbitrary record to force its own
+      // content after that record in every projection. When it fails the check it is
+      // a non-authoritative hint and the §12.4 ladder orders the record instead.
+      const prev = byCid.get(r.record.prev_device_record_cid);
+      if (
+        prev !== undefined &&
+        prev.record.author_device_key_id === r.record.author_device_key_id &&
+        prev.record.device_seq === r.record.device_seq - 1
+      ) {
+        parents.add(r.record.prev_device_record_cid);
+      }
     }
     for (const parent of parents) {
       if (!byCid.has(parent)) continue;

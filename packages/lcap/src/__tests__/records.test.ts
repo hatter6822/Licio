@@ -180,6 +180,34 @@ describe('display ordering (WS-R.2.3)', () => {
     expect(displayOrder([seq1, seq0]).map((r) => r.recordCid)).toEqual(['r-0', 'r-1']);
   });
 
+  it('ignores an unverified prev_device_record_cid (cross-device / wrong-seq forgery)', () => {
+    // An author points prev_device_record_cid at a VICTIM's record to force its own
+    // content after it.  The edge is honored ONLY for a verified same-device seq-1
+    // predecessor, so a cross-device (or wrong-seq) pointer is ignored and the §12.4
+    // ladder (here receiptMs) orders instead — the forgery cannot jump the order.
+    const victim = tr('r-v', mkRecord({ event_type: 'post', device_seq: 0 }), { receiptMs: 100 });
+    const crossDevice = tr(
+      'r-x',
+      mkRecord({
+        event_type: 'post',
+        author_device_key_id: 'key-attacker', // different device
+        device_seq: 5,
+        prev_device_record_cid: 'r-v',
+      }),
+      { receiptMs: 50 },
+    );
+    // receiptMs 50 < 100 ⇒ the attacker sorts FIRST; the forged edge did NOT force it
+    // after the victim (which it would have, had the edge been honored).
+    expect(displayOrder([victim, crossDevice]).map((r) => r.recordCid)).toEqual(['r-x', 'r-v']);
+    // Same device but a non-adjacent sequence (must be exactly prev + 1) is ignored too.
+    const wrongSeq = tr(
+      'r-ws',
+      mkRecord({ event_type: 'post', device_seq: 9, prev_device_record_cid: 'r-v' }),
+      { receiptMs: 40 },
+    );
+    expect(displayOrder([victim, wrongSeq]).map((r) => r.recordCid)).toEqual(['r-ws', 'r-v']);
+  });
+
   it('stays deterministic when same-device seq order contradicts cross-device claim order', () => {
     // The old CONDITIONAL device-seq rung made a 3-cycle: A<B (same device, seq), but
     // B<C and C<A by claim — so Array.sort output depended on input order.  With device
