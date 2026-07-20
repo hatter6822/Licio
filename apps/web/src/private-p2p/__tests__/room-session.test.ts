@@ -58,6 +58,30 @@ describe('PrivateRoomSession — create / author / persist / reload', () => {
     ).toBe(true);
   });
 
+  it('fails closed on load when the persisted manifest fails founder-commitment verification', async () => {
+    const session = await PrivateRoomSession.create({
+      roomName: 'Tamper Room',
+      roomType: 'global_topic',
+      ...FOUNDER,
+    });
+    const roomId = session.roomId;
+    // Tamper the persisted manifest (a modified IndexedDB row) so its recomputed §13.1
+    // commitment no longer matches the stored one: verifiedFounderDeviceId returns
+    // undefined and a freshly-created room has no snapshot base, so loading it with an
+    // UNPINNED genesis would let a bootstrap co-member seat a forged one. It must throw.
+    const { getRoomSession, putRoomSession } = await import('../session-store.js');
+    const stored = await getRoomSession(roomId);
+    if (!stored) throw new Error('expected a stored session');
+    await putRoomSession({
+      ...stored,
+      manifest: {
+        ...(stored.manifest as object),
+        profile: { name: 'HIJACKED', room_type: 'global_topic' },
+      },
+    });
+    await expect(PrivateRoomSession.load(roomId)).rejects.toThrow(/founder commitment|genesis/i);
+  });
+
   it('serializes concurrent authoring so two ops do not collide on one author seq (PRIV-WEB-SESSION-2)', async () => {
     const session = await PrivateRoomSession.create({
       roomName: 'Race',

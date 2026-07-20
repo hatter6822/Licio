@@ -2,7 +2,10 @@
 import { z } from 'zod';
 
 /** A base64url-encoded raw Ed25519 public key (32 bytes ⇒ 43 chars, optional pad). */
-const BASE64URL_ED25519_KEY = /^[A-Za-z0-9_-]{43,44}$/;
+// A 32-byte Ed25519 public key is EXACTLY 43 unpadded base64url chars (⌈32·8/6⌉);
+// 44 chars would decode to 33 bytes, so a lax {43,44} would accept a pin that later
+// fails update-manifest verification and locks private rooms.
+const BASE64URL_ED25519_KEY = /^[A-Za-z0-9_-]{43}$/;
 
 const bundleSignerKeys = z
   .string()

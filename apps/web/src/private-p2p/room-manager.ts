@@ -955,6 +955,19 @@ export class PrivateRoomSession {
       session.manifest,
       session.manifestCommitment,
     );
+    // FAIL CLOSED on genesis integrity: without a verified §14.5 base the reducer
+    // folds from EMPTY, so the founder pin is the ONLY thing stopping a bootstrap
+    // co-member from forging a lower-Lamport `member.add` as the genesis. If the
+    // founder commitment cannot be verified (tampered/undecodable persisted manifest)
+    // AND there is no base to fold from, refuse to load rather than adopt an unpinned
+    // genesis. (A verified base already bakes the real genesis in, so the pin is moot
+    // there — availability over strictness for the display-only manifest fields still
+    // holds whenever a base is present.)
+    if (genesisFounderDeviceId === undefined && session.snapshotBase === undefined) {
+      throw new Error(
+        `private-p2p: room ${roomId} founder commitment failed verification and no snapshot base — refusing to load an unpinned genesis (WS-S §12.1)`,
+      );
+    }
     const epochs = new Map(
       session.epochs.map((entry) => [
         entry.epoch,
@@ -1451,6 +1464,15 @@ export class PrivateRoomSession {
       grant.manifest,
       grant.manifestCommitment,
     );
+    // FAIL CLOSED: the join folds from EMPTY and then imports the grant archive, so a
+    // grant whose manifest fails founder-commitment verification (a malicious inviter
+    // pointing `founder` at itself) must be REJECTED — otherwise a bootstrap co-member
+    // could seat a forged lower-Lamport genesis. There is no base exception here.
+    if (genesisFounderDeviceId === undefined) {
+      throw new Error(
+        `private-p2p: room ${grant.roomId} grant manifest failed founder-commitment verification — refusing to join (WS-S §12.1)`,
+      );
+    }
     const engine = await p2p.PrivateRoomEngine.load({
       roomId: grant.roomId,
       roomIdCommitment: grant.roomIdCommitment,

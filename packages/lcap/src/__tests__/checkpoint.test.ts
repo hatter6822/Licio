@@ -117,6 +117,17 @@ describe('checkpoint record (WS-R.9.2b)', () => {
       status: 'rejected_checkpoint_body_mismatch',
     });
   });
+
+  it('returns a rejection (never throws) for a MALFORMED checkpoint object', async () => {
+    // Untrusted consensus data may carry a checkpoint missing a required field; the
+    // re-encode must be caught and returned as a rejection, not propagated to validate().
+    const { merkle_root: _omit, ...malformed } = bundle5.checkpoint;
+    const bundle = { ...bundle5, checkpoint: malformed as unknown as typeof bundle5.checkpoint };
+    expect(await verifyCheckpoint(bundle, authority.publicKey, { networkId: NET })).toEqual({
+      ok: false,
+      status: 'rejected_checkpoint_body_mismatch',
+    });
+  });
 });
 
 describe('inclusion proof (WS-R.9.3a)', () => {

@@ -102,7 +102,16 @@ export async function verifyCheckpoint(
   // proof+body from ANY real checkpoint with a forged `checkpoint` carrying a chosen
   // `merkle_root`, then supply a self-consistent inclusion proof.  Re-encoding is
   // deterministic + injective, so a mismatch means `checkpoint` is not what was signed.
-  if (!bytesEqual(encodeWithSchema(roomCheckpointRecordV2Schema, bundle.checkpoint), bundle.body)) {
+  // A MALFORMED runtime `checkpoint` (missing a required field) makes `encodeWithSchema`
+  // throw — catch it and return a rejection, since `bundle.checkpoint` is untrusted
+  // consensus data and `validate()` must never propagate that as an exception.
+  let encodedCheckpoint: Uint8Array;
+  try {
+    encodedCheckpoint = encodeWithSchema(roomCheckpointRecordV2Schema, bundle.checkpoint);
+  } catch {
+    return { ok: false, status: 'rejected_checkpoint_body_mismatch' };
+  }
+  if (!bytesEqual(encodedCheckpoint, bundle.body)) {
     return { ok: false, status: 'rejected_checkpoint_body_mismatch' };
   }
   return { ok: true, checkpoint: bundle.checkpoint };

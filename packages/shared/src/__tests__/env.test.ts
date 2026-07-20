@@ -403,6 +403,23 @@ describe('validateClientEnv', () => {
     ).toThrow('VITE_PRIVATE_BUNDLE');
   });
 
+  it('rejects a 44-char Ed25519 pin (a 32-byte key is EXACTLY 43 unpadded base64url chars)', () => {
+    const key44 = 'A'.repeat(44); // decodes to 33 bytes — not a 32-byte Ed25519 key
+    const key43 = 'A'.repeat(43);
+    expect(() =>
+      validateClientEnv({
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key44,
+        VITE_PRIVATE_BUNDLE_LOG_KEY: key43,
+      }),
+    ).toThrow('VITE_PRIVATE_BUNDLE_SIGNER_KEYS');
+    expect(() =>
+      validateClientEnv({
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key43,
+        VITE_PRIVATE_BUNDLE_LOG_KEY: key44,
+      }),
+    ).toThrow('VITE_PRIVATE_BUNDLE_LOG_KEY');
+  });
+
   it('rejects a partial private-bundle pin (signers without a log key, or vice versa)', () => {
     const key = 'A'.repeat(43);
     expect(() => validateClientEnv({ VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key })).toThrow(
