@@ -22,7 +22,7 @@
 // rooms.  There is no soft pass and no "unknown ⇒ allow" branch.
 
 import { ED25519_PUBLIC_KEY_LENGTH, fromBase64Url, sha256Concat, verifyEd25519 } from './crypto.js';
-import { leafHash, verifyInclusion } from './merkle.js';
+import { bytesEqual, leafHash, verifyInclusion } from './merkle.js';
 import {
   canonicalCheckpointBody,
   canonicalManifestBody,
@@ -39,6 +39,7 @@ export type UpdateUntrustedReason =
   | 'signature_invalid' // signer not trusted, or the maintainer signature failed
   | 'digest_mismatch' // the running bundle's hash != the manifest digest
   | 'not_in_transparency_log' // inclusion proof / checkpoint signature failed
+  | 'artifact_mismatch' // the signed body attests a different artifact than expected
   | 'stale'; // the release sequence is below the last-trusted sequence
 
 /** The verifier's verdict: a trusted bundle, or an untrusted one with a reason. */
@@ -59,6 +60,11 @@ export type UpdateActivationDecision =
 export interface VerifyUpdateManifestInput {
   /** The raw manifest object (typically parsed from a fetched JSON document). */
   readonly manifest: unknown;
+  /** The stable id of the artifact this client expects the manifest to attest
+   *  (the private-mode chunk name).  The signed body's `artifact_id` must equal
+   *  it — a valid signature over the WRONG artifact is not a match for THIS
+   *  bundle, so it is rejected before any digest/log work. */
+  readonly expectedArtifactId: string;
   /** The SHA-256 digest of the RUNNING private-mode bundle bytes, base64url.
    *  The caller hashes the actual loaded chunk and passes the result; the
    *  verifier never trusts a digest the manifest asserts about itself. */
@@ -87,9 +93,7 @@ function digestsMatch(manifestDigestB64: string, runningDigestB64: string): bool
     return false;
   }
   if (a.length === 0 || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= (a[i] as number) ^ (b[i] as number);
-  return diff === 0;
+  return bytesEqual(a, b);
 }
 
 /**
@@ -105,6 +109,14 @@ export async function verifyUpdateManifest(
   const parsed = updateManifestSchema.safeParse(input.manifest);
   if (!parsed.success) return { trusted: false, reason: 'malformed_manifest' };
   const manifest: UpdateManifest = parsed.data;
+
+  // 1b. Artifact binding: the signed body must attest the artifact this client
+  //     expects.  A valid signature over a DIFFERENT artifact_id is honest but
+  //     not about THIS bundle — reject with a distinct reason.  The subsequent
+  //     signature check still proves the signer attested this exact artifact_id.
+  if (manifest.body.artifact_id !== input.expectedArtifactId) {
+    return { trusted: false, reason: 'artifact_mismatch' };
+  }
 
   // 2. Decode every byte field once; any decode failure ⇒ malformed.
   let signerKey: Uint8Array;
@@ -135,7 +147,7 @@ export async function verifyUpdateManifest(
   //    (possibly rotated) trusted set AND the signature must verify over the
   //    canonical body.  A trusted-set miss and a bad signature both ⇒ invalid.
   const signerTrusted = trustedSigners.some(
-    (k) => k.length === signerKey.length && bytesEqualPublic(k, signerKey),
+    (k) => k.length === signerKey.length && bytesEqual(k, signerKey),
   );
   if (!signerTrusted) return { trusted: false, reason: 'signature_invalid' };
   const bodyBytes = canonicalManifestBody(manifest.body);
@@ -158,7 +170,7 @@ export async function verifyUpdateManifest(
     return { trusted: false, reason: 'malformed_manifest' };
   }
   const expectedLeaf = await sha256Concat(LOG_LEAF_DOMAIN, bundleDigestBytes);
-  if (!bytesEqualPublic(expectedLeaf, logLeaf)) {
+  if (!bytesEqual(expectedLeaf, logLeaf)) {
     return { trusted: false, reason: 'not_in_transparency_log' };
   }
 
@@ -199,14 +211,6 @@ export async function verifyUpdateManifest(
     releaseSequence: manifest.body.release_sequence,
     bundleVersion: manifest.body.bundle_version,
   };
-}
-
-/** Public-hash equality (the manifest key/leaf bytes are public). */
-function bytesEqualPublic(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= (a[i] as number) ^ (b[i] as number);
-  return diff === 0;
 }
 
 /**

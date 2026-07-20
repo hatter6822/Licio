@@ -39,21 +39,21 @@ const CONTENT_TYPES: ReadonlySet<ContributionEventRecordV2['event_type']> = new 
 ]);
 
 /**
- * Compare two records by the §12.4 precedence ladder, EXCLUDING causal order
- * (which the topological pass handles): room-log sequence → device sequence
- * (only meaningful within one device) → checkpoint index → claimed timestamp
- * (a weak hint) → receipt time → `record_cid` (a final deterministic tiebreak).
- * Phone clocks (claimed timestamp) only break ties nothing else resolves.
+ * Compare two records by the §12.4 precedence ladder: room-log sequence →
+ * checkpoint index → claimed timestamp (a weak hint) → receipt time → `record_cid`
+ * (a final deterministic tiebreak).  This is a PURE lexicographic TOTAL order —
+ * every rung is unconditional, so it is transitive.  Per-device sequence is NOT a
+ * rung here: it was a CONDITIONAL rung (fires only for same-device pairs), which
+ * made the comparator non-transitive (A<B by device-seq, B<C and C<A by claim = a
+ * 3-cycle) and left `Array.sort` output arrival-order-dependent, breaking the §25.2
+ * determinism guarantee.  Device ordering is now a synthetic DAG edge in
+ * `displayOrder`'s topological pass (via `prev_device_record_cid`), where causal
+ * order already lives.  Phone clocks (claimed timestamp) only break ties nothing
+ * else resolves.
  */
 export function compareDisplayOrder(a: ThreadRecord, b: ThreadRecord): number {
   const byRoomLog = compareOptionalAsc(a.roomLogSeq, b.roomLogSeq);
   if (byRoomLog !== 0) return byRoomLog;
-
-  if (a.record.author_device_key_id === b.record.author_device_key_id) {
-    if (a.record.device_seq !== b.record.device_seq) {
-      return a.record.device_seq - b.record.device_seq;
-    }
-  }
 
   const byCheckpoint = compareOptionalAsc(a.checkpointIndex, b.checkpointIndex);
   if (byCheckpoint !== 0) return byCheckpoint;
@@ -88,9 +88,12 @@ function compareOptionalAsc(a: number | undefined, b: number | undefined): numbe
 
 /**
  * Order records for display using the §12.4 precedence ladder with causal order
- * respected: a topological sort over `parent_record_cids` edges present in the
- * set (parents before children), with `compareDisplayOrder` ordering the ready
- * set.  Total and deterministic; independent of input order.
+ * respected: a topological sort over `parent_record_cids` AND the per-device chain
+ * (`prev_device_record_cid`) edges present in the set (predecessors before
+ * successors), with `compareDisplayOrder` (a pure total order) ordering the ready
+ * set.  Threading the device chain here — rather than as a conditional comparator
+ * rung — keeps per-device sequence causal while the comparator stays transitive.
+ * Total and deterministic; independent of input order.
  */
 export function displayOrder(records: readonly ThreadRecord[]): ThreadRecord[] {
   const byCid = new Map(records.map((r) => [r.recordCid, r]));
@@ -98,7 +101,26 @@ export function displayOrder(records: readonly ThreadRecord[]): ThreadRecord[] {
   const childrenOf = new Map<string, string[]>();
   for (const r of records) inDegree.set(r.recordCid, 0);
   for (const r of records) {
-    for (const parent of r.record.parent_record_cids ?? []) {
+    // Content-DAG parents PLUS the same-device predecessor (§12.2), deduped so a
+    // prev_device_record_cid that is also a content parent is not counted twice.
+    const parents = new Set(r.record.parent_record_cids ?? []);
+    if (r.record.prev_device_record_cid !== undefined) {
+      // Honor prev_device_record_cid as a causal ordering edge ONLY when it is a
+      // VERIFIED same-device immediate predecessor: the SAME device key AND
+      // device_seq - 1. `prev_device_record_cid` is an author-supplied optional CID;
+      // unverified, an author could point it at an arbitrary record to force its own
+      // content after that record in every projection. When it fails the check it is
+      // a non-authoritative hint and the §12.4 ladder orders the record instead.
+      const prev = byCid.get(r.record.prev_device_record_cid);
+      if (
+        prev !== undefined &&
+        prev.record.author_device_key_id === r.record.author_device_key_id &&
+        prev.record.device_seq === r.record.device_seq - 1
+      ) {
+        parents.add(r.record.prev_device_record_cid);
+      }
+    }
+    for (const parent of parents) {
       if (!byCid.has(parent)) continue;
       inDegree.set(r.recordCid, (inDegree.get(r.recordCid) ?? 0) + 1);
       const list = childrenOf.get(parent) ?? [];
@@ -150,16 +172,20 @@ export interface ProjectedContribution {
   readonly hiddenBy?: string;
 }
 
-/** Deterministically pick the visible edit among conflicting edits of one target. */
+/**
+ * Deterministically pick the visible edit among conflicting edits of one target:
+ * the canonically-latest under the §12.4 precedence ladder (room-log seq →
+ * checkpoint index → claim → receipt → record_cid), i.e. the maximum of the total
+ * order `compareDisplayOrder`.  Per-device sequence is NOT a rung — it is only
+ * meaningful within a single device's chain, so comparing `device_seq` across two
+ * different authors could surface a stale edit whose author merely used a higher
+ * local counter.  Because `compareDisplayOrder` is total, transitive, and
+ * deterministic, taking its maximum is arrival-order-independent.
+ */
 function pickLatestEdit(edits: readonly ThreadRecord[]): ThreadRecord {
   let best = edits[0] as ThreadRecord;
   for (const edit of edits) {
-    if (
-      edit.record.device_seq > best.record.device_seq ||
-      (edit.record.device_seq === best.record.device_seq && edit.recordCid < best.recordCid)
-    ) {
-      best = edit;
-    }
+    if (compareDisplayOrder(edit, best) > 0) best = edit;
   }
   return best;
 }

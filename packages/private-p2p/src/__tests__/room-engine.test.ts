@@ -11,10 +11,12 @@ import { type PrivateCryptoKeyPair, randomBytes, toBase64Url } from '../crypto/r
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import { InMemoryPrivateRoomStorage, PrivateRoomEngine } from '../engine/room-engine.js';
 import type { HeldEpochKeys } from '../reducer/intake-context.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { roomStateCommitment } from '../reducer/state.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import { sealOp } from '../reducer/validate-op.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
+import { headAnnouncementSchema } from '../sync/head-sync.js';
 import {
   decodeSyncMessage,
   encodeSyncMessage,
@@ -26,8 +28,20 @@ import {
 
 const ROOM = 'room-1';
 
+// op_id is DERIVED from (author_device_id, author_seq) (§14.3.2), so tests name
+// ops with readable LABELS (still passed as `op_id`) that this registry maps to
+// the real derived id — for parent references and for op-id assertions.  mkOp is
+// async (the derivation hashes) and MUST be awaited in call order so a parent
+// label is registered before a child references it.
+const opIds = new Map<string, string>();
+const opIdOf = (label: string): string => {
+  const value = opIds.get(label);
+  if (value === undefined) throw new Error(`no op id recorded for label ${label}`);
+  return value;
+};
+
 let n = 0;
-function mkOp(
+async function mkOp(
   body: PrivateOpBody,
   fields: {
     op_id?: string;
@@ -37,19 +51,24 @@ function mkOp(
     lamport?: string;
     parents?: string[];
   } = {},
-): PrivateRoomOp {
+): Promise<PrivateRoomOp> {
+  const label = fields.op_id ?? `op-${++n}`;
+  const deviceId = fields.author_device_id ?? 'founder-dev';
+  const seq = fields.author_seq ?? 0;
+  const opId = await deriveOpId(deviceId, seq);
+  opIds.set(label, opId);
   return privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
     room_id: ROOM,
     epoch: 0,
-    op_id: fields.op_id ?? `op-${++n}`,
+    op_id: opId,
     author_member_id: fields.author_member_id ?? 'founder',
-    author_device_id: fields.author_device_id ?? 'founder-dev',
-    author_seq: fields.author_seq ?? 0,
+    author_device_id: deviceId,
+    author_seq: seq,
     created_at: '2026-06-22T00:00:00Z',
     created_at_bucket: '2026-06-22T00',
     lamport: fields.lamport ?? '1',
-    parents: fields.parents ?? [],
+    parents: (fields.parents ?? []).map((p) => opIds.get(p) ?? p),
     body,
   });
 }
@@ -139,16 +158,16 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
 
     // 1) Genesis: the founder self-add.
-    const genesis = mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+    const genesis = await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
       op_id: 'genesis',
       lamport: '1',
     });
     const g = await engine.applyLocalOp(genesis, founderSeal);
-    expect(g.accepted).toStrictEqual(['genesis']);
+    expect(g.accepted).toStrictEqual([opIdOf('genesis')]);
     expect(engine.state().members.get('founder')?.role).toBe('admin');
 
     // 2) The founder posts a story.
-    const post = mkOp(story('s1'), {
+    const post = await mkOp(story('s1'), {
       op_id: 'cs1',
       author_seq: 1,
       lamport: '2',
@@ -159,7 +178,7 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
 
     // 3) The founder adds bob.
     const bob = await makeDevice();
-    const addBob = mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+    const addBob = await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
       op_id: 'add-bob',
       author_seq: 2,
       lamport: '3',
@@ -168,7 +187,7 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     await engine.applyLocalOp(addBob, founderSeal);
     expect(engine.state().members.get('bob')?.role).toBe('member');
     expect(engine.state().rejected).toHaveLength(0);
-    expect(engine.heads()).toStrictEqual(['add-bob']);
+    expect(engine.heads()).toStrictEqual([opIdOf('add-bob')]);
   });
 
   it('surfaces Tier-2 rendezvous-cap commitments + issuances to the carrier', async () => {
@@ -178,7 +197,7 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
 
     await engine.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
@@ -186,7 +205,7 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     );
     // The founder device publishes its blind commitment (rendezvous.request).
     await engine.applyLocalOp(
-      mkOp(
+      await mkOp(
         { type: 'rendezvous.request', commitment_with_proof: 'Q29tbWl0bWVudA' },
         { op_id: 'req', author_seq: 1, lamport: '2', parents: ['genesis'] },
       ),
@@ -194,7 +213,7 @@ describe('PrivateRoomEngine — create + author lifecycle', () => {
     );
     // The admin issues (rendezvous.issue).
     await engine.applyLocalOp(
-      mkOp(
+      await mkOp(
         {
           type: 'rendezvous.issue',
           target_epoch: 0,
@@ -228,14 +247,14 @@ describe('PrivateRoomEngine — persistence + verify-on-load', () => {
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
 
     await engine.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await engine.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
       founderSeal,
     );
 
@@ -243,7 +262,7 @@ describe('PrivateRoomEngine — persistence + verify-on-load', () => {
     const reloaded = await PrivateRoomEngine.load(r.engineParams(storage));
     expect(reloaded.state().members.get('founder')?.role).toBe('admin');
     expect(reloaded.state().stories.get('s1')?.title).toBe('Story s1');
-    expect(reloaded.heads()).toStrictEqual(['cs1']);
+    expect(reloaded.heads()).toStrictEqual([opIdOf('cs1')]);
   });
 });
 
@@ -255,17 +274,17 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
     const bobSeal = await r.sealParamsFor(bob.device, 'bob-dev');
 
     // Build + seal genesis, add-bob (by founder), and a bob-authored story.
-    const genesis = mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+    const genesis = await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
       op_id: 'genesis',
       lamport: '1',
     });
-    const addBob = mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+    const addBob = await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
       op_id: 'add-bob',
       author_seq: 1,
       lamport: '2',
       parents: ['genesis'],
     });
-    const bobStory = mkOp(story('s1'), {
+    const bobStory = await mkOp(story('s1'), {
       op_id: 'cs1',
       author_member_id: 'bob',
       author_device_id: 'bob-dev',
@@ -281,7 +300,9 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
 
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     const report = await engine.ingest(envelopes);
-    expect(report.accepted.sort()).toStrictEqual(['add-bob', 'cs1', 'genesis']);
+    expect(report.accepted.sort()).toStrictEqual(
+      [opIdOf('add-bob'), opIdOf('cs1'), opIdOf('genesis')].sort(),
+    );
     expect(report.quarantined).toHaveLength(0);
     expect(engine.state().stories.get('s1')?.authorMemberId).toBe('bob');
   });
@@ -292,7 +313,7 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
 
     const genesisEnv = await sealOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
@@ -308,24 +329,29 @@ describe('PrivateRoomEngine — fixpoint convergence + quarantine', () => {
 });
 
 describe('PrivateRoomEngine — §14.2 structural validation enforced in state', () => {
-  it('a device fork (two ops at the same author_seq) does not reach state', async () => {
+  it('a non-monotonic author_seq op does not reach state (§14.2 step 9)', async () => {
     const r = await room();
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
 
-    const genesis = mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+    const genesis = await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
       op_id: 'genesis',
       lamport: '1',
     });
-    // Two founder stories at the SAME author_seq (1) off genesis — a device fork.
-    const a = mkOp(story('s-a'), {
-      op_id: 'forkA',
-      author_seq: 1,
+    // op_id is now DERIVED from (device, seq), so two ops at the SAME seq are a
+    // same-op_id device fork (resolved at the engine — covered by the §15 fork
+    // tests).  The structural per-device monotonicity rule instead catches a DISTINCT
+    // op that REUSES/reorders a seq: A at seq 2, then B at seq 1 (lower seq, but a
+    // higher lamport so it is ordered AFTER A) — B's seq is not > A's, so it is
+    // quarantined `non_monotonic_author_seq` and never reaches state.
+    const a = await mkOp(story('s-a'), {
+      op_id: 'a',
+      author_seq: 2,
       lamport: '2',
       parents: ['genesis'],
     });
-    const b = mkOp(story('s-b'), {
-      op_id: 'forkB',
+    const b = await mkOp(story('s-b'), {
+      op_id: 'b',
       author_seq: 1,
       lamport: '3',
       parents: ['genesis'],
@@ -336,10 +362,12 @@ describe('PrivateRoomEngine — §14.2 structural validation enforced in state',
       await sealOp(a, founderSeal),
       await sealOp(b, founderSeal),
     ]);
-    // All three open cryptographically (each is a valid signed op)…
-    expect(report.accepted.sort()).toStrictEqual(['forkA', 'forkB', 'genesis']);
-    // …but only the lower-lamport member of the same-seq pair reaches state; the
-    // fork is quarantined by the structural pre-pass (§14.2 step 9).
+    // All three open cryptographically (each is a valid signed op with a distinct id)…
+    expect(report.accepted.sort()).toStrictEqual(
+      [opIdOf('a'), opIdOf('b'), opIdOf('genesis')].sort(),
+    );
+    // …but B (the non-monotonic seq) is quarantined by the structural pre-pass, so
+    // only A's story reaches state.
     expect(engine.state().stories.has('s-a')).toBe(true);
     expect(engine.state().stories.has('s-b')).toBe(false);
   });
@@ -349,21 +377,21 @@ describe('PrivateRoomEngine — §14.2 structural validation enforced in state',
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     await engine.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     // Parent 'ghost' was never ingested → missing_dependency, excluded from the fold.
-    const orphan = mkOp(story('s-orphan'), {
+    const orphan = await mkOp(story('s-orphan'), {
       op_id: 'orphan',
       author_seq: 1,
       lamport: '2',
       parents: ['ghost'],
     });
     const report = await engine.ingest([await sealOp(orphan, founderSeal)]);
-    expect(report.accepted).toStrictEqual(['orphan']); // crypto-opened
+    expect(report.accepted).toStrictEqual([opIdOf('orphan')]); // crypto-opened
     expect(engine.state().stories.has('s-orphan')).toBe(false); // but not folded
   });
 
@@ -372,14 +400,14 @@ describe('PrivateRoomEngine — §14.2 structural validation enforced in state',
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     await engine.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '5',
       }),
       founderSeal,
     );
     // lamport 3 ≤ parent genesis's 5 → violates §14.3.1, excluded from the fold.
-    const acausal = mkOp(story('s-acausal'), {
+    const acausal = await mkOp(story('s-acausal'), {
       op_id: 'acausal',
       author_seq: 1,
       lamport: '3',
@@ -396,24 +424,65 @@ describe('PrivateRoomEngine — §15.6 sync surface', () => {
     const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     await engine.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await engine.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
       founderSeal,
     );
 
     const announcement = engine.headAnnouncement('snap-1');
-    expect(announcement.heads).toStrictEqual(['cs1']);
+    expect(announcement.heads).toStrictEqual([opIdOf('cs1')]);
     expect(announcement.latest_snapshot_id).toBe('snap-1');
 
     // A fresh peer wants the announced head; once it holds it, it wants nothing.
     const peer = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
-    expect(peer.wantedFrom(announcement)).toStrictEqual(['cs1']);
+    expect(peer.wantedFrom(announcement)).toStrictEqual([opIdOf('cs1')]);
+    expect(engine.wantedFrom(announcement)).toStrictEqual([]);
+  });
+
+  it('a compacted engine never re-requests a covered (pruned) op', async () => {
+    const r = await room();
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    await engine.applyLocalOp(
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    await engine.applyLocalOp(
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      founderSeal,
+    );
+
+    // Compact: genesis + cs1 fold into the snapshot base and are pruned from
+    // `acceptedOps` (they now live only in `coveredOpLamports`).
+    const base = await engine.commitSnapshot({
+      epoch: 0,
+      roomEpochSecret: r.epoch0Secret,
+      contentWrapKey: r.contentWrapKey,
+      author: {
+        memberId: 'founder',
+        deviceId: 'founder-dev',
+        signingKey: r.founder.device.privateKey,
+      },
+      snapshotId: 'snap-1',
+    });
+    expect(base).toBeDefined();
+
+    // A peer announces a head that is a COVERED op id — already folded into the
+    // base — so the compacted engine must want nothing (no refetch of a pruned op).
+    const announcement = headAnnouncementSchema.parse({
+      schema: 'licio.private.head_announcement.v1',
+      heads: [opIdOf('cs1')],
+      op_count_bucket: 0,
+    });
     expect(engine.wantedFrom(announcement)).toStrictEqual([]);
   });
 });
@@ -427,14 +496,14 @@ describe('PrivateRoomEngine — §15.9 archive export/import (two-engine converg
     // Alice builds the room: genesis → add bob → a story.
     const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     await alice.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await alice.applyLocalOp(
-      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+      await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
         op_id: 'add-bob',
         author_seq: 1,
         lamport: '2',
@@ -443,7 +512,7 @@ describe('PrivateRoomEngine — §15.9 archive export/import (two-engine converg
       founderSeal,
     );
     await alice.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 2, lamport: '3', parents: ['add-bob'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 2, lamport: '3', parents: ['add-bob'] }),
       founderSeal,
     );
 
@@ -457,11 +526,13 @@ describe('PrivateRoomEngine — §15.9 archive export/import (two-engine converg
       r.engineParams(new InMemoryPrivateRoomStorage()),
     );
     const report = await bobEngine.importArchive(archive);
-    expect(report.accepted.sort()).toStrictEqual(['add-bob', 'cs1', 'genesis']);
+    expect(report.accepted.sort()).toStrictEqual(
+      [opIdOf('add-bob'), opIdOf('cs1'), opIdOf('genesis')].sort(),
+    );
     expect(bobEngine.state().members.get('founder')?.role).toBe('admin');
     expect(bobEngine.state().members.get('bob')?.role).toBe('member');
     expect(bobEngine.state().stories.get('s1')?.title).toBe('Story s1');
-    expect(bobEngine.heads()).toStrictEqual(['cs1']);
+    expect(bobEngine.heads()).toStrictEqual([opIdOf('cs1')]);
   });
 
   it('refuses to export an empty room', async () => {
@@ -477,7 +548,7 @@ describe('PrivateRoomEngine — §15.9 archive export/import (two-engine converg
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     await alice.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
@@ -501,7 +572,7 @@ describe('PrivateRoomEngine — device fork (§15) deterministic convergence', (
   async function forkPair(r: Awaited<ReturnType<typeof room>>) {
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const genesisEnv = await sealOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
@@ -510,8 +581,8 @@ describe('PrivateRoomEngine — device fork (§15) deterministic convergence', (
     // Two VALID ops sharing op_id 'fork' but with different content (story s-a vs
     // s-b) at the same causal position — a device fork.
     const base = { op_id: 'fork', author_seq: 1, lamport: '2', parents: ['genesis'] };
-    const envA = await sealOp(mkOp(story('s-a'), base), founderSeal);
-    const envB = await sealOp(mkOp(story('s-b'), base), founderSeal);
+    const envA = await sealOp(await mkOp(story('s-a'), base), founderSeal);
+    const envB = await sealOp(await mkOp(story('s-b'), base), founderSeal);
     return { genesisEnv, envA, envB };
   }
 
@@ -551,19 +622,19 @@ describe('PrivateRoomEngine — §15.7 op-exchange convergence (two engines, liv
     // Alice authors a 4-hop chain: genesis → cs1 → add-bob → cs2.
     const alice = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     await alice.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await alice.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
       founderSeal,
     );
     const bob = await makeDevice();
     await alice.applyLocalOp(
-      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+      await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
         op_id: 'add-bob',
         author_seq: 2,
         lamport: '3',
@@ -572,10 +643,10 @@ describe('PrivateRoomEngine — §15.7 op-exchange convergence (two engines, liv
       founderSeal,
     );
     await alice.applyLocalOp(
-      mkOp(story('s2'), { op_id: 'cs2', author_seq: 3, lamport: '4', parents: ['add-bob'] }),
+      await mkOp(story('s2'), { op_id: 'cs2', author_seq: 3, lamport: '4', parents: ['add-bob'] }),
       founderSeal,
     );
-    expect(alice.heads()).toStrictEqual(['cs2']);
+    expect(alice.heads()).toStrictEqual([opIdOf('cs2')]);
 
     // A fresh peer holding the SAME room keys + the founder bootstrap pulls from Alice.
     const peer = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
@@ -608,7 +679,7 @@ describe('PrivateRoomEngine — §15.7 op-exchange convergence (two engines, liv
     }
 
     // The peer converged to BYTE-IDENTICAL state with no transport and no archive.
-    expect(peer.heads()).toStrictEqual(['cs2']);
+    expect(peer.heads()).toStrictEqual([opIdOf('cs2')]);
     expect(peer.state().members.get('bob')?.role).toBe('member');
     expect(peer.state().stories.get('s2')?.title).toBe('Story s2');
     expect(Array.from(roomStateCommitment(peer.state()))).toEqual(

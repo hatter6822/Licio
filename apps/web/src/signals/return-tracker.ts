@@ -135,9 +135,16 @@ export class ReturnTracker {
     this.persist(now);
   }
 
-  /** True when returns within the window currently exceed the rage threshold. */
-  isRageLoop(itemId: string): boolean {
-    return (this.items.get(itemId)?.returnTimes.length ?? 0) >= this.config.rageCount;
+  /**
+   * True when returns within the rage window *as of `now`* meet the threshold.
+   * Time-aware and non-mutating: it re-prunes a copy against `now` so a burst
+   * whose window has since aged out no longer reports a rage loop (the stored
+   * `returnTimes` are pruned lazily on the next `visit`). The permanent
+   * forfeiture invariant is unaffected — it lives in `forfeited`/`returnCount`.
+   */
+  isRageLoop(itemId: string, now: number): boolean {
+    const times = this.items.get(itemId)?.returnTimes ?? [];
+    return times.filter((t) => now - t < this.config.rageWindowMs).length >= this.config.rageCount;
   }
 
   /**

@@ -112,7 +112,7 @@ export function privateOwnershipOutcome(
   return assertOwns(actorUserId, resourceOwnerUserId) ? 'ok' : 'not_found';
 }
 
-/** Highest-privilege role present (for display/audit only; authz uses `authorize`). */
+/** Whether ANY of the actor's roles may read steward audit surfaces / act on steward-gated surfaces (WS-D.1.5b). */
 export function isSteward(roles: readonly Role[]): boolean {
-  return roles.includes('steward') || roles.includes('admin');
+  return authorize(roles, 'steward.audit.read');
 }

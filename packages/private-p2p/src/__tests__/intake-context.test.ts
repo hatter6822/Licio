@@ -13,13 +13,18 @@ import { deriveAuthorDeviceIdBlind } from '../crypto/device-blind.js';
 import { randomBytes, toBase64Url } from '../crypto/runtime.js';
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import { buildOpIntakeContext, type HeldEpochKeys } from '../reducer/intake-context.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { reduceRoom } from '../reducer/reduce.js';
 import { openOp, sealOp } from '../reducer/validate-op.js';
 import type { PrivateEncryptedEnvelope } from '../schemas/envelope.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 
+// op_id is DERIVED from (author_device_id, author_seq) (§14.3.2); tests label ops
+// (still via `op_id`) and this registry maps a label to its real derived id for
+// parent references.  mkOp is async and must be awaited in call order.
+const opIds = new Map<string, string>();
 let n = 0;
-function mkOp(
+async function mkOp(
   body: PrivateOpBody,
   fields: {
     op_id?: string;
@@ -29,19 +34,24 @@ function mkOp(
     lamport?: string;
     parents?: string[];
   } = {},
-): PrivateRoomOp {
+): Promise<PrivateRoomOp> {
+  const label = fields.op_id ?? `op-${++n}`;
+  const deviceId = fields.author_device_id ?? 'founder-dev';
+  const seq = fields.author_seq ?? 0;
+  const opId = await deriveOpId(deviceId, seq);
+  opIds.set(label, opId);
   return privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
     room_id: 'room-1',
     epoch: 0,
-    op_id: fields.op_id ?? `op-${++n}`,
+    op_id: opId,
     author_member_id: fields.author_member_id ?? 'founder',
-    author_device_id: fields.author_device_id ?? 'founder-dev',
-    author_seq: fields.author_seq ?? 0,
+    author_device_id: deviceId,
+    author_seq: seq,
     created_at: '2026-06-22T00:00:00Z',
     created_at_bucket: '2026-06-22T00',
     lamport: fields.lamport ?? '1',
-    parents: fields.parents ?? [],
+    parents: (fields.parents ?? []).map((p) => opIds.get(p) ?? p),
     body,
   });
 }
@@ -109,7 +119,7 @@ async function setup() {
 describe('buildOpIntakeContext — seal → reduce → open against state', () => {
   it('opens the founder genesis op via a context built from reduced state', async () => {
     const s = await setup();
-    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    const genesis = await mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
     const state = reduceRoom([genesis]);
     expect(state.devices.get('founder-dev')?.removed).toBe(false);
 
@@ -126,10 +136,10 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
 
   it('resolves a second device (multi-device room)', async () => {
     const s = await setup();
-    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    const genesis = await mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
     // The founder adds bob (carrying bob's real signing key).
     const bob = await memberAdd('bob', 'bob-dev', 'member');
-    const addBob = mkOp(bob.body, {
+    const addBob = await mkOp(bob.body, {
       op_id: 'add-bob',
       lamport: '2',
       author_seq: 1,
@@ -145,7 +155,7 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
       'bob-dev',
       0,
     );
-    const bobStory = mkOp(story('s1'), {
+    const bobStory = await mkOp(story('s1'), {
       op_id: 'cs1',
       author_member_id: 'bob',
       author_device_id: 'bob-dev',
@@ -173,10 +183,10 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
 
   it('rejects an op whose plaintext author_device_id differs from the blind (impersonation defense)', async () => {
     const s = await setup();
-    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    const genesis = await mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
     // The founder admits bob as a low-privilege member (carrying bob's real key).
     const bob = await memberAdd('bob', 'bob-dev', 'member');
-    const addBob = mkOp(bob.body, {
+    const addBob = await mkOp(bob.body, {
       op_id: 'add-bob',
       lamport: '2',
       author_seq: 1,
@@ -193,7 +203,7 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
       'bob-dev',
       0,
     );
-    const forged = mkOp(
+    const forged = await mkOp(
       { type: 'role.grant', member_id: 'bob', role: 'admin' },
       {
         op_id: 'forge',
@@ -224,7 +234,7 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
 
   it('rejects an op whose blind id matches no known device', async () => {
     const s = await setup();
-    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    const genesis = await mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
     const state = reduceRoom([genesis]);
     // Seal with a random blind id not derivable from any state device.
     const envelope = await sealOp(genesis, {
@@ -244,7 +254,7 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
 
   it('rejects when the context holds only a different epoch (blind mismatch)', async () => {
     const s = await setup();
-    const genesis = mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
+    const genesis = await mkOp(s.founder.body, { op_id: 'genesis', lamport: '1' });
     const state = reduceRoom([genesis]);
     const envelope = await s.sealFounder(genesis); // sealed at epoch 0
     // The context holds epoch 1 keys only → it derives epoch-1 blinds → the
@@ -260,7 +270,7 @@ describe('buildOpIntakeContext — seal → reduce → open against state', () =
   it('skips a device with a malformed recorded key (no crash; its op is unknown_device)', async () => {
     const s = await setup();
     // A state whose device carries a non-Ed25519 signing key ('AAAA').
-    const badGenesis = mkOp(
+    const badGenesis = await mkOp(
       {
         type: 'member.add',
         member_id: 'founder',

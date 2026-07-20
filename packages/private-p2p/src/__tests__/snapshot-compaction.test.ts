@@ -13,6 +13,7 @@ import {
   createPrivateRoom,
   type PrivateOpBodyInput,
 } from '../engine/room-lifecycle.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
 import { roomStateCommitment } from '../reducer/state.js';
 import type { PrivateRoomOp } from '../schemas/ops.js';
@@ -44,10 +45,29 @@ async function founded() {
 
 type Room = Awaited<ReturnType<typeof founded>>;
 
+// op_id is now DERIVED from (author_device_id, author_seq) (§14.3.2), not a free
+// string.  Tests still name ops with readable LABELS; this registry maps each
+// label to the op's real derived id so parent references + assertions keep working.
+// Populated by `author`/`commitSnapshot`; read AFTER the op is authored, so the
+// natural author-before-assert ordering makes the shared map deterministic.
+const opIds = new Map<string, string>();
+
+/** The real derived op id for a label (throws if the op was not authored yet). */
+const id = (label: string): string => {
+  const value = opIds.get(label);
+  if (value === undefined) throw new Error(`no op id recorded for label ${label}`);
+  return value;
+};
+
+/** Resolve label parents (e.g. 'c1') to real op ids; leave a genuinely-absent
+ *  label (e.g. 'ghost') untouched so the missing-dependency path still fires. */
+const resolveParents = (parents: readonly string[]): string[] =>
+  parents.map((p) => opIds.get(p) ?? p);
+
 async function author(
   engine: PrivateRoomEngine,
   room: Room,
-  opId: string,
+  label: string,
   body: PrivateOpBodyInput,
   over: { lamport?: string; parents?: string[]; seq?: number } = {},
 ): Promise<PrivateRoomOp> {
@@ -62,13 +82,13 @@ async function author(
         signingKey: room.founder.signingKeyPair.privateKey,
         seq: over.seq ?? engine.nextAuthorSeq('alice-dev'),
       },
-      opId,
-      parents: over.parents ?? engine.heads(),
+      parents: resolveParents(over.parents ?? engine.heads()),
       lamport: over.lamport ?? engine.nextLamport(),
       createdAt: '2026-06-22T00:00:00Z',
     },
     body,
   );
+  opIds.set(label, op.op_id);
   await engine.applyLocalOp(op, sealParams);
   return op;
 }
@@ -76,9 +96,11 @@ async function author(
 async function commitSnapshot(
   engine: PrivateRoomEngine,
   room: Room,
-  opId: string,
+  label: string,
   snapshotId: string,
 ) {
+  // The commit op's id is derived from (author_device_id, the seq it will use).
+  opIds.set(label, await deriveOpId('alice-dev', engine.nextAuthorSeq('alice-dev')));
   return engine.commitSnapshot({
     epoch: Number(room.epochState.epoch),
     roomEpochSecret: room.epochState.roomEpochSecret,
@@ -88,7 +110,6 @@ async function commitSnapshot(
       deviceId: 'alice-dev',
       signingKey: room.founder.signingKeyPair.privateKey,
     },
-    opId,
     snapshotId,
     createdAt: '2026-06-22T00:00:00Z',
   });
@@ -175,7 +196,7 @@ describe('§14.5 in-band snapshot.commit + §25.6 compaction', () => {
     expect(engine.state().stories.get('s1')?.title).toBe('Hello');
     expect(engine.state().contributions.get('c1')?.bodyMarkdownLite).toBe('one');
     expect(engine.state().snapshots).toContain('snap-1');
-    expect((await storage.listEnvelopes()).map((e) => e.opId)).toStrictEqual(['snap-op-1']);
+    expect((await storage.listEnvelopes()).map((e) => e.opId)).toStrictEqual([id('snap-op-1')]);
 
     // Author MORE after compaction; Lamport/seq continue past the pruned max.
     expect(engine.nextLamport()).toBe('5'); // genesis,s1,c1 (1-3) + commit (4) ⇒ 5
@@ -225,7 +246,7 @@ describe('§14.5 in-band snapshot.commit + §25.6 compaction', () => {
     await engine.applyLocalOp(room.genesisOp, room.sealParams);
     await author(engine, room, 's1', story);
     const genesisEnvelope = (await storage.listEnvelopes()).find(
-      (e) => e.opId === 'genesis',
+      (e) => e.opId === room.genesisOp.op_id,
     )?.envelope;
     if (!genesisEnvelope) throw new Error('expected the genesis envelope');
 
@@ -257,10 +278,9 @@ describe('§14.5 in-band snapshot.commit + §25.6 compaction', () => {
     // the invalid `future` is NOT covered/pruned — it stays so a later-arriving
     // dependency can still resolve it (the bug pruned it permanently).
     await commitSnapshot(engine, room, 'snap-op-1', 'snap-1');
-    expect((await storage.listEnvelopes()).map((e) => e.opId).sort()).toStrictEqual([
-      'future',
-      'snap-op-1',
-    ]);
+    expect((await storage.listEnvelopes()).map((e) => e.opId).sort()).toStrictEqual(
+      [id('future'), id('snap-op-1')].sort(),
+    );
     expect(engine.state().stories.get('s1')?.title).toBe('Hello'); // covered state intact
   });
 
@@ -291,7 +311,9 @@ describe('§14.5 in-band snapshot.commit + §25.6 compaction', () => {
     );
     expect(engine.state().stories.has('s-bad')).toBe(false); // quarantined on the compacted device
 
-    const badEnvelope = (await storage.listEnvelopes()).find((e) => e.opId === 's-bad')?.envelope;
+    const badEnvelope = (await storage.listEnvelopes()).find(
+      (e) => e.opId === id('s-bad'),
+    )?.envelope;
     if (!badEnvelope) throw new Error('expected the s-bad envelope retained as fork evidence');
     const uncompacted = await PrivateRoomEngine.load({
       ...room.engineParams,
@@ -434,7 +456,7 @@ describe('§14.5 snapshot re-base (superset guard)', () => {
     const eLag = await PrivateRoomEngine.load({ ...room.engineParams, storage: lagStorage });
     await eLag.applyLocalOp(room.genesisOp, room.sealParams);
     await author(eLag, room, 's1', story);
-    const s1Env = (await lagStorage.listEnvelopes()).find((e) => e.opId === 's1')?.envelope;
+    const s1Env = (await lagStorage.listEnvelopes()).find((e) => e.opId === id('s1'))?.envelope;
     if (!s1Env) throw new Error('expected s1 envelope');
     await commitSnapshot(eLag, room, 'snap-lag', 'snap-lag');
 

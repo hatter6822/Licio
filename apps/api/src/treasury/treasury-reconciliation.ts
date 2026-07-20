@@ -23,7 +23,7 @@
 // treasury row marked divergent, and a HARD BLOCK on cap/mode expansion
 // (consumed by the WS-M.1.1b transition gate).  Snapshots are append-only.
 
-import { decCompare, decSum } from '@licio/governance';
+import { decCompare, decSub, decSum } from '@licio/governance';
 import { appendChainedAudit } from './audit-chain.js';
 import type { IntentDeps } from './intents.js';
 import type {
@@ -65,7 +65,11 @@ function signedAmount(intent: PaymentIntentRecord): string {
 }
 
 function absDiff(a: string, b: string): string {
-  const diff = decSum([a, `-${b}`]);
+  // decSub (not decSum([a, `-${b}`])): when `b` is already a negative balance
+  // string, string-concatenating a sign builds an unparseable `--` literal and
+  // reconcileTreasury would throw.  A balance source is negative whenever payouts
+  // exceed deposits, so this path is reachable.
+  const diff = decSub(a, b);
   return diff.startsWith('-') ? diff.slice(1) : diff;
 }
 

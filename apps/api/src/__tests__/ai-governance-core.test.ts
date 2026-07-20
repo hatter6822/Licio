@@ -245,6 +245,34 @@ describe('WS-K.1.1b registry deployment gate', () => {
     expect(await services.registry.getVersion('sum', '1.0.0')).not.toBeNull();
   });
 
+  it('rejects tampering with a prior version evaluation_summary', async () => {
+    await registerModel(registryDeps(services), card());
+    const { versionModel } = await import('../ai-governance/registry.js');
+    // A v2 whose history silently rewrites the v1 evaluation_summary is rejected.
+    const bad = await versionModel(
+      registryDeps(services),
+      card({
+        version: '2.0.0',
+        update_history: [
+          {
+            version: '1.0.0',
+            date: '2026-06-19T00:00:00.000Z',
+            description: 'init',
+            evaluation_summary: 'TAMPERED',
+          },
+          {
+            version: '2.0.0',
+            date: '2026-06-20T00:00:00.000Z',
+            description: 'v2',
+            evaluation_summary: 'ok',
+          },
+        ],
+      }),
+    );
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.code).toBe('history_not_appendonly');
+  });
+
   it('deprecates a model and warns on lookup', async () => {
     await registerModel(registryDeps(services), card());
     const { deprecateModel, lookupModels } = await import('../ai-governance/registry.js');

@@ -36,6 +36,8 @@ export interface HealthMetrics {
   errorCount: number;
   /** Mean coverage across recent outputs. */
   coverageRatio: number;
+  /** Mean confidence across recent outputs (the WS-H.1.2e promotion evidence). */
+  confidenceRatio: number;
   fallbackRate: number;
   outputCount: number;
   lastSuccessAt: string | null;
@@ -68,6 +70,7 @@ export function emptyHealthMetrics(): HealthMetrics {
     latencyMsP99: 0,
     errorCount: 0,
     coverageRatio: 0,
+    confidenceRatio: 0,
     fallbackRate: 0,
     outputCount: 0,
     lastSuccessAt: null,

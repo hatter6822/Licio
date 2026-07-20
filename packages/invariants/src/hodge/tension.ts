@@ -51,7 +51,12 @@ export function assessTension(
   input: HodgeTensionInput,
   config: HodgeLabelConfig = DEFAULT_HODGE_LABEL_CONFIG,
 ): HodgeTensionAssessment {
-  const hostility = Math.min(1, Math.max(0, input.hostilitySignal));
+  // Fail NaN / ±Infinity safe to the non-penalizing 0: an absent or invalid
+  // hostility signal must never penalize (preserves the HarmfulTensionRisk
+  // contract that harmonic tension alone never penalizes).
+  const hostility = Number.isFinite(input.hostilitySignal)
+    ? Math.min(1, Math.max(0, input.hostilitySignal))
+    : 0;
   const highHarmonic = input.harmonicFraction >= config.highHarmonicFraction;
   const hostile = hostility >= config.hostilityThreshold;
   let label: HodgeThreadLabel;

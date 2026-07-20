@@ -55,7 +55,7 @@ async function founderRoom() {
     schema: 'licio.private.op.v1',
     room_id: ROOM,
     epoch: 0,
-    op_id: 'genesis',
+    op_id: await p2p.deriveOpId('founder-dev', 0),
     author_member_id: 'founder',
     author_device_id: 'founder-dev',
     author_seq: 0,
@@ -115,13 +115,13 @@ describe('loadPrivateRoomEngine — persists to IndexedDB + re-verifies on reloa
 
     const engine = await loadPrivateRoomEngine(params);
     const report = await engine.applyLocalOp(genesis, sealParams);
-    expect(report.accepted).toStrictEqual(['genesis']);
+    expect(report.accepted).toStrictEqual([genesis.op_id]);
     expect(engine.state().members.get('founder')?.role).toBe('admin');
 
     // A brand-new engine over the SAME room re-reads IndexedDB + re-verifies.
     const reloaded = await loadPrivateRoomEngine(params);
     expect(reloaded.state().members.get('founder')?.role).toBe('admin');
-    expect(reloaded.heads()).toStrictEqual(['genesis']);
+    expect(reloaded.heads()).toStrictEqual([genesis.op_id]);
   });
 });
 

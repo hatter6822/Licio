@@ -41,6 +41,21 @@ describe('email OTP login', () => {
     });
   });
 
+  it('lets exactly one of two parallel verifies with the same valid code win', async () => {
+    const { code } = await startEmailLogin(store, ATTEMPT, USER, now);
+    // Two concurrent redemptions race for the single-use code; the atomic take()
+    // must let exactly one succeed so the code can never be redeemed twice.
+    const [a, b] = await Promise.all([
+      verifyEmailLogin(store, ATTEMPT, code, now),
+      verifyEmailLogin(store, ATTEMPT, code, now),
+    ]);
+    const wins = [a, b].filter((r) => r.ok);
+    expect(wins).toHaveLength(1);
+    expect(wins[0]).toEqual({ ok: true, userId: USER, target: '' });
+    const loser = [a, b].find((r) => !r.ok);
+    expect(loser?.ok).toBe(false);
+  });
+
   it('rejects a wrong code and invalidates after MAX_OTP_ATTEMPTS', async () => {
     await startEmailLogin(store, ATTEMPT, USER, now);
     for (let i = 0; i < MAX_OTP_ATTEMPTS - 1; i += 1) {

@@ -2,10 +2,11 @@
 //
 // WS-J.1.3 appeals: eligibility check, submission, independent-reviewer
 // assignment, and the overturn/uphold/modify decision + outcome (WS-J.2.4a /
-// WS-J.1.3d).  Independence is enforced server-side at BOTH assignment (never
-// the original decision-maker) and decision time (the original decision-maker
-// can never act on the appeal).  Ownership is enforced: a user may only appeal
-// their own action, and a non-owned action resolves to not-found (no oracle).
+// WS-J.1.3d).  Independence is enforced server-side at BOTH assignment and
+// decision time: neither the original decision-maker NOR the appellant/subject
+// may be assigned or decide (self-decision is a separation-of-duties violation).
+// Ownership is enforced: a user may only appeal their own action, and a non-owned
+// action resolves to not-found (no oracle).
 import {
   type AppealCreatedResponse,
   type AppealEligibilityView,
@@ -144,7 +145,10 @@ export async function submitAppeal(
     : services.config().appealSlaStandardHours;
   const slaDueAt = new Date(services.now() + slaHours * 3_600_000).toISOString();
   // Independent reviewer (never the original decision-maker; WS-J.1.3c).
-  const assignedReviewerId = await assignAppealReviewer(services, action.actorUserId);
+  const assignedReviewerId = await assignAppealReviewer(services, [
+    action.actorUserId,
+    appellantUserId,
+  ]);
 
   let appeal: ModerationAppealRecord;
   try {
@@ -225,7 +229,17 @@ export async function decideAppeal(
   }
   const original = await services.actions.getById(appeal.actionId);
   if (!original) return { ok: false, code: 'not_found', message: 'Original action not found' };
-  // Independence: the original decision-maker can NEVER act on the appeal.
+  // Independence: neither the original decision-maker NOR the appellant/subject may
+  // decide the appeal.  Self-decision is the most basic separation-of-duties
+  // violation — a steward whose own content was sanctioned (by another steward, or
+  // auto-blocked with actorUserId=null) must never clear their own sanction.
+  if (appeal.appellantUserId === actor.userId) {
+    return {
+      ok: false,
+      code: 'independence_violation',
+      message: 'You cannot decide your own appeal',
+    };
+  }
   if (original.actorUserId !== null && original.actorUserId === actor.userId) {
     return { ok: false, code: 'independence_violation', message: 'Independent reviewer required' };
   }

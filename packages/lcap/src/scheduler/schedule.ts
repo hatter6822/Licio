@@ -16,6 +16,10 @@ export interface ScheduleOptions {
   readonly mediaRequested?: boolean;
   readonly nowMs: number;
   readonly deadlineWindowMs?: number;
+  /** The §7.5 B4 bulk-lane gate: only under the idle + unmetered + charging posture
+   *  does the pre-fetch lane get a non-zero reservation.  Threaded from the caller's
+   *  device state; omitted ⇒ `false` (no bulk pre-fetch), never a silent default-on. */
+  readonly bulkAllowed?: boolean;
 }
 
 /** One transfer-order entry the pack writer consumes. */
@@ -39,7 +43,11 @@ export function scheduleTransfer(
   candidates: readonly ScheduledCandidate[],
   options: ScheduleOptions,
 ): ScheduleResult {
-  const laneBudget = computeLaneBudget(options.budgetBytes, options.mediaRequested ?? false);
+  const laneBudget = computeLaneBudget(
+    options.budgetBytes,
+    options.mediaRequested ?? false,
+    options.bulkAllowed ?? false,
+  );
   const ctx: ScoreContext = {
     nowMs: options.nowMs,
     ...(options.deadlineWindowMs !== undefined

@@ -61,6 +61,23 @@ describe('CSP report endpoint', () => {
     expect(body.error).toBe('Payload too large');
   });
 
+  it('caps the body during the stream read (bodyLimit runs before the handler)', async () => {
+    // The `bodyLimit` middleware sits between the rate limiter and the handler,
+    // so an oversized body is rejected as it streams in — never fully buffered.
+    // It fires ahead of the content-type check, so even a wrong content type on
+    // an oversized payload short-circuits to 413.
+    const largeBody = JSON.stringify({ 'csp-report': { data: 'x'.repeat(11_000) } });
+    const res = await app.request('/api/security/csp-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: largeBody,
+    });
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Payload too large');
+  });
+
   it('rejects invalid JSON', async () => {
     const res = await app.request('/api/security/csp-report', {
       method: 'POST',

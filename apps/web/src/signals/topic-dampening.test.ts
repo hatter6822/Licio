@@ -57,6 +57,16 @@ describe('computeTopicMultipliers', () => {
     expect(a).toBeGreaterThan(0);
   });
 
+  it('a re-entry aged exactly one half-life contributes weight 0.5 (half-life semantics)', () => {
+    // One re-entry of 'a' whose age is exactly halfLifeMs ⇒ recency weight = 0.5,
+    // so score('a') = 0.5 and multiplier = 1 − (0.5 / scoreAtFloor)·(1 − floor).
+    const hl = CFG.halfLifeMs;
+    const s = seq(['a', now - hl - 2], ['b', now - hl - 1], ['a', now - hl]);
+    const expectedWeight = 0.5;
+    const expectedMultiplier = 1 - (expectedWeight / CFG.scoreAtFloor) * (1 - CFG.minMultiplier);
+    expect(computeTopicMultipliers(s, now).get('a')).toBeCloseTo(expectedMultiplier, 6);
+  });
+
   it('the score decays with time → the topic recovers its normal frequency', () => {
     const pattern = seq(['a', 0], ['b', 1], ['a', 2], ['b', 3], ['a', 4]);
     // Evaluated right after: dampened.
@@ -79,25 +89,36 @@ describe('dampenFeed', () => {
     expect(dampenFeed(feed, new Map())).toEqual(feed);
   });
 
-  it('keeps the FIRST occurrence + every stride-th of a circled topic', () => {
+  it('keeps the FIRST occurrence + ~multiplier of a circled topic', () => {
     const feed = items(['a', 'a', 'a', 'a', 'a', 'a']); // six 'a' items
-    const out = dampenFeed(feed, new Map([['a', 0.2]])); // stride round(1/0.2)=5
-    // indices 0 and 5 kept.
-    expect(out.map((x) => x.id)).toEqual([0, 5]);
+    const out = dampenFeed(feed, new Map([['a', 0.2]])); // error diffusion at m=0.2
+    // credit 1→1.2(keep,0.2)→0.4→0.6→0.8→1.0(keep,0.0)→0.2 ⇒ ids 0 and 4 kept.
+    expect(out.map((x) => x.id)).toEqual([0, 4]);
     expect(out.length).toBeGreaterThan(0); // never fully hidden
   });
 
   it('thins the circled topic while other topics pass through untouched', () => {
     const feed = items(['a', 'b', 'a', 'b', 'a', 'b']);
-    const out = dampenFeed(feed, new Map([['a', 0.5]])); // stride 2 → keep a-index 0,2 of a
-    // 'a' occurrences are indices 0,2,4 → encounter idx 0 (keep), 1 (drop), 2 (keep).
+    const out = dampenFeed(feed, new Map([['a', 0.5]])); // error diffusion at m=0.5
+    // 'a' occurrences are ids 0,2,4 → credit 1→1.5(keep)→0.5→1.0(keep)→0.0→0.5(drop),
+    // so encounter idx 0,1 kept (ids 0,2), encounter idx 2 dropped (id 4).
     const kept = out.map((x) => x.id);
     expect(kept).toContain(1); // every 'b' kept
     expect(kept).toContain(3);
     expect(kept).toContain(5);
     expect(kept).toContain(0); // first 'a' kept
-    expect(kept).not.toContain(2); // second 'a' dropped
-    expect(kept).toContain(4); // third 'a' (encounter idx 2) kept
+    expect(kept).toContain(2); // second 'a' kept
+    expect(kept).not.toContain(4); // third 'a' dropped
+  });
+
+  it('keep-rate tracks the multiplier for m > 2/3 (a rounded stride would be a no-op)', () => {
+    // 20 items of one circled topic at m=0.8 → ~16 kept (a round(1/0.8)=1 stride
+    // would keep ALL 20, dampening nothing).
+    const feed = items(Array.from({ length: 20 }, () => 'a'));
+    const out = dampenFeed(feed, new Map([['a', 0.8]]));
+    expect(out[0]?.id).toBe(0); // first occurrence always kept
+    expect(out.length).toBe(17); // credit diffusion keeps ~n·m (17 of 20, ≈ 0.85)
+    expect(out.length).toBeLessThan(feed.length); // NOT a no-op (a rounded stride kept all 20)
   });
 
   it('passes through items with no primary topic or an un-circled topic', () => {

@@ -61,3 +61,6 @@ dump.rdb
 #     fixture here) and the local append-only transparency-log store.
 .licio-update-keys/
 .licio-update-log/
+
+# Agent/audit working directory (transient findings, worklists, scratch scripts).
+/scratchpad/

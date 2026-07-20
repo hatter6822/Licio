@@ -259,6 +259,35 @@ describe('Hodge and gauge guard rails', () => {
     ).toThrow(/missing edge/);
   });
 
+  it('an edge referencing a missing vertex is rejected', () => {
+    expect(() =>
+      helmholtzDecompose({
+        vertices: ['a', 'b'],
+        edges: [{ from: 'a', to: 'z', flow: 1 }],
+        triangles: [],
+      }),
+    ).toThrow(/missing vertex/);
+  });
+
+  it('space-containing vertex ids never collide on the edge key', () => {
+    // With a space separator, edges ('a b','c') and ('a','b c') would both
+    // key to "a b c" and alias — orthogonality would silently break.
+    const decomposition = helmholtzDecompose({
+      vertices: ['a b', 'c', 'a', 'b c'],
+      edges: [
+        { from: 'a b', to: 'c', flow: 1 },
+        { from: 'a', to: 'b c', flow: -1 },
+      ],
+      triangles: [],
+    });
+    // Distinct edges keep distinct gradient components; with no triangles the
+    // flow is pure gradient + harmonic and stays orthogonal.
+    expect(decomposition.gradient).toHaveLength(2);
+    const { gradient, harmonic } = decomposition;
+    const dot = gradient.reduce((acc, g, i) => acc + g * (harmonic[i] ?? 0), 0);
+    expect(Math.abs(dot)).toBeLessThan(1e-9);
+  });
+
   it('gauge verification accepts explicit score options', () => {
     const h = [
       [Math.cos(0.4), -Math.sin(0.4)],

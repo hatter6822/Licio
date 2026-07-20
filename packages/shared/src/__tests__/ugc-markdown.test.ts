@@ -69,12 +69,31 @@ describe('WS-G.4.1 Markdown-lite parser — allowed elements', () => {
     );
   });
 
+  it('flattens an autolinked label to its text so the outer anchor is never empty', () => {
+    // The label is entirely a bare URL: it autolinks recursively into an inner
+    // link node.  Flattening keeps its text children, so the outer anchor keeps
+    // visible text (a nested <a> is still impossible).
+    expect(toHtml('[https://example.org](https://out.example/a)')).toBe(
+      '<p><a href="https://out.example/a">https://example.org</a></p>',
+    );
+  });
+
   it('autolinks bare and angle-bracket URLs', () => {
     expect(toHtml('see https://example.org/x.')).toBe(
       '<p>see <a href="https://example.org/x">https://example.org/x</a>.</p>',
     );
     expect(toHtml('<https://example.org/y>')).toBe(
       '<p><a href="https://example.org/y">https://example.org/y</a></p>',
+    );
+  });
+
+  it('keeps a balanced trailing paren in a bare autolink (Wikipedia-style path)', () => {
+    expect(toHtml('see https://en.wikipedia.org/wiki/Foo_(bar)')).toBe(
+      '<p>see <a href="https://en.wikipedia.org/wiki/Foo_(bar)">https://en.wikipedia.org/wiki/Foo_(bar)</a></p>',
+    );
+    // An unbalanced trailing paren (sentence-level) is still trimmed.
+    expect(toHtml('(see https://example.org/x)')).toBe(
+      '<p>(see <a href="https://example.org/x">https://example.org/x</a>)</p>',
     );
   });
 
@@ -134,6 +153,9 @@ describe('WS-G.4.1 Markdown-lite parser — stripping and normalization', () => 
     expect(normalizeUgcLink('mailto:a@example.org?cc=b@example.org')).toBeNull();
     expect(normalizeUgcLink('mailto:not-an-address')).toBeNull();
     expect(normalizeUgcLink('mailto:a@example.org')).toBe('mailto:a@example.org');
+    // The scheme is emitted lower-cased regardless of input casing, matching
+    // the http/https normalization and UgcBody's case-sensitive `mailto:` guard.
+    expect(normalizeUgcLink('MAILTO:a@example.org')).toBe('mailto:a@example.org');
   });
 
   it('drops oversized destinations', () => {

@@ -118,9 +118,14 @@ export function topicTauMs(
   return Math.min(config.topicTauMaxMs, Math.max(config.topicTauMinMs, scaled));
 }
 
-/** Clamp an age to ≥ 0 (clock skew between writers must never raise a score). */
+/**
+ * Clamp an age to ≥ 0 (clock skew between writers must never raise a score).
+ * Total: a non-finite age (NaN/±Infinity timestamp) decays to +Infinity so
+ * its exp term is exp(−∞)=0 (least fresh) rather than producing a NaN score.
+ */
 function ageMs(nowMs: number, thenMs: number): number {
-  return Math.max(0, nowMs - thenMs);
+  const d = nowMs - thenMs;
+  return Number.isFinite(d) ? Math.max(0, d) : Number.POSITIVE_INFINITY;
 }
 
 /**
@@ -131,6 +136,15 @@ export function computeFreshnessScore(
   input: FreshnessInput,
   config: FreshnessConfig = DEFAULT_FRESHNESS_CONFIG,
 ): number {
+  // Enforce the (0, 1] precondition at the pure-function trust boundary. The
+  // default hot path (the per-story sweep always passes the default) pays only
+  // one reference comparison; any non-default config is validated and fails
+  // closed, so the documented bound is structural, not convention-dependent.
+  if (config !== DEFAULT_FRESHNESS_CONFIG) {
+    const err = validateFreshnessConfig(config);
+    if (err) throw new Error(`invalid freshness config: ${err}`);
+  }
+
   const tauTopic = topicTauMs(input.topicMedianInterArrivalMs, config);
   const submitAge = ageMs(input.nowMs, input.submittedAtMs);
   const updateAge = ageMs(input.nowMs, input.lastMaterialUpdateMs ?? input.submittedAtMs);
@@ -142,17 +156,17 @@ export function computeFreshnessScore(
     // Event recency unknown: its weight redistributes onto the submission
     // term so the weights still sum to 1 and unknown-event stories are not
     // penalized relative to known-event ones.
-    return (
-      (config.submitWeight + config.eventWeight) * submitTerm + config.updateWeight * updateTerm
-    );
+    const score =
+      (config.submitWeight + config.eventWeight) * submitTerm + config.updateWeight * updateTerm;
+    return Number.isFinite(score) ? score : 0;
   }
   const eventAge = ageMs(input.nowMs, input.eventTimeMs);
   const eventTerm = Math.exp(-eventAge / config.eventTauMs);
-  return (
+  const score =
     config.submitWeight * submitTerm +
     config.updateWeight * updateTerm +
-    config.eventWeight * eventTerm
-  );
+    config.eventWeight * eventTerm;
+  return Number.isFinite(score) ? score : 0;
 }
 
 /** The persisted feature record shape (WS-F.1.4g acceptance: versioned). */
@@ -160,7 +174,7 @@ export interface FreshnessBaselineRecord {
   storyId: string;
   freshnessScore: number;
   /** The topic-baseline input used (ms), or null when unknown — reproducibility. */
-  topicBaselineRef: number | null;
+  topicBaselineMs: number | null;
   computedAt: string;
   featureVersion: number;
 }

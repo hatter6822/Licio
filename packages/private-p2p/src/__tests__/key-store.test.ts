@@ -128,6 +128,20 @@ describe('tier 3 — passkey PRF', () => {
       reason: 'unlock_failed',
     });
   });
+
+  it('rejects a short PRF output (no silent AES-128/192 downgrade)', async () => {
+    // A <32-byte PRF output would `slice(0,32)` to a short key ⇒ a silent AES
+    // strength downgrade.  Both protect and unlock must reject it up front.
+    await expect(
+      protectWithPasskeyPrf(material(), randomBytes(31), randomBytes(16)),
+    ).rejects.toMatchObject({
+      reason: 'weak_prf_output',
+    });
+    const record = await protectWithPasskeyPrf(material(), randomBytes(32), randomBytes(16));
+    await expect(unlockWithPasskeyPrf(record, randomBytes(16))).rejects.toMatchObject({
+      reason: 'weak_prf_output',
+    });
+  });
 });
 
 describe('tier 4 — local key agent (no local secret)', () => {
@@ -149,10 +163,22 @@ describe('tier mismatch + record validation', () => {
 
   it('parses a valid record and rejects an invalid one', async () => {
     const record = await protectWithPassphrase(material(), 'pw', FAST);
+    if (record.tier !== 'argon2id-passphrase') throw new Error('unreachable');
     expect(parseProtectedKeyRecord(record)).toStrictEqual(record);
     expect(() => parseProtectedKeyRecord({ tier: 'nonsense' })).toThrow(KeyStoreError);
     // unknown extra field rejected by .strict()
     expect(() => parseProtectedKeyRecord({ ...record, extra: 1 })).toThrow(KeyStoreError);
+    // a non-base64url byte field is rejected at the schema floor (padded base64,
+    // or any char outside [A-Za-z0-9_-]).
+    expect(() => parseProtectedKeyRecord({ ...record, nonce: `${record.nonce}==` })).toThrow(
+      KeyStoreError,
+    );
+    expect(() => parseProtectedKeyRecord({ ...record, ciphertext: 'not/base64url+' })).toThrow(
+      KeyStoreError,
+    );
+    expect(() =>
+      parseProtectedKeyRecord({ ...record, kdf: { ...record.kdf, salt: 'has spaces' } }),
+    ).toThrow(KeyStoreError);
   });
 });
 

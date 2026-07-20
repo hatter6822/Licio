@@ -13,6 +13,7 @@
 
 import { verifyConsistencyProof } from '../checkpoint/consistency.js';
 import { verifyInclusionProof } from '../checkpoint/inclusion.js';
+import { type CheckpointBundle, verifyCheckpoint } from '../checkpoint/record.js';
 import { cidFor } from '../cid/index.js';
 import type { DetachedProofV2 } from '../cose/sign1.js';
 import { verifyDetached } from '../cose/sign1.js';
@@ -21,11 +22,7 @@ import {
   type IdentityChainDeps,
   validateIdentityChain,
 } from '../identity/chain.js';
-import type {
-  ConsistencyProofRecordV2,
-  InclusionProofRecordV2,
-  RoomCheckpointRecordV2,
-} from '../schemas/checkpoint.js';
+import type { ConsistencyProofRecordV2, InclusionProofRecordV2 } from '../schemas/checkpoint.js';
 import { decodeAndRouteRecord, type LcapRecordV2 } from '../schemas/codec.js';
 import { maxPositive, type PositiveState, type TrustState } from './states.js';
 
@@ -63,16 +60,22 @@ export interface ConsensusInput {
   readonly deviceForkDetected?: boolean;
   /** Server receipt status for this record (WS-R.10). */
   readonly serverReceipt?: 'stored' | 'accepted';
-  /** A checkpoint inclusion proof + its checkpoint (WS-R.9.3a). */
+  /** A checkpoint inclusion proof + the checkpoint BUNDLE it targets (WS-R.9.3a).
+   *  The bundle carries the room-authority COSE proof so `validate` can AUTHENTICATE
+   *  the checkpoint before trusting its `merkle_root`: a forged checkpoint (arbitrary
+   *  root + a self-consistent inclusion proof) must never elevate a record to
+   *  `checkpointed` (§18.3 step 13). */
   readonly inclusion?: {
     readonly proof: InclusionProofRecordV2;
-    readonly checkpoint: RoomCheckpointRecordV2;
+    readonly checkpoint: CheckpointBundle;
   };
-  /** A consistency proof + its two checkpoints (WS-R.9.3b). */
+  /** A consistency proof + the two checkpoint BUNDLES it relates (WS-R.9.3b).  Both
+   *  are authenticated before a consistency failure is treated as equivocation, so a
+   *  forged checkpoint pair cannot poison a record into `conflicting`. */
   readonly consistency?: {
     readonly proof: ConsistencyProofRecordV2;
-    readonly oldCheckpoint: RoomCheckpointRecordV2;
-    readonly newCheckpoint: RoomCheckpointRecordV2;
+    readonly oldCheckpoint: CheckpointBundle;
+    readonly newCheckpoint: CheckpointBundle;
   };
   /** A verified witness statement is present (WS-R.9.4). */
   readonly witnessVerified?: boolean;
@@ -219,19 +222,34 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
     else if (consensus?.serverReceipt === 'stored')
       achieved = maxPositive(achieved, 'server_stored');
 
+    // Authenticate a checkpoint under its room-authority key (the SAME key that
+    // signs capabilities, resolved via `identityDeps`).  Fail closed: an
+    // unresolvable authority or a bad COSE proof yields `false`, so no consensus
+    // trust is derived from an unauthenticated checkpoint.  Only the checkpoint's
+    // own `policy_epoch` selects the key — the record's epoch is irrelevant here.
+    const checkpointAuthentic = async (bundle: CheckpointBundle): Promise<boolean> => {
+      const authorityKey = input.identityDeps.resolveRoomAuthorityKey(
+        bundle.checkpoint.room_id,
+        bundle.checkpoint.policy_epoch,
+      );
+      if (!authorityKey) return false;
+      const verified = await verifyCheckpoint(bundle, authorityKey, {
+        networkId: input.ctx.networkId,
+      });
+      return verified.ok;
+    };
+
     if (consensus?.inclusion) {
       // Bind the inclusion proof to THIS record (and its room): a valid checkpoint
       // inclusion proof for some OTHER record must not raise this record's trust to
-      // `checkpointed` (§18.3 step 13).
-      const proof = consensus.inclusion.proof;
+      // `checkpointed` (§18.3 step 13).  AND authenticate the checkpoint itself —
+      // else a forged checkpoint (arbitrary `merkle_root` + a self-consistent proof)
+      // would spuriously reach `checkpointed`.
+      const { proof, checkpoint: bundle } = consensus.inclusion;
       const boundToRecord = proof.target_record_cid === input.recordCid;
       const boundToRoom = facts.roomId === undefined || proof.room_id === facts.roomId;
-      if (boundToRecord && boundToRoom) {
-        const included = await verifyInclusionProof(
-          proof,
-          consensus.inclusion.checkpoint,
-          input.ctx.networkId,
-        );
+      if (boundToRecord && boundToRoom && (await checkpointAuthentic(bundle))) {
+        const included = await verifyInclusionProof(proof, bundle.checkpoint, input.ctx.networkId);
         if (included.ok) achieved = maxPositive(achieved, 'checkpointed');
       }
     }
@@ -241,13 +259,24 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
       // treating a failure as equivocation: an inconsistency between checkpoints
       // of some OTHER room must not force this record into `conflicting`
       // (mirrors the inclusion binding above; a consistency proof is about a
-      // room's log, not a specific record).
+      // room's log, not a specific record).  BOTH checkpoints must authenticate
+      // first — a forged pair must not be able to poison a record into
+      // `conflicting` (an equivocation-injection DoS).
       const { proof, oldCheckpoint, newCheckpoint } = consensus.consistency;
       const boundToRoom =
         facts.roomId === undefined ||
-        (oldCheckpoint.room_id === facts.roomId && newCheckpoint.room_id === facts.roomId);
-      if (boundToRoom) {
-        const consistent = await verifyConsistencyProof(proof, oldCheckpoint, newCheckpoint);
+        (oldCheckpoint.checkpoint.room_id === facts.roomId &&
+          newCheckpoint.checkpoint.room_id === facts.roomId);
+      if (
+        boundToRoom &&
+        (await checkpointAuthentic(oldCheckpoint)) &&
+        (await checkpointAuthentic(newCheckpoint))
+      ) {
+        const consistent = await verifyConsistencyProof(
+          proof,
+          oldCheckpoint.checkpoint,
+          newCheckpoint.checkpoint,
+        );
         if (!consistent.ok) conflict = 'checkpoint_fork';
       }
     }

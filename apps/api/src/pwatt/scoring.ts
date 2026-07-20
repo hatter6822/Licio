@@ -301,8 +301,14 @@ export async function runPwattWindow(
     // (you need a MAJORITY of aged, expensive accounts to evade) — while a
     // legitimate aged community with a few new users keeps a high factor. A
     // genuinely viral item drawing a MAJORITY of new users may also trip the
-    // lowered threshold; that is an accepted trade-off (flags are shadow and the
-    // exact fiber test + human review clear organic virality).
+    // lowered threshold; that is an accepted trade-off. The burst FLAG event
+    // (→ mfci/reviewQueue hooks, below) is advisory, BUT the same detection also
+    // sets input.antiSignals.coordinatedBurst, which computePwattV1Components
+    // attenuates into the SERVED v1 active_attention/participation (up to
+    // coordinatedBurstMax × confidence) — and the served v0 participation by
+    // burstPlaceholderDampening — so a false positive on organic virality DOES
+    // reduce served distribution power. The trade-off is that ranking reduction
+    // (bounded by the low-quantile trust factor), not a no-op shadow flag.
     // Resolve each actor's account-age trust ONCE (WS-O.4.5): the low quantile
     // scales the burst DETECTION threshold, and the SAME per-actor factor
     // scales that actor's SCORE contribution (so a fresh-account brigade both

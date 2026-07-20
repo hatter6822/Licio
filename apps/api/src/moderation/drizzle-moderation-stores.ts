@@ -350,6 +350,9 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
     if (filter.subjectUserId !== undefined) {
       c.push(eq(moderationCases.subjectUserId, filter.subjectUserId));
     }
+    if (filter.enforcementDelayed !== undefined) {
+      c.push(eq(moderationCases.enforcementDelayed, filter.enforcementDelayed));
+    }
     if (filter.caseIds !== undefined) {
       // An empty set matches nothing (a reporter with no cases ⇒ empty queue).
       c.push(

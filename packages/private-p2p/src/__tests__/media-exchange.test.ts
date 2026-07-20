@@ -74,7 +74,6 @@ describe('WP-1 §13.6/§15.7 media block exchange (finding 3)', () => {
           signingKey: created.founder.signingKeyPair.privateKey,
           seq: alice.nextAuthorSeq('founder-dev'),
         },
-        opId: globalThis.crypto.randomUUID(),
         parents: alice.heads(),
         lamport: alice.nextLamport(),
       },

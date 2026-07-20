@@ -18,6 +18,14 @@ import {
 
 const realFetch = globalThis.fetch;
 
+// The response schemas pin uuid ids (they match the server's randomUUID output);
+// mock bodies must carry real uuids, not path-param shorthands.
+const UUID_ROOM = '00000000-0000-4000-8000-000000000001';
+const UUID_USER = '00000000-0000-4000-8000-000000000002';
+const UUID_MODEL = '00000000-0000-4000-8000-000000000003';
+const UUID_PROMPT = '00000000-0000-4000-8000-000000000004';
+const UUID_VOTE = '00000000-0000-4000-8000-000000000005';
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -56,8 +64,8 @@ describe('governance client flows', () => {
       'GET /v1/rooms/r1/steward': () =>
         jsonResponse({
           seat: {
-            room_id: 'r1',
-            holder_user_id: 'u1',
+            room_id: UUID_ROOM,
+            holder_user_id: UUID_USER,
             term_start: '2026-06-19T00:00:00.000Z',
             term_end: '2027-06-19T00:00:00.000Z',
             bootstrap: true,
@@ -66,7 +74,7 @@ describe('governance client flows', () => {
         }),
     });
     const res = await fetchStewardSeat('r1');
-    expect(res.seat?.holder_user_id).toBe('u1');
+    expect(res.seat?.holder_user_id).toBe(UUID_USER);
   });
 
   it('fetches the "governed by" agent view', async () => {
@@ -75,7 +83,7 @@ describe('governance client flows', () => {
         jsonResponse({
           active: true,
           frozen: false,
-          model_id: 'm1',
+          model_id: UUID_MODEL,
           granted: ['moderate.remove'],
           recent_actions: [],
         }),
@@ -89,20 +97,20 @@ describe('governance client flows', () => {
     mockRoutes({
       'GET /v1/rooms/r1/governance/models': () =>
         jsonResponse({
-          steward_user_id: 'u1',
+          steward_user_id: UUID_USER,
           models: [
             {
-              model_id: 'm1',
+              model_id: UUID_MODEL,
               artifact_digest: 'a'.repeat(64),
               status: 'eligible',
-              proposed_by_user_id: 'u1',
+              proposed_by_user_id: UUID_USER,
               created_at: '2026-06-19T00:00:00.000Z',
             },
           ],
         }),
       'GET /v1/rooms/r1/governance/models/m1/download': () =>
         jsonResponse({
-          model_id: 'm1',
+          model_id: UUID_MODEL,
           artifact_digest: 'a'.repeat(64),
           bundle: { name: 'Civility' },
         }),
@@ -114,15 +122,18 @@ describe('governance client flows', () => {
   it('proposes a model, opens a ratification vote, casts a ballot, and reads the tally', async () => {
     mockRoutes({
       'POST /v1/rooms/r1/governance/models': () =>
-        jsonResponse({ modelId: 'm1', promptId: 'p1', artifactDigest: 'a'.repeat(64) }, 201),
+        jsonResponse(
+          { modelId: UUID_MODEL, promptId: UUID_PROMPT, artifactDigest: 'a'.repeat(64) },
+          201,
+        ),
       'POST /v1/rooms/r1/governance/models/m1/ratification': () =>
-        jsonResponse({ vote_id: 'vote-1' }, 201),
+        jsonResponse({ vote_id: UUID_VOTE }, 201),
       'POST /v1/rooms/r1/governance/ratifications/vote-1/ballot': () => jsonResponse({ ok: true }),
       'GET /v1/rooms/r1/governance/ratification': () =>
         jsonResponse({
           vote: {
-            vote_id: 'vote-1',
-            model_id: 'm1',
+            vote_id: UUID_VOTE,
+            model_id: UUID_MODEL,
             opens_at: '2026-06-19T00:00:00.000Z',
             closes_at: '2026-06-26T00:00:00.000Z',
             min_quorum: 1,
@@ -132,8 +143,8 @@ describe('governance client flows', () => {
         }),
     });
     const proposed = await proposeGovernanceModel('r1', { bundle: {}, prompt_text: 'x' });
-    expect(proposed.modelId).toBe('m1');
-    expect((await openRatification('r1', 'm1')).vote_id).toBe('vote-1');
+    expect(proposed.modelId).toBe(UUID_MODEL);
+    expect((await openRatification('r1', 'm1')).vote_id).toBe(UUID_VOTE);
     expect((await castRatificationBallot('r1', 'vote-1', 'approve')).ok).toBe(true);
     expect((await fetchRatification('r1')).vote?.in_favor).toBe(1);
   });

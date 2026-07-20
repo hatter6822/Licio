@@ -36,7 +36,7 @@ describe('Security headers', () => {
     };
     expect(parsed.group).toBe('csp-endpoint');
     expect(parsed.max_age).toBe(86400);
-    expect(parsed.endpoints[0]?.url).toBe('/api/security/csp-report');
+    expect(parsed.endpoints[0]?.url).toMatch(/^https?:\/\/[^/]+\/api\/security\/csp-report$/);
   });
 
   it('should set Strict-Transport-Security', async () => {

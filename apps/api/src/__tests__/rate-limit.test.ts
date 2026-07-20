@@ -33,6 +33,17 @@ describe('rateLimit (global, identity-free)', () => {
     );
   });
 
+  it('resets the count once the window elapses (injectable clock)', async () => {
+    let t = 0;
+    const app = new Hono()
+      .use('*', rateLimit({ limit: 1, windowMs: 60_000, now: () => t }))
+      .get('/', (c) => c.text('ok'));
+    expect((await app.request('/')).status).toBe(200);
+    expect((await app.request('/')).status).toBe(429);
+    t = 60_000;
+    expect((await app.request('/')).status).toBe(200);
+  });
+
   it('each limiter instance has its own independent budget', async () => {
     const a = appWith(1);
     const b = appWith(1);

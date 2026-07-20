@@ -80,43 +80,56 @@ export function authMiddleware(
     }
     if (!validated) return c.json(deny('unauthenticated', 'Authentication required'), 401);
 
-    const user = await services.store.getUser(validated.record.user_id);
-    if (!user) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-    // A `restricted` account (WS-J `restrict` sanction) may authenticate and
-    // READ + self-serve (profile, data-rights, appeals, block/mute, notices);
-    // its public-contribution attempts are denied at the write routes (403
-    // `account_restricted`), not here.  `suspended`/`deleted`/non-grace
-    // `deactivated` are denied outright.
-    if (user.accountState !== 'active' && user.accountState !== 'restricted') {
-      // A deactivated account in its deletion grace period may reach ONLY the
-      // deletion cancel/status routes (so a no-email account can still cancel).
-      const inGrace =
-        opts.allowDeletionPending &&
-        user.accountState === 'deactivated' &&
-        (await services.store.getDeletion(user.userId))?.state === 'grace_period';
-      if (!inGrace) {
-        return c.json(deny(`account_${user.accountState}`, 'Account is not active'), 403);
+    try {
+      const user = await services.store.getUser(validated.record.user_id);
+      if (!user) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+      // A `restricted` account (WS-J `restrict` sanction) may authenticate and
+      // READ + self-serve (profile, data-rights, appeals, block/mute, notices);
+      // its public-contribution attempts are denied at the write routes (403
+      // `account_restricted`), not here.  `suspended`/`deleted`/non-grace
+      // `deactivated` are denied outright.
+      if (user.accountState !== 'active' && user.accountState !== 'restricted') {
+        // A deactivated account in its deletion grace period may reach ONLY the
+        // deletion cancel/status routes (so a no-email account can still cancel).
+        const inGrace =
+          opts.allowDeletionPending &&
+          user.accountState === 'deactivated' &&
+          (await services.store.getDeletion(user.userId))?.state === 'grace_period';
+        if (!inGrace) {
+          return c.json(deny(`account_${user.accountState}`, 'Account is not active'), 403);
+        }
       }
+
+      const inv = await authMethodInventory(services, user.userId);
+      const auth = await services.store.getAuth(user.userId);
+      c.set('auth', {
+        userId: user.userId,
+        accountState: user.accountState,
+        roles: user.roles,
+        stewardRoles: user.stewardRoles,
+        authMethod: validated.record.auth_method,
+        authAssurance: validated.record.auth_assurance,
+        emailVerified: auth?.emailVerified ?? false,
+        accountVerified: hasVerifiedCredential(inv),
+        ageBand: user.ageBand,
+        mfaActive: auth?.mfaEnabled ?? false,
+        mfaVerified: validated.record.mfa_verified,
+        tokenHash: validated.tokenHash,
+      });
+    } catch {
+      // A store outage while loading the account degrades to "no access",
+      // never "open access" — mirrors the validateSession fail-closed above.
+      return c.json(deny('unavailable', 'Authentication temporarily unavailable'), 503);
     }
 
-    const inv = await authMethodInventory(services, user.userId);
-    const auth = await services.store.getAuth(user.userId);
-    c.set('auth', {
-      userId: user.userId,
-      accountState: user.accountState,
-      roles: user.roles,
-      stewardRoles: user.stewardRoles,
-      authMethod: validated.record.auth_method,
-      authAssurance: validated.record.auth_assurance,
-      emailVerified: auth?.emailVerified ?? false,
-      accountVerified: hasVerifiedCredential(inv),
-      ageBand: user.ageBand,
-      mfaActive: auth?.mfaEnabled ?? false,
-      mfaVerified: validated.record.mfa_verified,
-      tokenHash: validated.tokenHash,
-    });
-
-    await touchSession(services.sessions, validated.tokenHash);
+    // The slide refresh is best-effort: the session is already validated and
+    // the touch is throttled, so a store write blip must NOT 500 a valid
+    // request.  Swallow and continue.
+    try {
+      await touchSession(services.sessions, validated.tokenHash);
+    } catch {
+      // best-effort; ignore refresh failures.
+    }
     await next();
     return;
   };
@@ -293,7 +306,6 @@ export function requireCounsel(): MiddlewareHandler<AuthEnv> {
 /** Best-effort audit of a denied authorization attempt (WS-D.1.6b/6c). */
 async function denyAudit(actorUserId: string): Promise<void> {
   try {
-    const { getIdentityServices } = await import('../identity/services.js');
     await getIdentityServices().audit.append({
       actorUserId,
       eventType: 'authz_denied',

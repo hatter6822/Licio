@@ -258,6 +258,31 @@ export interface RoomSummary {
   readonly createdAtBucket: string;
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= (a[i] as number) ^ (b[i] as number);
+  return diff === 0;
+}
+
+/**
+ * The §12.1 genesis founder device id to pin the reducer with — ONLY when the
+ * manifest is authentic, i.e. its computed §13.1 commitment matches the
+ * (crypto-bound) `manifestCommitment`.  A forged or mismatched manifest yields
+ * `undefined` (no pin), so a bad `founder` field can never mis-pin the genesis; the
+ * joiner remains protected by folding from the verified archive base regardless.
+ */
+async function verifiedFounderDeviceId(
+  p2p: P2pModule,
+  manifest: unknown,
+  manifestCommitment: Uint8Array,
+): Promise<string | undefined> {
+  const parsed = p2p.privateRoomManifestSchema.safeParse(manifest);
+  if (!parsed.success) return undefined;
+  const computed = await p2p.computeManifestCommitment(parsed.data);
+  return bytesEqual(computed, manifestCommitment) ? parsed.data.founder.device_id : undefined;
+}
+
 function manifestName(manifest: unknown): string {
   if (manifest && typeof manifest === 'object' && 'profile' in manifest) {
     const profile = (manifest as { profile?: unknown }).profile;
@@ -921,6 +946,28 @@ export class PrivateRoomSession {
     const validatedSession = manifestResult.success
       ? { ...session, manifest: manifestResult.data }
       : session;
+    // The §12.1 genesis founder pin — the manifest-committed founder device (the
+    // only identity permitted to bootstrap the room), accepted ONLY if the persisted
+    // manifest still verifies against its commitment.  A pre-`founder` or tampered
+    // manifest leaves it undefined, falling back to the legacy rule.
+    const genesisFounderDeviceId = await verifiedFounderDeviceId(
+      p2p,
+      session.manifest,
+      session.manifestCommitment,
+    );
+    // FAIL CLOSED on genesis integrity: without a verified §14.5 base the reducer
+    // folds from EMPTY, so the founder pin is the ONLY thing stopping a bootstrap
+    // co-member from forging a lower-Lamport `member.add` as the genesis. If the
+    // founder commitment cannot be verified (tampered/undecodable persisted manifest)
+    // AND there is no base to fold from, refuse to load rather than adopt an unpinned
+    // genesis. (A verified base already bakes the real genesis in, so the pin is moot
+    // there — availability over strictness for the display-only manifest fields still
+    // holds whenever a base is present.)
+    if (genesisFounderDeviceId === undefined && session.snapshotBase === undefined) {
+      throw new Error(
+        `private-p2p: room ${roomId} founder commitment failed verification and no snapshot base — refusing to load an unpinned genesis (WS-S §12.1)`,
+      );
+    }
     const epochs = new Map(
       session.epochs.map((entry) => [
         entry.epoch,
@@ -933,6 +980,7 @@ export class PrivateRoomSession {
       storage: new IndexedDbPrivateRoomStorage(roomId),
       epochs,
       bootstrapDevices: session.bootstrapDevices,
+      ...(genesisFounderDeviceId ? { genesisFounderDeviceId } : {}),
       // Resume from the persisted §14.5 base, if any (its covered envelopes were
       // pruned, so only the post-snapshot ones are re-verified on load).
       ...(session.snapshotBase ? { base: session.snapshotBase } : {}),
@@ -1033,7 +1081,6 @@ export class PrivateRoomSession {
           signingKey: this.session.signingPrivateKey,
           seq: this.engine.nextAuthorSeq(this.session.deviceId),
         },
-        opId: globalThis.crypto.randomUUID(),
         parents: this.engine.heads(),
         lamport: this.engine.nextLamport(),
       },
@@ -1065,7 +1112,6 @@ export class PrivateRoomSession {
         deviceId: this.session.deviceId,
         signingKey: this.session.signingPrivateKey,
       },
-      opId: globalThis.crypto.randomUUID(),
       snapshotId: globalThis.crypto.randomUUID(),
     });
     if (!base) return;
@@ -1291,7 +1337,6 @@ export class PrivateRoomSession {
           signingKey: this.session.signingPrivateKey,
           seq: this.engine.nextAuthorSeq(this.session.deviceId),
         },
-        opId: globalThis.crypto.randomUUID(),
         parents: this.engine.heads(),
         lamport: this.engine.nextLamport(),
       },
@@ -1344,7 +1389,6 @@ export class PrivateRoomSession {
         deviceId: this.session.deviceId,
         signingKey: this.session.signingPrivateKey,
       },
-      opId: globalThis.crypto.randomUUID(),
       snapshotId: globalThis.crypto.randomUUID(),
     });
     if (snapshotBase) {
@@ -1415,6 +1459,20 @@ export class PrivateRoomSession {
     });
     const epochState = joined.epochState;
     const epochNum = Number(epochState.epoch);
+    const genesisFounderDeviceId = await verifiedFounderDeviceId(
+      p2p,
+      grant.manifest,
+      grant.manifestCommitment,
+    );
+    // FAIL CLOSED: the join folds from EMPTY and then imports the grant archive, so a
+    // grant whose manifest fails founder-commitment verification (a malicious inviter
+    // pointing `founder` at itself) must be REJECTED — otherwise a bootstrap co-member
+    // could seat a forged lower-Lamport genesis. There is no base exception here.
+    if (genesisFounderDeviceId === undefined) {
+      throw new Error(
+        `private-p2p: room ${grant.roomId} grant manifest failed founder-commitment verification — refusing to join (WS-S §12.1)`,
+      );
+    }
     const engine = await p2p.PrivateRoomEngine.load({
       roomId: grant.roomId,
       roomIdCommitment: grant.roomIdCommitment,
@@ -1422,6 +1480,7 @@ export class PrivateRoomSession {
         joiner.createStorage?.(grant.roomId) ?? new IndexedDbPrivateRoomStorage(grant.roomId),
       epochs: new Map([[epochNum, p2p.heldKeysOf(epochState)]]),
       bootstrapDevices: grant.bootstrapDevices,
+      ...(genesisFounderDeviceId ? { genesisFounderDeviceId } : {}),
     });
     // Bootstrap the current state from the grant's archive (snapshot sealed under the
     // joined epoch + any post-snapshot envelopes), all re-validated.
@@ -1496,7 +1555,6 @@ export class PrivateRoomSession {
           signingKey: this.session.signingPrivateKey,
           seq: this.engine.nextAuthorSeq(this.session.deviceId),
         },
-        opId: globalThis.crypto.randomUUID(),
         parents: this.engine.heads(),
         lamport: this.engine.nextLamport(),
       },

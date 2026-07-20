@@ -6,7 +6,7 @@
 // state.  `roomStateCommitment` canonical-encodes the state (with sorted keys)
 // so that property can be asserted directly (§14.3.3 / §26.1).
 
-import { type CanonicalValue, canonical } from '../crypto/canonical.js';
+import { type CanonicalValue, canonical, compareBytes } from '../crypto/canonical.js';
 import type { PrivateCapability, PrivateRole } from '../schemas/common.js';
 
 export interface MemberState {
@@ -204,13 +204,19 @@ export function cloneRoomState(state: RoomReducerState): RoomReducerState {
   };
 }
 
-/** Sort an iterable of [key, value] entries by key (UTF-8 bytewise via `<`). */
+const COMMITMENT_ENCODER = new TextEncoder();
+
+/** Sort an iterable of [key, value] entries by key (UTF-8 bytewise). */
 function sortedEntries<V>(map: ReadonlyMap<string, V>): Array<[string, V]> {
-  return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return [...map.entries()].sort((a, b) =>
+    compareBytes(COMMITMENT_ENCODER.encode(a[0]), COMMITMENT_ENCODER.encode(b[0])),
+  );
 }
 
 function sortedStrings(values: Iterable<string>): string[] {
-  return [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...values].sort((a, b) =>
+    compareBytes(COMMITMENT_ENCODER.encode(a), COMMITMENT_ENCODER.encode(b)),
+  );
 }
 
 /**

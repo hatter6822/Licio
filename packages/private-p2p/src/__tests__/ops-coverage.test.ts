@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { privateOpBodySchema, privateRoomOpSchema } from '../schemas/ops.js';
 
-const CID = 'bafkreieaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const CID = 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku';
 const B64 = 'AAAAAAAA';
 
 /** Wrap an op body in a minimal valid op envelope. */

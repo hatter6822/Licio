@@ -130,12 +130,16 @@ export function computeBiasAudit(
   }
 
   // A disparity blocks iff it is above threshold AND significant AND not
-  // accepted with documentation.
+  // accepted with documentation. An acceptance waives a blocking gap ONLY when
+  // a non-blank justification is supplied — an undocumented acceptance is
+  // fail-open governance and must not deploy.
+  const documented =
+    typeof options.justification === 'string' && options.justification.trim().length > 0;
   const blocking = disparities.filter(
-    (d) => d.disparity > options.threshold && d.significant && !d.accepted,
+    (d) => d.disparity > options.threshold && d.significant && !(d.accepted && documented),
   );
   const acceptedBlocking = disparities.filter(
-    (d) => d.disparity > options.threshold && d.significant && d.accepted,
+    (d) => d.disparity > options.threshold && d.significant && d.accepted && documented,
   );
   const passed = blocking.length === 0;
 

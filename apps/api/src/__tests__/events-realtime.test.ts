@@ -202,6 +202,36 @@ describe('real-time counters (WS-E.3.2)', () => {
     expect(triggered).toEqual([storyId]); // debounced: once, not thrice
   });
 
+  it('never re-throws a trigger failure out of handle (retry-idempotent recording)', async () => {
+    const triggered: string[] = [];
+    fixture = freshEventServices();
+    registerDefaultConsumers(fixture.events, {
+      triggerThreshold: 1,
+      onVolumeTrigger: (itemId) => triggered.push(itemId),
+    });
+    const { userId } = await seedUserWithSession(fixture.identity);
+    const storyId = randomUUID();
+    // The counters commit before the trigger; make the trigger's snapshot read
+    // fail so we prove a post-record failure does NOT propagate out of handle
+    // (which would replay the already-committed, non-idempotent recordAttention).
+    const realtime = fixture.events.realtime;
+    const originalSnapshot = realtime.snapshot.bind(realtime);
+    realtime.snapshot = () => Promise.reject(new Error('snapshot boom'));
+
+    const event = attentionEvent(userId, { storyId });
+    await expect(
+      ingestAttentionEvents(fixture.events, fixture.identity, userId, [event], ONLINE_ACCEPTANCE),
+    ).resolves.toBeDefined();
+
+    expect(triggered).toEqual([]); // the failing trigger fired nothing
+
+    // Restore the real reader: the recording committed exactly once (no replay).
+    realtime.snapshot = originalSnapshot;
+    const windowStart = realtimeWindowStart(Date.parse(event.timestamp));
+    const snapshot = await realtime.snapshot(storyId, windowStart);
+    expect(snapshot?.eventCount).toBe(1);
+  });
+
   it('picks up a runtime-tuned trigger threshold via readTriggerThreshold (no restart)', async () => {
     const triggered: string[] = [];
     let liveThreshold = 1000; // start high — no trigger

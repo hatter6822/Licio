@@ -144,6 +144,22 @@ export function remove(operationId: string): Promise<void> {
   return rawDelete(STORE.pendingQueue, operationId);
 }
 
+/**
+ * Purge every queued operation of a given type.  The ONE sanctioned removal that
+ * is NOT a server ack: used ONLY for the WS-C.4.1d privacy opt-out, scoped to
+ * `attention-aggregate` hints (contributions/reports are never dropped this way).
+ * Each removal is counted as acknowledged so eviction detection does not misread
+ * the intentional pending-count drop as data loss.  Returns the number purged.
+ */
+export async function removeByType(operationType: OperationType): Promise<number> {
+  const matching = (await list()).filter((op) => op.operationType === operationType);
+  for (const op of matching) {
+    acknowledgedRemovals += 1;
+    await rawDelete(STORE.pendingQueue, op.operationId);
+  }
+  return matching.length;
+}
+
 /** Cumulative count of acked removals (for eviction reconciliation). */
 export function acknowledgedRemovalCount(): number {
   return acknowledgedRemovals;

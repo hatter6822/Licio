@@ -35,6 +35,21 @@ describe('createLocalSecretBox (AES-256-GCM)', () => {
     expect(() => box.open(parts.join('.'))).toThrow();
   });
 
+  it('rejects a truncated GCM auth tag (full 128-bit tag enforced)', () => {
+    const box = createLocalSecretBox(SECRET);
+    const sealed = box.seal('tag-truncation');
+    const parts = sealed.split('.');
+    const fullTag = Buffer.from(parts[3] as string, 'base64url');
+    // A shortened tag must never authenticate — otherwise forgery resistance
+    // collapses from 2^128 to 2^(8·len).
+    for (const len of [12, 8, 4]) {
+      const truncated = fullTag.subarray(0, len).toString('base64url');
+      expect(() => box.open([parts[0], parts[1], parts[2], truncated].join('.'))).toThrow(
+        'secret-box: bad tag',
+      );
+    }
+  });
+
   it('cannot be opened with a different master secret', () => {
     const sealed = createLocalSecretBox(SECRET).seal('cross-key');
     expect(() => createLocalSecretBox(`${SECRET}-other`).open(sealed)).toThrow();

@@ -71,7 +71,7 @@ function prepare(
 
   const canonicalQuery = [...req.url.searchParams]
     .map(([k, v]) => [uriEncode(k, true), uriEncode(v, true)] as const)
-    .sort(([ak, av], [bk, bv]) => (ak === bk ? av.localeCompare(bv) : ak.localeCompare(bk)))
+    .sort(([ak, av], [bk, bv]) => (ak === bk ? (av < bv ? -1 : av > bv ? 1 : 0) : ak < bk ? -1 : 1))
     .map(([k, v]) => `${k}=${v}`)
     .join('&');
 

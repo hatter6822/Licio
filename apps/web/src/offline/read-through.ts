@@ -170,6 +170,37 @@ export async function readThreadSnapshot(
   }
 }
 
+// --- Snapshot GC (unbounded-growth control) --------------------------------
+
+/**
+ * Snapshot caches are lossy convenience mirrors, not durable user data, so they
+ * age out. 14 days keeps recently-read threads/comments available offline while
+ * bounding IndexedDB growth. The `cachedAt` index on both stores exists precisely
+ * to make this sweep cheap; nothing consumed it before.
+ */
+export const SNAPSHOT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete story-comment and thread snapshots older than {@link SNAPSHOT_MAX_AGE_MS}
+ * (called on app start, alongside `expireOldDrafts`). Best-effort: a missing or
+ * full IndexedDB never throws, mirroring the rest of this module. Each record is
+ * removed by its own keyPath value (`cacheKey` / `threadId`), never a synthetic key.
+ */
+export async function expireOldSnapshots(now: number = Date.now()): Promise<void> {
+  await bestEffort(async () => {
+    const cutoff = now - SNAPSHOT_MAX_AGE_MS;
+    const range = IDBKeyRange.upperBound(cutoff);
+    const staleComments = await storyComments.getAllByIndex('cachedAt', range);
+    for (const record of staleComments) {
+      await storyComments.delete(record.cacheKey);
+    }
+    const staleThreads = await threadSnapshots.getAllByIndex('cachedAt', range);
+    for (const record of staleThreads) {
+      await threadSnapshots.delete(record.threadId);
+    }
+  });
+}
+
 // --- Saved stories (explicit save for offline reading) --------------------
 
 /** Save a story for offline reading (idempotent; re-saving refreshes savedAt). */

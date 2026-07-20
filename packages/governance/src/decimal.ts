@@ -105,6 +105,19 @@ export function decAdd(x: DecimalInput, y: DecimalInput): string {
   return render(a + b, scale);
 }
 
+/** Exact difference (x − y) as a canonical decimal string.  Total over all valid
+ *  decimals — never builds a `--` literal the way `decSum([x, `-${y}`])` does when
+ *  `y` is already negative. */
+export function decSub(x: DecimalInput, y: DecimalInput): string {
+  const { a, b, scale } = aligned(parseDecimal(x), parseDecimal(y));
+  return render(a - b, scale);
+}
+
+/** Exact negation as a canonical decimal string. */
+export function decNegate(x: DecimalInput): string {
+  return decSub(0, x);
+}
+
 /** Exact sum of a list (empty list ⇒ "0"). */
 export function decSum(values: readonly DecimalInput[]): string {
   return values.reduce<string>((acc, v) => decAdd(acc, v), '0');

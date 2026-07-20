@@ -143,6 +143,80 @@ describe('validateServerEnv', () => {
     expect(() => validateServerEnv({ ...validEnv, LCAP_NETWORK_ID: 'solo' })).not.toThrow();
   });
 
+  it('accepts a COMPLETE VAPID triad and rejects a PARTIAL one (WS-C.2.4a push)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      VAPID_PUBLIC_KEY: 'pub',
+      VAPID_PRIVATE_KEY: 'priv',
+      VAPID_SUBJECT: 'mailto:push@licio.app',
+    });
+    expect(result.VAPID_SUBJECT).toBe('mailto:push@licio.app');
+
+    // Any two-of-three is a deployment typo that would silently disable push
+    // (getVapidConfig returns null) — reject it at startup, not at first use.
+    expect(() =>
+      validateServerEnv({ ...validEnv, VAPID_PUBLIC_KEY: 'pub', VAPID_PRIVATE_KEY: 'priv' }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PUBLIC_KEY: 'pub',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PRIVATE_KEY: 'priv',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    // An EMPTY-string key is the same silent-disable path (min(1) closes it).
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PUBLIC_KEY: '',
+        VAPID_PRIVATE_KEY: 'priv',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow();
+    // The whole group absent stays valid (push simply disabled).
+    expect(validateServerEnv(validEnv).VAPID_PUBLIC_KEY).toBeUndefined();
+  });
+
+  it('accepts a well-formed CHAIN_RPC_URLS map and rejects a malformed one (WS-D contract-wallet)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      CHAIN_RPC_URLS: JSON.stringify({
+        '1': 'https://eth.example',
+        '8453': 'https://base.example',
+      }),
+    });
+    expect(result.CHAIN_RPC_URLS).toContain('eth.example');
+
+    // Malformed JSON fails fast rather than silently degrading to EOA-only.
+    expect(() => validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: '{not json' })).toThrow(
+      /CHAIN_RPC_URLS/,
+    );
+    // A non-object (array / scalar) is rejected.
+    expect(() => validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: '["https://x"]' })).toThrow(
+      /CHAIN_RPC_URLS/,
+    );
+    // A non-positive-integer chain-id key names the offending entry.
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ '0': 'https://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ foo: 'https://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    // A non-http(s) value is rejected.
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ '1': 'ftp://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    // Unset stays valid (EOA-only sign-in).
+    expect(validateServerEnv(validEnv).CHAIN_RPC_URLS).toBeUndefined();
+  });
+
   it('accepts the WS-U ADR-9 LLM backends in production — requirements still enforced', () => {
     const prod = { ...validEnv, NODE_ENV: 'production' };
     expect(() =>
@@ -296,11 +370,67 @@ describe('validateClientEnv', () => {
     ).toThrow('VITE_');
   });
 
-  it('should reject missing VITE_API_URL', () => {
+  it('accepts a missing VITE_API_URL / VITE_APP_URL (the app defaults to same-origin)', () => {
+    expect(() => validateClientEnv({ VITE_APP_URL: 'http://localhost:5173' })).not.toThrow();
+    expect(() => validateClientEnv({})).not.toThrow();
+  });
+
+  it('accepts the real framework-injected env (Vite built-ins + TanStack TSS_ flags)', () => {
+    // This is EXACTLY what Vite/TanStack Start inject into `import.meta.env`; the
+    // guard must not white-screen the app over framework metadata (regression: the
+    // `TSS_INLINE_CSS_ENABLED` key crashed boot → every E2E failed).
     expect(() =>
       validateClientEnv({
-        VITE_APP_URL: 'http://localhost:5173',
+        BASE_URL: '/',
+        MODE: 'production',
+        DEV: 'false',
+        PROD: 'true',
+        SSR: 'false',
+        TSS_INLINE_CSS_ENABLED: 'false',
+        VITE_API_URL: 'http://localhost:3001',
       }),
-    ).toThrow('VITE_API_URL');
+    ).not.toThrow();
+    // A genuinely leaked NON-framework key is still rejected (the guard's real job).
+    expect(() => validateClientEnv({ BASE_URL: '/', SECRET_TOKEN: 'leaked' })).toThrow('VITE_');
+  });
+
+  it('rejects a garbage private-bundle signer pin (fails the build loudly)', () => {
+    expect(() =>
+      validateClientEnv({
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: 'not-a-key',
+        VITE_PRIVATE_BUNDLE_LOG_KEY: 'x',
+      }),
+    ).toThrow('VITE_PRIVATE_BUNDLE');
+  });
+
+  it('rejects a 44-char Ed25519 pin (a 32-byte key is EXACTLY 43 unpadded base64url chars)', () => {
+    const key44 = 'A'.repeat(44); // decodes to 33 bytes — not a 32-byte Ed25519 key
+    const key43 = 'A'.repeat(43);
+    expect(() =>
+      validateClientEnv({
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key44,
+        VITE_PRIVATE_BUNDLE_LOG_KEY: key43,
+      }),
+    ).toThrow('VITE_PRIVATE_BUNDLE_SIGNER_KEYS');
+    expect(() =>
+      validateClientEnv({
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key43,
+        VITE_PRIVATE_BUNDLE_LOG_KEY: key44,
+      }),
+    ).toThrow('VITE_PRIVATE_BUNDLE_LOG_KEY');
+  });
+
+  it('rejects a partial private-bundle pin (signers without a log key, or vice versa)', () => {
+    const key = 'A'.repeat(43);
+    expect(() => validateClientEnv({ VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key })).toThrow(
+      'pinned together',
+    );
+    expect(() => validateClientEnv({ VITE_PRIVATE_BUNDLE_LOG_KEY: key })).toThrow(
+      'pinned together',
+    );
+    // Both pinned together ⇒ accepted.
+    expect(() =>
+      validateClientEnv({ VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key, VITE_PRIVATE_BUNDLE_LOG_KEY: key }),
+    ).not.toThrow();
   });
 });

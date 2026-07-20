@@ -1,18 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'fake-indexeddb/auto';
-import type { SignalLedgerEntry, StoryDetail, ThreadDetail } from '@licio/shared';
+import type {
+  SignalLedgerEntry,
+  StoryCommentsResponse,
+  StoryDetail,
+  ThreadDetail,
+} from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cacheSignalLedger,
+  cacheStoryCommentsSnapshot,
   cacheThreadSnapshot,
+  expireOldSnapshots,
   isStorySaved,
   listSavedStories,
   readCachedSignalLedger,
+  readStoryCommentsSnapshot,
   readThreadSnapshot,
+  SNAPSHOT_MAX_AGE_MS,
   saveStory,
   unsaveStory,
 } from './read-through.js';
-import { savedStories, signalLedger, threadSnapshots } from './store.js';
+import { savedStories, signalLedger, storyComments, threadSnapshots } from './store.js';
 
 const STORY: StoryDetail = {
   story_id: '11111111-1111-4111-8111-111111111111',
@@ -60,8 +69,26 @@ const THREAD: ThreadDetail = {
   sections: { sources: 1, challenges: 0, chronology: 2 },
 };
 
+const COMMENTS: StoryCommentsResponse = {
+  comments: [],
+  next_cursor: null,
+  anchor: null,
+  overview: {
+    comment_count: 0,
+    sources_count: 0,
+    corrections_count: 0,
+    debates_count: 0,
+    incorrect_count: 0,
+  },
+};
+
 beforeEach(async () => {
-  await Promise.all([savedStories.clear(), signalLedger.clear(), threadSnapshots.clear()]);
+  await Promise.all([
+    savedStories.clear(),
+    signalLedger.clear(),
+    threadSnapshots.clear(),
+    storyComments.clear(),
+  ]);
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -127,5 +154,39 @@ describe('thread snapshot cache', () => {
 
   it('returns undefined for an uncached thread', async () => {
     expect(await readThreadSnapshot(THREAD.thread_id)).toBeUndefined();
+  });
+});
+
+describe('snapshot expiry (unbounded-growth control)', () => {
+  it('deletes stale snapshots while fresh snapshots and user data survive', async () => {
+    // Snapshots + unrelated durable user data, all cached "now".
+    await cacheThreadSnapshot(THREAD);
+    await cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS);
+    await saveStory(STORY);
+    await cacheSignalLedger([LEDGER_ENTRY]);
+
+    // Sweep from a point past the max age: every snapshot is now stale.
+    await expireOldSnapshots(Date.now() + SNAPSHOT_MAX_AGE_MS + 1_000);
+
+    expect(await readThreadSnapshot(THREAD.thread_id)).toBeUndefined();
+    expect(await readStoryCommentsSnapshot(STORY.story_id, {})).toBeUndefined();
+    // Explicit saves, the private ledger, and the pending queue are untouched.
+    expect(await isStorySaved(STORY.story_id)).toBe(true);
+    expect(await readCachedSignalLedger()).toHaveLength(1);
+  });
+
+  it('leaves fresh snapshots in place', async () => {
+    await cacheThreadSnapshot(THREAD);
+    await cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS);
+
+    await expireOldSnapshots();
+
+    expect(await readThreadSnapshot(THREAD.thread_id)).toBeDefined();
+    expect(await readStoryCommentsSnapshot(STORY.story_id, {})).toBeDefined();
+  });
+
+  it('is best-effort: a storage error never throws', async () => {
+    vi.spyOn(storyComments, 'getAllByIndex').mockRejectedValueOnce(new Error('offline'));
+    await expect(expireOldSnapshots()).resolves.toBeUndefined();
   });
 });

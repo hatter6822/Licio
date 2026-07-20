@@ -219,16 +219,47 @@ describe('WS-H.1.2e promotion service', () => {
     observedConfidence: 0.9,
   };
 
-  it('status starts shadow; effects stay disabled without a valid promotion', async () => {
+  // Seed the SERVER-MEASURED shadow evidence an upward promotion now gates on: a
+  // (backdated) first run + observed health.  The self-reported evidence numbers are
+  // ignored — the gate derives duration from the first run and coverage/confidence
+  // from the invariant's rolling health.
+  const seedShadow = async (
+    fixture: ReturnType<typeof freshInvariantServices>,
+    type: string,
+    service: {
+      health: {
+        observe: (
+          ms: number,
+          o: { coverage: number; confidence: number; fallback_used: boolean }[],
+        ) => void;
+      };
+    },
+    daysAgo: number,
+  ): Promise<void> => {
+    await fixture.invariants.runMetadata.append({
+      invariantType: type,
+      tier: 'batch',
+      targetCount: 1,
+      durationMs: 1,
+      success: true,
+      failureReason: null,
+      startedAt: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+    });
+    service.health.observe(1, [{ coverage: 0.95, confidence: 0.9, fallback_used: false }]);
+  };
+
+  it('gates on the MEASURED shadow duration, not the self-reported one', async () => {
     const fixture = freshInvariantServices();
     expect(await fixture.invariants.promotionService.statusOf('MERI')).toBe('shadow');
     expect(await fixture.invariants.promotionService.effectsEnabled('MERI')).toBe(false);
+    // Only 2 days of REAL shadow, though the steward CLAIMS 30 — the gate must use 2.
+    await seedShadow(fixture, 'MERI', fixture.invariants.meri, 2);
     const rejected = await fixture.invariants.promotionService.apply(
       {
         invariantType: 'MERI',
         fromStatus: 'shadow',
         toStatus: 'soft_constraint',
-        evidence: { ...evidence, shadowDurationDays: 2 },
+        evidence: { ...evidence, shadowDurationDays: 30 },
         owner: 'ranking-lead',
         createdAt: new Date().toISOString(),
       },
@@ -240,6 +271,7 @@ describe('WS-H.1.2e promotion service', () => {
 
   it('promotion enables effects; demotion (kill switch) disables without redeploy', async () => {
     const fixture = freshInvariantServices();
+    await seedShadow(fixture, 'SCOI', fixture.invariants.scoi, 30);
     const promote = await fixture.invariants.promotionService.apply(
       {
         invariantType: 'SCOI',

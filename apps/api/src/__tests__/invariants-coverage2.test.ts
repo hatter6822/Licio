@@ -11,9 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { minhashSignature } from '@licio/invariants';
 import { UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assembleMeriCandidates,
+  assembleMfciActions,
   assemblePhiTopicData,
   assembleTopicCascade,
   citationDomainToken,
@@ -341,11 +342,110 @@ describe('degraded supporting-service branches', () => {
   });
 });
 
+describe('assembleMfciActions batch reads', () => {
+  it('resolves stories/users with batch reads (no per-row getById/getUser) and preserves labels', async () => {
+    const fixture = freshInvariantServices();
+    const nowMs = Date.now();
+    const { storyId } = await seedStory(fixture, { topicIds: ['topic-mfci'] });
+    const user = await seedUserWithSession(fixture.identity, { nowMs, accountAgeMs: 60_000 });
+    const fromIso = new Date(nowMs - 30 * 60_000).toISOString();
+    const toIso = new Date(nowMs + 30 * 60_000).toISOString();
+    // Two in-window events by the same actor on the same target: the very
+    // concentration MFCI detects, where the old N+1 pattern amplified worst.
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: new Date(nowMs).toISOString(),
+        privacyClassification: 'restricted',
+        retentionTier: 'security_log',
+        payload: { story_id: storyId },
+        ownerUserId: user.userId,
+        purgeAfter: null,
+      },
+      {
+        eventId: randomUUID(),
+        eventType: 'content.submitted',
+        topic: 'content.submitted',
+        timestamp: new Date(nowMs + 60_000).toISOString(),
+        privacyClassification: 'restricted',
+        retentionTier: 'security_log',
+        payload: { story_id: storyId },
+        ownerUserId: user.userId,
+        purgeAfter: null,
+      },
+    ]);
+
+    // The refactor must NOT fall back to the per-row lookups it replaced.
+    const getByIdSpy = vi.spyOn(fixture.ingestion.stories, 'getById');
+    const getUserSpy = vi.spyOn(fixture.identity.store, 'getUser');
+    const getByIdsSpy = vi.spyOn(fixture.ingestion.stories, 'getByIds');
+    const getUsersByIdsSpy = vi.spyOn(fixture.identity.store, 'getUsersByIds');
+
+    const window = await assembleMfciActions(
+      fixture.events,
+      fixture.identity,
+      fixture.ingestion,
+      fromIso,
+      toIso,
+    );
+
+    expect(getByIdSpy).not.toHaveBeenCalled();
+    expect(getUserSpy).not.toHaveBeenCalled();
+    // ONE batch read each regardless of the two matching rows.
+    expect(getByIdsSpy).toHaveBeenCalledTimes(1);
+    expect(getUsersByIdsSpy).toHaveBeenCalledTimes(1);
+
+    expect(window.observations).toHaveLength(2);
+    // Labels: [user_group, topic, time_bucket, action_type, target].
+    expect(window.observations[0]?.labels[0]).toBe('new');
+    expect(window.observations[0]?.labels[1]).toBe('topic-mfci');
+    expect(window.observations[0]?.labels[3]).toBe('contribution.created');
+    expect(window.observations[0]?.labels[4]).toBe(storyId);
+    expect(window.rawActions).toEqual([
+      { actorRef: user.userId, targetId: storyId, atMs: nowMs },
+      { actorRef: user.userId, targetId: storyId, atMs: nowMs + 60_000 },
+    ]);
+  });
+
+  it('tolerates unknown ids: missing story → untagged, anonymous/absent user → unknown', async () => {
+    const fixture = freshInvariantServices();
+    const nowMs = Date.now();
+    const fromIso = new Date(nowMs - 30 * 60_000).toISOString();
+    const toIso = new Date(nowMs + 30 * 60_000).toISOString();
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: new Date(nowMs).toISOString(),
+        privacyClassification: 'restricted',
+        retentionTier: 'security_log',
+        payload: { thread_id: 'thread-with-no-story' },
+        ownerUserId: null,
+        purgeAfter: null,
+      },
+    ]);
+    const window = await assembleMfciActions(
+      fixture.events,
+      fixture.identity,
+      fixture.ingestion,
+      fromIso,
+      toIso,
+    );
+    expect(window.observations[0]?.labels[0]).toBe('unknown');
+    expect(window.observations[0]?.labels[1]).toBe('untagged');
+    expect(window.observations[0]?.labels[4]).toBe('thread-with-no-story');
+    expect(window.rawActions[0]?.actorRef).toBe('anonymous');
+  });
+});
+
 describe('runner internals', () => {
   it('the health recorder trims its latency buffer and reports percentiles', () => {
     const recorder = new HealthRecorder();
     for (let i = 0; i < 1_100; i += 1) {
-      recorder.observe(i, [{ coverage: 1, fallback_used: i % 2 === 0 }]);
+      recorder.observe(i, [{ coverage: 1, confidence: 1, fallback_used: i % 2 === 0 }]);
     }
     const snapshot = recorder.snapshot();
     expect(snapshot.outputCount).toBe(1_100);

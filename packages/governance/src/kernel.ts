@@ -66,6 +66,24 @@ export function evaluateTreasuryAction(
     };
   }
 
+  // Self-guard every timestamp the same fail-closed way: `Date.parse` returns NaN
+  // for a malformed instant, and every NaN comparison in the window/interval/
+  // timelock checks below is silently false — so a bad `now`, `proposedAt`, or
+  // history timestamp would make those preconditions VACUOUSLY pass.  Reject up
+  // front rather than honor an un-timeable action.
+  if (
+    !Number.isFinite(ms(options.now)) ||
+    !Number.isFinite(ms(action.proposedAt)) ||
+    history.some((h) => !Number.isFinite(ms(h.timestamp)))
+  ) {
+    return {
+      accepted: false,
+      code: 'invalid_timestamp',
+      reason:
+        'Every treasury timestamp (now, proposedAt, and history entries) must be a valid instant.',
+    };
+  }
+
   const checks: ProofCheck[] = [];
   const cap = bounds.caps.find((c) => c.category === action.category);
   if (!cap) {

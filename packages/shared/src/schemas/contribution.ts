@@ -217,9 +217,11 @@ export const contributionCreateSchema = contributionWriteCreateSchema;
 export type ContributionCreate = ContributionWriteCreate;
 
 // ---------------------------------------------------------------------------
-// Update — body/citations/metadata only; `type` is structurally absent so it
-// can never change (WS-G.1.2c compile-time guarantee).  Per-type body caps
-// and metadata rules are re-validated server-side against the stored type.
+// Update — body/citations only; `type` AND structured metadata are
+// structurally absent, so both are immutable (WS-G.1.2c compile-time
+// guarantee).  Changing metadata is a NEW contribution, not an edit; the
+// `.strict()` schema below rejects any metadata key with a 422.  Per-type body
+// caps are re-validated server-side against the stored type.
 // ---------------------------------------------------------------------------
 
 export const contributionUpdateSchema = z
@@ -227,7 +229,6 @@ export const contributionUpdateSchema = z
     contribution_id: uuidSchema,
     body: z.string().trim().min(1).max(5_000).optional(),
     citations: z.array(citationSchema).max(MAX_CITATIONS).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 export type ContributionUpdate = z.infer<typeof contributionUpdateSchema>;

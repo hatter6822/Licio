@@ -172,9 +172,20 @@ export function initEvictionDetection(callbacks: EvictionCallbacks = {}): () => 
       void runProbe();
     }
   };
-  const runProbe = async (): Promise<void> => {
-    const result = await probeStorageIntegrity();
-    if (result.verdict === 'evicted') callbacks.onEvicted?.(result);
+  // Coalesce concurrent probes: a bfcache restore fires pageshow AND
+  // visibilitychange, which would otherwise run two overlapping probes that
+  // both report the same eviction (double onEvicted / toast / telemetry). The
+  // in-flight guard collapses the pair into a single probe.
+  let probing: Promise<void> | null = null;
+  const runProbe = (): Promise<void> => {
+    if (probing) return probing;
+    probing = (async () => {
+      const result = await probeStorageIntegrity();
+      if (result.verdict === 'evicted') callbacks.onEvicted?.(result);
+    })().finally(() => {
+      probing = null;
+    });
+    return probing;
   };
   const onPageShow = (): void => {
     void runProbe();

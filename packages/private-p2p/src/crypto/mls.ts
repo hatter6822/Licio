@@ -300,7 +300,12 @@ const DEFAULT_CLIENT_CONFIG = {
  *  client config (the only config Licio groups use). */
 export async function deserializeGroupState(bytes: Uint8Array): Promise<MlsGroup> {
   const decoded = decodeGroupState(bytes, 0);
-  if (!decoded) throw new Error('failed to decode MLS group state');
+  // Reject undecodable bytes OR trailing bytes after a complete group state
+  // (decodeGroupState returns [value, bytesConsumed]) — no silent suffix, matching
+  // decodeKeyPackage/decodeCommit/decodeWelcomeMessage.
+  if (!decoded || decoded[1] !== bytes.length) {
+    throw new Error('deserializeGroupState: not a single complete MLS group state');
+  }
   const cs = await resolveSuite();
   return { state: { ...decoded[0], clientConfig: DEFAULT_CLIENT_CONFIG }, cs };
 }

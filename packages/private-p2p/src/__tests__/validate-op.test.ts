@@ -10,14 +10,19 @@ import { buildBodyAad, sealBody, wrapKey } from '../crypto/aead.js';
 import { canonicalizeRecord } from '../crypto/record-encoding.js';
 import { randomBytes, sha256, toBase64Url } from '../crypto/runtime.js';
 import { generateDeviceSigningKeyPair, signEnvelope } from '../crypto/signatures.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { reduceRoom } from '../reducer/reduce.js';
 import { objectTypeForOpBody, openOp, sealOp } from '../reducer/validate-op.js';
 import { privateEncryptedEnvelopeSchema } from '../schemas/envelope.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 
 const KEY = 'AAAA';
+// op_id is DERIVED from (author_device_id, author_seq) (§14.3.2); tests label ops
+// (still via `op_id`) and this registry maps a label to its real derived id for
+// parent references.  mkOp is async and must be awaited in call order.
+const opIds = new Map<string, string>();
 let n = 0;
-function mkOp(
+async function mkOp(
   body: PrivateOpBody,
   fields: {
     author_member_id?: string;
@@ -28,19 +33,24 @@ function mkOp(
     parents?: string[];
     epoch?: number;
   } = {},
-): PrivateRoomOp {
+): Promise<PrivateRoomOp> {
+  const label = fields.op_id ?? `op-${++n}`;
+  const deviceId = fields.author_device_id ?? 'founder-dev';
+  const seq = fields.author_seq ?? 0;
+  const opId = await deriveOpId(deviceId, seq);
+  opIds.set(label, opId);
   return privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
     room_id: 'room-1',
     epoch: fields.epoch ?? 0,
-    op_id: fields.op_id ?? `op-${++n}`,
+    op_id: opId,
     author_member_id: fields.author_member_id ?? 'founder',
-    author_device_id: fields.author_device_id ?? 'founder-dev',
-    author_seq: fields.author_seq ?? 0,
+    author_device_id: deviceId,
+    author_seq: seq,
     created_at: '2026-06-22T00:00:00Z',
     created_at_bucket: '2026-06-22T00',
     lamport: fields.lamport ?? '1',
-    parents: fields.parents ?? [],
+    parents: (fields.parents ?? []).map((p) => opIds.get(p) ?? p),
     body,
   });
 }
@@ -94,7 +104,7 @@ describe('object-type mapping', () => {
 describe('sealOp → openOp round-trip', () => {
   it('round-trips an op through the encrypted envelope', async () => {
     const { sealParams, ctx } = await setup();
-    const op = mkOp(memberAdd('founder', 'founder-dev', 'admin'), { op_id: 'genesis' });
+    const op = await mkOp(memberAdd('founder', 'founder-dev', 'admin'), { op_id: 'genesis' });
     const envelope = await sealOp(op, sealParams);
     expect(envelope.schema).toBe('licio.private.envelope.v1');
     expect(envelope.object_type).toBe('membership_op');
@@ -105,7 +115,7 @@ describe('sealOp → openOp round-trip', () => {
 
   it('the envelope validates against the strict envelope schema', async () => {
     const { sealParams } = await setup();
-    const envelope = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const envelope = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     expect(() => privateEncryptedEnvelopeSchema.parse(envelope)).not.toThrow();
   });
 });
@@ -113,7 +123,7 @@ describe('sealOp → openOp round-trip', () => {
 describe('§14.2 stage-1 reject matrix', () => {
   it('unknown device → unknown_device', async () => {
     const { sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     const result = await openOp(env, { ...ctx, deviceSigningKey: () => undefined });
     expect(result).toMatchObject({ ok: false, reason: 'unknown_device' });
   });
@@ -121,21 +131,21 @@ describe('§14.2 stage-1 reject matrix', () => {
   it('a signature from a different device → signature_invalid', async () => {
     const { sealParams, ctx } = await setup();
     const other = await generateDeviceSigningKeyPair();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     const result = await openOp(env, { ...ctx, deviceSigningKey: () => other.publicKey });
     expect(result).toMatchObject({ ok: false, reason: 'signature_invalid' });
   });
 
   it('no held epoch key → no_epoch_key', async () => {
     const { sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     const result = await openOp(env, { ...ctx, contentWrapKeyForEpoch: () => undefined });
     expect(result).toMatchObject({ ok: false, reason: 'no_epoch_key' });
   });
 
   it('the wrong content_wrap_key → decrypt_failed', async () => {
     const { sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     const result = await openOp(env, { ...ctx, contentWrapKeyForEpoch: () => randomBytes(32) });
     expect(result).toMatchObject({ ok: false, reason: 'decrypt_failed' });
   });
@@ -146,7 +156,7 @@ describe('§14.2 stage-1 reject matrix', () => {
     // signature verifies (the signer is the blind's device), so only the
     // blind→device binding stops the impersonation.
     const { sealParams, ctx } = await setup();
-    const op = mkOp(memberAdd('founder', 'victim-dev', 'admin'), {
+    const op = await mkOp(memberAdd('founder', 'victim-dev', 'admin'), {
       author_device_id: 'victim-dev',
     });
     const env = await sealOp(op, sealParams);
@@ -159,7 +169,7 @@ describe('§14.2 stage-1 reject matrix', () => {
     // The encrypted plaintext claims epoch 6; the envelope metadata (and the
     // body_aad used to seal) claims epoch 0 — so the AEAD opens, but openOp must
     // catch that the plaintext's epoch ≠ the signed envelope epoch.
-    const plaintextOp = mkOp(memberAdd('f', 'fd', 'admin'), { epoch: 6 });
+    const plaintextOp = await mkOp(memberAdd('f', 'fd', 'admin'), { epoch: 6 });
     const objectType = objectTypeForOpBody(plaintextOp.body.type);
     const aadInput = {
       envelopeVersion: 1,
@@ -219,7 +229,7 @@ describe('§14.2 stage-1 reject matrix', () => {
 
   it('malformed base64 in an authenticated field → malformed_encoding (never throws)', async () => {
     const { sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     // 'A' passes the loose base64url regex but is an invalid encoding length; the
     // wire-intake path must quarantine it, not let `fromBase64Url` throw.
     const result = await openOp({ ...env, signature: 'A' }, ctx);
@@ -228,7 +238,7 @@ describe('§14.2 stage-1 reject matrix', () => {
 
   it('an unsupported (but schema-permitted) AEAD algorithm → unsupported_algorithm', async () => {
     const { device, sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     // Re-sign with the authenticated algorithm flipped to one this path can't open.
     const { signature: _signature, ...unsigned } = env;
     const mutated = {
@@ -246,7 +256,7 @@ describe('§14.2 stage-1 reject matrix', () => {
 
   it('a wrap epoch that differs from the signed op epoch → epoch_mismatch', async () => {
     const { device, sealParams, ctx } = await setup();
-    const env = await sealOp(mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
     // Re-sign with `wrapping_epoch` advanced past the signed `room_epoch`.
     const { signature: _signature, ...unsigned } = env;
     const mutated = {
@@ -284,12 +294,12 @@ describe('end-to-end: seal → open → reduce', () => {
     };
 
     const ops = [
-      mkOp(memberAdd('founder', 'founder-dev', 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', 'admin'), {
         op_id: 'genesis',
         lamport: '1',
         author_seq: 0,
       }),
-      mkOp(
+      await mkOp(
         {
           type: 'story.create',
           story_id: 's1',

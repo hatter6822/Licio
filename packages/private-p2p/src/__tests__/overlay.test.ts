@@ -18,7 +18,7 @@ import { reduceRoom } from '../reducer/reduce.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 
 const KEY = 'AAAA';
-const CID = `b${'a'.repeat(47)}`;
+const CID = 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku';
 let n = 0;
 function mkOp(
   body: PrivateOpBody,

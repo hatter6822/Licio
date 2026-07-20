@@ -46,17 +46,19 @@ export class HealthRecorder {
   #fallbackCount = 0;
   #outputCount = 0;
   #coverageSum = 0;
+  #confidenceSum = 0;
   #lastSuccessAt: string | null = null;
 
   observe(
     latencyMs: number,
-    outputs: readonly { coverage: number; fallback_used: boolean }[],
+    outputs: readonly { coverage: number; confidence: number; fallback_used: boolean }[],
   ): void {
     this.#latencies.push(latencyMs);
     if (this.#latencies.length > 1_000) this.#latencies.shift();
     for (const output of outputs) {
       this.#outputCount += 1;
       this.#coverageSum += output.coverage;
+      this.#confidenceSum += output.confidence;
       if (output.fallback_used) this.#fallbackCount += 1;
     }
     this.#lastSuccessAt = new Date().toISOString();
@@ -71,6 +73,7 @@ export class HealthRecorder {
     latencyMsP99: number;
     errorCount: number;
     coverageRatio: number;
+    confidenceRatio: number;
     fallbackRate: number;
     outputCount: number;
     lastSuccessAt: string | null;
@@ -85,6 +88,7 @@ export class HealthRecorder {
       latencyMsP99: pick(0.99),
       errorCount: this.#errorCount,
       coverageRatio: this.#outputCount === 0 ? 0 : this.#coverageSum / this.#outputCount,
+      confidenceRatio: this.#outputCount === 0 ? 0 : this.#confidenceSum / this.#outputCount,
       fallbackRate: this.#outputCount === 0 ? 0 : this.#fallbackCount / this.#outputCount,
       outputCount: this.#outputCount,
       lastSuccessAt: this.#lastSuccessAt,

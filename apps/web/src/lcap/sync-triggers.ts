@@ -17,13 +17,21 @@ export type SyncTrigger = 'online' | 'focus' | 'visibility' | 'open' | 'backgrou
 export interface SyncConditions {
   readonly online: boolean;
   readonly privacyMode: StorageMode;
+  /** §33 background-sync posture — Emergency/Stealth clear it, suppressing every non-user trigger. */
+  readonly backgroundSyncAllowed: boolean;
   readonly dataSaver: boolean;
   readonly batteryLow: boolean;
 }
 
 /** Whether an AUTOMATIC sync should run (§23.3: respect connectivity/mode/data/battery). */
 export function shouldAutoSync(c: SyncConditions): boolean {
-  return c.online && c.privacyMode !== 'stealth' && !c.dataSaver && !c.batteryLow;
+  return (
+    c.online &&
+    c.privacyMode !== 'stealth' &&
+    c.backgroundSyncAllowed &&
+    !c.dataSaver &&
+    !c.batteryLow
+  );
 }
 
 // §23.3 low-battery suppression.  The Battery Status API is Chromium-only (Firefox
@@ -73,13 +81,17 @@ export function initBatteryTracking(): () => void {
 }
 
 /** Read the live sync conditions from the browser (defensive; safe defaults). */
-export function readSyncConditions(privacyMode: StorageMode): SyncConditions {
+export function readSyncConditions(
+  privacyMode: StorageMode,
+  backgroundSyncAllowed = true,
+): SyncConditions {
   const nav = globalThis.navigator as
     | { onLine?: boolean; connection?: { saveData?: boolean } }
     | undefined;
   return {
     online: nav?.onLine ?? true,
     privacyMode,
+    backgroundSyncAllowed,
     dataSaver: nav?.connection?.saveData ?? false,
     batteryLow: cachedBatteryLow,
   };

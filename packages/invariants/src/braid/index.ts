@@ -22,14 +22,7 @@
 // Reference check (tested): the figure-eight braid σ₁σ₂⁻¹ in B₃ has
 // ρ = (3+√5)/2 = φ², log ρ ≈ 0.9624 — its true entropy.
 
-import {
-  frobeniusNorm,
-  identity,
-  type Matrix,
-  matMul,
-  matScale,
-  spectralRadius,
-} from '../math/linalg.js';
+import { frobeniusNorm, identity, type Matrix, matMul, spectralRadius } from '../math/linalg.js';
 
 export interface RankSnapshot {
   atMs: number;
@@ -158,39 +151,154 @@ export function burauWordMatrix(strands: number, word: readonly BraidGenerator[]
 }
 
 /**
- * log ρ of the Burau image, computed with PER-STEP Frobenius renormalization so
- * the ≈ρ^L entry growth never overflows (the exact product would exceed 2⁵³ and
- * then go non-finite, throwing in `spectralRadius`). Since ρ(cA) = |c|·ρ(A),
- * factoring the running norm sᵢ out at each step gives
- * log ρ(∏Gᵢ) = Σ log sᵢ + log ρ(M̂), where M̂ is the unit-Frobenius residual.
+ * log ρ of the Burau image, computed with an O(n)-per-crossing IN-PLACE row
+ * update and DEFERRED (batched) Frobenius renormalization so the ≈ρ^L entry
+ * growth never overflows (the exact product would exceed 2⁵³ and then go
+ * non-finite, throwing in `spectralRadius`) WITHOUT the O(n²) dense matMul and
+ * three full-matrix allocations the naive left-multiply cost per crossing.
+ * Since ρ(cA) = |c|·ρ(A), factoring the running norm sᵢ out gives
+ * log ρ(∏Gᵢ) = Σ log sᵢ + log ρ(M̂), where M̂ is the unit-Frobenius residual;
+ * renormalizing only every RENORM_INTERVAL crossings (entries grow ≤3×/step, so
+ * 3^32 ≪ 2⁵³ between renorms) preserves that identity at a fraction of the cost.
  * Returns −∞ for a singular residual (ρ = 0 ⇒ entropy 0).
  */
 function burauWordLogSpectralRadius(strands: number, word: readonly BraidGenerator[]): number {
-  let m = identity(Math.max(1, strands - 1));
+  const size = Math.max(1, strands - 1);
+  const m = identity(size);
   let logScale = 0;
-  for (const generator of word) {
-    m = matMul(burauGeneratorAtMinusOne(strands, generator.position, generator.sign), m);
+  let sinceRenorm = 0;
+  const RENORM_INTERVAL = 32; // entries grow <=3x/step from a unit-Frobenius start; 3^32 << 2^53
+  const renorm = (): number | null => {
     const norm = frobeniusNorm(m);
-    if (!Number.isFinite(norm)) return Number.POSITIVE_INFINITY; // unreachable once normalized
-    if (norm < 1e-280) return Number.NEGATIVE_INFINITY; // singular residual ⇒ ρ = 0
+    if (!Number.isFinite(norm)) return Number.POSITIVE_INFINITY;
+    if (norm < 1e-280) return Number.NEGATIVE_INFINITY;
     logScale += Math.log(norm);
-    m = matScale(m, 1 / norm); // keep ‖M̂‖_F = 1 ⇒ entries bounded, no overflow
+    const inv = 1 / norm;
+    for (const row of m) for (let j = 0; j < size; j += 1) row[j] = (row[j] ?? 0) * inv;
+    sinceRenorm = 0;
+    return null;
+  };
+  for (const generator of word) {
+    const p = generator.position;
+    // Preserve burauGeneratorAtMinusOne's load-bearing integer/range guard.
+    if (!Number.isInteger(p) || p < 0 || p >= size) {
+      throw new Error(`generator position ${p} out of range for ${strands} strands`);
+    }
+    const s = generator.sign;
+    const rowP = m[p];
+    if (!rowP) continue;
+    const rowUp = p - 1 >= 0 ? m[p - 1] : undefined;
+    const rowDown = p + 1 < size ? m[p + 1] : undefined;
+    // (G*m)[p][j] = m[p][j] - s*m[p-1][j] + s*m[p+1][j]; all other rows unchanged.
+    for (let j = 0; j < size; j += 1) {
+      rowP[j] = (rowP[j] ?? 0) - s * (rowUp?.[j] ?? 0) + s * (rowDown?.[j] ?? 0);
+    }
+    if (++sinceRenorm >= RENORM_INTERVAL) {
+      const early = renorm();
+      if (early !== null) return early;
+    }
   }
+  const early = renorm();
+  if (early !== null) return early;
   const rhoResidual = spectralRadius(m);
   return rhoResidual <= 0 ? Number.NEGATIVE_INFINITY : logScale + Math.log(rhoResidual);
+}
+
+// Longest word whose EXACT integer Burau product stays under 2⁵³: entries grow
+// ≤3×/crossing from a unit start, and 3^33 ≈ 5.6e15 < 2⁵³ ≈ 9.0e15 (3^34 spills),
+// so `burauWordMatrix` materializes an EXACT integer matrix for words this long.
+const EXACT_BURAU_MAX_CROSSINGS = 33;
+// Power-trace probe depth. tr(Mᵏ) = Σ λᵢᵏ; a genuine braid dilatation δ ≥ Lehmer
+// (~1.176) satisfies δᵏ > (size) well before this depth even for wide braids,
+// while a parabolic (all |λ|=1) keeps |tr| ≤ size forever — so the two separate
+// cleanly by TRACE_POWER_STEPS.
+const TRACE_POWER_STEPS = 128;
+// Below this the fallback's renormalized log-ρ is pure double-precision noise on
+// reachable (non-adversarial) words — snap it to an exact 0. (Empirically the
+// pure-oscillation residual lands ~1e-6; NOT a coarse 0.02 floor, which would
+// clobber genuine small dilatations at high strand counts.)
+const LOG_RHO_NOISE_FLOOR = 1e-6;
+
+/**
+ * EXACT braid entropy for short words, evaluated on the EXACT INTEGER Burau
+ * image (module header: at t = −1 the generators are I ± Nᵢ with Nᵢ² = 0, so the
+ * whole product is exact integer arithmetic — no floating renormalized residual).
+ * Returns the entropy, or `null` when the word is too long to materialize exactly
+ * (caller falls back to {@link burauWordLogSpectralRadius}).
+ *
+ * The parabolic/reducible case (spectral radius exactly 1) is detected EXACTLY
+ * from integer data via the power traces: tr(Mᵏ) = Σ λᵢᵏ is a plain integer, and
+ * — since det = ±1 forces no zero eigenvalue — every eigenvalue is a root of
+ * unity (⇒ ρ = 1) iff |tr(Mᵏ)| ≤ size for all k (Kronecker's theorem). Any
+ * eigenvalue of modulus > 1 makes |tr(Mᵏ)| exceed `size` within
+ * TRACE_POWER_STEPS. BigInt keeps the trace exact even when a defective
+ * (Jordan-block) parabolic blows the individual matrix entries up — the
+ * coordinate-free trace stays the small integer Σλᵢᵏ regardless.
+ */
+function exactBurauEntropy(strands: number, word: readonly BraidGenerator[]): number | null {
+  if (word.length > EXACT_BURAU_MAX_CROSSINGS) return null;
+  const m0 = burauWordMatrix(strands, word); // exact integer entries (< 2⁵³ by the gate)
+  const size = m0.length;
+  if (size === 0) return 0;
+  // BigInt copy so the power-trace probe stays exact under Jordan-block growth.
+  const base: bigint[][] = m0.map((row) => row.map((v) => BigInt(Math.round(v))));
+  let power = base.map((row) => [...row]);
+  const sizeBig = BigInt(size);
+  let hyperbolic = false;
+  for (let k = 1; k <= TRACE_POWER_STEPS; k += 1) {
+    let trace = 0n;
+    for (let i = 0; i < size; i += 1) trace += power[i]?.[i] ?? 0n;
+    // |Σ λᵢᵏ| > size ⇒ some |λ| > 1 ⇒ ρ > 1 (a genuine dilatation).
+    if (trace > sizeBig || trace < -sizeBig) {
+      hyperbolic = true;
+      break;
+    }
+    if (k < TRACE_POWER_STEPS) {
+      const next: bigint[][] = Array.from({ length: size }, () => new Array<bigint>(size).fill(0n));
+      for (let i = 0; i < size; i += 1) {
+        const pi = power[i];
+        const ni = next[i];
+        if (!pi || !ni) continue;
+        for (let t = 0; t < size; t += 1) {
+          const pit = pi[t] ?? 0n;
+          if (pit === 0n) continue;
+          const bt = base[t];
+          if (!bt) continue;
+          for (let j = 0; j < size; j += 1) ni[j] = (ni[j] ?? 0n) + pit * (bt[j] ?? 0n);
+        }
+      }
+      power = next;
+    }
+  }
+  if (!hyperbolic) return 0; // parabolic/reducible: spectral radius is exactly 1
+  const rho = spectralRadius(m0); // dominant eigenvalue is simple + well-separated here
+  return rho <= 1 ? 0 : Math.log(rho);
 }
 
 /**
  * Braid-entropy estimate: the homological lower bound
  * max(0, log ρ(Burau₋₁(word))). 0 for periodic/reducible-style words
  * (stable rankings, simple oscillation); positive for genuinely mixing
- * agenda dynamics. Computed via the renormalized log-spectral-radius so a long
- * word (realistic under `detectGaming`) yields the bound instead of overflowing.
+ * agenda dynamics.
+ *
+ * Short words (the common case, `word.length ≤ EXACT_BURAU_MAX_CROSSINGS`) are
+ * evaluated on the EXACT INTEGER Burau image ({@link exactBurauEntropy}), which
+ * returns a hard 0 for parabolic/reducible words — no spurious positive entropy
+ * from a floating renormalized residual. Longer words fall back to the
+ * renormalized log-spectral-radius (which never overflows) with a
+ * noise-floor snap. NOTE: the fallback path does NOT restore the strict
+ * homological lower-bound guarantee for adversarial EXACT-CONJUGATE parabolic
+ * words beyond EXACT_BURAU_MAX_CROSSINGS crossings — those can still surface a
+ * sub-noise-floor phantom; the snap suppresses only the reachable-word noise,
+ * not an adversary who deliberately drives the residual just above it.
  */
 export function braidEntropyEstimate(strands: number, word: readonly BraidGenerator[]): number {
   if (strands < 3 || word.length === 0) return 0;
+  const exact = exactBurauEntropy(strands, word);
+  if (exact !== null) return exact;
   const logRho = burauWordLogSpectralRadius(strands, word);
-  return Number.isFinite(logRho) ? Math.max(0, logRho) : 0;
+  if (!Number.isFinite(logRho) || logRho <= LOG_RHO_NOISE_FLOOR) return 0;
+  return logRho;
 }
 
 export interface GamingDetectionConfig {

@@ -102,6 +102,10 @@ function detectDappMimicry(hostname: string, knownDomains: readonly string[]): b
   }
   const hostLabels = host.split('.');
   const hostRegistrable = registrableDomain(host);
+  // (c) Any xn-- (punycode/IDN) label on a non-known host: the WHATWG URL parser
+  //     ASCII-encodes homograph domains, defeating the brand-substring/edit-distance
+  //     checks below, so flag IDN hosts here (interstitial only, per §18.5 proportionality).
+  if (hostLabels.some((label) => label.startsWith('xn--'))) return true;
   for (const domain of knownDomains) {
     const brand = domain.split('.')[0] ?? domain;
     // (a) brand label appears anywhere in the hostname's labels.

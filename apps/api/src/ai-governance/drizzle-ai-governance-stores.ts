@@ -175,7 +175,13 @@ export class DrizzleModelRegistryStore implements ModelRegistryStore {
       conditions.push(sql`${aiModelCards.card}->>'owner' = ${filter.owner}`);
     }
     if (filter.purpose !== undefined) {
-      conditions.push(sql`${aiModelCards.card}->>'purpose' like '%' || ${filter.purpose} || '%'`);
+      // Escape LIKE metacharacters so % and _ are matched literally — this makes
+      // the Drizzle result set equal the in-memory `card.purpose.includes(...)`
+      // literal-substring semantics for the same input (still parameterized).
+      const escaped = filter.purpose.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+      conditions.push(
+        sql`${aiModelCards.card}->>'purpose' like '%' || ${escaped} || '%' escape '\\'`,
+      );
     }
     const rows = await this.#db
       .select()

@@ -79,13 +79,13 @@ export async function recordNotificationShown(at: Date = new Date()): Promise<vo
   try {
     const db = await openMeterDb();
     const day = utcDay(at);
-    const existing = await idbRequest<DayCount | undefined>(
-      db.transaction(METER_STORE, 'readonly').objectStore(METER_STORE).get(day),
-    );
-    const count = (existing?.count ?? 0) + 1;
-    await idbRequest(
-      db.transaction(METER_STORE, 'readwrite').objectStore(METER_STORE).put({ day, count }),
-    );
+    // Share ONE readwrite transaction for the get and the put: IndexedDB
+    // serializes overlapping readwrite transactions scoped to the same store,
+    // so concurrent increments (SW + client) can no longer both read the
+    // pre-increment value and lose an update.
+    const store = db.transaction(METER_STORE, 'readwrite').objectStore(METER_STORE);
+    const existing = await idbRequest<DayCount | undefined>(store.get(day));
+    await idbRequest(store.put({ day, count: (existing?.count ?? 0) + 1 }));
     db.close();
   } catch {
     // Non-fatal.

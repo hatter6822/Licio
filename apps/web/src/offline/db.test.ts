@@ -83,6 +83,33 @@ describe('raw CRUD + indexes', () => {
   });
 });
 
+describe('versionchange self-close', () => {
+  it('drops the memo so getDb() reopens after a versionchange self-close', async () => {
+    // Prime the memoised connection through getDb().
+    await getDb();
+
+    // Fire `versionchange` on the live connection (a deleteDatabase from
+    // "another tab" is the simplest trigger). The handler closes the
+    // connection and — with the fix — clears the module memo so it is not
+    // blocked and getDb() no longer hands out the dead handle.
+    await deleteDatabase(DB_NAME);
+
+    // The next getDb() must hand back a FRESH open connection, not the closed
+    // handle (which would reject every request with InvalidStateError).
+    await rawPut(STORE.savedStories, {
+      schemaVersion: 1,
+      storyId: '99999999-9999-4999-8999-999999999999',
+      title: 'After versionchange',
+      source: 'Wire',
+      url: null,
+      roomId: null,
+      savedAt: 2000,
+    });
+    const record = await rawGet(STORE.savedStories, '99999999-9999-4999-8999-999999999999');
+    expect(record).toBeDefined();
+  });
+});
+
 describe('migrations', () => {
   it('applies a later migration that transforms existing records', async () => {
     const name = `licio-migrate-${Math.random().toString(36).slice(2)}`;

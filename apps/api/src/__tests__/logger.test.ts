@@ -15,8 +15,44 @@ describe('Logger', () => {
   });
 
   it('should redact sensitive fields', () => {
-    const logger = createLogger('info');
-    expect(logger).toBeDefined();
+    const chunks: string[] = [];
+    const dest = {
+      write: (s: string) => {
+        chunks.push(s);
+      },
+    };
+    const logger = createLogger('info', dest);
+    logger.info(
+      {
+        token: 't',
+        secret: 's',
+        apiKey: 'k',
+        privateKey: 'pk',
+        seedPhrase: 'sp',
+        mnemonic: 'mn',
+        password: 'pw',
+        req: { headers: { authorization: 'Bearer x', cookie: 'sid=1' } },
+        res: { headers: { 'set-cookie': 'sid=1' } },
+      },
+      'msg',
+    );
+    const line: Record<string, unknown> = JSON.parse(chunks.at(-1) ?? '{}');
+
+    expect(line['token']).toBe('[REDACTED]');
+    expect(line['secret']).toBe('[REDACTED]');
+    expect(line['apiKey']).toBe('[REDACTED]');
+    expect(line['privateKey']).toBe('[REDACTED]');
+    expect(line['seedPhrase']).toBe('[REDACTED]');
+    expect(line['mnemonic']).toBe('[REDACTED]');
+    expect(line['password']).toBe('[REDACTED]');
+
+    const req = line['req'] as { headers: Record<string, unknown> };
+    expect(req.headers['authorization']).toBe('[REDACTED]');
+    expect(req.headers['cookie']).toBe('[REDACTED]');
+
+    // This assertion catches a typo in the bracketed 'res.headers["set-cookie"]' path.
+    const res = line['res'] as { headers: Record<string, unknown> };
+    expect(res.headers['set-cookie']).toBe('[REDACTED]');
   });
 });
 

@@ -24,7 +24,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { emitPrivacyRequestEvent } from '../events/privacy-events.js';
 import { getEventPipelineServices } from '../events/services.js';
-import { randomToken } from '../identity/crypto.js';
+import { randomToken, sha256Hex } from '../identity/crypto.js';
 import { verifyDownloadToken } from '../identity/object-store.js';
 import {
   exportObjectKey,
@@ -43,7 +43,7 @@ import {
 } from '../middleware/auth.js';
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60_000;
-const cancelTokenKey = (token: string) => `delcancel:${token}`;
+const cancelTokenKey = (token: string) => `delcancel:${sha256Hex(token)}`;
 const u = { error: { code: 'unauthenticated', message: 'Authentication required' } } as const;
 
 export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentityServices) {

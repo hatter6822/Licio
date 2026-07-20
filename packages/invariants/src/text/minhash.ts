@@ -47,9 +47,12 @@ export const MINHASH_NUM_HASHES = 128;
 export const MINHASH_LSH_BANDS = 32;
 export const MINHASH_LSH_ROWS = 4;
 
-// Compile-time-checked relationship: bands × rows must cover the signature.
-const _bandsTimesRows: typeof MINHASH_NUM_HASHES = (MINHASH_LSH_BANDS * MINHASH_LSH_ROWS) as 128;
-void _bandsTimesRows;
+// Runtime-checked at module load: bands × rows must cover the full signature.
+if (MINHASH_LSH_BANDS * MINHASH_LSH_ROWS !== MINHASH_NUM_HASHES) {
+  throw new Error(
+    `MinHash LSH banding must cover the signature: ${MINHASH_LSH_BANDS} bands × ${MINHASH_LSH_ROWS} rows !== ${MINHASH_NUM_HASHES} hashes`,
+  );
+}
 
 /** Smallest prime greater than 2³² (universal-hash modulus). */
 const PRIME_NUMBER = 4_294_967_311;

@@ -54,6 +54,21 @@ describe('reservations + ladder (WS-R.5.1)', () => {
     expect(computeLaneBudget(100 * 1024).c0MinBytes).toBe(C0_MIN_BYTES);
   });
 
+  it('keeps the B4 bulk lane structurally dead unless the §15.3 bulk path is active', () => {
+    // Default (no bulk opt-in): B4 weight and cap are 0 at every rung.
+    expect(computeLaneBudget(600 * 1024).weights.B4).toBe(0);
+    expect(computeLaneBudget(600 * 1024).caps.B4).toBe(0);
+    expect(computeLaneBudget(600 * 1024, true).caps.B4).toBe(0);
+    // With bulk allowed: B4 draws only leftover bytes above the 512 KiB rung,
+    // and its weight sits below E2/M3 so it is served last.
+    const bulk = computeLaneBudget(600 * 1024, false, true);
+    expect(bulk.weights.B4).toBe(5);
+    expect(bulk.weights.B4).toBeLessThan(bulk.weights.E2);
+    expect(bulk.caps.B4).toBe(Math.floor(0.05 * 600 * 1024));
+    // Below the 512 KiB rung, B4 stays 0 even when bulk is allowed.
+    expect(computeLaneBudget(100 * 1024, false, true).caps.B4).toBe(0);
+  });
+
   it('forbids non-P0 material in C0', () => {
     expect(() => assertC0Purity('C0', 1)).toThrow();
     expect(() => assertC0Purity('C0', 0)).not.toThrow();
@@ -140,6 +155,54 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     expect(firstMediaIndex).toBeGreaterThan(0); // media DOES ship, but after C0
   });
 
+  it('ships a B4 bulk candidate only when bulkAllowed is threaded through scheduleTransfer', () => {
+    const bulk = cand({ cid: 'prefetch', lane: 'B4', priority: 4, bytes: 5_000 });
+    const opts = { budgetBytes: 600 * 1024, nowMs: 0 };
+    // Default (no bulkAllowed) ⇒ the B4 lane budget is zero, so nothing pre-fetches.
+    const off = scheduleTransfer([bulk], opts);
+    expect(off.usedByLane.B4).toBe(0);
+    expect(off.order.some((c) => c.lane === 'B4')).toBe(false);
+    // bulkAllowed threaded through ⇒ B4 gets a reservation and the candidate ships
+    // (regression: the option was unreachable from scheduleTransfer, capping B4 at 0).
+    const on = scheduleTransfer([bulk], { ...opts, bulkAllowed: true });
+    expect(on.usedByLane.B4).toBeGreaterThan(0);
+    expect(on.order.some((c) => c.lane === 'B4')).toBe(true);
+  });
+
+  it('defers B4 bulk behind a schedulable higher-lane (T1) candidate', () => {
+    // Bulk is leftover-only: even with bulkAllowed, a B4 object must not be emitted
+    // while a T1 head is still schedulable — otherwise it could consume budget the
+    // higher-priority candidate needs.
+    const t1 = cand({ cid: 't1', lane: 'T1', priority: 1, bytes: 50_000 });
+    const bulk = cand({ cid: 'b4', lane: 'B4', priority: 4, bytes: 1_000 });
+    const result = scheduleTransfer([bulk, t1], {
+      budgetBytes: 600 * 1024,
+      nowMs: 0,
+      bulkAllowed: true,
+    });
+    const t1Index = result.order.findIndex((c) => c.cid === 't1');
+    const b4Index = result.order.findIndex((c) => c.cid === 'b4');
+    expect(t1Index).toBeGreaterThanOrEqual(0);
+    expect(b4Index).toBeGreaterThan(t1Index); // B4 only after T1 is satisfied
+  });
+
+  it('does not deadlock when a higher lane depends on a B4 object (B4 flows to unblock it)', () => {
+    // An M3 candidate whose closure REQUIRES a B4 object: the B4 deferral gate must let
+    // that B4 flow (it is the prerequisite), or the two deadlock and neither is placed.
+    const bulkDep = cand({ cid: 'b4dep', lane: 'B4', priority: 4, bytes: 1_000 });
+    const m3 = cand({ cid: 'm3', lane: 'M3', priority: 3, bytes: 2_000, requires: ['b4dep'] });
+    const result = scheduleTransfer([m3, bulkDep], {
+      budgetBytes: 600 * 1024,
+      nowMs: 0,
+      mediaRequested: true,
+      bulkAllowed: true,
+    });
+    const b4Index = result.order.findIndex((c) => c.cid === 'b4dep');
+    const m3Index = result.order.findIndex((c) => c.cid === 'm3');
+    expect(b4Index).toBeGreaterThanOrEqual(0); // the B4 dependency ships…
+    expect(m3Index).toBeGreaterThan(b4Index); // …before its M3 dependent (no deadlock)
+  });
+
   it('never places a dependent before its dependency', () => {
     const dependency = cand({ cid: 'cap', lane: 'C0', priority: 0, bytes: 50 });
     const dependent = cand({ cid: 'post', lane: 'T1', priority: 1, bytes: 100, requires: ['cap'] });
@@ -172,6 +235,51 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     const firstMediaIndex = result.order.findIndex((c) => c.lane === 'M3');
     expect(c0Index).toBeGreaterThanOrEqual(0); // the C0 object is placed (after its dep)
     expect(firstMediaIndex).toBeGreaterThan(c0Index); // media only AFTER the C0 closure lands
+  });
+
+  it('releases the media gate when a C0 object depends on a never-placeable prerequisite', () => {
+    // A C0 control object depends on a prerequisite that can NEVER be placed in this run
+    // (here: a C0 dep far larger than the whole budget).  Membership-only "pending" logic
+    // treated the dep as in-progress and held the media gate forever (total M3/B4
+    // starvation + a maxRounds busy-spin).  `everPlaceable` recognises the dep can never
+    // fit, so the impossible C0 closure no longer holds the gate and media ships.
+    const impossibleDep = cand({ cid: 'huge', lane: 'C0', priority: 0, bytes: 100_000_000 });
+    const c0blocked = cand({
+      cid: 'c0blocked',
+      lane: 'C0',
+      priority: 0,
+      bytes: 100,
+      requires: ['huge'],
+    });
+    const media = Array.from({ length: 5 }, (_, i) =>
+      cand({ cid: `m${i}`, lane: 'M3', priority: 3, bytes: 10_000 }),
+    );
+    const result = scheduleTransfer([...media, c0blocked, impossibleDep], {
+      budgetBytes: 600 * 1024,
+      mediaRequested: true,
+      nowMs: 0,
+    });
+    // Neither the impossible dep nor the object gated on it can be placed.
+    expect(result.order.some((c) => c.cid === 'huge')).toBe(false);
+    expect(result.order.some((c) => c.cid === 'c0blocked')).toBe(false);
+    // But media is NOT starved — the unsatisfiable C0 closure released the gate.
+    expect(result.order.some((c) => c.lane === 'M3')).toBe(true);
+  });
+
+  it('does not starve a pinned head behind smaller unpinned objects under contention (§15.6)', () => {
+    // A large pinned T1 object + many small unpinned T1 objects, with a budget that
+    // cannot fit them all.  The deficit skip-over bug placed the smalls (draining the
+    // lane budget) and never shipped the pinned head; the head-of-line DRR fix places
+    // the pinned object FIRST (orderLane ranks pinned ahead of smaller ones).
+    const pinned = cand({ cid: 'pin', lane: 'T1', priority: 1, bytes: 8_000, pinned: true });
+    const smalls = Array.from({ length: 40 }, (_, i) =>
+      cand({ cid: `s${i}`, lane: 'T1', priority: 1, bytes: 2_000 }),
+    );
+    const result = scheduleTransfer([...smalls, pinned], { budgetBytes: 200 * 1024, nowMs: 0 });
+    const pinIndex = result.order.findIndex((c) => c.cid === 'pin');
+    expect(pinIndex).toBeGreaterThanOrEqual(0); // placed, not starved
+    const firstSmallIndex = result.order.findIndex((c) => c.cid.startsWith('s'));
+    expect(pinIndex).toBeLessThan(firstSmallIndex); // and shipped ahead of the smalls
   });
 
   it('stops before budget overflow and is deterministic', () => {

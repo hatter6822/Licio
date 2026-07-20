@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { randomBytes, toBase64Url } from '../crypto/runtime.js';
 import { generateDeviceSigningKeyPair } from '../crypto/signatures.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { type OpIntakeContext, sealOp } from '../reducer/validate-op.js';
 import type { PrivateEncryptedEnvelope } from '../schemas/envelope.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
@@ -20,13 +21,24 @@ import {
 } from '../sync/archive.js';
 
 const KEY = 'AAAA';
+// op_id is DERIVED from (author_device_id, author_seq) (§14.3.2); tests label ops
+// and this registry maps a label to its real derived id for parent references +
+// assertions.  mkOp is async, awaited in call order.
+const opIds = new Map<string, string>();
+const opIdOf = (label: string): string => {
+  const value = opIds.get(label);
+  if (value === undefined) throw new Error(`no op id recorded for label ${label}`);
+  return value;
+};
 let n = 0;
-function mkOp(
+async function mkOp(
   body: PrivateOpBody,
-  opId: string,
+  label: string,
   authorSeq: number,
   parents: string[],
-): PrivateRoomOp {
+): Promise<PrivateRoomOp> {
+  const opId = await deriveOpId('founder-dev', authorSeq);
+  opIds.set(label, opId);
   return privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
     room_id: 'room-1',
@@ -38,7 +50,7 @@ function mkOp(
     created_at: '2026-06-22T00:00:00Z',
     created_at_bucket: '2026-06-22T00',
     lamport: `${++n}`,
-    parents,
+    parents: parents.map((p) => opIds.get(p) ?? p),
     body,
   });
 }
@@ -82,9 +94,9 @@ async function setup() {
   };
   const roomIdHash = toBase64Url(roomIdCommitment);
   const ops = [
-    mkOp(memberAdd, 'genesis', 0, []),
-    mkOp(storyCreate('s1'), 'cs1', 1, ['genesis']),
-    mkOp(storyCreate('s2'), 'cs2', 2, ['cs1']),
+    await mkOp(memberAdd, 'genesis', 0, []),
+    await mkOp(storyCreate('s1'), 'cs1', 1, ['genesis']),
+    await mkOp(storyCreate('s2'), 'cs2', 2, ['cs1']),
   ];
   const envelopes: PrivateEncryptedEnvelope[] = [];
   for (const op of ops) envelopes.push(await sealOp(op, sealParams));
@@ -150,7 +162,11 @@ describe('importBlockArchive — no container-conferred trust (§15.9)', () => {
     expect(result.roomIdHash).toBe(roomIdHash);
     expect(result.accepted).toHaveLength(3);
     expect(result.rejected).toHaveLength(0);
-    expect(result.accepted.map((a) => a.op.op_id)).toStrictEqual(['genesis', 'cs1', 'cs2']);
+    expect(result.accepted.map((a) => a.op.op_id)).toStrictEqual([
+      opIdOf('genesis'),
+      opIdOf('cs1'),
+      opIdOf('cs2'),
+    ]);
   });
 
   it('rejects an archive for a DIFFERENT room up front, before any crypto (PRIV-SYNC-2)', async () => {

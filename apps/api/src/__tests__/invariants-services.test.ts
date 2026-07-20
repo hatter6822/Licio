@@ -114,6 +114,47 @@ describe('MERI service (WS-H.2)', () => {
     expect(redundancy).toBeGreaterThanOrEqual(0);
     expect(redundancy).toBeLessThanOrEqual(1);
   });
+
+  it('serves N candidates from ONE snapshot read, not one store read per item', async () => {
+    const fixture = freshInvariantServices();
+    const { originalId, copyId, freshId } = await seedSyndicatedPair(fixture);
+    const window = hourWindow(Date.now());
+    const target = { targetType: 'feed' as const, targetId: GLOBAL_FEED_TARGET_ID };
+    const outputs = await fixture.invariants.meri.computeBatch([target], window);
+    const first = outputs[0];
+    if (!first) throw new Error('no MERI output');
+    await fixture.events.invariantStore.upsert({
+      invariantType: 'MERI',
+      targetType: 'feed',
+      targetId: GLOBAL_FEED_TARGET_ID,
+      timeWindow: window,
+      version: first.version,
+      scoreVector: first.score_vector,
+      explanationSummary: null,
+      confidence: first.confidence,
+      coverage: first.coverage,
+      reasonCodes: first.reason_codes,
+      fallbackUsed: first.fallback_used,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt: new Date().toISOString(),
+    });
+    const latestSpy = vi.spyOn(fixture.events.invariantStore, 'latest');
+    const hook = fixture.events.hooks.redundancy;
+    // A whole feed render's worth of synchronous candidate lookups collapses to
+    // at most ONE in-flight global-feed read (the TTL snapshot), never one per item.
+    for (const id of [originalId, copyId, freshId, originalId, copyId]) hook?.(id);
+    expect(latestSpy.mock.calls.length).toBeLessThanOrEqual(1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // After the snapshot warms, every candidate reads from memory: still ≤ 1 read.
+    for (const id of [originalId, copyId, freshId]) {
+      const r = hook?.(id) ?? -1;
+      expect(r).toBeGreaterThanOrEqual(0);
+      expect(r).toBeLessThanOrEqual(1);
+    }
+    expect(latestSpy.mock.calls.length).toBeLessThanOrEqual(1);
+    latestSpy.mockRestore();
+  });
 });
 
 describe('MFCI service (WS-H.3)', () => {
@@ -173,6 +214,40 @@ describe('MFCI service (WS-H.3)', () => {
     );
     expect(resolved?.status).toBe('cleared');
     expect(await fixture.invariants.mfciCases.listOpen(10)).toHaveLength(0);
+  });
+
+  it('does NOT freeze an arbitrary target on DISTRIBUTED synchrony (cohort signal, not a per-story freeze)', async () => {
+    const fixture = freshInvariantServices();
+    const nowMs = Date.now();
+    // 20 DISTINCT actors act once each on 20 DISTINCT targets, all inside a ~1s
+    // cluster: synchrony (cross-actor temporal clustering) is maximal while
+    // target_concentration stays near zero (no single target is piled onto). None
+    // of the per-target evidence identifies the caller-supplied `firstTarget` as
+    // anomalous, so it must NOT be frozen — distributed synchrony is a COHORT signal
+    // routed to the nightly tier, not an individual-target freeze.
+    const targetIds = Array.from({ length: 20 }, () => randomUUID());
+    const rows = targetIds.map((targetId, i) => ({
+      eventId: randomUUID(),
+      eventType: 'contribution.created',
+      topic: 'contribution.created',
+      timestamp: new Date(nowMs - i * 50).toISOString(),
+      privacyClassification: 'public' as const,
+      retentionTier: 'public_contribution' as const,
+      payload: { story_id: targetId },
+      ownerUserId: `actor-${i}`,
+      purgeAfter: null,
+    }));
+    await fixture.events.eventStore.insertMany(rows);
+    const firstTarget = targetIds[0] ?? '';
+    await fixture.events.hooks.mfci?.({
+      target_ids: [firstTarget],
+    } as never);
+    // No per-story freeze case for the uninvolved target, and its risk state stays
+    // normal (only target-scoped evidence raises an individual target's state).
+    expect(await fixture.invariants.mfciCases.listOpen(10)).toHaveLength(0);
+    expect((await fixture.invariants.mfciRiskStates.get(firstTarget))?.state ?? 'normal').toBe(
+      'normal',
+    );
   });
 
   it('batch fiber test attributes per-target scores under one shared conditioning', async () => {

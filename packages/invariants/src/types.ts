@@ -43,21 +43,18 @@ export const INVARIANT_TARGET_TYPES = [
 ] as const;
 export type InvariantTargetType = (typeof INVARIANT_TARGET_TYPES)[number];
 
+/**
+ * Semver `{major, minor, patch}` struct.
+ *
+ * @deprecated The emitted/persisted shapes carry `version` as the semver
+ * *text* (`string`) — see {@link InvariantOutput}, {@link InvariantOutputEnvelope},
+ * and the runner/card schema. This struct is retained only for a parser that
+ * splits that text; do not add it to any output row.
+ */
 export interface InvariantVersion {
   major: number;
   minor: number;
   patch: number;
-}
-
-export interface InvariantOutput {
-  type: InvariantType;
-  version: InvariantVersion;
-  confidence: number;
-  coverage: number;
-  reasonCodes: string[];
-  fallbackBehavior: 'degrade-gracefully' | 'fail-open' | 'fail-closed';
-  timestamp: string;
-  metadata?: Record<string, unknown>;
 }
 
 /** A computation target. */
@@ -70,6 +67,33 @@ export interface InvariantTarget {
 export interface InvariantTimeWindow {
   start: string;
   end: string;
+}
+
+/**
+ * The single §22.1 InvariantOutput SSOT — the shape production actually emits
+ * and persists. It reconciles the WS-H.1.1c {@link InvariantOutputEnvelope}
+ * (score vector, confidence, coverage, reason codes, fallback indicator,
+ * semver-text version) with the computation {@link InvariantTarget} and
+ * {@link InvariantTimeWindow}. The apps/api persisted row type
+ * (`InvariantOutputRecord`) is the storage projection of this shape.
+ */
+export interface InvariantOutput {
+  type: InvariantType;
+  target: InvariantTarget;
+  window: InvariantTimeWindow;
+  /** Semver text (e.g. `"1.0.0"`), matching the envelope/card schema. */
+  version: string;
+  /** Validated per invariant type before persist (WS-H.1.1d schemas). */
+  score_vector: Record<string, unknown>;
+  confidence: number;
+  /** Fraction of required inputs available and fresh (WS-H.1.1c). */
+  coverage: number;
+  /** Registry-validated reason codes; `[]` = unqualified output. */
+  reason_codes: string[];
+  /** Derived from the reason codes (WS-H.1.1c). */
+  fallback_used: boolean;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
 }
 
 /** The WS-H.1.1c envelope every emitted output carries. */

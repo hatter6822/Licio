@@ -236,15 +236,17 @@ describe('assignment', () => {
     svc.reviewerQueues = async (id) => (id === A ? ['appeal-queue'] : ['report-queue']);
     // A report case may only go to B; an appeal may only go to A.
     expect(await autoAssignCase(svc)).toBe(B);
-    expect(await assignAppealReviewer(svc, null)).toBe(A);
+    expect(await assignAppealReviewer(svc, [null])).toBe(A);
   });
 
-  it('assignAppealReviewer enforces independence (never the original)', async () => {
+  it('assignAppealReviewer enforces independence (never the original NOR the appellant)', async () => {
     await services.reviewerStatus.set(A, 'available', new Date(services.now()).toISOString());
     // Only A available, but A is the original decision-maker → null (no oracle).
-    expect(await assignAppealReviewer(services, A)).toBeNull();
+    expect(await assignAppealReviewer(services, [A])).toBeNull();
     await services.reviewerStatus.set(B, 'available', new Date(services.now()).toISOString());
-    expect(await assignAppealReviewer(services, A)).toBe(B);
+    expect(await assignAppealReviewer(services, [A])).toBe(B);
+    // B is now the appellant → excluded too, so again no independent reviewer.
+    expect(await assignAppealReviewer(services, [A, B])).toBeNull();
   });
 });
 

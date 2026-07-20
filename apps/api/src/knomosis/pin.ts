@@ -9,7 +9,11 @@
 // values are permitted ONLY for `environment = local` (the in-memory dev/fake
 // gateway); scripts/check-knomosis-pins.ts enforces the same rule in CI.
 
-import { KNOMOSIS_SIGNED_ACTION_TYPES, knomosisEnvironmentSchema } from '@licio/shared';
+import {
+  KNOMOSIS_SIGNED_ACTION_TYPES,
+  KNOMOSIS_TYPED_DATA_REGISTRY_VERSION,
+  knomosisEnvironmentSchema,
+} from '@licio/shared';
 import { z } from 'zod';
 import rawPinConfig from './pin.config.json' with { type: 'json' };
 
@@ -66,6 +70,18 @@ export const pinConfigSchema = z
   })
   .strict()
   .superRefine((config, ctx) => {
+    // The pin file's typed-data registry version must equal the code's SSOT
+    // (`KNOMOSIS_TYPED_DATA_REGISTRY_VERSION`).  Without this the two can silently
+    // diverge — the pin could advertise a registry version the running EIP-712
+    // signer/verifier does not implement, so wallet signatures verify against the
+    // wrong domain.  Fail closed at boot (scripts/check-knomosis-pins.ts mirrors it).
+    if (config.typed_data_registry_version !== KNOMOSIS_TYPED_DATA_REGISTRY_VERSION) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['typed_data_registry_version'],
+        message: `pin typed_data_registry_version "${config.typed_data_registry_version}" != code SSOT "${KNOMOSIS_TYPED_DATA_REGISTRY_VERSION}"`,
+      });
+    }
     const ids = new Set<string>();
     const nonRetiredEnvChain = new Set<string>();
     for (const [i, d] of config.deployments.entries()) {

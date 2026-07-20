@@ -52,6 +52,7 @@ export const verdictRejectionCodeSchema = z.enum([
   'per_action_cap_exceeded',
   'per_window_cap_exceeded',
   'min_interval_violated',
+  'invalid_timestamp',
   'timelock_not_elapsed',
   'coi_required',
   'investment_band_violated',

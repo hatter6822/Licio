@@ -454,6 +454,28 @@ export async function processSubmittedStory(
         : null;
   if (deferSeconds !== null) {
     // robots unreachable (fail closed) or crawl-delay window: schedule retry.
+    if (
+      !verdict.allowed &&
+      verdict.reason === 'robots_unreachable' &&
+      attempt >= MAX_EXTRACTION_ATTEMPTS
+    ) {
+      // Terminal: a persistently-unreachable robots.txt fails closed on every
+      // attempt, so an unbounded defer would retry forever and drain the retry
+      // budget. Degrade to a link-only story from local submission text (the
+      // same finalization as a robots-disallowed link, mirroring the
+      // fetch-failure terminal above) so it still enters the feed and never
+      // re-enters the retry budget. The crawl-delay path stays unbounded: it
+      // self-resolves once the publisher's window elapses.
+      await emitLinkOnlyClassified(
+        ingestion,
+        events,
+        story,
+        config,
+        'pipeline.extraction_exhausted',
+      );
+      ingestion.metrics.increment('pipeline.extraction_exhausted');
+      return;
+    }
     await ingestion.reviewQueue.insert({
       kind: 'extraction_failure',
       storyId: story.storyId,

@@ -233,6 +233,30 @@ export async function applyAction(
           'Enforcement is delayed pending integrity review of a coordinated-report incident.',
       };
     }
+    // The target-keyed check above covers a content case only when THIS action
+    // hits the same content id.  An account action against the SUBJECT of a
+    // content-target incident carries a different target_id, so also hold when
+    // the subject has ANY open, enforcement-delayed case about them — a brigade
+    // cannot be evaded by pivoting the client-supplied target_type to `account`.
+    if (subjectUserId) {
+      // An EXISTENCE check over the full open set — not a bounded `list` page: a
+      // subject with more open cases than a page limit could otherwise carry the
+      // enforcement-delayed coordinated-report case off-page and slip the pivot.
+      const openDelayed = await services.cases.count({
+        subjectUserId,
+        status: ['new', 'in_progress', 'escalated'],
+        enforcementDelayed: true,
+      });
+      if (openDelayed > 0) {
+        services.metrics.increment('moderation.action.enforcement_delayed');
+        return {
+          ok: false,
+          code: 'enforcement_delayed',
+          message:
+            'Enforcement is delayed pending integrity review of a coordinated-report incident.',
+        };
+      }
+    }
   }
 
   // 1. Record the action FIRST — a durable record before any enforcement side

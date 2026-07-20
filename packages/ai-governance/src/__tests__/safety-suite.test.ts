@@ -90,6 +90,23 @@ describe('WS-K.1.2c runSafetySuite', () => {
     expect(result.categories.find((c) => c.category === 'data_minimization')?.passed).toBe(false);
   });
 
+  it('passes data_minimization when a forbidden value is empty/whitespace-only', () => {
+    // An empty (or whitespace-only) needle must not false-positive on every
+    // output — `''.includes('')` is always true — so guard against empty needles.
+    const result = runSafetySuite({
+      cases: [
+        {
+          output_text: 'A perfectly ordinary summary that leaks nothing.',
+          forbidden_cross_invocation_values: ['', '   '],
+        },
+      ],
+      harmful_term_denylist: [],
+      disclaimer_markers: [],
+    });
+    expect(result.categories.find((c) => c.category === 'data_minimization')?.passed).toBe(true);
+    expect(result.passed).toBe(true);
+  });
+
   it('fails sensitive_topic_handling without a disclaimer', () => {
     const result = runSafetySuite({
       cases: [{ output_text: 'just do it, no caveats', sensitive_topic: true }],

@@ -124,6 +124,12 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       '__Host-sid',
     );
 
+    // The confirm above burned its own step (WS-D.1.5b closes the enrollment-code
+    // replay).  Simulate the next step arriving — clearing the high-water mark —
+    // so a genuine later verify can succeed and its replay can then be rejected.
+    const replayUid = (await services.store.getUserByHandle('replayuser'))?.userId as string;
+    await services.otp.delete(`mfastep:${replayUid}`);
+
     const code = totp(secret, Date.now());
     const first = await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
@@ -131,9 +137,12 @@ describe('TOTP MFA enroll → confirm → verify', () => {
       body: JSON.stringify({ code }),
     });
     expect(first.status).toBe(200);
+    // The successful verify rotates the session (privilege-change fixation defense),
+    // so the replay must ride the NEW cookie.
+    const sidAfterFirst = cookie(first, '__Host-sid') || sidAfterConfirm;
     const replay = await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
-      headers: headers(sidAfterConfirm),
+      headers: headers(sidAfterFirst),
       body: JSON.stringify({ code }),
     });
     expect(replay.status).toBe(400);
@@ -164,12 +173,71 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(use.status).toBe(200);
     expect((await readJson<{ recovery_remaining: number }>(use)).recovery_remaining).toBe(9);
 
+    // The successful verify rotated the session; the reuse attempt rides the new cookie.
+    const sidAfterUse = cookie(use, '__Host-sid') || sid2;
     const reuse = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sidAfterUse),
+      body: JSON.stringify({ code: recovery }),
+    });
+    expect(reuse.status).toBe(400);
+  });
+
+  it('burns the confirm code so it cannot be replayed at /verify (WS-D.1.5b)', async () => {
+    const { app, sid } = await signup('confirmreplay');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const code = totp(secret, Date.now());
+    const sid2 = cookie(
+      await app.request('/v1/auth/mfa/totp/confirm', {
+        method: 'POST',
+        headers: headers(sid),
+        body: JSON.stringify({ code }),
+      }),
+      '__Host-sid',
+    );
+    // /confirm now seeds the same forward-only replay memory as /verify, so the
+    // identical enrollment code is a spent step — presenting it at /verify replays.
+    const replay = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code }),
+    });
+    expect(replay.status).toBe(400);
+    expect((await readJson<{ error: { code: string } }>(replay)).error.code).toBe('replayed');
+  });
+
+  it('rotates the session id on a successful /verify (privilege change)', async () => {
+    const { app, sid } = await signup('verifyrotate');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    const sid2 = cookie(confirm, '__Host-sid');
+    const recovery = (await readJson<{ recovery_codes: string[] }>(confirm))
+      .recovery_codes[0] as string;
+
+    // A recovery-code verify succeeds regardless of the TOTP step; it must mint a
+    // fresh, MFA-verified session id (mirroring /confirm and /disable rotation).
+    const verify = await app.request('/v1/auth/mfa/totp/verify', {
       method: 'POST',
       headers: headers(sid2),
       body: JSON.stringify({ code: recovery }),
     });
-    expect(reuse.status).toBe(400);
+    expect(verify.status).toBe(200);
+    const sid3 = cookie(verify, '__Host-sid');
+    expect(sid3).not.toBe('');
+    expect(sid3).not.toBe(sid2);
+    expect(await sessionMfaVerified(sid3)).toBe(true);
   });
 
   it('refuses to re-enroll over active MFA without the current factor', async () => {
@@ -244,5 +312,42 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect(disable.status).toBe(200);
     expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(false);
     expect((await services.store.getAuth(userId))?.mfaSecret).toBeNull();
+  });
+
+  it('refuses to DISABLE active MFA from a non-mfaVerified session (§WS-D.1.5b)', async () => {
+    const { app, sid } = await signup('disableattacker');
+    const userId = (await services.store.getUserByHandle('disableattacker'))?.userId as string;
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
+    const activeSecret = (await services.store.getAuth(userId))?.mfaSecret;
+
+    // A FRESH session satisfies primary step-up but has NOT cleared the current TOTP
+    // (mfaVerified=false).  /disable must refuse, leaving MFA intact — otherwise a
+    // phished primary credential could disable + re-enroll an attacker-chosen secret.
+    const fresh = await createSession(services.sessions, {
+      userId,
+      authMethod: 'webauthn',
+      deviceLabel: 'attacker-device',
+      rememberMe: false,
+    });
+    const blocked = await app.request('/v1/auth/mfa/totp/disable', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${fresh.token}`),
+    });
+    expect(blocked.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(blocked)).error.code).toBe(
+      'mfa_reverify_required',
+    );
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
+    expect((await services.store.getAuth(userId))?.mfaSecret).toBe(activeSecret);
   });
 });

@@ -62,6 +62,7 @@ export type KeyStoreReason =
   | 'tier_not_allowed'
   | 'malformed_material'
   | 'weak_kdf_params'
+  | 'weak_prf_output'
   | 'invalid_record';
 
 /** Thrown by the key store; `unlock_failed` ⇒ wrong passphrase/key/PRF. */
@@ -156,9 +157,18 @@ export async function deriveArgon2idWrapKey(
 // load rather than honored — the at-rest passphrase wrap is only as strong as these params.
 export const ARGON2ID_MIN_T = 2;
 export const ARGON2ID_MIN_M = 19_456;
+// The at-rest byte fields (salt, nonce, ciphertext, PRF salt) are all
+// `toBase64Url` output; pin the shape at the schema floor — matching the sibling
+// recovery-kit schema — so a record with a non-base64url (e.g. truncated or
+// re-encoded) field is rejected on load rather than blowing up later in
+// `fromBase64Url`/AEAD with a less legible error.
+const base64Url = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z0-9_-]+$/, 'expected base64url (no padding)');
 const argon2idKdfSchema = z
   .object({
-    salt: z.string().min(1),
+    salt: base64Url,
     t: z.number().int().min(ARGON2ID_MIN_T),
     m: z.number().int().min(ARGON2ID_MIN_M),
     p: z.number().int().min(1),
@@ -173,8 +183,8 @@ export const protectedKeyRecordSchema = z.discriminatedUnion('tier', [
       roomId: z.string().min(1).max(128),
       tier: z.literal('argon2id-passphrase'),
       kdf: argon2idKdfSchema,
-      nonce: z.string().min(1),
-      ciphertext: z.string().min(1),
+      nonce: base64Url,
+      ciphertext: base64Url,
     })
     .strict(),
   z
@@ -182,8 +192,8 @@ export const protectedKeyRecordSchema = z.discriminatedUnion('tier', [
       schema: z.literal('licio.private.key_record.v1'),
       roomId: z.string().min(1).max(128),
       tier: z.literal('webcrypto-non-extractable'),
-      nonce: z.string().min(1),
-      ciphertext: z.string().min(1),
+      nonce: base64Url,
+      ciphertext: base64Url,
     })
     .strict(),
   z
@@ -192,9 +202,9 @@ export const protectedKeyRecordSchema = z.discriminatedUnion('tier', [
       roomId: z.string().min(1).max(128),
       tier: z.literal('passkey-prf'),
       /** The per-credential PRF salt the client feeds to WebAuthn `prf`. */
-      prfSalt: z.string().min(1),
-      nonce: z.string().min(1),
-      ciphertext: z.string().min(1),
+      prfSalt: base64Url,
+      nonce: base64Url,
+      ciphertext: base64Url,
     })
     .strict(),
   z
@@ -375,6 +385,19 @@ export async function unlockNonExtractable(
 
 // --- Tier 3: passkey PRF (the WebAuthn `prf` extension output) ---------------
 
+/** Reject a PRF output that cannot supply a full AES-256 wrapping key.  Without
+ *  this, `prfOutput.slice(0, 32)` on a short output silently imports a 16/24-byte
+ *  key — a SILENT downgrade to AES-128/192.  A conformant WebAuthn `prf` output is
+ *  32 bytes; anything shorter is a broken authenticator, not a weaker-but-ok key. */
+function assertPrfStrength(prfOutput: Uint8Array): void {
+  if (prfOutput.length < WRAP_KEY_LENGTH) {
+    throw new KeyStoreError(
+      'weak_prf_output',
+      `passkey PRF output is ${prfOutput.length} bytes; need ≥ ${WRAP_KEY_LENGTH} for AES-256`,
+    );
+  }
+}
+
 /** Protect material under a WebAuthn-PRF-derived key (§10.8 tier 3).  The 32-byte
  *  `prfOutput` is obtained by the client from `navigator.credentials.get` with
  *  the `prf` extension; `prfSalt` is stored so unlock requests the same output. */
@@ -383,6 +406,7 @@ export async function protectWithPasskeyPrf(
   prfOutput: Uint8Array,
   prfSalt: Uint8Array,
 ): Promise<ProtectedKeyRecord> {
+  assertPrfStrength(prfOutput);
   const wrapKey = await importWrapKey(prfOutput.slice(0, WRAP_KEY_LENGTH), 'encrypt');
   const { nonce, ciphertext } = await sealMaterial(material, wrapKey, 'passkey-prf');
   return {
@@ -404,6 +428,7 @@ export async function unlockWithPasskeyPrf(
   if (record.tier !== 'passkey-prf') {
     throw new KeyStoreError('tier_mismatch', `expected passkey-prf, got ${record.tier}`);
   }
+  assertPrfStrength(prfOutput);
   const wrapKey = await importWrapKey(prfOutput.slice(0, WRAP_KEY_LENGTH), 'decrypt');
   return openMaterial(record, wrapKey);
 }

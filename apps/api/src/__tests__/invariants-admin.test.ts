@@ -123,9 +123,30 @@ describe('promotion endpoint (WS-H.1.2e)', () => {
     observed_confidence: 0.9,
   };
 
+  const seedRun = async (
+    fixture: ReturnType<typeof freshInvariantServices>,
+    daysAgo: number,
+  ): Promise<void> => {
+    await fixture.invariants.runMetadata.append({
+      invariantType: 'MERI',
+      tier: 'batch',
+      targetCount: 1,
+      durationMs: 1,
+      success: true,
+      failureReason: null,
+      startedAt: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+    });
+    fixture.invariants.meri.health.observe(1, [
+      { coverage: 0.95, confidence: 0.9, fallback_used: false },
+    ]);
+  };
+
   it('rejects an under-evidenced promotion with 422 and applies a valid one', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    // Only 1 day of MEASURED shadow so far: the promotion gate rejects on the real
+    // duration regardless of the self-reported number.
+    await seedRun(fixture, 1);
     const rejected = await adminRequest(fixture, steward.cookie, '/promotions', {
       method: 'POST',
       body: JSON.stringify({
@@ -138,6 +159,8 @@ describe('promotion endpoint (WS-H.1.2e)', () => {
     });
     expect(rejected.status).toBe(422);
 
+    // 30 days of measured shadow now (an earlier backdated run) ⇒ the gate passes.
+    await seedRun(fixture, 30);
     const applied = await adminRequest(fixture, steward.cookie, '/promotions', {
       method: 'POST',
       body: JSON.stringify({

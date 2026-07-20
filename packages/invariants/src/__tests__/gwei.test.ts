@@ -289,6 +289,24 @@ describe('GWEI release gate (WS-H.5.2c)', () => {
     expect(decision.overrideOwner).toBe('fairness-lead');
   });
 
+  it('rejects a blank-owner or blank-justification override (stays blocked)', () => {
+    const blankOwner = evaluateReleaseGate(
+      [{ cohortKey: 'minors', distance: 0.8, threshold: 0.4, protectedCohort: true }],
+      { owner: '', justification: '' },
+    );
+    expect(blankOwner.blocked).toBe(true);
+    expect(blankOwner.overridden).toBe(false);
+    expect(blankOwner.overrideOwner).toBeNull();
+
+    const blankJustification = evaluateReleaseGate(
+      [{ cohortKey: 'minors', distance: 0.8, threshold: 0.4, protectedCohort: true }],
+      { owner: 'fairness-lead', justification: '   ' },
+    );
+    expect(blankJustification.blocked).toBe(true);
+    expect(blankJustification.overridden).toBe(false);
+    expect(blankJustification.overrideOwner).toBeNull();
+  });
+
   it('passes cleanly when no cohort degrades', () => {
     const decision = evaluateReleaseGate([
       { cohortKey: 'minors', distance: 0.1, threshold: 0.4, protectedCohort: true },

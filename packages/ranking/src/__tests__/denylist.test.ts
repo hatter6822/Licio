@@ -41,6 +41,20 @@ describe('WS-I.2.1b denylist matcher', () => {
     expect(matchedFinancialPattern('roomTreasuryBalance')).not.toBeNull();
   });
 
+  it('denies camelCase multi-word financial compounds and their snake_case forms', () => {
+    // Regression: camelCase compounds (txHash, chainId, voteWeight,
+    // subscriptionAmount) must normalize through fieldNameSegments before the
+    // compound-containment check, so they cannot evade the WS-I.3.1g backstop.
+    expect(matchedFinancialPattern('txHash')).toBe('tx_hash');
+    expect(matchedFinancialPattern('tx_hash')).toBe('tx_hash');
+    expect(matchedFinancialPattern('chainId')).toBe('chain_id');
+    expect(matchedFinancialPattern('chain_id')).toBe('chain_id');
+    expect(matchedFinancialPattern('voteWeight')).toBe('vote_weight');
+    expect(matchedFinancialPattern('vote_weight')).toBe('vote_weight');
+    expect(matchedFinancialPattern('subscriptionAmount')).toBe('subscription_amount');
+    expect(matchedFinancialPattern('subscription_amount')).toBe('subscription_amount');
+  });
+
   it('is segment-exact: benign words sharing letters are NOT denied', () => {
     expect(matchedFinancialPattern('feed_mode')).toBeNull();
     expect(matchedFinancialPattern('tokenized_text')).toBeNull();

@@ -115,15 +115,27 @@ describe('ReturnTracker', () => {
     tracker.visit('item-1', MIN);
     tracker.visit('item-1', 2 * MIN);
     tracker.visit('item-1', 3 * MIN);
-    expect(tracker.isRageLoop('item-1')).toBe(true);
+    expect(tracker.isRageLoop('item-1', 3 * MIN)).toBe(true);
     expect(tracker.returnCount('item-1')).toBe(0);
+  });
+
+  it('isRageLoop is time-aware: the window ages out with no intervening visit', () => {
+    const tracker = new ReturnTracker({ rageWindowMs: 90 * 60_000, rageCount: 3 });
+    tracker.visit('item-1', 0);
+    tracker.visit('item-1', MIN);
+    tracker.visit('item-1', 2 * MIN);
+    tracker.visit('item-1', 3 * MIN); // burst → rage loop at 3*MIN
+    expect(tracker.isRageLoop('item-1', 3 * MIN)).toBe(true);
+    // Past the window (measured from the last burst return) with NO further visit:
+    // the stale stored timestamps must not report a rage loop any longer.
+    expect(tracker.isRageLoop('item-1', 3 * MIN + 90 * 60_000 + 1)).toBe(false);
   });
 
   it('counts a single genuine return from a notification', () => {
     const tracker = new ReturnTracker();
     tracker.visit('item-1', 0);
     tracker.visit('item-1', 45 * 60_000); // 45 min later
-    expect(tracker.isRageLoop('item-1')).toBe(false);
+    expect(tracker.isRageLoop('item-1', 45 * 60_000)).toBe(false);
     expect(tracker.returnCount('item-1')).toBe(1);
   });
 
@@ -137,7 +149,7 @@ describe('ReturnTracker', () => {
 
     // A genuine return long after the burst (window aged out, no longer a rage loop).
     tracker.visit('item-1', 3 * MIN + 10 * 60 * 60_000); // +10h
-    expect(tracker.isRageLoop('item-1')).toBe(false);
+    expect(tracker.isRageLoop('item-1', 3 * MIN + 10 * 60 * 60_000)).toBe(false);
     // Only the single post-burst genuine return counts; the 3 hostile returns stay
     // forfeited forever (regression guard for the resurrection bug).
     expect(tracker.returnCount('item-1')).toBe(1);
@@ -159,7 +171,7 @@ describe('ReturnTracker', () => {
     const after = new ReturnTracker({}, backing.store); // reload
     after.visit('x', 2 * MIN); // return 2
     after.visit('x', 3 * MIN); // return 3 → rage threshold
-    expect(after.isRageLoop('x')).toBe(true);
+    expect(after.isRageLoop('x', 3 * MIN)).toBe(true);
     expect(after.returnCount('x')).toBe(0);
   });
 

@@ -3,8 +3,3 @@ export * from './moderation.js';
 export * from './private-rooms.js';
 export * from './route-patterns.js';
 export * from './topics.js';
-
-export const APP_NAME = 'Licio';
-export const APP_VERSION = '0.1.0';
-export const DEFAULT_PAGE_SIZE = 25;
-export const MAX_PAGE_SIZE = 100;

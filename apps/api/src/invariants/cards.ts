@@ -251,7 +251,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
     ],
     fallback_behavior: 'No churn/gaming flags emitted for the affected windows.',
     approximation_notes:
-      'Entropy is the classical homological LOWER bound log ρ(reduced Burau at t = −1) — exact integer arithmetic; over/under signs follow the documented displacement convention (rank data carries no physical crossing).',
+      'Entropy is the classical homological LOWER bound log ρ(reduced Burau at t = −1) — over exact integer reduced-Burau generators at t = −1 (I ± N, N² = 0); ρ is obtained from the per-step Frobenius-renormalized matrix product (log ρ = Σ log sᵢ + log ρ(M̂)) so long words never overflow; over/under signs follow the documented displacement convention (rank data carries no physical crossing).',
     shadow_status: 'shadow',
     dependencies: ['WS-E aggregation windows (activity ranking until WS-I positions land)'],
   }),

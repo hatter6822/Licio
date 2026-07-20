@@ -294,6 +294,16 @@ export function migratePrivacySettings(blob: unknown): PrivacySettings {
   };
   // Parse through the strip-mode schema so retired/unknown keys are dropped
   // rather than rejected (a stored legacy blob is upgraded, not refused).
+  const parsed = privacySettingsMigrationSchema.safeParse(merged);
+  if (parsed.success) return parsed.data;
+  // Repair: any known field with an invalid stored value falls back to its
+  // (privacy-protective) default, keeping the helper total for arbitrary blobs.
+  for (const issue of parsed.error.issues) {
+    const top = issue.path[0];
+    if (typeof top === 'string' && top in base) {
+      merged[top] = base[top as keyof PrivacySettings];
+    }
+  }
   return privacySettingsMigrationSchema.parse(merged);
 }
 
@@ -301,9 +311,20 @@ export function migratePrivacySettings(blob: unknown): PrivacySettings {
 export function migratePersonalizationSettings(blob: unknown): PersonalizationSettings {
   const base = defaultPersonalizationSettings();
   if (!isRecord(blob)) return base;
-  return personalizationSettingsSchema.strip().parse({
+  const merged: Record<string, unknown> = {
     ...base,
     ...blob,
     schema_version: PRIVACY_SETTINGS_VERSION,
-  });
+  };
+  const parsed = personalizationSettingsSchema.strip().safeParse(merged);
+  if (parsed.success) return parsed.data;
+  // Repair: any known field with an invalid stored value falls back to its
+  // (privacy-protective) default, keeping the helper total for arbitrary blobs.
+  for (const issue of parsed.error.issues) {
+    const top = issue.path[0];
+    if (typeof top === 'string' && top in base) {
+      merged[top] = base[top as keyof PersonalizationSettings];
+    }
+  }
+  return personalizationSettingsSchema.strip().parse(merged);
 }

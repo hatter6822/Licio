@@ -27,6 +27,20 @@ export class RedisEphemeralStore implements EphemeralStore {
     await this.#redis.set(`${this.#prefix}${key}`, value, 'PX', Math.max(1, Math.ceil(ttlMs)));
   }
 
+  async setIfExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    // `SET … PX ttl XX` writes ONLY if the key still exists — atomic in Redis. If a
+    // concurrent GETDEL already consumed it, this returns null (no write), so a
+    // failed-attempt update can never resurrect a consumed single-use record.
+    const result = await this.#redis.set(
+      `${this.#prefix}${key}`,
+      value,
+      'PX',
+      Math.max(1, Math.ceil(ttlMs)),
+      'XX',
+    );
+    return result !== null;
+  }
+
   async get(key: string): Promise<string | null> {
     return this.#redis.get(`${this.#prefix}${key}`);
   }

@@ -27,20 +27,30 @@ export interface LaneBudget {
  * (§15.3) zeroes higher lanes for tiny budgets so a ≤8 KiB session carries only
  * C0 material.
  */
-export function computeLaneBudget(budgetBytes: number, mediaRequested = false): LaneBudget {
+export function computeLaneBudget(
+  budgetBytes: number,
+  mediaRequested = false,
+  bulkAllowed = false,
+): LaneBudget {
   const c0MinBytes = Math.min(C0_MIN_BYTES, budgetBytes);
   const weights: LaneByteMap = {
     C0: 25,
     T1: 40,
     E2: 25,
     M3: mediaRequested ? 10 : 0,
-    B4: 0,
+    // B4 is served last — a small weight below E2/M3, and only when the §15.3
+    // idle/unmetered/charging/opt-in bulk path is active (else structurally 0).
+    B4: bulkAllowed ? 5 : 0,
   };
-  const caps = ladderCaps(budgetBytes, mediaRequested);
+  const caps = ladderCaps(budgetBytes, mediaRequested, bulkAllowed);
   return { c0MinBytes, weights, caps };
 }
 
-function ladderCaps(budgetBytes: number, mediaRequested: boolean): LaneByteMap {
+function ladderCaps(
+  budgetBytes: number,
+  mediaRequested: boolean,
+  bulkAllowed: boolean,
+): LaneByteMap {
   // C0 may always use up to the whole budget (control can never be capped out).
   const base: LaneByteMap = { C0: budgetBytes, T1: 0, E2: 0, M3: 0, B4: 0 };
   if (budgetBytes <= 8 * KIB) return base; // ≤8 KiB: C0 only
@@ -49,6 +59,9 @@ function ladderCaps(budgetBytes: number, mediaRequested: boolean): LaneByteMap {
   base.E2 = Math.floor(0.25 * budgetBytes); // ≤512 KiB: add E2
   if (budgetBytes <= 512 * KIB) return base;
   base.M3 = mediaRequested ? Math.floor(0.1 * budgetBytes) : 0; // >512 KiB: add M3 if requested
+  // >512 KiB: the bulk lane draws only leftover bytes (≤5%), applied after the
+  // C0/T1/E2/M3 obligations so bulk never displaces a higher lane.
+  base.B4 = bulkAllowed ? Math.floor(0.05 * budgetBytes) : 0;
   return base;
 }
 

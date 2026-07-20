@@ -208,6 +208,12 @@ describe('PHI gauge invariance (WS-H.6.2c-2)', () => {
     expect(() => assertGaugeInvariantBoundary({ phi: 1, embedding_x: 0.4 })).toThrow(
       /boundary violation/,
     );
+    // The frame-dependent pattern is tested BEFORE whitelist membership, so a
+    // frame-dependent name raises the frame-dependent message specifically —
+    // this locks coverage on the tripwire even for a would-be whitelisted key.
+    expect(() => assertGaugeInvariantBoundary({ phi: 1, transport_x: 0.4 })).toThrow(
+      /frame-dependent field/,
+    );
   });
 });
 

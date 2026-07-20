@@ -5,6 +5,8 @@
 // device profile the identity layer also uses.
 import { randomUUID } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
+// Type-only import: erased at compile time, so no runtime app.ts↔logger.ts cycle.
+import type { AppEnv } from '../app.js';
 import { deviceProfile } from '../identity/security-alerts.js';
 import { createLogger } from '../lib/logger.js';
 
@@ -12,11 +14,11 @@ const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function loggerMiddleware(): MiddlewareHandler {
+export function loggerMiddleware(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const clientId = c.req.header('x-request-id');
     const requestId = clientId && UUID_RE.test(clientId) ? clientId : randomUUID();
-    c.set('requestId' as never, requestId);
+    c.set('requestId', requestId);
 
     const start = Date.now();
     const method = c.req.method;

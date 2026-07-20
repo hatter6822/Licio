@@ -8,6 +8,7 @@ import {
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
+import { sha256Hex } from '../identity/crypto.js';
 import { exportObjectKey } from '../identity/privacy-jobs.js';
 import {
   createInMemoryIdentityServices,
@@ -389,6 +390,32 @@ describe('account deletion lifecycle', () => {
       body: JSON.stringify({ token }),
     });
     expect(replay.status).toBe(404);
+  });
+
+  it('stores the cancel token hashed, never as the raw ephemeral-store key', async () => {
+    await seedUser('adult', 'hash@example.com', 'hashuser');
+    const app = createApp();
+    const sid = await login(app, 'hash@example.com');
+
+    await app.request('/v1/privacy/delete-account', { method: 'POST', headers: jsonHeaders(sid) });
+    const notice = (services.mailer as RecordingMailer).notices.find(
+      (n) => n.kind === 'deletion_requested',
+    );
+    const token = notice?.payload?.['cancel_token'];
+    expect(token).toBeTruthy();
+
+    // The raw token is NOT a valid key: a `take` on it finds nothing (and, being
+    // single-use, would consume the real entry if it collided — it must not).
+    expect(await services.otp.take(`delcancel:${token}`)).toBeNull();
+    // The hashed key is the real one; it still cancels afterwards.
+    const cancel = await app.request('/v1/privacy/delete-account/cancel', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ token }),
+    });
+    expect(cancel.status).toBe(200);
+    // Sanity: the helper hashes, so the stored key differs from the raw token.
+    expect(sha256Hex(String(token))).not.toBe(token);
   });
 });
 

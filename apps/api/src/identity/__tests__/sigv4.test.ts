@@ -84,4 +84,18 @@ describe('SigV4 building blocks', () => {
     const queryLine = canonical.split('\n')[2];
     expect(queryLine).toBe('list-type=2&prefix=export%2F');
   });
+
+  it('sorts query keys by UTF-16 code point, not locale (uppercase before lowercase)', () => {
+    const req: SigV4Request = {
+      method: 'GET',
+      url: new URL('https://s3.example.com/bucket?delimiter=/&Marker=x'),
+      headers: {},
+      payloadHash: EMPTY_HASH,
+    };
+    const canonical = canonicalRequestOf(req, VECTOR_DATE);
+    const queryLine = canonical.split('\n')[2];
+    // 'M' (0x4D) precedes 'd' (0x64) in code-point order; localeCompare would
+    // reverse this on many locales, breaking the AWS canonical ordering.
+    expect(queryLine).toBe('Marker=x&delimiter=%2F');
+  });
 });

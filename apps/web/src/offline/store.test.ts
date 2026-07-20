@@ -3,7 +3,12 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DB_NAME, rawPut, resetDbConnection, STORE } from './db.js';
 import type { SavedStoryRecord } from './schemas.js';
-import { getRejectionCount, resetRejectionCounts, savedStories } from './store.js';
+import {
+  drainRejectionDeltas,
+  getRejectionCount,
+  resetRejectionCounts,
+  savedStories,
+} from './store.js';
 
 function deleteDatabase(name: string): Promise<void> {
   return new Promise((resolve) => {
@@ -67,6 +72,22 @@ describe('integrity store reads (quarantine on invalid)', () => {
   it('returns undefined (not the raw value) for an invalid single read', async () => {
     await rawPut(STORE.savedStories, { storyId: 'x', bogus: true });
     expect(await savedStories.get('x')).toBeUndefined();
+  });
+
+  it('drains exactly one delta per new rejection (delta semantics)', async () => {
+    // Corrupt a record, then read it through the store to trigger a quarantine.
+    await rawPut(STORE.savedStories, {
+      schemaVersion: 2,
+      storyId: '44444444-4444-4444-8444-444444444444',
+      title: 'Corrupt',
+    });
+    await savedStories.getAll();
+
+    const first = drainRejectionDeltas();
+    expect(first).toEqual([{ store: STORE.savedStories, count: 1 }]);
+
+    // A subsequent drain with no new rejection returns nothing (no re-report).
+    expect(drainRejectionDeltas()).toEqual([]);
   });
 
   it('queries by index, validating each result', async () => {

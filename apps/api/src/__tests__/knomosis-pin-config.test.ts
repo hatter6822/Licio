@@ -43,6 +43,12 @@ describe('WS-L.1.1a pin loader', () => {
     }
   });
 
+  it('rejects a pin whose typed_data_registry_version diverges from the code SSOT', () => {
+    // The shipped file pins the SAME version the EIP-712 signer/verifier uses; a
+    // divergent version must fail closed at parse time (boot + CI).
+    expect(() => parsePinConfig({ ...KNOMOSIS_PIN, typed_data_registry_version: '999' })).toThrow();
+  });
+
   it('accepts sentinel commit/hashes ONLY for environment=local (fail closed)', () => {
     const base = KNOMOSIS_PIN.deployments[0];
     if (!base) throw new Error('no local deployment');

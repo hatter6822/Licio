@@ -37,7 +37,14 @@ export function evaluateReleaseGate(
   const violations = cohorts
     .filter((c) => c.protectedCohort && c.distance > c.threshold)
     .map((c) => ({ cohortKey: c.cohortKey, distance: c.distance, threshold: c.threshold }));
-  const overridden = violations.length > 0 && override !== undefined;
+  // A sign-off overrides the block only when it names a real owner and a
+  // non-blank justification (mirrors the promotion gate): a blank
+  // owner/justification cannot silently unblock a launch.
+  const validOverride =
+    override !== undefined &&
+    override.owner.trim().length > 0 &&
+    override.justification.trim().length > 0;
+  const overridden = violations.length > 0 && validOverride;
   return {
     blocked: violations.length > 0 && !overridden,
     violations,

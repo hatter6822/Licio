@@ -204,6 +204,19 @@ describe('resolveVotingWeight (WS-M.4.2c-1)', () => {
     expect(resolution).toMatchObject({ resolved: true, weight: '4' });
   });
 
+  it('quadratic_capped floors √units EXACTLY above 2^52 (no IEEE drift)', () => {
+    // 2^52 + 100 committed units.  ⌊√67108864²⌋ must be 67108864 exactly —
+    // IEEE Math.sqrt would round up to 67108865 at this magnitude.
+    const resolution = resolveVotingWeight(
+      base({
+        model: 'quadratic_capped',
+        facts: facts({ tokenVoteUnits: 4503599761588224 }),
+        maxVotingWeightPerAccount: 100000000,
+      }),
+    );
+    expect(resolution).toMatchObject({ resolved: true, weight: '67108864' });
+  });
+
   it('delegated sums only ELIGIBLE delegations and caps the aggregate', () => {
     const resolution = resolveVotingWeight(
       base({

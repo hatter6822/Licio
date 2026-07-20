@@ -132,4 +132,19 @@ describe('initTrustedTypes', () => {
     expect(dpPolicy?.['createHTML']).toBeDefined();
     expect(dpPolicy?.['createHTML']?.('<p>safe</p>')).toBe('<p>safe</p>');
   });
+
+  it('dompurify policy fails closed on script URLs (never mints one)', () => {
+    const { mock, policies } = createMockTT();
+    vi.stubGlobal('window', { ...window, trustedTypes: mock });
+
+    initTrustedTypes();
+
+    const dpPolicy = policies.get('dompurify');
+    // createScriptURL must exist so DOMPurify's config validation accepts the
+    // policy, but it always throws — sanitized HTML can never mint a script URL.
+    expect(dpPolicy?.['createScriptURL']).toBeDefined();
+    expect(() => dpPolicy?.['createScriptURL']?.('https://evil.com/x.js')).toThrow(
+      'dompurify policy never creates script URLs',
+    );
+  });
 });

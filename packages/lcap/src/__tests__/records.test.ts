@@ -103,6 +103,38 @@ describe('thread projection (WS-R.2.2)', () => {
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', hidden: true, hiddenBy: 'r-t' });
   });
 
+  it('picks the canonically-latest edit under §12.4, not the higher device_seq', () => {
+    // Two conflicting edits of the SAME target, authored by DIFFERENT devices.
+    // The stale one carries a higher local device_seq; the fresh one carries the
+    // higher room-log sequence (§12.4 rung #1).  device_seq is meaningless across
+    // devices, so the room-log-ordered edit must win — the stale high-seq edit
+    // must NOT surface as the visible tip.
+    const base = tr('t-o', mkRecord({ event_type: 'post', device_seq: 0 }));
+    const staleHighSeq = tr(
+      't-stale',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-A',
+        device_seq: 99,
+        replaces_record_cid: 't-o',
+      }),
+      { roomLogSeq: 1 },
+    );
+    const freshLowSeq = tr(
+      't-fresh',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-B',
+        device_seq: 1,
+        replaces_record_cid: 't-o',
+      }),
+      { roomLogSeq: 2 },
+    );
+    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?.visibleCid).toBe('t-fresh');
+  });
+
   it('is independent of record arrival order (property)', () => {
     const records = [post, edit1, edit2, tomb];
     const reference = JSON.stringify(
@@ -129,16 +161,89 @@ describe('display ordering (WS-R.2.3)', () => {
   });
 
   it('does not let a skewed clock reorder sequence-ordered records', () => {
-    // Same device: seq 0 has a LATER claimed timestamp than seq 1 (clock skew).
+    // Same device: seq 0 has a LATER claimed timestamp than seq 1 (clock skew).  The
+    // §12.2 device chain (prev_device_record_cid) orders them via the topological pass,
+    // not the (now clock-driven) comparator.
     const seq0 = tr(
       'r-0',
       mkRecord({ event_type: 'post', device_seq: 0, created_at_claim_ms: 9000 }),
     );
     const seq1 = tr(
       'r-1',
-      mkRecord({ event_type: 'answer', device_seq: 1, created_at_claim_ms: 1000 }),
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 1,
+        created_at_claim_ms: 1000,
+        prev_device_record_cid: 'r-0',
+      }),
     );
     expect(displayOrder([seq1, seq0]).map((r) => r.recordCid)).toEqual(['r-0', 'r-1']);
+  });
+
+  it('ignores an unverified prev_device_record_cid (cross-device / wrong-seq forgery)', () => {
+    // An author points prev_device_record_cid at a VICTIM's record to force its own
+    // content after it.  The edge is honored ONLY for a verified same-device seq-1
+    // predecessor, so a cross-device (or wrong-seq) pointer is ignored and the §12.4
+    // ladder (here receiptMs) orders instead — the forgery cannot jump the order.
+    const victim = tr('r-v', mkRecord({ event_type: 'post', device_seq: 0 }), { receiptMs: 100 });
+    const crossDevice = tr(
+      'r-x',
+      mkRecord({
+        event_type: 'post',
+        author_device_key_id: 'key-attacker', // different device
+        device_seq: 5,
+        prev_device_record_cid: 'r-v',
+      }),
+      { receiptMs: 50 },
+    );
+    // receiptMs 50 < 100 ⇒ the attacker sorts FIRST; the forged edge did NOT force it
+    // after the victim (which it would have, had the edge been honored).
+    expect(displayOrder([victim, crossDevice]).map((r) => r.recordCid)).toEqual(['r-x', 'r-v']);
+    // Same device but a non-adjacent sequence (must be exactly prev + 1) is ignored too.
+    const wrongSeq = tr(
+      'r-ws',
+      mkRecord({ event_type: 'post', device_seq: 9, prev_device_record_cid: 'r-v' }),
+      { receiptMs: 40 },
+    );
+    expect(displayOrder([victim, wrongSeq]).map((r) => r.recordCid)).toEqual(['r-ws', 'r-v']);
+  });
+
+  it('stays deterministic when same-device seq order contradicts cross-device claim order', () => {
+    // The old CONDITIONAL device-seq rung made a 3-cycle: A<B (same device, seq), but
+    // B<C and C<A by claim — so Array.sort output depended on input order.  With device
+    // order in the topological pass and a pure total-order comparator, every input
+    // permutation yields the identical projection.
+    const a = tr('A', mkRecord({ event_type: 'post', device_seq: 1, created_at_claim_ms: 600000 }));
+    const b = tr(
+      'B',
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 2,
+        created_at_claim_ms: 540000,
+        prev_device_record_cid: 'A',
+      }),
+    );
+    const c = tr(
+      'C',
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 0,
+        author_device_key_id: 'other-device',
+        created_at_claim_ms: 570000,
+      }),
+    );
+    const canonical = displayOrder([a, b, c]).map((r) => r.recordCid);
+    for (const perm of [
+      [b, a, c],
+      [c, b, a],
+      [c, a, b],
+      [b, c, a],
+      [a, c, b],
+    ]) {
+      expect(displayOrder(perm).map((r) => r.recordCid)).toEqual(canonical);
+    }
+    // A precedes B (its device-chain successor) regardless of the skewed claim.
+    expect(canonical.indexOf('A')).toBeLessThan(canonical.indexOf('B'));
   });
 
   it('orders one-sided weak hints transitively + deterministically (input-order-independent)', () => {

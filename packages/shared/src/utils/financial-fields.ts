@@ -85,9 +85,14 @@ export function fieldNameSegments(name: string): string[] {
  * terms, containment for compounds.
  */
 export function isFinancialFieldName(name: string): boolean {
-  const lower = name.toLowerCase();
-  if (FINANCIAL_FIELD_COMPOUNDS.some((compound) => lower.includes(compound))) return true;
-  const segments = new Set(fieldNameSegments(name));
+  // Compound containment runs against the NORMALIZED segment join (not the raw
+  // lowercased name), so a camelCase compound (txHash → tx_hash) cannot evade the
+  // backstop — and it stays consistent with `matchedFinancialPattern`, which uses
+  // the same normalization (a divergence there throws as a drift guard).
+  const segmentList = fieldNameSegments(name);
+  const normalized = segmentList.join('_');
+  if (FINANCIAL_FIELD_COMPOUNDS.some((compound) => normalized.includes(compound))) return true;
+  const segments = new Set(segmentList);
   return FINANCIAL_FIELD_SEGMENTS.some((term) => segments.has(term));
 }
 

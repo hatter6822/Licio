@@ -42,6 +42,7 @@ let proof: DetachedProofV2;
 let log: RoomLog;
 let inclusionProof: ReturnType<typeof inclusionProofRecordV2Schema.parse>;
 let checkpoint: Awaited<ReturnType<typeof buildCheckpoint>>;
+let checkpointBundle: Awaited<ReturnType<typeof signCheckpoint>>;
 
 function deps(revocations = new RevocationIndex()): IdentityChainDeps {
   return {
@@ -158,7 +159,7 @@ beforeAll(async () => {
     issuedAtMs: NOW,
     signerAuthorityId: 'auth-1',
   });
-  const checkpointBundle = await signCheckpoint({
+  checkpointBundle = await signCheckpoint({
     authorityPrivateKey: roomAuthority.privateKey,
     authoritySignerKeyId: 'room-authority-1',
     checkpoint,
@@ -318,9 +319,25 @@ describe('stage 2 — authority chain (WS-R.8.2b)', () => {
 describe('stage 3 — consensus (WS-R.8.2c)', () => {
   it('reaches checkpointed with a valid inclusion proof', async () => {
     const result = await validate(
-      input({ consensus: { inclusion: { proof: inclusionProof, checkpoint } } }),
+      input({ consensus: { inclusion: { proof: inclusionProof, checkpoint: checkpointBundle } } }),
     );
     expect(result.state).toBe('checkpointed');
+  });
+
+  it('does NOT reach checkpointed when the checkpoint authority proof is forged', async () => {
+    // Same checkpoint record (so the inclusion proof still matches its merkle_root),
+    // but the authority proof is signed by a NON-authority key.  Authentication must
+    // fail, so a forged checkpoint can never elevate the record to `checkpointed`.
+    const forged = await signCheckpoint({
+      authorityPrivateKey: device.privateKey, // not the room authority
+      authoritySignerKeyId: 'room-authority-1',
+      checkpoint,
+      networkId: NET,
+    });
+    const result = await validate(
+      input({ consensus: { inclusion: { proof: inclusionProof, checkpoint: forged } } }),
+    );
+    expect(result.state).toBe('authorized_provisional');
   });
 
   it('does not reach checkpointed with an inclusion proof for a DIFFERENT record', async () => {
@@ -331,7 +348,7 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
       target_record_cid: await cidFor('record', new Uint8Array([7, 7, 7])),
     };
     const result = await validate(
-      input({ consensus: { inclusion: { proof: otherTarget, checkpoint } } }),
+      input({ consensus: { inclusion: { proof: otherTarget, checkpoint: checkpointBundle } } }),
     );
     expect(result.state).toBe('authorized_provisional');
   });
@@ -343,7 +360,7 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
     // proof here would FAIL verification, but the room mismatch skips it.
     const otherLog = new RoomLog('RFC9162_SHA256', NET);
     await otherLog.append(await cidFor('record', new Uint8Array([1])));
-    const oldCp = await buildCheckpoint(otherLog, {
+    const oldCpRecord = await buildCheckpoint(otherLog, {
       roomId: 'room-other',
       treeSize: otherLog.size,
       policyEpoch: 1,
@@ -352,7 +369,7 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
       signerAuthorityId: 'auth-1',
     });
     await otherLog.append(await cidFor('record', new Uint8Array([2])));
-    const newCp = await buildCheckpoint(otherLog, {
+    const newCpRecord = await buildCheckpoint(otherLog, {
       roomId: 'room-other',
       treeSize: otherLog.size,
       policyEpoch: 1,
@@ -360,6 +377,15 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
       issuedAtMs: NOW,
       signerAuthorityId: 'auth-1',
     });
+    const signOther = (cp: typeof oldCpRecord) =>
+      signCheckpoint({
+        authorityPrivateKey: roomAuthority.privateKey,
+        authoritySignerKeyId: 'room-authority-1',
+        checkpoint: cp,
+        networkId: NET,
+      });
+    const oldCp = await signOther(oldCpRecord);
+    const newCp = await signOther(newCpRecord);
     const proof = consistencyProofRecordV2Schema.parse({
       record_version: 2,
       kind: 'consistency_proof',
@@ -379,7 +405,10 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
   it('reaches witnessed (the lub over checkpoint + witness)', async () => {
     const result = await validate(
       input({
-        consensus: { inclusion: { proof: inclusionProof, checkpoint }, witnessVerified: true },
+        consensus: {
+          inclusion: { proof: inclusionProof, checkpoint: checkpointBundle },
+          witnessVerified: true,
+        },
       }),
     );
     expect(result.state).toBe('witnessed');

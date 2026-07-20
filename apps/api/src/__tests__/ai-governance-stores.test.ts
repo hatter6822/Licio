@@ -77,6 +77,13 @@ describe('WS-K stores', () => {
     expect((await store.listVersions('m')).length).toBe(1);
     expect((await store.list({ owner: 'team' })).length).toBe(1);
     expect((await store.list({ purpose: 'nope' })).length).toBe(0);
+    // Purpose filter is literal substring — LIKE metacharacters in the query
+    // value are NOT wildcards. The Drizzle adapter escapes %/_ (with an ESCAPE
+    // clause) to match this same contract; here 'p' contains no '%'/'_', so a
+    // metacharacter query must miss.
+    expect((await store.list({ purpose: '%' })).length).toBe(0);
+    expect((await store.list({ purpose: '_' })).length).toBe(0);
+    expect((await store.list({ purpose: 'p' })).length).toBe(1);
     expect(
       await store.patchStatus('m', '9.9.9', {
         status: 'deployed',

@@ -160,6 +160,56 @@ describe('authMiddleware', () => {
     const res = await app.request('/x', { headers: { cookie: '__Host-sid=anything' } });
     expect(res.status).toBe(503);
   });
+
+  it('fails closed (503) when the account store throws mid-load, not a leaked 500', async () => {
+    const cookie = await seedSessionCookie();
+    const broken = {
+      ...services,
+      store: {
+        ...services.store,
+        async getUser() {
+          throw new Error('postgres down');
+        },
+      },
+    };
+    const app = new Hono<AuthEnv>().get(
+      '/x',
+      authMiddleware(() => broken),
+      (c) => c.json({ ok: true }),
+    );
+    const res = await app.request('/x', { headers: { cookie } });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('unavailable');
+  });
+
+  it('still serves a valid request when the best-effort slide refresh throws', async () => {
+    // A store write blip on the throttled touchSession must NOT 500 an
+    // already-validated request.  Age the session past the slide throttle so
+    // touchSession reaches the failing put().
+    const cookie = await seedSessionCookie({ sessionAge: 10 * 60_000 });
+    // Delegate to the REAL store (a class with private fields — a spread would drop
+    // its methods and make validateSession itself throw), overriding only `put` so
+    // ONLY the throttled slide write fails.
+    const brokenSessions = new Proxy(services.sessions, {
+      get(target, prop, receiver) {
+        if (prop === 'put') {
+          return async () => {
+            throw new Error('redis write blip');
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const brokenTouch = { ...services, sessions: brokenSessions };
+    const app = new Hono<AuthEnv>().get(
+      '/x',
+      authMiddleware(() => brokenTouch),
+      (c) => c.json({ ok: true }),
+    );
+    const res = await app.request('/x', { headers: { cookie } });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('requireAdult (fails closed on teen/unknown)', () => {

@@ -11,12 +11,28 @@ import {
   UGC_ALLOWED_TAGS,
   UGC_TRUSTED_TYPES_POLICY_NAME,
 } from '../ugc/dompurify.js';
-import { renderUGC, renderUGCDetailed } from '../ugc/render.js';
+import { renderUGC, renderUGCDetailed, type UgcSafeHtml } from '../ugc/render.js';
 import { jsdomDocument, jsdomWindow } from './jsdom-globals.js';
 
 afterEach(() => {
   resetUgcSanitizerForTests();
   delete jsdomWindow().trustedTypes;
+});
+
+describe('WS-G.4.2b UgcSafeHtml nominal brand', () => {
+  it('rejects a raw, unbranded string at the type level', () => {
+    // @ts-expect-error — a plain string cannot satisfy the branded UgcSafeHtml;
+    // only `renderUGC`/`renderUGCDetailed` output (which carries the unique-symbol
+    // brand) may be assigned here. If this stops erroring, the brand went no-op.
+    const x: UgcSafeHtml = 'raw';
+    // The runtime value is irrelevant; the guarantee is the compile-time rejection.
+    expect(String(x)).toBe('raw');
+  });
+
+  it('accepts genuine pipeline output', () => {
+    const html: UgcSafeHtml = renderUGC('hello');
+    expect(String(html)).toContain('hello');
+  });
 });
 
 describe('WS-G.4.2a centralized DOMPurify configuration', () => {

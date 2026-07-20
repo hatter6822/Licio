@@ -201,6 +201,13 @@ export async function readPack(
   // benign objects yet commit hidden frames.  Reject any divergence before returning ok.
   const entryCids = new Set<string>();
   for (const entry of entries) {
+    // A DUPLICATE cid must be rejected, not collapsed by the Set: consumers build
+    // `new Map(entries.map(e => [e.cid, e]))` (LAST-wins) while the §27.2 graph guard
+    // dedups FIRST-wins — so two table entries for one cid would let the guard
+    // evaluate a different entry than the consumers act on (a parser differential).
+    if (entryCids.has(entry.cid)) {
+      return { ok: false, status: 'table_frame_mismatch' }; // duplicate table entry for one cid
+    }
     entryCids.add(entry.cid);
     const frame = frames.get(entry.cid);
     if (!frame || FRAME_KIND_TO_CID[frame.frameKind] !== entry.cid_kind) {

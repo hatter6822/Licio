@@ -5,15 +5,17 @@
 //   CID(x, u) = E_g | R(g.x, g.u) − R(x, u) |
 //
 // The transformation group G acts on REPRESENTATIONS (attribute → value
-// records), never raw data. Transformations are value PERMUTATIONS of a
-// single protected attribute (identity swaps, language translation, source
-// swaps): permutations compose, invert, and contain the identity, so the
-// generated set is a genuine group — `generateGroup` closes the generators
-// under composition (bounded BFS) and the group axioms hold by
-// construction (verified by tests via `composeTransformations` /
-// `invertTransformation`). CID = 0 means ranking is invariant to the
-// transformations; a high CID on protected attributes is the bias signal
-// the model-release gate consumes.
+// records), never raw data. Generators are value PERMUTATIONS of a single
+// protected attribute (identity swaps, language translation, source swaps);
+// `generateGroup` LIFTS them to `GroupElement`s and closes under composition +
+// inversion ACROSS attributes (bounded BFS), so a multi-attribute generator set
+// yields the FULL product group — including every cross-attribute composite gL∘gA
+// (which swaps two attributes at once).  This is load-bearing: without the
+// cross-attribute composites the returned set is not closed and CID is BLIND to
+// INTERSECTIONAL bias (a ranking biased only against the intersection scores
+// CID = 0 and passes the release gate).  CID = 0 means ranking is invariant to the
+// transformations; a high CID on protected attributes is the bias signal the
+// model-release gate consumes.
 
 export interface AttributePermutation {
   /** Stable id, e.g. `gender:swap-a-b`, `language:en->es`. */
@@ -78,40 +80,112 @@ export function invertTransformation(p: AttributePermutation): AttributePermutat
 
 const IDENTITY_ID = 'identity';
 
-function canonicalKey(p: AttributePermutation): string {
-  const entries = Object.entries(p.mapping)
-    .filter(([from, to]) => from !== to)
-    // Codepoint order, NOT localeCompare: a "canonical" key must be deterministic
-    // across runtimes/ICU versions, never locale-dependent.
-    .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
-    .map(([from, to]) => `${from}>${to}`)
-    .join(',');
-  return `${p.attribute}|${entries}`;
+/**
+ * A group element acting on representations across ONE OR MORE attributes.  A
+ * single-attribute generator lifts to a one-key `mappings`; composition of two
+ * different-attribute swaps produces a two-key element (e.g. gL∘gA swaps BOTH
+ * locale AND age_band).  This is what makes `generateGroup` produce a genuine
+ * CLOSED group for a multi-attribute generator set — without it the returned set
+ * omits every cross-attribute composite, so CID is blind to intersectional bias.
+ */
+export interface GroupElement {
+  id: string;
+  /** attribute → its value permutation (values absent stay fixed). */
+  mappings: Readonly<Record<string, Readonly<Record<string, string>>>>;
+}
+
+/** Lift a single-attribute permutation into a group element. */
+export function liftPermutation(p: AttributePermutation): GroupElement {
+  return { id: p.id, mappings: { [p.attribute]: p.mapping } };
+}
+
+/** Apply a group element to a representation (each attribute's permutation). */
+export function applyGroupElement(
+  element: GroupElement,
+  representation: Representation,
+): Representation {
+  let result = representation;
+  for (const [attribute, mapping] of Object.entries(element.mappings)) {
+    const value = result[attribute];
+    if (value === undefined) continue;
+    const mapped = mapping[value];
+    if (mapped === undefined) continue;
+    result = { ...result, [attribute]: mapped };
+  }
+  return result;
+}
+
+/** Componentwise composition (a ∘ b)(v) = a(b(v)) over the union of attributes. */
+export function composeGroupElements(a: GroupElement, b: GroupElement): GroupElement {
+  const attributes = new Set([...Object.keys(a.mappings), ...Object.keys(b.mappings)]);
+  const mappings: Record<string, Record<string, string>> = {};
+  for (const attribute of attributes) {
+    const am = a.mappings[attribute] ?? {};
+    const bm = b.mappings[attribute] ?? {};
+    const domain = new Set([...Object.keys(am), ...Object.keys(bm)]);
+    const mapping: Record<string, string> = {};
+    for (const value of domain) {
+      const afterB = bm[value] ?? value;
+      mapping[value] = am[afterB] ?? afterB;
+    }
+    mappings[attribute] = mapping;
+  }
+  return { id: `${a.id}∘${b.id}`, mappings };
+}
+
+/** Componentwise inverse. */
+export function invertGroupElement(element: GroupElement): GroupElement {
+  const mappings: Record<string, Record<string, string>> = {};
+  for (const [attribute, mapping] of Object.entries(element.mappings)) {
+    const inverse: Record<string, string> = {};
+    for (const [from, to] of Object.entries(mapping)) inverse[to] = from;
+    mappings[attribute] = inverse;
+  }
+  return { id: `${element.id}⁻¹`, mappings };
 }
 
 /**
- * Close a generator set under composition and inversion (per attribute),
- * bounded by `maxElements`. The identity element is always included.
+ * A canonical key over the ELEMENT'S ACTION: the sorted, attribute-qualified set of
+ * non-fixed value moves across ALL attributes (codepoint order, not localeCompare,
+ * so it is deterministic across ICU versions).  Empty support ⇒ '' = THE identity,
+ * so gA∘gA and any product of a swap with itself collapses onto the single identity
+ * (no per-attribute duplicate-identity elements).  Attribute-qualifying each move
+ * (`attr:from>to`) keeps two different attributes that share value literals distinct.
+ */
+function groupElementKey(element: GroupElement): string {
+  const moves: string[] = [];
+  for (const [attribute, mapping] of Object.entries(element.mappings)) {
+    for (const [from, to] of Object.entries(mapping)) {
+      if (from !== to) moves.push(`${attribute}:${from}>${to}`);
+    }
+  }
+  moves.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+  return moves.join(',');
+}
+
+/**
+ * Close a generator set into a genuine group: lift each single-attribute generator,
+ * then close under composition + inversion across ALL attributes (bounded BFS), so a
+ * multi-attribute generator set yields the full product group (incl. every
+ * cross-attribute composite gL∘gA).  Bounded by `maxElements`; the identity is always
+ * present exactly once.
  */
 export function generateGroup(
   generators: readonly AttributePermutation[],
   maxElements = 64,
-): AttributePermutation[] {
+): GroupElement[] {
   for (const generator of generators) {
     const problem = validatePermutation(generator);
     if (problem) throw new Error(problem);
   }
-  const identityElement: AttributePermutation = {
-    id: IDENTITY_ID,
-    attribute: generators[0]?.attribute ?? '',
-    mapping: {},
-  };
-  const elements = new Map<string, AttributePermutation>();
-  elements.set(canonicalKey(identityElement), identityElement);
-  const queue: AttributePermutation[] = [];
+  const identity: GroupElement = { id: IDENTITY_ID, mappings: {} };
+  const elements = new Map<string, GroupElement>();
+  elements.set(groupElementKey(identity), identity); // key '' — the single identity
+  const queue: GroupElement[] = [];
   for (const generator of generators) {
-    for (const element of [generator, invertTransformation(generator)]) {
-      const key = canonicalKey(element);
+    const lifted = liftPermutation(generator);
+    for (const element of [lifted, invertGroupElement(lifted)]) {
+      const key = groupElementKey(element);
       if (!elements.has(key)) {
         elements.set(key, element);
         queue.push(element);
@@ -122,9 +196,9 @@ export function generateGroup(
     const current = queue.shift();
     if (!current) break;
     for (const other of [...elements.values()]) {
-      if (other.attribute !== current.attribute || other.id === IDENTITY_ID) continue;
-      const composed = composeTransformations(current, other);
-      const key = canonicalKey(composed);
+      if (groupElementKey(other) === '') continue; // skip the identity
+      const composed = composeGroupElements(current, other);
+      const key = groupElementKey(composed);
       if (!elements.has(key) && elements.size < maxElements) {
         elements.set(key, composed);
         queue.push(composed);
@@ -148,13 +222,13 @@ export function counterfactualInvarianceDefect(
   ranking: RankingFunction,
   content: Representation,
   user: Representation,
-  elements: readonly AttributePermutation[],
+  elements: readonly GroupElement[],
 ): CidResult {
   if (elements.length === 0) throw new Error('CID requires at least one group element');
   const baseline = ranking(content, user);
   if (!Number.isFinite(baseline)) throw new Error('ranking function returned a non-finite value');
   const perElement = elements.map((g) => {
-    const transformed = ranking(applyTransformation(g, content), applyTransformation(g, user));
+    const transformed = ranking(applyGroupElement(g, content), applyGroupElement(g, user));
     if (!Number.isFinite(transformed)) {
       throw new Error(`ranking function returned a non-finite value under ${g.id}`);
     }

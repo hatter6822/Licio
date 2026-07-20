@@ -53,7 +53,6 @@ async function realEnvelopes(n: number): Promise<PrivateEncryptedEnvelope[]> {
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: engine.nextAuthorSeq('alice-dev'),
         },
-        opId: `s${i}`,
         parents: engine.heads(),
         lamport: engine.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
