@@ -186,6 +186,23 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     expect(b4Index).toBeGreaterThan(t1Index); // B4 only after T1 is satisfied
   });
 
+  it('does not deadlock when a higher lane depends on a B4 object (B4 flows to unblock it)', () => {
+    // An M3 candidate whose closure REQUIRES a B4 object: the B4 deferral gate must let
+    // that B4 flow (it is the prerequisite), or the two deadlock and neither is placed.
+    const bulkDep = cand({ cid: 'b4dep', lane: 'B4', priority: 4, bytes: 1_000 });
+    const m3 = cand({ cid: 'm3', lane: 'M3', priority: 3, bytes: 2_000, requires: ['b4dep'] });
+    const result = scheduleTransfer([m3, bulkDep], {
+      budgetBytes: 600 * 1024,
+      nowMs: 0,
+      mediaRequested: true,
+      bulkAllowed: true,
+    });
+    const b4Index = result.order.findIndex((c) => c.cid === 'b4dep');
+    const m3Index = result.order.findIndex((c) => c.cid === 'm3');
+    expect(b4Index).toBeGreaterThanOrEqual(0); // the B4 dependency ships…
+    expect(m3Index).toBeGreaterThan(b4Index); // …before its M3 dependent (no deadlock)
+  });
+
   it('never places a dependent before its dependency', () => {
     const dependency = cand({ cid: 'cap', lane: 'C0', priority: 0, bytes: 50 });
     const dependent = cand({ cid: 'post', lane: 'T1', priority: 1, bytes: 100, requires: ['cap'] });

@@ -137,15 +137,40 @@ export function allocate(
           candidate.requires.every((dep) => placed.has(dep) || everPlaceable(dep))),
     );
   const schedulableC0Remaining = (): boolean => laneHasSchedulable('C0');
+  // Whether `cid`'s dependency closure includes a B4 (bulk) object — placing it
+  // REQUIRES a bulk object to go first.  Such a higher-lane candidate must NOT hold the
+  // B4 gate closed, or the two deadlock (the gate skips B4 because the higher work
+  // remains, and the higher work never places because its B4 prerequisite is skipped).
+  const dependsOnB4 = (cid: string, visiting: Set<string> = new Set<string>()): boolean => {
+    if (visiting.has(cid)) return false;
+    for (const lane of LANE_ORDER) {
+      const candidate = remaining[lane].find((c) => c.cid === cid);
+      if (candidate) {
+        if (lane === 'B4') return true;
+        visiting.add(cid);
+        const viaDep = candidate.requires.some((dep) => dependsOnB4(dep, visiting));
+        visiting.delete(cid);
+        return viaDep;
+      }
+    }
+    return false;
+  };
   // B4 (bulk pre-fetch) is leftover-only: defer it until NO higher lane (C0/T1/E2/M3)
-  // has schedulable work that still fits, so a small bulk object can never consume
-  // budget a higher-priority head is still accumulating deficit for (§15.2: bulk is
-  // "applied after C0/T1/E2/M3 obligations").  M3 stays gated on C0 only.
+  // has schedulable work that still fits AND does NOT itself depend on a B4 object, so a
+  // small bulk object can never consume budget a higher-priority head is accumulating
+  // deficit for (§15.2: bulk is "applied after C0/T1/E2/M3 obligations") — while a
+  // higher candidate whose closure NEEDS a B4 object still lets that B4 flow (no
+  // deadlock).  M3 stays gated on C0 only.
   const higherThanB4Remaining = (): boolean =>
-    schedulableC0Remaining() ||
-    laneHasSchedulable('T1') ||
-    laneHasSchedulable('E2') ||
-    laneHasSchedulable('M3');
+    (['C0', 'T1', 'E2', 'M3'] as const).some((lane) =>
+      remaining[lane].some(
+        (candidate) =>
+          fitsBudget(candidate, lane) &&
+          (isEligible(candidate) ||
+            candidate.requires.every((dep) => placed.has(dep) || everPlaceable(dep))) &&
+          !dependsOnB4(candidate.cid),
+      ),
+    );
 
   // Phase 1 — C0 minimum reservation (before any other lane is served).
   while (usedByLane.C0 < laneBudget.c0MinBytes && emitFromLane('C0', true)) {
