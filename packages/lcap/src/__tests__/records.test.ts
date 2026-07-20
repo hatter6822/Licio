@@ -129,16 +129,61 @@ describe('display ordering (WS-R.2.3)', () => {
   });
 
   it('does not let a skewed clock reorder sequence-ordered records', () => {
-    // Same device: seq 0 has a LATER claimed timestamp than seq 1 (clock skew).
+    // Same device: seq 0 has a LATER claimed timestamp than seq 1 (clock skew).  The
+    // §12.2 device chain (prev_device_record_cid) orders them via the topological pass,
+    // not the (now clock-driven) comparator.
     const seq0 = tr(
       'r-0',
       mkRecord({ event_type: 'post', device_seq: 0, created_at_claim_ms: 9000 }),
     );
     const seq1 = tr(
       'r-1',
-      mkRecord({ event_type: 'answer', device_seq: 1, created_at_claim_ms: 1000 }),
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 1,
+        created_at_claim_ms: 1000,
+        prev_device_record_cid: 'r-0',
+      }),
     );
     expect(displayOrder([seq1, seq0]).map((r) => r.recordCid)).toEqual(['r-0', 'r-1']);
+  });
+
+  it('stays deterministic when same-device seq order contradicts cross-device claim order', () => {
+    // The old CONDITIONAL device-seq rung made a 3-cycle: A<B (same device, seq), but
+    // B<C and C<A by claim — so Array.sort output depended on input order.  With device
+    // order in the topological pass and a pure total-order comparator, every input
+    // permutation yields the identical projection.
+    const a = tr('A', mkRecord({ event_type: 'post', device_seq: 1, created_at_claim_ms: 600000 }));
+    const b = tr(
+      'B',
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 2,
+        created_at_claim_ms: 540000,
+        prev_device_record_cid: 'A',
+      }),
+    );
+    const c = tr(
+      'C',
+      mkRecord({
+        event_type: 'answer',
+        device_seq: 0,
+        author_device_key_id: 'other-device',
+        created_at_claim_ms: 570000,
+      }),
+    );
+    const canonical = displayOrder([a, b, c]).map((r) => r.recordCid);
+    for (const perm of [
+      [b, a, c],
+      [c, b, a],
+      [c, a, b],
+      [b, c, a],
+      [a, c, b],
+    ]) {
+      expect(displayOrder(perm).map((r) => r.recordCid)).toEqual(canonical);
+    }
+    // A precedes B (its device-chain successor) regardless of the skewed claim.
+    expect(canonical.indexOf('A')).toBeLessThan(canonical.indexOf('B'));
   });
 
   it('orders one-sided weak hints transitively + deterministically (input-order-independent)', () => {

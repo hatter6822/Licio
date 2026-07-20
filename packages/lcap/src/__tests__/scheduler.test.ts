@@ -174,6 +174,22 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     expect(firstMediaIndex).toBeGreaterThan(c0Index); // media only AFTER the C0 closure lands
   });
 
+  it('does not starve a pinned head behind smaller unpinned objects under contention (§15.6)', () => {
+    // A large pinned T1 object + many small unpinned T1 objects, with a budget that
+    // cannot fit them all.  The deficit skip-over bug placed the smalls (draining the
+    // lane budget) and never shipped the pinned head; the head-of-line DRR fix places
+    // the pinned object FIRST (orderLane ranks pinned ahead of smaller ones).
+    const pinned = cand({ cid: 'pin', lane: 'T1', priority: 1, bytes: 8_000, pinned: true });
+    const smalls = Array.from({ length: 40 }, (_, i) =>
+      cand({ cid: `s${i}`, lane: 'T1', priority: 1, bytes: 2_000 }),
+    );
+    const result = scheduleTransfer([...smalls, pinned], { budgetBytes: 200 * 1024, nowMs: 0 });
+    const pinIndex = result.order.findIndex((c) => c.cid === 'pin');
+    expect(pinIndex).toBeGreaterThanOrEqual(0); // placed, not starved
+    const firstSmallIndex = result.order.findIndex((c) => c.cid.startsWith('s'));
+    expect(pinIndex).toBeLessThan(firstSmallIndex); // and shipped ahead of the smalls
+  });
+
   it('stops before budget overflow and is deterministic', () => {
     const candidates = Array.from({ length: 5 }, (_, i) =>
       cand({ cid: `t${i}`, lane: 'T1', priority: 1, bytes: 3000 }),

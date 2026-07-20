@@ -16,6 +16,7 @@ import {
 } from '../braid/index.js';
 import {
   type AttributePermutation,
+  applyGroupElement,
   applyTransformation,
   cidReleaseGate,
   composeTransformations,
@@ -415,6 +416,40 @@ describe('Reeb attention landscape (WS-H.7.4)', () => {
     expect(result.bridgePrompts).toEqual([]);
   });
 
+  it('counts BOTH same-level bridging valleys (connectingEdges is topology, not label order)', () => {
+    // Two peaks joined by TWO same-level valleys, each bridging both basins.  The
+    // connecting-edge count must be 2 regardless of which valley attaches first.
+    const nodes = [
+      { id: 'p1', value: 10 },
+      { id: 'p2', value: 9 },
+      { id: 'v1', value: 4 },
+      { id: 'v2', value: 4 },
+    ];
+    const edges = [
+      { a: 'p1', b: 'v1' },
+      { a: 'v1', b: 'p2' },
+      { a: 'p1', b: 'v2' },
+      { a: 'v2', b: 'p2' },
+    ];
+    const result = reebGraph(nodes, edges, { fragileEdgeThreshold: 1 });
+    expect(result.merges.length).toBe(1);
+    expect(result.merges[0]?.connectingEdges).toBe(2);
+    expect(result.merges[0]?.fragile).toBe(false); // 2 > 1 threshold
+
+    // A topology-identical relabeling (swap the two valley ids) yields the identical
+    // connectingEdges/fragile — the label-invariance the fix restores.
+    const relabeled = reebGraph(
+      nodes.map((n) => ({ ...n, id: n.id === 'v1' ? 'v2' : n.id === 'v2' ? 'v1' : n.id })),
+      edges.map((e) => ({
+        a: e.a === 'v1' ? 'v2' : e.a === 'v2' ? 'v1' : e.a,
+        b: e.b === 'v1' ? 'v2' : e.b === 'v2' ? 'v1' : e.b,
+      })),
+      { fragileEdgeThreshold: 1 },
+    );
+    expect(relabeled.merges[0]?.connectingEdges).toBe(result.merges[0]?.connectingEdges);
+    expect(relabeled.merges[0]?.fragile).toBe(result.merges[0]?.fragile);
+  });
+
   it('rejects edges to unknown nodes', () => {
     expect(() => reebGraph([{ id: 'a', value: 1 }], [{ a: 'a', b: 'ghost' }])).toThrow(/unknown/);
   });
@@ -482,6 +517,43 @@ describe('Counterfactual invariance defect (WS-H.7.5)', () => {
     );
     expect(biased.cid).toBeCloseTo(0.5, 12);
     expect(biased.perElement.find((e) => e.id !== 'identity')?.deviation).toBe(1);
+  });
+
+  it('closes a two-attribute generator set into the full 4-element product group', () => {
+    const group = generateGroup([
+      { id: 'locale:swap', attribute: 'locale', mapping: { en: 'es', es: 'en' } },
+      { id: 'age:swap', attribute: 'age_band', mapping: { adult: 'unknown', unknown: 'adult' } },
+    ]);
+    expect(group.length).toBe(4); // identity, gL, gA, gL∘gA — a genuine closed group
+    // Every one of the four (locale × age_band) cosets is reached ⇒ closure.
+    const reached = new Set(
+      group.map((el) => {
+        const r = applyGroupElement(el, { locale: 'en', age_band: 'adult' });
+        return `${r['locale']}/${r['age_band']}`;
+      }),
+    );
+    expect([...reached].sort()).toEqual(['en/adult', 'en/unknown', 'es/adult', 'es/unknown']);
+  });
+
+  it('detects INTERSECTIONAL bias the single-attribute closure missed (cross-attribute composite)', () => {
+    const group = generateGroup([
+      { id: 'locale:swap', attribute: 'locale', mapping: { en: 'es', es: 'en' } },
+      { id: 'age:swap', attribute: 'age_band', mapping: { adult: 'unknown', unknown: 'adult' } },
+    ]);
+    // A ranking biased ONLY against the intersection (locale=es AND age_band=unknown).
+    const ranking = (_c: Record<string, string>, u: Record<string, string>): number =>
+      u['locale'] === 'es' && u['age_band'] === 'unknown' ? 0 : 1;
+    const result = counterfactualInvarianceDefect(
+      ranking,
+      { topic: 'news' },
+      { locale: 'en', age_band: 'adult' },
+      group,
+    );
+    // Only gL∘gA maps the baseline (en, adult) to the penalized (es, unknown): 1 of 4
+    // elements deviates by 1 ⇒ CID = 0.25.  The old single-attribute closure omitted
+    // gL∘gA, scored CID = 0, and the release gate FAILED OPEN on intersectional bias.
+    expect(result.cid).toBeCloseTo(0.25, 12);
+    expect(cidReleaseGate(result.cid, 0.05).blocked).toBe(true);
   });
 
   it('the release gate blocks above-threshold CID', () => {

@@ -130,7 +130,35 @@ function sweep(
       activatedNow.push(node.id);
     }
 
-    // Union across every active edge joining two distinct components.
+    const bornAbove = (root: string): boolean =>
+      (nodeValue.get(peakOf.get(root) ?? root) ?? level) > level;
+
+    // Phase 1 — GROW basins to a fixpoint: union every active cross-component edge
+    // with at least one side born AT this level (a valley/plateau attachment).  Only
+    // after every basin is fully grown is a merge's connecting-edge count taken, so it
+    // no longer depends on which same-level bridging node happened to attach first
+    // (which was set purely by the codepoint edge order — a topology-identical
+    // relabeling flipped the count and the fragile flag).
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const edge of sortedEdges) {
+        if (!active.has(edge.a) || !active.has(edge.b)) continue;
+        const rootA = find(edge.a);
+        const rootB = find(edge.b);
+        if (rootA === rootB) continue;
+        if (bornAbove(rootA) && bornAbove(rootB)) continue; // a genuine merge — phase 2
+        const peakA = peakOf.get(rootA) ?? rootA;
+        const peakB = peakOf.get(rootB) ?? rootB;
+        parent.set(rootA, rootB);
+        peakOf.set(find(rootB), dominantPeak(peakA, peakB));
+        grew = true;
+      }
+    }
+
+    // Phase 2 — MERGES: the remaining cross-component edges join two basins both born
+    // ABOVE this level.  Count connecting edges against the now fully-grown basins.
+    // ≥3-basin pairing stays deterministic via the sorted edge order.
     for (const edge of sortedEdges) {
       if (!active.has(edge.a) || !active.has(edge.b)) continue;
       const rootA = find(edge.a);
@@ -138,26 +166,22 @@ function sweep(
       if (rootA === rootB) continue;
       const peakA = peakOf.get(rootA) ?? rootA;
       const peakB = peakOf.get(rootB) ?? rootB;
-      const bothBornAbove =
-        (nodeValue.get(peakA) ?? level) > level && (nodeValue.get(peakB) ?? level) > level;
-      if (bothBornAbove) {
-        let connecting = 0;
-        for (const candidate of sortedEdges) {
-          if (!active.has(candidate.a) || !active.has(candidate.b)) continue;
-          const ra = find(candidate.a);
-          const rb = find(candidate.b);
-          if ((ra === rootA && rb === rootB) || (ra === rootB && rb === rootA)) connecting += 1;
-        }
-        const survivor = dominantPeak(peakA, peakB);
-        merges.push({
-          level,
-          basinA: peakA,
-          basinB: peakB,
-          survivor,
-          connectingEdges: connecting,
-          fragile: connecting <= options.fragileEdgeThreshold,
-        });
+      let connecting = 0;
+      for (const candidate of sortedEdges) {
+        if (!active.has(candidate.a) || !active.has(candidate.b)) continue;
+        const ra = find(candidate.a);
+        const rb = find(candidate.b);
+        if ((ra === rootA && rb === rootB) || (ra === rootB && rb === rootA)) connecting += 1;
       }
+      const survivor = dominantPeak(peakA, peakB);
+      merges.push({
+        level,
+        basinA: peakA,
+        basinB: peakB,
+        survivor,
+        connectingEdges: connecting,
+        fragile: connecting <= options.fragileEdgeThreshold,
+      });
       parent.set(rootA, rootB);
       peakOf.set(find(rootB), dominantPeak(peakA, peakB));
     }
