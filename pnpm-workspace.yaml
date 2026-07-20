@@ -16,11 +16,13 @@ enablePrePostScripts: false
 # checklist).  These two dev-tool packages declare build scripts that this
 # project intentionally does not execute (esbuild's platform binary comes
 # from its optionalDependencies; lefthook is driven by the root `prepare`
-# script).  Declaring them ignored keeps that posture explicit — pnpm 11
-# hard-fails an install with undeclared ignored builds (ERR_PNPM_IGNORED_BUILDS).
-ignoredBuiltDependencies:
-  - esbuild
-  - lefthook
+# script).  `false` declares that decision — pnpm 11 hard-fails an install
+# whose ignored builds are UNDECLARED (ERR_PNPM_IGNORED_BUILDS), and it uses
+# this `allowBuilds` map (the pnpm 10-era only/ignoredBuiltDependencies lists
+# are no longer read).
+allowBuilds:
+  esbuild: false
+  lefthook: false
 
 # Security/peer pins (rationale + drop conditions: CLAUDE.md "Pinned dependencies").
 overrides:
