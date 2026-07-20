@@ -113,6 +113,26 @@ describe('CommentComposer draft autosave + offline queue', () => {
     });
   });
 
+  it('does NOT report "saved for later" when the durable enqueue itself fails', async () => {
+    // Transient POST failure AND a failed IndexedDB enqueue (quota / unavailable):
+    // the reader must not be told the comment is queued when nothing retains it.
+    mutHolder.impl = (_payload, opts) => {
+      opts.onError?.(new ApiClientError('http_503', 'Service Unavailable', 503));
+    };
+    mocks.enqueue.mockRejectedValueOnce(new Error('QuotaExceeded'));
+    render(
+      <CommentComposer storyId={STORY_ID} threadId={THREAD_ID} parentContributionId={PARENT_ID} />,
+    );
+    fireEvent.change(screen.getByLabelText('Write a reply'), {
+      target: { value: 'posted while storage is full' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalled());
+    // The optimistic "queued" status must NOT appear (enqueue rejected).
+    await Promise.resolve();
+    expect(screen.queryByText(/will post when you’re back online/)).not.toBeInTheDocument();
+  });
+
   it('rotates the client_draft_id after a successful post (still-mounted composer)', async () => {
     // The idempotency key must change between posts, or the API dedup path returns
     // the prior contribution for the second comment typed into the same composer.

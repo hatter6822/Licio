@@ -63,8 +63,9 @@ interface ContributionDraft {
   flush: () => void;
   /** Delete the autosaved draft after a confirmed post (cancels pending writes). */
   clearDraft: () => void;
-  /** Queue a transient-failed post for background retry; returns true if queued. */
-  queueIfTransient: (payload: ContributionWriteCreate, error: unknown) => boolean;
+  /** Queue a transient-failed post for background retry; resolves true ONLY after
+   *  the durable enqueue succeeds (false on a terminal error or a failed enqueue). */
+  queueIfTransient: (payload: ContributionWriteCreate, error: unknown) => Promise<boolean>;
 }
 
 /**
@@ -196,30 +197,30 @@ function useContributionDraft(args: {
   }, []);
 
   const queueIfTransient = useCallback(
-    (payload: ContributionWriteCreate, error: unknown): boolean => {
+    async (payload: ContributionWriteCreate, error: unknown): Promise<boolean> => {
       if (!isTransientPostFailure(error)) return false;
       // The operationId is the client_draft_id, so a re-send the server already
-      // received is deduped; the queue drain (offline/sync.ts) replays it. The
-      // queue now OWNS this write (its SSOT for unsynced writes), so drop the
-      // autosaved draft — otherwise a manual resume could post it a second time.
+      // received is deduped; the queue drain (offline/sync.ts) replays it.  AWAIT the
+      // durable enqueue before reporting success: on failure (quota exhaustion /
+      // unavailable storage) return `false` so the caller shows the error rather than
+      // a false "saved for later" — the autosaved draft (if any) is the fallback, and
+      // nothing is cleared/rotated so the composition is preserved for retry.
+      const handedOff = draftId.current;
+      try {
+        await queue.enqueue('contribution', payload, handedOff);
+      } catch {
+        return false;
+      }
+      // Durably taken: the queue now OWNS this write (its SSOT for unsynced writes),
+      // so stop autosave, drop the draft, and rotate the id — otherwise a manual
+      // resume could post it a second time, or the still-mounted composer's next
+      // write would reuse the (idempotency-keyed) id.
       if (debounceTimer.current !== null) {
         clearTimeout(debounceTimer.current);
         debounceTimer.current = null;
       }
       latestBody.current = '';
-      // Capture the handed-off id: the queue OWNS this write under it (its dedup key),
-      // and the deferred delete below must target the SAME id even after we rotate.
-      const handedOff = draftId.current;
-      // Drop the autosaved draft ONLY once the queue has durably taken the write —
-      // otherwise a failed enqueue (quota exhaustion / unavailable storage) would
-      // delete the ONLY copy while telling the reader it was saved for later. On an
-      // enqueue failure the draft is preserved, so the recoverable-draft path
-      // surfaces it on the next load.
-      void queue
-        .enqueue('contribution', payload, handedOff)
-        .then(() => deleteDraft(handedOff).catch(() => undefined))
-        .catch(() => undefined);
-      // The composer's next write is a NEW draft; the queued write keeps `handedOff`.
+      void deleteDraft(handedOff).catch(() => undefined);
       draftId.current = crypto.randomUUID();
       return true;
     },
@@ -424,7 +425,9 @@ export function CommentComposer({
       onError: (error) => {
         // Offline / transient failure — the write is queued and replays when
         // connectivity returns; a terminal 4xx keeps the plain error text.
-        if (draft.queueIfTransient(payload, error)) setQueued(true);
+        void draft.queueIfTransient(payload, error).then((queued: boolean) => {
+          if (queued) setQueued(true);
+        });
       },
     });
   };
@@ -614,7 +617,9 @@ export function CorrectionComposer({
       onError: (mutationError) => {
         // Offline / transient failure — queue the correction to replay when
         // connectivity returns; a terminal 4xx keeps the plain error text.
-        if (draft.queueIfTransient(payload, mutationError)) setQueued(true);
+        void draft.queueIfTransient(payload, mutationError).then((queued: boolean) => {
+          if (queued) setQueued(true);
+        });
       },
     });
   };

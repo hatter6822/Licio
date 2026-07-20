@@ -71,9 +71,6 @@ export class SignalProcessor {
   private readonly purgeQueuedAttention: () => Promise<unknown>;
 
   private policy: CollectionPolicy = COLLECTION_OFF;
-  /** Bumped on every policy change; fences the async opt-out purge against a fast
-   *  re-opt-in so the purge cannot delete aggregates produced after re-enable. */
-  private collectionGeneration = 0;
   private currentItemId: string | null = null;
   private sessionBucketLabel: string;
   private lastDwellMs = 0;
@@ -105,7 +102,6 @@ export class SignalProcessor {
    */
   setCollectionPolicy(policy: CollectionPolicy): void {
     this.policy = policy;
-    const gen = ++this.collectionGeneration;
     if (!policy.collect) {
       this.dwell.setEngaged(false);
       this.dwell.reset();
@@ -114,20 +110,18 @@ export class SignalProcessor {
       this.uploader.clear();
       // Also purge aggregates already DURABLY queued to IndexedDB (via a failed
       // flush or a page-hide flushDurable) — else the interval/visibility path would
-      // upload a pre-opt-out capture AFTER the user opted out (WS-C.4.1d). This is
-      // secondary cleanup: every live emit path above already gates on
-      // `policy.collect`, so NEW capture stops immediately. The durable purge is
-      // best-effort — if the queue store is unreachable (e.g. IndexedDB
-      // unavailable, in which case nothing could have been persisted to leak),
-      // swallow it rather than surface an unhandled rejection; the next opted-out
-      // app open re-applies this policy and re-purges (self-healing).  FENCE it
-      // against a fast re-opt-in: if collection was re-enabled before this async
-      // delete runs (the generation changed), skip it — otherwise removeByType
-      // would also delete aggregates legitimately produced in the re-enabled
-      // period (the pre-opt-out ones purge on the next opt-out).
-      void Promise.resolve()
-        .then(() => (this.collectionGeneration === gen ? this.purgeQueuedAttention() : undefined))
-        .catch(() => undefined);
+      // upload a pre-opt-out capture AFTER the user opted out (WS-C.4.1d). Runs
+      // UNCONDITIONALLY: opt-out MUST delete captured data (the privacy guarantee)
+      // even if the reader re-enables immediately — never skip it on a fast re-opt-in.
+      // The purge (`queue.removeByType`) is snapshot-based — it lists the durable set
+      // ONCE and deletes exactly those ids — so an aggregate captured + durably
+      // queued AFTER this snapshot (only reachable via a later engage→flush cycle, not
+      // within the purge microtask) is preserved; every live emit path above already
+      // stopped NEW capture synchronously. Best-effort: swallow an unreachable-store
+      // failure (e.g. IndexedDB unavailable, in which case nothing was persisted to
+      // leak) rather than surface an unhandled rejection; the next opted-out app open
+      // re-applies this policy and re-purges (self-healing).
+      void this.purgeQueuedAttention().catch(() => undefined);
     }
   }
 
