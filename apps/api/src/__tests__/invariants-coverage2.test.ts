@@ -345,7 +345,7 @@ describe('runner internals', () => {
   it('the health recorder trims its latency buffer and reports percentiles', () => {
     const recorder = new HealthRecorder();
     for (let i = 0; i < 1_100; i += 1) {
-      recorder.observe(i, [{ coverage: 1, fallback_used: i % 2 === 0 }]);
+      recorder.observe(i, [{ coverage: 1, confidence: 1, fallback_used: i % 2 === 0 }]);
     }
     const snapshot = recorder.snapshot();
     expect(snapshot.outputCount).toBe(1_100);

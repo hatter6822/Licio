@@ -35,6 +35,12 @@ export interface PromotionService {
   history(invariantType: string): Promise<PromotionRecord[]>;
 }
 
+export interface ObservedShadowEvidence {
+  shadowDurationDays: number;
+  observedCoverage: number;
+  observedConfidence: number;
+}
+
 export function createPromotionService(
   // Accept either the store or a getter for it. A getter lets the service read
   // the CURRENT store even after a post-construction swap (the production boot
@@ -45,6 +51,12 @@ export function createPromotionService(
   log: (event: string, meta: Record<string, unknown>) => void,
   regressionGate: () => { pass: boolean; failures: Array<{ invariant: string }> } = () =>
     runRegressionSuite(),
+  // The SERVER-MEASURED shadow metrics (from run history + the invariant's rolling
+  // health), or null if the invariant has not been observed yet.  When provided, an
+  // UPWARD promotion is gated on THESE, never the steward's self-reported evidence —
+  // otherwise the coverage/confidence/duration half of the WS-H.1.2e checklist would
+  // validate a steward's own numbers against a card bound derived from those numbers.
+  observedEvidence?: (invariantType: string) => Promise<ObservedShadowEvidence | null>,
 ): PromotionService {
   const resolveStore = (): PromotionStore => (typeof store === 'function' ? store() : store);
   const history = async (invariantType: string): Promise<PromotionRecord[]> => {
@@ -75,7 +87,33 @@ export function createPromotionService(
     async apply(record, minShadowDays) {
       const card = cardFor(record.invariantType);
       if (!card) return `unknown invariant type '${record.invariantType}'`;
-      const problem = validatePromotion(record, card, await history(record.invariantType), {
+      const upward = STATUS_RANK[record.toStatus] > STATUS_RANK[record.fromStatus];
+      // Gate an UPWARD promotion on the SERVER-MEASURED shadow metrics, not the
+      // self-reported ones; keep the driftReportRef (a pointer, not a metric).  The
+      // measured evidence is what gets validated AND stored, so the audit records the
+      // observed reality.  Demotions (the kill switch) are never gated.
+      let effective = record;
+      if (upward && observedEvidence) {
+        const observed = await observedEvidence(record.invariantType);
+        if (!observed) {
+          const reason = 'no observed shadow metrics yet — cannot verify promotion evidence';
+          log('invariants.promotion_rejected', {
+            invariant_type: record.invariantType,
+            problem: reason,
+          });
+          return reason;
+        }
+        effective = {
+          ...record,
+          evidence: {
+            ...record.evidence,
+            shadowDurationDays: observed.shadowDurationDays,
+            observedCoverage: observed.observedCoverage,
+            observedConfidence: observed.observedConfidence,
+          },
+        };
+      }
+      const problem = validatePromotion(effective, card, await history(record.invariantType), {
         minShadowDays,
       });
       if (problem !== null) {
@@ -102,12 +140,12 @@ export function createPromotionService(
         }
       }
       await resolveStore().append({
-        invariantType: record.invariantType,
-        fromStatus: record.fromStatus,
-        toStatus: record.toStatus,
-        evidence: { ...record.evidence },
-        owner: record.owner,
-        createdAt: record.createdAt,
+        invariantType: effective.invariantType,
+        fromStatus: effective.fromStatus,
+        toStatus: effective.toStatus,
+        evidence: { ...effective.evidence },
+        owner: effective.owner,
+        createdAt: effective.createdAt,
       });
       log('invariants.promotion_applied', {
         invariant_type: record.invariantType,

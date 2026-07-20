@@ -160,6 +160,17 @@ export class DrizzleRunMetadataStore implements RunMetadataStore {
     }));
   }
 
+  async firstRunAt(invariantType: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ startedAt: invariantRunMetadata.startedAt })
+      .from(invariantRunMetadata)
+      .where(eq(invariantRunMetadata.invariantType, invariantType))
+      .orderBy(asc(invariantRunMetadata.startedAt))
+      .limit(1);
+    const first = rows[0];
+    return first ? iso(first.startedAt) : null;
+  }
+
   async clear(): Promise<void> {
     await this.#db.delete(invariantRunMetadata);
   }

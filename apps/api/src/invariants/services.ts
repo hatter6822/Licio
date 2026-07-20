@@ -153,6 +153,24 @@ export function createInMemoryInvariantServices(
       (invariantType) =>
         Object.values(INVARIANT_CARDS).find((c) => c.invariant_type === invariantType) ?? null,
       log,
+      undefined,
+      // Server-measured shadow evidence: shadow duration from the first retained run,
+      // coverage/confidence from the invariant's rolling health.  Lazy so it reads the
+      // populated services (constructed below) at apply() time.  null (no observations
+      // yet) fails an upward promotion CLOSED.
+      async (invariantType) => {
+        const firstRun = await services.runMetadata.firstRunAt(invariantType);
+        if (firstRun === null) return null;
+        const service = services.all().find((s) => s.invariantType === invariantType);
+        if (!service) return null;
+        const health = service.getHealthMetrics();
+        if (health.outputCount === 0) return null;
+        return {
+          shadowDurationDays: (services.now() - Date.parse(firstRun)) / 86_400_000,
+          observedCoverage: health.coverageRatio,
+          observedConfidence: health.confidenceRatio,
+        };
+      },
     ),
     // Services are constructed below (deps need the config getter).
     meri: undefined as unknown as MeriService,

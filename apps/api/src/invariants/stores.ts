@@ -102,6 +102,9 @@ export interface RunMetadataStore {
   append(row: RunMetadataRow): Promise<void>;
   /** Most recent runs for an invariant, newest first. */
   listRecent(invariantType: string, limit: number): Promise<RunMetadataRow[]>;
+  /** The earliest RETAINED run's `startedAt` for an invariant (the shadow-start
+   *  floor the promotion gate measures shadow duration from), or null if none. */
+  firstRunAt(invariantType: string): Promise<string | null>;
   clear(): Promise<void>;
 }
 
@@ -118,6 +121,17 @@ export class InMemoryRunMetadataStore implements RunMetadataStore {
       .filter((r) => r.invariantType === invariantType)
       .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
       .slice(0, limit);
+  }
+
+  async firstRunAt(invariantType: string): Promise<string | null> {
+    let earliest: string | null = null;
+    for (const row of this.#rows) {
+      if (row.invariantType !== invariantType) continue;
+      if (earliest === null || Date.parse(row.startedAt) < Date.parse(earliest)) {
+        earliest = row.startedAt;
+      }
+    }
+    return earliest;
   }
 
   async clear(): Promise<void> {
