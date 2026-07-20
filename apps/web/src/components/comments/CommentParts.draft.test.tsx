@@ -111,6 +111,9 @@ describe('CommentComposer draft autosave + offline queue', () => {
     await waitFor(() => {
       expect(screen.getByText(/will post when you’re back online/)).toBeInTheDocument();
     });
+    // The composer is cleared once the queue owns the write, so a re-submit can't
+    // post the same text again under the rotated draft id.
+    expect((screen.getByLabelText('Write a reply') as HTMLTextAreaElement).value).toBe('');
   });
 
   it('does NOT report "saved for later" when the durable enqueue itself fails', async () => {

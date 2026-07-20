@@ -426,7 +426,11 @@ export function CommentComposer({
         // Offline / transient failure — the write is queued and replays when
         // connectivity returns; a terminal 4xx keeps the plain error text.
         void draft.queueIfTransient(payload, error).then((queued: boolean) => {
-          if (queued) setQueued(true);
+          if (queued) {
+            setQueued(true);
+            setBody(''); // the queue OWNS the write now — clear the composer so a
+            // re-submit can't post the same text again under the rotated draft id.
+          }
         });
       },
     });
@@ -618,7 +622,11 @@ export function CorrectionComposer({
         // Offline / transient failure — queue the correction to replay when
         // connectivity returns; a terminal 4xx keeps the plain error text.
         void draft.queueIfTransient(payload, mutationError).then((queued: boolean) => {
-          if (queued) setQueued(true);
+          if (queued) {
+            setQueued(true);
+            setBody(''); // the queue OWNS the write now — clear the composer so a
+            // re-submit can't post the same text again under the rotated draft id.
+          }
         });
       },
     });
