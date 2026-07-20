@@ -296,11 +296,31 @@ describe('validateClientEnv', () => {
     ).toThrow('VITE_');
   });
 
-  it('should reject missing VITE_API_URL', () => {
+  it('accepts a missing VITE_API_URL / VITE_APP_URL (the app defaults to same-origin)', () => {
+    expect(() => validateClientEnv({ VITE_APP_URL: 'http://localhost:5173' })).not.toThrow();
+    expect(() => validateClientEnv({})).not.toThrow();
+  });
+
+  it('rejects a garbage private-bundle signer pin (fails the build loudly)', () => {
     expect(() =>
       validateClientEnv({
-        VITE_APP_URL: 'http://localhost:5173',
+        VITE_PRIVATE_BUNDLE_SIGNER_KEYS: 'not-a-key',
+        VITE_PRIVATE_BUNDLE_LOG_KEY: 'x',
       }),
-    ).toThrow('VITE_API_URL');
+    ).toThrow('VITE_PRIVATE_BUNDLE');
+  });
+
+  it('rejects a partial private-bundle pin (signers without a log key, or vice versa)', () => {
+    const key = 'A'.repeat(43);
+    expect(() => validateClientEnv({ VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key })).toThrow(
+      'pinned together',
+    );
+    expect(() => validateClientEnv({ VITE_PRIVATE_BUNDLE_LOG_KEY: key })).toThrow(
+      'pinned together',
+    );
+    // Both pinned together ⇒ accepted.
+    expect(() =>
+      validateClientEnv({ VITE_PRIVATE_BUNDLE_SIGNER_KEYS: key, VITE_PRIVATE_BUNDLE_LOG_KEY: key }),
+    ).not.toThrow();
   });
 });

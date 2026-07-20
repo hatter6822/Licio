@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { validateClientEnv } from '@licio/shared/env';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createRouter, RouterProvider } from '@tanstack/react-router';
 import { StrictMode } from 'react';
@@ -15,6 +16,11 @@ import { registerQueryCachePurge } from './stores/auth.js';
 import './styles/app.css';
 
 initTrustedTypes();
+
+// Validate the client env at the trust boundary: a malformed value (esp. a garbage
+// or partial WS-S.10 update-channel pin, which otherwise silently disengages
+// verify-before-unlock or permanently locks rooms) must fail the boot loudly.
+validateClientEnv(import.meta.env as unknown as Record<string, string | undefined>);
 
 const queryClient = createAppQueryClient();
 
