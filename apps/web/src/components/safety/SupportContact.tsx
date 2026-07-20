@@ -13,7 +13,7 @@ export function SupportContact(): React.ReactElement {
   const t = useT();
   const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.supportContact(),
-    queryFn: fetchSupportContact,
+    queryFn: () => fetchSupportContact(),
     staleTime: 60 * 60 * 1000,
   });
 

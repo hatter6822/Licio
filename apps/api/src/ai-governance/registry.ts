@@ -138,7 +138,12 @@ function historyExtends(
     const a = prev[i];
     const b = next[i];
     if (a === undefined || b === undefined) return false;
-    if (a.version !== b.version || a.date !== b.date || a.description !== b.description)
+    if (
+      a.version !== b.version ||
+      a.date !== b.date ||
+      a.description !== b.description ||
+      a.evaluation_summary !== b.evaluation_summary
+    )
       return false;
   }
   return true;

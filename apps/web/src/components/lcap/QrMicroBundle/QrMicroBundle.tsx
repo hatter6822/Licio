@@ -103,18 +103,25 @@ export function QrMicroBundle({
 
   const onFileChosen = useCallback(async (file: File) => {
     setImportState({ phase: 'reading' });
-    const image = await fileToImageData(file);
-    if (!image) {
+    try {
+      const image = await fileToImageData(file);
+      if (!image) {
+        setImportState({ phase: 'no_qr' });
+        return;
+      }
+      const bytes = await decodeQr(image);
+      if (!bytes) {
+        setImportState({ phase: 'no_qr' });
+        return;
+      }
+      const { sizeBytes, hint } = describeQrPayload(bytes);
+      setImportState({ phase: 'summarized', bytes, hint, size: sizeBytes });
+    } catch {
+      // A non-decodable image (createImageBitmap rejection, jsQR chunk-load
+      // failure) routes to the same 'no QR found' state as a clean miss —
+      // never leaving the reader stuck on the spinner or throwing unhandled.
       setImportState({ phase: 'no_qr' });
-      return;
     }
-    const bytes = await decodeQr(image);
-    if (!bytes) {
-      setImportState({ phase: 'no_qr' });
-      return;
-    }
-    const { sizeBytes, hint } = describeQrPayload(bytes);
-    setImportState({ phase: 'summarized', bytes, hint, size: sizeBytes });
   }, []);
 
   const confirmImport = useCallback(() => {

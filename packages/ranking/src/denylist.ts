@@ -96,18 +96,23 @@ export class DeniedFinancialFieldError extends Error {
 /** The pattern (segment or compound) that makes `name` financial, or null. */
 export function matchedFinancialPattern(name: string): string | null {
   if (!isFinancialFieldName(name)) return null;
-  const lower = name.toLowerCase();
-  for (const compound of FINANCIAL_FIELD_COMPOUNDS) {
-    if (lower.includes(compound)) return compound;
-  }
   // The SAME segmentation the shared matcher uses (single source of truth —
-  // re-implementing the split here invited drift).
-  const segments = new Set(fieldNameSegments(name));
+  // re-implementing the split here invited drift). Compounds are matched
+  // against the normalized-segment join so camelCase multi-word financial
+  // fields (e.g. txHash → tx_hash) cannot evade the compound containment.
+  const segmentList = fieldNameSegments(name);
+  const normalized = segmentList.join('_');
+  for (const compound of FINANCIAL_FIELD_COMPOUNDS) {
+    if (normalized.includes(compound)) return compound;
+  }
+  const segments = new Set(segmentList);
   for (const term of FINANCIAL_FIELD_SEGMENTS) {
     if (segments.has(term)) return term;
   }
   // isFinancialFieldName matched, so one of the branches above must have too.
-  return 'financial';
+  // A reached-here state means the two matchers have drifted — fail loudly
+  // rather than silently mislabeling with a sentinel that is not a real match.
+  throw new Error(`matchedFinancialPattern: isFinancialFieldName/pattern-loop drift for "${name}"`);
 }
 
 /**

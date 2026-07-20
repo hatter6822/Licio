@@ -41,6 +41,10 @@ const KNOMOSIS_GATEWAY_REQUIRED_KEYS = [
  *  startup.  Both unset ⇒ the bridge is simply OFF (the opt-in default). */
 const LCAP_IPFS_REQUIRED_KEYS = ['LCAP_IPFS_GATEWAY_URL', 'LCAP_IPFS_PINNING_URL'] as const;
 
+/** The Web Push / VAPID group is all-or-none; a partial group silently disables
+ *  push (push-service.ts getVapidConfig returns null). */
+const VAPID_REQUIRED_KEYS = ['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT'] as const;
+
 /** The WS-N sanctions screening provider is all-or-none: a URL with no token
  *  file (or vice versa) is a deployment typo that would silently leave every
  *  screen `unavailable` — which real-fund environments REJECT — so fail fast
@@ -107,8 +111,8 @@ export const serverEnvSchema = z.object({
   // Web Push / VAPID (WS-C.2.4a). All optional: when unset, push is disabled and
   // the push endpoints report unconfigured rather than failing. The private key
   // lives ONLY here (server env), never in the client bundle (SPEC §6.8, §21.2).
-  VAPID_PUBLIC_KEY: z.string().optional(),
-  VAPID_PRIVATE_KEY: z.string().optional(),
+  VAPID_PUBLIC_KEY: z.string().min(1).optional(),
+  VAPID_PRIVATE_KEY: z.string().min(1).optional(),
   VAPID_SUBJECT: z
     .string()
     .regex(/^(mailto:|https:\/\/)/, {
@@ -250,6 +254,50 @@ export function isLoopbackHttpUrl(value: string): boolean {
   return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
 }
 
+/** Strictly parse the optional per-chain JSON-RPC map (CHAIN_RPC_URLS) into a
+ *  `{chainId → url}` record for contract-wallet (EIP-1271/6492) sign-in. Unset
+ *  ⇒ `{}` (only EOA sign-in available). A PRESENT-but-malformed value THROWS —
+ *  it must be a JSON object whose every key is a positive, safe-integer chain
+ *  id string and whose every value is an http(s) URL. Shared by the boot-time
+ *  env refinement (which fails fast at startup) and the runtime identity
+ *  consumer so both enforce the SAME predicate. */
+export function parseChainRpcUrls(raw: string | undefined): Record<number, string> {
+  if (raw === undefined) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('CHAIN_RPC_URLS must be valid JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('CHAIN_RPC_URLS must be a JSON object mapping chain id → RPC URL');
+  }
+  const out: Record<number, string> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (!/^[1-9][0-9]*$/.test(k)) {
+      throw new Error(`CHAIN_RPC_URLS chain id "${k}" must be a positive-integer string`);
+    }
+    const chainId = Number(k);
+    if (!Number.isInteger(chainId) || !Number.isSafeInteger(chainId)) {
+      throw new Error(`CHAIN_RPC_URLS chain id "${k}" is not a safe integer`);
+    }
+    if (typeof v !== 'string' || !/^https?:\/\//.test(v)) {
+      throw new Error(`CHAIN_RPC_URLS entry "${k}" must map to an http(s) URL`);
+    }
+    let url: URL;
+    try {
+      url = new URL(v);
+    } catch {
+      throw new Error(`CHAIN_RPC_URLS entry "${k}" must map to a valid http(s) URL`);
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(`CHAIN_RPC_URLS entry "${k}" must map to an http(s) URL`);
+    }
+    out[chainId] = v;
+  }
+  return out;
+}
+
 /** Infrastructure + secrets that MUST be configured in production but may be
  *  omitted in development/test (where the in-memory stores + dev defaults take
  *  over). Listed here so the refinement and the dev-default transform agree. */
@@ -281,6 +329,24 @@ export const serverEnvSchemaRefined = serverEnvSchema
     refineGroup(env, ctx, KNOMOSIS_GATEWAY_REQUIRED_KEYS, 'KNOMOSIS_GATEWAY');
     refineGroup(env, ctx, LCAP_IPFS_REQUIRED_KEYS, 'LCAP_IPFS');
     refineGroup(env, ctx, COMPLIANCE_SCREENING_REQUIRED_KEYS, 'COMPLIANCE_SCREENING');
+    refineGroup(env, ctx, VAPID_REQUIRED_KEYS, 'VAPID');
+    // CHAIN_RPC_URLS (WS-D contract-wallet sign-in): when SET, it must be a
+    // valid JSON object mapping positive-integer chain ids → http(s) URLs. A
+    // malformed value silently degrades to {} at the runtime consumer (only EOA
+    // sign-in remains), so reject it at startup rather than at first use —
+    // matching the fail-fast posture of every other all-or-none group. Unset ⇒
+    // {} (EOA-only) stays valid.
+    if (env.CHAIN_RPC_URLS !== undefined) {
+      try {
+        parseChainRpcUrls(env.CHAIN_RPC_URLS);
+      } catch (err) {
+        ctx.addIssue({
+          code: 'custom',
+          message: err instanceof Error ? err.message : 'CHAIN_RPC_URLS is invalid',
+          path: ['CHAIN_RPC_URLS'],
+        });
+      }
+    }
     // WS-U ADR-9: LLM-backend requirements fail FAST at startup in every
     // environment — never a silent boot with a half-configured backend that
     // would then silently serve deterministic. The value-level checks run

@@ -14,7 +14,7 @@ import {
   totpEnrollResponseSchema,
   totpVerifyRequestSchema,
 } from '@licio/shared';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { constantTimeEqual } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import {
@@ -101,9 +101,15 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
             return c.json(err('rate_limited', 'Too many attempts. Try again later.'), 429);
           }
           const secret = services.secretBox.open(userAuth.mfaSecret);
-          if (!verifyTotp(secret, c.req.valid('json').code).valid) {
+          const result = verifyTotp(secret, c.req.valid('json').code);
+          if (!result.valid || result.step === null) {
             return c.json(err('invalid_code', 'Invalid code.'), 400);
           }
+          // Burn the confirmation step against the SAME forward-only replay memory
+          // /verify enforces — otherwise the enrollment code is replayable once at
+          // /verify (no prior accepted step exists at initial enrollment, so no
+          // isReplayedStep check is needed here, only the high-water-mark write).
+          await services.otp.set(usedStepKey(auth.userId), String(result.step), MFA_STEP_MEMORY_MS);
           const recoveryCodes = generateRecoveryCodes();
           await services.store.setAuth(auth.userId, {
             mfaEnabled: true,
@@ -166,7 +172,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
               String(result.step),
               MFA_STEP_MEMORY_MS,
             );
-            await finishMfa(services, auth.userId, auth.tokenHash);
+            await finishMfa(services, auth.userId, auth.tokenHash, c);
             return c.json({ status: 'mfa_verified' as const });
           }
 
@@ -178,7 +184,7 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
           if (idx >= 0) {
             const remaining = userAuth.recoveryCodeHashes.filter((_, i) => i !== idx);
             await services.store.setAuth(auth.userId, { recoveryCodeHashes: remaining });
-            await finishMfa(services, auth.userId, auth.tokenHash);
+            await finishMfa(services, auth.userId, auth.tokenHash, c);
             return c.json({
               status: 'mfa_verified' as const,
               recovery_used: true,
@@ -232,13 +238,27 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
   );
 }
 
-/** Mark the session MFA-verified, reset the attempt counter, and audit success. */
+/**
+ * Mark the session MFA-verified, reset the attempt counter, audit success, and
+ * rotate the session id on the privilege change — mirroring /confirm and every
+ * other privilege transition (a new mfa_verified session id defeats fixation).
+ * `markMfaVerified` runs BEFORE the rotation so the rotated record — which
+ * `rotateSession` copies from the stored one — carries `mfa_verified=true`.
+ */
 async function finishMfa(
   services: IdentityServices,
   userId: string,
   tokenHash: string,
+  c: Context<AuthEnv>,
 ): Promise<void> {
   await markMfaVerified(services.sessions, tokenHash);
   await services.otp.delete(attemptsKey(userId));
   await services.audit.append({ actorUserId: userId, eventType: 'mfa_verify', context: {} });
+  const token = readSessionToken(c.req.header('cookie'));
+  const rotated = token ? await rotateSession(services.sessions, token) : null;
+  if (rotated) {
+    c.header('Set-Cookie', buildSessionCookie(rotated.token, rotated.maxAgeSec), {
+      append: true,
+    });
+  }
 }

@@ -29,6 +29,7 @@ function baseInput(manifest: unknown, runningBundleDigest: string) {
   return {
     manifest,
     runningBundleDigest,
+    expectedArtifactId: 'private-p2p',
     trustedSignerPublicKeys: [signer.publicKeyB64],
     logPublicKey: log.publicKeyB64,
   };
@@ -225,6 +226,25 @@ describe('verifyUpdateManifest — fail-closed lock reasons', () => {
     });
     const verdict = await verifyUpdateManifest(baseInput(tampered, runningBundleDigest));
     expect(verdict).toEqual({ trusted: false, reason: 'not_in_transparency_log' });
+  });
+
+  it('artifact_mismatch when the signed body attests a different artifact', async () => {
+    // A fully valid, genuinely-signed manifest for a DIFFERENT artifact must not
+    // activate THIS bundle: the signer honestly attested `some-other-artifact`,
+    // but the client expects `private-p2p`, so the verdict is a distinct
+    // artifact_mismatch (not overloaded onto malformed_manifest) → lock-rooms.
+    const { manifest, runningBundleDigest } = await buildValidManifest({
+      bundleBytes,
+      signer,
+      log,
+      artifactId: 'some-other-artifact',
+    });
+    const verdict = await verifyUpdateManifest(baseInput(manifest, runningBundleDigest));
+    expect(verdict).toEqual({ trusted: false, reason: 'artifact_mismatch' });
+    expect(decideUpdateActivation(verdict)).toEqual({
+      action: 'lock-rooms',
+      reason: 'artifact_mismatch',
+    });
   });
 
   it('malformed_manifest when the signer key is base64url-valid but not 32 bytes', async () => {

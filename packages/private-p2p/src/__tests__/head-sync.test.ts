@@ -142,7 +142,7 @@ describe('§15.8 fetch order', () => {
 });
 
 describe('§15.7 block request/response + refuse-large/backoff', () => {
-  const cid = `b${'a'.repeat(47)}`;
+  const cid = 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku';
   const request = blockRequestSchema.parse({
     schema: 'licio.private.block_request.v1',
     cids: [cid],

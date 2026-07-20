@@ -73,4 +73,10 @@ describe('assertNoRawEgress', () => {
   it('throws when a raw dwell duration would egress', () => {
     expect(() => assertNoRawEgress({ dwellMs: 42_000 })).toThrow();
   });
+
+  it('catches snake_case raw-trace keys via separator normalization', () => {
+    expect(() => assertNoRawEgress({ duration_ms: 42_000 })).toThrow(/forbidden key/);
+    expect(() => assertNoRawEgress({ scroll_y: 1200 })).toThrow(/forbidden key/);
+    expect(() => assertNoRawEgress({ raw_events: [{}] })).toThrow(/forbidden key/);
+  });
 });

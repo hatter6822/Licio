@@ -233,8 +233,13 @@ export function openDb(
     };
     request.onsuccess = () => {
       const db = request.result;
-      // If another tab triggers an upgrade, close so it is not blocked.
-      db.onversionchange = () => db.close();
+      // If another tab triggers an upgrade, close so it is not blocked. Drop the
+      // memoised connection too, or getDb() would keep handing out the closed
+      // handle and every subsequent request would reject with InvalidStateError.
+      db.onversionchange = () => {
+        db.close();
+        resetDbConnection();
+      };
       resolve(db);
     };
     request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));

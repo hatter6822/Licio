@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
+import { constantTimeEqual } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
-import { validateSession } from '../identity/sessions.js';
+import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { createLogger } from '../lib/logger.js';
 import { getAllowedOrigins } from './cors.js';
 
@@ -20,6 +21,14 @@ interface StoredToken {
 
 export interface TokenStore {
   get(sessionId: string): Promise<StoredToken | undefined>;
+  /**
+   * Atomically read-and-remove the stored token (single-use consumption).  A
+   * get→compare→delete sequence is NOT atomic on a shared store, so concurrent
+   * replays of the same token could all observe it before any delete lands;
+   * `consume` collapses the read+delete into one atomic step (Redis `GETDEL`;
+   * a synchronous get+delete with no intervening await in memory).
+   */
+  consume(sessionId: string): Promise<StoredToken | undefined>;
   set(sessionId: string, token: StoredToken): Promise<void>;
   delete(sessionId: string): Promise<void>;
   clear(): Promise<void>;
@@ -40,8 +49,22 @@ class MemoryTokenStore implements TokenStore {
     return this.map.get(sessionId);
   }
 
+  /** Atomic in the single-threaded event loop: no await sits between the read
+   *  and the delete, so two concurrent consumers can never both observe it. */
+  async consume(sessionId: string): Promise<StoredToken | undefined> {
+    const value = this.map.get(sessionId);
+    this.map.delete(sessionId);
+    return value;
+  }
+
   async set(sessionId: string, token: StoredToken): Promise<void> {
     this.map.set(sessionId, token);
+    // Re-arm the expiry sweep lazily: `clear()` may have disposed the timer, and
+    // a store that keeps accepting writes must keep sweeping expired entries.
+    if (!this.cleanupTimer) {
+      this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
+      this.cleanupTimer.unref?.();
+    }
   }
 
   async delete(sessionId: string): Promise<void> {
@@ -92,8 +115,9 @@ export class RedisTokenStore implements TokenStore {
     return `${this.prefix}${createHash('sha256').update(sessionId).digest('hex')}`;
   }
 
-  async get(sessionId: string): Promise<StoredToken | undefined> {
-    const raw = await this.redis.get(this.#key(sessionId));
+  /** Decode a Redis round-trip: a corrupted value reads as "no token" (fail
+   *  closed), never a crash or a forged acceptance. */
+  #decode(raw: string | null): StoredToken | undefined {
     if (!raw) return undefined;
     let parsed: unknown;
     try {
@@ -103,6 +127,16 @@ export class RedisTokenStore implements TokenStore {
     }
     const result = storedTokenSchema.safeParse(parsed);
     return result.success ? result.data : undefined;
+  }
+
+  async get(sessionId: string): Promise<StoredToken | undefined> {
+    return this.#decode(await this.redis.get(this.#key(sessionId)));
+  }
+
+  /** `GETDEL` is a single atomic Redis command: read-and-remove in one round
+   *  trip, so concurrent replays of the same token can never all pass. */
+  async consume(sessionId: string): Promise<StoredToken | undefined> {
+    return this.#decode(await this.redis.getdel(this.#key(sessionId)));
   }
 
   async set(sessionId: string, token: StoredToken): Promise<void> {
@@ -139,20 +173,6 @@ export function setTokenStore(store: TokenStore): void {
 
 function generateToken(): string {
   return randomBytes(TOKEN_BYTE_LENGTH).toString('hex');
-}
-
-function constantTimeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-function getSessionId(cookieHeader: string | undefined): string | undefined {
-  if (!cookieHeader) return undefined;
-  // Prefer the WS-D session cookie (`__Host-sid`); fall back to the WS-C name.
-  const match = cookieHeader.match(/(?:^|;\s*)__Host-(?:sid|session)=([^;]+)/);
-  return match?.[1];
 }
 
 // Fully CSRF-exempt paths (no token, no Origin check). Two rationales:
@@ -246,7 +266,7 @@ export function csrfTokenRoute(
   resolveIdentity: () => IdentityServices = getIdentityServices,
 ): MiddlewareHandler {
   return async (c) => {
-    const sessionId = getSessionId(c.req.header('cookie'));
+    const sessionId = readSessionToken(c.req.header('cookie'));
     if (!sessionId) {
       return c.json({ error: 'No session' }, 401);
     }
@@ -274,6 +294,7 @@ export function csrfTokenRoute(
       expiresAt: Date.now() + TOKEN_TTL_MS,
     });
 
+    c.header('Cache-Control', 'no-store');
     return c.json({ token });
   };
 }
@@ -309,7 +330,7 @@ export function csrfMiddleware(): MiddlewareHandler {
       return;
     }
 
-    const sessionId = getSessionId(c.req.header('cookie'));
+    const sessionId = readSessionToken(c.req.header('cookie'));
     if (!sessionId) {
       logger.warn({ auditAction: 'csrf_failure', reason: 'no_session', path: c.req.path });
       return c.json({ error: 'Forbidden' }, 403);
@@ -322,24 +343,25 @@ export function csrfMiddleware(): MiddlewareHandler {
     }
 
     const store = getTokenStore();
-    const stored = await store.get(sessionId);
+    // Single-use: atomically read-and-remove so concurrent replays cannot all
+    // pass.  A mismatch also consumes the stored token — hardening, since a
+    // legitimate client always submits the freshly-minted correct value, and it
+    // denies any retry oracle.
+    const stored = await store.consume(sessionId);
     if (!stored) {
       logger.warn({ auditAction: 'csrf_failure', reason: 'no_stored_token', path: c.req.path });
       return c.json({ error: 'CSRF token invalid' }, 403);
     }
 
     if (Date.now() > stored.expiresAt) {
-      await store.delete(sessionId);
       logger.warn({ auditAction: 'csrf_failure', reason: 'expired_token', path: c.req.path });
       return c.json({ error: 'CSRF token expired' }, 403);
     }
 
-    if (!constantTimeCompare(clientToken, stored.token)) {
+    if (!constantTimeEqual(clientToken, stored.token)) {
       logger.warn({ auditAction: 'csrf_failure', reason: 'token_mismatch', path: c.req.path });
       return c.json({ error: 'CSRF token invalid' }, 403);
     }
-
-    await store.delete(sessionId);
 
     await next();
   };

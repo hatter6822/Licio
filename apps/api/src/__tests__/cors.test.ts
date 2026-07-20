@@ -21,6 +21,30 @@ describe('CORS', () => {
     expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
   });
 
+  it('should set Vary: Origin on an allowed-origin response', async () => {
+    process.env['CORS_ORIGIN'] = 'https://licio.app';
+    const res = await app.request('/health', {
+      headers: { Origin: 'https://licio.app' },
+    });
+    expect(res.headers.get('Vary')).toContain('Origin');
+  });
+
+  it('should set Vary: Origin on a disallowed/absent-origin response', async () => {
+    const res = await app.request('/health', {
+      headers: { Origin: 'https://evil.com' },
+    });
+    expect(res.headers.get('Vary')).toContain('Origin');
+  });
+
+  it('should set Vary: Origin on a preflight OPTIONS response', async () => {
+    process.env['NODE_ENV'] = 'development';
+    const res = await app.request('/health', {
+      method: 'OPTIONS',
+      headers: { Origin: 'http://localhost:5173' },
+    });
+    expect(res.headers.get('Vary')).toContain('Origin');
+  });
+
   it('should reject substring-matching origins', async () => {
     process.env['CORS_ORIGIN'] = 'https://licio.app';
     const res = await app.request('/health', {

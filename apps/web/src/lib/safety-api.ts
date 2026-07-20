@@ -69,8 +69,12 @@ import { client, parseResponse } from './api.js';
 
 // --- User-facing controls --------------------------------------------------
 
-export async function fetchSupportContact(): Promise<SupportContactResponse> {
-  const response = await client.v1['support-contact'].$get();
+export async function fetchSupportContact(jurisdiction?: string): Promise<SupportContactResponse> {
+  // A 2-letter declared-region hint surfaces LOCAL crisis/CSAM hotlines (§19.1
+  // declared-region, never the client IP); omitted ⇒ the global fallback.
+  const response = await client.v1['support-contact'].$get({
+    query: jurisdiction ? { jurisdiction } : {},
+  });
   return parseResponse(response, supportContactResponseSchema);
 }
 

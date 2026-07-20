@@ -51,7 +51,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=test-session-id',
+        Cookie: '__Host-sid=test-session-id',
       },
       body: '{}',
     });
@@ -69,6 +69,8 @@ describe('CSRF protection', () => {
       headers: { Cookie: cookie },
     });
     expect(tokenRes.status).toBe(200);
+    // The minted token must never be cached by any intermediary (defense-in-depth).
+    expect(tokenRes.headers.get('cache-control')).toBe('no-store');
     const { token } = (await tokenRes.json()) as { token: string };
     expect(token).toBeDefined();
     expect(token.length).toBe(64);
@@ -214,7 +216,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-expired',
+        Cookie: '__Host-sid=session-expired',
         'X-CSRF-Token': 'b'.repeat(64),
       },
       body: '{}',
@@ -236,7 +238,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=session-len',
+        Cookie: '__Host-sid=session-len',
         'X-CSRF-Token': 'short',
       },
       body: '{}',
@@ -244,9 +246,38 @@ describe('CSRF protection', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects a multi-byte token (equal STRING length, differing BYTE length) with 403, not a 500', async () => {
+    const store = getTokenStore();
+    await store.set('session-highbyte', {
+      token: 'c'.repeat(64),
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const app = createApp();
+    // 64 UTF-16 code units, but the latin-1 high byte encodes to 2 UTF-8 bytes,
+    // so the Buffer byte length differs. A naive string-length guard would pass
+    // the length check and hand timingSafeEqual mismatched buffers → RangeError
+    // → 500. constantTimeEqual guards on byte length first, so this is a clean 403.
+    const res = await app.request('/api/csrf-token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: '__Host-sid=session-highbyte',
+        'X-CSRF-Token': `${'c'.repeat(63)}ÿ`,
+      },
+      body: '{}',
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('CSRF token invalid');
+  });
+
   it('supports setTokenStore to swap store implementation', async () => {
     const customStore: TokenStore = {
       async get() {
+        return { token: 'x'.repeat(64), expiresAt: Date.now() + 60_000 };
+      },
+      async consume() {
         return { token: 'x'.repeat(64), expiresAt: Date.now() + 60_000 };
       },
       async set() {},
@@ -260,7 +291,7 @@ describe('CSRF protection', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=custom-session',
+        Cookie: '__Host-sid=custom-session',
         'X-CSRF-Token': 'x'.repeat(64),
       },
       body: '{}',
@@ -275,7 +306,7 @@ describe('CSRF protection', () => {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
-        Cookie: '__Host-session=test-methods',
+        Cookie: '__Host-sid=test-methods',
       },
       body: '{}',
     });
@@ -284,7 +315,7 @@ describe('CSRF protection', () => {
     const deleteRes = await app.request('/api/csrf-token', {
       method: 'DELETE',
       headers: {
-        Cookie: '__Host-session=test-methods',
+        Cookie: '__Host-sid=test-methods',
       },
     });
     expect(deleteRes.status).toBe(403);
@@ -300,6 +331,11 @@ describe('RedisTokenStore', () => {
       map,
       async get(key: string): Promise<string | null> {
         return map.get(key) ?? null;
+      },
+      async getdel(key: string): Promise<string | null> {
+        const value = map.get(key) ?? null;
+        map.delete(key);
+        return value;
       },
       async set(key: string, value: string, _ex: 'EX', _ttl: number): Promise<'OK'> {
         map.set(key, value);

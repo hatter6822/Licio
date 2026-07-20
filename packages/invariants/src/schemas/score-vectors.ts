@@ -251,8 +251,13 @@ export function validateScoreVector(
       ? { ok: true }
       : { ok: false, problem: result.error.issues[0]?.message ?? 'invalid PWAtt vector' };
   }
+  // Own-property guard: never index the registry by an inherited prototype
+  // key (`toString`, `constructor`, `hasOwnProperty`), which would resolve to
+  // a function and crash `safeParse` — fail closed on any non-own key.
+  if (!Object.hasOwn(SCORE_VECTOR_SCHEMAS, invariantType)) {
+    return { ok: false, problem: `unknown invariant type '${invariantType}'` };
+  }
   const schema = SCORE_VECTOR_SCHEMAS[invariantType as InvariantType];
-  if (!schema) return { ok: false, problem: `unknown invariant type '${invariantType}'` };
   const result = schema.safeParse(vector);
   if (result.success) return { ok: true };
   const issue = result.error.issues[0];

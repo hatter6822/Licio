@@ -466,17 +466,31 @@ export async function runFeatureBatch(
   staleHours: number,
 ): Promise<{ refreshed: number }> {
   const cap = Math.max(1, limit);
-  const targets = new Set<string>();
+  // Reserve part of the per-tick budget for stale vectors so a burst of recent
+  // stories can never starve the stalest items this batch is meant to refresh.
+  const recentReserve = Math.max(1, Math.floor(cap / 2));
+  const recentIds: string[] = [];
   for (const story of await deps.ingestion.stories.listRecent(cap)) {
-    if (story.hiddenState === null) targets.add(story.storyId);
+    if (story.hiddenState === null) recentIds.push(story.storyId);
   }
   const staleBefore = new Date(deps.now() - staleHours * 3_600_000).toISOString();
-  for (const itemId of await deps.featureStore.listStaleItems(staleBefore, cap)) {
-    targets.add(itemId);
+  const staleIds = await deps.featureStore.listStaleItems(staleBefore, cap);
+  const targets = new Set<string>();
+  // Take up to half the budget of recent stories first (deterministic order).
+  for (const id of recentIds.slice(0, recentReserve)) targets.add(id);
+  // Fill the reserved remainder from the stalest vectors.
+  for (const id of staleIds) {
+    if (targets.size >= cap) break;
+    targets.add(id);
+  }
+  // Backfill any unused budget with the remaining recent stories.
+  for (const id of recentIds) {
+    if (targets.size >= cap) break;
+    targets.add(id);
   }
   let refreshed = 0;
   const versionCounts = new Map<string, number>();
-  for (const storyId of [...targets].slice(0, cap)) {
+  for (const storyId of targets) {
     if (await refreshFeatures(deps, storyId)) {
       refreshed += 1;
       const latest = await deps.featureStore.getLatest(storyId);

@@ -91,11 +91,14 @@ const FRAME_DEPENDENT_PATTERN = /^(matrix|entry|coord|embedding|frame|basis|h_\d
  */
 export function assertGaugeInvariantBoundary(scoreVector: Record<string, unknown>): void {
   for (const key of Object.keys(scoreVector)) {
-    if (!PHI_GAUGE_INVARIANT_FIELDS.has(key)) {
-      throw new Error(`PHI boundary violation: unexpected field '${key}'`);
-    }
+    // Test the frame-dependent pattern FIRST, independent of whitelist
+    // membership: a frame-dependent name is rejected even if erroneously
+    // added to PHI_GAUGE_INVARIANT_FIELDS (defense-in-depth, not dead code).
     if (FRAME_DEPENDENT_PATTERN.test(key)) {
       throw new Error(`PHI boundary violation: frame-dependent field '${key}'`);
+    }
+    if (!PHI_GAUGE_INVARIANT_FIELDS.has(key)) {
+      throw new Error(`PHI boundary violation: unexpected field '${key}'`);
     }
   }
 }

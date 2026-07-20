@@ -193,9 +193,13 @@ export interface ActorV1ContributionResult {
  * One actor's v1 contribution score: per-type counts pass through the
  * per-user diminishing curve at an EFFECTIVE count where uncited accusations
  * keep only `accusationDownweight` of an instance, then weight by the
- * hierarchy and cap at 1 (the per-user/item/window cap). Monotone: adding any
- * contribution never lowers the score; adding a citation to an accusation
- * raises it (the transparency remedy, WS-E.2.2b).
+ * hierarchy and cap at 1 (the per-user/item/window cap). Monotone below the
+ * rapid-repetition threshold: adding a constructive contribution never lowers
+ * the score while totalContributions <= config.rapidThreshold; once it exceeds
+ * the threshold the SPEC §5.3 rapid-repetition anti-signal deliberately
+ * multiplies the value by config.rapidDampening (mirrors actorParticipation in
+ * participation.ts). Adding a citation to an accusation always raises the
+ * pre-dampening value (the transparency remedy, WS-E.2.2b).
  */
 export function actorV1Contribution(
   actor: Pick<

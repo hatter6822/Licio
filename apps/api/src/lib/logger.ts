@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import pino from 'pino';
 
-export function createLogger(level = 'info'): pino.Logger {
-  return pino({
+export function createLogger(level = 'info', destination?: pino.DestinationStream): pino.Logger {
+  const options: pino.LoggerOptions = {
     level,
     redact: {
       paths: [
@@ -31,6 +31,11 @@ export function createLogger(level = 'info'): pino.Logger {
       ],
       censor: '[REDACTED]',
     },
-    ...(process.env['NODE_ENV'] === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
-  });
+    ...(process.env['NODE_ENV'] === 'development' && destination === undefined
+      ? { transport: { target: 'pino-pretty' } }
+      : {}),
+  };
+  // An explicit destination (tests capturing output) takes the two-arg pino form;
+  // otherwise pino defaults to stdout.
+  return destination === undefined ? pino(options) : pino(options, destination);
 }

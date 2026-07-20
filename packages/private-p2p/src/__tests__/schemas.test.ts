@@ -9,9 +9,11 @@ import { describe, expect, it } from 'vitest';
 import {
   BODY_AAD_ENVELOPE_FIELDS,
   contributionCreateOpSchema,
+  hourBucketSchema,
   inviteSecretSchema,
   joinRequestSchema,
   privateAttachmentManifestSchema,
+  privateCidSchema,
   privateEncryptedEnvelopeSchema,
   privateLocalSearchShardSchema,
   privateRoomManifestSchema,
@@ -20,7 +22,7 @@ import {
   WRAP_AAD_ENVELOPE_FIELDS,
 } from '../schemas/index.js';
 
-const CID = 'bafkreieaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const CID = 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku';
 const B64 = 'AAAAAAAA';
 
 const validEnvelope = {
@@ -109,6 +111,32 @@ describe('WS-S.2.3 envelope (§10.4) + AAD alignment (§10.5)', () => {
         Object.hasOwn(validEnvelope, field) || Object.hasOwn(validEnvelope.key_wrap, field);
       expect(present, `envelope missing wrap-AAD field ${field}`).toBe(true);
     }
+  });
+});
+
+describe('WS-S.2.3 scalar building blocks (§5.4, §9.4)', () => {
+  it('hourBucketSchema accepts a coarse UTC hour bucket but rejects a full-precision timestamp', () => {
+    expect(hourBucketSchema.safeParse('2026-06-22T00').success).toBe(true);
+    expect(hourBucketSchema.safeParse('2026-06-22T05').success).toBe(true);
+    // A finer-grained value must NOT masquerade as a coarse bucket.
+    expect(hourBucketSchema.safeParse('2026-06-22T05:37:41.219Z').success).toBe(false);
+    expect(hourBucketSchema.safeParse('2026-06-22T05:37').success).toBe(false);
+  });
+
+  it('privateCidSchema pins the §9.4 v1 profile shape (59-char bafkrei/bafyrei)', () => {
+    expect(privateCidSchema.safeParse(CID).success).toBe(true);
+    expect(
+      privateCidSchema.safeParse('bafyreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku')
+        .success,
+    ).toBe(true);
+    // An 8-char base32 string and a 60-char base32 string both fail the length/prefix guarantee.
+    expect(privateCidSchema.safeParse('baaaaaaa').success).toBe(false);
+    expect(privateCidSchema.safeParse(`${CID}a`).success).toBe(false);
+    // A non-profile multibase prefix (e.g. bafybei / raw base32) is rejected.
+    expect(
+      privateCidSchema.safeParse('bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku')
+        .success,
+    ).toBe(false);
   });
 });
 

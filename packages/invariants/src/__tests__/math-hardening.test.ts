@@ -122,6 +122,18 @@ describe('PHI path-signature Lévy area — documented semantics', () => {
     expect(bursty).toBeGreaterThan(0);
   });
 
+  it('rejects out-of-range and fractional dimension indices (no silent aliasing)', () => {
+    const sig = pathSignature(
+      sessionPathPoints([{ kind: 'read', topicOrdinal: 0, atMs: 0, engagement: 0.5 }]),
+    );
+    const d = sig.dimension;
+    expect(() => signedArea(sig, 0, d)).toThrow(/out of range/);
+    expect(() => signedArea(sig, -1, 0)).toThrow(/out of range/);
+    expect(() => signedArea(sig, 0.5, 1)).toThrow(/out of range/);
+    // A valid in-range pair still resolves.
+    expect(Number.isFinite(signedArea(sig, 0, 1))).toBe(true);
+  });
+
   it('classifySessionHealth still records the area as an interpretable feature', () => {
     const result = classifySessionHealth([
       { kind: 'read', topicOrdinal: 0, atMs: 0, engagement: 0.5 },

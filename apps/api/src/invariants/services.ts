@@ -24,10 +24,12 @@ import {
   analystCaseSummary,
   appealSummary,
   buildNullCalibration,
+  InvariantType,
   type MfciStatistic,
   type NullCalibration,
   nextRiskState,
   riskStateForScore,
+  synchronyScore,
   targetConcentrationScore,
 } from '@licio/invariants';
 import { isSentinelTopicId } from '@licio/shared';
@@ -47,6 +49,7 @@ import { registerScoiBridgeConsumer } from './scoi-actions.js';
 import {
   BraidService,
   CidService,
+  GLOBAL_FEED_TARGET_ID,
   GweiService,
   HodgeService,
   MeriService,
@@ -268,29 +271,44 @@ export function registerInvariantConsumers(
   invariants: InvariantPlatformServices,
 ): void {
   // WS-E seam closure: MERI redundancy for the PWAtt redundancy penalty.
-  // Bounded LRU: the cache would otherwise grow one entry per distinct item ever
-  // scored, leaking memory on a long-running server. Map preserves insertion
-  // order, so re-inserting on write keeps hot items recent and evicting the first
-  // key drops the least-recently-refreshed once the cap is exceeded.
-  const REDUNDANCY_CACHE_CAP = 5_000;
-  const redundancyCache = new Map<string, number>();
-  const cacheRedundancy = (itemId: string, value: number): void => {
-    redundancyCache.delete(itemId);
-    redundancyCache.set(itemId, value);
-    if (redundancyCache.size > REDUNDANCY_CACHE_CAP) {
-      const oldest = redundancyCache.keys().next().value;
-      if (oldest !== undefined) redundancyCache.delete(oldest);
+  // The redundancy hook fires once PER CANDIDATE during a feed render, but the
+  // signal it needs — the marginal_gains map — is a SINGLE global-feed MERI row
+  // shared by every item.  A per-item store read (the previous shape) re-fetched
+  // that identical row N times per render and spawned N un-awaited background
+  // reads.  Instead we snapshot the whole map once per TTL window and serve every
+  // item synchronously from memory, with at most one in-flight refresh.
+  const MERI_SNAPSHOT_TTL_MS = 30_000;
+  let meriGainsSnapshot: Record<string, number> = {};
+  let meriSnapshotAt = 0;
+  let meriRefreshInFlight = false;
+  const refreshMeriGains = async (): Promise<void> => {
+    // Read the same global-feed MERI row + parse the same field redundancyOf
+    // does, but ONCE for the whole map rather than once per item.
+    const latest = await events.invariantStore.latest(InvariantType.MERI, GLOBAL_FEED_TARGET_ID);
+    const next: Record<string, number> = {};
+    const gains = latest?.scoreVector['marginal_gains'];
+    if (typeof gains === 'object' && gains !== null) {
+      for (const [itemId, gain] of Object.entries(gains as Record<string, unknown>)) {
+        if (typeof gain === 'number') next[itemId] = gain;
+      }
     }
+    meriGainsSnapshot = next;
+    meriSnapshotAt = Date.now();
   };
   events.hooks.redundancy = (itemId: string): number => {
-    // The hook is synchronous (WS-E contract); serve the latest computed
-    // value and refresh the cache in the background.
-    const cached = redundancyCache.get(itemId) ?? 0;
-    void invariants.meri
-      .redundancyOf(itemId)
-      .then((value) => cacheRedundancy(itemId, value))
-      .catch(() => {});
-    return cached;
+    // The hook is synchronous (WS-E contract); serve from the in-memory snapshot
+    // and refresh it in the background at most once per TTL window.
+    if (Date.now() - meriSnapshotAt > MERI_SNAPSHOT_TTL_MS && !meriRefreshInFlight) {
+      meriRefreshInFlight = true;
+      void refreshMeriGains()
+        .catch(() => {})
+        .finally(() => {
+          meriRefreshInFlight = false;
+        });
+    }
+    // Identical clamp semantics to redundancyOf: redundancy = 1 − marginal_gain.
+    const gain = meriGainsSnapshot[itemId];
+    return typeof gain === 'number' ? Math.min(1, Math.max(0, 1 - gain)) : 0;
   };
 
   // PHI session sequences (WS-H.6.1a): topic-cluster ids + timing ONLY.
@@ -388,14 +406,42 @@ export function registerInvariantConsumers(
           { volume: 50, rawValue: 0.2 },
           { volume: 50, rawValue: 0.3 },
         ]);
-    const score = targetConcentrationScore(actions, calibration, { nowMs });
+    const tcScore = targetConcentrationScore(actions, calibration, { nowMs });
+    // The synchrony statistic (cross-actor temporal clustering) is built and
+    // anti-poisoned nightly (scheduler.ts) alongside target_concentration; the
+    // cheap intake evaluates BOTH so a coordinated burst that is not
+    // target-concentrated (e.g. many bots hitting distinct targets in lockstep)
+    // still fires (WS-H.3.1a/b).
+    const syncRow = await invariants.calibrations.get('mfci:synchrony');
+    const syncCalibration: NullCalibration = syncRow
+      ? (syncRow.data as unknown as NullCalibration)
+      : buildNullCalibration('synchrony', 'bootstrap', nowMs, [
+          { volume: 10, rawValue: 0.3 },
+          { volume: 10, rawValue: 0.4 },
+          { volume: 50, rawValue: 0.2 },
+          { volume: 50, rawValue: 0.3 },
+        ]);
+    const syncScore = synchronyScore(actions, syncCalibration, { nowMs });
     events.metrics.increment('invariants.mfci.cheap_checks');
-    if (score.score < config.mfciFreezeScore) return;
+    if (tcScore.score < config.mfciFreezeScore && syncScore.score < config.mfciFreezeScore) return;
+    // Pick the firing statistic: whichever clears the freeze threshold,
+    // preferring the higher score when both clear, so the case describes the
+    // detector that actually tripped.
+    const syncFires =
+      syncScore.score >= config.mfciFreezeScore &&
+      (tcScore.score < config.mfciFreezeScore || syncScore.score > tcScore.score);
+    const [firedStatistic, firedResult, firedCalibration]: [
+      MfciStatistic,
+      typeof tcScore,
+      NullCalibration,
+    ] = syncFires
+      ? ['synchrony', syncScore, syncCalibration]
+      : ['target_concentration', tcScore, calibration];
     // Conservative anomaly: open (or refresh) the analyst case at `high`.
     const existing = await invariants.mfciCases.latestForTarget(itemId);
     if (existing && existing.status === 'open') return;
-    const statistic: MfciStatistic = 'target_concentration';
-    const mfciScore = Math.max(config.mfciRiskThresholds.high, score.score);
+    const statistic: MfciStatistic = firedStatistic;
+    const mfciScore = Math.max(config.mfciRiskThresholds.high, firedResult.score);
     const riskState = riskStateForScore(mfciScore, config.mfciRiskThresholds);
     const facts = {
       statistic,
@@ -403,7 +449,9 @@ export function registerInvariantConsumers(
       pHat: Math.exp(-mfciScore),
       sampleCount: 0,
       riskState,
-      conditionedMargins: ['volume_bucket'],
+      // Synchrony conditions on the time-bucket margin; target_concentration on
+      // the volume-bucket margin (the axes the nightly calibrations key on).
+      conditionedMargins: statistic === 'synchrony' ? ['time_bucket'] : ['volume_bucket'],
       targetCount: 1,
     };
     await invariants.mfciCases.insert({
@@ -415,7 +463,7 @@ export function registerInvariantConsumers(
       mfciScore,
       pHat: facts.pHat,
       sampleCount: 0,
-      fixedMarginsRef: `cheap:${calibration.version}`,
+      fixedMarginsRef: `cheap:${firedCalibration.version}`,
       summary: analystCaseSummary(facts),
       appealSummary: appealSummary(facts),
       status: 'open',
@@ -438,8 +486,9 @@ export function registerInvariantConsumers(
     });
     invariants.log('invariants.mfci.case_opened', {
       item_id: itemId,
-      score: score.score,
-      reason_codes: score.reasonCodes,
+      statistic,
+      score: firedResult.score,
+      reason_codes: firedResult.reasonCodes,
       risk_state: transition.to,
     });
   };

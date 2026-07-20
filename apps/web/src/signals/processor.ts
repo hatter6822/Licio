@@ -110,8 +110,14 @@ export class SignalProcessor {
       this.uploader.clear();
       // Also purge aggregates already DURABLY queued to IndexedDB (via a failed
       // flush or a page-hide flushDurable) — else the interval/visibility path would
-      // upload a pre-opt-out capture AFTER the user opted out (WS-C.4.1d).
-      void this.purgeQueuedAttention();
+      // upload a pre-opt-out capture AFTER the user opted out (WS-C.4.1d). This is
+      // secondary cleanup: every live emit path above already gates on
+      // `policy.collect`, so NEW capture stops immediately. The durable purge is
+      // best-effort — if the queue store is unreachable (e.g. IndexedDB
+      // unavailable, in which case nothing could have been persisted to leak),
+      // swallow it rather than surface an unhandled rejection; the next opted-out
+      // app open re-applies this policy and re-purges (self-healing).
+      void this.purgeQueuedAttention().catch(() => undefined);
     }
   }
 

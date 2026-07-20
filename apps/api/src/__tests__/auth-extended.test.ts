@@ -108,6 +108,33 @@ describe('passkey-first signup', () => {
     });
     expect(res.status).toBe(409);
   });
+
+  it('rejects a corrupted pending-signup record instead of casting it through', async () => {
+    const app = createApp();
+    const authenticator = new SoftwareAuthenticator();
+    const opt = await app.request('/v1/auth/webauthn/signup/options', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'forged',
+        display_name: 'Forged',
+        date_of_birth: '1990-01-01',
+      }),
+    });
+    const attempt = cookie(opt, '__Host-pksignup');
+    const options = await readJson<{ challenge: string }>(opt);
+    // Overwrite the ephemeral pending record with a malformed payload (a forged /
+    // corrupted store entry): the verify path must reject on validation, not cast.
+    const attemptId = attempt.split('=')[1] as string;
+    await services.challenges.set(`pksignup:${attemptId}`, '{ not json', 60_000);
+    const verify = await app.request('/v1/auth/webauthn/signup/verify', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({ response: authenticator.register(options.challenge, RP, ORIGIN) }),
+    });
+    expect(verify.status).toBe(400);
+    expect(await services.store.getUserByHandle('forged')).toBeNull();
+  });
 });
 
 describe('email factor verify/resend gating', () => {

@@ -127,6 +127,23 @@ function canonical(value: VoteWeight): string {
 }
 
 /**
+ * Exact integer square root (Newton's method on bigints).  IEEE `Math.sqrt`
+ * loses precision above 2^52 and would violate this module's exact-decimal
+ * invariant, so the quadratic model floors √units through this helper — the
+ * documented ⌊√units⌋ contract holds for arbitrarily large inputs.
+ */
+function isqrt(n: bigint): bigint {
+  if (n < 2n) return n;
+  let x = n;
+  let y = (x + 1n) / 2n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) / 2n;
+  }
+  return x;
+}
+
+/**
  * Resolve a voter's effective weight for one proposal (WS-M.4.2c-1).  The
  * caller has already run `checkVoterEligibility`; this function only computes
  * the capped weight and its explanation.  Deterministic and pure.
@@ -188,7 +205,7 @@ export function resolveVotingWeight(input: WeightResolverInput): WeightResolutio
     case 'quadratic_capped': {
       // Quadratic voting: weight grows with the square root of committed units,
       // floored to keep the tally integral, then capped per account.
-      const quadratic = Math.floor(Math.sqrt(input.facts.tokenVoteUnits));
+      const quadratic = isqrt(BigInt(Math.trunc(input.facts.tokenVoteUnits))).toString();
       const weight = decMin(quadratic, cap);
       return {
         resolved: true,

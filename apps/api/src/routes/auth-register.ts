@@ -53,11 +53,17 @@ const passkeySignupRequestSchema = z
 
 const emailAddRequestSchema = z.object({ email: emailSchema }).strict();
 
-interface PendingSignup {
-  handle: string;
-  displayName: string;
-  ageBand: 'adult' | 'teen_16_17' | 'teen_13_15';
-}
+// The ephemeral store hands back an opaque string; validate the JSON on read
+// so a corrupted/forged pending record cannot reach account creation via a bare
+// cast.  The type is derived from the schema so the two never drift.
+const pendingSignupSchema = z
+  .object({
+    handle: handleSchema,
+    displayName: z.string().min(1).max(80),
+    ageBand: z.enum(['adult', 'teen_16_17', 'teen_13_15']),
+  })
+  .strict();
+type PendingSignup = z.infer<typeof pendingSignupSchema>;
 
 export function createRegisterRoutes(resolve: () => IdentityServices) {
   // GLOBAL (identity-free) budget on unauthenticated account creation: bounds
@@ -121,7 +127,14 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
             return c.json(err('registration_failed', 'Could not register passkey.'), 400);
           const rawPending = await services.challenges.take(pendingKey(attemptId));
           if (!rawPending) return c.json(err('registration_failed', 'Signup expired.'), 400);
-          const pending = JSON.parse(rawPending) as PendingSignup;
+          let pending: PendingSignup;
+          try {
+            const parsed = pendingSignupSchema.safeParse(JSON.parse(rawPending));
+            if (!parsed.success) return c.json(err('registration_failed', 'Signup expired.'), 400);
+            pending = parsed.data;
+          } catch {
+            return c.json(err('registration_failed', 'Signup expired.'), 400);
+          }
           if (await services.store.getUserByHandle(pending.handle)) {
             return c.json(err('handle_taken', 'That handle is unavailable.'), 409);
           }

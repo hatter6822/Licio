@@ -14,7 +14,14 @@ import {
 } from './sync-triggers.js';
 
 function conditions(over: Partial<SyncConditions> = {}): SyncConditions {
-  return { online: true, privacyMode: 'standard', dataSaver: false, batteryLow: false, ...over };
+  return {
+    online: true,
+    privacyMode: 'standard',
+    backgroundSyncAllowed: true,
+    dataSaver: false,
+    batteryLow: false,
+    ...over,
+  };
 }
 
 afterEach(() => {
@@ -27,6 +34,7 @@ describe('shouldAutoSync (§23.3)', () => {
     expect(shouldAutoSync(conditions())).toBe(true);
     expect(shouldAutoSync(conditions({ online: false }))).toBe(false);
     expect(shouldAutoSync(conditions({ privacyMode: 'stealth' }))).toBe(false);
+    expect(shouldAutoSync(conditions({ backgroundSyncAllowed: false }))).toBe(false);
     expect(shouldAutoSync(conditions({ dataSaver: true }))).toBe(false);
     expect(shouldAutoSync(conditions({ batteryLow: true }))).toBe(false);
   });

@@ -12,10 +12,27 @@ vi.mock('./api.js', async (importOriginal) => {
   };
 });
 
+// Capture the SyncOptions the runtime wires so the terminal-failure callback is
+// asserted at the bootstrap seam (the sync module's own drain behaviour is
+// covered by sync.test.ts). Teardown is a no-op the runtime can call safely.
+vi.mock('../offline/sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../offline/sync.js')>();
+  return {
+    ...actual,
+    initForegroundSync: vi.fn(() => () => undefined),
+    processPendingQueue: vi.fn(async () => ({ sent: 0, retried: 0, failed: 0 })),
+  };
+});
+
 const api = await import('./api.js');
-const { applySignalPolicy, confirmSession, hydrateFeatureFlags, startRuntime } = await import(
-  './bootstrap.js'
-);
+const sync = await import('../offline/sync.js');
+const {
+  applySignalPolicy,
+  confirmSession,
+  hydrateFeatureFlags,
+  QUEUE_FAILURE_EVENT,
+  startRuntime,
+} = await import('./bootstrap.js');
 const { useFeatureFlagStore } = await import('../stores/feature-flags.js');
 const { useAuthStore } = await import('../stores/auth.js');
 const { setSignalProcessor } = await import('../signals/runtime.js');
@@ -197,5 +214,52 @@ describe('startRuntime', () => {
     const teardown = startRuntime();
     expect(typeof teardown).toBe('function');
     expect(() => teardown()).not.toThrow();
+  });
+
+  it('wires a terminal-failure callback into foreground sync that emits an id-only event', () => {
+    vi.mocked(api.fetchFeatureFlags).mockResolvedValue({
+      cryptoEnabled: false,
+      governanceEnabled: false,
+      regionFlags: {},
+      content: FAIL_CLOSED_FLAGS.content,
+    });
+    vi.mocked(api.fetchAuthStatus).mockResolvedValue({ authenticated: false });
+    vi.mocked(api.fetchSettings).mockResolvedValue({
+      feed_mode: 'best',
+      personalization_enabled: true,
+      privacy_level: 'standard',
+      theme: 'system',
+      reduced_motion: 'system',
+    });
+    const teardown = startRuntime();
+    // The runtime must hand foreground sync an onTerminalFailure sink.
+    const options = vi.mocked(sync.initForegroundSync).mock.calls[0]?.[0];
+    expect(options?.onTerminalFailure).toBeTypeOf('function');
+
+    // Invoking it dispatches QUEUE_FAILURE_EVENT carrying only ids / closed
+    // enums — never the (potentially server-authored) failure reason.
+    let detail: unknown = null;
+    const listener = (event: Event): void => {
+      detail = (event as CustomEvent).detail;
+    };
+    window.addEventListener(QUEUE_FAILURE_EVENT, listener);
+    options?.onTerminalFailure?.(
+      {
+        schemaVersion: 2,
+        operationId: 'op-1',
+        operationType: 'contribution',
+        status: 'failed',
+        createdAt: 0,
+        attempts: 5,
+        lastError: 'server said no (secret message)',
+        payload: {},
+      },
+      'server said no (secret message)',
+    );
+    window.removeEventListener(QUEUE_FAILURE_EVENT, listener);
+
+    expect(detail).toEqual({ operationId: 'op-1', operationType: 'contribution' });
+    expect(JSON.stringify(detail)).not.toContain('secret message');
+    teardown();
   });
 });

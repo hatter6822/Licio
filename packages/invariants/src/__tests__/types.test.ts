@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import type { InvariantOutput, InvariantVersion } from '../types.js';
+import type { InvariantOutput } from '../types.js';
 import { INVARIANT_TARGET_TYPES, INVARIANT_TYPE_NAMES, InvariantType } from '../types.js';
 
 describe('InvariantType', () => {
@@ -40,20 +40,26 @@ describe('InvariantType', () => {
 });
 
 describe('InvariantOutput', () => {
-  it('accepts a well-formed output', () => {
-    const version: InvariantVersion = { major: 1, minor: 0, patch: 0 };
+  it('accepts a well-formed output aligned with the §22.1 SSOT', () => {
     const output: InvariantOutput = {
       type: InvariantType.MERI,
-      version,
+      target: { targetType: 'story', targetId: 'story-1' },
+      window: { start: '2026-07-19T00:00:00.000Z', end: '2026-07-19T01:00:00.000Z' },
+      version: '1.0.0',
+      score_vector: { meri: 0.72 },
       confidence: 0.95,
       coverage: 0.88,
-      reasonCodes: ['MATROID_FALLBACK'],
-      fallbackBehavior: 'degrade-gracefully',
+      reason_codes: ['MATROID_FALLBACK'],
+      fallback_used: true,
       timestamp: new Date().toISOString(),
     };
     expect(output.type).toBe(InvariantType.MERI);
+    expect(output.version).toBe('1.0.0');
     expect(output.confidence).toBeGreaterThan(0);
     expect(output.coverage).toBeGreaterThan(0);
-    expect(output.reasonCodes).toHaveLength(1);
+    expect(output.reason_codes).toHaveLength(1);
+    expect(output.fallback_used).toBe(true);
+    expect(output.target.targetType).toBe('story');
+    expect(output.score_vector).toMatchObject({ meri: 0.72 });
   });
 });

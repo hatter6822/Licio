@@ -76,7 +76,16 @@ function sweep(
   edges: readonly ReebEdge[],
   options: ReebOptions,
 ): SweepResult {
-  const nodeValue = new Map(nodes.map((n) => [n.id, n.value]));
+  const nodeValue = new Map<string, number>();
+  for (const n of nodes) {
+    if (!Number.isFinite(n.value)) {
+      throw new Error(`node ${n.id} has non-finite value ${n.value}`);
+    }
+    if (nodeValue.has(n.id)) {
+      throw new Error(`duplicate node id ${n.id}`);
+    }
+    nodeValue.set(n.id, n.value);
+  }
   for (const edge of edges) {
     if (!nodeValue.has(edge.a) || !nodeValue.has(edge.b)) {
       throw new Error(`edge references unknown node ${edge.a}/${edge.b}`);

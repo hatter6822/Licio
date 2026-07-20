@@ -77,6 +77,34 @@ describe('computeBiasAudit', () => {
     expect(result.justification).not.toBeNull();
   });
 
+  it('does NOT waive a gap when the acceptance carries no justification', () => {
+    const result = computeBiasAudit(
+      [metric({ subgroup: 'en', accuracy: 0.95 }), metric({ subgroup: 'sw', accuracy: 0.7 })],
+      {
+        threshold: 0.1,
+        acceptedDisparities: new Set([disparityKey('language', 'accuracy')]),
+        // no justification (undocumented acceptance is fail-open governance)
+      },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.accepted_with_documentation).toBe(false);
+    expect(result.justification).toBeNull();
+  });
+
+  it('does NOT waive a gap when the justification is blank', () => {
+    const result = computeBiasAudit(
+      [metric({ subgroup: 'en', accuracy: 0.95 }), metric({ subgroup: 'sw', accuracy: 0.7 })],
+      {
+        threshold: 0.1,
+        acceptedDisparities: new Set([disparityKey('language', 'accuracy')]),
+        justification: '   ',
+      },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.accepted_with_documentation).toBe(false);
+    expect(result.justification).toBeNull();
+  });
+
   it('passes when the gap is below threshold', () => {
     const result = computeBiasAudit(
       [metric({ subgroup: 'en', accuracy: 0.92 }), metric({ subgroup: 'sw', accuracy: 0.9 })],

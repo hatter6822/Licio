@@ -52,9 +52,24 @@ export function createTrustSafetyRoutes() {
   return (
     new Hono<AuthEnv>()
       // --- Support contact (UNAUTHENTICATED; WS-J.1.1e) --------------------
-      .get('/support-contact', (c) => {
-        return c.json(supportContactResponseSchema.parse(buildSupportContact(null)));
-      })
+      .get(
+        '/support-contact',
+        zValidator(
+          'query',
+          z.object({
+            jurisdiction: z
+              .string()
+              .regex(/^[A-Za-z]{2}$/)
+              .optional(),
+          }),
+        ),
+        (c) => {
+          const { jurisdiction } = c.req.valid('query');
+          return c.json(
+            supportContactResponseSchema.parse(buildSupportContact(jurisdiction ?? null)),
+          );
+        },
+      )
 
       // --- Reports (WS-J.1.1a) --------------------------------------------
       .post(

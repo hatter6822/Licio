@@ -51,7 +51,11 @@ export function createLocalSecretBox(masterSecret: string): SecretBox {
       const ciphertext = Buffer.from(parts[2] as string, 'base64url');
       const tag = Buffer.from(parts[3] as string, 'base64url');
       if (iv.length !== IV_BYTES) throw new Error('secret-box: bad iv');
-      const decipher = createDecipheriv('aes-256-gcm', key, iv);
+      // Enforce the full 128-bit GCM tag: a truncated tag drops forgery
+      // resistance from 2^128 to 2^(8·len).  Reject before setAuthTag, and pass
+      // authTagLength so Node itself rejects a non-16-byte tag (and DEP0182 stays quiet).
+      if (tag.length !== 16) throw new Error('secret-box: bad tag');
+      const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
       decipher.setAuthTag(tag);
       return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     },

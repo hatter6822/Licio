@@ -271,7 +271,8 @@ export class InMemoryLcapServerStore implements LcapServerStore {
   }
 
   listForkEvidence(): Promise<readonly ForkEvidence[]> {
-    return Promise.resolve(this.forkEvidence);
+    // A copy so the caller can never mutate the canonical evidence log (matches roomLog + the Drizzle adapter's fresh array).
+    return Promise.resolve([...this.forkEvidence]);
   }
 
   indexRecordEdge(

@@ -46,9 +46,19 @@ export function initTrustedTypes(): void {
     },
   });
 
-  tt.createPolicy('dompurify', {
+  const dompurifyPolicy = tt.createPolicy('dompurify', {
     createHTML: (input: string) => input,
+    // DOMPurify's config validation requires createScriptURL to exist; UGC/sanitized
+    // HTML can never legitimately mint a script URL, so fail closed.
+    createScriptURL: () => {
+      throw new Error('dompurify policy never creates script URLs');
+    },
   });
 
-  DOMPurify.setConfig({ RETURN_TRUSTED_TYPE: true });
+  DOMPurify.setConfig({
+    RETURN_TRUSTED_TYPE: true,
+    TRUSTED_TYPES_POLICY: dompurifyPolicy as NonNullable<
+      Parameters<typeof DOMPurify.setConfig>[0]
+    >['TRUSTED_TYPES_POLICY'],
+  });
 }

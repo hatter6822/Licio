@@ -208,6 +208,13 @@ describe('score-vector schemas (WS-H.1.1d)', () => {
     expect(validateScoreVector('PWAtt_v2', { anything: 0.5 }).ok).toBe(true);
     expect(validateScoreVector('PWAtt_v2', { bad: 'high' }).ok).toBe(false);
     expect(validateScoreVector('unknown_type', {}).ok).toBe(false);
+    // Prototype-chain keys must fail closed, not crash on the inherited function.
+    for (const protoKey of ['toString', 'constructor', 'hasOwnProperty']) {
+      expect(validateScoreVector(protoKey, {})).toEqual({
+        ok: false,
+        problem: `unknown invariant type '${protoKey}'`,
+      });
+    }
   });
 
   it('the discriminated union routes by invariant_type', () => {

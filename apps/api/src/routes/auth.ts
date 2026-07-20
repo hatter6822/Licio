@@ -141,7 +141,15 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         // either way keeps account existence unobservable.
         if (sendable && user) {
           const { code } = await startEmailLogin(services.otp, attemptId, user.userId);
-          await services.mailer.sendCode(email, code, 'login');
+          // Fire-and-forget the SES round trip: awaiting it on the response path
+          // would make the dominant HTTPS send latency an account-existence oracle
+          // (the branch only runs for an existing account).  The code-mint store
+          // write above already happened on both branches' cheap local/Redis path,
+          // so the 202 returns after uniform work either way.  Delivery is
+          // best-effort — a send failure never surfaces to the caller (mirrors the
+          // security-alerts.ts onError best-effort transports); the payload never
+          // touches a log line (§19.1).
+          void services.mailer.sendCode(email, code, 'login').catch(() => {});
         }
         c.header('Set-Cookie', buildAttemptCookie(ATTEMPT_COOKIES.emailLogin, attemptId), {
           append: true,
@@ -326,7 +334,9 @@ function createLoginRoutes(resolve: () => IdentityServices) {
           ...(contractVerifier ? { contractVerifier } : {}),
         });
         if (!result.ok) {
-          // An invalid signature is unattributable ⇒ null account key (IP only).
+          // An invalid signature is unattributable ⇒ null account key (only the
+          // global identity-free backstop counter moves; §19.1 — no IP/client-network
+          // dimension exists).
           await recordAuthFailure(services, { accountKey: null, authMethod: 'wallet' });
           return c.json(err('auth_failed', 'Authentication failed.'), 400);
         }

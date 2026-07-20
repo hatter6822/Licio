@@ -38,8 +38,8 @@ export const UGC_ALLOWED_TAGS = [
   'br',
 ] as const;
 
-/** WS-G.4.2a ALLOWED_ATTR — href (anchors) + class (syntax highlighting). */
-export const UGC_ALLOWED_ATTR = ['href', 'class'] as const;
+/** WS-G.4.2a ALLOWED_ATTR — href (anchors) — the single attribute the WS-G serializer emits. */
+export const UGC_ALLOWED_ATTR = ['href'] as const;
 
 /** WS-G.4.2a ALLOWED_URI_REGEXP — http, https, mailto only. */
 export const UGC_ALLOWED_URI_REGEXP = /^(?:https?:|mailto:)/i;

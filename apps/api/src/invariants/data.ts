@@ -356,6 +356,19 @@ export async function assembleMfciActions(
   const observations: Array<{ labels: string[] }> = [];
   const rawActions: Array<{ actorRef: string; targetId: string; atMs: number }> = [];
   const fromMs = Date.parse(fromIso);
+
+  // First pass: resolve each row's target and collect the distinct target/owner
+  // ids, so the story + user lookups are TWO batch reads — not N+1 per-row
+  // getById/getUser calls that amplify worst under the very concentration
+  // attack MFCI detects (symmetric with assembleCohorts' batch reads).
+  interface ResolvedRow {
+    row: (typeof rows)[number];
+    targetId: string;
+    atMs: number;
+  }
+  const resolved: ResolvedRow[] = [];
+  const targetIds = new Set<string>();
+  const ownerIds = new Set<string>();
   for (const row of rows) {
     const payload = row.payload;
     const targetId =
@@ -365,14 +378,26 @@ export async function assembleMfciActions(
           ? payload['thread_id']
           : null;
     if (!targetId) continue;
-    const atMs = Date.parse(row.timestamp);
+    resolved.push({ row, targetId, atMs: Date.parse(row.timestamp) });
+    targetIds.add(targetId);
+    if (row.ownerUserId) ownerIds.add(row.ownerUserId);
+  }
+
+  // Batch-fetch: getByIds omits unknown ids (missing story → 'untagged'),
+  // getUsersByIds omits unknown ids (missing user → 'unknown').
+  const storyMap = await ingestion.stories.getByIds([...targetIds]);
+  const userList = await identity.store.getUsersByIds([...ownerIds]);
+  const userMap = new Map(userList.map((u) => [u.userId, u]));
+
+  // Second pass: emit each observation from the pre-fetched maps.
+  for (const { row, targetId, atMs } of resolved) {
     const actorRef = row.ownerUserId ?? 'anonymous';
     let group = 'unknown';
     if (row.ownerUserId) {
-      const user = await identity.store.getUser(row.ownerUserId);
+      const user = userMap.get(row.ownerUserId);
       if (user) group = accountAgeBucket(Date.parse(user.createdAt), atMs);
     }
-    const story = await ingestion.stories.getById(targetId);
+    const story = storyMap.get(targetId);
     // First REAL topic (never the UNCLASSIFIED sentinel) — unclassified stories
     // must not group under one synthetic MFCI topic label.
     const topic = story?.topicIds.find((id) => !isSentinelTopicId(id)) ?? 'untagged';

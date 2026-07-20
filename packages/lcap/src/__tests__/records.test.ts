@@ -103,6 +103,38 @@ describe('thread projection (WS-R.2.2)', () => {
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', hidden: true, hiddenBy: 'r-t' });
   });
 
+  it('picks the canonically-latest edit under §12.4, not the higher device_seq', () => {
+    // Two conflicting edits of the SAME target, authored by DIFFERENT devices.
+    // The stale one carries a higher local device_seq; the fresh one carries the
+    // higher room-log sequence (§12.4 rung #1).  device_seq is meaningless across
+    // devices, so the room-log-ordered edit must win — the stale high-seq edit
+    // must NOT surface as the visible tip.
+    const base = tr('t-o', mkRecord({ event_type: 'post', device_seq: 0 }));
+    const staleHighSeq = tr(
+      't-stale',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-A',
+        device_seq: 99,
+        replaces_record_cid: 't-o',
+      }),
+      { roomLogSeq: 1 },
+    );
+    const freshLowSeq = tr(
+      't-fresh',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-B',
+        device_seq: 1,
+        replaces_record_cid: 't-o',
+      }),
+      { roomLogSeq: 2 },
+    );
+    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?.visibleCid).toBe('t-fresh');
+  });
+
   it('is independent of record arrival order (property)', () => {
     const records = [post, edit1, edit2, tomb];
     const reference = JSON.stringify(

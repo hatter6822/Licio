@@ -99,31 +99,44 @@ export function registerDefaultConsumers(
         itemIds.push(saved.story_id);
       }
       // Volume-threshold trigger for early aggregation (WS-E.2.1a).
+      //
+      // The recordAttention/recordSourceOpen/recordContribution/recordSave calls
+      // above have already COMMITTED their (non-idempotent) per-item counters.
+      // A failure below must therefore never re-throw out of `handle`, or the
+      // router would replay this event and double-count those counters.  Guard
+      // the trigger logic so it fails open — the scheduled boundary run is the
+      // safety net for the early trigger regardless.
       if (options.onVolumeTrigger) {
-        const nowMs = Date.now();
-        // Evict debounce buckets whose window's realtime counters are already
-        // gone, mirroring InMemoryRealtimeAggregator#expire so a key is dropped
-        // only AFTER its counter — never a window early enough for a late event
-        // to re-fire the trigger.
-        const oldest = nowMs - REALTIME_TTL_MS;
-        for (const windowStart of fired.keys()) {
-          if (windowStart + REALTIME_WINDOW_MS <= oldest) fired.delete(windowStart);
-        }
-        // The live-tunable threshold (refreshed at most once per window).
-        const activeThreshold = await currentThreshold(nowMs);
-        for (const itemId of itemIds) {
-          const windowStartMs = realtimeWindowStart(Date.parse(event.timestamp));
-          let bucket = fired.get(windowStartMs);
-          if (bucket?.has(itemId)) continue;
-          const snapshot = await events.realtime.snapshot(itemId, windowStartMs);
-          if (snapshot && snapshot.eventCount >= activeThreshold) {
-            if (bucket === undefined) {
-              bucket = new Set();
-              fired.set(windowStartMs, bucket);
-            }
-            bucket.add(itemId);
-            options.onVolumeTrigger(itemId, windowStartMs);
+        try {
+          const nowMs = Date.now();
+          // Evict debounce buckets whose window's realtime counters are already
+          // gone, mirroring InMemoryRealtimeAggregator#expire so a key is dropped
+          // only AFTER its counter — never a window early enough for a late event
+          // to re-fire the trigger.
+          const oldest = nowMs - REALTIME_TTL_MS;
+          for (const windowStart of fired.keys()) {
+            if (windowStart + REALTIME_WINDOW_MS <= oldest) fired.delete(windowStart);
           }
+          // The live-tunable threshold (refreshed at most once per window).
+          const activeThreshold = await currentThreshold(nowMs);
+          for (const itemId of itemIds) {
+            const windowStartMs = realtimeWindowStart(Date.parse(event.timestamp));
+            let bucket = fired.get(windowStartMs);
+            if (bucket?.has(itemId)) continue;
+            const snapshot = await events.realtime.snapshot(itemId, windowStartMs);
+            if (snapshot && snapshot.eventCount >= activeThreshold) {
+              if (bucket === undefined) {
+                bucket = new Set();
+                fired.set(windowStartMs, bucket);
+              }
+              bucket.add(itemId);
+              options.onVolumeTrigger(itemId, windowStartMs);
+            }
+          }
+        } catch {
+          // Fail-open: the scheduled boundary run is the safety net for the early
+          // trigger, and re-throwing here would replay the non-idempotent counter
+          // recording (recordAttention/…) on router retry.
         }
       }
     },

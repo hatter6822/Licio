@@ -257,13 +257,14 @@ function aesGcmParams(nonce: Uint8Array, aad: Uint8Array | undefined) {
  *
  * NONCE SAFETY (PRIV-CRYPTO-3).  AES-256-GCM tolerates a random 96-bit nonce only up to the
  * birthday bound: under ONE fixed key, the probability of a nonce collision reaches ~2^-32 near
- * ~2^48 seals.  The two regimes here are both safe by different arguments:
+ * ~2^32 seals (the NIST SP 800-38D §8.3 random-IV cap of 2^32 invocations per key).  The two regimes
+ * here are both safe by different arguments:
  *   • the §10.5 BODY layer (`sealBody`) generates a FRESH 32-byte `object_key` PER object, so the
  *     (key, nonce) pair is unique by construction — nonce reuse is structurally impossible there;
  *   • the long-lived-key layers (`wrapKey`, the rendezvous announcement, §15.4 signaling) seal under
  *     a FIXED per-EPOCH key, so they rely on the random-nonce birthday bound.  This is safe under the
  *     per-epoch volume assumption: an epoch is bounded by membership changes (each rotates the key),
- *     and the number of wraps/announcements/signals per epoch is many orders of magnitude below 2^48.
+ *     and the number of wraps/announcements/signals per epoch is many orders of magnitude below 2^32.
  *     A future hardening (a per-epoch monotonic or random‖counter nonce) would remove that assumption.
  */
 export async function aeadSeal(

@@ -53,6 +53,8 @@ const ID = {
   timecodeScale: [0x2a, 0xd7, 0xb1],
   duration: [0x44, 0x89],
   tags: [0x12, 0x54, 0xc3, 0x67],
+  dateUtc: [0x44, 0x61],
+  writingApp: [0x57, 0x41],
 };
 
 function vintSize(len: number, width: number): number[] {
@@ -191,6 +193,29 @@ describe('WS-Q.2.3d — WebM probe', () => {
     expect(probe.bytes.length).toBe(input.length);
     expect(textOf(probe.bytes)).not.toContain('SECRET-LOCATION-TAG');
     expect(probe.bytes).toContain(0xec); // a Void element id was written
+  });
+
+  it('neutralizes Info device/timestamp children (DateUTC/WritingApp) while keeping duration', () => {
+    const header = ebml(ID.ebml, ascii('webm'), 1);
+    const timecodeScale = ebml(ID.timecodeScale, [0x0f, 0x42, 0x40], 1);
+    const duration = ebml(ID.duration, f64(4000), 1);
+    const dateUtc = ebml(ID.dateUtc, ascii('DATEUTC-DEVICE-CLOCK'), 1);
+    const writingApp = ebml(ID.writingApp, ascii('WRITINGAPP-DEVICE-MODEL'), 1);
+    // Order the metadata around Duration so a bug that stops at the first hit
+    // would miss one of them.
+    const info = ebml(ID.info, [...dateUtc, ...timecodeScale, ...duration, ...writingApp], 1);
+    const segment = ebml(ID.segment, info, 2);
+    const input = new Uint8Array([...header, ...segment]);
+    const probe = probeVideo('video/webm', input);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.stripped).toBe(true);
+    expect(probe.bytes.length).toBe(input.length); // offset-preserving
+    expect(probe.durationSeconds).toBeCloseTo(4.0, 6); // Duration still parsed
+    const out = textOf(probe.bytes);
+    expect(out).not.toContain('DATEUTC-DEVICE-CLOCK'); // timestamp voided
+    expect(out).not.toContain('WRITINGAPP-DEVICE-MODEL'); // device string voided
+    expect(probe.bytes).toContain(0xec); // Void element ids written in place
   });
 
   it('rejects non-EBML bytes declared WebM', () => {

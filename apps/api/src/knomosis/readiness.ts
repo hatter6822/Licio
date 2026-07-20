@@ -205,9 +205,14 @@ export async function requestModeTransition(
     });
   }
 
-  const applied = await deps.roomMode.setMode(args.roomId, args.targetMode);
+  const applied = await deps.roomMode.setModeIf(args.roomId, current, args.targetMode);
   if (!applied) {
-    return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
+    return {
+      ok: false,
+      status: 409,
+      code: 'concurrent_transition',
+      message: 'Another transition raced this one; re-check.',
+    };
   }
   await deps.governanceAudit.append({
     entryId: deps.uuid(),

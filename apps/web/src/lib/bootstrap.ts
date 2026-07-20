@@ -13,6 +13,7 @@ import {
   type ProbeResult,
   requestPersistentStorage,
 } from '../offline/eviction.js';
+import type { PendingOperationRecord } from '../offline/schemas.js';
 import { initForegroundSync, processPendingQueue } from '../offline/sync.js';
 import {
   connectionBucket,
@@ -35,6 +36,40 @@ import { flushTelemetry, initTelemetry, track } from './telemetry.js';
 
 /** Event dispatched on detected eviction so the UI can notify the reader. */
 export const EVICTION_EVENT = 'licio:storage-evicted';
+
+/**
+ * Event dispatched when a queued write is parked as terminally `failed` (a 4xx
+ * server rejection, an exhausted-retry transient, or a corrupt payload) so the
+ * UI can toast the reader and offer a manual retry. The detail carries only
+ * closed enums / ids (operationId + operationType) — never the failure `reason`
+ * string, which can contain server-message text: the no-PII telemetry posture
+ * (SPEC §19 / §6.10) applies to DOM events that a listener could re-egress too.
+ */
+export const QUEUE_FAILURE_EVENT = 'licio:queue-terminal-failure';
+
+/** Detail payload of {@link QUEUE_FAILURE_EVENT} (ids / closed enums only). */
+export interface QueueFailureDetail {
+  operationId: string;
+  operationType: PendingOperationRecord['operationType'];
+}
+
+/**
+ * Shared terminal-failure sink passed to every drain path (foreground sync +
+ * the post-eviction resync): record the parked write for observability (no
+ * payload) and dispatch {@link QUEUE_FAILURE_EVENT} so the offline indicator can
+ * notify the reader and expose the manual retry (WS-C.2.3: terminal rejections
+ * are surfaced for manual retry, never silently dropped).
+ */
+const onTerminalFailure = (op: PendingOperationRecord, _reason: string): void => {
+  track({ name: 'queue_status', metric: 'terminal', bucket: op.operationType });
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent<QueueFailureDetail>(QUEUE_FAILURE_EVENT, {
+        detail: { operationId: op.operationId, operationType: op.operationType },
+      }),
+    );
+  }
+};
 
 /** Hydrate feature flags from the server; any failure leaves them fail-closed. */
 export async function hydrateFeatureFlags(): Promise<void> {
@@ -112,7 +147,7 @@ export async function applySignalPolicy(): Promise<void> {
 
 function onEvicted(result: ProbeResult): void {
   // Resync surviving queue items and surface a notice (esp. if the queue was lost).
-  void processPendingQueue();
+  void processPendingQueue({ onTerminalFailure });
   track({
     name: 'eviction',
     count: (result.lostPending ? 1 : 0) + (result.lostLedger ? 1 : 0),
@@ -144,7 +179,7 @@ export function startRuntime(): () => void {
   const teardownTelemetry = initTelemetry();
   const teardownAuthSync = initAuthSync();
   const teardownProcessor = getSignalProcessor().start();
-  const teardownSync = initForegroundSync();
+  const teardownSync = initForegroundSync({ onTerminalFailure });
   const teardownEviction = initEvictionDetection({ onEvicted });
   // WS-R.11.4: the LCAP C0-first sync hooks (§23.3) — sync on app open + regained
   // connectivity / focus, suppressed offline / in Stealth / under data-saver / on low

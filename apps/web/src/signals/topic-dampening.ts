@@ -87,7 +87,7 @@ export function computeTopicMultipliers(
     }
     // Recency-weighted: an old re-entry contributes little, so once the reader
     // stops circling, the score decays and the multiplier recovers toward 1.
-    const weight = Math.exp(-(nowMs - visit.atMs) / config.halfLifeMs);
+    const weight = Math.exp((-Math.LN2 * (nowMs - visit.atMs)) / config.halfLifeMs);
     score.set(visit.topicClusterId, (score.get(visit.topicClusterId) ?? 0) + weight);
   }
 
@@ -117,16 +117,20 @@ export interface DampenableItem {
 /**
  * Subsample a feed so each circled topic appears about `multiplier` as often,
  * preserving order. The FIRST item of a circled topic is always kept (so the
- * topic still surfaces — "rarely", never removed); thereafter one item is kept
- * per deterministic stride `round(1 / multiplier)`. Items of un-circled topics
- * (and items whose primary topic has no multiplier) pass through untouched.
+ * topic still surfaces — "rarely", never removed); thereafter items are kept by
+ * per-topic error diffusion — each occurrence adds `multiplier` to a running
+ * credit and an item is kept when the credit reaches 1 (then decremented). This
+ * yields a keep-rate ≈ `multiplier` for EVERY value in (0, 1), where a rounded
+ * `1 / multiplier` stride would be a no-op for any multiplier above 2/3. Items
+ * of un-circled topics (and items whose primary topic has no multiplier) pass
+ * through untouched.
  */
 export function dampenFeed<T extends DampenableItem>(
   items: readonly T[],
   multipliers: ReadonlyMap<string, number>,
 ): T[] {
   if (multipliers.size === 0) return [...items];
-  const encountered = new Map<string, number>();
+  const credit = new Map<string, number>();
   const out: T[] = [];
   for (const item of items) {
     const topic = item.topic_ids?.[0];
@@ -135,11 +139,16 @@ export function dampenFeed<T extends DampenableItem>(
       out.push(item);
       continue;
     }
-    const index = encountered.get(topic) ?? 0;
-    encountered.set(topic, index + 1);
-    const stride = Math.max(1, Math.round(1 / multiplier));
-    // index 0 (the first occurrence), then every `stride`-th, are kept.
-    if (index % stride === 0) out.push(item);
+    // Error diffusion: credit starts at 1 so the first occurrence always keeps;
+    // each occurrence adds `multiplier` and an item is emitted whenever the
+    // credit reaches a whole unit — keep-rate ≈ multiplier for all m ∈ (0, 1).
+    const c = (credit.get(topic) ?? 1) + multiplier;
+    if (c >= 1) {
+      credit.set(topic, c - 1);
+      out.push(item);
+    } else {
+      credit.set(topic, c);
+    }
   }
   return out;
 }

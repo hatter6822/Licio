@@ -15,6 +15,7 @@ import {
   getTypedDataStruct,
   KNOMOSIS_SIGNED_ACTION_TYPES,
   KNOMOSIS_TYPED_DATA_REGISTRY,
+  KNOMOSIS_TYPED_DATA_REGISTRY_VERSION,
   type KnomosisEip712Domain,
   PUBLIC_VISIBILITY_DISCLOSURE,
   primaryButtonLabel,
@@ -93,19 +94,26 @@ describe('typed-data registry (WS-L.2.4d)', () => {
     }
   });
 
-  it('type-hash serializations are stable (NORMATIVE snapshot)', () => {
+  it('type-hash serializations are stable (NORMATIVE snapshot, keyed by registry version)', () => {
     const encoded = KNOMOSIS_SIGNED_ACTION_TYPES.map((t) =>
       encodeStructType(KNOMOSIS_TYPED_DATA_REGISTRY[t]),
     );
-    expect(encoded).toEqual([
+    // The snapshot is keyed by KNOMOSIS_TYPED_DATA_REGISTRY_VERSION: any change to
+    // a normative struct field/order MUST bump the version in lockstep, or this
+    // fails (the pin/CI cross-check binds the same constant to the deployment).
+    expect({ [KNOMOSIS_TYPED_DATA_REGISTRY_VERSION]: encoded }).toEqual({
       // Registry v2: the ballot (purpose + choice) is INSIDE the signed struct.
-      'ProposalSignature(string roomId,string proposalId,string purpose,string choice,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-      'TreasuryDeposit(string roomId,string treasuryId,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-      'GrantPayout(string roomId,string grantId,address recipient,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-      'CharterUpdate(string roomId,string charterVersionId,bytes32 contentHash,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-      'BountyContribution(string roomId,string bountyId,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-      'StewardRotation(string roomId,string incomingUserId,string outgoingUserId,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
-    ]);
+      '2': [
+        'ProposalSignature(string roomId,string proposalId,string purpose,string choice,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+        'TreasuryDeposit(string roomId,string treasuryId,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+        'GrantPayout(string roomId,string grantId,address recipient,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+        'CharterUpdate(string roomId,string charterVersionId,bytes32 contentHash,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+        'BountyContribution(string roomId,string bountyId,string asset,uint256 amount,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+        'StewardRotation(string roomId,string incomingUserId,string outgoingUserId,address actor,uint256 nonce,uint256 expiration,string deploymentId)',
+      ],
+    });
+    // Pin the constant itself so a bump can never silently orphan the snapshot key.
+    expect(KNOMOSIS_TYPED_DATA_REGISTRY_VERSION).toBe('2');
   });
 
   it('fail-closed lookup: unknown action types have no struct', () => {

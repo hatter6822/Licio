@@ -51,6 +51,10 @@ export function resolveCollectionPolicy(
 // Keys that would indicate a RAW trace (scroll/touch/pointer positions, event
 // streams, or a raw dwell duration) leaking into a payload. The aggregate carries
 // only buckets, so none of these may ever appear (defense in depth, WS-C.4.1d).
+// Stored as canonical collapsed tokens (lower-cased, separators stripped) so that
+// snake_case / camelCase / SCREAMING_SNAKE spellings all normalize to one entry —
+// `duration_ms`, `scroll_y`, and `raw_events` are caught alongside their camelCase
+// twins.
 const FORBIDDEN_KEYS = new Set([
   'scrollx',
   'scrolly',
@@ -69,7 +73,6 @@ const FORBIDDEN_KEYS = new Set([
   'events',
   'trace',
   'dwellms',
-  'dwell_ms',
   'durationms',
 ]);
 
@@ -86,7 +89,8 @@ export function assertNoRawEgress(value: unknown, path = '$'): void {
   }
   if (value !== null && typeof value === 'object') {
     for (const [key, child] of Object.entries(value)) {
-      if (FORBIDDEN_KEYS.has(key.toLowerCase())) {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (FORBIDDEN_KEYS.has(normalizedKey)) {
         throw new Error(`Raw attention trace would egress: forbidden key "${key}" at ${path}`);
       }
       assertNoRawEgress(child, `${path}.${key}`);

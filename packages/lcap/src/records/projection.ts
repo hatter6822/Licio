@@ -159,16 +159,20 @@ export interface ProjectedContribution {
   readonly hiddenBy?: string;
 }
 
-/** Deterministically pick the visible edit among conflicting edits of one target. */
+/**
+ * Deterministically pick the visible edit among conflicting edits of one target:
+ * the canonically-latest under the §12.4 precedence ladder (room-log seq →
+ * checkpoint index → claim → receipt → record_cid), i.e. the maximum of the total
+ * order `compareDisplayOrder`.  Per-device sequence is NOT a rung — it is only
+ * meaningful within a single device's chain, so comparing `device_seq` across two
+ * different authors could surface a stale edit whose author merely used a higher
+ * local counter.  Because `compareDisplayOrder` is total, transitive, and
+ * deterministic, taking its maximum is arrival-order-independent.
+ */
 function pickLatestEdit(edits: readonly ThreadRecord[]): ThreadRecord {
   let best = edits[0] as ThreadRecord;
   for (const edit of edits) {
-    if (
-      edit.record.device_seq > best.record.device_seq ||
-      (edit.record.device_seq === best.record.device_seq && edit.recordCid < best.recordCid)
-    ) {
-      best = edit;
-    }
+    if (compareDisplayOrder(edit, best) > 0) best = edit;
   }
   return best;
 }

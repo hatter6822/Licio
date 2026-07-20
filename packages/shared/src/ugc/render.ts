@@ -25,8 +25,9 @@ import { MAX_UGC_INPUT_LENGTH, parseUgcMarkdown } from './markdown.js';
  * 'script'` directive decides which one the sink will accept).  Branded so a
  * raw string cannot be passed where pipeline output is required.
  */
+declare const licioUgcSafeHtmlBrand: unique symbol;
 export type UgcSafeHtml = (string | { toString(): string }) & {
-  readonly __licioUgcSafeHtml?: never;
+  readonly [licioUgcSafeHtmlBrand]: true;
 };
 
 /** Render result with the honesty flags the UI may surface. */

@@ -143,6 +143,80 @@ describe('validateServerEnv', () => {
     expect(() => validateServerEnv({ ...validEnv, LCAP_NETWORK_ID: 'solo' })).not.toThrow();
   });
 
+  it('accepts a COMPLETE VAPID triad and rejects a PARTIAL one (WS-C.2.4a push)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      VAPID_PUBLIC_KEY: 'pub',
+      VAPID_PRIVATE_KEY: 'priv',
+      VAPID_SUBJECT: 'mailto:push@licio.app',
+    });
+    expect(result.VAPID_SUBJECT).toBe('mailto:push@licio.app');
+
+    // Any two-of-three is a deployment typo that would silently disable push
+    // (getVapidConfig returns null) — reject it at startup, not at first use.
+    expect(() =>
+      validateServerEnv({ ...validEnv, VAPID_PUBLIC_KEY: 'pub', VAPID_PRIVATE_KEY: 'priv' }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PUBLIC_KEY: 'pub',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PRIVATE_KEY: 'priv',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow(/Incomplete VAPID configuration/);
+    // An EMPTY-string key is the same silent-disable path (min(1) closes it).
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        VAPID_PUBLIC_KEY: '',
+        VAPID_PRIVATE_KEY: 'priv',
+        VAPID_SUBJECT: 'mailto:push@licio.app',
+      }),
+    ).toThrow();
+    // The whole group absent stays valid (push simply disabled).
+    expect(validateServerEnv(validEnv).VAPID_PUBLIC_KEY).toBeUndefined();
+  });
+
+  it('accepts a well-formed CHAIN_RPC_URLS map and rejects a malformed one (WS-D contract-wallet)', () => {
+    const result = validateServerEnv({
+      ...validEnv,
+      CHAIN_RPC_URLS: JSON.stringify({
+        '1': 'https://eth.example',
+        '8453': 'https://base.example',
+      }),
+    });
+    expect(result.CHAIN_RPC_URLS).toContain('eth.example');
+
+    // Malformed JSON fails fast rather than silently degrading to EOA-only.
+    expect(() => validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: '{not json' })).toThrow(
+      /CHAIN_RPC_URLS/,
+    );
+    // A non-object (array / scalar) is rejected.
+    expect(() => validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: '["https://x"]' })).toThrow(
+      /CHAIN_RPC_URLS/,
+    );
+    // A non-positive-integer chain-id key names the offending entry.
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ '0': 'https://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ foo: 'https://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    // A non-http(s) value is rejected.
+    expect(() =>
+      validateServerEnv({ ...validEnv, CHAIN_RPC_URLS: JSON.stringify({ '1': 'ftp://x' }) }),
+    ).toThrow(/CHAIN_RPC_URLS/);
+    // Unset stays valid (EOA-only sign-in).
+    expect(validateServerEnv(validEnv).CHAIN_RPC_URLS).toBeUndefined();
+  });
+
   it('accepts the WS-U ADR-9 LLM backends in production — requirements still enforced', () => {
     const prod = { ...validEnv, NODE_ENV: 'production' };
     expect(() =>

@@ -186,7 +186,10 @@ async function consumeCode(
   }
 
   if (verifyOneTimeCode(submittedCode, record.codeHash)) {
-    await store.delete(key); // single-use
+    // Atomic single-use consumption (GETDEL): only one concurrent request wins
+    // the take, so a valid code can never be redeemed twice under a race.
+    const claimed = await store.take(key);
+    if (claimed === null) return { ok: false, reason: 'no_code' };
     return { ok: true, userId: record.userId, target: record.target ?? '' };
   }
 

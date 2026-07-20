@@ -11,13 +11,247 @@ import {
   type ContributionWriteCreate,
   deriveCitationsFromBody,
 } from '@licio/shared';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ZodError } from 'zod';
+import { ApiClientError } from '../../lib/api.js';
 import { cn } from '../../lib/cn.js';
 import { useCreateCommentMutation } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
+import {
+  type DraftContributionRecord,
+  deleteDraft,
+  listDraftsForThread,
+  queue,
+  saveDraft,
+} from '../../offline/index.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { DisputeBadge } from '../story/DisputeBadge/index.js';
 import { Button } from '../ui/Button/index.js';
+
+/** Trailing autosave debounce: one encrypt+write per pause (mirrors StoryComposer). */
+const DRAFT_DEBOUNCE_MS = 800;
+
+/**
+ * A failed post is TRANSIENT when a later retry could succeed — offline/network,
+ * a 5xx, or a 408/429.  A 4xx validation / locked-thread reject (or a corrupt
+ * payload / invalid_response) is TERMINAL and must NOT be queued.  This mirrors
+ * `isTerminal` in `offline/sync.ts`, which classifies the same way when the queue
+ * later replays the operation, so a queued write is one the drain will actually
+ * accept rather than immediately park as failed.
+ */
+function isTransientPostFailure(error: unknown): boolean {
+  if (error instanceof ZodError) return false;
+  if (error instanceof ApiClientError) {
+    if (error.code === 'invalid_response') return false;
+    if (error.status === 408 || error.status === 429) return true;
+    if (error.status !== undefined && error.status >= 400 && error.status < 500) return false;
+  }
+  // Network error / offline / 5xx / unknown — a retry may succeed.
+  return true;
+}
+
+interface ContributionDraft {
+  /** Stable for the composition lifetime: the payload `client_draft_id`, the draft
+   *  key, AND the offline-queue operationId — so autosave, server idempotency, and
+   *  retry all dedupe against ONE id. */
+  draftId: string;
+  /** The newest resumable saved draft for this thread (recovery prompt input). */
+  recoverable: DraftContributionRecord | null;
+  resumeRecoverable: () => void;
+  discardRecoverable: () => void;
+  /** Flush the pending debounced draft immediately (form blur). */
+  flush: () => void;
+  /** Delete the autosaved draft after a confirmed post (cancels pending writes). */
+  clearDraft: () => void;
+  /** Queue a transient-failed post for background retry; returns true if queued. */
+  queueIfTransient: (payload: ContributionWriteCreate, error: unknown) => boolean;
+}
+
+/**
+ * Draft autosave + offline queue for a comment/correction composer (mirrors
+ * StoryComposer's WS-Q.5.1b wiring): a comment typed offline, or lost to a
+ * reload, is preserved rather than silently dropped.  All IndexedDB writes are
+ * best-effort (`.catch(() => undefined)`) so a failed persistence never blocks
+ * posting (availability > confidentiality, per `offline/drafts.ts`).
+ */
+function useContributionDraft(args: {
+  storyId: string;
+  threadId: string;
+  contributionType: DraftContributionRecord['contributionType'];
+  body: string;
+  /** Repopulate the composer when the user resumes a recovered draft. */
+  onRecover: (body: string) => void;
+  /** Reply boxes autosave + queue but skip the resume prompt (many share a thread). */
+  enableRecovery: boolean;
+}): ContributionDraft {
+  const { storyId, threadId, contributionType, body, onRecover, enableRecovery } = args;
+  const draftId = useRef<string>(crypto.randomUUID());
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestBody = useRef(body);
+  latestBody.current = body;
+  const [recoverable, setRecoverable] = useState<DraftContributionRecord | null>(null);
+
+  const persist = useCallback((): void => {
+    const text = latestBody.current.trim();
+    if (text.length === 0) return;
+    void saveDraft({
+      draftId: draftId.current,
+      storyId,
+      threadId,
+      contributionType,
+      values: { body: latestBody.current },
+    }).catch(() => undefined);
+  }, [storyId, threadId, contributionType]);
+
+  // Recovery: on mount surface the newest NON-EMPTY saved draft for this thread
+  // that isn't the one being composed now, so a comment lost to a reload can be
+  // resumed. Draft I/O is best-effort — a missing/quota-blocked IndexedDB never
+  // breaks composing.
+  useEffect(() => {
+    if (!enableRecovery) return;
+    let cancelled = false;
+    void listDraftsForThread(threadId)
+      .then((drafts) => {
+        if (cancelled) return;
+        const prior = drafts.find(
+          (draft) =>
+            draft.draftId !== draftId.current &&
+            draft.contributionType === contributionType &&
+            (draft.values['body']?.trim().length ?? 0) > 0,
+        );
+        setRecoverable(prior ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [enableRecovery, threadId, contributionType]);
+
+  // Trailing-debounced autosave: an empty composer never writes; each pause
+  // persists the latest (AES-GCM-encrypted) body.
+  useEffect(() => {
+    if (body.trim().length === 0) return;
+    if (debounceTimer.current !== null) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      debounceTimer.current = null;
+      persist();
+    }, DRAFT_DEBOUNCE_MS);
+    return () => {
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+    };
+  }, [body, persist]);
+
+  const flush = useCallback((): void => {
+    if (debounceTimer.current !== null) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    persist();
+  }, [persist]);
+
+  // Flush immediately on app backgrounding and on unmount, so a half-written
+  // comment is never lost between debounce ticks.
+  useEffect(() => {
+    const onHide = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      flush();
+    };
+  }, [flush]);
+
+  const resumeRecoverable = useCallback((): void => {
+    setRecoverable((current) => {
+      if (current) {
+        draftId.current = current.draftId;
+        onRecover(current.values['body'] ?? '');
+      }
+      return null;
+    });
+  }, [onRecover]);
+
+  const discardRecoverable = useCallback((): void => {
+    setRecoverable((current) => {
+      if (current) void deleteDraft(current.draftId).catch(() => undefined);
+      return null;
+    });
+  }, []);
+
+  const clearDraft = useCallback((): void => {
+    if (debounceTimer.current !== null) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    latestBody.current = '';
+    void deleteDraft(draftId.current).catch(() => undefined);
+  }, []);
+
+  const queueIfTransient = useCallback(
+    (payload: ContributionWriteCreate, error: unknown): boolean => {
+      if (!isTransientPostFailure(error)) return false;
+      // The operationId is the client_draft_id, so a re-send the server already
+      // received is deduped; the queue drain (offline/sync.ts) replays it. The
+      // queue now OWNS this write (its SSOT for unsynced writes), so drop the
+      // autosaved draft — otherwise a manual resume could post it a second time.
+      if (debounceTimer.current !== null) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+      latestBody.current = '';
+      void queue
+        .enqueue('contribution', payload, draftId.current)
+        .catch(() => undefined)
+        .finally(() => {
+          void deleteDraft(draftId.current).catch(() => undefined);
+        });
+      return true;
+    },
+    [],
+  );
+
+  return {
+    draftId: draftId.current,
+    recoverable,
+    resumeRecoverable,
+    discardRecoverable,
+    flush,
+    clearDraft,
+    queueIfTransient,
+  };
+}
+
+/** The shared resume-or-discard prompt for a recovered comment/correction draft. */
+function DraftRecoveryPrompt({
+  label,
+  onResume,
+  onDiscard,
+}: {
+  label: string;
+  onResume: () => void;
+  onDiscard: () => void;
+}): React.ReactElement {
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-sunken p-3"
+    >
+      <span className="text-ink text-sm">{label}</span>
+      <div className="flex gap-2">
+        <Button type="button" variant="secondary" onClick={onResume}>
+          Resume
+        </Button>
+        <Button type="button" variant="ghost" onClick={onDiscard}>
+          Discard
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function authorName(comment: CommentItemType): string {
   return comment.author_display_name ?? comment.author_handle ?? 'Deleted account';
@@ -134,6 +368,7 @@ export function CommentComposer({
   onCancel?: () => void;
 }): React.ReactElement {
   const [body, setBody] = useState('');
+  const [queued, setQueued] = useState(false);
   const mutation = useCreateCommentMutation(storyId);
   const trimmed = body.trim();
   // Sources are the INLINE links in the body — derived, not a separate list.
@@ -143,13 +378,26 @@ export function CommentComposer({
   // tag); replies stay untagged.
   const postingLensId = isReply ? null : (postingLens?.id ?? null);
 
+  // Draft autosave + offline queue (WS-C.2.2/2.3): a comment typed offline or
+  // lost to a reload survives. Reply boxes autosave + queue but skip the resume
+  // prompt (many replies share one thread).
+  const draft = useContributionDraft({
+    storyId,
+    threadId,
+    contributionType: 'comment',
+    body,
+    onRecover: setBody,
+    enableRecovery: !isReply,
+  });
+
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
+    setQueued(false);
     const citations = derivedSources;
     const payload: ContributionWriteCreate = {
       type: 'comment',
       thread_id: threadId,
-      client_draft_id: crypto.randomUUID(),
+      client_draft_id: draft.draftId,
       body: trimmed,
       ...(citations.length > 0 ? { citations } : {}),
       ...(parentContributionId ? { parent_contribution_id: parentContributionId } : {}),
@@ -157,8 +405,14 @@ export function CommentComposer({
     };
     mutation.mutate(payload, {
       onSuccess: () => {
+        draft.clearDraft();
         setBody('');
         onCancel?.();
+      },
+      onError: (error) => {
+        // Offline / transient failure — the write is queued and replays when
+        // connectivity returns; a terminal 4xx keeps the plain error text.
+        if (draft.queueIfTransient(payload, error)) setQueued(true);
       },
     });
   };
@@ -170,7 +424,15 @@ export function CommentComposer({
         event.preventDefault();
         submit();
       }}
+      onBlur={draft.flush}
     >
+      {draft.recoverable !== null ? (
+        <DraftRecoveryPrompt
+          label="You have an unsent comment draft. Resume or discard?"
+          onResume={draft.resumeRecoverable}
+          onDiscard={draft.discardRecoverable}
+        />
+      ) : null}
       {isReply ? (
         // Replies open inline inside a thread and can nest deep, so they stay a
         // plain, short box to keep the reading column dense.
@@ -249,7 +511,11 @@ export function CommentComposer({
           </Button>
         </div>
       </div>
-      {mutation.isError ? (
+      {queued ? (
+        <p role="status" className="text-sm text-ink-muted">
+          Saved — this comment will post when you’re back online.
+        </p>
+      ) : mutation.isError ? (
         <p role="alert" className="text-sm text-error">
           Comment could not be posted. Please try again.
         </p>
@@ -281,6 +547,7 @@ export function CorrectionComposer({
 }): React.ReactElement {
   const [body, setBody] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [queued, setQueued] = useState(false);
   const mutation = useCreateCommentMutation(storyId);
   const trimmed = body.trim();
   // A correction MUST carry ≥1 source — the sources are the inline links in the
@@ -288,17 +555,29 @@ export function CorrectionComposer({
   const derivedSources = useMemo(() => deriveCitationsFromBody(trimmed).slice(0, 5), [trimmed]);
   const hasSource = derivedSources.length > 0;
 
+  // Draft autosave + offline queue (WS-C.2.2/2.3): a correction typed offline or
+  // lost to a reload survives rather than being silently dropped.
+  const draft = useContributionDraft({
+    storyId,
+    threadId,
+    contributionType: 'correction',
+    body,
+    onRecover: setBody,
+    enableRecovery: true,
+  });
+
   const submit = (): void => {
     if (trimmed.length === 0 || mutation.isPending) return;
     if (!hasSource) {
       setError('A correction must cite at least one source — link the key phrase to its evidence.');
       return;
     }
+    setQueued(false);
     const citations = derivedSources as [Citation, ...Citation[]];
     const payload: ContributionWriteCreate = {
       type: 'correction',
       thread_id: threadId,
-      client_draft_id: crypto.randomUUID(),
+      client_draft_id: draft.draftId,
       body: trimmed,
       citations,
       ...('commentId' in target
@@ -307,6 +586,7 @@ export function CorrectionComposer({
     };
     mutation.mutate(payload, {
       onSuccess: (response) => {
+        draft.clearDraft();
         const debateId = response.contribution.metadata.debate_arena_id;
         if (debateId) {
           onOpened(debateId);
@@ -319,6 +599,11 @@ export function CorrectionComposer({
           'Your correction was posted, but no debate opened — it may be held for review, or another challenge is already live for this target.',
         );
       },
+      onError: (mutationError) => {
+        // Offline / transient failure — queue the correction to replay when
+        // connectivity returns; a terminal 4xx keeps the plain error text.
+        if (draft.queueIfTransient(payload, mutationError)) setQueued(true);
+      },
     });
   };
 
@@ -329,8 +614,16 @@ export function CorrectionComposer({
         event.preventDefault();
         submit();
       }}
+      onBlur={draft.flush}
       aria-label="Raise a correction"
     >
+      {draft.recoverable !== null ? (
+        <DraftRecoveryPrompt
+          label="You have an unsent correction draft. Resume or discard?"
+          onResume={draft.resumeRecoverable}
+          onDiscard={draft.discardRecoverable}
+        />
+      ) : null}
       <p className="text-sm text-ink-muted">
         A correction is a <strong className="text-ink">sourced</strong> challenge. It opens a live
         debate the room's AI resolves — you and the author can each adjust your case for up to 24
@@ -372,7 +665,11 @@ export function CorrectionComposer({
           Open debate
         </Button>
       </div>
-      {mutation.isError ? (
+      {queued ? (
+        <p role="status" className="text-sm text-ink-muted">
+          Saved — this correction will open its debate when you’re back online.
+        </p>
+      ) : mutation.isError ? (
         <p role="alert" className="text-sm text-error">
           The correction could not be opened. Please try again.
         </p>

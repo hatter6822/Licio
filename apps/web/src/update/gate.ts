@@ -33,6 +33,7 @@ import {
 } from './bundle-digest.js';
 import {
   loadUpdateChannelConfig,
+  PRIVATE_BUNDLE_ARTIFACT_ID,
   UPDATE_MANIFEST_PATH,
   type UpdateChannelConfig,
 } from './config.js';
@@ -142,6 +143,7 @@ async function runVerification(
       const manifest = await fetchManifest(fetchImpl);
       verdict = await verifyUpdateManifest({
         manifest,
+        expectedArtifactId: PRIVATE_BUNDLE_ARTIFACT_ID,
         runningBundleDigest: bundleDigest,
         trustedSignerPublicKeys: config.trustedSignerPublicKeys,
         logPublicKey: config.logPublicKey,

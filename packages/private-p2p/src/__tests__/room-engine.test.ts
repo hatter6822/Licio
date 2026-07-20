@@ -16,6 +16,7 @@ import { roomStateCommitment } from '../reducer/state.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import { sealOp } from '../reducer/validate-op.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
+import { headAnnouncementSchema } from '../sync/head-sync.js';
 import {
   decodeSyncMessage,
   encodeSyncMessage,
@@ -441,6 +442,47 @@ describe('PrivateRoomEngine — §15.6 sync surface', () => {
     // A fresh peer wants the announced head; once it holds it, it wants nothing.
     const peer = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
     expect(peer.wantedFrom(announcement)).toStrictEqual([opIdOf('cs1')]);
+    expect(engine.wantedFrom(announcement)).toStrictEqual([]);
+  });
+
+  it('a compacted engine never re-requests a covered (pruned) op', async () => {
+    const r = await room();
+    const engine = await PrivateRoomEngine.load(r.engineParams(new InMemoryPrivateRoomStorage()));
+    const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
+    await engine.applyLocalOp(
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+        op_id: 'genesis',
+        lamport: '1',
+      }),
+      founderSeal,
+    );
+    await engine.applyLocalOp(
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      founderSeal,
+    );
+
+    // Compact: genesis + cs1 fold into the snapshot base and are pruned from
+    // `acceptedOps` (they now live only in `coveredOpLamports`).
+    const base = await engine.commitSnapshot({
+      epoch: 0,
+      roomEpochSecret: r.epoch0Secret,
+      contentWrapKey: r.contentWrapKey,
+      author: {
+        memberId: 'founder',
+        deviceId: 'founder-dev',
+        signingKey: r.founder.device.privateKey,
+      },
+      snapshotId: 'snap-1',
+    });
+    expect(base).toBeDefined();
+
+    // A peer announces a head that is a COVERED op id — already folded into the
+    // base — so the compacted engine must want nothing (no refetch of a pruned op).
+    const announcement = headAnnouncementSchema.parse({
+      schema: 'licio.private.head_announcement.v1',
+      heads: [opIdOf('cs1')],
+      op_count_bucket: 0,
+    });
     expect(engine.wantedFrom(announcement)).toStrictEqual([]);
   });
 });

@@ -222,6 +222,7 @@ export async function verifyProducedManifest(
     sha256Concat: (...parts: Uint8Array[]) => Promise<Uint8Array>;
     verifyUpdateManifest: (input: {
       manifest: unknown;
+      expectedArtifactId: string;
       runningBundleDigest: string;
       trustedSignerPublicKeys: readonly string[];
       logPublicKey: string;
@@ -254,6 +255,7 @@ export async function verifyProducedManifest(
 
   const verdict = await shared.verifyUpdateManifest({
     manifest,
+    expectedArtifactId: ARTIFACT_ID,
     runningBundleDigest,
     trustedSignerPublicKeys: keys.signerPublicKeys,
     logPublicKey: keys.logPublicKey,

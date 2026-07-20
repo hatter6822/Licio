@@ -7,6 +7,7 @@
 // §14.3.3/§26.1 property — byte-identical reducer state across shuffled op-
 // delivery orders.
 import { describe, expect, it } from 'vitest';
+import { decodeCanonical } from '../crypto/canonical.js';
 import {
   canonicalOpOrder,
   compareDecimalStrings,
@@ -14,7 +15,7 @@ import {
   nextLamport,
 } from '../reducer/order.js';
 import { reduceRoom } from '../reducer/reduce.js';
-import { roomStateCommitment } from '../reducer/state.js';
+import { emptyRoomState, roomStateCommitment } from '../reducer/state.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 
 const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
@@ -621,5 +622,48 @@ describe('§14.3.3 / §26.1 determinism — byte-identical state across shuffled
     const state = reduceRoom(buildDag());
     expect(state.stories.get('s1')?.title).toBe('from-founder');
     expect(state.stories.get('s1')?.tombstoned).toBe(true);
+  });
+});
+
+describe('roomStateCommitment key ordering — UTF-8 bytewise (not UTF-16 code units)', () => {
+  // A 3-byte 0xEE-lead id (U+E000, a BMP private-use char) vs a 4-byte 0xF0-lead
+  // id (U+10000). In UTF-16 code-unit order the 4-byte id — a 0xD800 surrogate —
+  // sorts FIRST (0xD800 < 0xE000); in UTF-8 bytewise order it sorts LAST
+  // (0xEE < 0xF0). The commitment sorts map keys as the canonical map does, so
+  // it must match the UTF-8 order the comment claims.
+  it('orders supplementary-plane member ids by UTF-8 bytes, not UTF-16 units', () => {
+    const bmp = '\uE000'; // UTF-8: EE 80 80
+    const supp = '\u{10000}'; // UTF-8: F0 90 80 80; UTF-16: D800 DC00
+    expect(supp < bmp).toBe(true); // UTF-16 code-unit order would sort supp first
+
+    const state = emptyRoomState();
+    for (const id of [supp, bmp]) {
+      state.members.set(id, {
+        memberId: id,
+        role: 'member',
+        capabilities: new Set(),
+        removed: false,
+      });
+    }
+
+    const decoded = decodeCanonical(roomStateCommitment(state));
+    if (
+      typeof decoded !== 'object' ||
+      decoded === null ||
+      Array.isArray(decoded) ||
+      decoded instanceof Uint8Array
+    ) {
+      throw new Error('commitment did not decode to an object');
+    }
+    const members = decoded['members'];
+    if (!Array.isArray(members)) throw new Error('members did not decode to an array');
+    const ids = members.map((m) => {
+      if (typeof m !== 'object' || m === null || Array.isArray(m) || m instanceof Uint8Array) {
+        throw new Error('member did not decode to an object');
+      }
+      return m['memberId'];
+    });
+    // UTF-8 bytewise: EE… before F0… (the reverse of the UTF-16 order above).
+    expect(ids).toEqual([bmp, supp]);
   });
 });

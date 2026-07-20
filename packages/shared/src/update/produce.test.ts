@@ -67,6 +67,7 @@ describe('produceSignedManifest ↔ verifyUpdateManifest', () => {
     const produced = await produce();
     const verdict = await verifyUpdateManifest({
       manifest: produced.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: produced.bundleDigest,
       trustedSignerPublicKeys: [signer.signerPublicKeyB64],
       logPublicKey: signer.logPublicKeyB64,
@@ -82,6 +83,7 @@ describe('produceSignedManifest ↔ verifyUpdateManifest', () => {
     const otherDigest = toBase64Url(new Uint8Array(32).fill(0xab));
     const verdict = await verifyUpdateManifest({
       manifest: produced.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: otherDigest,
       trustedSignerPublicKeys: [signer.signerPublicKeyB64],
       logPublicKey: signer.logPublicKeyB64,
@@ -93,6 +95,7 @@ describe('produceSignedManifest ↔ verifyUpdateManifest', () => {
     const produced = await produce();
     const verdict = await verifyUpdateManifest({
       manifest: produced.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: produced.bundleDigest,
       trustedSignerPublicKeys: [signer.logPublicKeyB64], // wrong key
       logPublicKey: signer.logPublicKeyB64,
@@ -104,6 +107,7 @@ describe('produceSignedManifest ↔ verifyUpdateManifest', () => {
     const produced = await produce();
     const verdict = await verifyUpdateManifest({
       manifest: produced.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: produced.bundleDigest,
       trustedSignerPublicKeys: [signer.signerPublicKeyB64],
       logPublicKey: signer.signerPublicKeyB64, // not the log key
@@ -115,6 +119,7 @@ describe('produceSignedManifest ↔ verifyUpdateManifest', () => {
     const produced = await produce();
     const verdict = await verifyUpdateManifest({
       manifest: produced.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: produced.bundleDigest,
       trustedSignerPublicKeys: [signer.signerPublicKeyB64],
       logPublicKey: signer.logPublicKeyB64,
@@ -187,6 +192,7 @@ describe('appendLeaf — append-only log', () => {
     // The SECOND manifest's proof is against tree_size 2 and verifies.
     const verdict = await verifyUpdateManifest({
       manifest: second.manifest,
+      expectedArtifactId: 'private-p2p',
       runningBundleDigest: second.bundleDigest,
       trustedSignerPublicKeys: [signer.signerPublicKeyB64],
       logPublicKey: signer.logPublicKeyB64,

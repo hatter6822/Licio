@@ -117,6 +117,37 @@ describe('robots.txt compliance (WS-F.1.4f)', () => {
     expect(deferred[0]?.notBefore).not.toBeNull();
   });
 
+  it('a persistently-unreachable robots.txt degrades to link-only once the retry budget is exhausted', async () => {
+    // Without a terminal, a fail-closed robots_unreachable origin re-defers on
+    // every retry forever, draining the retry budget. Past MAX_EXTRACTION_ATTEMPTS
+    // it must degrade to a link-only story (like a robots-disallowed link) and
+    // stop re-queueing.
+    const fx = freshIngestionServices({ config: { minAccountAgeMinutes: 0 }, now: () => nowMs });
+    const { RobotsCache } = await import('../ingestion/robots.js');
+    fx.ingestion.robots = new RobotsCache(
+      async () => ({ error: 'network down' }),
+      () => nowMs,
+    );
+    const { cookie } = await seedUserWithSession(fx.identity, { nowMs });
+    const url = 'https://forever-down.example/article';
+    fx.pages.set(url, { status: 200, body: articleHtml() });
+    const res = await app().request(post('/v1/stories', linkSubmission(url), cookie));
+    expect(res.status).toBe(201);
+    const { story_id } = (await res.json()) as { story_id: string };
+    await fx.ingestion.settle();
+    // Simulate the terminal retry (attempt >= MAX_EXTRACTION_ATTEMPTS = 8).
+    await processSubmittedStory(fx.ingestion, fx.events, { story_id }, 8);
+    const story = await fx.ingestion.stories.getById(story_id);
+    expect(story?.extractionState).toBe('disallowed_robots'); // link-only degrade
+    expect(fx.fetchedUrls).not.toContain(url); // still never fetched
+    // No new defer was queued by the terminal pass.
+    const stillPending = await fx.ingestion.reviewQueue.list(
+      { kind: 'extraction_failure', status: 'pending' },
+      10,
+    );
+    expect(stillPending).toHaveLength(1); // only the original attempt-0 defer
+  });
+
   it('link-only (robots-disallowed) stories classify + extract claims from local text', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity, { nowMs });
     fixture.robots.set('https://blocked.example', 'User-agent: *\nDisallow: /private/');

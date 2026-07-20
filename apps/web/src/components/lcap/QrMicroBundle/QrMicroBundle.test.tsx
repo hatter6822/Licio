@@ -49,6 +49,33 @@ describe('QrMicroBundle (§22.3)', () => {
     expect(onImport).not.toHaveBeenCalled();
   });
 
+  it('reports no QR found (never hangs on the spinner) when decoding throws', async () => {
+    cleanup();
+    // Force fileToImageData past its capability guard, then have createImageBitmap
+    // REJECT — the try/catch must route the rejection to the same no_qr state
+    // rather than leaving the reader stuck on 'reading' with an unhandled rejection.
+    const g = globalThis as unknown as {
+      createImageBitmap?: unknown;
+      OffscreenCanvas?: unknown;
+    };
+    const priorCreate = g.createImageBitmap;
+    const priorCanvas = g.OffscreenCanvas;
+    g.createImageBitmap = vi.fn().mockRejectedValue(new Error('undecodable'));
+    g.OffscreenCanvas = class {};
+    try {
+      const onImport = vi.fn();
+      const user = userEvent.setup();
+      render(<QrMicroBundle onImport={onImport} />);
+      const file = new File([new Uint8Array([1, 2, 3])], 'corrupt.png', { type: 'image/png' });
+      await user.upload(screen.getByLabelText(/choose a qr image/i), file);
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/no qr code/i));
+      expect(onImport).not.toHaveBeenCalled();
+    } finally {
+      g.createImageBitmap = priorCreate;
+      g.OffscreenCanvas = priorCanvas;
+    }
+  });
+
   it('passes the accessibility audit', async () => {
     const { container } = render(<QrMicroBundle payload={new Uint8Array([1, 2])} />);
     await checkA11y(container);

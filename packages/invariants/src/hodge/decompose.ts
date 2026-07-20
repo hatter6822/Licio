@@ -44,16 +44,28 @@ function magnitude(values: readonly number[]): number {
 /** Helmholtz decomposition of the complex's edge flow. */
 export function helmholtzDecompose(complex: ConversationComplex): HelmholtzDecomposition {
   const vertexIndex = new Map(complex.vertices.map((v, i) => [v, i]));
-  const edgeIndex = new Map(complex.edges.map((e, i) => [`${e.from} ${e.to}`, i]));
+  for (const e of complex.edges) {
+    if (!vertexIndex.has(e.from) || !vertexIndex.has(e.to)) {
+      throw new Error('edge references a missing vertex');
+    }
+  }
+  // Key on the NUL separator (matching complex.ts's edgeKey) so vertex ids
+  // that contain spaces cannot collide and silently destroy orthogonality.
+  const edgeIndex = new Map(complex.edges.map((e, i) => [`${e.from}\x00${e.to}`, i]));
   const flow = complex.edges.map((e) => e.flow);
   const edgeCount = complex.edges.length;
   const vertexCount = complex.vertices.length;
 
   // --- gradient: solve (B₁ᵀ B₁) φ = B₁ᵀ Y, gradient = B₁ φ -----------------
   const applyB1 = (phi: readonly number[]): number[] =>
-    complex.edges.map(
-      (e) => (phi[vertexIndex.get(e.to) ?? 0] ?? 0) - (phi[vertexIndex.get(e.from) ?? 0] ?? 0),
-    );
+    complex.edges.map((e) => {
+      // The endpoints are guaranteed present by the missing-vertex guard
+      // above; the -1 sentinels are dead but keep noUncheckedIndexedAccess
+      // satisfied without a non-null assertion.
+      const to = vertexIndex.get(e.to) ?? -1;
+      const from = vertexIndex.get(e.from) ?? -1;
+      return (phi[to] ?? 0) - (phi[from] ?? 0);
+    });
   const applyB1T = (y: readonly number[]): number[] => {
     const out = new Array<number>(vertexCount).fill(0);
     complex.edges.forEach((e, i) => {
@@ -76,9 +88,9 @@ export function helmholtzDecompose(complex: ConversationComplex): HelmholtzDecom
     ac: number;
   }
   const triangleEdges: TriangleEdges[] = complex.triangles.map(([a, b, c]) => ({
-    ab: edgeIndex.get(`${a} ${b}`) ?? -1,
-    bc: edgeIndex.get(`${b} ${c}`) ?? -1,
-    ac: edgeIndex.get(`${a} ${c}`) ?? -1,
+    ab: edgeIndex.get(`${a}\x00${b}`) ?? -1,
+    bc: edgeIndex.get(`${b}\x00${c}`) ?? -1,
+    ac: edgeIndex.get(`${a}\x00${c}`) ?? -1,
   }));
   for (const t of triangleEdges) {
     if (t.ab < 0 || t.bc < 0 || t.ac < 0) {

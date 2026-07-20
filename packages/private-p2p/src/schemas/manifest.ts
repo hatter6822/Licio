@@ -13,7 +13,12 @@ export const privateRoomProfileSchema = z
     name: z.string().min(1).max(100),
     description: z.string().min(1).max(2_000).optional(),
     room_type: roomTypeSchema,
-    /** A CID over an ENCRYPTED avatar attachment (never a plaintext CID). */
+    /**
+     * The room-local attachment id (an `attachment.add` op) whose encrypted
+     * manifest + wrapped key resolve the avatar — never a bare CID (a CID
+     * alone carries no key material).  Resolve like `captions_attachment_id`,
+     * through the reducer's attachment state.
+     */
     avatar_attachment_id: privateIdSchema.optional(),
   })
   .strict();

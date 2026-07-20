@@ -37,11 +37,35 @@ const IS_DEV = import.meta.env.DEV === true;
 // Per-store read-validation rejection counts (observability, WS-C.2.2c — a spike
 // signals a bad migration or tampering and should alert).
 const rejectionCounts = new Map<string, number>();
+// The last value reported to the telemetry sink per store, so drainRejectionDeltas
+// can emit only the NEW rejections since the previous report (delta semantics —
+// exactly one quarantine event per new rejection, never a re-report of the total).
+const lastReported = new Map<string, number>();
 export function getRejectionCount(store: StoreName): number {
   return rejectionCounts.get(store) ?? 0;
 }
 export function resetRejectionCounts(): void {
   rejectionCounts.clear();
+  lastReported.clear();
+}
+
+/**
+ * Drain the per-store rejection counters into positive deltas since the last
+ * drain, advancing the reported watermark. Returns one entry per store whose
+ * rejection count grew, so the observability layer can emit a single telemetry
+ * event per new quarantine (WS-C.2.2c — a spike signals a bad migration or
+ * tampering and should alert).
+ */
+export function drainRejectionDeltas(): Array<{ store: StoreName; count: number }> {
+  const deltas: Array<{ store: StoreName; count: number }> = [];
+  for (const [store, current] of rejectionCounts) {
+    const delta = current - (lastReported.get(store) ?? 0);
+    if (delta > 0) {
+      lastReported.set(store, current);
+      deltas.push({ store: store as StoreName, count: delta });
+    }
+  }
+  return deltas;
 }
 
 export interface IntegrityStore<T> {

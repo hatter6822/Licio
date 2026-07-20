@@ -54,6 +54,21 @@ describe('reservations + ladder (WS-R.5.1)', () => {
     expect(computeLaneBudget(100 * 1024).c0MinBytes).toBe(C0_MIN_BYTES);
   });
 
+  it('keeps the B4 bulk lane structurally dead unless the §15.3 bulk path is active', () => {
+    // Default (no bulk opt-in): B4 weight and cap are 0 at every rung.
+    expect(computeLaneBudget(600 * 1024).weights.B4).toBe(0);
+    expect(computeLaneBudget(600 * 1024).caps.B4).toBe(0);
+    expect(computeLaneBudget(600 * 1024, true).caps.B4).toBe(0);
+    // With bulk allowed: B4 draws only leftover bytes above the 512 KiB rung,
+    // and its weight sits below E2/M3 so it is served last.
+    const bulk = computeLaneBudget(600 * 1024, false, true);
+    expect(bulk.weights.B4).toBe(5);
+    expect(bulk.weights.B4).toBeLessThan(bulk.weights.E2);
+    expect(bulk.caps.B4).toBe(Math.floor(0.05 * 600 * 1024));
+    // Below the 512 KiB rung, B4 stays 0 even when bulk is allowed.
+    expect(computeLaneBudget(100 * 1024, false, true).caps.B4).toBe(0);
+  });
+
   it('forbids non-P0 material in C0', () => {
     expect(() => assertC0Purity('C0', 1)).toThrow();
     expect(() => assertC0Purity('C0', 0)).not.toThrow();
@@ -172,6 +187,35 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     const firstMediaIndex = result.order.findIndex((c) => c.lane === 'M3');
     expect(c0Index).toBeGreaterThanOrEqual(0); // the C0 object is placed (after its dep)
     expect(firstMediaIndex).toBeGreaterThan(c0Index); // media only AFTER the C0 closure lands
+  });
+
+  it('releases the media gate when a C0 object depends on a never-placeable prerequisite', () => {
+    // A C0 control object depends on a prerequisite that can NEVER be placed in this run
+    // (here: a C0 dep far larger than the whole budget).  Membership-only "pending" logic
+    // treated the dep as in-progress and held the media gate forever (total M3/B4
+    // starvation + a maxRounds busy-spin).  `everPlaceable` recognises the dep can never
+    // fit, so the impossible C0 closure no longer holds the gate and media ships.
+    const impossibleDep = cand({ cid: 'huge', lane: 'C0', priority: 0, bytes: 100_000_000 });
+    const c0blocked = cand({
+      cid: 'c0blocked',
+      lane: 'C0',
+      priority: 0,
+      bytes: 100,
+      requires: ['huge'],
+    });
+    const media = Array.from({ length: 5 }, (_, i) =>
+      cand({ cid: `m${i}`, lane: 'M3', priority: 3, bytes: 10_000 }),
+    );
+    const result = scheduleTransfer([...media, c0blocked, impossibleDep], {
+      budgetBytes: 600 * 1024,
+      mediaRequested: true,
+      nowMs: 0,
+    });
+    // Neither the impossible dep nor the object gated on it can be placed.
+    expect(result.order.some((c) => c.cid === 'huge')).toBe(false);
+    expect(result.order.some((c) => c.cid === 'c0blocked')).toBe(false);
+    // But media is NOT starved — the unsatisfiable C0 closure released the gate.
+    expect(result.order.some((c) => c.lane === 'M3')).toBe(true);
   });
 
   it('does not starve a pinned head behind smaller unpinned objects under contention (§15.6)', () => {

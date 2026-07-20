@@ -580,7 +580,9 @@ export class PrivateRoomEngine {
   /** Given a peer's §15.6 announcement, the head op ids the engine still wants
    *  (the first §15.7 reconciliation step; fetched heads then feed `ingest`). */
   wantedFrom(announcement: HeadAnnouncement): string[] {
-    return wantedHeads(new Set(this.acceptedOps.keys()), announcement);
+    const known = new Set<string>(this.acceptedOps.keys());
+    for (const id of this.coveredOpLamports.keys()) known.add(id);
+    return wantedHeads(known, announcement);
   }
 
   /**

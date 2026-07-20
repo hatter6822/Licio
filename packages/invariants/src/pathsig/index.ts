@@ -118,6 +118,9 @@ export function pathSignature(points: readonly (readonly number[])[]): Truncated
 /** Lévy (signed) area between dimensions i and j: (S²ᵢⱼ − S²ⱼᵢ)/2. */
 export function signedArea(sig: TruncatedSignature, i: number, j: number): number {
   const d = sig.dimension;
+  if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= d || j >= d) {
+    throw new Error(`signedArea indices (${i}, ${j}) out of range for dimension ${d}`);
+  }
   return ((sig.level2[i * d + j] ?? 0) - (sig.level2[j * d + i] ?? 0)) / 2;
 }
 

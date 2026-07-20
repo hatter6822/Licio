@@ -23,16 +23,18 @@ export interface RateLimitOptions {
   limit: number;
   /** Window length in milliseconds. */
   windowMs: number;
+  /** Injectable clock (tests); defaults to Date.now. */
+  now?: () => number;
 }
 
 /** Create a global fixed-window budget middleware (429 when exhausted). */
 export function rateLimit(options: RateLimitOptions): MiddlewareHandler {
-  const { limit, windowMs } = options;
+  const { limit, windowMs, now: clock = () => Date.now() } = options;
   let count = 0;
   let resetAt = 0;
 
   return async (c, next) => {
-    const now = Date.now();
+    const now = clock();
     if (now >= resetAt) {
       count = 0;
       resetAt = now + windowMs;

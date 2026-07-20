@@ -183,6 +183,28 @@ describe('computeFreshnessScore (WS-F.1.4g)', () => {
   it('is deterministic', () => {
     expect(computeFreshnessScore(input())).toBe(computeFreshnessScore(input()));
   });
+
+  it('validates a non-default config at the trust boundary (fails closed on bad weights)', () => {
+    expect(() =>
+      computeFreshnessScore(input(), {
+        ...DEFAULT_FRESHNESS_CONFIG,
+        submitWeight: 0.5,
+        updateWeight: 0.5,
+        eventWeight: 0.5,
+      }),
+    ).toThrow(/invalid freshness config/);
+    expect(() => computeFreshnessScore(input(), DEFAULT_FRESHNESS_CONFIG)).not.toThrow();
+  });
+
+  it('is total: a non-finite timestamp yields the least-fresh finite score, never NaN', () => {
+    const nanInput = computeFreshnessScore(input({ submittedAtMs: Number.NaN }));
+    expect(Number.isFinite(nanInput)).toBe(true);
+    expect(nanInput).toBeGreaterThanOrEqual(0);
+    expect(nanInput).toBeLessThanOrEqual(1);
+    const infInput = computeFreshnessScore(input({ eventTimeMs: Number.NEGATIVE_INFINITY }));
+    expect(Number.isFinite(infInput)).toBe(true);
+    expect(infInput).toBeLessThanOrEqual(1);
+  });
 });
 
 describe('topicTauMs', () => {

@@ -22,19 +22,29 @@ const CSP = [
 
 const REPORTING_ENDPOINTS = 'csp-endpoint="/api/security/csp-report"';
 
-const REPORT_TO = JSON.stringify({
-  group: 'csp-endpoint',
-  max_age: 86400,
-  endpoints: [{ url: '/api/security/csp-report' }],
-});
-
 export function securityHeadersMiddleware(): MiddlewareHandler {
   return async (c, next) => {
     await next();
 
+    // The legacy v0 Reporting-API (Report-To) rejects relative endpoint URLs,
+    // so derive the server's own public origin per-request (proxy-aware) and
+    // emit an absolute URL.  Naming the server's own origin from its Host /
+    // X-Forwarded-Host is not client-IP handling (§19.1).
+    const proto = c.req.header('x-forwarded-proto') ?? new URL(c.req.url).protocol.replace(':', '');
+    const host =
+      c.req.header('x-forwarded-host') ?? c.req.header('host') ?? new URL(c.req.url).host;
+    const origin = `${proto}://${host}`;
+
     c.res.headers.set('Content-Security-Policy', CSP);
     c.res.headers.set('Reporting-Endpoints', REPORTING_ENDPOINTS);
-    c.res.headers.set('Report-To', REPORT_TO);
+    c.res.headers.set(
+      'Report-To',
+      JSON.stringify({
+        group: 'csp-endpoint',
+        max_age: 86400,
+        endpoints: [{ url: `${origin}/api/security/csp-report` }],
+      }),
+    );
     c.res.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
     c.res.headers.set('X-Content-Type-Options', 'nosniff');
     c.res.headers.set('X-Frame-Options', 'SAMEORIGIN');

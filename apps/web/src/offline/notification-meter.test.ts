@@ -27,6 +27,14 @@ describe('notification meter', () => {
     expect(await readNotificationsUsedToday()).toBe(2);
   });
 
+  it('does not lose an update when two increments run concurrently', async () => {
+    // Both calls fire without awaiting the first: the shared readwrite
+    // transaction must serialize them so neither reads a stale pre-increment
+    // value (the lost-update race).
+    await Promise.all([recordNotificationShown(), recordNotificationShown()]);
+    expect(await readNotificationsUsedToday()).toBe(2);
+  });
+
   it('buckets by UTC day, so a different day is not counted today', async () => {
     await recordNotificationShown(new Date('2020-01-01T00:00:00.000Z'));
     expect(await readNotificationsUsedToday()).toBe(0);

@@ -213,6 +213,25 @@ describe('migratePrivacySettings', () => {
     expect(migratePrivacySettings([1, 2, 3])).toEqual(defaultPrivacySettings());
   });
 
+  it('stays total: repairs invalid stored values from the privacy-safe defaults', () => {
+    // A malformed at-rest blob must never make the helper throw (which would
+    // 500 every read of the affected user); the offending field falls back to
+    // its default instead.
+    const bad = migratePrivacySettings({ cross_device_sync: 'yes' });
+    expect(bad.cross_device_sync).toBe(defaultPrivacySettings().cross_device_sync);
+    expect(
+      migratePrivacySettings({ attention_retention_preference: 'forever' })
+        .attention_retention_preference,
+    ).toBe('default');
+    // An invalid NESTED value resets its whole block to the privacy-safe default.
+    const nested = migratePrivacySettings({
+      notification_preferences: { digest_mode: 'hourly-nonsense' },
+    });
+    expect(nested.notification_preferences).toEqual(
+      defaultPrivacySettings().notification_preferences,
+    );
+  });
+
   it('deep-merges nested notification/data-sharing blocks', () => {
     const migrated = migratePrivacySettings({
       notification_preferences: { push_enabled: true },
@@ -259,6 +278,11 @@ describe('personalization settings', () => {
     const migrated = migratePersonalizationSettings({ feed_mode: 'chronological' });
     expect(migrated.schema_version).toBe(PRIVACY_SETTINGS_VERSION);
     expect(migrated.feed_mode).toBe('chronological');
+  });
+
+  it('stays total: repairs an invalid personalization value from the default', () => {
+    const migrated = migratePersonalizationSettings({ feed_mode: 'nonexistent' });
+    expect(migrated.feed_mode).toBe(defaultPersonalizationSettings().feed_mode);
   });
 
   it('returns defaults for a non-object personalization blob', () => {

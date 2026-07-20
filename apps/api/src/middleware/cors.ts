@@ -30,6 +30,14 @@ export function corsMiddleware(): MiddlewareHandler {
     const allowedOrigins = getAllowedOrigins();
     const origin = c.req.header('origin');
 
+    // The per-origin `Access-Control-Allow-Origin` below is content-negotiated on
+    // the request `Origin`, so every response (allowed, disallowed, or preflight)
+    // must advertise `Vary: Origin` to keep shared caches from serving one
+    // origin's CORS decision to another. Append (not set) so a future `Vary`
+    // contributor is preserved, and place it before the OPTIONS early return so it
+    // carries onto the reconstructed 204.
+    c.res.headers.append('Vary', 'Origin');
+
     if (origin && allowedOrigins.has(origin)) {
       c.res.headers.set('Access-Control-Allow-Origin', origin);
       c.res.headers.set('Access-Control-Allow-Credentials', 'true');

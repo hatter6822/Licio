@@ -77,6 +77,27 @@ describe('evaluateTreasuryAction', () => {
     expect(v).toMatchObject({ accepted: false, code: 'no_cap_configured' });
   });
 
+  it('rejects fail-closed on a malformed timestamp (now, proposedAt, or history)', () => {
+    // A NaN instant would make every window/interval/timelock comparison silently
+    // false — the guard must reject rather than let those preconditions pass.
+    expect(
+      evaluateTreasuryAction(action(), bounds, [], { cryptoEnabled: true, now: 'nonsense' }),
+    ).toMatchObject({
+      code: 'invalid_timestamp',
+    });
+    expect(
+      evaluateTreasuryAction(action({ proposedAt: 'not-a-date' }), bounds, [], opts),
+    ).toMatchObject({
+      code: 'invalid_timestamp',
+    });
+    const badHistory: TreasuryHistoryEntry[] = [
+      { category: 'member_distribution', amount: 10, timestamp: 'bogus' },
+    ];
+    expect(evaluateTreasuryAction(action(), bounds, badHistory, opts)).toMatchObject({
+      code: 'invalid_timestamp',
+    });
+  });
+
   it('rejects per-action and per-window cap breaches', () => {
     expect(evaluateTreasuryAction(action({ amount: 200 }), bounds, [], opts)).toMatchObject({
       code: 'per_action_cap_exceeded',

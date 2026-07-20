@@ -2,7 +2,12 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DB_NAME, rawClear, resetDbConnection, STORE } from './db.js';
-import { probeStorageIntegrity, requestPersistentStorage, snapshotStorage } from './eviction.js';
+import {
+  initEvictionDetection,
+  probeStorageIntegrity,
+  requestPersistentStorage,
+  snapshotStorage,
+} from './eviction.js';
 import * as queue from './queue.js';
 
 function deleteDatabase(name: string): Promise<void> {
@@ -70,6 +75,28 @@ describe('probeStorageIntegrity', () => {
 
     expect((await probeStorageIntegrity()).verdict).toBe('evicted');
     expect((await probeStorageIntegrity()).verdict).toBe('ok');
+  });
+});
+
+describe('initEvictionDetection', () => {
+  it('coalesces the bfcache pageshow+visibilitychange pair into a single onEvicted', async () => {
+    await queue.enqueue('contribution', { a: 1 }, 'op-1');
+    await snapshotStorage(); // snapshot: pending = 1
+    await rawClear(STORE.pendingQueue); // real eviction
+
+    const onEvicted = vi.fn();
+    const teardown = initEvictionDetection({ onEvicted });
+
+    // A bfcache restore fires BOTH events; the two overlapping probes must
+    // share one in-flight probe so eviction is reported exactly once.
+    window.dispatchEvent(new Event('pageshow'));
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    // Let the coalesced probe resolve.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onEvicted).toHaveBeenCalledTimes(1);
+    teardown();
   });
 });
 

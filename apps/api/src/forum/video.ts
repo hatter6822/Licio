@@ -15,7 +15,10 @@
 //      them). We therefore NEUTRALIZE in place, length-preserving:
 //        • MP4  `udta` (user-data; holds the `©xyz` GPS-location box) → retyped
 //          to a `free` box with a zeroed payload.
-//        • WebM `Tags` → overwritten with a `Void` element of identical span.
+//        • WebM `Tags` → overwritten with a `Void` element of identical span,
+//          and the `Info` device/timestamp/UID children (`DateUTC`, `Title`,
+//          `MuxingApp`, `WritingApp`, `SegmentUID`) → each voided in place
+//          (TimecodeScale/Duration are kept for the duration cap + playback).
 //
 // Duration is read from the container where it declares one (MP4 `mvhd`, WebM
 // `Info/Duration`×`TimecodeScale`) so the §14.x duration cap can apply; an
@@ -201,6 +204,20 @@ const ID_INFO = 0x1549a966;
 const ID_TIMECODE_SCALE = 0x2ad7b1;
 const ID_DURATION = 0x4489;
 const ID_TAGS = 0x1254c367;
+// Info-child device/timestamp/uid metadata (droppable — none is needed for
+// playback or the §14.x duration cap, unlike TimecodeScale/Duration).
+const ID_DATE_UTC = 0x4461;
+const ID_TITLE = 0x7ba9;
+const ID_MUXING_APP = 0x4d80;
+const ID_WRITING_APP = 0x5741;
+const ID_SEGMENT_UID = 0x73a4;
+const INFO_METADATA_IDS = new Set<number>([
+  ID_DATE_UTC,
+  ID_TITLE,
+  ID_MUXING_APP,
+  ID_WRITING_APP,
+  ID_SEGMENT_UID,
+]);
 
 interface Vint {
   /** Element id (marker bits retained) or size value (marker stripped). */
@@ -390,6 +407,13 @@ function probeWebm(input: Uint8Array): VideoProbeResult {
       for (const ic of infoChildren) {
         if (ic.id === ID_TIMECODE_SCALE) timecodeScale = ebmlUint(bytes, ic) ?? timecodeScale;
         if (ic.id === ID_DURATION) rawDuration = ebmlFloat(bytes, ic);
+        // DateUTC/Title/MuxingApp/WritingApp/SegmentUID leak device+timestamp
+        // (and a stable cross-file linking UID) — void them length-preservingly,
+        // keeping TimecodeScale/Duration (needed above) and every byte offset.
+        if (INFO_METADATA_IDS.has(ic.id)) {
+          neutralizeEbmlElement(bytes, ic);
+          stripped = true;
+        }
       }
       if (rawDuration !== null && rawDuration > 0 && timecodeScale > 0) {
         durationSeconds = (rawDuration * timecodeScale) / 1_000_000_000;

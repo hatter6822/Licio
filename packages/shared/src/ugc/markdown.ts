@@ -91,7 +91,7 @@ export function normalizeUgcLink(rawHref: string): string | null {
   if (scheme === 'mailto') {
     // Keep mailto simple: a single address, no headers (no ?cc= injection).
     const address = compact.slice('mailto:'.length);
-    if (/^[^\s@?&]+@[^\s@?&]+\.[^\s@?&]+$/.test(address)) return compact;
+    if (/^[^\s@?&]+@[^\s@?&]+\.[^\s@?&]+$/.test(address)) return `mailto:${address}`;
     return null;
   }
   return null;
@@ -175,7 +175,9 @@ function parseInline(text: string, depth: number): UgcInlineNode[] {
       const label = linkMatch[1] ?? '';
       const href = normalizeUgcLink(linkMatch[2] ?? '');
       flushLiteral();
-      const children = parseInline(label, depth + 1).filter((n) => n.kind !== 'link');
+      const children = parseInline(label, depth + 1).flatMap((n) =>
+        n.kind === 'link' ? n.children : [n],
+      );
       if (href !== null) {
         nodes.push({ kind: 'link', href, children });
       } else {
@@ -202,7 +204,27 @@ function parseInline(text: string, depth: number): UgcInlineNode[] {
     const bareMatch = stickyExec(BARE_URL_Y, text, position);
     if (bareMatch !== null) {
       // Trim trailing punctuation that is almost certainly sentence-level.
-      const trimmed = bareMatch[0].replace(/[.,;:!?)\]]+$/, '');
+      // `.,;:!?` always trims; a trailing `)`/`]` trims ONLY when unbalanced,
+      // so a balanced Wikipedia paren URL (`.../Foo_(bar)`) keeps its closer
+      // (CommonMark autolink termination).
+      let trimmed = bareMatch[0];
+      for (;;) {
+        const punct = /[.,;:!?]+$/.exec(trimmed);
+        if (punct) {
+          trimmed = trimmed.slice(0, punct.index);
+          continue;
+        }
+        const last = trimmed[trimmed.length - 1];
+        if (last === ')' || last === ']') {
+          const opens = (trimmed.match(/[([]/g) ?? []).length;
+          const closes = (trimmed.match(/[)\]]/g) ?? []).length;
+          if (closes > opens) {
+            trimmed = trimmed.slice(0, -1);
+            continue;
+          }
+        }
+        break;
+      }
       const href = normalizeUgcLink(trimmed);
       flushLiteral();
       if (href !== null) {

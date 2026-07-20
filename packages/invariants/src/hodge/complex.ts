@@ -62,6 +62,13 @@ function edgeKey(a: string, b: string): string {
 }
 
 /**
+ * Codepoint comparator, NOT localeCompare: edge ordering must be deterministic
+ * across runtimes/ICU versions (the same rule reeb/index.ts pins). ASCII ids
+ * are unaffected; non-ASCII ids would otherwise be locale-dependent.
+ */
+const cp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
  * Build the complex from raw interactions. Triangle enumeration intersects
  * edge-neighborhoods (O(E · max-degree)) so a 500-participant conversation
  * stays within the batch budget.
@@ -91,7 +98,7 @@ export function buildConversationComplex(
       const [from, to] = key.split('\x00');
       return { from: from ?? '', to: to ?? '', flow };
     })
-    .sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+    .sort((a, b) => cp(a.from, b.from) || cp(a.to, b.to));
 
   // Neighbor sets for triangle enumeration.
   const neighbors = new Map<string, Set<string>>();

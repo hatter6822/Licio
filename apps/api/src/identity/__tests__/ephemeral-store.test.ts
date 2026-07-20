@@ -24,6 +24,14 @@ describe('InMemoryEphemeralStore', () => {
     expect(await store.get('k')).toBeNull();
   });
 
+  it('concurrent takes consume a single-use secret exactly once', async () => {
+    const store = new InMemoryEphemeralStore();
+    await store.set('k', 'N1', 1000);
+    const results = await Promise.all([store.take('k'), store.take('k')]);
+    const nonNull = results.filter((r) => r !== null);
+    expect(nonNull).toEqual(['N1']);
+  });
+
   it('take of an expired/absent key returns null', async () => {
     let now = 0;
     const store = new InMemoryEphemeralStore(() => now);

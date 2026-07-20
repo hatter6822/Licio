@@ -45,9 +45,14 @@ export class InMemoryEphemeralStore implements EphemeralStore {
   }
 
   async take(key: string): Promise<string | null> {
-    const value = await this.get(key);
+    // Read AND delete with no intervening await so two concurrent takes can
+    // never both observe the entry — a single-use secret is consumed once
+    // (mirrors Redis GETDEL).  Preserves get()'s expiry semantics.
+    const entry = this.#map.get(key);
     this.#map.delete(key);
-    return value;
+    if (!entry) return null;
+    if (entry.expiresAt <= this.#now()) return null;
+    return entry.value;
   }
 
   async delete(key: string): Promise<void> {

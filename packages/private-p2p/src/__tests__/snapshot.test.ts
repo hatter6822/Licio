@@ -199,7 +199,7 @@ describe('snapshot integration — a snapshot.commit op enters state, but the ro
         snapshot_id: 'snap-1',
         includes_ops_up_to: ['cs-s1'],
         state_merkle_root: root,
-        snapshot_body_cid: 'b'.repeat(48),
+        snapshot_body_cid: 'bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku',
       },
       { op_id: 'snap-op', lamport: '3', parents: ['cs-s1'] },
     );

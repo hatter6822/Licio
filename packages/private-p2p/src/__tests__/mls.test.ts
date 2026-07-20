@@ -203,4 +203,13 @@ describe('group lifecycle', () => {
     expect(currentEpoch(restored)).toBe(currentEpoch(alice));
     expect(toHex(epochAuthenticator(restored))).toBe(toHex(epochAuthenticator(alice)));
   });
+
+  it('deserializeGroupState rejects trailing bytes after a complete group state', async () => {
+    const { alice } = await twoDeviceGroup();
+    const bytes = serializeGroupState(alice);
+    const withSuffix = new Uint8Array([...bytes, 0]);
+    await expect(deserializeGroupState(withSuffix)).rejects.toThrow(
+      /not a single complete MLS group state/,
+    );
+  });
 });

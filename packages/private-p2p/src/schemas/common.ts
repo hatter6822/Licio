@@ -12,12 +12,19 @@ import { z } from 'zod';
  *  Never a server uuid — private ids are room-scoped strings (§11.1). */
 export const privateIdSchema = z.string().min(1).max(128);
 
-/** A CIDv1 base32 multibase string over CIPHERTEXT (§9.4): `b` + base32 lower. */
+/** A CIDv1 base32 multibase string over CIPHERTEXT (§9.4): the pinned
+ *  `licio-private-cid-v1` profile — `b` (base32 multibase) + a CIDv1 whose
+ *  only codecs are raw `0x55` (→ `bafkrei…`) or dag-cbor `0x71` (→ `bafyrei…`),
+ *  SHA-256 (32-byte) digest, so the encoding is a fixed 59 chars.  Pinning the
+ *  shape here quarantines a malformed/mis-profiled "CID" at schema intake
+ *  rather than letting any 8–256-char base32 string masquerade as one. */
 export const privateCidSchema = z
   .string()
-  .min(8)
-  .max(256)
-  .regex(/^b[a-z2-7]+$/, 'expected a CIDv1 base32 (multibase "b") string');
+  .length(59)
+  .regex(
+    /^baf[ky]rei[a-z2-7]{52}$/,
+    'expected a licio-private-cid-v1 CIDv1 base32 string (b + 58 base32 chars, codec raw 0x55 -> bafkrei / dag-cbor 0x71 -> bafyrei)',
+  );
 
 /** A base64url-encoded binary value (no padding): keys, nonces, signatures,
  *  commitments, wrapped keys, ciphertext.  The crypto layer (WS-S.3) decodes. */
@@ -48,8 +55,18 @@ export const lamportSchema = z
   .max(40)
   .regex(/^(0|[1-9]\d*)$/, 'lamport must be a canonical non-negative decimal string');
 
-/** A COARSE time bucket (never an exact timestamp where avoidable, §5.4). */
+/** A COARSE time bucket (never an exact timestamp where avoidable, §5.4).
+ *  Kept permissive because the archive label field (`snapshot-serve`, etc.)
+ *  still needs a free-form coarse tag — use `hourBucketSchema` for any field
+ *  that is ALWAYS a UTC hour bucket so a finer-grained value cannot leak. */
 export const timeBucketSchema = z.string().min(1).max(64);
+
+/** A COARSE UTC hour bucket, `YYYY-MM-DDTHH` (§5.4).  The always-hour-bucket
+ *  envelope/op/invite fields pin this so a full-precision timestamp cannot
+ *  masquerade as a "coarse bucket" in server/platform-visible metadata. */
+export const hourBucketSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}$/, 'expected a coarse UTC hour bucket (YYYY-MM-DDTHH), §5.4');
 
 /** §11.3 — room capabilities (NOT platform roles; authority is room-key-only). */
 export const PRIVATE_CAPABILITIES = [

@@ -89,23 +89,52 @@ export function allocate(
   const laneHead = (lane: LcapLane): ScheduledCandidate | undefined =>
     remaining[lane].find((c) => isEligible(c) && fitsBudget(c, lane));
 
-  // A CID still pending placement in any lane (so a not-yet-placed prerequisite of a
-  // blocked C0 object is recognised as available, not absent).
-  const isPending = (cid: string): boolean =>
-    LANE_ORDER.some((lane) => remaining[lane].some((c) => c.cid === cid));
+  // Whether a CID can STILL possibly be placed in this run given the current usage.
+  // Membership alone is not enough: a pending candidate that can never individually
+  // fit (over total/lane budget), sits in an unservable lane, or whose dependency
+  // closure is itself unplaceable (or cyclic) must NOT be treated as "in progress",
+  // or it would hold the media gate forever (total M3/B4 starvation + a maxRounds
+  // busy-spin).  A genuinely absent CID (external, never a candidate) returns false,
+  // matching the absent-dependency gate-open behaviour.  `visiting` guards cycles:
+  // a member of a dependency cycle can never become eligible, so it is not placeable.
+  const everPlaceable = (cid: string, visiting: Set<string> = new Set<string>()): boolean => {
+    if (placed.has(cid)) return true;
+    if (visiting.has(cid)) return false; // cycle → neither member can ever become eligible
+    let found: { candidate: ScheduledCandidate; lane: LcapLane } | undefined;
+    for (const lane of LANE_ORDER) {
+      const candidate = remaining[lane].find((c) => c.cid === cid);
+      if (candidate) {
+        found = { candidate, lane };
+        break;
+      }
+    }
+    if (!found) return false; // genuinely absent → does not hold the gate
+    const { candidate, lane } = found;
+    // Could it still individually fit at the current state, and can its lane serve it?
+    if (candidate.bytes > totalBudget - usedBytes) return false;
+    if (candidate.bytes > laneBudget.caps[lane] - usedByLane[lane]) return false;
+    if (laneBudget.weights[lane] <= 0 && lane !== 'C0') return false; // C0 drains in the ignoreDeficit phase
+    visiting.add(cid);
+    const closureOk = candidate.requires.every(
+      (dep) => placed.has(dep) || everPlaceable(dep, visiting),
+    );
+    visiting.delete(cid);
+    return closureOk;
+  };
 
   // True while any C0 object is still schedulable.  No M3/B4 byte may be sent while this
   // holds (the hard §15.2 ordering invariant).  A C0 object blocked ONLY by unmet
-  // dependencies that are themselves still placed-or-pending counts too: its closure is
-  // in progress, so the media gate stays closed until the whole C0 closure lands.  A C0
-  // object blocked by a genuinely absent (external, never-placeable) dependency does NOT
-  // hold the gate (it can never be scheduled).
+  // dependencies whose closure can still be placed (`everPlaceable`) counts too: its
+  // closure is in progress, so the media gate stays closed until the whole C0 closure
+  // lands.  A C0 object blocked by a dependency that can NEVER be placed — genuinely
+  // absent (external), over budget, in an unservable lane, or part of a dependency
+  // cycle — does NOT hold the gate (it can never be scheduled).
   const schedulableC0Remaining = (): boolean =>
     remaining.C0.some(
       (candidate) =>
         fitsBudget(candidate, 'C0') &&
         (isEligible(candidate) ||
-          candidate.requires.every((dep) => placed.has(dep) || isPending(dep))),
+          candidate.requires.every((dep) => placed.has(dep) || everPlaceable(dep))),
     );
 
   // Phase 1 — C0 minimum reservation (before any other lane is served).

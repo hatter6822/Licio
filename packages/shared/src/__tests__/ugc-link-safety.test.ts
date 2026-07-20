@@ -59,6 +59,17 @@ describe('WS-G.4.2c dApp mimicry', () => {
     expect(evaluateLinkSafety('https://uniswao.org/', []).reasons).toContain('dapp_mimicry');
   });
 
+  it('flags IDN/punycode homograph hosts (WHATWG parser ASCII-encodes them to xn--)', () => {
+    // "uniswар.org" — Cyrillic "ар" homograph — the URL parser encodes the label
+    // to xn--, which defeats the ASCII brand-substring/edit-distance checks, so the
+    // punycode guard flags it as mimicry-suspicious.
+    expect(evaluateLinkSafety('https://uniswар.org', []).reasons).toContain('dapp_mimicry');
+  });
+
+  it('never flags a plain ASCII known domain or subdomain as IDN mimicry', () => {
+    expect(evaluateLinkSafety('https://app.uniswap.org', []).suspicious).toBe(false);
+  });
+
   it('never flags the real dApp domains or their subdomains', () => {
     for (const domain of KNOWN_DAPP_DOMAINS) {
       expect(evaluateLinkSafety(`https://${domain}/`, []).suspicious).toBe(false);

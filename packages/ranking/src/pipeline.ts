@@ -135,7 +135,11 @@ export function scoreItem(
   // sensitivity labels — per-item topics are catalog UUIDs, not slugs, so a
   // topic match against a slug set never fires per item). The topic-id set
   // stays a forward-compat hook for a deployment that marks specific catalog
-  // topics sensitive. Either fires the conservative curve + the §11.5 penalty.
+  // topics sensitive. Either selection realizes §11.5 sensitive-topic handling
+  // via the conservative (evergreen) decay curve here plus the request-level PHI
+  // threshold tightening (phi_sensitive_factor) in phiDiversification — there is
+  // no per-item sensitive-content penalty; the sensitiveTopic flag is threaded to
+  // computePenalties only for signature stability / future per-item terms.
   const sensitiveTopic = isSensitiveItem(features, context.sensitiveTopicIds);
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
