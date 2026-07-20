@@ -41,18 +41,20 @@ export async function pickLeastLoaded(
 }
 
 /**
- * Choose an independent appeal reviewer: an available reviewer other than the
- * original decision-maker, least-loaded.  Returns null when none is available
- * (the appeal stays unassigned → surfaced for senior pickup; never assigned to
- * the original decision-maker — the independence constraint is structural).
+ * Choose an independent appeal reviewer: an available reviewer who is neither the
+ * original decision-maker NOR the appellant/subject, least-loaded.  Returns null
+ * when none is available (the appeal stays unassigned → surfaced for senior
+ * pickup; the independence constraint is structural — a conflicted reviewer is
+ * never even suggested).
  */
 export async function assignAppealReviewer(
   services: ModerationServices,
-  excludeUserId: string | null,
+  excludeUserIds: ReadonlyArray<string | null>,
 ): Promise<string | null> {
+  const excluded = new Set(excludeUserIds.filter((id): id is string => id !== null));
   const available = await services.reviewerStatus.availableIds();
   const eligible = await eligibleForQueue(services, available, 'appeal-queue');
-  const candidates = eligible.filter((id) => id !== excludeUserId);
+  const candidates = eligible.filter((id) => !excluded.has(id));
   if (candidates.length === 0) return null;
   return pickLeastLoaded(candidates, (id) => services.appeals.countOpenByReviewer(id));
 }

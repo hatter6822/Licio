@@ -10,6 +10,8 @@ import {
   decAdd,
   decCompare,
   decIsNegative,
+  decNegate,
+  decSub,
   decSum,
   isDecimalString,
   isValidDecimal,
@@ -87,6 +89,26 @@ describe('decAdd / decSum', () => {
   it('never renders -0 and trims trailing zeros', () => {
     expect(decAdd('0.10', '-0.10')).toBe('0');
     expect(decAdd('1.100', '0')).toBe('1.1');
+  });
+});
+
+describe('decSub / decNegate', () => {
+  it('subtracts exactly, total over already-negative operands (no `--` literal)', () => {
+    expect(decSub('5', '3')).toBe('2');
+    expect(decSub('3', '5')).toBe('-2');
+    expect(decSub('0.3', '0.1')).toBe('0.2');
+    // The regression: subtracting a negative must NOT build "--30".
+    expect(decSub('10', '-30')).toBe('40');
+    expect(decSub('-30', '-30')).toBe('0');
+    expect(decSub('-5', '3')).toBe('-8');
+  });
+
+  it('negates exactly, treating -0 as 0', () => {
+    expect(decNegate('5')).toBe('-5');
+    expect(decNegate('-5')).toBe('5');
+    expect(decNegate('0')).toBe('0');
+    expect(decNegate('-0')).toBe('0');
+    expect(decNegate('1.25')).toBe('-1.25');
   });
 });
 

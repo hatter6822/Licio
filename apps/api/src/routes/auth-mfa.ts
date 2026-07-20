@@ -200,6 +200,14 @@ export function createMfaRoutes(resolve: () => IdentityServices) {
         const services = resolve();
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
+        // Disabling ACTIVE MFA requires this session to have cleared the CURRENT TOTP
+        // (`mfaVerified`), not merely a primary step-up — mirroring the enroll guard
+        // (§WS-D.1.5b: primary compromise ≠ steward power).  Otherwise a session opened
+        // with a phished primary credential could /disable, then /enroll + /confirm an
+        // attacker-chosen secret, and obtain a fully mfaVerified steward session.
+        if ((await services.store.getAuth(auth.userId))?.mfaEnabled && !auth.mfaVerified) {
+          return c.json(err('mfa_reverify_required', 'Verify your current code first.'), 403);
+        }
         await services.store.setAuth(auth.userId, {
           mfaEnabled: false,
           mfaPending: false,

@@ -56,11 +56,23 @@ describe('validateStructure (§14.2)', () => {
   });
 
   it('rejects a lamport not strictly greater than a parent', () => {
-    const a = op({ op_id: 'a', lamport: '5' });
-    const bad = op({ op_id: 'b', lamport: '5', parents: ['a'] }); // equal, not greater
+    const a = op({ op_id: 'a', lamport: '1' });
+    const bad = op({ op_id: 'b', lamport: '1', parents: ['a'] }); // equal, not greater
     const r = validateStructure([a, bad], 'room-1');
     expect(r.accepted.map((o) => o.op_id)).toStrictEqual(['a']);
     expect(r.quarantined[0]).toMatchObject({ opId: 'b', reason: 'lamport_not_after_parents' });
+  });
+
+  it('quarantines an op whose lamport jumps beyond runningMax + 1 (anti-DoS)', () => {
+    const a = op({ op_id: 'a', lamport: '1' });
+    // A near-cap lamport with no causal justification: unbounded, this poisons
+    // nextLamport and freezes authoring (§14.3.1).
+    const poison = op({ op_id: 'p', author_seq: 1, lamport: '9'.repeat(40) });
+    const r = validateStructure([a, poison], 'room-1');
+    expect(r.accepted.map((o) => o.op_id)).toStrictEqual(['a']);
+    expect(r.quarantined.some((q) => q.opId === 'p' && q.reason === 'lamport_jump_exceeded')).toBe(
+      true,
+    );
   });
 
   it('rejects a non-monotonic per-device author_seq (device fork)', () => {

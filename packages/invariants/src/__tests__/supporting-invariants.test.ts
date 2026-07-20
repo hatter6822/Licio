@@ -199,6 +199,23 @@ describe('Tropical cascade rank (WS-H.7.2)', () => {
     expect(cold.detected).toBe(false);
   });
 
+  it('detects a coordinated burst that lands AFTER an early organic arrival', () => {
+    // Each node: one organic seed early (t=1000), then a coordinated 2-seed burst
+    // ~1.4h later, tightly clustered (100ms apart, inside the 5s window).  Anchoring
+    // the window to the FIRST arrival misses this typical shape; a sliding-window
+    // cluster scan catches it.
+    const lateBurst = buildTimingMatrix(
+      ['n1', 'n2', 'n3', 'n4'].flatMap((nodeId) => [
+        { seedId: 's1', nodeId, arrivalMs: 1000 },
+        { seedId: 's2', nodeId, arrivalMs: 5_000_000 },
+        { seedId: 's3', nodeId, arrivalMs: 5_000_100 },
+      ]),
+    );
+    const result = detectSynchronizedCascade(lateBurst);
+    expect(result.detected).toBe(true);
+    expect(result.coordinatedDropNodes.length).toBe(4);
+  });
+
   it('too few seeds yields no detection (insufficient independence)', () => {
     const matrix = buildTimingMatrix([
       { seedId: 's1', nodeId: 'n1', arrivalMs: 1000 },

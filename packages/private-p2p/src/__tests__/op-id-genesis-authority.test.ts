@@ -21,6 +21,7 @@ import { randomBytes } from '../crypto/runtime.js';
 import { generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import { deriveOpId } from '../reducer/op-id.js';
 import { reduceRoom } from '../reducer/reduce.js';
+import { validateStructure } from '../reducer/validate.js';
 import { openOp, sealOp } from '../reducer/validate-op.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
 
@@ -159,5 +160,29 @@ describe('§14.2 genesis founder pin — a forged competing genesis cannot hijac
     const unpinned = reduceRoom([forged, founder]);
     expect(unpinned.members.get('attacker')?.role).toBe('admin');
     expect(unpinned.members.has('founder')).toBe(false);
+  });
+});
+
+describe('§14.3.1 anti-DoS — a near-cap Lamport op cannot freeze authoring', () => {
+  it('quarantines an op whose lamport jumps beyond runningMax + 1', async () => {
+    const genesis = await op(selfAdd('founder', 'founder-dev'), {
+      author_member_id: 'founder',
+      author_device_id: 'founder-dev',
+      lamport: '1',
+    });
+    // A member seals a valid op with a 40-digit lamport (the schema cap): unbounded,
+    // this poisons nextLamport (max+1 → 41 digits → schema reject → permanent freeze).
+    const poison = await op(selfAdd('attacker', 'attacker-dev'), {
+      author_member_id: 'attacker',
+      author_device_id: 'attacker-dev',
+      author_seq: 1,
+      lamport: '9'.repeat(40),
+    });
+    const { accepted, quarantined } = validateStructure([genesis, poison], 'room-1');
+    expect(accepted.map((o) => o.op_id)).toContain(genesis.op_id);
+    expect(quarantined.some((q) => q.reason === 'lamport_jump_exceeded')).toBe(true);
+    // Because the poison op is quarantined, the running ceiling stays at 1 — the next
+    // legitimate stamp is 2, not a 41-digit value.
+    expect(accepted.map((o) => o.op_id)).not.toContain(poison.op_id);
   });
 });

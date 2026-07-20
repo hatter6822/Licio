@@ -300,6 +300,7 @@ export class PrivateRoomEngine {
     return validateStructure([...this.acceptedOps.values()], this.roomId, {
       knownOpLamports: this.coveredOpLamports,
       deviceSeqFloor: this.baseAuthorSeq,
+      maxLamport: this.baseMaxLamport.toString(),
     }).accepted;
   }
 
@@ -417,7 +418,10 @@ export class PrivateRoomEngine {
    *  device has seen. */
   nextLamport(): string {
     let max = this.baseMaxLamport;
-    for (const op of this.acceptedOps.values()) {
+    // Over the STRUCTURALLY-ACCEPTED ops only, so a quarantined poison op (e.g. a
+    // near-cap lamport) cannot push the next stamp past the 40-digit schema cap and
+    // permanently freeze local authoring (§14.3.1 anti-DoS).
+    for (const op of this.structurallyAccepted()) {
       const value = BigInt(op.lamport);
       if (value > max) max = value;
     }
@@ -430,6 +434,10 @@ export class PrivateRoomEngine {
   nextAuthorSeq(deviceId: string): number {
     const fromBase = this.baseAuthorSeq.get(deviceId);
     let next = fromBase === undefined ? 0 : fromBase + 1;
+    // Over ALL of THIS device's accepted ops (including ones transiently quarantined
+    // for a missing parent) — the device really did author them, so reusing a seq
+    // would collide op ids.  A poison op from ANOTHER device cannot affect this
+    // counter (the device filter), so no structural filtering is needed here.
     for (const op of this.acceptedOps.values()) {
       if (op.author_device_id === deviceId && op.author_seq >= next) next = op.author_seq + 1;
     }

@@ -1469,6 +1469,35 @@ describe('appeals (independence enforced)', () => {
     expect(!decision.ok && decision.code).toBe('independence_violation');
   });
 
+  it('forbids the appellant from deciding their OWN appeal (separation of duties)', async () => {
+    // A DIFFERENT steward sanctions AUTHOR's content; AUTHOR appeals.
+    const out = await applyAction(services, safetyActor('00000000-0000-4000-8000-0000000000d1'), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'hide',
+      reason_code: 'MOD_HARASS_001',
+    });
+    if (!out.ok) throw new Error('hide failed');
+    await submitAppeal(services, AUTHOR, {
+      action_id: out.response.action_id,
+      user_statement: 's',
+    });
+    const appeal = await services.appeals.getByActionId(out.response.action_id);
+    if (!appeal) throw new Error('appeal not created');
+    // AUTHOR (the appellant) holds appeals access and tries to clear their own sanction.
+    const decision = await decideAppeal(
+      services,
+      { ...safetyActor(AUTHOR), stewardRoles: ['ROLE_APPEALS'] },
+      appeal.appealId,
+      'overturn',
+      'MOD_HARASS_001',
+      'Clearing myself.',
+      undefined,
+    );
+    expect(decision.ok).toBe(false);
+    expect(!decision.ok && decision.code).toBe('independence_violation');
+  });
+
   it('overturns an appeal, reverting the action and notifying the user', async () => {
     const port = recordingContentPort();
     services = createInMemoryModerationServices({

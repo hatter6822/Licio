@@ -27,6 +27,7 @@ import {
 
 export type RecordSchemaErrorReason =
   | 'not_a_map'
+  | 'forbidden_map_key'
   | 'unsupported_record_version'
   | 'unknown_record_kind'
   | 'unsupported_proof_version';
@@ -48,10 +49,20 @@ export class RecordSchemaError extends Error {
 export function ldcToPlain(value: LdcValue): unknown {
   if (isUint8Array(value)) return value;
   if (value instanceof Map) {
-    const obj: Record<string, unknown> = {};
+    // Null-prototype accumulator so no map key can invoke Object.prototype's
+    // `__proto__` setter and mutate the prototype (pollution defense-in-depth).
+    const obj: Record<string, unknown> = Object.create(null);
     for (const [key, child] of value) {
       if (typeof key !== 'string') {
         throw new RecordSchemaError('not_a_map', 'record bodies must use text map keys');
+      }
+      // Reject `__proto__` explicitly: zod's `.strict()` SILENTLY IGNORES it (neither
+      // rejects nor preserves), so a body carrying it would parse yet lose the key on
+      // re-encode — a decoder differential + broken round-trip.  No record schema has a
+      // `__proto__` field, so a conformant decoder treats it as an unknown key; reject
+      // it here so every implementation agrees (consensus determinism, §9.1.4).
+      if (key === '__proto__') {
+        throw new RecordSchemaError('forbidden_map_key', 'record map key __proto__ is not allowed');
       }
       obj[key] = ldcToPlain(child);
     }

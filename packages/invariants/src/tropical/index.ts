@@ -195,9 +195,16 @@ export function detectSynchronizedCascade(
       .sort((a, b) => a - b);
     if (arrivals.length < 2) continue;
     multiSeedNodes += 1;
-    const first = arrivals[0] ?? 0;
-    const collisions = arrivals.filter((v) => v - first <= config.simultaneousWindowMs).length;
-    if (collisions >= 2) coordinatedDropNodes.push(matrix.nodeIds[j] ?? '');
+    // A coordinated drop is any window-bounded CLUSTER of ≥2 distinct-seed arrivals —
+    // NOT only arrivals near the earliest.  Anchoring to the first arrival missed the
+    // typical shape (organic seed first, coordinated multi-seed burst hours later);
+    // a consecutive-pair scan over the sorted arrivals catches a cluster anywhere.
+    const collided = arrivals.some((v, i) => {
+      if (i === 0) return false;
+      const prev = arrivals[i - 1];
+      return prev !== undefined && v - prev <= config.simultaneousWindowMs;
+    });
+    if (collided) coordinatedDropNodes.push(matrix.nodeIds[j] ?? '');
   }
   const synchronizedFraction =
     multiSeedNodes === 0 ? 0 : coordinatedDropNodes.length / multiSeedNodes;

@@ -45,6 +45,13 @@ export const MAX_SYNC_MESSAGE_BYTES = 16 * 1024 * 1024;
 const SYNC_DECODE_LIMITS: CanonicalDecodeLimits = {
   ...DEFAULT_CANONICAL_DECODE_LIMITS,
   maxBytes: MAX_SYNC_MESSAGE_BYTES,
+  // Scale the item budget WITH the byte budget (the same cap the 64 MiB archive
+  // path uses).  The default 131_072 items is exhausted at ~2_520 envelopes, far
+  // below the 4_096 the byte cap admits — so a protocol-maximal op_response that
+  // reassembles would fail to decode (`item_budget_exceeded`) and stall §15.7
+  // convergence.  4_096 envelopes × ~64 items ≈ 262k fits with headroom while a
+  // decode bomb is still bounded at ~32 B/item.
+  maxItems: 524_288,
 };
 
 /**

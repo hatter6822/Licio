@@ -22,6 +22,7 @@ export type QuarantineReason =
   | 'room_mismatch'
   | 'missing_dependency'
   | 'lamport_not_after_parents'
+  | 'lamport_jump_exceeded'
   | 'non_monotonic_author_seq'
   | 'duplicate_op_id';
 
@@ -47,6 +48,10 @@ export interface StructuralBaseContext {
   readonly knownOpLamports?: ReadonlyMap<string, string>;
   /** Per-device max `author_seq` covered by the prefix (the monotonicity floor). */
   readonly deviceSeqFloor?: ReadonlyMap<string, number>;
+  /** The max `lamport` (decimal string) covered by the prefix — the §14.3.1 running
+   *  ceiling floor, so the anti-DoS lamport-jump cap continues across compaction
+   *  identically on every device. */
+  readonly maxLamport?: string;
 }
 
 /**
@@ -71,6 +76,18 @@ export function validateStructure(
   const deviceMaxSeq = new Map<string, number>(base?.deviceSeqFloor);
   const seenOpIds = new Set<string>(base?.knownOpLamports?.keys());
   const knownOpLamports = base?.knownOpLamports;
+  // Running max lamport over the accepted prefix + this pass (§14.3.1).  A legitimate
+  // clock advances by exactly +1 per op (nextLamport = max+1), and a concurrent op is
+  // at most max+1 as well, so any op whose lamport exceeds runningMax+1 is a poison op
+  // (lamport is attacker-chosen, only lower-bounded by parents) — quarantine it so one
+  // op cannot push nextLamport past the 40-digit schema cap and freeze all authoring.
+  let runningMax = base?.maxLamport !== undefined ? BigInt(base.maxLamport) : 0n;
+  if (knownOpLamports) {
+    for (const lamport of knownOpLamports.values()) {
+      const v = BigInt(lamport);
+      if (v > runningMax) runningMax = v;
+    }
+  }
 
   for (const op of canonicalOpOrder(candidateOps)) {
     if (seenOpIds.has(op.op_id)) {
@@ -109,12 +126,18 @@ export function validateStructure(
       quarantined.push({ opId: op.op_id, reason: 'lamport_not_after_parents' });
       continue;
     }
+    const opLamport = BigInt(op.lamport);
+    if (opLamport > runningMax + 1n) {
+      quarantined.push({ opId: op.op_id, reason: 'lamport_jump_exceeded' });
+      continue;
+    }
     const prevSeq = deviceMaxSeq.get(op.author_device_id);
     if (prevSeq !== undefined && op.author_seq <= prevSeq) {
       quarantined.push({ opId: op.op_id, reason: 'non_monotonic_author_seq' });
       continue;
     }
 
+    if (opLamport > runningMax) runningMax = opLamport;
     deviceMaxSeq.set(op.author_device_id, op.author_seq);
     acceptedLamport.set(op.op_id, op.lamport);
     seenOpIds.add(op.op_id);

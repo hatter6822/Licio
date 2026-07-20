@@ -195,6 +195,19 @@ describe('version + kind routing (WS-R.0.7)', () => {
   it('rejects a non-map record body', () => {
     expect(() => decodeAndRouteRecord(encode([1, 2, 3]))).toThrow(RecordSchemaError);
   });
+
+  it('rejects a record whose body carries a __proto__ map key (prototype-pollution safe)', () => {
+    // `__proto__` is a valid LDC text key.  Projected into a `{}` accumulator it would
+    // trigger the prototype setter — silently swallowed, so `.strict()` never sees it
+    // and a spec-conformant decoder that treats it as an unknown key would DIVERGE.
+    // With the null-prototype accumulator it is an OWN key and `.strict()` rejects it.
+    const map = plainToLdc(deviceCert as unknown as Record<string, unknown>) as Map<
+      LdcKey,
+      LdcValue
+    >;
+    map.set('__proto__', 'x');
+    expect(() => decodeAndRouteRecord(encode(map))).toThrow(RecordSchemaError);
+  });
 });
 
 describe('isPublicControlRecord — checkpoint serving (PUB-API-CHECKPOINT-1)', () => {

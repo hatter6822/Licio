@@ -245,4 +245,41 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(false);
     expect((await services.store.getAuth(userId))?.mfaSecret).toBeNull();
   });
+
+  it('refuses to DISABLE active MFA from a non-mfaVerified session (§WS-D.1.5b)', async () => {
+    const { app, sid } = await signup('disableattacker');
+    const userId = (await services.store.getUserByHandle('disableattacker'))?.userId as string;
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const secret = secretFromUri((await readJson<{ otpauth_uri: string }>(enroll)).otpauth_uri);
+    await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
+    const activeSecret = (await services.store.getAuth(userId))?.mfaSecret;
+
+    // A FRESH session satisfies primary step-up but has NOT cleared the current TOTP
+    // (mfaVerified=false).  /disable must refuse, leaving MFA intact — otherwise a
+    // phished primary credential could disable + re-enroll an attacker-chosen secret.
+    const fresh = await createSession(services.sessions, {
+      userId,
+      authMethod: 'webauthn',
+      deviceLabel: 'attacker-device',
+      rememberMe: false,
+    });
+    const blocked = await app.request('/v1/auth/mfa/totp/disable', {
+      method: 'POST',
+      headers: headers(`__Host-sid=${fresh.token}`),
+    });
+    expect(blocked.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(blocked)).error.code).toBe(
+      'mfa_reverify_required',
+    );
+    expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
+    expect((await services.store.getAuth(userId))?.mfaSecret).toBe(activeSecret);
+  });
 });
