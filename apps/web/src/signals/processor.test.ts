@@ -109,7 +109,26 @@ describe('SignalProcessor collection gating', () => {
       privacyLevel: 'standard',
       identifier: 'privacy-bucket',
     });
+    // The purge is fenced through a microtask (so a fast re-opt-in can cancel it);
+    // flush the microtask queue before asserting it ran.
+    await Promise.resolve();
     expect(s.purgeQueuedAttention).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fast re-opt-in cancels the pending durable purge (no post-opt-in data loss)', async () => {
+    const s = setup();
+    s.processor.setCollectionPolicy(ENABLED);
+    // Opt OUT then immediately back IN before the microtask-fenced purge runs.
+    s.processor.setCollectionPolicy({
+      collect: false,
+      privacyLevel: 'standard',
+      identifier: 'privacy-bucket',
+    });
+    s.processor.setCollectionPolicy(ENABLED);
+    await Promise.resolve();
+    // The purge must NOT run — it would delete the aggregates produced after the
+    // re-enable (the generation changed, so the fenced purge is skipped).
+    expect(s.purgeQueuedAttention).not.toHaveBeenCalled();
   });
 });
 

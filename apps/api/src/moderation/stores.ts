@@ -222,6 +222,9 @@ export interface CaseQueueFilter {
   unassigned?: boolean;
   /** Restrict to cases ABOUT this user (the `target_user` filter). */
   subjectUserId?: string;
+  /** Restrict to cases whose enforcement is (or is not) integrity-review-delayed.
+   *  Enables an existence/`count` check without paging the full SLA-ordered queue. */
+  enforcementDelayed?: boolean;
   /** Restrict to this set of case ids (the `reporter` filter resolves a
    *  reporter's reports → their case ids).  An EMPTY set matches nothing. */
   caseIds?: readonly string[];
@@ -584,6 +587,8 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
     if (f.assignedTo !== undefined && f.assignedTo !== null && r.assignedTo !== f.assignedTo)
       return false;
     if (f.subjectUserId !== undefined && r.subjectUserId !== f.subjectUserId) return false;
+    if (f.enforcementDelayed !== undefined && r.enforcementDelayed !== f.enforcementDelayed)
+      return false;
     if (f.caseIds !== undefined && !f.caseIds.includes(r.caseId)) return false;
     if (f.createdAfter && r.createdAt < f.createdAfter) return false;
     if (f.createdBefore && r.createdAt > f.createdBefore) return false;

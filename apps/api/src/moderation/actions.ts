@@ -239,12 +239,15 @@ export async function applyAction(
     // the subject has ANY open, enforcement-delayed case about them — a brigade
     // cannot be evaded by pivoting the client-supplied target_type to `account`.
     if (subjectUserId) {
-      const subjectCases = await services.cases.list({
+      // An EXISTENCE check over the full open set — not a bounded `list` page: a
+      // subject with more open cases than a page limit could otherwise carry the
+      // enforcement-delayed coordinated-report case off-page and slip the pivot.
+      const openDelayed = await services.cases.count({
         subjectUserId,
         status: ['new', 'in_progress', 'escalated'],
-        limit: 50,
+        enforcementDelayed: true,
       });
-      if (subjectCases.some((k) => k.enforcementDelayed)) {
+      if (openDelayed > 0) {
         services.metrics.increment('moderation.action.enforcement_delayed');
         return {
           ok: false,
