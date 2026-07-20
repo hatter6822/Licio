@@ -66,7 +66,11 @@ export function startLcapSync(options: LcapSyncBootOptions = {}): () => void {
   const getStorageMode = options.getStorageMode ?? syncStorageMode;
   teardownBattery = initBatteryTracking();
   const orchestrator = createSyncOrchestrator({
-    conditions: () => readSyncConditions(getStorageMode()),
+    // Thread the live §33 background-sync posture in: in Emergency/minimal the
+    // storage mode is `minimal` but `backgroundSyncAllowed()` is false, and an
+    // omitted arg would default to `true` — re-enabling the automatic open/focus/
+    // online/visibility syncs the selected mode is meant to suppress.
+    conditions: () => readSyncConditions(getStorageMode(), backgroundSyncAllowed()),
     runSync: async () => {
       // The lazy chunk: the @licio/lcap codec loads only when a sync actually fires.
       const { runC0Sync } = await import('./sync-pass.js');

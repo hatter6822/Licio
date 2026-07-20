@@ -155,6 +155,20 @@ describe('allocation invariants (WS-R.5.2b, 5.4)', () => {
     expect(firstMediaIndex).toBeGreaterThan(0); // media DOES ship, but after C0
   });
 
+  it('ships a B4 bulk candidate only when bulkAllowed is threaded through scheduleTransfer', () => {
+    const bulk = cand({ cid: 'prefetch', lane: 'B4', priority: 4, bytes: 5_000 });
+    const opts = { budgetBytes: 600 * 1024, nowMs: 0 };
+    // Default (no bulkAllowed) ⇒ the B4 lane budget is zero, so nothing pre-fetches.
+    const off = scheduleTransfer([bulk], opts);
+    expect(off.usedByLane.B4).toBe(0);
+    expect(off.order.some((c) => c.lane === 'B4')).toBe(false);
+    // bulkAllowed threaded through ⇒ B4 gets a reservation and the candidate ships
+    // (regression: the option was unreachable from scheduleTransfer, capping B4 at 0).
+    const on = scheduleTransfer([bulk], { ...opts, bulkAllowed: true });
+    expect(on.usedByLane.B4).toBeGreaterThan(0);
+    expect(on.order.some((c) => c.lane === 'B4')).toBe(true);
+  });
+
   it('never places a dependent before its dependency', () => {
     const dependency = cand({ cid: 'cap', lane: 'C0', priority: 0, bytes: 50 });
     const dependent = cand({ cid: 'post', lane: 'T1', priority: 1, bytes: 100, requires: ['cap'] });

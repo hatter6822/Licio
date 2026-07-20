@@ -203,12 +203,15 @@ function useContributionDraft(args: {
         debounceTimer.current = null;
       }
       latestBody.current = '';
+      // Drop the autosaved draft ONLY once the queue has durably taken the write —
+      // otherwise a failed enqueue (quota exhaustion / unavailable storage) would
+      // delete the ONLY copy while telling the reader it was saved for later. On an
+      // enqueue failure the draft is preserved, so the recoverable-draft path
+      // surfaces it on the next load.
       void queue
         .enqueue('contribution', payload, draftId.current)
-        .catch(() => undefined)
-        .finally(() => {
-          void deleteDraft(draftId.current).catch(() => undefined);
-        });
+        .then(() => deleteDraft(draftId.current).catch(() => undefined))
+        .catch(() => undefined);
       return true;
     },
     [],

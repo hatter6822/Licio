@@ -266,9 +266,12 @@ describe('content authoring — buildRoomOp + engine metadata helpers', () => {
       },
       {
         type: 'story.create',
-        story_id: 's1',
+        // An identifier in decomposed form must be PRESERVED byte-exact \u2014 ids are
+        // matched for equality (and against the unnormalized envelope author ids),
+        // so normalizing them would desync/retarget them.
+        story_id: 'ste\u0301phane', // decomposed id
         thread_id: 't1',
-        title: 'Cafe\u0301', // decomposed: 'e' + U+0301 combining acute (5 code units)
+        title: 'Cafe\u0301', // decomposed: 'e' + U+0301 (5 code units)
         submission_type: 'original_brief',
         topic_ids: [],
         submission_metadata: {},
@@ -278,6 +281,9 @@ describe('content authoring — buildRoomOp + engine metadata helpers', () => {
     if (op.body.type === 'story.create') {
       expect(op.body.title).toBe('Caf\u00e9'); // composed NFC (single U+00E9)
       expect(op.body.title.length).toBe(4); // composed = 4 units (was 5 decomposed)
+      // The id keeps its decomposed bytes (NOT normalized to 'st\u00e9phane').
+      expect(op.body.story_id).toBe('ste\u0301phane');
+      expect(op.body.story_id).not.toBe('st\u00e9phane'); // NOT normalized to composed
     }
   });
 

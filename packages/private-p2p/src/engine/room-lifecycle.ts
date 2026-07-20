@@ -60,23 +60,43 @@ import type { PrivateRoomEngineParams } from './room-engine.js';
 export type PrivateOpBodyInput = z.input<typeof privateRoomOpSchema>['body'];
 
 /**
- * Deep NFC-normalize every string in an op body at the AUTHORING boundary, before
- * the op is parsed/sealed/signed.  Two visually-identical strings in different
- * Unicode normal forms (e.g. composed "é" vs. "e"+combining-acute) must converge
- * to ONE canonical byte sequence, or otherwise-equal content would produce
- * different CIDs/signatures and diverge across devices — and a homograph could be
- * smuggled past a display/search check.  Done HERE (not in the schema) because the
- * §14.3 wire boundary must keep rejecting non-canonical bytes verbatim, and the
- * body carries `z.unknown()` passthrough fields a per-field schema transform can
- * never reach.  ASCII (ids, base64url keys, CIDs) is NFC-invariant, so structural
- * fields pass through unchanged; only human text is affected.
+ * The op-body fields that carry HUMAN-AUTHORED PROSE (title/comment/reason/name).
+ * ONLY these are NFC-normalized — never identifiers, keys, CIDs, or digests, which
+ * must stay byte-exact: `privateIdSchema` permits Unicode, so normalizing an id
+ * (e.g. `member_id`/`device_id`) would desync it from the UNnormalized envelope
+ * `author_member_id`/`author_device_id` and fail the reducer's self-add equality,
+ * or silently retarget a reference in an edit/remove op.
  */
-function deepNormalizeNfc<T>(value: T): T {
-  if (typeof value === 'string') return value.normalize('NFC') as T;
-  if (Array.isArray(value)) return value.map((v) => deepNormalizeNfc(v)) as T;
+const NFC_TEXT_FIELDS: ReadonlySet<string> = new Set([
+  'title',
+  'body_markdown_lite',
+  'reason',
+  'display_name',
+  'uncertainty_note',
+]);
+
+/**
+ * NFC-normalize the human-text fields of an op body at the AUTHORING boundary,
+ * before the op is parsed/sealed/signed.  Two visually-identical prose strings in
+ * different Unicode normal forms (composed "é" vs. "e"+combining-acute) must
+ * converge to ONE canonical byte sequence, or otherwise-equal content would
+ * produce different CIDs/signatures and diverge across devices — and a homograph
+ * could slip past a display/search check.  Done HERE (not in the schema) because
+ * the §14.3 wire boundary must keep rejecting non-canonical bytes verbatim.  Only
+ * keys in {@link NFC_TEXT_FIELDS} are touched; every id/key/cid/structural field
+ * (and any unknown field) passes through byte-exact.  `parentKey` carries the
+ * object key down so a string is normalized IFF its own key is a prose field.
+ */
+function normalizeBodyText<T>(value: T, parentKey?: string): T {
+  if (typeof value === 'string') {
+    return (
+      parentKey !== undefined && NFC_TEXT_FIELDS.has(parentKey) ? value.normalize('NFC') : value
+    ) as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => normalizeBodyText(v, parentKey)) as T;
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value)) out[key] = deepNormalizeNfc(v);
+    for (const [key, v] of Object.entries(value)) out[key] = normalizeBodyText(v, key);
     return out as T;
   }
   return value;
@@ -285,7 +305,7 @@ export async function createPrivateRoom(
     created_at_bucket: createdAt.slice(0, 13),
     lamport: '1',
     parents: [],
-    body: deepNormalizeNfc({
+    body: normalizeBodyText({
       type: 'member.add',
       member_id: params.founderMemberId,
       device_id: params.founderDeviceId,
@@ -472,7 +492,7 @@ export async function buildRoomOp(
     created_at_bucket: createdAt.slice(0, 13),
     lamport: base.lamport,
     parents: [...base.parents],
-    body: deepNormalizeNfc(body),
+    body: normalizeBodyText(body),
   } satisfies z.input<typeof privateRoomOpSchema>);
   const sealParams = await buildSealParams(
     base.epochState,
