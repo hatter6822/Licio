@@ -92,8 +92,10 @@ pnpm check:sw                       # SW security scan (run after build)
 pnpm sbom                           # CycloneDX SBOM (includes transitive deps)
 pnpm clean                          # remove build artifacts
 
-# Database (development).
-pnpm db:generate                    # generate Drizzle migrations
+# Database (development).  Migrations are HAND-AUTHORED (SQL + a
+# drizzle/meta/_journal.json entry — docs/DEVELOPMENT.md §15): the tracked
+# meta snapshots are far behind the chain, so db:generate would diff against
+# stale state and emit a garbage migration — do not run it here.
 pnpm db:migrate                     # run Drizzle migrations
 pnpm db:push                        # push schema directly (development only)
 

@@ -55,7 +55,7 @@ With **Node 22** and **Corepack**, `pnpm dev` runs with **zero setup** — no
 Docker, no `.env`:
 
 ```sh
-corepack enable && corepack prepare pnpm@9.15.4 --activate
+corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install --frozen-lockfile
 pnpm dev        # web :5173 + API :3001 — in-memory stores, seeded demo data
 ```
@@ -191,7 +191,7 @@ initial bundle — enforced by `check:lcap-p2p-split` and `check:private-p2p-spl
 | Tool | Version | Why | Verify |
 |------|---------|-----|--------|
 | **Node.js** | `22.x` (pinned in [`.nvmrc`](../.nvmrc); `engines` requires `>=22`) | Runtime for the API, build tools, and tests | `node --version` |
-| **pnpm** | `9.15.4` (pinned in `package.json` `packageManager`) | The only supported package manager; workspaces depend on it | `pnpm --version` |
+| **pnpm** | `11.15.1` (pinned in `package.json` `packageManager`; `engines` requires `>=11`) | The only supported package manager; workspaces depend on it. pnpm 11's default supply-chain gate (24h `minimumReleaseAge`) vets every resolution, and its security `overrides` live in `pnpm-workspace.yaml` (pnpm 9 would silently ignore them) | `pnpm --version` |
 | **Corepack** | Bundled with Node 22 | Installs and pins the exact pnpm version automatically | `corepack --version` |
 | **Docker + Compose** | Optional | Only for running dev against a real PostgreSQL (pgvector) + Redis; `pnpm dev` runs in-memory without it | `docker --version && docker compose version` |
 | **Git** | Any recent version | Version control + the Lefthook git hooks | `git --version` |
@@ -226,13 +226,13 @@ node --version     # expect v22.x
 ### Enabling pnpm via Corepack
 
 Corepack ships with Node and reads the `packageManager` field, so you do
-**not** install pnpm globally — Corepack fetches the pinned `9.15.4` on
+**not** install pnpm globally — Corepack fetches the pinned `11.15.1` on
 first use:
 
 ```sh
 corepack enable
-corepack prepare pnpm@9.15.4 --activate
-pnpm --version     # expect 9.15.4
+corepack prepare pnpm@11.15.1 --activate
+pnpm --version     # expect 11.15.1
 ```
 
 > If `corepack enable` reports a permission error, your Node install may
@@ -281,9 +281,19 @@ pnpm install --frozen-lockfile
   lockfile).
 - **No install scripts run.** Every dependency in this project is vetted to
   have **no** `preinstall`/`install`/`postinstall` script (a hard rule in
-  the dependency checklist in `CLAUDE.md`), and CI enforces it. A few CI
-  jobs even install with `--ignore-scripts`; locally you don't need that
-  flag, but it is safe.
+  the dependency checklist in `CLAUDE.md`), and CI enforces it. pnpm 11
+  additionally blocks dependency lifecycle scripts **by default** (only the
+  root project's own scripts run), so the doctrine is now enforced by the
+  package manager itself. A few CI jobs also install with
+  `--ignore-scripts`; locally you don't need that flag, but it is safe.
+- **The supply-chain age gate.** pnpm 11's default `minimumReleaseAge`
+  policy refuses any package version published **less than 24 hours ago** —
+  both at resolution time and when verifying the lockfile. If an install
+  fails naming a too-new version, wait for it to age (or resolve to the
+  previous version); do **not** weaken the policy to force it through.
+- **Security overrides live in `pnpm-workspace.yaml`.** pnpm ≥ 10 no longer
+  reads the `pnpm` field in `package.json`; the `ws`/`undici`/`esbuild`
+  pins (rationale: `CLAUDE.md` → "Pinned dependencies") are declared there.
 - The install populates `node_modules/` for the root and every workspace
   and links the `@licio/*` workspace packages together.
 
@@ -1266,35 +1276,35 @@ behind the byte-identity no-fork gate). All must pass before merge. See
 ## 15. Database and schema workflow
 
 Schema lives in [`packages/db/src/schema/`](../packages/db) as Drizzle
-table definitions. Migrations are generated SQL in `packages/db/drizzle/`.
+table definitions. Migrations are ordered SQL files in
+`packages/db/drizzle/`, tracked by `drizzle/meta/_journal.json`.
 
-The three commands and when to use them:
-
-| Command | Use |
-|---------|-----|
-| `pnpm db:generate` | After editing a schema file — diffs the schema against existing migrations and writes a **new** SQL migration plus an updated `drizzle/meta/` snapshot. Commit both (see the note below) |
-| `pnpm db:migrate` | Apply pending migrations to the database `DATABASE_URL` points at (the normal "catch up my DB" command) |
-| `pnpm db:push` | **Development only** — push the schema directly without a migration file. Handy for rapid local iteration; never use against a shared/production database |
-
-Typical schema-change loop:
+**Migrations are hand-authored in this repository.** The tracked Drizzle
+meta snapshots stop far behind the migration chain (they end at `0047`;
+the chain runs past `0090`), so `pnpm db:generate` would diff the schema
+against a stale snapshot and emit a garbage migration — do not use it here.
+The working loop:
 
 ```sh
 # 1. edit packages/db/src/schema/<table>.ts
-pnpm db:generate            # create the migration
-pnpm db:migrate             # apply it locally
-pnpm --filter @licio/db test    # run the db project's tests
+# 2. hand-write packages/db/drizzle/NNNN_short_name.sql (next number in order)
+# 3. append the matching entry to packages/db/drizzle/meta/_journal.json
+pnpm db:migrate                  # apply it locally
+pnpm --filter @licio/db test     # run the db project's tests
 ```
 
-> **Commit the meta snapshot too.** `db:generate` also writes/updates
-> `packages/db/drizzle/meta/<NNNN>_snapshot.json` and `_journal.json` —
-> Drizzle's bookkeeping for the next diff. The existing snapshots are
-> tracked, but `.gitignore` excludes `drizzle/meta/`, so a **new** snapshot
-> is not staged by a plain `git add`. Force-add it alongside the SQL:
-> `git add -f packages/db/drizzle/meta/<NNNN>_snapshot.json packages/db/drizzle/meta/_journal.json`.
-> Omitting the snapshot breaks later migration generation.
+The commands:
 
-All queries in the codebase use Drizzle's parameterized queries — never
-string-concatenated SQL.
+| Command | Use |
+|---------|-----|
+| `pnpm db:migrate` | Apply pending migrations to the database `DATABASE_URL` points at (the normal "catch up my DB" command — and the production deploy step, 17.5) |
+| `pnpm db:push` | **Development only** — push the schema directly without a migration file. Handy for rapid local iteration; never use against a shared/production database |
+| `pnpm db:generate` | The stock drizzle-kit generator — **not usable here** (stale meta snapshots, above); it exists in `package.json` but the hand-authored flow replaces it |
+
+Keep each migration **online-safe** (expand/contract; no long-lived table
+locks) and mirror any invariant into the schema as a `CHECK`/trigger where
+possible — see the existing chain for the house style. All queries in the
+codebase use Drizzle's parameterized queries — never string-concatenated SQL.
 
 ---
 
@@ -1598,6 +1608,58 @@ instead of silently falling back.** The API refuses to boot without its
 required environment; every optional binding group either binds its real
 adapter or degrades to a loudly-logged, fail-closed default (17.4).
 
+### 17.0 Launch runbook — zero to serving traffic
+
+The explicit, ordered path for a public launch. Each step names the
+subsection that carries its full detail — follow them in this order:
+
+1. **Provision the infrastructure** (17.1, 17.3). A host for the API,
+   **PostgreSQL 16 + pgvector**, **Redis 7** (managed or self-hosted), a
+   TLS-terminating edge (reverse proxy or CDN) that owns the single public
+   origin, and a static host for the web bundle. Point DNS at the edge and
+   obtain certificates. Never reuse any credential from
+   `docker-compose.yml`/`.env.example`.
+2. **Generate the production secrets** (17.4, 16, 17.2).
+   `SESSION_SECRET` (`openssl rand -hex 32`); the WS-S.10 **release-signer**
+   and **transparency-log** Ed25519 keypairs (separate custody — private
+   halves are build-time secrets only); VAPID keys if you enable push; SES /
+   S3 / embedding / RPC credentials for whichever optional groups you bind.
+3. **Build the release artifacts** (17.2). On a clean checkout: Corepack
+   pnpm → `pnpm install --frozen-lockfile` → export the two `VITE_` trust-
+   anchor pins → `pnpm build` → `pnpm gen:update-manifest` → `pnpm check:sw`
+   → `pnpm check:update-channel` → `pnpm sbom`.
+4. **Stage the artifacts.** Deploy the **built checkout** (the API resolves
+   dependencies from its installed `node_modules` — never ship a bare
+   `dist/`) to the API host; upload `apps/web/dist` to the static host.
+5. **Configure the environment** (17.4). `NODE_ENV=production`,
+   `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, `CORS_ORIGIN`, plus your
+   chosen optional groups — via your process supervisor or secret manager
+   (nothing auto-loads `.env`).
+6. **Migrate the database** (17.5). `pnpm db:migrate` against the
+   production `DATABASE_URL`. The API does **not** migrate at boot.
+7. **Start the governance-LLM runtime** (17.7), loopback-only, if the
+   governed AI surfaces should serve real model verdicts from day one
+   (`pnpm setup:llm --docker`, or any native OpenAI-compatible runtime). A
+   missing runtime never blocks launch — the surfaces fail closed to their
+   deterministic paths until it answers.
+8. **Start the API** (17.5) under your process supervisor
+   (`pnpm --filter api start`). Watch the boot log through the parity guard
+   to `Server started`, and confirm the only degraded-binding warnings are
+   ones you chose.
+9. **Wire the edge** (17.1, 17.6). Route `/v1/*`, `/api/*`, and `/health*`
+   to the API; everything else to the static host with the SPA fallback,
+   the security headers, HSTS at the edge, and the caching rules
+   (immutable hashed assets; no-cache `index.html`/SW/update-manifest).
+10. **Smoke-verify, then announce** (17.10). Run the checklist end to end —
+    liveness + readiness through the edge, a real sign-in over HTTPS, no
+    pending migrations — before pointing the public at it.
+
+Ongoing operations after launch: take Postgres backups (and rely on Redis
+persistence only for sessions/limits — it is reconstructible state); re-run
+steps 3–4 + 6 + 8 for every release (`gen:update-manifest` on every web
+release; `db:migrate` on every API release that adds migrations); scale API
+replicas freely (schedulers serialize through the Postgres job lease, 17.5).
+
 ### 17.1 Topology — one origin behind an edge
 
 Production serves the PWA and the API from **one public origin**. The client
@@ -1649,7 +1711,7 @@ PostgreSQL   Redis 7      ┌─────────────────
 On the build machine, from a clean checkout:
 
 ```sh
-corepack enable && corepack prepare pnpm@9.15.4 --activate
+corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install --frozen-lockfile
 
 # Pin the client trust anchors BEFORE the web build (WS-S.10 — below): the
@@ -1941,7 +2003,8 @@ After a deploy, verify in order:
 | `Incomplete S3/SES/EMBEDDING/KNOMOSIS_GATEWAY configuration: missing …` at boot | A partial all-or-none group is set | Set the whole group or unset all of it (Section 7.6) |
 | API boots but errors connecting to the database, or relation/table "… does not exist" | Postgres not running, or migrations not applied | `docker compose up -d`, then `pnpm db:migrate` (Sections 6, 8) |
 | Migration fails at `CREATE EXTENSION "vector"` | Postgres image lacks pgvector | Use `pgvector/pgvector:pg16` (the Compose default); if running native PG, install pgvector |
-| `corepack: command not found` or wrong pnpm version | Corepack not enabled / pnpm not pinned | `corepack enable && corepack prepare pnpm@9.15.4 --activate` (Section 3) |
+| `corepack: command not found` or wrong pnpm version | Corepack not enabled / pnpm not pinned | `corepack enable && corepack prepare pnpm@11.15.1 --activate` (Section 3) |
+| Install fails with `MINIMUM_RELEASE_AGE_VIOLATION` naming a package version | The version was published < 24h ago — pnpm 11's supply-chain age gate holds it back | Expected protection, not an error to bypass: wait for the version to age, or resolve to the previous version (Section 5). Do not weaken the policy |
 | `pnpm install` fails on a frozen lockfile | Lockfile and `package.json` diverge | Intentional dep change? install without `--frozen-lockfile` and commit the lockfile. Otherwise check your branch is up to date |
 | Port already in use (5432 / 6379 / 5173 / 3001) | Another process/stack is bound | Stop the other process, or remap: change `PORT` (API) / the Compose port mappings, and keep `CORS_ORIGIN`/`VITE_*` consistent |
 | Web loads but `/v1/*` calls 404 (e.g. `:5173/v1/telemetry`, `:5173/v1/security/link-blocklist`) | The API (:3001) isn't running, so the dev proxy has nothing to forward to | The dev server proxies `/v1/*` to :3001 by default — just start the API (`pnpm dev` runs both). The 404 origin being `:5173` means the request reached Vite but the API was down/unreachable |
@@ -1985,10 +2048,10 @@ git clean -xnd -e .env     # preview, keeping your .env
   Install the Biome editor extension and set it as the default formatter so
   format-on-save matches `pnpm lint`. The project does **not** use ESLint or
   Prettier.
-- **TypeScript:** use the workspace TypeScript version (`6.0.x`) rather than
-  your editor's bundled one, so strict-mode behavior matches `pnpm
-  typecheck`. In VS Code: "TypeScript: Select TypeScript Version → Use
-  Workspace Version".
+- **TypeScript:** use the workspace TypeScript version (`7.0.x`, the native
+  compiler) rather than your editor's bundled one, so strict-mode behavior
+  matches `pnpm typecheck`. In VS Code: "TypeScript: Select TypeScript
+  Version → Use Workspace Version".
 - **Tailwind:** styling is utility-first Tailwind CSS v4 (static, zero JS
   runtime); no inline styles. A Tailwind IntelliSense extension helps.
 - **SPDX header:** every new source file starts with
