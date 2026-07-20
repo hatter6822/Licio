@@ -136,6 +136,34 @@ describe('CommentComposer draft autosave + offline queue', () => {
     expect(screen.queryByText(/will post when you’re back online/)).not.toBeInTheDocument();
   });
 
+  it('waits for an in-flight autosave before deleting the draft on post (no orphan)', async () => {
+    // onBlur→flush starts a saveDraft; a fire-and-forget delete on the successful post
+    // could otherwise land BEFORE that put completes, orphaning the draft. The delete
+    // must serialize behind the pending save.
+    let resolveSave: () => void = () => {};
+    mocks.saveDraft.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    mutHolder.impl = (_payload, opts) => {
+      opts.onSuccess?.();
+    };
+    render(
+      <CommentComposer storyId={STORY_ID} threadId={THREAD_ID} parentContributionId={PARENT_ID} />,
+    );
+    const input = screen.getByLabelText('Write a reply');
+    fireEvent.change(input, { target: { value: 'racy comment' } });
+    fireEvent.blur(input); // form onBlur → flush → saveDraft (pending)
+    await waitFor(() => expect(mocks.saveDraft).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' })); // post success → clearDraft
+    await Promise.resolve();
+    expect(mocks.deleteDraft).not.toHaveBeenCalled(); // delete is waiting for the save
+    resolveSave();
+    await waitFor(() => expect(mocks.deleteDraft).toHaveBeenCalled()); // now it deletes
+  });
+
   it('rotates the client_draft_id after a successful post (still-mounted composer)', async () => {
     // The idempotency key must change between posts, or the API dedup path returns
     // the prior contribution for the second comment typed into the same composer.

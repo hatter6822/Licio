@@ -91,11 +91,21 @@ function useContributionDraft(args: {
   const latestBody = useRef(body);
   latestBody.current = body;
   const [recoverable, setRecoverable] = useState<DraftContributionRecord | null>(null);
+  // The most recent autosave promise. Deleting a draft (on a confirmed post / queue
+  // handoff) SERIALIZES behind it — clearing the debounce timer cannot cancel a
+  // saveDraft that already started (e.g. onBlur→flush right before Submit), and a
+  // fire-and-forget delete could otherwise land BEFORE that put, leaving an orphan
+  // draft that re-surfaces a recovery prompt for already-posted text.
+  const lastSave = useRef<Promise<unknown>>(Promise.resolve());
+  const deleteDraftAfterSave = useCallback((id: string): void => {
+    const pending = lastSave.current;
+    void pending.then(() => deleteDraft(id).catch(() => undefined));
+  }, []);
 
   const persist = useCallback((): void => {
     const text = latestBody.current.trim();
     if (text.length === 0) return;
-    void saveDraft({
+    lastSave.current = saveDraft({
       draftId: draftId.current,
       storyId,
       threadId,
@@ -189,12 +199,13 @@ function useContributionDraft(args: {
       debounceTimer.current = null;
     }
     latestBody.current = '';
-    void deleteDraft(draftId.current).catch(() => undefined);
+    // Serialize the delete behind any in-flight autosave (see `deleteDraftAfterSave`).
+    deleteDraftAfterSave(draftId.current);
     // Rotate the draft id: `client_draft_id` is the write's idempotency key, and the
     // top-level composer stays mounted after a successful post — reusing the id would
     // make the API's dedup path return the PRIOR contribution instead of the new one.
     draftId.current = crypto.randomUUID();
-  }, []);
+  }, [deleteDraftAfterSave]);
 
   const queueIfTransient = useCallback(
     async (payload: ContributionWriteCreate, error: unknown): Promise<boolean> => {
@@ -220,11 +231,12 @@ function useContributionDraft(args: {
         debounceTimer.current = null;
       }
       latestBody.current = '';
-      void deleteDraft(handedOff).catch(() => undefined);
+      // Serialize the delete behind any in-flight autosave (see `deleteDraftAfterSave`).
+      deleteDraftAfterSave(handedOff);
       draftId.current = crypto.randomUUID();
       return true;
     },
-    [],
+    [deleteDraftAfterSave],
   );
 
   return {
