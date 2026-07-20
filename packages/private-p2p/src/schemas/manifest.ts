@@ -85,11 +85,23 @@ export const privateRoomRootsSchema = z
   .strict();
 
 /** §13.1 — `PrivateRoomManifestPlainV1`. */
+export const privateRoomFounderSchema = z
+  .object({
+    /** The §12.1 founder member + device — the ONLY identity permitted to author
+     *  the genesis self-add.  Committed by the manifest commitment, so every
+     *  device that verifies the manifest pins the same genesis author and a forged
+     *  competing genesis is rejected network-wide (§14.2 genesis rule). */
+    member_id: privateIdSchema,
+    device_id: privateIdSchema,
+  })
+  .strict();
+
 export const privateRoomManifestSchema = z
   .object({
     schema: z.literal('licio.private.room_manifest.v1'),
     room_id: privateIdSchema,
     created_at: z.string().min(1).max(64),
+    founder: privateRoomFounderSchema,
     profile: privateRoomProfileSchema,
     policy: privateRoomPolicySchema,
     crypto: privateRoomCryptoSchema,

@@ -57,7 +57,7 @@ describe('createPrivateRoom', () => {
       storage: new InMemoryPrivateRoomStorage(),
     });
     const report = await engine.applyLocalOp(created.genesisOp, created.sealParams);
-    expect(report.accepted).toStrictEqual(['genesis']);
+    expect(report.accepted).toStrictEqual([created.genesisOp.op_id]);
     expect(engine.state().members.get('founder')?.role).toBe('admin');
     expect(engine.state().devices.get('founder-dev')?.signingPublicKey).toBe(
       created.genesisOp.body.type === 'member.add'
@@ -196,7 +196,6 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: alice.nextAuthorSeq('alice-dev'),
         },
-        opId: 'add-bob',
         parents: alice.heads(),
         lamport: alice.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
@@ -232,10 +231,10 @@ describe('membership flow — invite + join (two devices, no transport)', () => 
     });
     const report = await bob.importArchive(archive);
 
-    expect(report.accepted.sort()).toStrictEqual(['add-bob', 'genesis']);
+    expect(report.accepted.sort()).toStrictEqual([room.genesisOp.op_id, addBobOp.op_id].sort());
     expect(bob.state().members.get('alice')?.role).toBe('admin');
     expect(bob.state().members.get('bob')?.role).toBe('member');
-    expect(bob.heads()).toStrictEqual(['add-bob']);
+    expect(bob.heads()).toStrictEqual([addBobOp.op_id]);
   });
 });
 
@@ -260,7 +259,6 @@ describe('content authoring — buildRoomOp + engine metadata helpers', () => {
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: engine.nextAuthorSeq('founder-dev'),
         },
-        opId: 's1',
         parents: engine.heads(),
         lamport: engine.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
@@ -290,7 +288,6 @@ describe('content authoring — buildRoomOp + engine metadata helpers', () => {
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: engine.nextAuthorSeq('founder-dev'),
         },
-        opId: 'c1',
         parents: engine.heads(),
         lamport: engine.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
@@ -369,7 +366,6 @@ describe('membership removal — MLS Remove rotates the epoch (forward secrecy)'
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: alice.nextAuthorSeq('alice-dev'),
         },
-        opId: 'secret',
         parents: alice.heads(),
         lamport: alice.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
@@ -384,9 +380,11 @@ describe('membership removal — MLS Remove rotates the epoch (forward secrecy)'
         submission_metadata: {},
       },
     );
-    expect((await alice.applyLocalOp(secretOp, secretSeal)).accepted).toStrictEqual(['secret']);
+    expect((await alice.applyLocalOp(secretOp, secretSeal)).accepted).toStrictEqual([
+      secretOp.op_id,
+    ]);
     const secretEnvelope = (await aliceStorage.listEnvelopes()).find(
-      (e) => e.opId === 'secret',
+      (e) => e.opId === secretOp.op_id,
     )?.envelope;
     if (!secretEnvelope) throw new Error('expected the sealed secret envelope');
 
@@ -409,10 +407,10 @@ describe('membership removal — MLS Remove rotates the epoch (forward secrecy)'
     expect(bobReport.accepted).toStrictEqual([]);
     expect(bobReport.quarantined).toHaveLength(0); // pended awaiting a key it will never get
     expect(bob.pendingCount()).toBe(1);
-    expect(bob.state().stories.has('secret')).toBe(false);
+    expect(bob.state().stories.has('post-removal')).toBe(false);
     const retried = await bob.retryPending();
     expect(retried.accepted).toStrictEqual([]); // still no epoch-2 key ⇒ still unreadable
     expect(bob.pendingCount()).toBe(1);
-    expect(bob.state().stories.has('secret')).toBe(false);
+    expect(bob.state().stories.has('post-removal')).toBe(false);
   });
 });

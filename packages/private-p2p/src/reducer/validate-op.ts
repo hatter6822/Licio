@@ -37,6 +37,7 @@ import {
   privateEncryptedEnvelopeSchema,
 } from '../schemas/envelope.js';
 import { type PrivateOpBody, type PrivateRoomOp, privateRoomOpSchema } from '../schemas/ops.js';
+import { deriveOpId } from './op-id.js';
 
 /**
  * The §10.4 `object_type` an op body maps to (deterministic; seal + open must
@@ -178,7 +179,8 @@ export type OpIntakeRejection =
   | 'aad_hash_mismatch'
   | 'decrypt_failed'
   | 'schema_invalid'
-  | 'metadata_mismatch';
+  | 'metadata_mismatch'
+  | 'op_id_mismatch';
 
 export type OpIntakeResult =
   | { readonly ok: true; readonly op: PrivateRoomOp }
@@ -316,6 +318,16 @@ export async function openOp(
     compareBytes(roomIdCommitment, ctx.roomIdCommitment) !== 0
   ) {
     return { ok: false, reason: 'metadata_mismatch' };
+  }
+
+  // §14.3.2 — op_id MUST be the content-derived id, not a free/author-chosen
+  // string.  Without this a member could mint an envelope whose op_id equals
+  // ANOTHER member's op and displace it via the device-fork resolver (op-id
+  // squatting).  Binding op_id to (author_device_id, author_seq) makes a
+  // cross-author collision impossible; a genuine collision is only an idempotent
+  // re-seal of the identical (device, seq).
+  if (op.op_id !== (await deriveOpId(op.author_device_id, op.author_seq))) {
+    return { ok: false, reason: 'op_id_mismatch' };
   }
 
   return { ok: true, op };

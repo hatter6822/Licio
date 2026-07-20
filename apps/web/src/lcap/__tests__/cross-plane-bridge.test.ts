@@ -75,7 +75,6 @@ async function sealRealEnvelopes(): Promise<{
         signingKey: created.founder.signingKeyPair.privateKey,
         seq: engine.nextAuthorSeq('founder-dev'),
       },
-      opId: globalThis.crypto.randomUUID(),
       parents: engine.heads(),
       lamport: engine.nextLamport(),
     },

@@ -33,6 +33,7 @@ import {
   buildOpIntakeContext,
   type HeldEpochKeys,
 } from '../reducer/intake-context.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { reduceRoom } from '../reducer/reduce.js';
 import {
   openSnapshotBundle,
@@ -194,6 +195,12 @@ export interface PrivateRoomEngineParams {
    *  needed to open the genesis (founder self-add) op before any device is in
    *  reduced state. */
   readonly bootstrapDevices?: ReadonlyArray<BootstrapDevice>;
+  /** The §13.1 manifest-committed founder device id — the ONLY device permitted to
+   *  author the §12.1 genesis.  Pins the genesis so a member cannot forge a
+   *  competing lower-`lamport` self-add and hijack the room (§14.2 genesis rule).
+   *  Sourced from the verified manifest at create/join; omitting it falls back to
+   *  the legacy unpinned rule (isolated tests only). */
+  readonly genesisFounderDeviceId?: string;
   /** A persisted §14.5 compaction base to resume from (WS-S.7): the engine seeds
    *  it, then `load` ingests only the post-snapshot envelopes still in storage. */
   readonly base?: PersistedSnapshotBase;
@@ -210,6 +217,8 @@ export class PrivateRoomEngine {
   private readonly storage: PrivateRoomStorage;
   private epochs: Map<number, HeldEpochKeys>;
   private readonly bootstrapDevices: readonly BootstrapDevice[];
+  /** The §12.1 genesis founder pin (see PrivateRoomEngineParams). */
+  private readonly genesisFounderDeviceId: string | undefined;
   /** op_id → accepted op (the reducer's POST-snapshot input set). */
   private readonly acceptedOps = new Map<string, PrivateRoomOp>();
   /** op_id → the WINNING envelope's signature — so a device fork (a second valid
@@ -250,6 +259,7 @@ export class PrivateRoomEngine {
     this.storage = params.storage;
     this.epochs = new Map(params.epochs);
     this.bootstrapDevices = params.bootstrapDevices ?? [];
+    this.genesisFounderDeviceId = params.genesisFounderDeviceId;
     if (openedBase) {
       // Resume from a §14.5 base (opened from its sealed body): its covered
       // envelopes were pruned from storage, so only the post-snapshot envelopes
@@ -261,7 +271,7 @@ export class PrivateRoomEngine {
       for (const [device, seq] of openedBase.authorSeq) this.baseAuthorSeq.set(device, seq);
       this.sealedSnapshot = openedBase.sealedSnapshot;
     }
-    this.currentState = reduceRoom([], this.baseState);
+    this.currentState = reduceRoom([], this.baseState, this.genesisFounderDeviceId);
   }
 
   /**
@@ -277,7 +287,11 @@ export class PrivateRoomEngine {
    * do not contribute to `currentState`.
    */
   private refold(): void {
-    this.currentState = reduceRoom(this.structurallyAccepted(), this.baseState);
+    this.currentState = reduceRoom(
+      this.structurallyAccepted(),
+      this.baseState,
+      this.genesisFounderDeviceId,
+    );
   }
 
   /** The structurally-valid subset of the accepted ops, in canonical order (the
@@ -883,14 +897,15 @@ export class PrivateRoomEngine {
       ),
       capabilityRootAtSeq: await sha256(canonical([])),
     };
+    const authorSeq = this.nextAuthorSeq(params.author.deviceId);
     const op = privateRoomOpSchema.parse({
       schema: 'licio.private.op.v1',
       room_id: this.roomId,
       epoch: params.epoch,
-      op_id: params.opId,
+      op_id: await deriveOpId(params.author.deviceId, authorSeq),
       author_member_id: params.author.memberId,
       author_device_id: params.author.deviceId,
-      author_seq: this.nextAuthorSeq(params.author.deviceId),
+      author_seq: authorSeq,
       created_at: createdAt,
       created_at_bucket: createdAt.slice(0, 13),
       lamport: this.nextLamport(),
@@ -1080,7 +1095,6 @@ export interface CommitSnapshotParams {
     readonly deviceId: string;
     readonly signingKey: CryptoKey;
   };
-  readonly opId: string;
   readonly snapshotId: string;
   /** ISO timestamp for the commit op (defaults to now). */
   readonly createdAt?: string;

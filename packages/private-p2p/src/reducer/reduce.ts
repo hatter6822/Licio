@@ -350,16 +350,27 @@ function applyAttachmentAdd(
   }
 }
 
-function applyOp(state: RoomReducerState, op: PrivateRoomOp): void {
+function applyOp(
+  state: RoomReducerState,
+  op: PrivateRoomOp,
+  genesisFounderDeviceId: string | undefined,
+): void {
   if (op.epoch > state.epoch) state.epoch = op.epoch;
   const body = op.body;
 
-  // Genesis: the founder's self-add is the one self-authorizing op (§12.1).
+  // Genesis: the founder's self-add is the one self-authorizing op (§12.1).  The
+  // founder is PINNED to the room's manifest-committed founder device: without
+  // this pin ANY member could seal a competing self-add with a lower `lamport`
+  // that sorts first on a fold-from-empty, become the genesis, and orphan the real
+  // founder's whole subtree (room hijack + a compacted-vs-uncompacted split).  When
+  // a pin is supplied (always, from the engine), a non-founder genesis is rejected
+  // on every device, so no device ever adopts a forged genesis.
   if (state.members.size === 0) {
     if (
       body.type === 'member.add' &&
       body.member_id === op.author_member_id &&
-      body.device_id === op.author_device_id
+      body.device_id === op.author_device_id &&
+      (genesisFounderDeviceId === undefined || op.author_device_id === genesisFounderDeviceId)
     ) {
       applyMemberAdd(state, body, op.epoch);
       return;
@@ -473,14 +484,20 @@ function applyRendezvousRequest(
  * equals a full fold of every op iff the snapshot covers a causally-closed
  * prefix (which `PrivateRoomEngine` guarantees — it snapshots at its own heads).
  * The base is cloned, never mutated.
+ *
+ * `genesisFounderDeviceId` (the manifest-committed founder device, §13.1) pins the
+ * §12.1 genesis: only that device may bootstrap an empty room.  The engine always
+ * supplies it; when omitted (an isolated reducer unit test that folds from empty
+ * and does not exercise the founder pin) the legacy self-add rule applies.
  */
 export function reduceRoom(
   acceptedOps: readonly PrivateRoomOp[],
   baseState?: RoomReducerState,
+  genesisFounderDeviceId?: string,
 ): RoomReducerState {
   const state = baseState ? cloneRoomState(baseState) : emptyRoomState();
   for (const op of canonicalOpOrder(acceptedOps)) {
-    applyOp(state, op);
+    applyOp(state, op, genesisFounderDeviceId);
   }
   return state;
 }

@@ -117,6 +117,7 @@ describe('WS-S.2.3 room manifest (§13.1)', () => {
     schema: 'licio.private.room_manifest.v1',
     room_id: 'room-1',
     created_at: '2026-06-22T00:00:00Z',
+    founder: { member_id: 'alice', device_id: 'alice-dev' },
     profile: { name: 'A room', room_type: 'global_topic' },
     policy: {
       directory_mode: 'unlisted',

@@ -62,7 +62,6 @@ describe('WP-1 cross-epoch engine self-heal (§10.9)', () => {
             signingKey: created.founder.signingKeyPair.privateKey,
             seq: alice.nextAuthorSeq('founder-dev'),
           },
-          opId: globalThis.crypto.randomUUID(),
           parents: alice.heads(),
           lamport: alice.nextLamport(),
         },

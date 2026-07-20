@@ -27,6 +27,7 @@ import {
   InMemoryPrivateRoomStorage,
   PrivateRoomEngine,
 } from '../index.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { sealSnapshotBundle } from '../reducer/snapshot-seal.js';
 import { deserializeReducerState, serializeReducerState } from '../reducer/snapshot-state.js';
 import { roomStateCommitment } from '../reducer/state.js';
@@ -163,7 +164,6 @@ describe('re-audit finding 3 (CRITICAL) — §14.5 snapshot-authority anchoring'
           signingKey: room.founder.signingKeyPair.privateKey,
           seq: alice.nextAuthorSeq('alice-dev'),
         },
-        opId: 'add-bob',
         parents: alice.heads(),
         lamport: alice.nextLamport(),
         createdAt: '2026-06-22T00:00:00Z',
@@ -218,7 +218,9 @@ describe('re-audit finding 3 (CRITICAL) — §14.5 snapshot-authority anchoring'
       schema: 'licio.private.op.v1',
       room_id: 'r-auth',
       epoch: 1,
-      op_id: 'forged-snap-commit',
+      // A crypto-VALID op_id (the forgery is the AUTHORITY it claims, not the id):
+      // bob really signs it, so op_id must be bob's derived id for openOp to accept.
+      op_id: await deriveOpId('bob-dev', 1),
       author_member_id: 'bob',
       author_device_id: 'bob-dev',
       author_seq: 1,

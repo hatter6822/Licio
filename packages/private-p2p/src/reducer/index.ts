@@ -6,6 +6,7 @@
 
 export * from './capabilities.js';
 export * from './intake-context.js';
+export * from './op-id.js';
 export * from './order.js';
 export * from './overlay.js';
 export * from './recovery-threshold.js';

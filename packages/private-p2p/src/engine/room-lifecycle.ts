@@ -44,6 +44,7 @@ import {
 } from '../crypto/runtime.js';
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import type { HeldEpochKeys } from '../reducer/intake-context.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import type { privateRoleSchema } from '../schemas/common.js';
 import {
@@ -227,6 +228,7 @@ export async function createPrivateRoom(
     schema: 'licio.private.room_manifest.v1',
     room_id: params.roomId,
     created_at: createdAt,
+    founder: { member_id: params.founderMemberId, device_id: params.founderDeviceId },
     profile: params.profile,
     policy,
     crypto: {
@@ -252,7 +254,7 @@ export async function createPrivateRoom(
     schema: 'licio.private.op.v1',
     room_id: params.roomId,
     epoch: Number(epochState.epoch),
-    op_id: 'genesis',
+    op_id: await deriveOpId(params.founderDeviceId, 0),
     author_member_id: params.founderMemberId,
     author_device_id: params.founderDeviceId,
     author_seq: 0,
@@ -309,6 +311,7 @@ export async function createPrivateRoom(
       roomIdCommitment,
       epochs,
       bootstrapDevices: [{ deviceId: params.founderDeviceId, signingPublicKey }],
+      genesisFounderDeviceId: params.founderDeviceId,
     },
   };
 }
@@ -417,7 +420,6 @@ export interface OpAuthoringBase {
     readonly signingKey: CryptoKey;
     readonly seq: number;
   };
-  readonly opId: string;
   readonly parents: readonly string[];
   readonly lamport: string;
   readonly createdAt?: string;
@@ -439,7 +441,7 @@ export async function buildRoomOp(
     schema: 'licio.private.op.v1',
     room_id: base.roomId,
     epoch: Number(base.epochState.epoch),
-    op_id: base.opId,
+    op_id: await deriveOpId(base.author.deviceId, base.author.seq),
     author_member_id: base.author.memberId,
     author_device_id: base.author.deviceId,
     author_seq: base.author.seq,

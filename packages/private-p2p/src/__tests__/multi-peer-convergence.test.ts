@@ -29,6 +29,7 @@ import { type PrivateCryptoKeyPair, randomBytes, toBase64Url } from '../crypto/r
 import { exportPublicKeyRaw, generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import { InMemoryPrivateRoomStorage, PrivateRoomEngine } from '../engine/room-engine.js';
 import type { HeldEpochKeys } from '../reducer/intake-context.js';
+import { deriveOpId } from '../reducer/op-id.js';
 import { roomStateCommitment } from '../reducer/state.js';
 import type { SealOpParams } from '../reducer/validate-op.js';
 import { sealOp } from '../reducer/validate-op.js';
@@ -130,8 +131,17 @@ async function room() {
   return { roomIdCommitment, epochs, founder, sealParamsFor, newEngine };
 }
 
+// op_id is DERIVED from (author_device_id, author_seq) (§14.3.2); tests label ops
+// (still via `op_id`) and this registry maps a label to its real derived id for
+// parent references + op-id assertions.  mkOp is async, awaited in call order.
+const opIds = new Map<string, string>();
+const opIdOf = (label: string): string => {
+  const value = opIds.get(label);
+  if (value === undefined) throw new Error(`no op id recorded for label ${label}`);
+  return value;
+};
 let opSeq = 0;
-function mkOp(
+async function mkOp(
   body: PrivateOpBody,
   fields: {
     op_id?: string;
@@ -141,19 +151,24 @@ function mkOp(
     lamport?: string;
     parents?: string[];
   } = {},
-): PrivateRoomOp {
+): Promise<PrivateRoomOp> {
+  const label = fields.op_id ?? `op-${++opSeq}`;
+  const deviceId = fields.author_device_id ?? 'founder-dev';
+  const seq = fields.author_seq ?? 0;
+  const opId = await deriveOpId(deviceId, seq);
+  opIds.set(label, opId);
   return privateRoomOpSchema.parse({
     schema: 'licio.private.op.v1',
     room_id: ROOM,
     epoch: 0,
-    op_id: fields.op_id ?? `op-${++opSeq}`,
+    op_id: opId,
     author_member_id: fields.author_member_id ?? 'founder',
-    author_device_id: fields.author_device_id ?? 'founder-dev',
-    author_seq: fields.author_seq ?? 0,
+    author_device_id: deviceId,
+    author_seq: seq,
     created_at: '2026-06-22T00:00:00Z',
     created_at_bucket: '2026-06-22T00',
     lamport: fields.lamport ?? '1',
-    parents: fields.parents ?? [],
+    parents: (fields.parents ?? []).map((p) => opIds.get(p) ?? p),
     body,
   });
 }
@@ -229,22 +244,22 @@ describe('multi-peer convergence — (a) star topology (1 author, N readers)', (
     // Author builds genesis → 3 stories.
     const author = await r.newEngine();
     await author.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await author.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
       founderSeal,
     );
     await author.applyLocalOp(
-      mkOp(story('s2'), { op_id: 'cs2', author_seq: 2, lamport: '3', parents: ['cs1'] }),
+      await mkOp(story('s2'), { op_id: 'cs2', author_seq: 2, lamport: '3', parents: ['cs1'] }),
       founderSeal,
     );
     await author.applyLocalOp(
-      mkOp(story('s3'), { op_id: 'cs3', author_seq: 3, lamport: '4', parents: ['cs2'] }),
+      await mkOp(story('s3'), { op_id: 'cs3', author_seq: 3, lamport: '4', parents: ['cs2'] }),
       founderSeal,
     );
     const target = commitOf(author);
@@ -254,7 +269,7 @@ describe('multi-peer convergence — (a) star topology (1 author, N readers)', (
       const rounds = await pull(reader, author);
       expect(rounds).toBeGreaterThan(1); // genuinely walked the multi-hop chain
       expect(commitOf(reader)).toBe(target);
-      expect(reader.heads()).toStrictEqual(['cs3']);
+      expect(reader.heads()).toStrictEqual([opIdOf('cs3')]);
       expect(reader.state().stories.size).toBe(3);
     }
   });
@@ -273,18 +288,18 @@ describe('multi-peer convergence — (b) chain relay (A→B→C, C never sees A)
     // A authors: genesis → add bob → a bob-authored comment under cs1.
     const a = await r.newEngine();
     await a.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await a.applyLocalOp(
-      mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
+      await mkOp(story('s1'), { op_id: 'cs1', author_seq: 1, lamport: '2', parents: ['genesis'] }),
       founderSeal,
     );
     await a.applyLocalOp(
-      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+      await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
         op_id: 'add-bob',
         author_seq: 2,
         lamport: '3',
@@ -294,7 +309,7 @@ describe('multi-peer convergence — (b) chain relay (A→B→C, C never sees A)
     );
     const bobSeal = await r.sealParamsFor(bob.device, 'bob-dev');
     await a.applyLocalOp(
-      mkOp(comment('cm1', 't-s1'), {
+      await mkOp(comment('cm1', 't-s1'), {
         op_id: 'cm1',
         author_member_id: 'bob',
         author_device_id: 'bob-dev',
@@ -334,14 +349,14 @@ describe('multi-peer convergence — (c) concurrent authorship (two devices)', (
     // in the prefix for either author to reference, independent of merge order).
     const root = await r.newEngine();
     await root.applyLocalOp(
-      mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+      await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
         op_id: 'genesis',
         lamport: '1',
       }),
       founderSeal,
     );
     await root.applyLocalOp(
-      mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+      await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
         op_id: 'add-bob',
         author_seq: 1,
         lamport: '2',
@@ -350,7 +365,7 @@ describe('multi-peer convergence — (c) concurrent authorship (two devices)', (
       founderSeal,
     );
     await root.applyLocalOp(
-      mkOp(story('s0'), { op_id: 'cs0', author_seq: 2, lamport: '3', parents: ['add-bob'] }),
+      await mkOp(story('s0'), { op_id: 'cs0', author_seq: 2, lamport: '3', parents: ['add-bob'] }),
       founderSeal,
     );
 
@@ -363,7 +378,7 @@ describe('multi-peer convergence — (c) concurrent authorship (two devices)', (
 
     const bobSeal = await r.sealParamsFor(bob.device, 'bob-dev');
     await alice.applyLocalOp(
-      mkOp(story('s-alice'), {
+      await mkOp(story('s-alice'), {
         op_id: 'cs-alice',
         author_seq: 3,
         lamport: '4',
@@ -372,7 +387,7 @@ describe('multi-peer convergence — (c) concurrent authorship (two devices)', (
       founderSeal,
     );
     await bobEngine.applyLocalOp(
-      mkOp(comment('cm-bob', 't-s0'), {
+      await mkOp(comment('cm-bob', 't-s0'), {
         op_id: 'cm-bob',
         author_member_id: 'bob',
         author_device_id: 'bob-dev',
@@ -405,7 +420,7 @@ describe('multi-peer convergence — (c) concurrent authorship (two devices)', (
       expect(e.state().stories.has('s-alice')).toBe(true);
       expect(e.state().contributions.get('cm-bob')?.bodyMarkdownLite).toBe('comment cm-bob');
       // Two concurrent heads (cs-alice + cm-bob) — neither is an ancestor of the other.
-      expect([...e.heads()].sort()).toStrictEqual(['cm-bob', 'cs-alice']);
+      expect([...e.heads()].sort()).toStrictEqual([opIdOf('cm-bob'), opIdOf('cs-alice')].sort());
     }
   });
 });
@@ -420,23 +435,23 @@ describe('multi-peer convergence — (d) out-of-order + duplicated delivery', ()
     const founderSeal = await r.sealParamsFor(r.founder.device, 'founder-dev');
     const bob = await makeDevice();
     const bobSeal = await r.sealParamsFor(bob.device, 'bob-dev');
-    const genesis = mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
+    const genesis = await mkOp(memberAdd('founder', 'founder-dev', r.founder.pub, 'admin'), {
       op_id: 'genesis',
       lamport: '1',
     });
-    const cs1 = mkOp(story('s1'), {
+    const cs1 = await mkOp(story('s1'), {
       op_id: 'cs1',
       author_seq: 1,
       lamport: '2',
       parents: ['genesis'],
     });
-    const addBob = mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
+    const addBob = await mkOp(memberAdd('bob', 'bob-dev', bob.pub, 'member'), {
       op_id: 'add-bob',
       author_seq: 2,
       lamport: '3',
       parents: ['cs1'],
     });
-    const cm1 = mkOp(comment('cm1', 't-s1'), {
+    const cm1 = await mkOp(comment('cm1', 't-s1'), {
       op_id: 'cm1',
       author_member_id: 'bob',
       author_device_id: 'bob-dev',
@@ -470,7 +485,7 @@ describe('multi-peer convergence — (d) out-of-order + duplicated delivery', ()
     const baseline = await r.newEngine();
     await baseline.ingest(chain);
     const target = commitOf(baseline);
-    expect(baseline.heads()).toStrictEqual(['cm1']);
+    expect(baseline.heads()).toStrictEqual([opIdOf('cm1')]);
 
     const commitments = new Set<string>();
     for (const order of orders) {
@@ -483,7 +498,7 @@ describe('multi-peer convergence — (d) out-of-order + duplicated delivery', ()
       // All four ops opened; duplicates were absorbed (no fork quarantine).
       expect(report.quarantined.filter((q) => q.reason === 'duplicate_op_id')).toHaveLength(0);
       expect(commitOf(engine)).toBe(target);
-      expect(engine.heads()).toStrictEqual(['cm1']);
+      expect(engine.heads()).toStrictEqual([opIdOf('cm1')]);
       commitments.add(commitOf(engine));
     }
     // No silent divergence: every delivery order produced the SAME state.
@@ -503,6 +518,6 @@ describe('multi-peer convergence — (d) out-of-order + duplicated delivery', ()
     // Now deliver the rest out of order; the previously-undelivered leaf must fold.
     await engine.ingest([chain[2], chain[0], chain[1], chain[3]] as typeof chain);
     expect(engine.state().contributions.get('cm1')?.bodyMarkdownLite).toBe('comment cm1');
-    expect(engine.heads()).toStrictEqual(['cm1']);
+    expect(engine.heads()).toStrictEqual([opIdOf('cm1')]);
   });
 });

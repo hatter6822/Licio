@@ -97,7 +97,6 @@ describe('WS-S.4.3 PrivateSyncSession × real engine × real codec', () => {
             signingKey: created.founder.signingKeyPair.privateKey,
             seq: alice.nextAuthorSeq('founder-dev'),
           },
-          opId: globalThis.crypto.randomUUID(),
           parents: alice.heads(),
           lamport: alice.nextLamport(),
         },

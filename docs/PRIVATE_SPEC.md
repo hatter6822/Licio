@@ -1030,6 +1030,13 @@ type PrivateRoomManifestPlainV1 = {
   room_id: string;
   created_at: string;
 
+  // The §12.1 founder — the ONLY identity permitted to author the genesis
+  // self-add.  Committed by the manifest commitment, so every device that
+  // verifies the manifest pins the same genesis author and a forged competing
+  // genesis (a member self-adding as admin on an empty fold) is rejected
+  // network-wide (§14.2 genesis rule).
+  founder: { member_id: string; device_id: string };
+
   profile: {
     name: string;
     description?: string;
@@ -1083,6 +1090,13 @@ type PrivateRoomOpPlainV1 = {
   room_id: string;
   epoch: number;
 
+  // op_id is DERIVED, never author-chosen: op_id = base32/64(sha256(canonical
+  // ['licio.private.op-id.v1', author_device_id, author_seq])).  This makes it
+  // "fully determined by op content" (§14.3.2) and non-forgeable across authors:
+  // two ops from different devices can never share an id, and `openOp` rejects any
+  // envelope whose op_id != deriveOpId(author_device_id, author_seq).  A free-string
+  // op_id would let a member squat another member's id and displace their op via
+  // the device-fork resolver.
   op_id: string;
   author_member_id: string;
   author_device_id: string;
