@@ -7,6 +7,7 @@
 // buffered for upload. Collection only runs when personalization is enabled
 // (privacy gate); raw events are processed here and never leave the browser.
 import { SESSION_BUCKET_WINDOW_MS, sessionBucket } from '@licio/shared';
+import * as queue from '../offline/queue.js';
 import { type AggregateInput, AggregateUploader, buildAggregate } from './aggregate.js';
 import { CadenceTracker } from './cadence.js';
 import { DEFAULT_DWELL_CAP_MS, DwellCapTracker } from './caps.js';
@@ -48,6 +49,9 @@ export interface SignalProcessorOptions {
   tickMs?: number;
   /** Batched-upload cadence (ms, default 30s). Configurable per WS-C.4.4. */
   flushIntervalMs?: number;
+  /** Purge durably-queued attention aggregates on opt-out (default: the
+   *  IndexedDB `attention-aggregate` sweep).  Injected in tests. */
+  purgeQueuedAttention?: () => Promise<unknown>;
 }
 
 export class SignalProcessor {
@@ -64,6 +68,7 @@ export class SignalProcessor {
   private readonly sessionWindowMs: number;
   private readonly tickMs: number;
   private readonly flushIntervalMs: number;
+  private readonly purgeQueuedAttention: () => Promise<unknown>;
 
   private policy: CollectionPolicy = COLLECTION_OFF;
   private currentItemId: string | null = null;
@@ -81,6 +86,8 @@ export class SignalProcessor {
     this.sessionWindowMs = options.sessionWindowMs ?? SESSION_BUCKET_WINDOW_MS;
     this.tickMs = options.tickMs ?? 1_000;
     this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+    this.purgeQueuedAttention =
+      options.purgeQueuedAttention ?? (() => queue.removeByType('attention-aggregate'));
     this.dwell = new DwellAccumulator(this.now);
     this.cap = new DwellCapTracker(options.capMs ?? DEFAULT_DWELL_CAP_MS);
     this.sessionBucketLabel = sessionBucket(this.wallClock(), this.sessionWindowMs);
@@ -101,6 +108,10 @@ export class SignalProcessor {
       this.lastDwellMs = 0;
       this.returns.resetSession();
       this.uploader.clear();
+      // Also purge aggregates already DURABLY queued to IndexedDB (via a failed
+      // flush or a page-hide flushDurable) — else the interval/visibility path would
+      // upload a pre-opt-out capture AFTER the user opted out (WS-C.4.1d).
+      void this.purgeQueuedAttention();
     }
   }
 

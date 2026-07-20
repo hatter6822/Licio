@@ -21,6 +21,7 @@ function setup(options: { capMs?: number; flushIntervalMs?: number; tickMs?: num
   const cadence = new CadenceTracker({ idleMs: 10_000_000, sampleMs: 0 });
   const upload = vi.fn().mockResolvedValue(undefined);
   const enqueue = vi.fn().mockResolvedValue(undefined);
+  const purgeQueuedAttention = vi.fn().mockResolvedValue(undefined);
   const uploader = new AggregateUploader({ upload, enqueue });
   const returnTracker = new ReturnTracker(); // no-op (in-memory) persistence
   const processor = new SignalProcessor({
@@ -28,6 +29,7 @@ function setup(options: { capMs?: number; flushIntervalMs?: number; tickMs?: num
     cadence,
     uploader,
     returnTracker,
+    purgeQueuedAttention,
     now: () => mono,
     wallClock: () => wall,
     sessionWindowMs: 3_600_000,
@@ -47,6 +49,7 @@ function setup(options: { capMs?: number; flushIntervalMs?: number; tickMs?: num
     processor,
     upload,
     enqueue,
+    purgeQueuedAttention,
     uploader,
     returnTracker,
     accrue,
@@ -92,6 +95,21 @@ describe('SignalProcessor collection gating', () => {
     expect(s.uploader.size).toBe(0);
     await s.processor.flush();
     expect(s.upload).not.toHaveBeenCalled();
+  });
+
+  it('purges DURABLY-queued attention aggregates on opt-out (WS-C.4.1d)', async () => {
+    const s = setup();
+    s.processor.setCollectionPolicy(ENABLED);
+    // The durable queue path (a failed flush / page-hide flushDurable) is NOT the
+    // in-memory buffer; opting out must sweep it too, else a pre-opt-out capture
+    // uploads on the next online/visibility drain.
+    expect(s.purgeQueuedAttention).not.toHaveBeenCalled();
+    s.processor.setCollectionPolicy({
+      collect: false,
+      privacyLevel: 'standard',
+      identifier: 'privacy-bucket',
+    });
+    expect(s.purgeQueuedAttention).toHaveBeenCalledTimes(1);
   });
 });
 
