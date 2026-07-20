@@ -2,12 +2,13 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DB_NAME, rawPut, resetDbConnection, STORE } from './db.js';
-import type { SavedStoryRecord } from './schemas.js';
+import type { SavedStoryRecord, StoryCommentsSnapshotRecord } from './schemas.js';
 import {
   drainRejectionDeltas,
   getRejectionCount,
   resetRejectionCounts,
   savedStories,
+  storyComments,
 } from './store.js';
 
 function deleteDatabase(name: string): Promise<void> {
@@ -100,5 +101,66 @@ describe('integrity store reads (quarantine on invalid)', () => {
     const recent = await savedStories.getAllByIndex('savedAt', IDBKeyRange.lowerBound(1500));
     expect(recent).toHaveLength(1);
     expect(recent[0]?.savedAt).toBe(2000);
+  });
+});
+
+// A well-formed snapshot record for the evict-policy (cache) store.
+const SNAPSHOT: StoryCommentsSnapshotRecord = {
+  schemaVersion: 2,
+  cacheKey: '11111111-1111-4111-8111-111111111111:{}',
+  storyId: '11111111-1111-4111-8111-111111111111',
+  optionsKey: '{}',
+  comments: [],
+  nextCursor: null,
+  overview: {
+    comment_count: 0,
+    sources_count: 0,
+    corrections_count: 0,
+    debates_count: 0,
+    incorrect_count: 0,
+  },
+  cachedAt: 1000,
+};
+
+describe('integrity store reads (evict on invalid — snapshot caches)', () => {
+  it('deletes an invalid cache record on a keyed read and counts it once', async () => {
+    // A pre-rework shape inserted raw: a retired `type` + a removed strict key.
+    await rawPut(STORE.storyComments, {
+      ...SNAPSHOT,
+      cacheKey: 'stale',
+      comments: [{ type: 'evidence', metadata: { evidence_type: 'primary' } }],
+    });
+
+    expect(await storyComments.get('stale')).toBeUndefined();
+    expect(getRejectionCount(STORE.storyComments)).toBe(1);
+    // Evicted, not quarantined: the raw record is gone…
+    expect(await storyComments.count()).toBe(0);
+    // …so a re-read cannot re-count (the every-read warn/telemetry spam ends).
+    expect(await storyComments.get('stale')).toBeUndefined();
+    expect(getRejectionCount(STORE.storyComments)).toBe(1);
+  });
+
+  it('deletes an invalid record even when its key field is not extractable', async () => {
+    // A numeric primary key is a valid IDB key but fails the string-only key
+    // extraction — the keyed read still evicts via the key it was issued for.
+    await rawPut(STORE.storyComments, { cacheKey: 42, bogus: true });
+    expect(await storyComments.get(42)).toBeUndefined();
+    expect(await storyComments.count()).toBe(0);
+  });
+
+  it('evicts invalid records surfaced by an index scan while keeping valid ones', async () => {
+    await storyComments.put(SNAPSHOT);
+    await rawPut(STORE.storyComments, { ...SNAPSHOT, cacheKey: 'stale-scan', comments: 'bogus' });
+
+    const scanned = await storyComments.getAllByIndex(
+      'cachedAt',
+      IDBKeyRange.upperBound(SNAPSHOT.cachedAt),
+    );
+    expect(scanned).toHaveLength(1);
+    expect(scanned[0]?.cacheKey).toBe(SNAPSHOT.cacheKey);
+    // The invalid record was deleted by the scan itself, so it can never become
+    // an immortal record the GC sweep cannot see.
+    expect(await storyComments.count()).toBe(1);
+    expect(getRejectionCount(STORE.storyComments)).toBe(1);
   });
 });

@@ -9,7 +9,7 @@
 // (never half-migrated, WS-C.2.2c).
 
 export const DB_NAME = 'licio';
-export const DB_VERSION = 5;
+export const DB_VERSION = 6;
 
 /** Object-store names (WS-C.2.2a object-store table). */
 export const STORE = {
@@ -126,6 +126,17 @@ export const MIGRATIONS: MigrationMap = {
   5: (_db, tx) => {
     remapRetiredContributionTypes(tx.objectStore(STORE.draftContributions));
     remapRetiredQueuedContributions(tx.objectStore(STORE.pendingQueue));
+  },
+  // The WS-T comment-centric rework that migration 5 answered ALSO reshaped the
+  // read model: the STRICT `contributionPublicSchema` lost the EvidenceCard keys
+  // (`evidence_type`/`evidence_id`) and its `type` enum shrank to
+  // comment|correction, so a story-comments snapshot cached before the rework
+  // fails the record schema on every read and is rejected.  Migration 5 remapped
+  // the USER data (drafts + queued submissions) but left this lossy read CACHE
+  // holding pre-rework shapes.  Evict it so they are refetched, never mis-parsed
+  // — the migration-2/4 precedent.  User data is untouched.
+  6: (_db, tx) => {
+    tx.objectStore(STORE.storyComments).clear();
   },
 };
 

@@ -7,6 +7,7 @@ import type {
   ThreadDetail,
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { rawPut, STORE } from './db.js';
 import {
   cacheSignalLedger,
   cacheStoryCommentsSnapshot,
@@ -188,5 +189,25 @@ describe('snapshot expiry (unbounded-growth control)', () => {
   it('is best-effort: a storage error never throws', async () => {
     vi.spyOn(storyComments, 'getAllByIndex').mockRejectedValueOnce(new Error('offline'));
     await expect(expireOldSnapshots()).resolves.toBeUndefined();
+  });
+
+  it('an invalid snapshot record cannot evade the expiry sweep (evicted on scan)', async () => {
+    // A stale record whose cached comment carries a pre-WS-T-rework shape: it
+    // fails read validation, so the sweep's validated read excludes it from the
+    // delete list — under quarantine semantics it would be IMMORTAL, re-warning
+    // on every sweep. The evict policy deletes it during the scan itself.
+    await rawPut(STORE.storyComments, {
+      schemaVersion: 2,
+      cacheKey: `${STORY.story_id}:stale`,
+      storyId: STORY.story_id,
+      optionsKey: '{}',
+      comments: [{ type: 'evidence', metadata: { evidence_type: 'primary' } }],
+      nextCursor: null,
+      overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+      cachedAt: 1,
+    });
+
+    await expireOldSnapshots(Date.now() + SNAPSHOT_MAX_AGE_MS + 1_000);
+    expect(await storyComments.count()).toBe(0);
   });
 });

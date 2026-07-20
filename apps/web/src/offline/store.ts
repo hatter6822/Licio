@@ -3,8 +3,14 @@
 // Data-integrity layer over IndexedDB (WS-C.2.2c, SPEC §6.9/§6.12.7). Every read
 // is validated through a zod schema before it reaches application state, and
 // every write is validated before it is stored. A record that fails read
-// validation is QUARANTINED — counted, logged, and EXCLUDED from results, but
-// left in place so a recovery path exists (never silently deleted).
+// validation is counted, logged, and EXCLUDED from results; what happens to it
+// then is a per-store policy. USER DATA (saves, drafts) is QUARANTINED — left in
+// place so a recovery path exists (never silently deleted). Server-refetchable
+// SNAPSHOT CACHES are EVICTED — the server copy is authoritative, so there is
+// nothing to recover, and a quarantined cache record would otherwise be immortal:
+// the GC sweep reads through this validating layer, so an invalid record never
+// appears in the sweep's results and can never age out, re-logging (and
+// re-counting) on every read until a same-key write-through overwrites it.
 import type { z } from 'zod';
 import {
   rawClear,
@@ -82,15 +88,56 @@ export interface IntegrityStore<T> {
   count(): Promise<number>;
 }
 
-function createStore<T>(storeName: StoreName, schema: z.ZodType<T>): IntegrityStore<T> {
-  const validateRead = (raw: unknown): T | null => {
+/**
+ * What happens to a record that fails read validation, after it is counted and
+ * logged.  `quarantine` (user data) leaves it in place so a recovery path
+ * exists.  `evict` (server-refetchable snapshot caches) deletes it best-effort
+ * by its primary key — `keyPath` names the store's keyPath property — so the
+ * next online read repopulates it and it can never become an immortal record
+ * the GC sweep cannot see.
+ */
+type InvalidReadPolicy = { mode: 'quarantine' } | { mode: 'evict'; keyPath: string };
+
+function createStore<T>(
+  storeName: StoreName,
+  schema: z.ZodType<T>,
+  policy: InvalidReadPolicy,
+): IntegrityStore<T> {
+  const recordRejection = (): void => {
+    rejectionCounts.set(storeName, (rejectionCounts.get(storeName) ?? 0) + 1);
+    if (IS_DEV) {
+      const verb = policy.mode === 'evict' ? 'evicted' : 'quarantined';
+      console.warn(`[offline] ${verb} an invalid ${storeName} record`);
+    }
+  };
+
+  // The invalid record's primary key, read from the raw value (untrusted, so
+  // only a non-empty string is accepted — every store here has a string keyPath).
+  const keyOf = (raw: unknown): IDBValidKey | undefined => {
+    if (policy.mode !== 'evict' || typeof raw !== 'object' || raw === null) return undefined;
+    const key = (raw as Record<string, unknown>)[policy.keyPath];
+    return typeof key === 'string' && key.length > 0 ? key : undefined;
+  };
+
+  const evict = async (key: IDBValidKey | undefined): Promise<void> => {
+    if (policy.mode !== 'evict' || key === undefined) return;
+    try {
+      await rawDelete(storeName, key);
+    } catch {
+      // Best-effort: the record is already excluded from results either way.
+    }
+  };
+
+  /** Validate one raw record; on failure count + log it and, under the evict
+   *  policy, delete it (`knownKey` — the key a keyed `get` was issued for —
+   *  beats extraction, so even a record with a corrupt keyPath field is removable). */
+  const validateRead = async (raw: unknown, knownKey?: IDBValidKey): Promise<T | null> => {
     const parsed = schema.safeParse(raw);
     if (parsed.success) return parsed.data;
-    rejectionCounts.set(storeName, (rejectionCounts.get(storeName) ?? 0) + 1);
-    if (IS_DEV) console.warn(`[offline] quarantined an invalid ${storeName} record`);
+    recordRejection();
+    await evict(knownKey ?? keyOf(raw));
     return null;
   };
-  const keep = (record: T | null): record is T => record !== null;
 
   return {
     async put(record) {
@@ -99,15 +146,25 @@ function createStore<T>(storeName: StoreName, schema: z.ZodType<T>): IntegritySt
     async get(key) {
       const raw = await rawGet<unknown>(storeName, key);
       if (raw === undefined) return undefined;
-      return validateRead(raw) ?? undefined;
+      return (await validateRead(raw, key)) ?? undefined;
     },
     async getAll() {
       const raws = await rawGetAll<unknown>(storeName);
-      return raws.map(validateRead).filter(keep);
+      const records: T[] = [];
+      for (const raw of raws) {
+        const record = await validateRead(raw);
+        if (record !== null) records.push(record);
+      }
+      return records;
     },
     async getAllByIndex(index, query) {
       const raws = await rawGetAllByIndex<unknown>(storeName, index, query);
-      return raws.map(validateRead).filter(keep);
+      const records: T[] = [];
+      for (const raw of raws) {
+        const record = await validateRead(raw);
+        if (record !== null) records.push(record);
+      }
+      return records;
     },
     delete: (key) => rawDelete(storeName, key),
     clear: () => rawClear(storeName),
@@ -115,27 +172,36 @@ function createStore<T>(storeName: StoreName, schema: z.ZodType<T>): IntegritySt
   };
 }
 
+// USER DATA — quarantined in place on read failure (a recovery path must exist).
 export const savedStories: IntegrityStore<SavedStoryRecord> = createStore(
   STORE.savedStories,
   savedStoryRecordSchema,
+  { mode: 'quarantine' },
 );
 export const draftContributions: IntegrityStore<DraftContributionRecord> = createStore(
   STORE.draftContributions,
   draftContributionRecordSchema,
+  { mode: 'quarantine' },
 );
 export const draftStories: IntegrityStore<DraftStoryRecord> = createStore(
   STORE.draftStories,
   draftStoryRecordSchema,
+  { mode: 'quarantine' },
 );
+// SERVER-REFETCHABLE SNAPSHOT CACHES — evicted on read failure (the server copy
+// is authoritative; the next online read-through repopulates the record).
 export const threadSnapshots: IntegrityStore<ThreadSnapshotRecord> = createStore(
   STORE.threadSnapshots,
   threadSnapshotRecordSchema,
+  { mode: 'evict', keyPath: 'threadId' },
 );
 export const storyComments: IntegrityStore<StoryCommentsSnapshotRecord> = createStore(
   STORE.storyComments,
   storyCommentsSnapshotRecordSchema,
+  { mode: 'evict', keyPath: 'cacheKey' },
 );
 export const signalLedger: IntegrityStore<SignalLedgerRecord> = createStore(
   STORE.signalLedger,
   signalLedgerRecordSchema,
+  { mode: 'evict', keyPath: 'itemId' },
 );
