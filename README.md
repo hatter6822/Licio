@@ -60,8 +60,9 @@ whole network) doesn't.
 There is no applause. Distribution is earned through
 **Participation-Weighted Attention (PWAtt)**: coarse reading signals (dwell
 buckets, source-opening, return visits, reply depth) weighted by constructive
-participation — sourced comments, corrections, synthesis, bridge-building. Anti-signals
-(burst and cascade detectors, coordinated-behavior dampening) can only
+participation — cited comments, corrections, saves-for-later — with uncited
+accusations downweighted. Anti-signals (burst and cascade detectors,
+coordinated-behavior dampening) can only
 *subtract*; nothing can buy rank. The pay-to-rank firewall is structural:
 a financial denylist inside the ranking feature space, database-level
 wallet↔ranking isolation, and ten ranking-neutrality tests that run as a
@@ -111,8 +112,10 @@ inside hard, platform-enforced bounds:
 
 Licio replaces dogpiles with **challenge resolution** (WS-T): filing a sourced
 `correction` against a story or comment opens a **debate arena**. Both sides
-post and edit co-visible positions (summary + citations) for 12 hours; the
-governed AI adjudicator then weighs *only* the material presented —
+post and edit co-visible positions (summary + citations) across a 24-hour
+arena — locked for its final hour, expedited the moment both sides go an hour
+without edits; the governed AI adjudicator then weighs *only* the material
+presented —
 source count, domain independence, direct rebuttal, substance — and emits
 class **probabilities**, never a verdict: a deterministic shell maps the
 outcome, rejects URL-carrying rationales, and falls back to a pinned-weights
@@ -182,7 +185,8 @@ The novel layers sit on a complete, hardened platform:
   SIWE, server-side sessions (`__Host-` cookies), RBAC, steward TOTP step-up
   MFA, append-only audit logs, age gates, and granular privacy controls.
 - **Comment-first conversation.** Stories own inline comment sections;
-  sourced comments (citations) and `correction` enrichments carry the sourcing; interpretation **lenses**
+  sourcing is comment-centric — inline citations on comments plus typed
+  `correction` enrichments; interpretation **lenses**
   let a room read the same story from declared vantages (feeding SCOI). All
   user-generated HTML egresses through one sanctioned Markdown-lite →
   DOMPurify → Trusted Types path.
@@ -222,7 +226,7 @@ same interfaces as the production adapters, and the whole product is live
 immediately:
 
 - A **seeded demo corpus** — role accounts, rooms across every visibility
-  tier, stories with nested comments, sourced comments and lenses, a moderation queue,
+  tier, stories with nested, cited comments and lenses, a moderation queue,
   and real computed invariant/reading signals.
 - A **community-governed room** (*Elections & Governance*) with an active,
   member-ratified AI moderation model, so the WS-U surfaces render real data.
@@ -265,7 +269,7 @@ adapter.
 | Attribute | Value |
 | --- | --- |
 | Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` core, plus [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE rooms) |
-| Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.8`, ~992 atomic tasks across 22 workstreams |
+| Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.9`, ~994 atomic tasks across 22 workstreams |
 | Runtime | Node.js `>=22`, pinned for local development in [`.nvmrc`](.nvmrc) |
 | Package manager | pnpm `9.15.4`, pinned by `packageManager` |
 | Language/tooling | TypeScript `7.0.2`, Vite `8`, Vitest `4`, Biome `2.5` |
@@ -378,7 +382,7 @@ The gates, grouped by what they defend:
 | Private rooms leave nothing on the server | `check:no-p2p-server-content` · `check:no-private-cid-egress` · `check:private-rendezvous-schema` · `check:p2p-endpoint-rejections` · `check:p2p-ranking-exclusion` · `check:p2p-search-exclusion` · `check:private-bundle-transparency` |
 | Verified code only, everywhere it runs | `check:update-channel` · `check:sw` (post-build) · `lint:security` · `lint:lockfile` |
 | Dev never diverges from production | `check:prod-parity` (every in-memory adapter needs a boot-wired production counterpart; production adapters hold no in-memory state) |
-| Structural boundaries hold | `check:workspace-deps` · `check:deps` · `check:lcap-p2p-split` · `check:private-p2p-split` · `check:lcap-schema-egress` |
+| Structural boundaries hold | `check:workspace-deps` · `check:deps` · `check:lcap-p2p-split` · `check:private-p2p-split` · `check:lcap-schema-egress` · `check:p2p-mls-wrapper` |
 | Policy, adversarial, and protocol posture | `check:policy` · `check:adversarial` · `check:lcap-scheduler` · `check:knomosis-pins` |
 
 The full list with per-gate detail lives in [`CLAUDE.md`](CLAUDE.md); CI runs
@@ -399,6 +403,7 @@ pnpm test:e2e                    # Playwright E2E via the web workspace
 pnpm --filter web test:e2e:bff   # authenticated BFF-in-the-loop E2E
 pnpm build                       # ordered monorepo production build
 pnpm sbom                        # CycloneDX SBOM/license check
+pnpm audit:advisories            # dependency advisories via the npm bulk endpoint
 ```
 
 Before declaring a branch green, prefer `pnpm typecheck:ci` over the incremental

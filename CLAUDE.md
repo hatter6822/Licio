@@ -81,6 +81,7 @@ pnpm check:private-bundle-transparency # WS-S.1.5: the private bundle loads no d
 pnpm check:p2p-endpoint-rejections  # WS-S.1.5: submission/contribution/feed reject p2p rooms
 pnpm check:p2p-ranking-exclusion    # WS-S.1.5: every retriever predicates storage_mode='server'
 pnpm check:p2p-search-exclusion     # WS-S.1.5: server search indexes/serves only server rooms
+pnpm check:p2p-mls-wrapper          # WS-S.3.1a: ts-mls is imported ONLY via the reviewed MLS wrapper
 pnpm check:update-channel           # WS-S.10.2b: the private-mode bundle is signature + transparency-log + digest verified BEFORE activation (untrusted ⇒ rooms locked)
 pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP + private-p2p
 pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP + private-p2p planes)
