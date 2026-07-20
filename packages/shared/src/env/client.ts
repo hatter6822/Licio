@@ -75,14 +75,15 @@ export const clientEnvSchema = z
 export type ClientEnv = z.infer<typeof clientEnvSchema>;
 
 export function validateClientEnv(env: Record<string, string | undefined>): ClientEnv {
+  // Framework/bundler build-time metadata that legitimately rides `import.meta.env`
+  // and is NEVER a secret: Vite's five built-ins plus TanStack Start's `TSS_*`
+  // flags (e.g. `TSS_INLINE_CSS_ENABLED`, injected by its Vite plugin).  Vite's
+  // `envPrefix` already guarantees only `VITE_` USER vars are exposed, so this
+  // guard exists to catch a genuinely leaked non-framework key — it must not
+  // white-screen the app over framework metadata it does not control.
+  const FRAMEWORK_ENV_KEYS = new Set(['BASE_URL', 'MODE', 'DEV', 'PROD', 'SSR']);
   const nonViteKeys = Object.keys(env).filter(
-    (key) =>
-      !key.startsWith('VITE_') &&
-      key !== 'BASE_URL' &&
-      key !== 'MODE' &&
-      key !== 'DEV' &&
-      key !== 'PROD' &&
-      key !== 'SSR',
+    (key) => !key.startsWith('VITE_') && !key.startsWith('TSS_') && !FRAMEWORK_ENV_KEYS.has(key),
   );
   if (nonViteKeys.length > 0) {
     throw new Error(

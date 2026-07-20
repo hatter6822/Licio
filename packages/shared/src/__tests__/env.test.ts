@@ -375,6 +375,25 @@ describe('validateClientEnv', () => {
     expect(() => validateClientEnv({})).not.toThrow();
   });
 
+  it('accepts the real framework-injected env (Vite built-ins + TanStack TSS_ flags)', () => {
+    // This is EXACTLY what Vite/TanStack Start inject into `import.meta.env`; the
+    // guard must not white-screen the app over framework metadata (regression: the
+    // `TSS_INLINE_CSS_ENABLED` key crashed boot → every E2E failed).
+    expect(() =>
+      validateClientEnv({
+        BASE_URL: '/',
+        MODE: 'production',
+        DEV: 'false',
+        PROD: 'true',
+        SSR: 'false',
+        TSS_INLINE_CSS_ENABLED: 'false',
+        VITE_API_URL: 'http://localhost:3001',
+      }),
+    ).not.toThrow();
+    // A genuinely leaked NON-framework key is still rejected (the guard's real job).
+    expect(() => validateClientEnv({ BASE_URL: '/', SECRET_TOKEN: 'leaked' })).toThrow('VITE_');
+  });
+
   it('rejects a garbage private-bundle signer pin (fails the build loudly)', () => {
     expect(() =>
       validateClientEnv({
