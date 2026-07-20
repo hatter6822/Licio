@@ -215,7 +215,7 @@ The novel layers sit on a complete, hardened platform:
 Zero setup — no Docker, no `.env`:
 
 ```sh
-corepack enable && corepack prepare pnpm@9.15.4 --activate
+corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install --frozen-lockfile
 pnpm dev
 ```
@@ -271,7 +271,7 @@ adapter.
 | Specification | [`docs/SPEC.md`](docs/SPEC.md) `v0.7` core, plus [`docs/OFFLINE_SPEC.md`](docs/OFFLINE_SPEC.md) (LCAP) and [`docs/PRIVATE_SPEC.md`](docs/PRIVATE_SPEC.md) (E2EE rooms) |
 | Implementation plan | [`docs/planning/00-index.md`](docs/planning/00-index.md) `v4.9`, ~994 atomic tasks across 22 workstreams |
 | Runtime | Node.js `>=22`, pinned for local development in [`.nvmrc`](.nvmrc) |
-| Package manager | pnpm `9.15.4`, pinned by `packageManager` |
+| Package manager | pnpm `11.15.1`, pinned by `packageManager`; the pnpm 11 supply-chain gate (24h `minimumReleaseAge`) vets every resolution |
 | Language/tooling | TypeScript `7.0.2`, Vite `8`, Vitest `4`, Biome `2.5` |
 | Database/cache | PostgreSQL 16 with pgvector; Redis 7 for sessions, replay/rate-limit, leases, and realtime stores |
 | AI backend | Loopback-local LLM by default (`gpt-oss:20b` via any OpenAI-compatible runtime); hosted Anthropic as explicit opt-in; deterministic fallbacks everywhere |

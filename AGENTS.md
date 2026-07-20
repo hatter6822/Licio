@@ -36,8 +36,8 @@ type level, runtime, and CI (the no-applause static gate).
 ## Build and run
 
 ```bash
-# Prerequisites: Node 22+ (pinned in .nvmrc), pnpm 9.15.4+.
-corepack enable && corepack prepare pnpm@9.15.4 --activate
+# Prerequisites: Node 22+ (pinned in .nvmrc), pnpm 11.15.1+.
+corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install
 
 # Daily commands.
@@ -120,9 +120,14 @@ pnpm --filter courier test:unit     # courier Layer-1+2 JVM unit tests (pure fra
 `package.json` (root and per-workspace) is the source of truth for
 every build command; consult it before adding new scripts.
 
-**Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 9.15.4 (pinned
-in `package.json` `packageManager`), TypeScript 7.0.2, Vite 8.1.5,
-Biome 2.5.4.
+**Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 11.15.1 (pinned
+in `package.json` `packageManager`; engines require pnpm >= 11 — the
+security overrides live in `pnpm-workspace.yaml`, which pnpm 9 would
+silently ignore), TypeScript 7.0.2, Vite 8.1.5, Biome 2.5.4.  pnpm 11's
+default supply-chain gate (24h `minimumReleaseAge`) vets every
+resolution: a version published less than 24 hours ago is held back
+until it ages — do NOT weaken or bypass the gate to force a
+newer-than-24h version in.
 
 ## Pre-commit verification (mandatory)
 
@@ -329,10 +334,12 @@ dependency:
 4. License — must be AGPL-3.0-or-later compatible (MIT, ISC, BSD, Apache-2.0)
 5. Web-API alternative — can a built-in browser/Node.js API replace it?
 
-**Pinned dependencies (`pnpm.overrides` + exact peers).**  A few versions are
-pinned to keep the `audit:advisories` gate clean or to satisfy an exact peer;
-drop each once upstream ships the fix (per-CVE rationale lives in the commit
-that added the pin, not here).
+**Pinned dependencies (`pnpm-workspace.yaml` `overrides` + exact peers).**
+A few versions are pinned to keep the `audit:advisories` gate clean or to
+satisfy an exact peer; drop each once upstream ships the fix (per-CVE
+rationale lives in the commit that added the pin, not here).  The overrides
+live in `pnpm-workspace.yaml` — pnpm >= 10 no longer reads the `pnpm` field
+in `package.json`, so an override placed there is silently ignored.
 
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
