@@ -12,6 +12,12 @@ resolutionMode: highest
 preferFrozenLockfile: true
 enablePrePostScripts: false
 
+# The supply-chain age gate (documented in CLAUDE.md/README): a version
+# published less than 24 hours ago is rejected at resolution AND lockfile
+# verification.  Declared explicitly so the gate never depends on a pnpm
+# default drifting between majors.
+minimumReleaseAge: 1440
+
 # Doctrine: dependency install scripts NEVER run (CLAUDE.md dependency
 # checklist).  These two dev-tool packages declare build scripts that this
 # project intentionally does not execute (esbuild's platform binary comes

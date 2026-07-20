@@ -402,7 +402,8 @@ pnpm test -- --coverage          # Vitest with coverage gate
 pnpm test:e2e                    # Playwright E2E via the web workspace
 pnpm --filter web test:e2e:bff   # authenticated BFF-in-the-loop E2E
 pnpm build                       # ordered monorepo production build
-pnpm sbom                        # CycloneDX SBOM/license check
+pnpm run sbom                    # CycloneDX SBOM/license check (`run` required — pnpm 11's
+                                 #   builtin `sbom` shadows the bare name)
 pnpm audit:advisories            # dependency advisories via the npm bulk endpoint
 ```
 

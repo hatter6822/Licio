@@ -1124,7 +1124,7 @@ saves a CI round-trip:
 | `pnpm check:knomosis-pins` | a non-`local` Knomosis deployment in `apps/api/src/knomosis/pin.config.json` carries sentinel (all-zero) finality values (Section 17.8) |
 | `pnpm lint:lockfile` | the lockfile's registry/integrity hashes don't validate |
 | `pnpm check:sw` | the **built** service worker contains remote `importScripts`/`eval` (run after `pnpm build`) |
-| `pnpm sbom` | (generates the CycloneDX SBOM + license-compatibility check) |
+| `pnpm run sbom` | (generates the CycloneDX SBOM + license-compatibility check; `run` is required — pnpm 11's builtin `sbom` command shadows the bare script name) |
 
 **Per-workspace filtering** — run any workspace script in isolation:
 
@@ -1627,7 +1627,7 @@ subsection that carries its full detail — follow them in this order:
 3. **Build the release artifacts** (17.2). On a clean checkout: Corepack
    pnpm → `pnpm install --frozen-lockfile` → export the two `VITE_` trust-
    anchor pins → `pnpm build` → `pnpm gen:update-manifest` → `pnpm check:sw`
-   → `pnpm check:update-channel` → `pnpm sbom`.
+   → `pnpm check:update-channel` → `pnpm run sbom`.
 4. **Stage the artifacts.** Deploy the **built checkout** (the API resolves
    dependencies from its installed `node_modules` — never ship a bare
    `dist/`) to the API host; upload `apps/web/dist` to the static host.
@@ -1724,7 +1724,8 @@ pnpm build                  # ordered monorepo build → apps/web/dist + apps/ap
 pnpm gen:update-manifest    # sign the private-mode bundle (WS-S.10 — below)
 pnpm check:sw               # post-build service-worker gate
 pnpm check:update-channel   # verify the manifest binds the built bundle
-pnpm sbom                   # CycloneDX SBOM — the supply-chain record (recommended)
+pnpm run sbom               # CycloneDX SBOM — the supply-chain record (recommended;
+                            #   `run` required: pnpm 11's builtin `sbom` shadows the name)
 ```
 
 | Artifact | Produced by | Notes |

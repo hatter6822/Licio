@@ -248,7 +248,9 @@ jobs:
       - name: Security lint
         run: pnpm lint:security
       - name: Generate SBOM
-        run: pnpm sbom
+        # `pnpm run` is required: pnpm 11 ships a builtin `sbom` command that
+        # shadows the bare script name.
+        run: pnpm run sbom
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: build-artifacts

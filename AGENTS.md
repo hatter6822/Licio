@@ -89,7 +89,8 @@ pnpm check:knomosis-pins            # WS-L.1.1a: every non-local Knomosis deploy
 pnpm check:sw                       # SW security scan (run after build)
 
 # Supply chain and build validation.
-pnpm sbom                           # CycloneDX SBOM (includes transitive deps)
+pnpm run sbom                       # CycloneDX SBOM (includes transitive deps; `run` is
+                                    #   required — pnpm 11's builtin `sbom` shadows the bare name)
 pnpm clean                          # remove build artifacts
 
 # Database (development).  Migrations are HAND-AUTHORED (SQL + a
