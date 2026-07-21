@@ -2,7 +2,8 @@
 //
 // WS-U HTTP surface: the steward seat, the community model registry (propose /
 // list / member-downloadable artifact / approve), and the "governed by" agent
-// view. Authentication is required; steward-only writes are service-enforced.
+// view. Authentication is required; the service enforces the write gates
+// (member-gated propose, steward-only open/cancel/law-pack).
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -184,6 +185,75 @@ describe('WS-U governance routes', () => {
     const agentBody = await json<{ active: boolean; model_id: string }>(agent);
     expect(agentBody.active).toBe(true);
     expect(agentBody.model_id).toBe(modelId);
+  });
+
+  it('model candidacy is a MEMBER power: a joined member proposes, a non-member is 403, and the steward can cancel an open vote', async () => {
+    const roomId = '00000000-0000-4000-8000-000000000003';
+    const steward = await seedUserWithSession(forum.identity);
+    const member = await seedUserWithSession(forum.identity);
+    const outsider = await seedUserWithSession(forum.identity);
+    await getGovernanceService().bootstrapSeat(roomId, steward.userId);
+    await joinRoom(forum, roomId, member.userId);
+
+    // A NON-member cannot propose (candidacy is a member power)…
+    const refused = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/models`,
+        'POST',
+        { bundle, prompt_text: 'Moderate r3.' },
+        outsider.cookie,
+      ),
+    );
+    expect(refused.status).toBe(403);
+
+    // …a plain member (not the steward) can.
+    const propose = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/models`,
+        'POST',
+        { bundle, prompt_text: 'Moderate r3.' },
+        member.cookie,
+      ),
+    );
+    expect(propose.status).toBe(201);
+    const { modelId } = await json<{ modelId: string }>(propose);
+
+    // The steward VALIDATES: opens the vote on the member-authored proposal…
+    const open = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/models/${modelId}/ratification`,
+        'POST',
+        {},
+        steward.cookie,
+      ),
+    );
+    expect(open.status).toBe(201);
+    const { vote_id } = await json<{ vote_id: string }>(open);
+
+    // …and holds the improper-vote CANCEL (steward-only; a member is refused).
+    const memberCancel = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/ratifications/${vote_id}/cancel`,
+        'POST',
+        undefined,
+        member.cookie,
+      ),
+    );
+    expect(memberCancel.status).toBe(403);
+    const cancelled = await app.request(
+      jsonReq(
+        `/v1/rooms/${roomId}/governance/ratifications/${vote_id}/cancel`,
+        'POST',
+        undefined,
+        steward.cookie,
+      ),
+    );
+    expect(cancelled.status).toBe(200);
+    // The vote is gone from the open-vote view; the candidate stays eligible.
+    const view = await app.request(
+      jsonReq(`/v1/rooms/${roomId}/governance/ratification`, 'GET', undefined, member.cookie),
+    );
+    expect((await json<{ vote: unknown }>(view)).vote).toBeNull();
   });
 
   it('opens a ratification vote (steward only) and gates ballots to room members', async () => {

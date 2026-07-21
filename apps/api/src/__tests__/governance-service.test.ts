@@ -209,7 +209,7 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
       },
     });
     if (!lp.ok) throw new Error('law-pack proposal failed');
-    const proposed = await h.svc.proposeModel('r1', 'creator', goodBundle(), 'prompt');
+    const proposed = await h.svc.proposeModel('r1', 'creator', goodBundle(), 'prompt', true);
     if (!proposed.ok) throw new Error('model proposal failed');
     await h.svc.evaluateModel(proposed.value.modelId);
     // Approve (bind the law-pack) so settle resolves rules from the binding.
@@ -264,15 +264,21 @@ describe('GovernanceService — Stage 2 model admission', () => {
     await h.svc.bootstrapSeat('r', 'steward');
   });
 
-  it('lets only the steward propose, and content-addresses the bundle', async () => {
-    expect((await h.svc.proposeModel('r', 'intruder', goodBundle(), 'p')).ok).toBe(false);
-    const p = await h.svc.proposeModel('r', 'steward', goodBundle(), 'You moderate r.');
+  it('lets any MEMBER propose (candidacy is a member power; the steward validates), and content-addresses the bundle', async () => {
+    // A non-member is refused; a plain member — not just the steward — proposes
+    // (a distinct bundle: the same one would collide on the room-digest guard).
+    expect((await h.svc.proposeModel('r', 'outsider', goodBundle(), 'p', false)).ok).toBe(false);
+    expect(
+      (await h.svc.proposeModel('r', 'member-1', { ...goodBundle(), bundleId: 'b2' }, 'p', true))
+        .ok,
+    ).toBe(true);
+    const p = await h.svc.proposeModel('r', 'steward', goodBundle(), 'You moderate r.', true);
     expect(p.ok).toBe(true);
     if (p.ok) expect(p.value.artifactDigest).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('content-addresses a bundle independent of key order (canonical digest)', async () => {
-    const ordered = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    const ordered = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p', true);
     // The SAME bundle with reordered top-level keys, proposed in another room.
     await h.svc.bootstrapSeat('r2', 'steward');
     const reordered = await h.svc.proposeModel(
@@ -289,6 +295,7 @@ describe('GovernanceService — Stage 2 model admission', () => {
         bundleId: 'b',
       },
       'p',
+      true,
     );
     expect(ordered.ok && reordered.ok).toBe(true);
     if (ordered.ok && reordered.ok) {
@@ -304,7 +311,7 @@ describe('GovernanceService — Stage 2 model admission', () => {
     // carries the community's moderationPrompt.
 
     // Well-behaved (the deterministic default proposer) ⇒ eligible.
-    const good = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    const good = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p', true);
     const goodId = good.ok ? good.value.modelId : '';
     expect((await h.svc.evaluateModel(goodId)).ok).toBe(true);
     expect((await h.stores.models.get(goodId))?.status).toBe('eligible');
@@ -312,7 +319,7 @@ describe('GovernanceService — Stage 2 model admission', () => {
     // Over-moderation: a model that REMOVES even the benign fixture ⇒ rejected.
     const over = makeService(false, fixedProposer('remove'));
     await over.svc.bootstrapSeat('r', 'steward');
-    const nuke = await over.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    const nuke = await over.svc.proposeModel('r', 'steward', goodBundle(), 'p', true);
     const nukeId = nuke.ok ? nuke.value.modelId : '';
     await over.svc.evaluateModel(nukeId);
     expect((await over.stores.models.get(nukeId))?.status).toBe('rejected');
@@ -320,7 +327,7 @@ describe('GovernanceService — Stage 2 model admission', () => {
     // Under-moderation: a model that ALLOWS even clearly-violating spam ⇒ rejected.
     const under = makeService(false, fixedProposer('allow'));
     await under.svc.bootstrapSeat('r', 'steward');
-    const empty = await under.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    const empty = await under.svc.proposeModel('r', 'steward', goodBundle(), 'p', true);
     const emptyId = empty.ok ? empty.value.modelId : '';
     await under.svc.evaluateModel(emptyId);
     expect((await under.stores.models.get(emptyId))?.status).toBe('rejected');
@@ -333,7 +340,7 @@ describe('GovernanceService — Stage 3 bounded moderation agent', () => {
   beforeEach(async () => {
     h = makeService();
     await h.svc.bootstrapSeat('r', 'steward');
-    const p = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p');
+    const p = await h.svc.proposeModel('r', 'steward', goodBundle(), 'p', true);
     modelId = p.ok ? p.value.modelId : '';
     await h.svc.evaluateModel(modelId);
   });
@@ -358,6 +365,7 @@ describe('GovernanceService — Stage 3 bounded moderation agent', () => {
       'steward',
       goodBundle({ requestedCapabilities: ['moderate.warn'] }),
       'p2',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await h.svc.evaluateModel(id);
@@ -454,6 +462,7 @@ describe('GovernanceService — Stage 5 kernel-backed treasury', () => {
         requestedCapabilities: ['gateway.submit_signed_action', 'treasury.report'],
       }),
       'p',
+      true,
     );
     const modelId = p.ok ? p.value.modelId : '';
     await h.svc.evaluateModel(modelId);

@@ -12,7 +12,7 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Layer | Where | Status |
 |---|---|---|
 | Pure domain (kernel, DSL, capabilities, elections) | `packages/governance` (`@licio/governance`) | **Shipped** |
-| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038`, `0066` (content-free deferred-re-moderation queue), `0067` (admitting-backend pin) | **Shipped** |
+| Isolated persistence | `packages/db/src/schema/governance.ts` (`knomosis` pgSchema) + migrations `0035`–`0038`, `0053` (durable floor-freeze), `0054` (frozen electorate + election lock), `0055` (treasury target allocation), `0066` (content-free deferred-re-moderation queue), `0067` (admitting-backend pin), `0094` (the per-lane adjudication pin + the hub-verification snapshot — the role split + model candidacy) | **Shipped** |
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
@@ -83,15 +83,35 @@ gate fails any new governance POST route that ships unclassified.
   tally rules AND the next term length come from the room's **community-voted
   law-pack** (`election` bounds: quorum, turnout, per-account cap, term), defaulting
   to the platform baseline — never a hardcoded constant.
-- **Stage 2** — community model/prompt registry, content-addressing, and the
-  **platform admission gate**: the candidate in-room model (an LLM proposer) is
-  **sampled k-of-N** over the platform floor-safety eval set and must land in the
-  platform `[min,max]` severity band on every fixture (catching under- and
-  over-moderation), beneath — never replacing — the platform legal floor. A
-  TRANSIENT proposer outage during admission is **retryable, never a permanent
-  reject**: the model stays `evaluating` (so the `(room,digest)` dedup can't lock
-  the bundle out) and the scheduler's `admission_retry` sweep re-runs it when the
-  backend recovers. A model
+- **Stage 2** — community model/prompt registry, content-addressing, **hub
+  model candidacy**, and the **platform admission gate**. Candidacy is a
+  MEMBER power (2026-07-21): any governance-eligible ROOM MEMBER proposes the
+  bundle + prompt (`proposeModel` is membership-gated, with the elected
+  seat-holder always counting as a member; the KYC floor applies at the
+  route); the steward VALIDATES — the ratification-opening gate below plus a
+  time-bounded **cancel of an improper open vote** (`cancelRatification`,
+  CAS-raced against the scheduler settle via `transitionOpen` so a cancelled
+  vote can never activate and a settled one can never be retro-cancelled). A
+  bundle may carry a per-role `modelSelection` — REVISION-PINNED huggingface.co references for
+  the room's MODERATION and/or ADJUDICATION model (any public, text-capable
+  hub model; the propose form's model picker or a hand-authored block). Every reference is
+  **verified against the hub at propose time** (existence at the pin, not
+  gated/private, a candidate pipeline; the verified snapshot is stored on the
+  model row for transparency; no verifier ⇒ `hub_disabled`, fail-closed — see
+  `GOVERNANCE_MODEL_HUB`). Admission then evaluates **the selected model
+  itself**: the moderation candidate is **sampled k-of-N** over the platform
+  floor-safety eval set and must land in the platform `[min,max]` severity
+  band on every fixture (catching under- and over-moderation), beneath —
+  never replacing — the platform legal floor; a `debate.judge`-requesting
+  bundle additionally passes the ADJUDICATION validity probe (one canonical
+  debate fixture through the resolved adjudication model — advisory surface,
+  so its bar is validity, not the floor bands). On pass, **both lane pins**
+  are recorded (`admitted_backend_id` + `admitted_adjudication_backend_id`).
+  A TRANSIENT outage during admission — including a hub selection no runtime
+  serves YET — is **retryable, never a permanent reject**: the model stays
+  `evaluating` (so the `(room,digest)` dedup can't lock the bundle out) and
+  the scheduler's `admission_retry` sweep re-runs it when the backend (or the
+  operator-provisioned runtime) recovers. A model
   becomes the active agent ONLY by passing a **member ratification vote** (`@licio/
   governance` `tallyRatification`): the seat-holder opens a vote on an eligible
   model (optionally binding a law-pack), members cast one yes/no ballot each
@@ -113,12 +133,18 @@ gate fails any new governance POST route that ships unclassified.
   the live content stores at retry (the queue holds only soft refs — **no UGC** — so a
   contribution deletion has nothing to purge there), re-running the model once it
   recovers, and RAISING the already-published contribution to review post-hoc
-  (floor-dominant), so the model's judgment is **delayed, never dropped**. A model is
-  admitted under a SPECIFIC backend (`ModerationProposer.backendId`, pinned on the
-  model at admission); if the live backend differs — LLM moderation enabled over a
-  deterministic-admitted model, or `GOVERNANCE_LLM_MODEL` changed — moderation **fails
-  closed to the baseline** until the model is re-admitted (never runs under an
-  un-vetted backend). A **deterministic default proposer** serves the same seam when no
+  (floor-dominant), so the model's judgment is **delayed, never dropped**. The
+  moderation model runs on the dedicated **MODERATION LANE** (project default: the
+  `Qwen/Qwen3Guard-Gen-4B` guard classifier in its NATIVE Safety/Categories dialect,
+  deterministically mapped onto the action vocabulary — `guard-format.ts`; a
+  room-selected hub model resolves through the room-model resolver in ITS dialect).
+  A model is admitted under a SPECIFIC backend (`ModerationProposer.backendId` —
+  the bundle's hub selection when it carries one, else the lane — pinned on the
+  model at admission); if the live resolution differs — LLM moderation enabled over
+  a deterministic-admitted model, the moderation-lane model changed, or a hub
+  selection no longer served — moderation **fails closed to the baseline** until the
+  model is re-admitted (never runs under an un-vetted backend). A **deterministic
+  default proposer** serves the same seam when no
   LLM is configured (dev/test; opt out of the LLM with `GOVERNANCE_LLM_MODERATION=off`).
   Provenance-triple audit log; the floor's
   room-governance-freeze — a live, platform-steward-gated control (`POST
@@ -146,10 +172,18 @@ gate fails any new governance POST route that ships unclassified.
   ratified agent holds the `debate.judge` capability (permitted by the default
   law-pack; deny-by-default derivation) adjudicates its own correction-debate
   queue: `GovernanceService.debateConditioning(roomId)` resolves the active
-  binding → capability gate → the ratified model under the SAME
-  backend-admission pin as moderation → the community-ratified prompt, and the
+  binding → capability gate → the ratified model under its OWN
+  **ADJUDICATION-lane admission pin** (`admitted_adjudication_backend_id` — the
+  role split: the adjudicator runs the ADJUDICATION lane, project default the
+  `Qwen/Qwen3.6-27B` generalist, or the bundle's hub adjudication selection
+  resolved per call) → the community-ratified prompt, and the
   governed LLM debate leg runs room-conditioned (the prompt folds in
-  subordinate to the platform rules).  The verdict's `AIOutputRecord` pins the
+  subordinate to the platform rules).  A pin mismatch — a lane-model swap, an
+  unserved hub selection, or a row admitted before the split — fails closed to
+  the platform adjudicator legs until the scheduler's `adjudication_repin`
+  sweep re-probes and heals it (a passing validity re-probe IS that lane's
+  re-admission; the moderation pin stays strict — its re-admission is the full
+  k-of-N floor evaluation).  The verdict's `AIOutputRecord` pins the
   room/model/prompt digest and `recordDebateAgentAction` appends the
   provenance triple to the agent action log (`actionType: 'debate.judge'`,
   reversible — the steward's 24h overrule is the human remedy).  Every failure
@@ -184,17 +218,25 @@ platform-floor freeze stays unlimited so an emergency pause is always available.
 Both surfaces are mounted on the room page behind the WS-Q content read bar:
 
 - **`GovernedByPanel`** — the in-room "how this room is governed" transparency view
-  for every member: whether a community-approved agent governs the room, the powers
+  for every member: whether a community-approved agent governs the room, **which
+  model serves each governed ROLE** (the ratified hub selection with its pinned
+  revision, or "platform default" — the role-split transparency row), the powers
   the community granted it, the recent agent actions (each named as appealable to
   the platform's human floor), a one-click **download** of the active,
   content-addressed model artifact, and a distinct **floor-paused** state when the
   platform floor has frozen a community-approved agent (vs a room that never had one).
-- **`StewardModelManager`** — the elected steward's two powers + the member vote: a
-  steward-only **propose** form (a declarative `GovernancePolicyBundle` editor
-  seeded with a valid starter policy + an agent prompt, JSON-validated client-side
-  before the POST); on a model that cleared the admission gate, a steward
-  **"Open ratification vote"** action; and, while a vote is open, a member voting
-  panel (**Approve / Reject** with the live in-favour/opposed tally and the close
+- **`StewardModelManager`** — member candidacy + the steward's validation gate +
+  the member vote (the 2026-07-21 topology: members author and adopt; the steward
+  checks): a MEMBER **propose** form (a declarative `GovernancePolicyBundle`
+  editor seeded with a valid starter policy + an agent prompt, JSON-validated
+  client-side before the POST) with the per-role **hub model picker** (search
+  public huggingface.co models through the BFF `/v1/model-hub` proxy, pin the
+  selection at its head revision sha into the bundle's `modelSelection`, clear
+  back to the platform default; gated models are flagged, never selectable); on a
+  model that cleared the admission gate, the steward's
+  **"Open ratification vote"** action (the validation gate) and, while a vote is
+  open, the steward's **improper-vote cancel** alongside the member voting panel
+  (**Approve / Reject** with the live in-favour/opposed tally and the close
   time) shown to every member. The proposal **registry** — status pipeline +
   per-proposal digest + member **download** — is shown to every member for
   transparency. No applause primitives; the tally is governance data (in-favour /
@@ -255,7 +297,8 @@ hypothetical `knomosis → public.rooms` FK is caught.
   on a hold/removal (`moderation-prechecks-wiring.test.ts`).
 - `apps/web` — the governance client flows (`governance-api.test.ts`), the
   `GovernedByPanel` transparency states, and the `StewardModelManager` steward
-  surface (steward-gating, propose with client-side JSON validation, confirm-gated
+  surface (member candidacy + the steward validation gate + the improper-vote
+  cancel + the hub model picker, propose with client-side JSON validation, confirm-gated
   ratify, per-proposal download, loading/error branches, axe a11y).
 - `apps/api` — the member-ratification vote (`governance-ratification.test.ts`:
   open/ballot membership-gating + idempotency, approving-majority activation,
@@ -294,7 +337,7 @@ hypothetical `knomosis → public.rooms` FK is caught.
   (`apps/api/src/treasury/proposals.ts` → `buildTreasuryExecutorPort` in
   `apps/api/src/treasury/services.ts`) routes every fund-moving execution through
   this kernel executor — see `docs/treasury/README.md`.  This residual is closed.
-- **Web surfaces** — the in-room "governed by" panel, the steward propose surface,
+- **Web surfaces** — the in-room "governed by" panel, the member propose surface,
   the member-downloadable proposal registry, AND the **member ratification voting
   panel** (open vote → Approve/Reject + live tally, now **membership-gated** — a
   non-member sees "Join the room to take part in this vote" rather than a ballot
@@ -325,18 +368,25 @@ hypothetical `knomosis → public.rooms` FK is caught.
   and FALLS BACK to the deterministic summary on any provider failure. Two real
   backends exist behind the same governed pipeline
   (`apps/api/src/ai-governance/llm/`): the hosted Anthropic API (official SDK)
-  and a **loopback-only local** OpenAI-compatible runtime (llama.cpp server,
-  Ollama, vLLM, LM Studio). Every invocation is guard-checked
+  and **loopback-only local** OpenAI-compatible runtimes running the TWO role
+  lanes of the 2026-07-21 split — moderation (`Qwen/Qwen3Guard-Gen-4B`,
+  guard-native dialect) and adjudication (`Qwen/Qwen3.6-27B`; the summariser
+  rides this lane, incl. a room's ratified hub adjudication model) — vLLM the
+  reviewed default runtime, Ollama/llama.cpp/LM Studio the alternatives. Every
+  invocation is guard-checked
   (`gov_summarize_proposal`, advisory), zod-validated, gated by the
   deterministic §24.5 quality/grounding checks, budgeted per room (ADR-6) with
-  a circuit breaker, registered/deployed through the real WS-K gate (one
-  registry identity per backend), and recorded as an immutable `AIOutputRecord`.
-  Fail-closed: OFF by default behind the explicit env opt-in
-  (`GOVERNANCE_LLM_PROVIDER`), and available in EVERY environment — production
-  included (the 2026-07-09 maintainer decision, ADR-9) — never mandatory,
-  never silent: the hosted backend's data-processor egress is boot-logged
-  loudly, and the `local` backend is loopback-enforced so content stays
-  on-host (see `docs/DEVELOPMENT.md` for setup). **The in-room moderation MODEL
+  per-model circuit breakers, registered/deployed through the real WS-K gate
+  (one registry identity per backend+config), and recorded as an immutable
+  `AIOutputRecord`.
+  Fail-closed and never silent: PRODUCTION defaults an unset
+  `GOVERNANCE_LLM_PROVIDER` to the loopback-`local` backend (the
+  production-complete posture; development wires the DEV-ONLY simulated
+  runtime instead), `deterministic` is the explicit opt-out, and every
+  governed surface fails closed per call to its deterministic path until its
+  lane responds. The hosted backend stays an explicit opt-in whose
+  data-processor egress is boot-logged loudly; the `local` backend is
+  loopback-enforced so content stays on-host (see `docs/DEVELOPMENT.md` §16). **The in-room moderation MODEL
   is the wrapped LLM** (ADR-9, revised — the deterministic policy-DSL and the
   earlier score-blind shadow advisor were both removed): a governed
   `toxicity_safety_triage` LLM CLASSIFIES each moderated contribution, and

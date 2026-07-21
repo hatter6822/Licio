@@ -50,13 +50,65 @@ async function proposeEligible(
   steward: string,
   over: Record<string, unknown> = {},
 ): Promise<string> {
-  const p = await svc.proposeModel(roomId, steward, bundle(over), 'p');
+  const p = await svc.proposeModel(roomId, steward, bundle(over), 'p', true);
   if (!p.ok) throw new Error('propose failed');
   await svc.evaluateModel(p.value.modelId);
   return p.value.modelId;
 }
 
 describe('GovernanceService ratification', () => {
+  it('cancel: the steward closes an improper OPEN vote with NO outcome (the last line of defence)', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    const open = await svc.openRatification('r', 's', modelId, null);
+    if (!open.ok) throw new Error('open failed');
+    const voteId = open.value.voteId;
+    // Steward-only: a non-steward member cannot cancel.
+    expect((await svc.cancelRatification('r', 'intruder', voteId)).ok).toBe(false);
+    // A ballot lands while open; then the steward cancels…
+    expect((await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true)).ok).toBe(true);
+    expect((await svc.cancelRatification('r', 's', voteId)).ok).toBe(true);
+    // …ballots refuse from that instant, the settle sweep skips it, nothing adopts:
+    expect((await svc.castRatificationBallot('r', voteId, 'v2', 'approve', true)).ok).toBe(false);
+    expect((await svc.settleRatification(voteId)).ok).toBe(false); // not_open
+    expect(await svc.getBinding('r')).toBeNull();
+    // The cancel checked the VOTE, not the candidate: the model stays eligible
+    // and a FRESH vote may open (the one-open-per-room slot is released).
+    expect((await svc.cancelRatification('r', 's', voteId)).ok).toBe(false); // already closed
+    expect((await svc.openRatification('r', 's', modelId, null)).ok).toBe(true);
+  });
+
+  it('cancel: refused after the published close (no pocket veto during the settle latency window)', async () => {
+    const { svc, advance } = make(50);
+    await svc.bootstrapSeat('r', 's');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    const open = await svc.openRatification('r', 's', modelId, null);
+    if (!open.ok) throw new Error('open failed');
+    // A member ballot lands, the window closes… a steward watching the tally
+    // must NOT be able to cancel the concluded vote before the settle tick.
+    expect(
+      (await svc.castRatificationBallot('r', open.value.voteId, 'v1', 'approve', true)).ok,
+    ).toBe(true);
+    advance(51_000); // past closesAt (window = 50s), before any settle tick
+    const lateCancel = await svc.cancelRatification('r', 's', open.value.voteId);
+    expect(!lateCancel.ok && lateCancel.code).toBe('not_open');
+    // The concluded vote still settles and activates normally.
+    const settled = await svc.settleRatification(open.value.voteId);
+    expect(settled.ok && settled.value.activated).toBe(true);
+  });
+
+  it('cancel: a foreign room vote id is a 404-class refusal, never cross-room cancellable', async () => {
+    const { svc } = make();
+    await svc.bootstrapSeat('r', 's');
+    await svc.bootstrapSeat('r2', 's2');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    const open = await svc.openRatification('r', 's', modelId, null);
+    if (!open.ok) throw new Error('open failed');
+    const foreign = await svc.cancelRatification('r2', 's2', open.value.voteId);
+    expect(!foreign.ok && foreign.code).toBe('not_found');
+  });
+
   it('opens a vote (steward only), gates ballots to members, and is idempotent', async () => {
     const { svc } = make();
     await svc.bootstrapSeat('r', 's');

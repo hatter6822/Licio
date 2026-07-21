@@ -2253,6 +2253,7 @@ export async function seedGovernanceDemo(
     steward,
     bundle,
     'Be neutral and concise; cite the community rule when you act, and never exceed your granted powers.',
+    true, // the seeded steward is a room member (candidacy is a member power)
   );
   if (!proposed.ok) return;
   await governance.evaluateModel(proposed.value.modelId);
@@ -2300,6 +2301,7 @@ export async function seedGovernanceDemo(
     steward,
     { ...bundle, bundleId: 'demo-civility-v2', name: 'Community civility policy v2' },
     'Prefer a warning before a removal; otherwise as before.',
+    true, // the seeded steward is a room member (candidacy is a member power)
   );
   if (!upgrade.ok) return;
   await governance.evaluateModel(upgrade.value.modelId);

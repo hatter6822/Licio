@@ -243,6 +243,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       status: 'proposed',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: t,
     });
     expect(m1).not.toBeNull();
@@ -257,6 +259,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       status: 'proposed',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: t,
     });
     expect(dup).toBeNull();
@@ -264,6 +268,10 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     const patched = await models.patchStatus(modelId, 'eligible', evalRef);
     expect(patched?.status).toBe('eligible');
     expect(patched?.evaluationRef).toBe(evalRef);
+    // The per-lane admission pins (the role split) round-trip.
+    const pinned = await models.patchAdmission(modelId, 'llm:mod-pin', 'llm:adj-pin');
+    expect(pinned?.admittedBackendId).toBe('llm:mod-pin');
+    expect(pinned?.admittedAdjudicationBackendId).toBe('llm:adj-pin');
     expect((await models.listByRoom(roomId)).some((m) => m.modelId === modelId)).toBe(true);
     // R3-4: listByStatus drives the transient-admission retry sweep.
     expect((await models.listByStatus('eligible', 50)).some((m) => m.modelId === modelId)).toBe(
@@ -288,6 +296,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       status: 'eligible',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: t,
     });
     const promptId = randomUUID();
@@ -327,6 +337,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       status: 'approved',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: t,
     });
     const promptId = randomUUID();
@@ -452,6 +464,8 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
       status: 'eligible',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: t,
     });
     const voteId = randomUUID();
@@ -510,13 +524,17 @@ describe.skipIf(!DB_URL)('WS-U governance Drizzle adapters (live Postgres)', () 
     expect(second).toBeNull();
     expect(await ratificationBallots.listByVote(voteId)).toHaveLength(1);
 
-    const settled = await ratifications.patch(voteId, {
+    const settled = await ratifications.transitionOpen(voteId, {
       status: 'settled',
       outcome: 'approved',
       settledAt: t,
     });
     expect(settled?.status).toBe('settled');
     expect(settled?.outcome).toBe('approved');
+    // The CAS: a second terminal transition (a racing cancel) matches nothing.
+    expect(await ratifications.transitionOpen(voteId, { status: 'cancelled', settledAt: t })).toBe(
+      null,
+    );
     // No longer open ⇒ off the open-room read.
     expect(await ratifications.getOpenForRoom(roomId)).toBeNull();
   });

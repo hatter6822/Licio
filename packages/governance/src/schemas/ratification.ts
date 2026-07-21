@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-U model-ratification schemas (SPEC §16.6/§24.6; the member-vote that adopts
-// a steward-proposed, platform-eligible model). A ratification is a yes/no member
+// a member-proposed, platform-eligible model). A ratification is a yes/no member
 // vote on a specific model; `tallyRatification` (../ratification.ts) computes the
 // outcome. Quorum-gated and FAIL-SAFE: below quorum/turnout, or without a
 // majority, the model is NOT adopted (the room keeps its current governance). The

@@ -121,6 +121,7 @@ async function activate(h: Harness, capabilities: string[]): Promise<void> {
     STEWARD,
     bundle(capabilities),
     'The room prizes sourced, courteous argument.',
+    true,
   );
   if (!proposed.ok) throw new Error('propose');
   await h.svc.evaluateModel(proposed.value.modelId);

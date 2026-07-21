@@ -8,6 +8,7 @@
 
 import { z } from 'zod';
 import { isoTimestampSchema, uuidSchema } from './common.js';
+import { hubRepoIdSchema, hubRevisionSchema } from './model-hub.js';
 
 export const stewardSeatSchema = z
   .object({
@@ -74,12 +75,37 @@ export const agentActionSummarySchema = z
   .strict();
 export type AgentActionSummary = z.infer<typeof agentActionSummarySchema>;
 
+/** A ratified per-role hub model reference in the transparency view (WS-U
+ *  model candidacy): the exact revision-pinned weights the community adopted
+ *  for that role; null ⇒ the project-wide default model serves it.
+ *  Module-local: consumers read it through `governedByResponseSchema`. */
+const governedByModelRefSchema = z
+  .object({
+    repo_id: hubRepoIdSchema,
+    revision: hubRevisionSchema,
+    /** Present ONLY when the bundle serves the model under a DIFFERENT runtime
+     *  id than the verified repo (e.g. a GGUF re-serve) — surfaced so a served
+     *  id can never hide behind the hub-verified repo id in the members' view. */
+    served_model_id: z.string().min(1).max(256).optional(),
+  })
+  .strict()
+  .nullable();
+
 export const governedByResponseSchema = z
   .object({
     active: z.boolean(),
     /** A community-approved agent exists but the platform floor has paused it. */
     frozen: z.boolean(),
     model_id: uuidSchema.nullable(),
+    /** The ratified bundle's per-role hub model selections; null when the
+     *  bundle selects none (every role on the platform default). */
+    model_selection: z
+      .object({
+        moderation: governedByModelRefSchema,
+        adjudication: governedByModelRefSchema,
+      })
+      .strict()
+      .nullable(),
     // The bounded capability descriptor: short capability slugs, count-capped so a
     // malformed/hostile descriptor can never balloon the cached grant list.
     granted: z.array(z.string().min(1).max(64)).max(32),

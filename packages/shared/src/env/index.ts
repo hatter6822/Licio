@@ -3,4 +3,9 @@
 export type { ClientEnv } from './client.js';
 export { clientEnvSchema, validateClientEnv } from './client.js';
 export type { ServerEnv } from './server.js';
-export { isLoopbackHttpUrl, serverEnvSchema, validateServerEnv } from './server.js';
+export {
+  isLoopbackHttpUrl,
+  parseGovernanceExtraRuntimeUrls,
+  serverEnvSchema,
+  validateServerEnv,
+} from './server.js';

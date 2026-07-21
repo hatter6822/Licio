@@ -19,6 +19,7 @@ import {
   type ProposalSummary,
   summarizeProposal,
 } from '@licio/governance';
+import type { HubModelRef } from '@licio/shared';
 
 /** The bundle `promptTemplates` key consulted for the lawmaking summary. */
 export const LAWMAKING_SUMMARIZE_TEMPLATE_KEY = 'lawmaking.summarize';
@@ -34,6 +35,13 @@ export interface LawmakingSummaryRequest {
   promptTemplate: string | null;
   /** The bundle's NL style knob (ADR-3; deterministic default: neutral_brief). */
   summaryStyle: PolicyBundleConfig['summaryStyle'];
+  /** The bundle's member-selected hub ADJUDICATION model (WS-U model
+   *  candidacy): the summariser rides the adjudication lane, so a room that
+   *  ratified its own adjudication model gets its summaries from THAT model
+   *  too. Null ⇒ the platform lane; an unresolvable ref throws (⇒ the
+   *  deterministic summary serves), never a silent fallback onto an
+   *  unratified model. The deterministic default ignores it. */
+  adjudicationRef: HubModelRef | null;
 }
 
 export interface GovernanceNlProvider {

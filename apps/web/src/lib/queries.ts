@@ -291,6 +291,18 @@ export function useCastBallotMutation(roomId: string) {
   });
 }
 
+/** Steward-only: cancel an improper OPEN ratification vote (no outcome). */
+export function useCancelRatificationMutation(roomId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (voteId: string) => governanceApi.cancelRatification(roomId, voteId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ratification(roomId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceModels(roomId) });
+    },
+  });
+}
+
 /** WS-Q.5.3b — the room feed (gated by the WS-G content bar; `enabled` lets the
  *  caller defer the fetch until the reader has passed the tier-two bar). */
 export function useRoomFeedQuery(roomId: string, enabled = true) {

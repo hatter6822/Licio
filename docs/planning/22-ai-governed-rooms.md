@@ -19,8 +19,9 @@
 > deterministic **lawmaking facilitation** (capability-gated summary/schedule/attest; the agent
 > never computes a tally), kernel-backed treasury), the rate-limited **`/v1/rooms/*`** routes +
 > seat bootstrap on room create, and the **web surface** (`apps/web/src/components/governance/`):
-> the in-room "governed by" transparency panel and the elected-steward propose/ratify
-> manager with the member-downloadable proposal registry, both on the room page. The eleven
+> the in-room "governed by" transparency panel and the governance propose/ratify
+> manager (member candidacy + the steward's validation gate, 2026-07-21) with the
+> member-downloadable proposal registry, both on the room page. The eleven
 > stores have gated Drizzle adapters bound at boot (migration `0036` adds the vote PK + model
 > digest uniqueness; `0037` adds the model-ratification tables; `0038` adds the one-open-per-room
 > partial unique index). The route layer is uuid-validated + room-content-bar-gated, ballots are
@@ -42,7 +43,11 @@ final sanctions.** The maintainer has deliberately inverted that posture for *in
 governance, while keeping it intact at the *platform* layer. The new model is:
 
 - **Every room has an elected steward** (the room's first member at creation; a Knomosis
-  election after one year and each year thereafter). The steward holds **exactly two powers**:
+  election after one year and each year thereafter). *(SUPERSEDED 2026-07-21 — candidacy is a
+  MEMBER power: any governance-eligible member proposes the model + prompt; the steward
+  VALIDATES — opening the ratification vote and cancelling an improper open one — as the last
+  line of defence. The original decision below is kept as the historical record.)* The steward
+  holds **exactly two powers**:
   upload a **community-approved governance/moderation AI model**, and upload the **in-room
   prompt** for that model. Both are *proposals* that take effect only on a Knomosis on-chain
   governance vote of the room's members. Any in-room member can **view and download** the
@@ -76,11 +81,16 @@ The maintainer's four binding decisions (the design envelope):
 The four binding decisions above left several hard questions open. They are resolved here (a
 second round of maintainer decisions, 2026-06-19) so the implementation has a settled spec.
 
-**ADR-1 (REVISED 2026-07-09 — the LLM-in-a-deterministic-wrapper redesign; see ADR-9) — A "model"
-is a content-addressed governance bundle: a community-ratified moderation PROMPT + config, whose
-in-room LLM the platform bounds deterministically.** What the steward proposes and members download
+**ADR-1 (REVISED 2026-07-09 — the LLM-in-a-deterministic-wrapper redesign; see ADR-9. Candidacy
+REVISED 2026-07-21 — model candidacy is a MEMBER power: any governance-eligible room member
+proposes; the elected steward VALIDATES — the ratification-opening gate + the open-vote cancel —
+rather than authors; and a bundle may additionally select revision-pinned huggingface.co models
+per governed role, admission-evaluated before eligibility.) — A "model"
+is a content-addressed governance bundle: a community-ratified moderation PROMPT + config (+
+optional per-role hub model selections), whose
+in-room LLM the platform bounds deterministically.** What a member proposes and members download
 is a **content-addressed `GovernancePolicyBundle`**: a versioned, machine-readable document
-containing (a) a **moderation prompt** — prose that conditions the platform's in-room LLM moderation
+containing (a) a **moderation prompt** — prose that conditions the room's in-room LLM moderation
 model — (b) **prompt templates** for the natural-language facilitation surfaces, and (c) **config**
 (thresholds, cadences, requested capabilities). **No arbitrary code or model weights execute
 server-side** — the platform runs the model and enforces every effect OUTSIDE it. *The original cut
@@ -234,11 +244,16 @@ mirrored to the AI team at `GET /v1/ai/admin/governance/moderation/:roomId`. Run
 the dev-simulated runtime).** Three maintainer decisions, one posture: *production always runs
 the complete feature; development may fake it — never the reverse.*
 (1) **Production defaults to the LLM.** An UNSET `GOVERNANCE_LLM_PROVIDER` in production now
-resolves to the **`local`** backend, with reviewed defaults for both the base URL (the Ollama
-loopback endpoint, `http://127.0.0.1:11434/v1`) and the model
-(`DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID`, currently `gpt-oss:20b` — Apache-2.0 open weights,
-served by Ollama/vLLM/llama.cpp/LM Studio, folded into the config-hashed registry identity so a
-swap re-clears the WS-K gate). Until the runtime responds, every governed surface fails CLOSED
+resolves to the **`local`** backend. *(REVISED 2026-07-21 — the ROLE SPLIT: the backend runs TWO
+model lanes, because moderation and adjudication fail differently. The MODERATION lane defaults
+to `Qwen/Qwen3Guard-Gen-4B` — a guard safety classifier spoken to in its native
+Safety/Categories dialect — on the vLLM instance at `http://127.0.0.1:8001/v1`; the ADJUDICATION
+lane (the debate adjudicator + the lawmaking summariser) to `Qwen/Qwen3.6-27B` at
+`http://127.0.0.1:8002/v1`. Both Apache-2.0 open weights, vLLM the reviewed default runtime with
+Ollama/llama.cpp/LM Studio as single-URL alternatives, every model id folded into its lane's
+config-hashed registry identity so a swap re-clears the WS-K gate; and a room bundle may select
+ANY public huggingface.co model per role — revision-pinned, hub-verified at propose,
+admission-evaluated before eligibility.) Until the runtime responds, every governed surface fails CLOSED
 per call to its deterministic path (deterministic summary; WS-J baseline + deferred
 re-moderation; the pinned-weights MLP adjudicator) and recovers automatically; the boot log
 states exactly what runtime is expected where. `GOVERNANCE_LLM_PROVIDER=deterministic` remains
@@ -257,7 +272,8 @@ global hourly budget + breaker + its own config-hashed registry identity + `AIOu
 In a governed room whose ratified agent holds the `debate.judge` capability (permitted by the
 default law-pack; deny-by-default derivation), `GovernanceService.debateConditioning` routes
 the SAME leg room-conditioned: the community-ratified prompt folds in subordinate to the
-platform rules under the moderation-admission backend pin, the record's input refs pin the
+platform rules under the ADJUDICATION-admission backend pin (2026-07-21 role split; migration
+`0094` — a room's hub adjudication selection resolves per call), the record's input refs pin the
 room/model/prompt digest, and the verdict lands in the WS-U agent action log
 (`actionType: 'debate.judge'`, reversible).
 ANY failure returns null and `adjudicateDebate` falls back to the pinned-weights MLP, so a
@@ -289,13 +305,17 @@ Layer 2 — Knomosis-bounded in-room AI agent   (autonomous WITHIN community-vot
    │               + the WS-K evaluation/prohibited-use gate + no key custody + transparency.
    │
 Layer 1 — Room sovereignty             (the community + its elected steward)
-      the elected steward proposes a model + prompt; the members approve them by Knomosis vote;
-      any member may view/download the model and read the prompt; fork/exit preserved.
+      any governance-eligible member proposes a model + prompt; the members approve them by
+      Knomosis vote; the elected steward VALIDATES (opens the vote; can cancel an improper
+      one) as the last line of defence; any member may view/download the model and read the
+      prompt; fork/exit preserved.
 ```
 
-**Layer 1 — Room sovereignty.** The community owns its governance. The elected steward is a
-*nominator*, not a ruler: their only levers are the model and the prompt, and even those bind
-nothing until the members ratify them by a Knomosis vote. Transparency (download the model,
+**Layer 1 — Room sovereignty.** The community owns its governance. Candidacy is a MEMBER
+power (2026-07-21): any governance-eligible member authors the model + prompt, and the
+elected steward is a *validator*, not a ruler — their only levers are opening the
+ratification vote on an admitted proposal and cancelling an improper open one, and nothing
+binds until the members ratify it by a Knomosis vote. Transparency (download the model,
 read the prompt) plus fork/exit rights mean a community that dislikes how it is governed can
 elect a new steward, vote in a different model/prompt, or fork the room.
 
@@ -336,21 +356,22 @@ The incumbent may stand again. A vacated seat (steward departs, is removed by th
 or loses quorum) falls back to the longest-tenured active member until the next election, and
 the room reverts to the **platform moderation baseline** (§U.3.5) in the interim.
 
-**The two powers (and only these two).** The steward may:
+**The steward's powers (REVISED 2026-07-21 — validation, not authorship).** Any
+governance-eligible room MEMBER may propose the model artifact + prompt (content-addressed,
+hash-pinned; the proposal must pass the **platform evaluation gate** (§U.4) before it is even
+*eligible* to be voted on). The steward's powers over the pipeline are checks:
 
-1. **Propose a community model** — upload a governance/moderation AI **model artifact**
-   (content-addressed, hash-pinned, reproducible) for the room. The proposal carries the model
-   card (reusing the WS-K model-card schema) and must pass the **platform evaluation gate**
-   (§U.4) before it is even *eligible* to be voted on.
-2. **Propose the in-room prompt** — upload the **prompt** that conditions the approved model for
-   this room's law-pack and norms.
+1. **Open the ratification vote** — decide which admission-passed member proposals face a
+   member vote (the pre-vote validation gate).
+2. **Cancel an improper open vote** — close it with no outcome (the candidate stays eligible;
+   a fresh vote may open); time-bounded by the vote's published close.
 
-Neither power takes effect on the steward's say-so. **Both require a Knomosis on-chain
-governance vote of the room's members to be adopted** (decision #3). The steward has **no**
+Nothing takes effect on the steward's say-so. **Adoption requires a Knomosis governance vote
+of the room's members** (decision #3). The steward has **no**
 direct moderation, treasury, or lawmaking authority — those belong to the *approved agent*
 (Layer 2), bounded by the *members' votes*, never to the steward personally. This is the
-critical anti-capture property: capturing the steward seat grants only agenda-setting (the
-right to *propose* a model/prompt), not rule — and agenda-setting is itself checked by the
+critical anti-capture property: capturing the steward seat grants only the validation gate,
+not authorship and not rule — and the gate is itself checked by the
 yearly election and the members' ratifying vote.
 
 **Transparency (the accountability core).** The approved model is **viewable and downloadable
@@ -952,6 +973,10 @@ an applause/reaction; axe-clean.
 
 ## WS-U.2 Community model + prompt transparency registry (Stage 2; reuse WS-K)
 
+*(The task rows below record the shipped 2026-06/07 cut; per the 2026-07-21 revision,
+"steward-proposed"/"seat-holder-only insertion" now read MEMBER-proposed — candidacy is a
+member power and the steward validates via the ratification gate.)*
+
 Extends the shipped WS-K registry so a steward-proposed, member-ratified model + prompt become a
 content-addressed, member-downloadable, evaluation-gated artifact set.
 
@@ -1451,10 +1476,11 @@ WS-U is complete when:
 - **Steward + elections.** Every room has a steward seat (creator-bootstrapped); the one-year term
   triggers a Knomosis election; the simulated lifecycle (open → tally → settle) moves the seat to the
   winner with a full audit trail (WS-U.1).
-- **Transparent, evaluated models.** A steward can propose a model + prompt; a model is votable only
+- **Transparent, evaluated models.** Any governance-eligible member can propose a model + prompt
+  (2026-07-21: candidacy is a member power; the steward validates); a model is votable only
   after passing the platform bias/hallucination/safety/red-team gate on room + floor-safety fixtures;
   any member can download the hash-pinned model and read the prompt; adoption is a recorded member
-  vote (WS-U.2).
+  vote the steward opens — and can cancel — as the validation gate (WS-U.2).
 - **Bounded moderation agent.** The sandboxed agent moderates within the law-pack through the §15.4
   machine — parity with the human console — logged with the provenance triple, appealable to the
   floor, freezable by the floor, with **no capability** for any floor-reserved act (the
@@ -1488,7 +1514,8 @@ WS-U is complete when:
 | 0.3.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Hardened the plan to house-complete: a ten-point **cross-cutting requirements** block (bounded autonomy, floor supremacy, no-key-custody, no-pay-to-rank, fail-closed crypto/jurisdiction, schema isolation, transparency/reproducibility, appealability, auditability, accessibility/no-applause), a **migration-sequencing** note (`0035`+ in the `knomosis` pgSchema, online-safe, isolation-walk-extended), and a **Definition of done** spanning steward/elections, transparent-evaluated models, the bounded moderation agent, unbiased lawmaking, bounded treasury, maturity, the green-CI gate set, and doctrine fidelity. Verified all cited cross-references (WS-K/D/I/L/M/J/C task IDs) resolve. |
 | 0.6.0 (DESIGN) | 2026-07-09 | AI-Governed Rooms redesign | **ADR-9 slice 2 — score-blind shadow moderation advisor.** A governed `toxicity_safety_triage` LLM runs ALONGSIDE the authoritative deterministic DSL on each moderated contribution purely to MEASURE agreement: score-blind (never sees the DSL decision), authority-free (`moderate` returns the gated DSL decision unchanged), and fire-and-forget (off the hot path; every failure swallowed). Full governed path (guard → schema → immutable `AIOutputRecord`) under its own per-room budget + breaker; a metadata-only divergence row (no content, no attention values) lands in an in-memory store surfaced to the AI team at `GET /v1/ai/admin/governance/shadow-moderation/:roomId`. Enabled with the LLM backend (opt out via `GOVERNANCE_LLM_SHADOW_MODERATION=off`). Moderation decisions stay pure policy-DSL (ADR-1/ADR-5). Runtime: `apps/api/src/governance/moderation-shadow.ts` (port) + `apps/api/src/ai-governance/llm/advisor.ts` + the `ShadowModerationStore`. Promotion past shadow stays a future doctrine-gated decision. *(Superseded by 0.7.0.)* |
 | 0.7.0 (DESIGN + RUNTIME) | 2026-07-09 | AI-Governed Rooms redesign | **ADR-1 REVERSED — the in-room moderation MODEL is an LLM inside a deterministic wrapper; the policy-DSL and the score-blind shadow advisor are REMOVED.** The maintainer replaced the deterministic moderation DSL (and the 0.6.0 parallel advisor) with a single design: the model CLASSIFIES a contribution (a `toxicity_safety_triage` LLM over the full WS-K governed path — guard → completion → strict schema → immutable `AIOutputRecord`, per-room budget + breaker), and `GovernanceService.moderate` is the deterministic WRAPPER that bounds the proposal by an **escalate-to-human-review ceiling** (never above `flag_for_review` — an AI-driven removal is impossible; a human confirms) then the **community-capability clamp** (`boundAiModerationAction`, `@licio/governance`). Effects are floor-dominant over the always-on WS-J baseline; authority stays outside the model (ADR-5). On model **unavailable** the wrapper **fails to the WS-J baseline** and enqueues the contribution in the durable **pending-remoderation queue** (`knomosis.room_pending_remoderation`, migration `0066`) that the scheduler's `remoderation_lifecycle` sweep drains — re-running the model on recovery and RAISING the published contribution to review post-hoc (**delayed, never dropped**). Model **admission** is now sampled k-of-N over the platform floor-safety eval set. LLM is the moderation model by default when a backend is configured (opt out `GOVERNANCE_LLM_MODERATION=off` ⇒ the deterministic default proposer); decided moderations mirror to the AI team at `GET /v1/ai/admin/governance/moderation/:roomId`. Runtime: `packages/governance/src/moderation-bound.ts` + `apps/api/src/governance/{moderation-proposer,deterministic-moderation-proposer,service,forum-agent,scheduler,stores,drizzle-governance-stores}.ts` + `apps/api/src/ai-governance/llm/moderation.ts`. **Removed:** `packages/governance/src/policy-dsl.ts`, `apps/api/src/governance/moderation-shadow.ts`, `apps/api/src/ai-governance/llm/advisor.ts`. |
-| 0.8.0 (DESIGN + RUNTIME) | 2026-07-09 | AI-Governed Rooms redesign | **ADR-9 slice 3 — the production-complete default, the LLM debate adjudicator, and the dev-simulated runtime.** (1) PRODUCTION now DEFAULTS an unset `GOVERNANCE_LLM_PROVIDER` to the **loopback-`local`** backend with reviewed defaults for the base URL (the Ollama loopback endpoint) and the model (`gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds (and recovers automatically); `deterministic` opts out, `anthropic` stays an explicit opt-in. (2) The **WS-T debate adjudicator** (challenge resolution — the AI reviewing a sourced story/comment correction debate) is the third governed LLM surface: the model emits ONLY class probabilities + a bounded no-URLs rationale, the deterministic shell owns the outcome (`judgeDebate`'s exact argmax/tie rule + the shared `debateClassToOutcome` vocabulary), and ANY failure falls back to the pinned-weights MLP — a verdict is always rendered; the steward's 24h overrule remains the human remedy; opt out `GOVERNANCE_LLM_DEBATE=off`. (3) A DEV boot with no provider auto-starts the DEV-ONLY deterministic **simulated local runtime** (loopback-bound, never in production) through the unchanged `local` seam, so `pnpm dev` runs the identical governed path (with failure-injection markers). Runtime: `apps/api/src/ai-governance/llm/{config,debate,registration}.ts` + `apps/api/src/ai-governance/debate.ts` (the two-leg shell) + `apps/api/src/simulator/governance-llm.ts`. |
+| 0.9.0 (DESIGN + RUNTIME) | 2026-07-21 | AI-Governed Rooms redesign | **The ROLE SPLIT + MEMBER CANDIDACY + HUB CANDIDACY revision.** (1) The local backend now runs TWO model lanes (moderation ≠ adjudication failure modes): moderation defaults to the `Qwen/Qwen3Guard-Gen-4B` guard classifier (spoken to in its NATIVE Safety/Categories dialect, `guard-format.ts`) on the vLLM instance at `127.0.0.1:8001/v1`; adjudication (the debate judge + the lawmaking summariser) to `Qwen/Qwen3.6-27B` at `:8002/v1`; per-lane env keys > legacy single-lane keys > defaults; per-lane WS-K identities, per-model breakers, and PER-LANE admission pins (migration `0094`), with the scheduler's `adjudication_repin` + `moderation_readmission` sweeps healing approved rooms across lane changes. (2) **Model candidacy is a MEMBER power**: any governance-eligible member proposes; the steward VALIDATES (opens the ratification vote; cancels an improper open one — time-bounded, CAS-raced against settle via `transitionOpen`). (3) **Hub candidacy**: a bundle may select ANY public huggingface.co model per role — revision-pinned, BFF-verified at propose (`/v1/model-hub` + `HttpModelHubClient`, metadata-only, `GOVERNANCE_MODEL_HUB=off` fail-closed), admission-evaluated through the floor machinery, resolved at runtime via the loopback runtime catalog (`GET /v1/models`; the dev simulator wildcard makes the whole flow work under `pnpm dev`). Runtime: `apps/api/src/ai-governance/llm/{config,guard-format,runtime-catalog,room-models,moderation,debate,provider,registration}.ts`, `apps/api/src/ai-governance/model-hub.ts`, `apps/api/src/routes/model-hub.ts`, service/stores/scheduler + the web picker/transparency surfaces. |
+| 0.8.0 (DESIGN + RUNTIME) | 2026-07-09 | AI-Governed Rooms redesign | **ADR-9 slice 3 — the production-complete default, the LLM debate adjudicator, and the dev-simulated runtime.** *(Defaults superseded by 0.9.0 — the role-split lanes above.)* (1) PRODUCTION now DEFAULTS an unset `GOVERNANCE_LLM_PROVIDER` to the **loopback-`local`** backend with reviewed defaults for the base URL (the Ollama loopback endpoint) and the model (`gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds (and recovers automatically); `deterministic` opts out, `anthropic` stays an explicit opt-in. (2) The **WS-T debate adjudicator** (challenge resolution — the AI reviewing a sourced story/comment correction debate) is the third governed LLM surface: the model emits ONLY class probabilities + a bounded no-URLs rationale, the deterministic shell owns the outcome (`judgeDebate`'s exact argmax/tie rule + the shared `debateClassToOutcome` vocabulary), and ANY failure falls back to the pinned-weights MLP — a verdict is always rendered; the steward's 24h overrule remains the human remedy; opt out `GOVERNANCE_LLM_DEBATE=off`. (3) A DEV boot with no provider auto-starts the DEV-ONLY deterministic **simulated local runtime** (loopback-bound, never in production) through the unchanged `local` seam, so `pnpm dev` runs the identical governed path (with failure-injection markers). Runtime: `apps/api/src/ai-governance/llm/{config,debate,registration}.ts` + `apps/api/src/ai-governance/debate.ts` (the two-leg shell) + `apps/api/src/simulator/governance-llm.ts`. |
 | 0.5.0 (DESIGN) | 2026-07-09 | AI-Governed Rooms redesign | Added **ADR-9**: the ADR-3 governed NL provider seam is exercised with REAL LLM backends for the advisory lawmaking summary — the hosted Anthropic API (official SDK) or a **loopback-only local** OpenAI-compatible runtime (llama.cpp server/Ollama/vLLM/LM Studio) — behind the full WS-K governed path (registry admission with one identity per backend, the pre-execution prohibited-use guard, a strict zod schema, the deterministic §24.5 quality/grounding gate, and the immutable `AIOutputRecord` config-hash pin), bounded by the ADR-6 per-room hourly budget + a consecutive-failure circuit breaker, failing closed to the deterministic summariser on any error. **Available in every environment as an explicit operator opt-in** (the same-day maintainer decision; OFF by default, never mandatory or silent — the hosted backend's data-processor egress is boot-logged loudly, the local backend is loopback-enforced), amending §U.3.3 and SPEC §17.4/§24.6 to "deterministic **by default**". Moderation decisions stay pure policy-DSL (ADR-1/ADR-5 preserved); the slice-3 recorded-fixture eval corpus remains tracked. Runtime: `apps/api/src/governance/nl-provider.ts` (the port) + `apps/api/src/ai-governance/llm/` (config/provider/local/quality/registration). |
 | 0.4.0 (DESIGN) | 2026-06-19 | AI-Governed Rooms redesign | Added **§U.0.1 Resolved architectural decisions (ADR-1…8)** from the maintainer's second-round decisions, resolving the hard questions left open by the first cut: a "model" is a declarative **`GovernancePolicyBundle`** (DSL + prompt templates + config) interpreted deterministically — not weights/code (ADR-1); the Knomosis foundations ship as a deterministic in-process **`GovernanceKernel`** behind the real-gateway seam (ADR-2); NL work uses a governed provider port, deterministic default (ADR-3); the agent is a **bounded executor role, never a key holder** (ADR-4); prompt injection is defeated by enforcing capabilities **outside** the model (ADR-5); cost/DoS are bounded by event-driven, per-room budgets (ADR-6); elections are quorum-gated and fail-safe (ADR-7); lawmaking neutrality is structural for the tally and honestly only mitigated for summary framing (ADR-8). Begins the runtime build (`@licio/governance` + DB + API + web). |
 

@@ -1,22 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-U steward write surface (SPEC §16.6, §24.6). The elected room steward's two
-// powers, and only those two: propose a community AI **model** (a declarative,
-// member-downloadable GovernancePolicyBundle) and its **prompt**. The MEMBERS
-// ratify by vote: once a proposal clears the platform admission gate the steward
-// opens a ratification vote, and every member casts a yes/no ballot; the model
-// activates only if the vote passes (settled by the scheduler at the window
-// close). The registry (proposal pipeline + admission status) is shown to every
-// member for transparency. No applause primitives; the vote shows governance
-// counts (in favour / opposed), never a popularity signal.
+// WS-U governance write surface (SPEC §16.6, §24.6). Model candidacy is a
+// MEMBER power: any governance-eligible room member proposes a community AI
+// **model** (a declarative, member-downloadable GovernancePolicyBundle —
+// optionally selecting hub models per governed role) and its **prompt**, and
+// the MEMBERS adopt it by ratification vote. The elected steward VALIDATES
+// rather than authors — their pipeline powers are checks: opening the
+// ratification vote on an admitted proposal (which candidates face a vote) and
+// CANCELLING an improper open vote (the last line of defence; the candidate
+// stays eligible, a fresh vote may open). The model activates only if the vote
+// passes (settled by the scheduler at the window close). The registry
+// (proposal pipeline + admission status) is shown to every member for
+// transparency. No applause primitives; the vote shows governance counts
+// (in favour / opposed), never a popularity signal.
 
-import type { GovernanceModelSummary, RatificationViewResponse } from '@licio/shared';
+import type {
+  GovernanceModelSummary,
+  HubModelRef,
+  ModelHubSearchResult,
+  RatificationViewResponse,
+} from '@licio/shared';
+import { hubModelRefSchema } from '@licio/shared';
 import { useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
 import { downloadModelBundle } from '../../lib/governance-download.js';
+import { resolveModelHubModel, searchModelHub } from '../../lib/model-hub-api.js';
 import {
+  useCancelRatificationMutation,
   useCastBallotMutation,
   useGovernanceModelsQuery,
   useOpenRatificationMutation,
@@ -40,8 +52,8 @@ type OpenVote = NonNullable<RatificationViewResponse['vote']>;
  * platform's deterministic wrapper bounds whatever it proposes (an
  * escalate-to-human-review ceiling + the community-granted capability), so a
  * benign comment is never over-moderated and the model can never exceed the
- * community-voted powers. The steward edits this to express the community's
- * policy.
+ * community-voted powers. The proposing member edits this to express the
+ * community's policy.
  */
 const STARTER_BUNDLE = `{
   "bundleId": "starter-civility",
@@ -109,24 +121,30 @@ export function StewardModelManager({
   const items = models.data?.models ?? [];
   const openVote = ratification.data?.vote ?? null;
 
-  // Nothing to show until there's a proposal, an open vote, or a steward viewer —
-  // UNLESS embedded in the governance modal, where the reader explicitly opened
-  // the surface and an honest empty registry is clearer than a blank tab.
-  if (!embedded && !isSteward && items.length === 0 && openVote === null) return null;
+  // Nothing to show until there's a proposal, an open vote, or a member viewer
+  // (members hold the propose affordance) — UNLESS embedded in the governance
+  // modal, where the reader explicitly opened the surface and an honest empty
+  // registry is clearer than a blank tab.
+  if (!embedded && !isMember && items.length === 0 && openVote === null) return null;
 
   const inner = (
     <>
       <p className="mt-1 text-sm text-ink-muted">
         {t(
           'room.governance.models.intro',
-          "The elected steward proposes an AI model and prompt; the community ratifies it by member vote. A model governs the room only within community-voted, kernel-enforced limits, and never below Licio's non-overridable platform floor.",
+          "Any governance-eligible member proposes an AI model and prompt; the community adopts it by member vote, with the elected steward validating which admitted proposals face a vote. A model governs the room only within community-voted, kernel-enforced limits, and never below Licio's non-overridable platform floor.",
         )}
       </p>
 
-      {isSteward ? <ProposeForm roomId={roomId} /> : null}
+      {isMember ? <ProposeForm roomId={roomId} /> : null}
 
       {openVote ? (
-        <RatificationVotePanel roomId={roomId} vote={openVote} canVote={isMember} />
+        <RatificationVotePanel
+          roomId={roomId}
+          vote={openVote}
+          canVote={isMember}
+          isSteward={isSteward}
+        />
       ) : null}
 
       <div className="mt-4">
@@ -179,18 +197,22 @@ export function StewardModelManager({
   );
 }
 
-/** The open member ratification vote: every member casts one yes/no ballot. */
+/** The open member ratification vote: every member casts one yes/no ballot;
+ *  the steward additionally holds the improper-vote CANCEL (no outcome). */
 function RatificationVotePanel({
   roomId,
   vote,
   canVote,
+  isSteward,
 }: {
   roomId: string;
   vote: OpenVote;
   canVote: boolean;
+  isSteward: boolean;
 }): React.ReactElement {
   const t = useT();
   const cast = useCastBallotMutation(roomId);
+  const cancel = useCancelRatificationMutation(roomId);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
@@ -208,6 +230,18 @@ function RatificationVotePanel({
           ),
       },
     );
+  }
+
+  function cancelVote(): void {
+    setError(null);
+    cancel.mutate(vote.vote_id, {
+      onError: (e) =>
+        setError(
+          e instanceof ApiClientError
+            ? e.message
+            : t('room.governance.cancel.error', 'Could not cancel the vote.'),
+        ),
+    });
   }
 
   return (
@@ -245,6 +279,15 @@ function RatificationVotePanel({
           </Button>
         </div>
       )}
+      {isSteward ? (
+        <div>
+          {/* The steward's improper-vote defence: close the vote with NO
+              outcome (the candidate stays eligible; a fresh vote may open). */}
+          <Button variant="ghost" disabled={cancel.isPending} onClick={cancelVote}>
+            {t('room.governance.vote.cancel', 'Cancel this vote (steward)')}
+          </Button>
+        </div>
+      ) : null}
       {error ? <p className="text-error-on-soft text-xs">{error}</p> : null}
     </div>
   );
@@ -320,6 +363,219 @@ function ModelRow({
   );
 }
 
+/** The two governed model roles a bundle may select a hub model for. */
+type HubRole = 'moderation' | 'adjudication';
+
+/** Read the bundle JSON's current selection for a role (null on invalid JSON
+ *  or no selection) — the TEXTAREA stays the single source of truth; the
+ *  picker only reads and rewrites it. */
+function selectionOf(bundleText: string, role: HubRole): HubModelRef | null {
+  try {
+    const parsed = JSON.parse(bundleText) as Record<string, unknown>;
+    const selection = parsed['modelSelection'];
+    if (typeof selection !== 'object' || selection === null) return null;
+    const ref = (selection as Record<string, unknown>)[role];
+    const validated = hubModelRefSchema.safeParse(ref);
+    return validated.success ? validated.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Merge (or clear) a role's hub selection into the bundle JSON. Returns null
+ *  when the textarea is not valid JSON (the caller surfaces the error). */
+function mergeSelection(bundleText: string, role: HubRole, ref: HubModelRef | null): string | null {
+  try {
+    const parsed = JSON.parse(bundleText) as Record<string, unknown>;
+    const existing = parsed['modelSelection'];
+    const selection: Record<string, unknown> = {
+      ...(typeof existing === 'object' && existing !== null
+        ? (existing as Record<string, unknown>)
+        : {}),
+    };
+    if (ref === null) delete selection[role];
+    else selection[role] = ref;
+    if (Object.keys(selection).length === 0) delete parsed['modelSelection'];
+    else parsed['modelSelection'] = selection;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The per-role hub model picker (WS-U model candidacy): search public
+ * huggingface.co models through the BFF proxy, pin the selected repo at its
+ * CURRENT head revision, and write the reference into the bundle JSON — the
+ * exact weights members then ratify. Gated models are shown but not
+ * selectable (the platform rejects them as candidates).
+ */
+function HubModelPicker({
+  hubRole,
+  bundleText,
+  onBundleText,
+}: {
+  hubRole: HubRole;
+  bundleText: string;
+  /** FUNCTIONAL updates only: the pin resolves asynchronously, and merging
+   *  against a render-time snapshot would silently revert anything the author
+   *  typed (or the other picker merged) while the resolve was in flight. */
+  onBundleText: (updater: (prev: string) => string) => void;
+}): React.ReactElement {
+  const t = useT();
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<ModelHubSearchResult[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const current = selectionOf(bundleText, hubRole);
+  const roleLabel =
+    hubRole === 'moderation'
+      ? t('room.governance.hub.roleModeration', 'Moderation model')
+      : t('room.governance.hub.roleAdjudication', 'Adjudication model');
+
+  async function search(): Promise<void> {
+    if (query.trim().length < 2) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await searchModelHub(query.trim());
+      setResults(response.results);
+    } catch (e) {
+      setResults(null);
+      setError(
+        e instanceof ApiClientError
+          ? e.message
+          : t('room.governance.hub.searchError', 'Model search is unavailable right now.'),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pick(repoId: string): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const { metadata } = await resolveModelHubModel(repoId);
+      // Merge against the LATEST text (never the render-time snapshot): the
+      // author may have kept editing — or the other picker merged — while the
+      // pin resolved, and a stale-snapshot write would silently revert them.
+      let mergeFailed = false;
+      onBundleText((prev) => {
+        const merged = mergeSelection(prev, hubRole, {
+          source: 'huggingface',
+          repoId: metadata.repo_id,
+          revision: metadata.revision,
+        });
+        if (merged === null) {
+          mergeFailed = true;
+          return prev;
+        }
+        return merged;
+      });
+      if (mergeFailed) {
+        setError(t('room.governance.propose.invalidJson', 'The model must be valid JSON.'));
+        return;
+      }
+      setResults(null);
+    } catch (e) {
+      setError(
+        e instanceof ApiClientError
+          ? e.message
+          : t('room.governance.hub.pinError', 'Could not pin that model. Try again.'),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function clear(): void {
+    onBundleText((prev) => mergeSelection(prev, hubRole, null) ?? prev);
+  }
+
+  return (
+    <fieldset className="rounded-md border border-line p-3">
+      <legend className="px-1 text-sm font-medium">{roleLabel}</legend>
+      {current ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-mono text-xs">{current.repoId}</span>
+          <Badge tone="info">
+            {t('room.governance.hub.pinned', 'pinned')} {current.revision.slice(0, 12)}
+          </Badge>
+          <Button type="button" variant="ghost" onClick={clear}>
+            {t('room.governance.hub.useDefault', 'Use platform default')}
+          </Button>
+        </div>
+      ) : (
+        <p className="text-sm text-ink-muted">
+          {t(
+            'room.governance.hub.defaultInUse',
+            'The project-wide default model serves this role. Search huggingface.co to propose a different one.',
+          )}
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter searches — it must NEVER implicitly submit the surrounding
+            // propose form (an accidental proposal instead of a search).
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void search();
+            }
+          }}
+          aria-label={t(
+            'room.governance.hub.searchLabel',
+            'Search huggingface.co models for {role}',
+            {
+              role: roleLabel,
+            },
+          )}
+          placeholder={t('room.governance.hub.searchPlaceholder', 'e.g. Qwen3Guard')}
+          className="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-sm"
+        />
+        <Button type="button" variant="secondary" disabled={busy} onClick={() => void search()}>
+          {t('room.governance.hub.search', 'Search')}
+        </Button>
+      </div>
+      {results !== null ? (
+        results.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-muted">
+            {t('room.governance.hub.noResults', 'No matching public text models.')}
+          </p>
+        ) : (
+          <ul className="mt-2 flex flex-col gap-1">
+            {results.map((result) => (
+              <li key={result.repo_id} className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-mono text-xs">{result.repo_id}</span>
+                {result.license ? <Badge tone="neutral">{result.license}</Badge> : null}
+                {result.gated ? (
+                  <Badge tone="error">
+                    {t('room.governance.hub.gated', 'gated — not selectable')}
+                  </Badge>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => void pick(result.repo_id)}
+                  >
+                    {t('room.governance.hub.select', 'Select')}
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )
+      ) : null}
+      {error ? <p className="mt-1 text-error-on-soft text-xs">{error}</p> : null}
+    </fieldset>
+  );
+}
+
 /** The steward's propose form: a policy-bundle editor + a prompt, parsed client-side. */
 function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
   const t = useT();
@@ -386,6 +642,8 @@ function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
           'A declarative, downloadable model bundle — no code runs. The moderation prompt guides the in-room model; the platform bounds every action it can take. Members verify the digest.',
         )}
       />
+      <HubModelPicker hubRole="moderation" bundleText={bundleText} onBundleText={setBundleText} />
+      <HubModelPicker hubRole="adjudication" bundleText={bundleText} onBundleText={setBundleText} />
       <TextArea
         label={t('room.governance.propose.promptLabel', 'Agent prompt')}
         value={promptText}

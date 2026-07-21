@@ -35,7 +35,8 @@ import type { ModelIdentity } from '../models.js';
 import { recordAiOutput } from '../output-records.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmSettings } from './config.js';
-import { ConsecutiveFailureBreaker, type LlmCompletion, RoomHourlyBudget } from './provider.js';
+import { createBreakerPool, type LlmCompletion, RoomHourlyBudget } from './provider.js';
+import type { ResolvedRoomModel, RoomModelResolver } from './room-models.js';
 
 /** Bumped whenever DEBATE_SYSTEM_PROMPT changes (pinned via the identity
  *  config into every AIOutputRecord's config hash). */
@@ -205,8 +206,24 @@ export function boundDebateAssessment(
   }
 
   const rationale = truncateAtWord(collapseWhitespace(assessment.rationale), RATIONALE_MAX_CHARS);
+  // The no-URL bound, stated structurally: reject every ADDRESSABLE form — any
+  // `//` sequence (absolute http(s) + protocol-relative), a `www.` prefix
+  // token, and ANY URI-scheme shape (an RFC 3986 scheme token followed by `:`
+  // and a non-space) — which covers every scheme (mailto/tel/blob/custom app
+  // handlers) rather than enumerating dangerous ones. Prose colons survive:
+  // "Verdict: the challenger" has whitespace after the colon, so it never
+  // matches; over-rejection merely drops the LLM leg to the MLP fallback
+  // (fail-closed, never fail-open). The arena additionally renders the
+  // rationale as escaped text and NEVER linkifies, so a bare dot-domain in
+  // prose stays inert text — this filter closes the clickable/exfiltration
+  // shapes structurally rather than trusting the renderer alone.
   const lower = rationale.toLowerCase();
-  if (rationale.length === 0 || lower.includes('http://') || lower.includes('https://')) {
+  if (
+    rationale.length === 0 ||
+    lower.includes('//') ||
+    lower.includes('www.') ||
+    /[a-z][a-z0-9+.-]*:[^\s/]/.test(lower)
+  ) {
     return null;
   }
 
@@ -221,25 +238,128 @@ export function boundDebateAssessment(
   });
 }
 
+/**
+ * The synthetic debate id the ADJUDICATION ADMISSION probe stamps on its one
+ * canonical-fixture run (the moderation gate's ADMISSION_ROOM_ID pattern): the
+ * judge recognises it and bypasses the live breaker/budget, so probing a
+ * candidate can never degrade live adjudication. The probe still runs the full
+ * governed path — completion, strict schema, deterministic shell, immutable
+ * AIOutputRecord — because "the model produces a valid bounded verdict on this
+ * fixture" is exactly what admission asserts.
+ */
+export const ADMISSION_DEBATE_ID = 'admission';
+
+/** The canonical sourced-correction fixture the admission probe adjudicates
+ *  (a well-sourced challenger against a thinly-sourced incumbent — any
+ *  text-capable judge must at least produce a VALID bounded verdict on it;
+ *  the verdict's direction is not asserted, validity is). */
+export const ADMISSION_DEBATE_FIXTURE: DebateJudgeInput = {
+  incumbent: {
+    content:
+      'Regional hospital admissions fell 12% last quarter, according to the certified quarterly totals.',
+    summary:
+      'The stated admission figure comes directly from the certified quarterly totals; the original claim stands as written.',
+    sources: [
+      {
+        url: 'https://harborledger.example/health/figures',
+        domain: 'harborledger.example',
+        link_safe: true,
+        reliability: 0.55,
+      },
+    ],
+    rebuts_opponent: false,
+  },
+  challenger: {
+    content:
+      'Correction: the primary admissions series shows a 4% fall for the quarter cited, not 12%; the 12% figure matches a different quarter.',
+    summary:
+      'The stated figure does not match the primary series: the linked reports cover the same admissions dataset and land outside the published interval for the quarter cited, so the claim as written needs correcting.',
+    sources: [
+      {
+        url: 'https://civicregister.example/refs/health-1',
+        domain: 'civicregister.example',
+        link_safe: true,
+        reliability: 0.9,
+      },
+      {
+        url: 'https://northbulletin.example/refs/health-2',
+        domain: 'northbulletin.example',
+        link_safe: true,
+        reliability: 0.8,
+      },
+    ],
+    rebuts_opponent: true,
+  },
+};
+
 export interface GovernanceLlmDebateJudgeDeps {
   services: AiGovernanceServices;
   settings: GovernanceLlmSettings;
   identity: ModelIdentity;
   complete: LlmCompletion;
+  /** WS-U model candidacy: resolves a room-selected hub ADJUDICATION model to
+   *  a live governed completion. Absent ⇒ room selections are unresolvable and
+   *  the leg returns null (the deterministic MLP then adjudicates). */
+  roomModels?: RoomModelResolver;
+}
+
+/**
+ * The GovernanceService's `adjudicationBackend` seam (the role split): the
+ * adjudication admission pin + validity probe, built over the SAME governed
+ * judge the live surface uses. `backendId` resolves the pin for a bundle's
+ * adjudication selection; `probe` adjudicates the canonical fixture through
+ * the judge under ADMISSION_DEBATE_ID (breaker/budget bypassed) — a non-null
+ * verdict is 'ok', anything else 'transient' (adjudication admission never
+ * permanently rejects: the surface is advisory with a deterministic fallback,
+ * so its bar is validity, and a flaky/absent runtime simply keeps the model
+ * retryable until it recovers).
+ */
+export function createAdjudicationAdmission(deps: {
+  judge: LlmDebateJudge;
+  laneBackendId: string;
+  roomModels?: RoomModelResolver;
+}): {
+  backendId(ref: DebateRoomConditioning['adjudicationRef']): Promise<string | null>;
+  probe(ref: DebateRoomConditioning['adjudicationRef']): Promise<'ok' | 'transient'>;
+} {
+  return {
+    async backendId(ref) {
+      if (ref === null) return deps.laneBackendId;
+      if (!deps.roomModels) return null;
+      const resolved = await deps.roomModels.resolveAdjudication(ref);
+      return resolved?.backendId ?? null;
+    },
+    async probe(ref) {
+      const room: DebateRoomConditioning | undefined =
+        ref === null
+          ? undefined
+          : {
+              roomId: ADMISSION_DEBATE_ID,
+              prompt: '',
+              modelId: ADMISSION_DEBATE_ID,
+              promptHash: ADMISSION_DEBATE_ID,
+              adjudicationRef: ref,
+            };
+      const outcome = await deps.judge(ADMISSION_DEBATE_ID, ADMISSION_DEBATE_FIXTURE, room);
+      return outcome === null ? 'transient' : 'ok';
+    },
+  };
 }
 
 /** Build the governed LLM debate-adjudicator leg over an injected completion. */
 export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDeps): LlmDebateJudge {
-  const { services, settings, identity } = deps;
+  const { services, settings: laneSettings, identity: laneIdentity } = deps;
   // A PER-PROCESS fixed-window budget (RoomHourlyBudget keyed by a constant;
   // identity-free). The debate scheduler's job lease scopes draining to one
   // process per tick, so this approximates a deployment-wide cap; an
   // exactly-global shared-store window is a tracked residual
   // (docs/ai-governance/README.md).
-  const budget = new RoomHourlyBudget(settings.maxDebateJudgementsPerHour);
-  const breaker = new ConsecutiveFailureBreaker(
-    settings.breakerFailureThreshold,
-    settings.breakerCooldownSeconds * 1000,
+  const budget = new RoomHourlyBudget(laneSettings.maxDebateJudgementsPerHour);
+  // One breaker PER model identity (as in the moderation proposer): a broken
+  // room-selected hub model trips its own breaker, never the shared lane's.
+  const breakerFor = createBreakerPool(
+    laneSettings.breakerFailureThreshold,
+    laneSettings.breakerCooldownSeconds * 1000,
   );
 
   const unavailable = (code: string, meta: Record<string, unknown>): null => {
@@ -251,22 +371,52 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
   return async (debateId, input, room) => {
     const meta =
       room === undefined ? { debate_id: debateId } : { debate_id: debateId, room_id: room.roomId };
+
+    // Resolve the EFFECTIVE adjudication model: the room's ratified hub
+    // selection when the conditioning carries one, else the platform
+    // adjudication lane. Unresolvable ⇒ null (the deterministic MLP
+    // adjudicates) — never a silent fallback onto an unratified model.
+    let effective: Pick<ResolvedRoomModel, 'complete' | 'settings' | 'identity'> = {
+      complete: deps.complete,
+      settings: laneSettings,
+      identity: laneIdentity,
+    };
+    if (room !== undefined && room.adjudicationRef !== null) {
+      const resolved = deps.roomModels
+        ? await deps.roomModels.resolveAdjudication(room.adjudicationRef)
+        : null;
+      if (resolved === null) return unavailable('room_model_unavailable', meta);
+      effective = resolved;
+    }
+    const { complete, settings, identity } = effective;
+    const breaker = breakerFor(identity.name);
+
+    // The adjudication ADMISSION probe (ADMISSION_DEBATE_ID) bypasses the live
+    // breaker/budget — probing a candidate must never degrade live
+    // adjudication (the moderation gate's ADMISSION_ROOM_ID pattern).
+    const isAdmission = debateId === ADMISSION_DEBATE_ID;
+    const recordFailure = () => {
+      if (!isAdmission) breaker.recordFailure(services.now());
+    };
+
     const nowMs = services.now();
-    if (!breaker.allowed(nowMs)) return unavailable('breaker_open', meta);
-    if (!budget.tryConsume('debate-global', nowMs)) return unavailable('budget_exhausted', meta);
+    if (!isAdmission && !breaker.allowed(nowMs)) return unavailable('breaker_open', meta);
+    if (!isAdmission && !budget.tryConsume('debate-global', nowMs)) {
+      return unavailable('budget_exhausted', meta);
+    }
 
     // The ProhibitedUseGuard already ran in adjudicateDebate (before either
     // leg), so this leg starts at the completion.
     let completion: Awaited<ReturnType<LlmCompletion>>;
     try {
-      completion = await deps.complete({
+      completion = await complete({
         system: buildDebateSystemPrompt(room),
         user: buildDebateUserPrompt(input),
         maxOutputTokens: settings.maxOutputTokens,
         jsonSchema: DEBATE_JSON_SCHEMA,
       });
     } catch (error) {
-      breaker.recordFailure(services.now());
+      recordFailure();
       return unavailable('transport', {
         ...meta,
         error: error instanceof Error ? error.message : 'unknown',
@@ -274,11 +424,11 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
     }
 
     if (completion.stopReason === 'refusal') {
-      breaker.recordFailure(services.now());
+      recordFailure();
       return unavailable('refusal', meta);
     }
     if (completion.stopReason === 'max_tokens') {
-      breaker.recordFailure(services.now());
+      recordFailure();
       return unavailable('truncated', meta);
     }
 
@@ -286,13 +436,13 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
     try {
       assessment = debateLlmAssessmentSchema.parse(JSON.parse(completion.text ?? ''));
     } catch {
-      breaker.recordFailure(services.now());
+      recordFailure();
       return unavailable('invalid_output', meta);
     }
 
     const verdict = boundDebateAssessment(assessment, identity.name);
     if (verdict === null) {
-      breaker.recordFailure(services.now());
+      recordFailure();
       return unavailable('unusable_assessment', meta);
     }
 
@@ -324,11 +474,11 @@ export function createGovernanceLlmDebateJudge(deps: GovernanceLlmDebateJudgeDep
         nowIso: new Date(services.now()).toISOString(),
       });
     } catch {
-      breaker.recordFailure(services.now());
+      recordFailure();
       services.metrics.increment('ai.governance.debate.llm.record_failed');
       return unavailable('record_failed', meta);
     }
-    breaker.recordSuccess();
+    if (!isAdmission) breaker.recordSuccess();
 
     services.metrics.increment('ai.governance.debate.llm.decided');
     services.metrics.increment(`ai.governance.debate.llm.verdict.${verdict.verdict}`);

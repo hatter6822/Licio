@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-U GovernancePolicyBundle (SPEC §16.6, §24.2/§24.6; ADR-9). The content-
-// addressed, member-downloadable artifact a steward proposes and members ratify.
+// addressed, member-downloadable artifact a member proposes and members ratify (the steward validates).
 // The in-room moderation MODEL is an LLM (the deterministic policy-DSL was
 // removed), so what the community ratifies + downloads is the MODERATION PROMPT
 // that conditions the platform model, the natural-language prompt templates, the
@@ -12,6 +12,7 @@
 // set that govern the room are auditable and reproducible even though the model's
 // individual classifications are not bit-reproducible.
 
+import { hubModelSelectionSchema } from '@licio/shared';
 import { z } from 'zod';
 import { capabilitySchema } from './capability.js';
 
@@ -36,5 +37,13 @@ export const governancePolicyBundleSchema = z.object({
   config: policyBundleConfigSchema,
   /** Capabilities the bundle requests; intersected with the law-pack at derivation. */
   requestedCapabilities: z.array(capabilitySchema),
+  /** WS-U model candidacy: the steward's per-role hub model selection —
+   *  revision-pinned huggingface.co references for the room's MODERATION and/or
+   *  ADJUDICATION model. Content-addressed with the bundle (members ratify the
+   *  exact weights reference), server-verified against the hub at propose time,
+   *  and admission-evaluated through the platform floor-safety machinery before
+   *  eligibility. Omitted (or a role omitted) ⇒ the project-wide default model
+   *  serves that role. */
+  modelSelection: hubModelSelectionSchema.optional(),
 });
 export type GovernancePolicyBundle = z.infer<typeof governancePolicyBundleSchema>;

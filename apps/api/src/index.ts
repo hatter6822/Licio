@@ -7,14 +7,18 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
 import { type PrivacyClassification, type RetentionTier, stewardRolesQueues } from '@licio/shared';
-import { validateServerEnv } from '@licio/shared/env';
+import { parseGovernanceExtraRuntimeUrls, validateServerEnv } from '@licio/shared/env';
 import { createDrizzleAiGovernanceStores } from './ai-governance/drizzle-ai-governance-stores.js';
 import { ProhibitedUseGuard } from './ai-governance/guard.js';
 import {
   type GovernanceLlmEnvInput,
+  type GovernanceLlmLane,
   resolveGovernanceLlmDecision,
 } from './ai-governance/llm/config.js';
-import { createGovernanceLlmDebateJudge } from './ai-governance/llm/debate.js';
+import {
+  createAdjudicationAdmission,
+  createGovernanceLlmDebateJudge,
+} from './ai-governance/llm/debate.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
 import {
@@ -27,7 +31,11 @@ import {
   buildGovernanceLlmIdentity,
   buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
+  llmBackendId,
 } from './ai-governance/llm/registration.js';
+import { createRoomModelResolver } from './ai-governance/llm/room-models.js';
+import { createRuntimeCatalog } from './ai-governance/llm/runtime-catalog.js';
+import { HttpModelHubClient } from './ai-governance/model-hub.js';
 import {
   AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
   startAiGovernanceScheduler,
@@ -1457,11 +1465,21 @@ identityServices.purgeCompliance = buildCompliancePurge(complianceServices, asyn
 // deterministic path, byte-identical to before.
 let governanceNlProvider: GovernanceNlProvider | undefined;
 let governanceModerationProposer: ModerationProposer | undefined;
+let governanceAdjudicationBackend: ReturnType<typeof createAdjudicationAdmission> | undefined;
 let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   provider: env.GOVERNANCE_LLM_PROVIDER,
   apiKey: env.ANTHROPIC_API_KEY,
   modelId: env.GOVERNANCE_LLM_MODEL,
   localBaseUrl: env.GOVERNANCE_LLM_LOCAL_URL,
+  // The per-ROLE lanes (the moderation/adjudication split): per-lane keys win,
+  // the legacy single-lane keys above apply to both lanes, and the reviewed
+  // per-lane defaults (two loopback vLLM instances + the Qwen pair) close out.
+  moderationModelId: env.GOVERNANCE_LLM_MODERATION_MODEL,
+  adjudicationModelId: env.GOVERNANCE_LLM_ADJUDICATION_MODEL,
+  moderationUrl: env.GOVERNANCE_LLM_MODERATION_URL,
+  adjudicationUrl: env.GOVERNANCE_LLM_ADJUDICATION_URL,
+  extraRuntimeUrls: parseGovernanceExtraRuntimeUrls(env.GOVERNANCE_LLM_EXTRA_RUNTIME_URLS),
+  moderationFormat: env.GOVERNANCE_LLM_MODERATION_FORMAT,
   moderation: env.GOVERNANCE_LLM_MODERATION,
   debate: env.GOVERNANCE_LLM_DEBATE,
   debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR,
@@ -1470,6 +1488,19 @@ let governanceLlmEnvInput: GovernanceLlmEnvInput = {
   // production-complete posture); development defaults to the simulator below.
   nodeEnv: env.NODE_ENV,
 };
+// WS-U model candidacy: the huggingface.co metadata client (member model search +
+// propose-time candidate verification; metadata-only, fixed-host, never room
+// content). GOVERNANCE_MODEL_HUB=off removes it — the /v1/model-hub surface
+// then answers 503 and hub-referencing bundles are rejected (fail-closed).
+if (env.GOVERNANCE_MODEL_HUB !== 'off') {
+  aiGovernanceServices.modelHub = new HttpModelHubClient({
+    ...(env.HF_TOKEN !== undefined ? { token: env.HF_TOKEN } : {}),
+  });
+} else {
+  logger.warn(
+    'WS-U model hub disabled (GOVERNANCE_MODEL_HUB=off) — steward hub-model search is off and hub-referencing bundles are rejected at propose time',
+  );
+}
 // DEV ONLY: the simulated local governance-LLM runtime. When the operator has
 // made NO backend choice on a development box, start the deterministic loopback
 // OpenAI-compatible simulator and route the UNCHANGED `local` backend seam at
@@ -1500,10 +1531,29 @@ if (
       provider: 'local',
       localBaseUrl: simulated.baseUrl,
       modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID,
+      // The overlay must also CLEAR any leftover per-lane keys: they outrank
+      // the legacy keys, and a stale GOVERNANCE_LLM_MODERATION_URL exported in
+      // a dev shell would silently point one lane away from the simulator —
+      // "the simulated runtime serves all three surfaces from one URL" must
+      // hold whenever the simulator was chosen.
+      moderationModelId: undefined,
+      adjudicationModelId: undefined,
+      moderationUrl: undefined,
+      adjudicationUrl: undefined,
       // The simulated runtime is cost-free, so the ADR-6 debate budget must
       // never cap a dev challenge-resolution throughput run (env still wins).
       debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR ?? 100_000,
     };
+    if (
+      env.GOVERNANCE_LLM_MODERATION_URL !== undefined ||
+      env.GOVERNANCE_LLM_ADJUDICATION_URL !== undefined ||
+      env.GOVERNANCE_LLM_MODERATION_MODEL !== undefined ||
+      env.GOVERNANCE_LLM_ADJUDICATION_MODEL !== undefined
+    ) {
+      logger.warn(
+        'dev simulated governance LLM: ignoring the per-lane GOVERNANCE_LLM_* overrides (the simulator serves all surfaces from one URL). Set GOVERNANCE_LLM_PROVIDER=local to use them against real runtimes.',
+      );
+    }
     logger.warn(
       { baseUrl: simulated.baseUrl, modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID },
       'DEV simulated governance LLM runtime started (development only; never in production). Disable with LICIO_LLM_SIM=off, or choose a real backend via GOVERNANCE_LLM_PROVIDER.',
@@ -1514,30 +1564,58 @@ if (
 }
 const governanceLlmDecision = resolveGovernanceLlmDecision(governanceLlmEnvInput);
 if (governanceLlmDecision.enabled) {
-  const { backend, settings, llmModeration, llmDebate, providerDefaulted } = governanceLlmDecision;
-  // One completion closure, shared by every governed surface: the key/URL live
-  // ONLY here — never in the hashed identity config, never in a log line.
-  const complete: LlmCompletion =
-    backend.kind === 'anthropic'
-      ? createAnthropicCompletion(backend.apiKey, settings)
-      : createLocalCompletion(backend.baseUrl, settings, fetch, (event, meta) =>
-          // The per-runtime negotiation latches (effort rejected / thinking
-          // exhausted) are operational signals — surface them in the boot log.
+  const { lanes, moderationFormat, runtimeUrls, llmModeration, llmDebate, providerDefaulted } =
+    governanceLlmDecision;
+  // One completion closure PER LANE (the moderation/adjudication split): the
+  // key/URL live ONLY in these closures — never in the hashed identity config,
+  // never in a log line. The per-runtime negotiation latches (effort rejected /
+  // thinking exhausted) are operational signals — surface them in the boot log.
+  const laneCompletion = (lane: GovernanceLlmLane): LlmCompletion =>
+    lane.backend.kind === 'anthropic'
+      ? createAnthropicCompletion(lane.backend.apiKey, lane.settings)
+      : createLocalCompletion(lane.backend.baseUrl, lane.settings, fetch, (event, meta) =>
           logger.warn(meta, event),
         );
+  const moderationComplete = laneCompletion(lanes.moderation);
+  const adjudicationComplete = laneCompletion(lanes.adjudication);
 
-  // Surface 1 — the advisory lawmaking summariser (slice 1).
-  const llmIdentity = buildGovernanceLlmIdentity(settings, backend);
+  // WS-U model candidacy: the room-model resolver locates a bundle's ratified
+  // hub model on the configured loopback runtimes and pushes it through the
+  // real WS-K gate. Local backend only (the hosted backend cannot serve
+  // arbitrary hub weights — a hub selection under it stays unresolvable).
+  const roomModels =
+    runtimeUrls.length > 0
+      ? createRoomModelResolver({
+          services: aiGovernanceServices,
+          catalog: createRuntimeCatalog({
+            urls: runtimeUrls,
+            log: (event, meta) => logger.warn(meta, event),
+          }),
+          lanes,
+          log: (event, meta) => logger.warn(meta, event),
+        })
+      : undefined;
+
+  // Surface 1 — the advisory lawmaking summariser, on the ADJUDICATION lane
+  // (drafting a neutral summary is generalist reasoning, not safety triage).
+  const llmIdentity = buildGovernanceLlmIdentity(
+    lanes.adjudication.settings,
+    lanes.adjudication.backend,
+  );
   if (await ensureGovernanceLlmDeployed(aiGovernanceServices, llmIdentity)) {
     governanceNlProvider = createGovernanceLlmNlProvider({
       services: aiGovernanceServices,
-      settings,
+      settings: lanes.adjudication.settings,
       identity: llmIdentity,
-      complete,
+      complete: adjudicationComplete,
+      ...(roomModels !== undefined ? { roomModels } : {}),
     });
     logger.info(
-      { backend: backend.kind, modelId: settings.modelId },
-      'WS-U governance LLM summariser enabled (explicit opt-in; fail-closed to deterministic)',
+      {
+        backend: lanes.adjudication.backend.kind,
+        modelId: lanes.adjudication.settings.modelId,
+      },
+      'WS-U governance LLM summariser enabled on the adjudication lane (fail-closed to deterministic)',
     );
   } else {
     logger.warn(
@@ -1546,22 +1624,32 @@ if (governanceLlmDecision.enabled) {
   }
 
   // Surface 2 — the in-room moderation MODEL (the LLM the deterministic wrapper
-  // bounds). Replaces the deterministic default proposer when a backend is
-  // configured (unless GOVERNANCE_LLM_MODERATION=off).
+  // bounds), on the MODERATION lane. Replaces the deterministic default
+  // proposer when a backend is configured (unless GOVERNANCE_LLM_MODERATION=off).
   if (llmModeration) {
-    const modIdentity = buildGovernanceModerationProposerIdentity(settings, backend);
+    const modIdentity = buildGovernanceModerationProposerIdentity(
+      lanes.moderation.settings,
+      lanes.moderation.backend,
+      moderationFormat,
+    );
     if (await ensureGovernanceLlmDeployed(aiGovernanceServices, modIdentity)) {
       governanceModerationProposer = createGovernanceLlmModerationProposer({
         services: aiGovernanceServices,
-        settings,
+        settings: lanes.moderation.settings,
         identity: modIdentity,
-        complete,
+        complete: moderationComplete,
+        format: moderationFormat,
+        ...(roomModels !== undefined ? { roomModels } : {}),
       });
       // Observability flag (the dev simulator's moderation pulse reads it).
       aiGovernanceServices.llmModerationActive = true;
       logger.info(
-        { backend: backend.kind, modelId: settings.modelId },
-        'WS-U in-room moderation model = LLM (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation). NOTE: a room model is admitted under a specific backend/model — moderation FAILS CLOSED to the platform baseline for any room whose model was admitted under a different backend, until it is re-admitted (re-run the model evaluation) under this one.',
+        {
+          backend: lanes.moderation.backend.kind,
+          modelId: lanes.moderation.settings.modelId,
+          format: moderationFormat,
+        },
+        'WS-U in-room moderation model = LLM on the moderation lane (deterministically wrapped: escalate-to-review ceiling + capability clamp; fail-to-baseline + deferred re-moderation). NOTE: a room model is admitted under a specific backend/model — moderation FAILS CLOSED to the platform baseline for any room whose model was admitted under a different backend, until it is re-admitted (re-run the model evaluation) under this one.',
       );
     } else {
       logger.warn(
@@ -1571,21 +1659,38 @@ if (governanceLlmDecision.enabled) {
   }
 
   // Surface 3 — the WS-T debate ADJUDICATOR (challenge resolution: the AI
-  // reviewing a sourced story/comment correction debate). The deterministic
-  // shell maps its probabilities to the outcome; the pinned-weights MLP stays
-  // the per-call fail-closed fallback inside adjudicateDebate.
+  // reviewing a sourced story/comment correction debate), on the ADJUDICATION
+  // lane. The deterministic shell maps its probabilities to the outcome; the
+  // pinned-weights MLP stays the per-call fail-closed fallback inside
+  // adjudicateDebate.
   if (llmDebate) {
-    const debateIdentity = buildGovernanceDebateJudgeIdentity(settings, backend);
+    const debateIdentity = buildGovernanceDebateJudgeIdentity(
+      lanes.adjudication.settings,
+      lanes.adjudication.backend,
+    );
     if (await ensureGovernanceLlmDeployed(aiGovernanceServices, debateIdentity)) {
-      aiGovernanceServices.llmDebateJudge = createGovernanceLlmDebateJudge({
+      const debateJudge = createGovernanceLlmDebateJudge({
         services: aiGovernanceServices,
-        settings,
+        settings: lanes.adjudication.settings,
         identity: debateIdentity,
-        complete,
+        complete: adjudicationComplete,
+        ...(roomModels !== undefined ? { roomModels } : {}),
+      });
+      aiGovernanceServices.llmDebateJudge = debateJudge;
+      // The GovernanceService's adjudication admission pin + validity probe
+      // (the role split): evaluateModel pins `debate.judge`-capable bundles to
+      // this lane, and debateConditioning fails closed on a mismatch.
+      governanceAdjudicationBackend = createAdjudicationAdmission({
+        judge: debateJudge,
+        laneBackendId: llmBackendId(debateIdentity),
+        ...(roomModels !== undefined ? { roomModels } : {}),
       });
       logger.info(
-        { backend: backend.kind, modelId: settings.modelId },
-        'WS-T debate adjudicator = LLM (deterministic shell maps the outcome; fail-closed to the pinned-weights MLP; steward may overrule for 24h)',
+        {
+          backend: lanes.adjudication.backend.kind,
+          modelId: lanes.adjudication.settings.modelId,
+        },
+        'WS-T debate adjudicator = LLM on the adjudication lane (deterministic shell maps the outcome; fail-closed to the pinned-weights MLP; steward may overrule for 24h)',
       );
     } else {
       logger.warn(
@@ -1600,16 +1705,30 @@ if (governanceLlmDecision.enabled) {
     // is expected where — until it is running, every governed surface fails
     // closed per call to its deterministic path and recovers automatically.
     logger.warn(
-      { baseUrl: backend.kind === 'local' ? backend.baseUrl : null, modelId: settings.modelId },
-      'WS-U governance LLM: production defaulted to the loopback-local backend — run an OpenAI-compatible inference server there (e.g. `ollama serve` + `ollama pull <model>`), or set GOVERNANCE_LLM_PROVIDER explicitly (deterministic opts out). Until the runtime responds, the governed surfaces fail closed to their deterministic paths and recover automatically.',
+      {
+        moderation: {
+          baseUrl:
+            lanes.moderation.backend.kind === 'local' ? lanes.moderation.backend.baseUrl : null,
+          modelId: lanes.moderation.settings.modelId,
+        },
+        adjudication: {
+          baseUrl:
+            lanes.adjudication.backend.kind === 'local' ? lanes.adjudication.backend.baseUrl : null,
+          modelId: lanes.adjudication.settings.modelId,
+        },
+      },
+      'WS-U governance LLM: production defaulted to the loopback-local backend with the two role lanes above — provision them with `pnpm setup:llm` (vLLM default; `--runtime ollama` for the single-URL alternative), or set GOVERNANCE_LLM_PROVIDER explicitly (deterministic opts out). Until a lane responds, its governed surfaces fail closed to their deterministic paths and recover automatically.',
     );
   }
-  if (backend.kind === 'anthropic') {
+  if (lanes.moderation.backend.kind === 'anthropic') {
     // Honest operational posture: the hosted backend sends governed-room content
     // off-host, making the vendor an operator-chosen data processor. Say so
     // loudly at boot, once.
     logger.warn(
-      { modelId: settings.modelId },
+      {
+        moderationModelId: lanes.moderation.settings.modelId,
+        adjudicationModelId: lanes.adjudication.settings.modelId,
+      },
       'WS-U governance LLM: hosted backend enabled — governed-room content is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
     );
   }
@@ -1628,6 +1747,12 @@ setGovernanceService(
     killSwitches: buildGovernanceKillSwitchGuards(knomosisServices),
     ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
     ...(governanceModerationProposer ? { moderationProposer: governanceModerationProposer } : {}),
+    // The adjudication lane's admission pin + probe (the role split) and the
+    // hub verifier for steward model candidacy — both fail closed when absent.
+    ...(governanceAdjudicationBackend
+      ? { adjudicationBackend: governanceAdjudicationBackend }
+      : {}),
+    ...(aiGovernanceServices.modelHub ? { modelHub: aiGovernanceServices.modelHub } : {}),
     // Observability: record every decided in-room moderation (proposed vs the
     // wrapper-bounded action) to the WS-K moderation decision log.
     onModerationDecided: (record) => {

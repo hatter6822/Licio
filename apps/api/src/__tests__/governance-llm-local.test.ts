@@ -95,7 +95,9 @@ describe('createLocalCompletion (OpenAI-compatible wire shape)', () => {
     ]);
     expect(payload['response_format']).toEqual({
       type: 'json_schema',
-      json_schema: { name: 'lawmaking_summary', strict: true, schema: LLM_SUMMARY_JSON_SCHEMA },
+      // The surface-neutral schema name (one wire shape serves all three
+      // governed surfaces; the schema itself is the per-surface part).
+      json_schema: { name: 'governed_output', strict: true, schema: LLM_SUMMARY_JSON_SCHEMA },
     });
   });
 
@@ -164,6 +166,7 @@ describe('local backend through the governed provider (end to end, no network)',
       roomPromptText: null,
       promptTemplate: null,
       summaryStyle: 'neutral_brief',
+      adjudicationRef: null,
     });
 
     expect(summary.headline).toBe(draft.headline);
@@ -174,7 +177,7 @@ describe('local backend through the governed provider (end to end, no network)',
   });
 });
 
-describe('reasoning_effort (the gpt-oss latency lever)', () => {
+describe('reasoning_effort (the reasoning-model latency lever)', () => {
   const OK_BODY = {
     choices: [{ message: { content: '{"headline":"h","summary":"s"}' }, finish_reason: 'stop' }],
   };

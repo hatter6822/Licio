@@ -94,43 +94,66 @@ guard, the governed models, and a module singleton for routes.
 - `lineage.ts` — the data-lineage service (privacy-review precondition).
 - `models.ts` — the governed deterministic models + the topic classifier +
   the translation-provider seam.
-- `llm/` — the REAL model backends (WS-U ADR-9), all behind the unchanged
-  registry/guard/output-record surface: `config.ts` (fail-closed enablement;
-  PRODUCTION defaults an unset provider to the loopback-`local` backend — the
-  production-complete posture, with reviewed defaults for the local URL
-  (Ollama loopback) and model (`gpt-oss:20b`) — while `deterministic` opts out
-  and `anthropic` stays an explicit opt-in; the `GOVERNANCE_LLM_MODERATION` +
+- `llm/` — the REAL model backends (WS-U ADR-9, the ROLE-SPLIT revision), all
+  behind the unchanged registry/guard/output-record surface: `config.ts`
+  (fail-closed enablement; PRODUCTION defaults an unset provider to the
+  loopback-`local` backend running TWO model LANES — the roles fail
+  differently, so each gets a model selected for its failure mode: the
+  MODERATION lane defaults to the `Qwen/Qwen3Guard-Gen-4B` guard safety
+  classifier on the vLLM instance at `127.0.0.1:8001/v1`, and the
+  ADJUDICATION lane (the debate adjudicator + the lawmaking summariser) to
+  the `Qwen/Qwen3.6-27B` generalist at `127.0.0.1:8002/v1`; per-lane env keys
+  override lane-by-lane, the legacy `GOVERNANCE_LLM_MODEL`/`_LOCAL_URL` pair
+  runs both lanes on one runtime, `deterministic` opts out and `anthropic`
+  stays an explicit opt-in; the `GOVERNANCE_LLM_MODERATION` +
   `GOVERNANCE_LLM_DEBATE` per-surface off-switches; the config-hashed local
   `reasoning_effort` latency lever, reviewed default `low`, env-overridable
-  incl. `off`), `provider.ts`
+  incl. `off`), `guard-format.ts` (the moderation-lane OUTPUT DIALECTS:
+  guard-family models are spoken to in their NATIVE `Safety:/Categories:`
+  block — no system prompt, no schema-guided decoding — with a tolerant
+  parser + a versioned deterministic taxonomy→action mapping; generalists get
+  the strict-JSON verdict; auto-detected per model id,
+  `GOVERNANCE_LLM_MODERATION_FORMAT` overrides), `provider.ts`
   (the governed lawmaking summariser: guard → completion → zod → quality gate →
   `AIOutputRecord`, under a per-room budget + circuit breaker; the Anthropic
   SDK completion + the reusable budget/breaker/completion plumbing),
   `moderation.ts` (the in-room moderation MODEL — a `toxicity_safety_triage`
-  LLM that CLASSIFIES a contribution; guard → completion → zod →
-  `AIOutputRecord`, returning a `decided` proposal or `unavailable`; the
-  proposal is then bounded by the deterministic wrapper in
-  `governance/service.ts`, ADR-9 revised — this replaced the earlier
-  score-blind shadow advisor), `debate.ts` (the WS-T debate ADJUDICATOR —
-  challenge resolution: the LLM weighs both positions of a sourced
-  story/comment correction debate and emits ONLY class probabilities + a
-  bounded rationale; the deterministic shell owns the outcome — `judgeDebate`'s
-  exact argmax/tie rule, the shared verdict vocabulary, a no-URLs rationale
-  bound — and ANY failure returns null so `adjudicateDebate` falls back to the
-  pinned-weights MLP; global hourly budget + breaker + `AIOutputRecord`),
+  LLM that CLASSIFIES a contribution in the lane's dialect; guard → completion
+  → parse → `AIOutputRecord`, returning a `decided` proposal or `unavailable`;
+  the proposal is then bounded by the deterministic wrapper in
+  `governance/service.ts`; PER-MODEL circuit breakers so a broken
+  room-selected candidate never degrades other rooms), `debate.ts` (the WS-T
+  debate ADJUDICATOR — challenge resolution: the LLM weighs both positions of
+  a sourced story/comment correction debate and emits ONLY class
+  probabilities + a bounded rationale; the deterministic shell owns the
+  outcome — `judgeDebate`'s exact argmax/tie rule, the shared verdict
+  vocabulary, a no-URLs rationale bound — and ANY failure returns null so
+  `adjudicateDebate` falls back to the pinned-weights MLP; global hourly
+  budget + per-model breakers + `AIOutputRecord`; also the ADJUDICATION
+  ADMISSION seam — a canonical-fixture validity probe under
+  `ADMISSION_DEBATE_ID` that bypasses the live breaker/budget),
   `local.ts` (the loopback-only OpenAI-compatible
-  local-runtime completion — llama.cpp server/Ollama/vLLM/LM Studio over plain
+  local-runtime completion — vLLM/Ollama/llama.cpp server/LM Studio over plain
   fetch, with per-runtime PARAMETER NEGOTIATION: a 400-rejected
   `reasoning_effort` is retried without the field and latched, a
   thinking-exhausted response retries once at `none` and latches — both
   logged, never silent; an explicit `off` is honoured strictly),
-  `quality.ts` (the deterministic §24.5 summary acceptance gate; v2 grounds on
-  lexical stems — shared ≥5-char prefixes — so inflection variants of proposal
-  vocabulary are not counted as hallucination while foreign words still fail),
-  `registration.ts` (register + deploy every model through the REAL gate; one
-  identity per surface **and config** — the identity name folds in a config hash,
-  so changing the model/prompt/URL/ceiling mints a new identity that must re-clear
-  the gate and forces moderation re-admission, never reusing a stale card).
+  `runtime-catalog.ts` (which loopback runtime serves which model, via the
+  standard `GET /v1/models` listing, TTL-cached; carries the DEV simulator
+  wildcard so the full candidacy flow runs under `pnpm dev`),
+  `room-models.ts` (the WS-U model-candidacy resolver: a room bundle's
+  revision-pinned hub selection → catalog location → the REAL WS-K
+  register/deploy gate → a cached loopback completion; null on every failure
+  edge so callers fail closed), `quality.ts` (the deterministic
+  §24.5 summary acceptance gate; v2 grounds on lexical stems — both tokens
+  ≥5 chars sharing a full prefix or a ≥6-char leading stem — so inflection
+  variants of proposal vocabulary are not counted as hallucination while
+  foreign words still fail), `registration.ts`
+  (register + deploy every model through the REAL gate; one identity per
+  surface **and config** — the identity name folds in a config hash, so
+  changing the model/dialect/prompt/URL/ceiling mints a new identity that
+  must re-clear the gate and forces re-admission, never reusing a stale card;
+  hub-selected room models get their own revision-pinned identities).
   Every DECIDED moderation (raw proposed vs
   wrapper-bounded action, metadata only) is logged to the in-memory
   `ModerationDecisionLog` (`stores.ts`), read by the AI team at `GET
@@ -142,6 +165,10 @@ guard, the governed models, and a module singleton for routes.
   full governed path (admission, gates, budgets, records, wrapper, deferred
   re-moderation) runs with zero setup; see `docs/DEVELOPMENT.md` §16 for the
   knobs + failure-injection markers.  Never constructed in production.
+- `model-hub.ts` — the huggingface.co METADATA client (a sibling of `llm/`)
+  behind the member model search + propose-time candidate verification:
+  fixed-host, typed errors, TTL-cached, revision-pinning; gated/private
+  models are never selectable candidates.
 - `seed.ts` — registers **and deploys** every governed model through the real
   gate; seeds risk assessments, lineage, and the inventory.
 - `pipelines.ts` — topic classification + claim extraction (WS-K.1.3a/b).

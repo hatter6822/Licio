@@ -17,6 +17,7 @@ const mockRatification = vi.hoisted(() => vi.fn());
 const proposeMutate = vi.hoisted(() => vi.fn());
 const openVoteMutate = vi.hoisted(() => vi.fn());
 const castMutate = vi.hoisted(() => vi.fn());
+const cancelMutate = vi.hoisted(() => vi.fn());
 const downloadModel = vi.hoisted(() => vi.fn());
 
 vi.mock('../../lib/queries.js', () => ({
@@ -26,8 +27,15 @@ vi.mock('../../lib/queries.js', () => ({
   useProposeModelMutation: () => ({ mutate: proposeMutate, isPending: false }),
   useOpenRatificationMutation: () => ({ mutate: openVoteMutate, isPending: false }),
   useCastBallotMutation: () => ({ mutate: castMutate, isPending: false }),
+  useCancelRatificationMutation: () => ({ mutate: cancelMutate, isPending: false }),
 }));
 vi.mock('../../lib/governance-api.js', () => ({ downloadGovernanceModel: downloadModel }));
+const hubSearch = vi.hoisted(() => vi.fn());
+const hubResolve = vi.hoisted(() => vi.fn());
+vi.mock('../../lib/model-hub-api.js', () => ({
+  searchModelHub: hubSearch,
+  resolveModelHubModel: hubResolve,
+}));
 
 import { StewardModelManager } from './StewardModelManager.js';
 
@@ -281,5 +289,94 @@ describe('StewardModelManager (WS-U §16.6)', () => {
     fireEvent.click(screen.getByRole('button', { name: /download/i }));
     await waitFor(() => expect(downloadModel).toHaveBeenCalledWith('r1', 'm1'));
     expect(createObjectURL).toHaveBeenCalled();
+  });
+
+  it('candidacy is a MEMBER power: a joined non-steward gets the propose form; the steward gets the vote cancel', () => {
+    // A joined member (not the steward) sees the propose affordance.
+    signInAs('member-9');
+    seatHeldBy('steward-1');
+    modelsList([]);
+    openVote(null);
+    const { unmount } = render(<StewardModelManager roomId="r1" joined />);
+    expect(screen.getByRole('button', { name: /propose a model/i })).toBeInTheDocument();
+    unmount();
+
+    // With a vote open: the member votes but cannot cancel; the steward can.
+    openVote({
+      vote_id: 'v1',
+      model_id: 'm1',
+      opens_at: '2026-06-19T00:00:00.000Z',
+      closes_at: '2026-06-20T00:00:00.000Z',
+      min_quorum: 1,
+      in_favor: 0,
+      opposed: 0,
+    });
+    const memberView = render(<StewardModelManager roomId="r1" joined />);
+    expect(screen.queryByRole('button', { name: /cancel this vote/i })).not.toBeInTheDocument();
+    memberView.unmount();
+    signInAs('steward-1');
+    render(<StewardModelManager roomId="r1" />);
+    fireEvent.click(screen.getByRole('button', { name: /cancel this vote/i }));
+    expect(cancelMutate).toHaveBeenCalledWith('v1', expect.anything());
+  });
+
+  it('the hub model picker searches, pins the head revision into the bundle, and clears back to the default', async () => {
+    const SHA = 'f'.repeat(40);
+    hubSearch.mockResolvedValue({
+      results: [
+        {
+          repo_id: 'Qwen/Qwen3Guard-Gen-8B',
+          pipeline_tag: 'text-generation',
+          license: 'apache-2.0',
+          gated: false,
+        },
+        { repo_id: 'org/gated', pipeline_tag: 'text-generation', license: null, gated: true },
+      ],
+    });
+    hubResolve.mockResolvedValue({
+      metadata: {
+        repo_id: 'Qwen/Qwen3Guard-Gen-8B',
+        revision: SHA,
+        pipeline_tag: 'text-generation',
+        license: 'apache-2.0',
+        parameter_count: 8_000_000_000,
+        fetched_at: '2026-07-01T00:00:00.000Z',
+      },
+    });
+    signInAs('steward-1');
+    seatHeldBy('steward-1');
+    modelsList([]);
+    openVote(null);
+    render(<StewardModelManager roomId="r1" />);
+    fireEvent.click(screen.getByRole('button', { name: /propose a model/i }));
+
+    // Search the moderation role and pin the selected repo at its head sha.
+    fireEvent.change(
+      screen.getByRole('searchbox', { name: /search huggingface\.co models for moderation/i }),
+      { target: { value: 'qwen guard' } },
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: /^search$/i })[0] as HTMLElement);
+    await waitFor(() => expect(hubSearch).toHaveBeenCalledWith('qwen guard'));
+    // The gated row is flagged, not selectable.
+    expect(screen.getByText(/gated — not selectable/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^select$/i }));
+    await waitFor(() => expect(hubResolve).toHaveBeenCalledWith('Qwen/Qwen3Guard-Gen-8B'));
+
+    // The bundle textarea (the SSOT the propose submits) carries the pinned ref…
+    const bundleBox = screen.getByLabelText(/policy bundle/i) as HTMLTextAreaElement;
+    const parsed = JSON.parse(bundleBox.value) as {
+      modelSelection?: { moderation?: { repoId: string; revision: string } };
+    };
+    expect(parsed.modelSelection?.moderation).toEqual({
+      source: 'huggingface',
+      repoId: 'Qwen/Qwen3Guard-Gen-8B',
+      revision: SHA,
+    });
+    expect(screen.getByText(`pinned ${SHA.slice(0, 12)}`)).toBeInTheDocument();
+
+    // …and clearing restores the platform default (the selection is removed).
+    fireEvent.click(screen.getByRole('button', { name: /use platform default/i }));
+    const cleared = JSON.parse(bundleBox.value) as { modelSelection?: unknown };
+    expect(cleared.modelSelection).toBeUndefined();
   });
 });

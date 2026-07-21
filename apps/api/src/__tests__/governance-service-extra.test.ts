@@ -118,7 +118,7 @@ describe('GovernanceService residual branches', () => {
     const { svc } = make();
     await svc.bootstrapSeat('rA', 's');
     await svc.bootstrapSeat('rB', 's');
-    const p = await svc.proposeModel('rA', 's', bundle(), 'p');
+    const p = await svc.proposeModel('rA', 's', bundle(), 'p', true);
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
     expect((await svc.approveModel('rB', id, null, null)).ok).toBe(false); // roomId mismatch
@@ -141,6 +141,7 @@ describe('GovernanceService residual branches', () => {
         requestedCapabilities: [],
       }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -166,6 +167,7 @@ describe('GovernanceService residual branches', () => {
         requestedCapabilities: ['moderate.flag'],
       }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -179,7 +181,7 @@ describe('GovernanceService residual branches', () => {
     await svc.bootstrapSeat('r', 's');
     // Adopt an initial model → active agent that flags the spam contribution for
     // human review (the escalate-to-review ceiling caps it below removal).
-    const p1 = await svc.proposeModel('r', 's', bundle(), 'p');
+    const p1 = await svc.proposeModel('r', 's', bundle(), 'p', true);
     const m1 = p1.ok ? p1.value.modelId : '';
     await svc.evaluateModel(m1);
     await svc.approveModel('r', m1, null, null);
@@ -197,7 +199,7 @@ describe('GovernanceService residual branches', () => {
 
     // A member ratification adopts a DIFFERENT model — but must NOT re-activate the
     // floor-frozen agent (the legal floor is non-overridable by a community vote).
-    const p2 = await svc.proposeModel('r', 's', bundle({ name: 'n2' }), 'p2');
+    const p2 = await svc.proposeModel('r', 's', bundle({ name: 'n2' }), 'p2', true);
     const m2 = p2.ok ? p2.value.modelId : '';
     await svc.evaluateModel(m2);
     const adopt = await svc.approveModel('r', m2, 'vote-1', null);
@@ -257,6 +259,7 @@ describe('GovernanceService residual branches', () => {
         requestedCapabilities: ['gateway.submit_signed_action', 'treasury.report'],
       }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -312,6 +315,7 @@ describe('GovernanceService residual branches', () => {
       's',
       bundle({ requestedCapabilities: ['gateway.submit_signed_action', 'treasury.report'] }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -380,6 +384,7 @@ describe('GovernanceService residual branches', () => {
       's',
       bundle({ requestedCapabilities: ['gateway.submit_signed_action', 'treasury.invest'] }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -461,6 +466,7 @@ describe('GovernanceService residual branches', () => {
         requestedCapabilities: ['moderate.flag', 'moderate.remove'],
       }),
       'p',
+      true,
     );
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
@@ -480,7 +486,7 @@ describe('GovernanceService floor freeze/restore', () => {
     expect(empty.ok && empty.value.reactivated).toBe(false);
     // Approve a model ⇒ active binding; freeze ⇒ inactive; reactivate ⇒ restored.
     await svc.bootstrapSeat('r', 's');
-    const p = await svc.proposeModel('r', 's', bundle(), 'p');
+    const p = await svc.proposeModel('r', 's', bundle(), 'p', true);
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
     await svc.approveModel('r', id, null, null);

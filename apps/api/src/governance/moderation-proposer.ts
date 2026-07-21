@@ -17,6 +17,7 @@
 // benign" (no escalation, no deferral).
 
 import type { ModerationAction, ModerationContext } from '@licio/governance';
+import type { HubModelRef } from '@licio/shared';
 
 export interface ModerationProposalRequest {
   roomId: string;
@@ -24,9 +25,15 @@ export interface ModerationProposalRequest {
   subjectRef: string;
   /** The room-scoped, PII-free context (content + bucketed signals). */
   context: ModerationContext;
-  /** The room's member-ratified moderation prompt (the "model" the community
-   *  approved conditions the platform LLM). Null ⇒ the platform default. */
+  /** The room's member-ratified moderation prompt (conditions a generalist
+   *  moderation model; a guard-dialect model enforces its fixed taxonomy
+   *  instead). Null ⇒ the platform default. */
   moderationPrompt: string | null;
+  /** The bundle's member-selected hub model for the MODERATION role (WS-U
+   *  model candidacy). Null ⇒ the platform moderation-lane model. The proposer
+   *  resolves it per call; an unresolvable selection is `unavailable`, never a
+   *  silent fallback onto a model the room did not ratify. */
+  modelRef: HubModelRef | null;
 }
 
 /** The model's proposed action + reason, and the provenance of the invocation. */
@@ -62,6 +69,16 @@ export interface ModerationProposer {
    * the real proposers always set it.
    */
   readonly backendId?: string;
+  /**
+   * Resolve the admission-pin backend id for a room model selection (null ref
+   * ⇒ the proposer's own lane, i.e. `backendId`). Returns null when the
+   * selection is not currently resolvable — no configured runtime serves it,
+   * or the WS-K gate refused its identity — so admission stays retryable and
+   * the live surfaces fail closed rather than run un-vetted. Optional so a
+   * test double may omit it; when absent, the static `backendId` stands for
+   * every selection.
+   */
+  resolveBackendId?(ref: HubModelRef | null): Promise<string | null>;
   /** Classify one contribution. NEVER throws — any failure is `unavailable`. */
   propose(request: ModerationProposalRequest): Promise<ModerationProposerResult>;
 }

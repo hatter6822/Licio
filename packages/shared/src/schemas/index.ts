@@ -28,6 +28,7 @@ export * from './invariants-api.js';
 export * from './jurisdiction.js';
 export * from './knomosis-api.js';
 export * from './migration-api.js';
+export * from './model-hub.js';
 export * from './moderation-api.js';
 export * from './moderation-console-api.js';
 export * from './notifications.js';

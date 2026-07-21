@@ -14,6 +14,7 @@ import type {
   RatificationResult,
   Verdict,
 } from '@licio/governance';
+import type { HubModelMetadata } from '@licio/shared';
 
 export type ElectionStatus = 'scheduled' | 'open' | 'tallying' | 'settled' | 'cancelled';
 export type RatificationStatus = 'open' | 'settled' | 'cancelled';
@@ -65,11 +66,25 @@ export interface ModelRecord {
   proposedByUserId: string | null;
   status: ModelStatus;
   evaluationRef: string | null;
-  /** The `ModerationProposer.backendId` that ran this model's admission gate (set
-   *  when it became `eligible`; null until admitted, or for a proposer with no
-   *  backendId). `moderate` refuses a live decision under a different backend
-   *  (WS-U ADR-9 review — an un-vetted backend swap fails closed). */
+  /** The MODERATION backend that ran this model's admission gate — the
+   *  bundle's hub selection when it carries one, else the platform moderation
+   *  lane (set when it became `eligible`; null until admitted, or for a
+   *  proposer with no backendId). `moderate` refuses a live decision under a
+   *  different backend (WS-U ADR-9 review — an un-vetted swap fails closed). */
   admittedBackendId: string | null;
+  /** The ADJUDICATION backend pinned at admission (the role split): set when
+   *  the bundle requests `debate.judge` and the adjudication validity probe
+   *  passed; null otherwise (incl. rows admitted before the split — the
+   *  scheduler's repin sweep heals those). `debateConditioning` refuses the
+   *  room's LLM debate leg under a different backend. */
+  admittedAdjudicationBackendId: string | null;
+  /** WS-U model candidacy: the hub-verified metadata snapshots for the
+   *  bundle's model selections, captured at propose time (transparency /
+   *  audit); null when the bundle selects no hub model. */
+  hubVerification: {
+    moderation?: HubModelMetadata;
+    adjudication?: HubModelMetadata;
+  } | null;
   createdAt: string;
 }
 export interface PromptRecord {
@@ -226,15 +241,24 @@ export interface ModelStore {
   insert(model: ModelRecord): Promise<ModelRecord | null>; // null ⇒ digest already present
   get(modelId: string): Promise<ModelRecord | null>;
   listByRoom(roomId: string): Promise<ModelRecord[]>;
-  /** Models in a given lifecycle status, oldest-first, bounded — the admission
-   *  retry sweep drains `evaluating` models (WS-U ADR-9 review). */
-  listByStatus(status: ModelStatus, limit: number): Promise<ModelRecord[]>;
+  /** Models in a given lifecycle status, oldest-first, bounded, from `offset`
+   *  (default 0). The retry/repin/re-admission sweeps ROTATE the offset across
+   *  ticks so a permanently-transient head (e.g. a never-provisioned hub
+   *  selection) can never starve the tail out of the fixed window. */
+  listByStatus(status: ModelStatus, limit: number, offset?: number): Promise<ModelRecord[]>;
   patchStatus(
     modelId: string,
     status: ModelStatus,
     evaluationRef: string | null,
-    /** When provided, also pins the admitting backend (undefined ⇒ leave unchanged). */
-    admittedBackendId?: string | null,
+  ): Promise<ModelRecord | null>;
+  /** Pin the per-lane admitting backends (WS-U ADR-9 + the role split): the
+   *  MODERATION backend that ran the floor-safety sampling and the
+   *  ADJUDICATION backend the validity probe passed under (null ⇒ that lane
+   *  is unpinned — its surface fails closed). */
+  patchAdmission(
+    modelId: string,
+    admittedBackendId: string | null,
+    admittedAdjudicationBackendId: string | null,
   ): Promise<ModelRecord | null>;
   clear(): Promise<void>;
 }
@@ -259,9 +283,22 @@ export interface RatificationVoteStore {
   /** The single OPEN vote for a room (at most one at a time), or null. */
   getOpenForRoom(roomId: string): Promise<RatificationVoteRecord | null>;
   listOpen(): Promise<RatificationVoteRecord[]>;
-  patch(
+  /**
+   * ATOMICALLY transition an OPEN vote to a terminal status — the
+   * compare-and-set BOTH the scheduler settle and the steward's improper-vote
+   * cancel go through, so the two can never both claim one vote (a settle
+   * cannot activate a model whose vote was cancelled mid-tally, and a cancel
+   * cannot erase a settle). Returns null when the vote is not currently open
+   * (the loser aborts); in production this is `UPDATE … WHERE status='open'`.
+   */
+  transitionOpen(
     voteId: string,
-    fields: Partial<RatificationVoteRecord>,
+    fields: {
+      status: Exclude<RatificationStatus, 'open'>;
+      settledAt: string;
+      outcome?: RatificationOutcome;
+      tally?: RatificationResult;
+    },
   ): Promise<RatificationVoteRecord | null>;
   clear(): Promise<void>;
 }
@@ -392,26 +429,28 @@ export class InMemoryModelStore implements ModelStore {
   async listByRoom(roomId: string) {
     return [...this.models.values()].filter((m) => m.roomId === roomId);
   }
-  async listByStatus(status: ModelStatus, limit: number) {
+  async listByStatus(status: ModelStatus, limit: number, offset = 0) {
+    const start = Math.max(0, offset);
     return [...this.models.values()]
       .filter((m) => m.status === status)
       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
-      .slice(0, Math.max(0, limit));
+      .slice(start, start + Math.max(0, limit));
   }
-  async patchStatus(
+  async patchStatus(modelId: string, status: ModelStatus, evaluationRef: string | null) {
+    const cur = this.models.get(modelId);
+    if (!cur) return null;
+    const next: ModelRecord = { ...cur, status, evaluationRef };
+    this.models.set(modelId, next);
+    return next;
+  }
+  async patchAdmission(
     modelId: string,
-    status: ModelStatus,
-    evaluationRef: string | null,
-    admittedBackendId?: string | null,
+    admittedBackendId: string | null,
+    admittedAdjudicationBackendId: string | null,
   ) {
     const cur = this.models.get(modelId);
     if (!cur) return null;
-    const next: ModelRecord = {
-      ...cur,
-      status,
-      evaluationRef,
-      ...(admittedBackendId !== undefined ? { admittedBackendId } : {}),
-    };
+    const next: ModelRecord = { ...cur, admittedBackendId, admittedAdjudicationBackendId };
     this.models.set(modelId, next);
     return next;
   }
@@ -484,10 +523,18 @@ export class InMemoryRatificationVoteStore implements RatificationVoteStore {
   async listOpen() {
     return [...this.votes.values()].filter((v) => v.status === 'open');
   }
-  async patch(voteId: string, fields: Partial<RatificationVoteRecord>) {
+  async transitionOpen(
+    voteId: string,
+    fields: {
+      status: Exclude<RatificationStatus, 'open'>;
+      settledAt: string;
+      outcome?: RatificationOutcome;
+      tally?: RatificationResult;
+    },
+  ) {
     const cur = this.votes.get(voteId);
-    if (!cur) return null;
-    const next = { ...cur, ...fields };
+    if (cur?.status !== 'open') return null; // the CAS: only an open vote transitions
+    const next: RatificationVoteRecord = { ...cur, ...fields };
     this.votes.set(voteId, next);
     return next;
   }

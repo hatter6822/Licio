@@ -85,6 +85,18 @@ export async function castRatificationBallot(
   return parseResponse(res, ratificationBallotResponseSchema);
 }
 
+/** The steward's last-line-of-defence against an improper open vote: cancel it
+ *  with NO outcome (the candidate stays eligible; a fresh vote may open). */
+export async function cancelRatification(
+  roomId: string,
+  voteId: string,
+): Promise<RatificationBallotResponse> {
+  const res = await client.v1.rooms[':roomId'].governance.ratifications[':voteId'].cancel.$post({
+    param: { roomId, voteId },
+  });
+  return parseResponse(res, ratificationBallotResponseSchema);
+}
+
 export async function fetchRatification(roomId: string): Promise<RatificationViewResponse> {
   const res = await client.v1.rooms[':roomId'].governance.ratification.$get({ param: { roomId } });
   return parseResponse(res, ratificationViewResponseSchema);

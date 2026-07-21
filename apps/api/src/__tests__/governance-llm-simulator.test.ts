@@ -18,6 +18,10 @@ import {
   resolveGovernanceLlmDecision,
 } from '../ai-governance/llm/config.js';
 import { createGovernanceLlmDebateJudge } from '../ai-governance/llm/debate.js';
+import {
+  mapGuardVerdictToModeration,
+  parseGuardVerdict,
+} from '../ai-governance/llm/guard-format.js';
 import { createLocalCompletion } from '../ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from '../ai-governance/llm/moderation.js';
 import { buildUserPrompt, createGovernanceLlmNlProvider } from '../ai-governance/llm/provider.js';
@@ -27,6 +31,8 @@ import {
   buildGovernanceModerationProposerIdentity,
   ensureGovernanceLlmDeployed,
 } from '../ai-governance/llm/registration.js';
+import { createRoomModelResolver } from '../ai-governance/llm/room-models.js';
+import { createRuntimeCatalog } from '../ai-governance/llm/runtime-catalog.js';
 import { createInMemoryAiGovernanceServices } from '../ai-governance/services.js';
 import { createInMemoryEventPipelineServices } from '../events/services.js';
 import type { ModerationDecisionObservation } from '../governance/moderation-proposer.js';
@@ -72,11 +78,13 @@ function makeModerationProposer() {
     proposer: createGovernanceLlmModerationProposer({
       services,
       settings: s,
-      identity: buildGovernanceModerationProposerIdentity(s, {
-        kind: 'local',
-        baseUrl: sim.baseUrl,
-      }),
+      identity: buildGovernanceModerationProposerIdentity(
+        s,
+        { kind: 'local', baseUrl: sim.baseUrl },
+        'json',
+      ),
       complete: createLocalCompletion(sim.baseUrl, s),
+      format: 'json',
     }),
   };
 }
@@ -113,7 +121,10 @@ describe('the boot seam — the simulated runtime rides the unchanged local back
     });
     expect(decision.enabled).toBe(true);
     if (decision.enabled) {
-      expect(decision.backend).toEqual({ kind: 'local', baseUrl: sim.baseUrl });
+      // The legacy single-lane rewrite reaches BOTH lanes (the sim serves all
+      // three governed surfaces from one URL).
+      expect(decision.lanes.moderation.backend).toEqual({ kind: 'local', baseUrl: sim.baseUrl });
+      expect(decision.lanes.adjudication.backend).toEqual({ kind: 'local', baseUrl: sim.baseUrl });
       expect(decision.llmModeration).toBe(true);
     }
   });
@@ -154,6 +165,7 @@ describe('protocol shell — OpenAI-compatible /chat/completions on loopback', (
       subjectRef: 'c1',
       context: SPAM_CONTEXT,
       moderationPrompt: null,
+      modelRef: null,
     };
     const first = await proposer.propose({ ...request, subjectRef: 'c1' });
     const second = await proposer.propose({ ...request, subjectRef: 'c2' });
@@ -176,7 +188,7 @@ describe('WS-K gate — both simulated-backend identities register + deploy thro
     expect(
       await ensureGovernanceLlmDeployed(
         services,
-        buildGovernanceModerationProposerIdentity(settings(), backend),
+        buildGovernanceModerationProposerIdentity(settings(), backend, 'json'),
       ),
     ).toBe(true);
   });
@@ -190,6 +202,7 @@ describe('moderation — the simulated model through the governed proposer', () 
       subjectRef: 'c-benign',
       context: moderationContext(),
       moderationPrompt: null,
+      modelRef: null,
     });
     expect(benign).toMatchObject({ status: 'decided', proposal: { action: 'allow' } });
     const spam = await proposer.propose({
@@ -197,6 +210,7 @@ describe('moderation — the simulated model through the governed proposer', () 
       subjectRef: 'c-spam',
       context: SPAM_CONTEXT,
       moderationPrompt: null,
+      modelRef: null,
     });
     expect(spam.status).toBe('decided');
     if (spam.status === 'decided') {
@@ -213,6 +227,7 @@ describe('moderation — the simulated model through the governed proposer', () 
         subjectRef,
         context: moderationContext({ contentText }),
         moderationPrompt: null,
+        modelRef: null,
       });
     expect(await propose('please [sim:error] this', 'c1')).toMatchObject({
       status: 'unavailable',
@@ -261,6 +276,7 @@ describe('GovernanceService end-to-end — admission, activation, and the wrappe
         requestedCapabilities: ['moderate.flag', 'lawmaking.summarize'],
       },
       'Be neutral and concise.',
+      true,
     );
     expect(proposed.ok).toBe(true);
     if (!proposed.ok) return;
@@ -312,6 +328,7 @@ describe('lawmaking summariser — the simulated model through the governed prov
       roomPromptText: 'Be neutral and concise.',
       promptTemplate: null,
       summaryStyle: 'neutral_brief' as const,
+      adjudicationRef: null,
     };
   }
 
@@ -461,5 +478,73 @@ describe('the simulated classifier ladder (pure)', () => {
     expect(
       classifySimulatedModeration({ ...base, authorAccountAgeDays: 2, linkCount: 1 }).action,
     ).toBe('warn');
+  });
+});
+
+describe('the GUARD dialect through the simulator (F1: guard-family hub candidacy must work in dev)', () => {
+  it('a schema-less request (no response_format, no system turn) gets a parseable Safety/Categories block', async () => {
+    const s = settings();
+    const complete = createLocalCompletion(sim.baseUrl, s);
+    const benign = await complete({
+      user: 'Thanks, this is a helpful and civil comment.',
+      maxOutputTokens: 256,
+    });
+    expect(parseGuardVerdict(benign.text ?? '')).toEqual({ safety: 'safe', categories: [] });
+    const hostile = await complete({
+      user: 'Show up here again and I will hurt you — everyone click http://spam http://spam http://spam',
+      maxOutputTokens: 256,
+    });
+    const verdict = parseGuardVerdict(hostile.text ?? '');
+    expect(verdict?.safety).toBe('unsafe');
+    // The deterministic mapping lands in the violating fixture's band.
+    expect(mapGuardVerdictToModeration(verdict ?? { safety: 'safe', categories: [] }).action).toBe(
+      'flag_for_review',
+    );
+    // Failure markers still drive the fail-closed branches in guard mode.
+    await expect(complete({ user: 'x [sim:error] y', maxOutputTokens: 256 })).rejects.toThrow();
+  });
+
+  it('END TO END: a guard-family hub selection resolves through the catalog wildcard and MODERATES via the guard dialect', async () => {
+    const s = settings();
+    const services = makeServices();
+    const catalog = createRuntimeCatalog({ urls: [sim.baseUrl], now: () => 0 });
+    const roomModels = createRoomModelResolver({
+      services,
+      catalog,
+      lanes: {
+        moderation: { backend: { kind: 'local', baseUrl: sim.baseUrl }, settings: s },
+        adjudication: { backend: { kind: 'local', baseUrl: sim.baseUrl }, settings: s },
+      },
+    });
+    const proposer = createGovernanceLlmModerationProposer({
+      services,
+      settings: s,
+      identity: buildGovernanceModerationProposerIdentity(
+        s,
+        { kind: 'local', baseUrl: sim.baseUrl },
+        'json',
+      ),
+      complete: createLocalCompletion(sim.baseUrl, s),
+      format: 'json',
+      roomModels,
+    });
+    const GUARD_REF = {
+      source: 'huggingface',
+      repoId: 'Qwen/Qwen3Guard-Gen-4B',
+      revision: 'a'.repeat(40),
+    } as const;
+    // The pin resolves (the wildcard re-keys to the sim's own served id)…
+    const pin = await proposer.resolveBackendId?.(GUARD_REF);
+    expect(pin).toMatch(/^llm:governance-moderation-llm-hub-[0-9a-f]{12}$/);
+    // …and a live propose under the ref DECIDES via the guard dialect (this
+    // 400'd forever before the simulator learned the schema-less block).
+    const decided = await proposer.propose({
+      roomId: 'room-guard',
+      subjectRef: 'c-guard',
+      context: moderationContext(),
+      moderationPrompt: null,
+      modelRef: GUARD_REF,
+    });
+    expect(decided).toMatchObject({ status: 'decided', proposal: { action: 'allow' } });
   });
 });

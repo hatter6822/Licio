@@ -250,8 +250,9 @@ export function RoomDetailBody({
           The legacy route itself still 301s to `?governance=` for bookmarked URLs. */}
 
       {/* WS-U §24.6/§16.6 — the governance modal (opened by the compact button
-          above). Tabs separate the "governed by" transparency view, the steward's
-          model powers + member vote, and the steward-only settings. */}
+          above). Tabs separate the "governed by" transparency view, the member
+          model candidacy + vote (with the steward's validation powers), and the
+          steward-only settings. */}
       {contentVisible ? (
         <RoomGovernanceDialog
           open={governanceOpen}

@@ -75,7 +75,7 @@ async function activate(h: Harness, capabilities: string[]): Promise<void> {
   await h.svc.bootstrapSeat(ROOM, STEWARD);
   const lp = await h.svc.proposeLawPack(ROOM, STEWARD, lawPack(capabilities));
   if (!lp.ok) throw new Error('law-pack');
-  const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(capabilities), 'prompt');
+  const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(capabilities), 'prompt', true);
   if (!proposed.ok) throw new Error('propose');
   await h.svc.evaluateModel(proposed.value.modelId);
   const approved = await h.svc.approveModel(ROOM, proposed.value.modelId, null, lp.value.lawPackId);

@@ -87,9 +87,10 @@ const lawmakingSummaryBodySchema = z.object({ proposal: z.unknown() }).strict();
 export function createGovernanceRoutes() {
   // Identity-free per-endpoint cost ceilings (SPEC §19.1): governance writes are
   // low-frequency by construction, so a global fixed-window budget sheds load
-  // before auth/validation cost. Per-account fairness comes from the steward-only
-  // gates (propose/open/law-pack) and the composite-PK ballot idempotency.
-  // Member ballots get a roomier budget than steward proposals (more voters).
+  // before auth/validation cost. Per-account fairness comes from the service
+  // gates (member-gated propose, steward-only open/cancel/law-pack) and the
+  // composite-PK ballot idempotency. Member ballots get a roomier budget than
+  // the other governance writes (more voters).
   const stewardWriteLimit = rateLimit({ limit: 120, windowMs: 60_000 });
   const voteLimit = rateLimit({ limit: 600, windowMs: 60_000 });
   return (
@@ -184,16 +185,27 @@ export function createGovernanceRoutes() {
           const denial = await checkGovernanceEligibility(auth.userId);
           if (denial) return c.json({ error: denial }, 403);
           const { bundle, prompt_text } = c.req.valid('json');
+          // Model candidacy is a MEMBER power (the community authors its own
+          // model; the elected steward VALIDATES via the ratification gate) —
+          // the same membership read the ratification ballot uses, plus the
+          // elected seat-holder (a steward is elected from among the room's
+          // members; a governance-only seat may lack forum rows — the
+          // `governanceReadable` posture).
+          const roomId = c.req.param('roomId');
+          const member =
+            (await isRoomMember(roomId, auth.userId)) ||
+            (await getGovernanceService().getSeat(roomId))?.holderUserId === auth.userId;
           const result = await getGovernanceService().proposeModel(
-            c.req.param('roomId'),
+            roomId,
             auth.userId,
             bundle,
             prompt_text,
+            member,
           );
           if (!result.ok) {
             return c.json(
               deny(result.code, result.message),
-              result.code === 'not_steward' ? 403 : 422,
+              result.code === 'not_member' ? 403 : 422,
             );
           }
           // Eagerly run the admission gate so the eligibility status is visible.
@@ -311,6 +323,33 @@ export function createGovernanceRoutes() {
           return c.json({ ok: true });
         },
       )
+      .post(
+        '/rooms/:roomId/governance/ratifications/:voteId/cancel',
+        stewardWriteLimit,
+        authMiddleware(),
+        validateVoteId,
+        async (c) => {
+          const auth = c.get('auth');
+          if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: cancelling a vote is governance power.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
+          // The steward's last-line-of-defence against an improper open vote
+          // (steward-only, service-enforced): the vote closes with NO outcome —
+          // the candidate stays eligible and a fresh vote may open.
+          const result = await getGovernanceService().cancelRatification(
+            c.req.param('roomId'),
+            auth.userId,
+            c.req.param('voteId'),
+          );
+          if (!result.ok) {
+            const status =
+              result.code === 'not_steward' ? 403 : result.code === 'not_found' ? 404 : 409;
+            return c.json(deny(result.code, result.message), status);
+          }
+          return c.json({ ok: true });
+        },
+      )
       .get('/rooms/:roomId/governance/ratification', authMiddleware(), async (c) => {
         const roomId = c.req.param('roomId');
         if (!(await governanceReadable(roomId, c.get('auth')?.userId ?? null))) {
@@ -408,12 +447,39 @@ export function createGovernanceRoutes() {
         const svc = getGovernanceService();
         const binding = await svc.getBinding(roomId);
         const actions = await svc.recentAgentActions(roomId, 20);
+        // WS-U model candidacy transparency: surface the ratified bundle's
+        // per-role hub model selections (revision-pinned) so members see WHICH
+        // weights govern each role — the platform default when a role is unset.
+        const boundModel = binding ? await svc.getModel(binding.modelId) : null;
+        const selection = boundModel?.bundle.modelSelection;
+        const selectionWire = (
+          ref: { repoId: string; revision: string; servedModelId?: string | undefined } | undefined,
+        ) =>
+          ref
+            ? {
+                repo_id: ref.repoId,
+                revision: ref.revision,
+                // Transparency: a runtime id differing from the verified repo
+                // must be VISIBLE — the served id can never hide behind the
+                // hub-verified repo id in the members' view.
+                ...(ref.servedModelId !== undefined && ref.servedModelId !== ref.repoId
+                  ? { served_model_id: ref.servedModelId }
+                  : {}),
+              }
+            : null;
         return c.json({
           active: binding?.active ?? false,
           // A binding that exists but is inactive ⇒ the platform floor has paused
           // a community-approved agent (distinct from a room that never had one).
           frozen: binding !== null && !binding.active,
           model_id: binding?.modelId ?? null,
+          model_selection:
+            selection === undefined
+              ? null
+              : {
+                  moderation: selectionWire(selection.moderation),
+                  adjudication: selectionWire(selection.adjudication),
+                },
           granted: binding?.capabilityDescriptor.granted ?? [],
           recent_actions: actions.map((a) => ({
             action_id: a.actionId,

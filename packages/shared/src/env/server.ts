@@ -176,24 +176,66 @@ export const serverEnvSchema = z.object({
   //               Enabling it sends governed-room proposal text off-host,
   //               making the vendor an operator-chosen data processor — boot
   //               logs this loudly.
-  //   local     — a SAME-HOST inference server speaking the OpenAI-compatible
-  //               /chat/completions protocol (llama.cpp server, Ollama, vLLM,
-  //               LM Studio). GOVERNANCE_LLM_LOCAL_URL (LOOPBACK-ONLY, so
-  //               "local" provably means no third-party egress) defaults to
-  //               the Ollama loopback endpoint http://127.0.0.1:11434/v1 and
-  //               GOVERNANCE_LLM_MODEL to the reviewed default local model
-  //               (apps/api ai-governance/llm/config.ts).
+  //   local     — SAME-HOST inference servers speaking the OpenAI-compatible
+  //               /chat/completions protocol (vLLM — the reviewed default
+  //               runtime — plus Ollama, llama.cpp server, LM Studio as
+  //               operator alternatives). Every local URL is LOOPBACK-ONLY, so
+  //               "local" provably means no third-party egress. The backend
+  //               runs TWO role lanes (the moderation/adjudication split
+  //               below); the per-lane defaults are two loopback vLLM
+  //               instances (apps/api ai-governance/llm/config.ts).
   // Absent ⇒ PRODUCTION defaults to 'local' (the production-complete posture:
   // production always runs the full feature, failing closed per call to the
   // deterministic paths when the runtime is absent); development wires the
   // DEV-ONLY simulated runtime instead. 'deterministic' opts out explicitly.
   GOVERNANCE_LLM_PROVIDER: z.enum(['deterministic', 'anthropic', 'local']).optional(),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  // The legacy SINGLE-lane overrides: when set they apply to BOTH role lanes
+  // (the single-runtime posture — e.g. one Ollama serving both models from one
+  // URL). The per-lane keys below take precedence over them lane-by-lane.
   GOVERNANCE_LLM_MODEL: z.string().min(1).optional(),
   GOVERNANCE_LLM_LOCAL_URL: z
     .string()
     .url({ message: 'GOVERNANCE_LLM_LOCAL_URL must be a valid URL' })
     .optional(),
+  // WS-U per-ROLE model lanes (the moderation/adjudication split): each
+  // governed role runs its own model because the roles fail differently — an
+  // over/under-blocking safety classifier is a moderation failure mode, a
+  // shallow-reasoning generalist an adjudication one. The moderation lane
+  // defaults to the Qwen3Guard generative safety classifier
+  // (Qwen/Qwen3Guard-Gen-4B); the adjudication lane — which also serves the
+  // advisory lawmaking summariser — to the Qwen3.6 generalist
+  // (Qwen/Qwen3.6-27B). Lane precedence: per-lane key → legacy single-lane
+  // key → the reviewed per-lane default. URLs are loopback-enforced below.
+  GOVERNANCE_LLM_MODERATION_MODEL: z.string().min(1).optional(),
+  GOVERNANCE_LLM_ADJUDICATION_MODEL: z.string().min(1).optional(),
+  GOVERNANCE_LLM_MODERATION_URL: z
+    .string()
+    .url({ message: 'GOVERNANCE_LLM_MODERATION_URL must be a valid URL' })
+    .optional(),
+  GOVERNANCE_LLM_ADJUDICATION_URL: z
+    .string()
+    .url({ message: 'GOVERNANCE_LLM_ADJUDICATION_URL must be a valid URL' })
+    .optional(),
+  // Additional loopback OpenAI-compatible runtime base URLs (comma-separated)
+  // the room-model resolver may locate ratified hub models on, beyond the two
+  // lane URLs (e.g. extra vLLM instances provisioned for room-ratified models).
+  GOVERNANCE_LLM_EXTRA_RUNTIME_URLS: z.string().min(1).optional(),
+  // Moderation-lane output format: 'guard' = the Qwen3Guard-native
+  // Safety/Categories block (parsed + deterministically mapped to the action
+  // vocabulary), 'json' = the strict JSON verdict schema, 'auto' (default)
+  // detects guard-family models by model id.
+  GOVERNANCE_LLM_MODERATION_FORMAT: z.enum(['auto', 'json', 'guard']).optional(),
+  // WS-U model-hub candidacy (SPEC §24.6): server-side huggingface.co METADATA
+  // reads only (steward model search + revision-pinned candidate verification;
+  // never any room content, never any user identifier). 'off' disables the
+  // /v1/model-hub surface AND rejects hub-referencing bundles at propose time
+  // (fail-closed, never a silently unverified candidate).
+  GOVERNANCE_MODEL_HUB: z.enum(['on', 'off']).optional(),
+  // Optional huggingface.co API token (server-side only; rate-limit headroom
+  // for the metadata reads). Gated models are rejected as candidates
+  // regardless — the token never widens what a room may select.
+  HF_TOKEN: z.string().min(1).optional(),
   // WS-U ADR-9: when an LLM backend is enabled, the LLM is the in-room
   // moderation MODEL (bounded by the deterministic wrapper). Set `off` to keep
   // the deterministic default moderation proposer even with a backend
@@ -304,6 +346,27 @@ export function parseChainRpcUrls(raw: string | undefined): Record<number, strin
   return out;
 }
 
+/** Strictly parse the optional comma-separated extra-runtime list
+ *  (GOVERNANCE_LLM_EXTRA_RUNTIME_URLS) into loopback base URLs. Unset ⇒ [].
+ *  Shared by the boot-time env refinement (fail-fast) and the runtime-catalog
+ *  consumer so both enforce the SAME predicate. A PRESENT-but-invalid entry
+ *  THROWS — a silently dropped runtime URL would strand ratified room models. */
+export function parseGovernanceExtraRuntimeUrls(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  const urls = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  for (const url of urls) {
+    if (!isLoopbackHttpUrl(url)) {
+      throw new Error(
+        `GOVERNANCE_LLM_EXTRA_RUNTIME_URLS entry "${url}" must be a loopback http(s) URL (localhost / 127.0.0.1 / [::1])`,
+      );
+    }
+  }
+  return urls;
+}
+
 /** Infrastructure + secrets that MUST be configured in production but may be
  *  omitted in development/test (where the in-memory stores + dev defaults take
  *  over). Listed here so the refinement and the dev-default transform agree. */
@@ -359,25 +422,48 @@ export const serverEnvSchemaRefined = serverEnvSchema
     // whenever the value is SET (not only under an explicit provider):
     // production defaults an unset provider to 'local', so an explicit URL or
     // model must be valid even when GOVERNANCE_LLM_PROVIDER is omitted.
-    if (
-      env.GOVERNANCE_LLM_LOCAL_URL !== undefined &&
-      !isLoopbackHttpUrl(env.GOVERNANCE_LLM_LOCAL_URL)
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        message:
-          'GOVERNANCE_LLM_LOCAL_URL must point at the loopback interface (localhost / 127.0.0.1 / [::1]) — a non-local URL is third-party egress and belongs to the anthropic backend decision, not local',
-        path: ['GOVERNANCE_LLM_LOCAL_URL'],
-      });
+    for (const urlKey of [
+      'GOVERNANCE_LLM_LOCAL_URL',
+      'GOVERNANCE_LLM_MODERATION_URL',
+      'GOVERNANCE_LLM_ADJUDICATION_URL',
+    ] as const) {
+      const value = env[urlKey];
+      if (value !== undefined && !isLoopbackHttpUrl(value)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `${urlKey} must point at the loopback interface (localhost / 127.0.0.1 / [::1]) — a non-local URL is third-party egress and belongs to the anthropic backend decision, not local`,
+          path: [urlKey],
+        });
+      }
+    }
+    // Every extra-runtime entry is loopback-enforced with the same predicate.
+    if (env.GOVERNANCE_LLM_EXTRA_RUNTIME_URLS !== undefined) {
+      try {
+        parseGovernanceExtraRuntimeUrls(env.GOVERNANCE_LLM_EXTRA_RUNTIME_URLS);
+      } catch (err) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            err instanceof Error ? err.message : 'GOVERNANCE_LLM_EXTRA_RUNTIME_URLS is invalid',
+          path: ['GOVERNANCE_LLM_EXTRA_RUNTIME_URLS'],
+        });
+      }
     }
     // A blank model override is silently trimmed to empty and replaced by the
     // backend default — an explicit-yet-ignored value that must fail fast.
-    if (env.GOVERNANCE_LLM_MODEL !== undefined && env.GOVERNANCE_LLM_MODEL.trim() === '') {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'GOVERNANCE_LLM_MODEL must be non-empty when set',
-        path: ['GOVERNANCE_LLM_MODEL'],
-      });
+    for (const modelKey of [
+      'GOVERNANCE_LLM_MODEL',
+      'GOVERNANCE_LLM_MODERATION_MODEL',
+      'GOVERNANCE_LLM_ADJUDICATION_MODEL',
+    ] as const) {
+      const value = env[modelKey];
+      if (value !== undefined && value.trim() === '') {
+        ctx.addIssue({
+          code: 'custom',
+          message: `${modelKey} must be non-empty when set`,
+          path: [modelKey],
+        });
+      }
     }
     if (env.GOVERNANCE_LLM_PROVIDER === 'anthropic') {
       // Reject a blank (whitespace-only) key too: it passes an undefined-only

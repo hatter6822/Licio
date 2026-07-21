@@ -44,7 +44,7 @@ function ctx(over: Partial<ModerationContext> = {}): ModerationContext {
   };
 }
 function req(roomId: string, subjectRef: string) {
-  return { roomId, subjectRef, context: ctx(), moderationPrompt: null };
+  return { roomId, subjectRef, context: ctx(), moderationPrompt: null, modelRef: null };
 }
 
 interface Harness {
@@ -54,7 +54,7 @@ interface Harness {
   queue: Array<LlmCompletionResult | Error>;
   advance: (ms: number) => void;
 }
-function makeHarness(): Harness {
+function makeHarness(format: 'json' | 'qwen3guard' = 'json'): Harness {
   let nowMs = Date.parse('2026-07-01T00:00:00.000Z');
   const NOW = () => nowMs;
   const events = createInMemoryEventPipelineServices({ now: NOW });
@@ -64,13 +64,14 @@ function makeHarness(): Harness {
   const proposer = createGovernanceLlmModerationProposer({
     services,
     settings: SETTINGS,
-    identity: buildGovernanceModerationProposerIdentity(SETTINGS, BACKEND),
+    identity: buildGovernanceModerationProposerIdentity(SETTINGS, BACKEND, format),
     complete: async (request) => {
       requests.push(request);
       const next = queue.shift() ?? { stopReason: 'end_turn', text: JSON.stringify(DECISION) };
       if (next instanceof Error) throw next;
       return next;
     },
+    format,
   });
   return {
     services,
@@ -170,5 +171,112 @@ describe('provenance-write failures count toward the breaker (parity with the de
       code: 'breaker_open',
     });
     expect(h.requests).toHaveLength(2);
+  });
+});
+
+describe('the guard dialect (the role split: Qwen3Guard-family moderation lane)', () => {
+  it('sends ONLY the contribution text (no system turn, no schema constraint) and maps the native block deterministically', async () => {
+    const g = makeHarness('qwen3guard');
+    g.queue.push({
+      stopReason: 'end_turn',
+      text: 'Safety: Unsafe\nCategories: Violent, Jailbreak',
+    });
+    const result = await g.proposer.propose(req('room-1', 'c1'));
+    expect(result.status).toBe('decided');
+    if (result.status === 'decided') {
+      expect(result.proposal.action).toBe('flag_for_review');
+      expect(result.proposal.reason).toContain('Violent');
+      expect(result.proposal.outputId).not.toBeNull();
+    }
+    const sent = g.requests[0];
+    expect(sent?.system).toBeUndefined();
+    expect(sent?.jsonSchema).toBeUndefined();
+    expect(sent?.user).toBe('hi'); // the raw contribution text only
+  });
+
+  it('Safe → allow and Controversial → warn (the versioned taxonomy mapping)', async () => {
+    const g = makeHarness('qwen3guard');
+    g.queue.push({ stopReason: 'end_turn', text: 'Safety: Safe\nCategories: None' });
+    const safe = await g.proposer.propose(req('room-1', 'c1'));
+    expect(safe.status === 'decided' && safe.proposal.action).toBe('allow');
+    g.queue.push({ stopReason: 'end_turn', text: 'safety: controversial\ncategories: PII' });
+    const contested = await g.proposer.propose(req('room-1', 'c2'));
+    expect(contested.status === 'decided' && contested.proposal.action).toBe('warn');
+  });
+
+  it('an unparseable guard block is invalid_output (fail-closed, never freetext into effect)', async () => {
+    const g = makeHarness('qwen3guard');
+    g.queue.push({ stopReason: 'end_turn', text: 'I think this is probably fine!' });
+    expect(await g.proposer.propose(req('room-1', 'c1'))).toEqual({
+      status: 'unavailable',
+      code: 'invalid_output',
+    });
+  });
+});
+
+describe('room model selection (WS-U model candidacy)', () => {
+  const REF = {
+    source: 'huggingface',
+    repoId: 'Qwen/Qwen3Guard-Gen-8B',
+    revision: 'a'.repeat(40),
+  } as const;
+
+  it('an unresolvable hub selection is room_model_unavailable — never a silent fallback onto the lane model', async () => {
+    // No roomModels resolver wired at all.
+    expect(await h.proposer.propose({ ...req('room-1', 'c1'), modelRef: REF })).toEqual({
+      status: 'unavailable',
+      code: 'room_model_unavailable',
+    });
+    expect(h.requests).toHaveLength(0); // the lane completion was never consulted
+    // resolveBackendId mirrors it: null (⇒ admission stays retryable).
+    expect(await h.proposer.resolveBackendId?.(REF)).toBeNull();
+    expect(await h.proposer.resolveBackendId?.(null)).toBe(h.proposer.backendId);
+  });
+
+  it('a resolved hub selection runs ITS completion + identity (own provenance, own dialect)', async () => {
+    const g = makeHarness('json');
+    const roomRequests: LlmCompletionRequest[] = [];
+    const proposer = createGovernanceLlmModerationProposer({
+      services: g.services,
+      settings: SETTINGS,
+      identity: buildGovernanceModerationProposerIdentity(SETTINGS, BACKEND, 'json'),
+      complete: async (request) => {
+        g.requests.push(request);
+        return { stopReason: 'end_turn', text: JSON.stringify(DECISION) };
+      },
+      format: 'json',
+      roomModels: {
+        resolveModeration: async () => ({
+          complete: async (request) => {
+            roomRequests.push(request);
+            return {
+              stopReason: 'end_turn',
+              text: 'Safety: Unsafe\nCategories: Non-violent Illegal Acts',
+            };
+          },
+          settings: SETTINGS,
+          identity: {
+            name: 'governance-moderation-llm-hub-abcdefabcdef',
+            version: '1.0.0',
+            useCaseId: 'toxicity_safety_triage',
+            modalities: ['classification'],
+            promptTemplateId: 'governance-moderation-llm/v1',
+            config: { model_id: 'Qwen/Qwen3Guard-Gen-8B' },
+          },
+          backendId: 'llm:governance-moderation-llm-hub-abcdefabcdef',
+          format: 'qwen3guard',
+        }),
+        resolveAdjudication: async () => null,
+      },
+    });
+    const result = await proposer.propose({ ...req('room-1', 'c1'), modelRef: REF });
+    expect(result.status).toBe('decided');
+    if (result.status === 'decided') expect(result.proposal.action).toBe('flag_for_review');
+    expect(g.requests).toHaveLength(0); // the LANE completion was never consulted
+    expect(roomRequests).toHaveLength(1); // the ROOM model's completion ran, in ITS dialect
+    expect(roomRequests[0]?.jsonSchema).toBeUndefined();
+    expect(await proposer.resolveBackendId?.(REF)).toBe(
+      'llm:governance-moderation-llm-hub-abcdefabcdef',
+    );
   });
 });

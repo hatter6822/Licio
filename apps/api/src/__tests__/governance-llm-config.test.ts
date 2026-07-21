@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-U ADR-9 fail-closed enablement matrix for the LLM-backed governance NL
-// provider: an explicit 'anthropic'/'local' opts in; PRODUCTION defaults an
-// UNSET provider to 'local' (the production-complete posture — the loopback
-// URL + model both carry reviewed defaults); 'deterministic' opts out
-// explicitly; every invalid combination resolves to the deterministic default
-// (no silent enablement, no silent egress).
+// WS-U ADR-9 fail-closed enablement matrix for the LLM-backed governance
+// surfaces (the role-split revision): an explicit 'anthropic'/'local' opts in;
+// PRODUCTION defaults an UNSET provider to 'local' with the TWO reviewed lane
+// defaults (moderation = the Qwen3Guard safety classifier on :8001,
+// adjudication = the Qwen3.6 generalist on :8002); the legacy single-lane keys
+// apply to BOTH lanes; 'deterministic' opts out explicitly; every invalid
+// combination resolves to the deterministic default (no silent enablement, no
+// silent egress — every lane + extra URL is loopback-enforced).
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID,
-  DEFAULT_GOVERNANCE_LLM_LOCAL_URL,
+  DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID,
+  DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
+  DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID,
+  DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
   DEFAULT_GOVERNANCE_LLM_SETTINGS,
   resolveGovernanceLlmDecision,
 } from '../ai-governance/llm/config.js';
@@ -37,7 +41,7 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
-  it('PRODUCTION defaults an unset provider to the local backend with the reviewed defaults (the production-complete posture)', () => {
+  it('PRODUCTION defaults an unset provider to the local backend with the TWO reviewed lane defaults (the production-complete posture)', () => {
     const decision = resolveGovernanceLlmDecision({
       provider: undefined,
       apiKey: undefined,
@@ -45,30 +49,105 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     });
     expect(decision.enabled).toBe(true);
     if (decision.enabled) {
-      expect(decision.backend).toEqual({
+      expect(decision.lanes.moderation.backend).toEqual({
         kind: 'local',
-        baseUrl: DEFAULT_GOVERNANCE_LLM_LOCAL_URL,
+        baseUrl: DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
       });
-      expect(decision.settings.modelId).toBe(DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID);
+      expect(decision.lanes.moderation.settings.modelId).toBe(
+        DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID,
+      );
+      expect(decision.lanes.adjudication.backend).toEqual({
+        kind: 'local',
+        baseUrl: DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
+      });
+      expect(decision.lanes.adjudication.settings.modelId).toBe(
+        DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID,
+      );
+      // The moderation default is a guard model ⇒ the guard-native dialect.
+      expect(decision.moderationFormat).toBe('qwen3guard');
+      // Both lane URLs are probeable by the room-model resolver.
+      expect(decision.runtimeUrls).toEqual([
+        DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
+        DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
+      ]);
       expect(decision.providerDefaulted).toBe(true);
       // All three governed surfaces default on.
       expect(decision.llmModeration).toBe(true);
       expect(decision.llmDebate).toBe(true);
     }
-    // Explicit env values still condition the defaulted backend.
-    const tuned = resolveGovernanceLlmDecision({
-      provider: undefined,
-      apiKey: undefined,
-      modelId: 'qwen3:14b',
-      nodeEnv: 'production',
-    });
-    expect(tuned.enabled && tuned.settings.modelId).toBe('qwen3:14b');
     // Non-production never silently defaults (dev wires the simulator at boot).
     for (const nodeEnv of [undefined, 'development', 'test']) {
       expect(
         resolveGovernanceLlmDecision({ provider: undefined, apiKey: undefined, nodeEnv }),
       ).toEqual({ enabled: false, reason: 'not_requested' });
     }
+  });
+
+  it('the LEGACY single-lane keys apply to BOTH lanes (the single-runtime posture)', () => {
+    const decision = resolveGovernanceLlmDecision({
+      provider: 'local',
+      apiKey: undefined,
+      modelId: 'qwen3:14b',
+      localBaseUrl: LOCAL_URL,
+    });
+    expect(decision.enabled).toBe(true);
+    if (decision.enabled) {
+      expect(decision.lanes.moderation.backend).toEqual({ kind: 'local', baseUrl: LOCAL_URL });
+      expect(decision.lanes.adjudication.backend).toEqual({ kind: 'local', baseUrl: LOCAL_URL });
+      expect(decision.lanes.moderation.settings.modelId).toBe('qwen3:14b');
+      expect(decision.lanes.adjudication.settings.modelId).toBe('qwen3:14b');
+      // One shared URL ⇒ one deduplicated runtime entry.
+      expect(decision.runtimeUrls).toEqual([LOCAL_URL]);
+      // A generalist single model ⇒ the strict-JSON dialect.
+      expect(decision.moderationFormat).toBe('json');
+    }
+  });
+
+  it('per-lane keys override the legacy keys lane-by-lane', () => {
+    const decision = resolveGovernanceLlmDecision({
+      provider: 'local',
+      apiKey: undefined,
+      modelId: 'qwen3:14b',
+      localBaseUrl: LOCAL_URL,
+      moderationModelId: 'Qwen/Qwen3Guard-Gen-8B',
+      moderationUrl: 'http://127.0.0.1:9001/v1',
+    });
+    expect(decision.enabled).toBe(true);
+    if (decision.enabled) {
+      expect(decision.lanes.moderation.settings.modelId).toBe('Qwen/Qwen3Guard-Gen-8B');
+      expect(decision.lanes.moderation.backend).toEqual({
+        kind: 'local',
+        baseUrl: 'http://127.0.0.1:9001/v1',
+      });
+      // The adjudication lane still follows the legacy keys.
+      expect(decision.lanes.adjudication.settings.modelId).toBe('qwen3:14b');
+      expect(decision.lanes.adjudication.backend).toEqual({ kind: 'local', baseUrl: LOCAL_URL });
+      // A guard-family override auto-detects the guard dialect.
+      expect(decision.moderationFormat).toBe('qwen3guard');
+      expect(decision.runtimeUrls).toEqual(['http://127.0.0.1:9001/v1', LOCAL_URL]);
+    }
+  });
+
+  it('the moderation format override wins over auto-detection; garbage auto-detects', () => {
+    const base = {
+      provider: 'local',
+      apiKey: undefined,
+      localBaseUrl: LOCAL_URL,
+    } as const;
+    const forcedJson = resolveGovernanceLlmDecision({ ...base, moderationFormat: 'json' });
+    expect(forcedJson.enabled && forcedJson.moderationFormat).toBe('json');
+    const forcedGuard = resolveGovernanceLlmDecision({
+      ...base,
+      modelId: 'llama3.3',
+      moderationFormat: 'guard',
+    });
+    expect(forcedGuard.enabled && forcedGuard.moderationFormat).toBe('qwen3guard');
+    const garbage = resolveGovernanceLlmDecision({
+      ...base,
+      modelId: 'llama3.3',
+      moderationFormat: 'yaml',
+    });
+    expect(garbage.enabled && garbage.moderationFormat).toBe('json');
   });
 
   it('anthropic: disabled without a key (absent, empty, or whitespace)', () => {
@@ -78,47 +157,37 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
-  it('anthropic: enables with the reviewed defaults and honours a model override', () => {
+  it('anthropic: enables with the reviewed defaults on both lanes; per-lane models override; hub resolution is off', () => {
     const decision = resolveGovernanceLlmDecision({ provider: 'anthropic', apiKey: ` ${KEY} ` });
     expect(decision.enabled).toBe(true);
     if (decision.enabled) {
-      expect(decision.backend).toEqual({ kind: 'anthropic', apiKey: KEY }); // trimmed
-      expect(decision.settings).toEqual(DEFAULT_GOVERNANCE_LLM_SETTINGS);
-      expect(decision.settings.modelId).toBe('claude-opus-4-8');
+      expect(decision.lanes.moderation.backend).toEqual({ kind: 'anthropic', apiKey: KEY }); // trimmed
+      expect(decision.lanes.adjudication.backend).toEqual({ kind: 'anthropic', apiKey: KEY });
+      expect(decision.lanes.moderation.settings.modelId).toBe('claude-opus-4-8');
+      expect(decision.lanes.adjudication.settings.modelId).toBe('claude-opus-4-8');
+      // Hub models are local-runtime-only: nothing to probe under the hosted backend.
+      expect(decision.runtimeUrls).toEqual([]);
     }
     const overridden = resolveGovernanceLlmDecision({
       provider: 'anthropic',
       apiKey: KEY,
-      modelId: 'claude-haiku-4-5',
+      adjudicationModelId: 'claude-haiku-4-5',
     });
-    expect(overridden.enabled && overridden.settings.modelId).toBe('claude-haiku-4-5');
+    expect(overridden.enabled && overridden.lanes.adjudication.settings.modelId).toBe(
+      'claude-haiku-4-5',
+    );
+    expect(overridden.enabled && overridden.lanes.moderation.settings.modelId).toBe(
+      'claude-opus-4-8',
+    );
     const blank = resolveGovernanceLlmDecision({
       provider: 'anthropic',
       apiKey: KEY,
       modelId: '   ',
     });
-    expect(blank.enabled && blank.settings.modelId).toBe('claude-opus-4-8');
+    expect(blank.enabled && blank.lanes.moderation.settings.modelId).toBe('claude-opus-4-8');
   });
 
-  it('local: an unset/blank base URL defaults to the Ollama loopback endpoint', () => {
-    for (const localBaseUrl of [undefined, '', '   ']) {
-      const decision = resolveGovernanceLlmDecision({
-        provider: 'local',
-        apiKey: undefined,
-        localBaseUrl,
-        modelId: 'llama3.3',
-      });
-      expect(decision.enabled).toBe(true);
-      if (decision.enabled) {
-        expect(decision.backend).toEqual({
-          kind: 'local',
-          baseUrl: DEFAULT_GOVERNANCE_LLM_LOCAL_URL,
-        });
-      }
-    }
-  });
-
-  it('local: disabled for ANY non-loopback or non-http(s) URL (no egress wearing a local flag)', () => {
+  it('local: disabled for ANY non-loopback or non-http(s) URL on either lane or the extras (no egress wearing a local flag)', () => {
     for (const localBaseUrl of [
       'http://192.168.1.20:11434/v1',
       'https://api.example.com/v1',
@@ -134,20 +203,32 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
       });
       expect(decision).toEqual({ enabled: false, reason: 'local_url_not_loopback' });
     }
-  });
-
-  it('local: an unset/blank model defaults to the reviewed default local model', () => {
-    for (const modelId of [undefined, '', '   ']) {
-      const decision = resolveGovernanceLlmDecision({
+    expect(
+      resolveGovernanceLlmDecision({
         provider: 'local',
         apiKey: undefined,
-        localBaseUrl: LOCAL_URL,
-        modelId,
-      });
-      expect(decision.enabled).toBe(true);
-      if (decision.enabled) {
-        expect(decision.settings.modelId).toBe(DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID);
-      }
+        adjudicationUrl: 'https://api.example.com/v1',
+      }),
+    ).toEqual({ enabled: false, reason: 'local_url_not_loopback' });
+    expect(
+      resolveGovernanceLlmDecision({
+        provider: 'local',
+        apiKey: undefined,
+        extraRuntimeUrls: ['http://127.0.0.1:9005/v1', 'http://10.0.0.2:9005/v1'],
+      }),
+    ).toEqual({ enabled: false, reason: 'local_url_not_loopback' });
+  });
+
+  it('local: extra runtime URLs join the probeable set (deduplicated, order-preserving)', () => {
+    const decision = resolveGovernanceLlmDecision({
+      provider: 'local',
+      apiKey: undefined,
+      localBaseUrl: LOCAL_URL,
+      extraRuntimeUrls: ['http://127.0.0.1:9005/v1', LOCAL_URL, ' '],
+    });
+    expect(decision.enabled).toBe(true);
+    if (decision.enabled) {
+      expect(decision.runtimeUrls).toEqual([LOCAL_URL, 'http://127.0.0.1:9005/v1']);
     }
   });
 
@@ -161,9 +242,12 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
       });
       expect(decision.enabled).toBe(true);
       if (decision.enabled) {
-        expect(decision.backend).toEqual({ kind: 'local', baseUrl: localBaseUrl.trim() });
-        expect(decision.settings.modelId).toBe('llama3.3:70b'); // trimmed, required
-        expect(decision.settings.maxCallsPerRoomPerHour).toBe(
+        expect(decision.lanes.moderation.backend).toEqual({
+          kind: 'local',
+          baseUrl: localBaseUrl.trim(),
+        });
+        expect(decision.lanes.moderation.settings.modelId).toBe('llama3.3:70b'); // trimmed
+        expect(decision.lanes.moderation.settings.maxCallsPerRoomPerHour).toBe(
           DEFAULT_GOVERNANCE_LLM_SETTINGS.maxCallsPerRoomPerHour,
         );
       }
@@ -217,16 +301,20 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
   it('GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR overrides the ADR-6 debate budget (invalid values ignored)', () => {
     const base = { provider: 'anthropic', apiKey: KEY } as const;
     const defaulted = resolveGovernanceLlmDecision(base);
-    expect(defaulted.enabled && defaulted.settings.maxDebateJudgementsPerHour).toBe(60);
+    expect(
+      defaulted.enabled && defaulted.lanes.adjudication.settings.maxDebateJudgementsPerHour,
+    ).toBe(60);
     const raised = resolveGovernanceLlmDecision({ ...base, debateBudgetPerHour: 5_000 });
-    expect(raised.enabled && raised.settings.maxDebateJudgementsPerHour).toBe(5_000);
+    expect(raised.enabled && raised.lanes.adjudication.settings.maxDebateJudgementsPerHour).toBe(
+      5_000,
+    );
     for (const bad of [0, -5, 1.5, Number.NaN]) {
       const d = resolveGovernanceLlmDecision({ ...base, debateBudgetPerHour: bad });
-      expect(d.enabled && d.settings.maxDebateJudgementsPerHour).toBe(60);
+      expect(d.enabled && d.lanes.adjudication.settings.maxDebateJudgementsPerHour).toBe(60);
     }
   });
 
-  it('reasoning effort: local defaults to the reviewed `low`, honours overrides, and `off` disables; hosted never sends it', () => {
+  it('reasoning effort: local defaults to the reviewed `low` on both lanes, honours overrides, and `off` disables; hosted never sends it', () => {
     const local = (reasoningEffort?: string) =>
       resolveGovernanceLlmDecision({
         provider: 'local',
@@ -237,7 +325,8 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
       });
     const expectEffort = (value: string | undefined, effort: 'low' | 'medium' | 'high' | null) => {
       const decision = local(value);
-      expect(decision.enabled && decision.settings.reasoningEffort).toBe(effort);
+      expect(decision.enabled && decision.lanes.moderation.settings.reasoningEffort).toBe(effort);
+      expect(decision.enabled && decision.lanes.adjudication.settings.reasoningEffort).toBe(effort);
     };
     expectEffort(undefined, 'low'); // the reviewed default for the local backend
     expectEffort('medium', 'medium');
@@ -251,7 +340,7 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
       apiKey: KEY,
       reasoningEffort: 'high',
     });
-    expect(hosted.enabled && hosted.settings.reasoningEffort).toBe(null);
+    expect(hosted.enabled && hosted.lanes.adjudication.settings.reasoningEffort).toBe(null);
   });
 
   it('never mutates the shared default settings object', () => {

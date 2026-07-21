@@ -53,6 +53,8 @@ import type {
   PromptStore,
   RatificationBallotRecord,
   RatificationBallotStore,
+  RatificationOutcome,
+  RatificationStatus,
   RatificationVoteRecord,
   RatificationVoteStore,
   SeatStore,
@@ -117,6 +119,8 @@ function toModel(row: typeof roomGovernanceModels.$inferSelect): ModelRecord {
     status: row.status,
     evaluationRef: row.evaluationRef,
     admittedBackendId: row.admittedBackendId,
+    admittedAdjudicationBackendId: row.admittedAdjudicationBackendId,
+    hubVerification: row.hubVerification as ModelRecord['hubVerification'],
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -419,6 +423,8 @@ export class DrizzleModelStore implements ModelStore {
         status: model.status,
         evaluationRef: model.evaluationRef,
         admittedBackendId: model.admittedBackendId,
+        admittedAdjudicationBackendId: model.admittedAdjudicationBackendId,
+        hubVerification: model.hubVerification,
         createdAt: new Date(model.createdAt),
       })
       .onConflictDoNothing({
@@ -446,13 +452,14 @@ export class DrizzleModelStore implements ModelStore {
     return rows.map(toModel);
   }
 
-  async listByStatus(status: ModelStatus, limit: number): Promise<ModelRecord[]> {
+  async listByStatus(status: ModelStatus, limit: number, offset = 0): Promise<ModelRecord[]> {
     const rows = await this.#db
       .select()
       .from(roomGovernanceModels)
       .where(eq(roomGovernanceModels.status, status))
       .orderBy(asc(roomGovernanceModels.createdAt))
-      .limit(Math.max(0, limit));
+      .limit(Math.max(0, limit))
+      .offset(Math.max(0, offset));
     return rows.map(toModel);
   }
 
@@ -460,13 +467,23 @@ export class DrizzleModelStore implements ModelStore {
     modelId: string,
     status: ModelStatus,
     evaluationRef: string | null,
-    admittedBackendId?: string | null,
   ): Promise<ModelRecord | null> {
-    const set: Partial<typeof roomGovernanceModels.$inferInsert> = { status, evaluationRef };
-    if (admittedBackendId !== undefined) set.admittedBackendId = admittedBackendId;
     const rows = await this.#db
       .update(roomGovernanceModels)
-      .set(set)
+      .set({ status, evaluationRef })
+      .where(eq(roomGovernanceModels.modelId, modelId))
+      .returning();
+    return rows[0] ? toModel(rows[0]) : null;
+  }
+
+  async patchAdmission(
+    modelId: string,
+    admittedBackendId: string | null,
+    admittedAdjudicationBackendId: string | null,
+  ): Promise<ModelRecord | null> {
+    const rows = await this.#db
+      .update(roomGovernanceModels)
+      .set({ admittedBackendId, admittedAdjudicationBackendId })
       .where(eq(roomGovernanceModels.modelId, modelId))
       .returning();
     return rows[0] ? toModel(rows[0]) : null;
@@ -752,32 +769,27 @@ export class DrizzleRatificationVoteStore implements RatificationVoteStore {
     return rows.map(toRatification);
   }
 
-  async patch(
+  async transitionOpen(
     voteId: string,
-    fields: Partial<RatificationVoteRecord>,
+    fields: {
+      status: Exclude<RatificationStatus, 'open'>;
+      settledAt: string;
+      outcome?: RatificationOutcome;
+      tally?: RatificationResult;
+    },
   ): Promise<RatificationVoteRecord | null> {
-    // Translate the FULL mutable surface (parity with the in-memory adapter, which
-    // spreads every field) so a patch of any field is honoured by both adapters.
-    const set: Partial<typeof modelRatifications.$inferInsert> = {};
-    if (fields.status !== undefined) set.status = fields.status;
+    // The CAS: `status = 'open'` in the WHERE clause makes the settle/cancel
+    // race a single-winner update — the loser matches zero rows and aborts.
+    const set: Partial<typeof modelRatifications.$inferInsert> = {
+      status: fields.status,
+      settledAt: new Date(fields.settledAt),
+    };
     if (fields.outcome !== undefined) set.outcome = fields.outcome;
     if (fields.tally !== undefined) set.tally = fields.tally;
-    if (fields.lawPackId !== undefined) set.lawPackId = fields.lawPackId;
-    if (fields.roomId !== undefined) set.roomId = fields.roomId;
-    if (fields.modelId !== undefined) set.modelId = fields.modelId;
-    if (fields.minQuorum !== undefined) set.minQuorum = fields.minQuorum;
-    if (fields.openedByUserId !== undefined) set.openedByUserId = fields.openedByUserId;
-    if (fields.opensAt !== undefined) set.opensAt = new Date(fields.opensAt);
-    if (fields.closesAt !== undefined) set.closesAt = new Date(fields.closesAt);
-    if (fields.createdAt !== undefined) set.createdAt = new Date(fields.createdAt);
-    if (fields.settledAt !== undefined) {
-      set.settledAt = fields.settledAt === null ? null : new Date(fields.settledAt);
-    }
-    if (Object.keys(set).length === 0) return this.get(voteId);
     const rows = await this.#db
       .update(modelRatifications)
       .set(set)
-      .where(eq(modelRatifications.voteId, voteId))
+      .where(and(eq(modelRatifications.voteId, voteId), eq(modelRatifications.status, 'open')))
       .returning();
     return rows[0] ? toRatification(rows[0]) : null;
   }

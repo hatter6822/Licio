@@ -38,23 +38,129 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # --- The WS-U/WS-T governance-LLM LOCAL runtime (OpenAI-compatible
+  # /v1/chat/completions) — the backend PRODUCTION defaults to when
+  # GOVERNANCE_LLM_PROVIDER is unset, running TWO role lanes (the
+  # moderation/adjudication split). vLLM serves ONE model per instance, so the
+  # `llm` profile provisions one instance per lane, matching the API boot's
+  # per-lane defaults exactly. OPT-IN (a plain `docker compose up -d` never
+  # starts them):
+  #   docker compose --profile llm up -d      (or: pnpm setup:llm --docker)
+  # A FIRST start downloads the model weights from huggingface.co into the
+  # shared hf-cache volume (the 27B adjudication model is tens of GB). Both
+  # ports publish on the LOOPBACK interface ONLY — the `local` backend doctrine
+  # is that governed-room content never leaves the host. vLLM requires a GPU
+  # (the device reservations below). SINGLE-GPU HOSTS: both instances land on
+  # the same card, so each declares a --gpu-memory-utilization FRACTION
+  # (defaults below: 0.25 + 0.65) — without the split, vLLM's 0.9 default
+  # would OOM the second instance. Multi-GPU hosts pin one card per lane via a
+  # compose override setting CUDA_VISIBLE_DEVICES per service (and may raise
+  # the fractions to 0.9). Size the adjudication card for the 27B default, or
+  # override VLLM_ADJUDICATION_MODEL / add a quantization flag for your
+  # hardware. The single-URL CPU-friendly alternative is the `llm-ollama`
+  # profile below (`pnpm setup:llm --runtime ollama --docker`).
+  vllm-moderation:
+    # Pin to digest in production for reproducibility: docker pull vllm/vllm-openai:v0.25.1 && docker inspect --format='{{index .RepoDigests 0}}' vllm/vllm-openai:v0.25.1
+    image: vllm/vllm-openai:v0.25.1
+    profiles: ["llm"]
+    command:
+      - "--model"
+      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      - "--served-model-name"
+      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      # Right-size the context for the governed surfaces (prompts ≤ ~2.5k
+      # tokens; the guard classifies one contribution at a time).
+      - "--max-model-len"
+      - "8192"
+      # The single-GPU co-residency split (see the header comment).
+      - "--gpu-memory-utilization"
+      - "${VLLM_MODERATION_GPU_FRACTION:-0.25}"
+    environment:
+      # Optional hub token (rate-limit headroom for the weight download only;
+      # the platform never selects gated models).
+      HF_TOKEN: "${HF_TOKEN:-}"
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    # vLLM uses shared memory for tensor transfer; the default 64 MB starves it.
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Weight download + load on first start can take a long while.
+      start_period: 600s
+    restart: unless-stopped
+
+  vllm-adjudication:
+    # Pin to digest in production for reproducibility (same digest note as above).
+    image: vllm/vllm-openai:v0.25.1
+    profiles: ["llm"]
+    command:
+      - "--model"
+      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "--served-model-name"
+      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "--max-model-len"
+      - "8192"
+      # The single-GPU co-residency split (see the header comment).
+      - "--gpu-memory-utilization"
+      - "${VLLM_ADJUDICATION_GPU_FRACTION:-0.65}"
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+    ports:
+      - "127.0.0.1:8002:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    restart: unless-stopped
+
   ollama:
-    # The WS-U/WS-T governance-LLM LOCAL runtime (OpenAI-compatible
-    # /v1/chat/completions) — the backend PRODUCTION defaults to when
-    # GOVERNANCE_LLM_PROVIDER is unset. OPT-IN via the `llm` compose profile
-    # (a plain `docker compose up -d` never starts it):
-    #   docker compose --profile llm up -d ollama
-    #   pnpm setup:llm         # pulls + verifies the default model
-    # Published on the LOOPBACK interface ONLY — the `local` backend doctrine
-    # is that governed-room content never leaves the host, so the runtime must
-    # never listen on a LAN-reachable address. For GPU inference add a
-    # `deploy.resources.reservations.devices` block (NVIDIA) per the Compose
-    # GPU docs; CPU works for the default model, just slower.
+    # The single-URL ALTERNATIVE runtime (`llm-ollama` profile): one Ollama
+    # multiplexes both role lanes' models from http://127.0.0.1:11434/v1 —
+    # CPU-capable and convenient for smaller GGUF builds. Provision + verify:
+    #   pnpm setup:llm --runtime ollama --docker
+    # (it pulls GGUF builds of the two lane defaults and prints the env lines
+    # the API boot needs). Loopback-only, as above.
     # Pin to digest in production for reproducibility: docker pull ollama/ollama:latest && docker inspect --format='{{index .RepoDigests 0}}' ollama/ollama:latest
     image: ollama/ollama:latest
-    profiles: ["llm"]
+    profiles: ["llm-ollama"]
     environment:
-      # Keep the governed model resident: an idle-unloaded model costs a
+      # Keep the governed models resident: an idle-unloaded model costs a
       # multi-second cold load on the next verdict/moderation call.
       OLLAMA_KEEP_ALIVE: "-1"
       # Parallel request slots (the debate lifecycle fans adjudications out
@@ -81,4 +187,5 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  hf-cache:
   ollama-data:

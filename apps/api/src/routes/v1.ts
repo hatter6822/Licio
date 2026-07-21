@@ -99,6 +99,7 @@ import { createIngestionAdminRoutes } from './ingestion-admin.js';
 import { createInvariantsAdminRoutes } from './invariants-admin.js';
 import { createInvariantsPublicRoutes } from './invariants-public.js';
 import { createKnomosisRoutes } from './knomosis.js';
+import { createModelHubRoutes } from './model-hub.js';
 import { createModerationConsoleRoutes } from './moderation-console.js';
 import { createPrivacyRoutes } from './privacy.js';
 import { createRankingAdminRoutes } from './ranking-admin.js';
@@ -526,6 +527,10 @@ export function createV1Routes() {
       // "governed by" agent view.  Steward-only writes are enforced by the
       // service; treasury powers stay behind the fail-closed crypto flag.
       .route('/', createGovernanceRoutes())
+      // WS-U model candidacy: the member hub-model READ surface (search +
+      // revision-pinning resolve), BFF-proxied so the browser never reaches a
+      // third party; 503 fail-closed when GOVERNANCE_MODEL_HUB=off.
+      .route('/model-hub', createModelHubRoutes())
 
       // --- Knomosis gateway, wallets, and receipts (WS-L) ---------------------
       // Wallet link/unlink/list/risk (SIWE + abuse limits), the pinned

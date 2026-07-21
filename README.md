@@ -128,8 +128,13 @@ vector). No member count appears anywhere: this is adjudication, not a vote.
 ### The AI runs on your own hardware
 
 All three governed AI surfaces — lawmaking summaries, in-room moderation, and
-debate adjudication — run behind one seam that **defaults to a local,
-loopback-only LLM runtime** (Ollama-compatible; `gpt-oss:20b` by default).
+debate adjudication — run behind one seam that **defaults to local,
+loopback-only LLM runtimes** (vLLM by default; Ollama/llama.cpp/LM Studio as
+alternatives) with a dedicated model per ROLE: moderation runs the
+`Qwen/Qwen3Guard-Gen-4B` safety classifier in its native dialect, and
+adjudication (debates + lawmaking summaries) runs the `Qwen/Qwen3.6-27B`
+generalist — and a room may ratify ANY public huggingface.co model for either
+role through the admission-gated candidacy pipeline.
 Under the `local` backend a non-loopback URL fails boot validation, so
 governed-room content provably never leaves the host; the hosted Anthropic
 backend is an explicit, boot-logged operator opt-in. Every call passes the
@@ -286,7 +291,7 @@ adapter.
 | Package manager | pnpm `11.15.1`, pinned by `packageManager`; the pnpm 11 supply-chain gate (24h `minimumReleaseAge`) vets every resolution |
 | Language/tooling | TypeScript `7.0.2`, Vite `8`, Vitest `4`, Biome `2.5` |
 | Database/cache | PostgreSQL 16 with pgvector; Redis 7 for sessions, replay/rate-limit, leases, and realtime stores |
-| AI backend | Loopback-local LLM by default (`gpt-oss:20b` via any OpenAI-compatible runtime); hosted Anthropic as explicit opt-in; deterministic fallbacks everywhere |
+| AI backend | Loopback-local LLM lanes by default (vLLM serving `Qwen/Qwen3Guard-Gen-4B` for moderation + `Qwen/Qwen3.6-27B` for adjudication; Ollama/llama.cpp/LM Studio alternatives); hosted Anthropic as explicit opt-in; deterministic fallbacks everywhere |
 | Test posture | Vitest projects are in-memory by default; integration legs run when Postgres/Redis are reachable (as in CI) |
 
 ### Workstream status
@@ -333,7 +338,8 @@ adapter.
 │ Storage, adapters, and the local AI runtime                                │
 │ PostgreSQL/Drizzle migrations and production stores · Redis session,       │
 │ replay, rate-limit, realtime, and lease stores · in-memory test/dev        │
-│ stores · loopback-only governance-LLM runtime (Ollama/llama.cpp/vLLM)      │
+│ stores · loopback-only governance-LLM lane runtimes (vLLM default;        │
+│ Ollama/llama.cpp/LM Studio alternatives)                                   │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -429,15 +435,14 @@ Governance-LLM commands:
 
 ```sh
 pnpm setup:llm                    # provision + verify the local LLM runtime
-pnpm setup:llm --docker           # also start the Compose `llm`-profile Ollama
+pnpm setup:llm --docker           # also start the Compose `llm` profile (two vLLM instances)
 pnpm bench:llm                    # race local models through the REAL governed surfaces
 ```
 
 Database commands:
 
 ```sh
-pnpm db:generate                 # generate Drizzle migrations
-pnpm db:migrate                  # apply migrations
+pnpm db:migrate                  # apply migrations (hand-authored SQL — see docs/DEVELOPMENT.md §15)
 pnpm db:push                     # development-only direct schema push
 ```
 

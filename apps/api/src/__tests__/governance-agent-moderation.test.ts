@@ -164,7 +164,7 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
     const svc = createGovernanceService({ stores: createInMemoryGovernanceStores() });
     setGovernanceService(svc);
     await svc.bootstrapSeat(ROOM, STEWARD);
-    const proposed = await svc.proposeModel(ROOM, STEWARD, flagBundle(), 'Be neutral.');
+    const proposed = await svc.proposeModel(ROOM, STEWARD, flagBundle(), 'Be neutral.', true);
     if (!proposed.ok) throw new Error('propose failed');
     await svc.evaluateModel(proposed.value.modelId);
     const approved = await svc.approveModel(ROOM, proposed.value.modelId, null, null);
@@ -271,7 +271,7 @@ describe('WS-U createRoomAgentModerator (governance adapter)', () => {
       config: { summaryStyle: 'neutral_brief', explanationVerbosity: 'standard' },
       requestedCapabilities: ['moderate.flag'],
     };
-    const proposed = await svc.proposeModel(ROOM, STEWARD, mentionBundle, 'Be neutral.');
+    const proposed = await svc.proposeModel(ROOM, STEWARD, mentionBundle, 'Be neutral.', true);
     if (!proposed.ok) throw new Error('propose failed');
     await svc.evaluateModel(proposed.value.modelId);
     await svc.approveModel(ROOM, proposed.value.modelId, null, null);

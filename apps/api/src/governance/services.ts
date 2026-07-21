@@ -14,7 +14,7 @@ import type {
   ModerationProposer,
 } from './moderation-proposer.js';
 import type { GovernanceNlProvider } from './nl-provider.js';
-import { GovernanceService } from './service.js';
+import { GovernanceService, type GovernanceServiceDeps } from './service.js';
 import { createInMemoryGovernanceStores, type GovernanceStores } from './stores.js';
 
 export function sha256Hex(input: string): string {
@@ -45,6 +45,14 @@ export interface GovernanceServiceOptions {
   onModerationDeferred?: ModerationDeferralSink;
   /** Moderation observability sink (boot wires the decision log). */
   onModerationDecided?: ModerationDecisionSink;
+  /** WS-U model candidacy: the propose-time hub verifier (boot wires the
+   *  huggingface.co client unless GOVERNANCE_MODEL_HUB=off; absent ⇒
+   *  hub-referencing bundles are rejected `hub_disabled`, fail-closed). */
+  modelHub?: GovernanceServiceDeps['modelHub'];
+  /** The ADJUDICATION lane's admission pin + validity probe (boot wires it when
+   *  the LLM debate adjudicator is enabled; absent ⇒ no adjudication pin is
+   *  recorded and the debate-leg pin gate is skipped — the test posture). */
+  adjudicationBackend?: GovernanceServiceDeps['adjudicationBackend'];
 }
 
 export function createGovernanceService(opts: GovernanceServiceOptions = {}): GovernanceService {
@@ -62,6 +70,8 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     ...(opts.nlProvider ? { nlProvider: opts.nlProvider } : {}),
     ...(opts.onModerationDeferred ? { onModerationDeferred: opts.onModerationDeferred } : {}),
     ...(opts.onModerationDecided ? { onModerationDecided: opts.onModerationDecided } : {}),
+    ...(opts.modelHub ? { modelHub: opts.modelHub } : {}),
+    ...(opts.adjudicationBackend ? { adjudicationBackend: opts.adjudicationBackend } : {}),
   });
 }
 

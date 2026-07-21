@@ -26,7 +26,9 @@ export type GovernanceSchedulerTask =
   | 'election_lifecycle'
   | 'ratification_lifecycle'
   | 'remoderation_lifecycle'
-  | 'admission_retry';
+  | 'admission_retry'
+  | 'adjudication_repin'
+  | 'moderation_readmission';
 
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
@@ -104,6 +106,33 @@ export async function runGovernanceTick(
     }
   } catch (err) {
     onError(err, 'admission_retry');
+  }
+  try {
+    // The role split: heal the ADJUDICATION pin of approved `debate.judge`
+    // bundles whose pin no longer matches the live adjudication backend (rows
+    // approved before the split, lane-model swaps) — a passing validity
+    // re-probe is exactly that lane's re-admission, so the room's debate leg
+    // recovers without demoting the approved model.
+    const { mismatched, repinned } = await deps.service.repinAdjudication();
+    if (mismatched > 0) {
+      deps.log('governance.adjudication_repin', { mismatched, repinned });
+    }
+  } catch (err) {
+    onError(err, 'adjudication_repin');
+  }
+  try {
+    // The MODERATION re-admission sweep: an approved model whose moderation
+    // pin no longer matches the live backend (a lane/default upgrade, a URL
+    // move, a dialect/prompt-version bump) is re-run through the FULL k-of-N
+    // floor evaluation and re-pinned on a clean pass — without this, a lane
+    // change would strand every approved room on the platform baseline
+    // forever (the identical bundle is digest-locked against re-proposal).
+    const { mismatched, readmitted, refused } = await deps.service.readmitModeration();
+    if (mismatched > 0) {
+      deps.log('governance.moderation_readmission', { mismatched, readmitted, refused });
+    }
+  } catch (err) {
+    onError(err, 'moderation_readmission');
   }
 }
 

@@ -652,6 +652,13 @@
       "when": 1783728000017,
       "tag": "0093_kyc_verification",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1783728000018,
+      "tag": "0094_governance_lane_pins",
+      "breakpoints": true
     }
   ]
 }

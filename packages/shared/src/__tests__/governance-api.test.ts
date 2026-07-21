@@ -69,6 +69,7 @@ describe('governance-api wire contracts', () => {
       active: true,
       frozen: false,
       model_id: UUID,
+      model_selection: null,
       recent_actions: [],
     };
     expect(governedByResponseSchema.parse({ ...base, granted: ['moderate'] })).toBeDefined();
@@ -76,6 +77,40 @@ describe('governance-api wire contracts', () => {
       governedByResponseSchema.parse({ ...base, granted: Array.from({ length: 33 }, () => 'x') }),
     ).toThrow();
     expect(() => governedByResponseSchema.parse({ ...base, granted: ['x'.repeat(65)] })).toThrow();
+  });
+
+  it('carries the per-role model selection (revision-pinned hub refs or the platform default)', () => {
+    const base = {
+      active: true,
+      frozen: false,
+      model_id: UUID,
+      granted: [],
+      recent_actions: [],
+    };
+    const parsed = governedByResponseSchema.parse({
+      ...base,
+      model_selection: {
+        moderation: {
+          repo_id: 'Qwen/Qwen3Guard-Gen-4B',
+          revision: 'a'.repeat(40),
+          // A runtime id differing from the verified repo is carried openly.
+          served_model_id: 'guard-gguf:q8',
+        },
+        adjudication: null,
+      },
+    });
+    expect(parsed.model_selection?.moderation?.repo_id).toBe('Qwen/Qwen3Guard-Gen-4B');
+    expect(parsed.model_selection?.moderation?.served_model_id).toBe('guard-gguf:q8');
+    // A movable ref (branch name) is never a valid pin.
+    expect(() =>
+      governedByResponseSchema.parse({
+        ...base,
+        model_selection: {
+          moderation: { repo_id: 'Qwen/Qwen3Guard-Gen-4B', revision: 'main' },
+          adjudication: null,
+        },
+      }),
+    ).toThrow();
   });
 
   it('rejects unknown keys on the propose request (request SSOT)', () => {
