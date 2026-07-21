@@ -606,10 +606,16 @@ describe('behavioral-authenticity damping is applied in the SAME tick (WS-E orde
       return_visit_count_bucket: 'several' as const,
     });
     for (let i = 0; i < 3; i += 1) {
-      const fleet = await seedUserWithSession(fixture.identity, { handle: `bfleet${i}` });
+      const fleet = await seedUserWithSession(fixture.identity, {
+        handle: `bfleet${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
       await fixture.events.behaviorStore.upsertWindows(botWindows(fleet.userId));
       await ingestAttention(fleet.userId, dampedStory, { items: [richItem(dampedStory)] });
-      const clean = await seedUserWithSession(fixture.identity, { handle: `bclean${i}` });
+      const clean = await seedUserWithSession(fixture.identity, {
+        handle: `bclean${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
       await ingestAttention(clean.userId, cleanStory, { items: [richItem(cleanStory)] });
     }
 
@@ -639,10 +645,16 @@ describe('behavioral-authenticity damping is applied in the SAME tick (WS-E orde
       return_visit_count_bucket: 'several' as const,
     });
     for (let i = 0; i < 3; i += 1) {
-      const fleet = await seedUserWithSession(fixture.identity, { handle: `tfleet${i}` });
+      const fleet = await seedUserWithSession(fixture.identity, {
+        handle: `tfleet${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
       await fixture.events.behaviorStore.upsertWindows(botWindows(fleet.userId));
       await ingestAttention(fleet.userId, dampedStory, { items: [richItem(dampedStory)] });
-      const clean = await seedUserWithSession(fixture.identity, { handle: `tclean${i}` });
+      const clean = await seedUserWithSession(fixture.identity, {
+        handle: `tclean${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
       await ingestAttention(clean.userId, cleanStory, { items: [richItem(cleanStory)] });
     }
 
@@ -653,6 +665,60 @@ describe('behavioral-authenticity damping is applied in the SAME tick (WS-E orde
     const clean = await fixture.events.invariantStore.latest('PWAtt_v1', cleanStory);
     expect(asNumber(damped?.scoreVector['active_attention'], 1)).toBeLessThan(
       asNumber(clean?.scoreVector['active_attention'], 0),
+    );
+  });
+
+  it('IGNORES a STALE assessment (dormant past the lookback), applies a fresh one', async () => {
+    const DAY = 24 * HOUR;
+    const now = fixture.events.now();
+    const richItem = (storyId: string) => ({
+      story_id: storyId,
+      active_dwell_bucket: 'extended' as const,
+      source_opened: true,
+      context_opened: true,
+      reply_depth_bucket: 'shallow' as const,
+      return_visit_count_bucket: 'several' as const,
+    });
+    const damped = (actorRef: string, computedAt: string) => ({
+      actorRef,
+      score: 0.25,
+      coherence: 0.25,
+      components: { dwell_variety: 0.25, interaction_breadth: 0.25, temporal_rhythm: 0.25 },
+      flags: ['dwell_variety'],
+      evidence: 100,
+      clusterId: null,
+      clusterSize: 1,
+      computedAt,
+    });
+    // Same age, same damped score — the ONLY difference is when it was computed.
+    const freshStory = randomUUID();
+    const fresh = await seedUserWithSession(fixture.identity, {
+      handle: 'sfresh',
+      accountAgeMs: 500 * DAY,
+    });
+    await fixture.events.behaviorStore.upsertAuthenticity([
+      damped(fresh.userId, new Date(now).toISOString()),
+    ]);
+    await ingestAttention(fresh.userId, freshStory, { items: [richItem(freshStory)] });
+
+    const staleStory = randomUUID();
+    const stale = await seedUserWithSession(fixture.identity, {
+      handle: 'sstale',
+      accountAgeMs: 500 * DAY,
+    });
+    await fixture.events.behaviorStore.upsertAuthenticity([
+      damped(stale.userId, new Date(now - 8 * DAY).toISOString()), // dormant > 7-day lookback
+    ]);
+    await ingestAttention(stale.userId, staleStory, { items: [richItem(staleStory)] });
+
+    // runPwattWindow directly (no behavior job to recompute the seeded scores).
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+
+    const freshOut = await fixture.events.invariantStore.latest('PWAtt_v1', freshStory);
+    const staleOut = await fixture.events.invariantStore.latest('PWAtt_v1', staleStory);
+    // The fresh assessment damps; the stale one is ignored (scores as neutral).
+    expect(asNumber(freshOut?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(staleOut?.scoreVector['active_attention'], 0),
     );
   });
 });

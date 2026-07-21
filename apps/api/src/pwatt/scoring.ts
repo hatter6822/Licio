@@ -53,7 +53,11 @@ import {
   detectCoordinatedBurst,
   detectHarassmentCascade,
 } from './anti-signals.js';
-import { foldActorBehaviorWindows, runBehaviorAuthenticityJob } from './behavior.js';
+import {
+  BEHAVIOR_LOOKBACK_MS,
+  foldActorBehaviorWindows,
+  runBehaviorAuthenticityJob,
+} from './behavior.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
 import { pwattRowForRanking } from './shadow.js';
 
@@ -263,7 +267,7 @@ export async function runTriggeredPwattWindow(
 ): Promise<WindowScoringReport> {
   const config = await loadPwattRuntimeConfig(events);
   await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
-  return runPwattWindow(events, identity, startMs, size, config);
+  return runPwattWindow(events, identity, startMs, size, config, nowMs);
 }
 
 /**
@@ -276,6 +280,7 @@ export async function runPwattWindow(
   startMs: number,
   size: AggregationWindowSize,
   preloadedConfig?: PwattRuntimeConfig,
+  nowMsOverride?: number,
 ): Promise<WindowScoringReport> {
   const config = preloadedConfig ?? (await loadPwattRuntimeConfig(events));
   const configHash = pwattConfigHash(config);
@@ -325,7 +330,7 @@ export async function runPwattWindow(
   // influence is reduced, never silenced — and it is a pure function of the
   // actor's own organic behavior, so two behaviorally-identical accounts
   // score identically (the WS-I.3 neutrality obligation).
-  const nowMs = events.now();
+  const nowMs = nowMsOverride ?? events.now();
   // Bot-prevention layer 2: pre-load the CURRENT authenticity multiplier for
   // every profiled actor in the window in ONE batch read (rather than a point
   // read per distinct actor), keyed off the aggregation the fold above just
@@ -339,6 +344,12 @@ export async function runPwattWindow(
     }
   }
   const authenticityByActor = await events.behaviorStore.getAuthenticityMany([...profiledActors]);
+  // An assessment is only trustworthy while its evidence is still in the active
+  // evaluation window. An actor dormant PAST the behavior lookback is not
+  // recomputed (no current windows) yet survives to the 14-day assessment cutoff,
+  // so a stale score must NOT damp their fresh attention on return — ignore any
+  // assessment last computed before the lookback edge (WS-E BAI).
+  const assessmentFreshFromIso = new Date(nowMs - BEHAVIOR_LOOKBACK_MS).toISOString();
   const trustCache = new Map<string, number>();
   const actorTrust = async (actorKey: string): Promise<number> => {
     // The anonymity bucket and the deletion pseudonym are NEVER profiled and
@@ -359,7 +370,11 @@ export async function runPwattWindow(
       (nowMs - Date.parse(user.createdAt)) / 86_400_000,
       config.trustWeights,
     );
-    const authenticity = authenticityByActor.get(actorKey)?.score ?? 1;
+    const assessment = authenticityByActor.get(actorKey);
+    const authenticity =
+      assessment !== undefined && assessment.computedAt >= assessmentFreshFromIso
+        ? assessment.score
+        : 1;
     const weight =
       authenticity < 1
         ? Math.max(config.behavior.overallFloor, ageWeight * authenticity)

@@ -93,7 +93,9 @@ export async function runEventPipelineTick(
   }
   try {
     for (const window of await windowsNeedingCompute(events, nowMs)) {
-      await runPwattWindow(events, identity, window.startMs, window.size, config);
+      // Thread the tick's nowMs so account-age + assessment-freshness use the
+      // SAME clock the behavior job just ran on (consistent within the tick).
+      await runPwattWindow(events, identity, window.startMs, window.size, config, nowMs);
     }
   } catch (err) {
     onError(err, 'scoring');

@@ -317,8 +317,8 @@ describe('runBehaviorAuthenticityJob (assessment + duplication clustering)', () 
 
 describe('authenticity damps the served PWAtt trust factor', () => {
   it('an assessed low-authenticity actor earns lower served v1 components than an identical neutral actor', async () => {
-    const damped = await seedUserWithSession(fixture.identity);
-    const neutral = await seedUserWithSession(fixture.identity);
+    const damped = await seedUserWithSession(fixture.identity, { nowMs: T0 + HOUR });
+    const neutral = await seedUserWithSession(fixture.identity, { nowMs: T0 + HOUR });
     await fixture.events.behaviorStore.upsertAuthenticity([
       {
         actorRef: damped.userId,
@@ -337,7 +337,9 @@ describe('authenticity damps the served PWAtt trust factor', () => {
     await ingestAttention(damped.userId, storyDamped);
     await ingestAttention(neutral.userId, storyNeutral);
 
-    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+    // Score on a clock consistent with the assessment's computedAt (T0), so the
+    // freshness guard applies it rather than treating the seed as dormant-stale.
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h', undefined, T0 + HOUR);
     const dampedRow = await fixture.events.invariantStore.latest('PWAtt_v1', storyDamped);
     const neutralRow = await fixture.events.invariantStore.latest('PWAtt_v1', storyNeutral);
     const dampedAttention = dampedRow?.scoreVector['raw_active_attention'] as number;
