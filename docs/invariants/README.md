@@ -595,3 +595,16 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
   through the WS-P experiment/calibration framework; until then the signature is
   recorded per session and the classifier stays on the scalar heuristics (no
   speculative threshold on a wellbeing signal).
+- **Degraded-output persistence (`behavioral_authenticity` SHIPPED; MFCI/Hodge
+  tracked):** `persistComputations` validates every `score_vector` against its
+  strict per-type schema and DROPS a vector that fails (`runner.ts`,
+  `invariants.score_vector_rejected`). An `INSUFFICIENT_COVERAGE` computation
+  therefore only reaches consumers if its vector is schema-valid. The BAI
+  cold-start / post-pruning path emits a VALID neutral vector (all shares 0,
+  `median_score: 1`, `scored_actors: 0`) so the degraded output persists and is
+  visible. MFCI (`services-impl.ts` empty-substrate path) and Hodge (empty
+  interaction graph) still emit `{}` on their degraded path, which the gate
+  drops — pre-existing and benign (the ABSENCE of a row already reads as "no
+  signal" to their consumers). **Closure target:** align both on the BAI pattern
+  (a valid neutral vector) in a WS-H follow-up so every invariant's degraded
+  state is a persisted, first-class row rather than a silent gap.

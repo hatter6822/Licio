@@ -995,7 +995,32 @@ export class BehavioralAuthenticityService extends BaseInvariantService {
     const target: InvariantTarget = { targetType: 'feed', targetId: GLOBAL_FEED_TARGET_ID };
     const assessments = await this.deps.events.behaviorStore.listAuthenticity();
     if (assessments.length === 0) {
-      return [this.computation(target, window, {}, 0, 0, ['INSUFFICIENT_COVERAGE'], null)];
+      // Cold start (and again after retention pruning): no identifiable actor
+      // carries a current assessment. Emit the schema-VALID neutral vector — an
+      // empty population has no low-authenticity share and no duplicate clusters
+      // — rather than `{}`, so this INSUFFICIENT_COVERAGE output actually
+      // persists (persistComputations drops a vector that fails the strict
+      // per-type schema) and stays visible to health/audit consumers.
+      // `scored_actors: 0` plus the reason code mark it degraded; median_score
+      // defaults to 1 (a vacuous population holds nothing suspect).
+      return [
+        this.computation(
+          target,
+          window,
+          {
+            flagged_share: 0,
+            damped_weight_share: 0,
+            cluster_count: 0,
+            largest_cluster_size: 0,
+            scored_actors: 0,
+            median_score: 1,
+          },
+          0,
+          0,
+          ['INSUFFICIENT_COVERAGE'],
+          null,
+        ),
+      ];
     }
     const flagged = assessments.filter((a) => a.score < 1);
     const totalEvidence = assessments.reduce((sum, a) => sum + a.evidence, 0);

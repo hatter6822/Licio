@@ -1015,6 +1015,15 @@ export function createComplianceRoutes() {
         if (existing === null && body.decision !== 'verify') {
           return c.json(notFound, 404);
         }
+        // Creating a standing (a `verify` with no prior record) requires the
+        // target user to exist: the production `kyc_verification.user_id` FK
+        // would otherwise reject the insert (500) while the in-memory store
+        // would accept an orphan — masking the failure in tests. Resolve the
+        // user first and return the route's normal 404 (dev↔prod parity).
+        if (existing === null) {
+          const target = await getIdentityServices().store.getUser(userId);
+          if (target === null) return c.json(notFound, 404);
+        }
         const status =
           body.decision === 'verify'
             ? ('verified' as const)

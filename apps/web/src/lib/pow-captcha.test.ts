@@ -5,7 +5,7 @@
 // main-thread branch runs here), the single-use prime/take cache, and the
 // cross-check pinning the worker's dependency-free digest-input format to the
 // shared wire contract.
-import { powDigestInput } from '@licio/shared';
+import { POW_CAPTCHA_MAX_NUMBER_CEILING, powDigestInput } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetApiClientState } from './api.js';
 import {
@@ -15,7 +15,11 @@ import {
   solveSignupCaptcha,
   takeSignupCaptcha,
 } from './pow-captcha.js';
-import { powSolveDigestInput } from './pow-solve.js';
+import {
+  POW_SOLVE_MAX_NUMBER_CEILING,
+  parseSolveRequest,
+  powSolveDigestInput,
+} from './pow-solve.js';
 
 const realFetch = globalThis.fetch;
 
@@ -93,6 +97,46 @@ describe('powSolveDigestInput (worker-isolation cross-check)', () => {
     ] as const) {
       expect(powSolveDigestInput(salt, n)).toBe(powDigestInput(salt, n));
     }
+  });
+});
+
+describe('parseSolveRequest (the worker trust boundary)', () => {
+  const salt = '0123456789abcdef0123456789abcdef'; // 32 hex
+  const target = 'a'.repeat(64); // 64 hex
+  const valid = { salt, target, max_number: 40_000 };
+
+  it('accepts a well-formed challenge payload', () => {
+    expect(parseSolveRequest(valid)).toEqual(valid);
+  });
+
+  it('never drifts from the shared ceiling (worker stays dependency-free)', () => {
+    // The worker cannot import @licio/shared, so the ceiling is mirrored — this
+    // pins the two together exactly like the digest-format cross-check above.
+    expect(POW_SOLVE_MAX_NUMBER_CEILING).toBe(POW_CAPTCHA_MAX_NUMBER_CEILING);
+  });
+
+  it('accepts max_number at the ceiling and 0, rejects above/negative/non-integer', () => {
+    expect(
+      parseSolveRequest({ ...valid, max_number: POW_SOLVE_MAX_NUMBER_CEILING }),
+    ).not.toBeNull();
+    expect(parseSolveRequest({ ...valid, max_number: 0 })).not.toBeNull();
+    // A pathological max_number can never spin the brute-force loop.
+    expect(
+      parseSolveRequest({ ...valid, max_number: POW_SOLVE_MAX_NUMBER_CEILING + 1 }),
+    ).toBeNull();
+    expect(parseSolveRequest({ ...valid, max_number: -1 })).toBeNull();
+    expect(parseSolveRequest({ ...valid, max_number: 1.5 })).toBeNull();
+    expect(parseSolveRequest({ ...valid, max_number: Number.NaN })).toBeNull();
+  });
+
+  it('rejects malformed salt / target and non-object payloads', () => {
+    expect(parseSolveRequest({ ...valid, salt: 'xyz' })).toBeNull(); // not 32 hex
+    expect(parseSolveRequest({ ...valid, salt: 'A'.repeat(32) })).toBeNull(); // uppercase
+    expect(parseSolveRequest({ ...valid, target: 'a'.repeat(63) })).toBeNull(); // not 64 hex
+    expect(parseSolveRequest({ salt, target })).toBeNull(); // missing max_number
+    expect(parseSolveRequest(null)).toBeNull();
+    expect(parseSolveRequest('a string')).toBeNull();
+    expect(parseSolveRequest(undefined)).toBeNull();
   });
 });
 

@@ -4,6 +4,7 @@
 // POPULATION invariant (flagged share, evidence-weighted damped-weight share,
 // duplicate-behavior cluster census, median). Per-account scores never leave
 // the computation; zero assessments degrade to INSUFFICIENT_COVERAGE.
+import { validateScoreVector } from '@licio/invariants';
 import { describe, expect, it } from 'vitest';
 import type { ActorAuthenticityRecord } from '../events/stores.js';
 import { GLOBAL_FEED_TARGET_ID } from '../invariants/services-impl.js';
@@ -28,12 +29,25 @@ function score(
 }
 
 describe('BehavioralAuthenticityService.computeBatch (population math)', () => {
-  it('degrades to INSUFFICIENT_COVERAGE with no assessments', async () => {
+  it('degrades to INSUFFICIENT_COVERAGE with a schema-valid neutral vector (no assessments)', async () => {
     const fixture = freshInvariantServices();
     const [out] = await fixture.invariants.bai.computeBatch([], WINDOW);
     expect(out?.reason_codes).toEqual(['INSUFFICIENT_COVERAGE']);
     expect(out?.coverage).toBe(0);
-    expect(out?.score_vector).toEqual({});
+    // A VALID zero/neutral vector (never `{}`): an empty population has no
+    // low-authenticity share and no clusters, so the degraded output survives
+    // the persistComputations strict-schema gate and stays visible to consumers.
+    expect(out?.score_vector).toEqual({
+      flagged_share: 0,
+      damped_weight_share: 0,
+      cluster_count: 0,
+      largest_cluster_size: 0,
+      scored_actors: 0,
+      median_score: 1,
+    });
+    // The whole point of the fix: this vector now PASSES the persist-gate that
+    // silently drops schema-invalid vectors (an empty `{}` failed it).
+    expect(validateScoreVector('behavioral_authenticity', out?.score_vector).ok).toBe(true);
     expect(out?.target.targetId).toBe(GLOBAL_FEED_TARGET_ID);
   });
 
