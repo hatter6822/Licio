@@ -36,12 +36,14 @@
 //
 // Usage:
 //   pnpm setup:llm                      # verify the resolved vLLM lanes
-//   pnpm setup:llm --docker             # first start the Compose `llm` profile (two vLLM instances)
+//   pnpm setup:llm --docker             # first start the Compose `llm` profile (two vLLM instances, NVIDIA)
+//   pnpm setup:llm --docker --rocm      # the AMD-GPU variant (`llm-rocm` profile: rocm/vllm image)
 //   pnpm setup:llm --runtime ollama     # the single-URL Ollama alternative (GGUF builds)
 //   pnpm setup:llm --runtime ollama --docker
 //   pnpm setup:llm --runtime ollama --moderation-model <ollama-name> --adjudication-model <ollama-name>
 
 import { spawnSync } from 'node:child_process';
+import { readdirSync, statSync } from 'node:fs';
 import process from 'node:process';
 import {
   type GovernanceLlmLane,
@@ -70,6 +72,8 @@ import {
 } from '../apps/api/src/ai-governance/llm/moderation.js';
 
 const DOCKER_FLAG = '--docker';
+/** With --docker: start the AMD-GPU (`llm-rocm`) variant of the vLLM lanes. */
+const ROCM_FLAG = '--rocm';
 /** How long to wait for a just-started container to begin listening. vLLM
  *  downloads the model weights from the hub on FIRST start (the 27B
  *  adjudication default is tens of GB), so the ceiling is generous — progress
@@ -402,29 +406,79 @@ async function main(): Promise<void> {
   // Step 2 — optionally start the repo's Compose runtime.
   if (process.argv.includes(DOCKER_FLAG)) {
     // Name the services explicitly: a bare `--profile llm up -d` would ALSO
-    // start the profile-less postgres/redis services on this host.
-    const composeArgs =
+    // start the profile-less postgres/redis services on this host. `--rocm`
+    // selects the AMD-GPU variant of the SAME two vLLM lanes (rocm/vllm
+    // image, kfd/dri devices) — identical protocol, ports, and verification.
+    const rocm = process.argv.includes(ROCM_FLAG);
+    if (rocm && runtime !== 'vllm') fail(`${ROCM_FLAG} applies to the vLLM runtime only`);
+    // vLLM lanes start SEQUENTIALLY (moderation first, then adjudication once
+    // :8001 is listening): on a single-GPU host both instances profile the
+    // same card, and a simultaneous start makes each measure free VRAM while
+    // the other is mid-allocation — measured here as a negative KV-cache
+    // budget that crashed BOTH engines. Sequential startup costs one model
+    // load of latency and is correct on every topology.
+    const composeStages: Array<{ profile: string; services: string[]; url: string }> =
       runtime === 'vllm'
-        ? ['compose', '--profile', 'llm', 'up', '-d', 'vllm-moderation', 'vllm-adjudication']
-        : ['compose', '--profile', 'llm-ollama', 'up', '-d', 'ollama'];
-    info(`starting the Compose runtime (docker ${composeArgs.join(' ')})…`);
-    const result = spawnSync('docker', composeArgs, { stdio: 'inherit' });
-    if (result.error || result.status !== 0) {
-      fail(`\`docker ${composeArgs.join(' ')}\` failed — is Docker installed and running?`);
+        ? rocm
+          ? [
+              { profile: 'llm-rocm', services: ['vllm-moderation-rocm'], url: moderationUrl },
+              { profile: 'llm-rocm', services: ['vllm-adjudication-rocm'], url: adjudicationUrl },
+            ]
+          : [
+              { profile: 'llm', services: ['vllm-moderation'], url: moderationUrl },
+              { profile: 'llm', services: ['vllm-adjudication'], url: adjudicationUrl },
+            ]
+        : // The single-URL Ollama posture: both lanes resolve to one runtime —
+          // one stage, waiting on the (shared) resolved URL.
+          [{ profile: 'llm-ollama', services: ['ollama'], url: moderationUrl }];
+    // ROCm containers join the host's video/render groups by NUMERIC gid (the
+    // rocm/vllm image defines no named groups). Derive both from the actual
+    // devices so the profile works on any host's group numbering; explicit
+    // LICIO_*_GID env still wins, and the compose defaults close out.
+    const rocmEnv: Record<string, string> = {};
+    if (rocm) {
+      try {
+        if (process.env['LICIO_RENDER_GID'] === undefined) {
+          const render = readdirSync('/dev/dri').find((entry) => entry.startsWith('renderD'));
+          const gid = statSync(render !== undefined ? `/dev/dri/${render}` : '/dev/kfd').gid;
+          rocmEnv['LICIO_RENDER_GID'] = String(gid);
+        }
+        if (process.env['LICIO_VIDEO_GID'] === undefined) {
+          rocmEnv['LICIO_VIDEO_GID'] = String(statSync('/dev/dri/card0').gid);
+        }
+      } catch {
+        info('could not derive the video/render GIDs from /dev — using the compose defaults');
+      }
     }
     const waitMs = runtime === 'vllm' ? VLLM_STARTUP_WAIT_MS : OLLAMA_STARTUP_WAIT_MS;
     if (runtime === 'vllm') {
       info(
-        'waiting for the vLLM lanes (a FIRST start downloads the model weights from huggingface.co — the 27B adjudication model is tens of GB; follow along with `docker compose logs -f`)…',
+        'starting + waiting for the vLLM lanes sequentially (a FIRST start downloads the model weights from huggingface.co — the 27B adjudication default is tens of GB; follow along with `docker compose logs -f`)…',
       );
     }
-    const deadline = Date.now() + waitMs;
-    for (const url of new Set([moderationUrl, adjudicationUrl])) {
-      while (!(await isListening(url))) {
-        if (Date.now() > deadline) fail(`the container started but ${url} never began listening`);
+    const waited = new Set<string>();
+    for (const stage of composeStages) {
+      const composeArgs = ['compose', '--profile', stage.profile, 'up', '-d', ...stage.services];
+      info(`  docker ${composeArgs.join(' ')}`);
+      const result = spawnSync('docker', composeArgs, {
+        stdio: 'inherit',
+        env: { ...process.env, ...rocmEnv },
+      });
+      if (result.error || result.status !== 0) {
+        fail(`\`docker ${composeArgs.join(' ')}\` failed — is Docker installed and running?`);
+      }
+      // A single-URL posture (legacy GOVERNANCE_LLM_LOCAL_URL pointing both
+      // lanes at one runtime) waits once, not per stage.
+      if (waited.has(stage.url)) continue;
+      waited.add(stage.url);
+      const deadline = Date.now() + waitMs;
+      while (!(await isListening(stage.url))) {
+        if (Date.now() > deadline) {
+          fail(`the container started but ${stage.url} never began listening`);
+        }
         await sleep(5_000);
       }
-      info(`  ${url} is listening`);
+      info(`  ${stage.url} is listening`);
     }
   }
 

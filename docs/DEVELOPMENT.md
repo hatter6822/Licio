@@ -349,7 +349,11 @@ Opt-in services sit behind the LLM Compose profiles (a plain
 `llm-ollama` profile runs the single-URL **ollama** alternative
 (`127.0.0.1:11434`, persistent `ollama-data` volume). All loopback-published
 only. Start + provision either in one step with `pnpm setup:llm --docker`
-(vLLM) or `pnpm setup:llm --runtime ollama --docker` (Section 16); dev
+(vLLM, NVIDIA) or `pnpm setup:llm --runtime ollama --docker` (Section 16);
+**AMD-GPU hosts** use the `llm-rocm` profile instead
+(`pnpm setup:llm --docker --rocm` — AMD's official `rocm/vllm` build of the
+SAME two vLLM lanes on the same loopback ports; gfx110X image tag by default
+(Radeon RX 7900 class), `VLLM_ROCM_IMAGE` overrides for other AMD classes). Dev
 doesn't strictly need them — `pnpm dev` probes the lanes at boot, uses any
 real runtime that is up, and the simulated runtime stands in for the rest.
 
@@ -1469,6 +1473,15 @@ reverse:
 #      pnpm setup:llm --docker  # ALSO starts the Compose `llm` profile first
 #                               # (two loopback vLLM instances; weights pull
 #                               #  from huggingface.co into the hf-cache volume)
+#      pnpm setup:llm --docker --rocm
+#                               # AMD-GPU hosts: the `llm-rocm` profile — AMD's
+#                               # official rocm/vllm build of the SAME two vLLM
+#                               # lanes (RDNA tag default; VLLM_ROCM_IMAGE
+#                               # overrides for CDNA). On a 24 GB consumer card
+#                               # override VLLM_ADJUDICATION_MODEL (the 27B
+#                               # default doesn't fit) and re-balance
+#                               # VLLM_*_GPU_FRACTION (0.42/0.50 measured on
+#                               # a 24 GB RX 7900 XTX)
 #      pnpm setup:llm --runtime ollama --docker
 #                               # the single-URL ALTERNATIVE: one Ollama serves
 #                               # GGUF builds of both lane models from :11434
@@ -2034,6 +2047,10 @@ Operational rules — Section 16 has the full tuning detail:
   (or override `VLLM_ADJUDICATION_MODEL` / add a quantization flag for your
   hardware). The compose services set `--max-model-len 8192` (the governed
   prompts are ≤ ~2.5k tokens) and share an `hf-cache` weights volume.
+  **AMD GPUs are first-class**: the `llm-rocm` profile runs AMD's official
+  `rocm/vllm` build of the same two lanes (identical protocol, ports,
+  verification) — gfx110X image tag by default (Radeon RX 7900 class),
+  `VLLM_ROCM_IMAGE` selects the broader rdna tag or the cdna datacenter tags.
 - **On the Ollama alternative, match the runtime to the platform's fan-out:**
   `OLLAMA_NUM_PARALLEL=4` (debate adjudications fan out 4-wide),
   `OLLAMA_KEEP_ALIVE=-1`, and `OLLAMA_CONTEXT_LENGTH=8192` — the Compose
