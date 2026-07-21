@@ -24,7 +24,7 @@ import {
   buildDisclosureDeps,
   createInMemoryComplianceServices,
 } from '../services.js';
-import { InMemoryRegionDeclarationStore } from '../stores.js';
+import { InMemoryKycVerificationStore, InMemoryRegionDeclarationStore } from '../stores.js';
 
 const NOW = Date.parse('2026-07-15T12:00:00.000Z');
 const USER = '6f9619ff-8b86-4d01-b42d-00cf4fc964ff';
@@ -35,6 +35,48 @@ function services() {
     now: () => NOW,
   });
 }
+
+describe('the KYC verification store CAS (WS-N.1.1f / bot-prevention layer 3)', () => {
+  const kycRecord = (over: Partial<Record<'status' | 'evidenceRef', string>> = {}) => ({
+    userId: USER,
+    status: (over.status ?? 'verified') as 'pending' | 'verified' | 'revoked',
+    evidenceRef: over.evidenceRef ?? 'partner:first',
+    verifiedAt: new Date(NOW).toISOString(),
+    verifiedBy: null,
+    createdAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+  });
+
+  it('create is conflict-only: a second initial write never overwrites the first', async () => {
+    const kyc = new InMemoryKycVerificationStore();
+    const first = await kyc.upsert(kycRecord({ evidenceRef: 'partner:first' }));
+    expect(first?.evidenceRef).toBe('partner:first');
+    // A concurrent reviewer who also read an absent standing submits verify: the
+    // write is refused (null) rather than clobbering the first decision.
+    expect(await kyc.upsert(kycRecord({ evidenceRef: 'partner:second' }))).toBeNull();
+    expect((await kyc.get(USER))?.evidenceRef).toBe('partner:first');
+  });
+
+  it('update refuses a stale premise and honours a matching one', async () => {
+    const kyc = new InMemoryKycVerificationStore();
+    const created = await kyc.upsert(kycRecord());
+    if (created === null) throw new Error('create returned null');
+    // Stale premise → CAS miss → null (the row is untouched).
+    expect(
+      await kyc.upsert(
+        { ...created, status: 'revoked', updatedAt: new Date(NOW + 1000).toISOString() },
+        { status: 'pending', updatedAt: created.updatedAt },
+      ),
+    ).toBeNull();
+    expect((await kyc.get(USER))?.status).toBe('verified');
+    // Matching premise → the update lands.
+    const revoked = await kyc.upsert(
+      { ...created, status: 'revoked', updatedAt: new Date(NOW + 1000).toISOString() },
+      { status: created.status, updatedAt: created.updatedAt },
+    );
+    expect(revoked?.status).toBe('revoked');
+  });
+});
 
 describe('the region resolution ladder (WS-N.1.1b — identity-free)', () => {
   it('verified declaration > locale subtag > unknown, with the basis reported', async () => {

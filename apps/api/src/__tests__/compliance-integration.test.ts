@@ -798,6 +798,23 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(verified.status).toBe('verified');
     expect((await stores.kyc.get(userId))?.evidenceRef).toBe('partner:fixture');
 
+    // A SECOND initial create (no CAS) is conflict-only: a concurrent reviewer
+    // who also read an absent standing cannot overwrite the first decision — the
+    // insert does nothing and returns null (the route then answers kyc_changed).
+    expect(
+      await stores.kyc.upsert({
+        userId,
+        status: 'verified',
+        evidenceRef: 'partner:SECOND',
+        verifiedAt: NOW(),
+        verifiedBy: userId,
+        createdAt: NOW(),
+        updatedAt: NOW(),
+      }),
+    ).toBeNull();
+    // The first reviewer's evidence_ref is intact — no silent clobber.
+    expect((await stores.kyc.get(userId))?.evidenceRef).toBe('partner:fixture');
+
     // CAS on the timestamptz `updatedAt` WHERE clause: a stale-premise decision
     // matches zero rows (the guarantee the review route rides).
     expect(

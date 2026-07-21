@@ -1213,3 +1213,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 4. **SAR filing is record-keeping, not transmission.**  The SAR store holds
    counsel-approved drafts and filing metadata; actual submission to a FIU
    goes through counsel's regulated channel, not an API.  Deliberate.
+5. **Region-declaration create is not yet conflict-only.**  The KYC store's
+   CREATE path is conflict-only (`onConflictDoNothing` / in-memory existence
+   guard), so two reviewers reading an absent standing cannot silently overwrite
+   each other — the loser gets `null` → `kyc_changed` (409).  The structurally
+   identical `RegionDeclarationStore` still `onConflictDoUpdate`s on create.
+   Production is unaffected — the declaration routes only take the create path
+   when `existing === null` and retry on a CAS miss — but a concurrent first
+   declaration for the SAME user could clobber (low risk: member-self-initiated,
+   one row per member, client-serialised).  **Closure:** align the declaration
+   store on the KYC conflict-only create (and migrate the one integration-test
+   create-to-overwrite fixture to the CAS-update path) in a WS-N follow-up.

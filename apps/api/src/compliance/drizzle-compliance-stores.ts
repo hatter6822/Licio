@@ -975,15 +975,16 @@ export class DrizzleKycVerificationStore implements KycVerificationStore {
       verifiedBy: values.verifiedBy,
       updatedAt: values.updatedAt,
     };
-    // Same CAS discipline as declarations: with `expected` this is an UPDATE,
+    // CAS discipline in BOTH directions. With `expected` this is an UPDATE,
     // never an upsert — a record deleted under review (the deletion purge) must
-    // not be resurrected by a stale reviewer decision.
+    // not be resurrected by a stale reviewer decision. WITHOUT `expected` this
+    // is a CREATE, and it is conflict-only (`onConflictDoNothing`): if a row
+    // already exists it inserts nothing and returns null, so two reviewers who
+    // both read an absent standing and submit the only allowed initial decision
+    // (`verify`) concurrently cannot silently overwrite each other — the loser
+    // gets `null` and the route answers `kyc_changed` (409), same as a CAS miss.
     const rows = await (expected === undefined
-      ? this.#db
-          .insert(kycVerifications)
-          .values(values)
-          .onConflictDoUpdate({ target: kycVerifications.userId, set })
-          .returning()
+      ? this.#db.insert(kycVerifications).values(values).onConflictDoNothing().returning()
       : this.#db
           .update(kycVerifications)
           .set(set)

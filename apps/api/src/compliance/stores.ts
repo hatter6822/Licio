@@ -1044,8 +1044,11 @@ export class InMemoryKycVerificationStore implements KycVerificationStore {
     record: KycVerificationRecord,
     expected?: KycPremises,
   ): Promise<KycVerificationRecord | null> {
-    // The same CAS the declarations store applies (the Drizzle adapter's
-    // WHERE clause): a verdict against changed premises is refused.
+    // CAS in both directions (mirrors the Drizzle adapter). With `expected`
+    // this is an UPDATE: a verdict against changed premises is refused. Without
+    // it this is a conflict-only CREATE: if a standing already exists the write
+    // is refused (`null`) so two concurrent initial `verify` decisions cannot
+    // overwrite each other — the loser is told the record changed (409).
     if (expected !== undefined) {
       const current = this.#rows.get(record.userId);
       if (
@@ -1055,6 +1058,8 @@ export class InMemoryKycVerificationStore implements KycVerificationStore {
       ) {
         return null;
       }
+    } else if (this.#rows.has(record.userId)) {
+      return null;
     }
     this.#rows.set(record.userId, { ...record });
     return { ...record };

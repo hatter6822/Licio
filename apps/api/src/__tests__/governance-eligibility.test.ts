@@ -33,15 +33,24 @@ function freshCompliance() {
 
 async function seedKyc(userId: string, status: 'pending' | 'verified' | 'revoked'): Promise<void> {
   const nowIso = new Date().toISOString();
-  await getComplianceServices().kyc.upsert({
-    userId,
-    status,
-    evidenceRef: null,
-    verifiedAt: status === 'verified' ? nowIso : null,
-    verifiedBy: null,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  });
+  const kyc = getComplianceServices().kyc;
+  // The create path is conflict-only (a concurrent initial verify cannot
+  // overwrite), so a re-seed to change a standing must go through the CAS update
+  // path — exactly what the real review route does (read → create-when-absent /
+  // CAS-update-when-present).
+  const existing = await kyc.get(userId);
+  await kyc.upsert(
+    {
+      userId,
+      status,
+      evidenceRef: null,
+      verifiedAt: status === 'verified' ? nowIso : null,
+      verifiedBy: null,
+      createdAt: existing?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+    },
+    existing === null ? undefined : { status: existing.status, updatedAt: existing.updatedAt },
+  );
 }
 
 beforeEach(() => {
