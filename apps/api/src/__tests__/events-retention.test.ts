@@ -146,9 +146,49 @@ describe('retention sweeps (WS-E.1.4)', () => {
         created_at: new Date(now - 2 * 3_600_000).toISOString(),
       },
     ]);
+    // Bot-prevention layer 2: the attention-derived BAI state (behavior window +
+    // authenticity score) must ALSO be purged for a `none` owner — otherwise it
+    // outlives the aggregates to the 14-day BAI horizon, defeating the choice.
+    await fixture.events.behaviorStore.upsertWindows([
+      {
+        actorRef: userId,
+        windowStart: new Date(now - 2 * 3_600_000).toISOString(),
+        eventCount: 5,
+        itemsTouched: 5,
+        dwellHistogram: { short: 5 },
+        replyDepthHistogram: {},
+        returnHistogram: {},
+        sourceOpens: 0,
+        contextOpens: 0,
+        saves: 0,
+        contributions: 0,
+      },
+    ]);
+    await fixture.events.behaviorStore.upsertAuthenticity([
+      {
+        actorRef: userId,
+        score: 0.5,
+        coherence: 0.5,
+        components: { dwell_variety: 0.5, interaction_breadth: 0.5, temporal_rhythm: 0.5 },
+        flags: [],
+        evidence: 10,
+        clusterId: null,
+        clusterSize: 1,
+        computedAt: new Date(now).toISOString(),
+      },
+    ]);
+
     const report = await runRetentionSweeps(fixture.events, fixture.identity, now);
     expect(report.aggregatesDeleted).toBe(1);
     expect(await fixture.events.attentionStore.listByUser(userId)).toHaveLength(0);
+    // The BAI state is gone with the aggregates (not lingering to 14 days).
+    expect(report.behaviorStatePurged).toBeGreaterThanOrEqual(1);
+    expect(await fixture.events.behaviorStore.getAuthenticity(userId)).toBeNull();
+    expect(
+      (await fixture.events.behaviorStore.listWindowsSince(new Date(0).toISOString())).some(
+        (w) => w.actorRef === userId,
+      ),
+    ).toBe(false);
   });
 
   it('honors `minimal` with the 90-day minimum window', async () => {

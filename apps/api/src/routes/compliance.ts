@@ -34,6 +34,8 @@ import {
   fraudQueueResponseSchema,
   intentReviewRequestSchema,
   type JurisdictionFeaturePolicy,
+  kycReviewRequestSchema,
+  kycStatusResponseSchema,
   lawfulAccessCreateRequestSchema,
   lawfulAccessListResponseSchema,
   lawfulAccessProduceRequestSchema,
@@ -413,6 +415,20 @@ export function createComplianceRoutes() {
           region: resolution.region,
           basis: resolution.basis,
           declaration: declaration === null ? null : declarationToWire(declaration),
+        }),
+      );
+    })
+
+    // WS-N.1.1f — the member's OWN KYC standing (bot-prevention layer 3: the
+    // governance-participation eligibility basis).  Standing only — reviewer
+    // identity and evidence references never leave the compliance surface.
+    .get('/kyc', authMiddleware(), async (c) => {
+      const auth = requireAuth(c);
+      const record = await getComplianceServices().kyc.get(auth.userId);
+      return c.json(
+        kycStatusResponseSchema.parse({
+          status: record?.status ?? 'none',
+          verified_at: record?.status === 'verified' ? record.verifiedAt : null,
         }),
       );
     })
@@ -962,6 +978,90 @@ export function createComplianceRoutes() {
           context: { setting: body.decision, reason: body.note },
         });
         return c.json({ declaration: declarationToWire(record) });
+      },
+    )
+
+    // WS-N.1.1f — the KYC verification review surface (bot-prevention layer 3).
+    // A reviewer records the outcome of a partner-performed verification:
+    // `verify` establishes the `kyc_partner` level (creating the standing when
+    // the partner flow ran off-platform), `reject` closes a pending record,
+    // `revoke` removes a standing verification.  Audited with the subject on
+    // `targetRef` — the same discipline as declaration verification, and for
+    // the same reason: this standing is the governance-participation gate.
+    .get(
+      '/admin/kyc/:userId',
+      authMiddleware(),
+      requireCompliance(),
+      zValidator('param', z.object({ userId: uuidSchema })),
+      async (c) => {
+        const record = await getComplianceServices().kyc.get(c.req.valid('param').userId);
+        if (record === null) return c.json(notFound, 404);
+        return c.json({ kyc: record });
+      },
+    )
+    .post(
+      '/admin/kyc/:userId',
+      authMiddleware(),
+      requireCompliance(),
+      zValidator('param', z.object({ userId: uuidSchema })),
+      zValidator('json', kycReviewRequestSchema),
+      async (c) => {
+        const auth = requireAuth(c);
+        const services = getComplianceServices();
+        const { userId } = c.req.valid('param');
+        const body = c.req.valid('json');
+        const nowIso = new Date(services.now()).toISOString();
+        const existing = await services.kyc.get(userId);
+        if (existing === null && body.decision !== 'verify') {
+          return c.json(notFound, 404);
+        }
+        // Creating a standing (a `verify` with no prior record) requires the
+        // target user to exist: the production `kyc_verification.user_id` FK
+        // would otherwise reject the insert (500) while the in-memory store
+        // would accept an orphan — masking the failure in tests. Resolve the
+        // user first and return the route's normal 404 (dev↔prod parity).
+        if (existing === null) {
+          const target = await getIdentityServices().store.getUser(userId);
+          if (target === null) return c.json(notFound, 404);
+        }
+        const status =
+          body.decision === 'verify'
+            ? ('verified' as const)
+            : body.decision === 'revoke'
+              ? ('revoked' as const)
+              : ('pending' as const);
+        const record = await services.kyc.upsert(
+          {
+            userId,
+            status,
+            evidenceRef: body.evidence_ref ?? existing?.evidenceRef ?? null,
+            verifiedAt: status === 'verified' ? nowIso : null,
+            verifiedBy: status === 'verified' ? auth.userId : null,
+            createdAt: existing?.createdAt ?? nowIso,
+            updatedAt: nowIso,
+          },
+          // CAS on the premises the decision was made about (declaration
+          // discipline): a standing that changed under review is not clobbered.
+          existing === null
+            ? undefined
+            : { status: existing.status, updatedAt: existing.updatedAt },
+        );
+        if (record === null) {
+          return c.json(
+            deny(
+              'kyc_changed',
+              'The verification record changed while under review; re-read it and decide again.',
+            ),
+            409,
+          );
+        }
+        await getIdentityServices().audit.append({
+          actorUserId: auth.userId,
+          eventType: 'kyc_verification_change',
+          targetRef: services.opaqueRef(userId),
+          context: { setting: body.decision, reason: body.note },
+        });
+        return c.json({ kyc: record });
       },
     )
 

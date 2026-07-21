@@ -7,4 +7,12 @@
 import { defineConfig } from 'vitest/config';
 import { nodeProjectTest } from '../../vitest.shared';
 
-export default defineConfig({ test: nodeProjectTest('api') });
+export default defineConfig({
+  test: {
+    ...nodeProjectTest('api'),
+    // Migrate the gated integration DB ONCE before the parallel workers (avoids
+    // the concurrent-migrate DDL race on a fresh database) — mirrors the api
+    // project entry in the root multi-project config.
+    globalSetup: ['./src/__tests__/global-db-setup.ts'],
+  },
+});

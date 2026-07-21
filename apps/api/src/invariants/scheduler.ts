@@ -530,6 +530,10 @@ export async function runBatchTier(
       runAndPersist('path_signature_wellbeing', invariants.pathsig, null, () =>
         invariants.pathsig.computeBatch([], window),
       ),
+    () =>
+      runAndPersist('behavioral_authenticity', invariants.bai, null, () =>
+        invariants.bai.computeBatch([], window),
+      ),
   ];
   // Bounded concurrency: the batch tier may never starve real-time work.
   await mapBounded(jobs, config.batchConcurrency, (job) => job());

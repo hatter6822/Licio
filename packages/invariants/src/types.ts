@@ -2,7 +2,7 @@
 //
 // Core invariant types (WS-H.1, SPEC §21.4/§22.1/§30.4).
 
-/** The eleven WS-H invariant families (5 core + 6 supporting). */
+/** The twelve WS-H invariant families (5 core + 7 supporting). */
 export enum InvariantType {
   MERI = 'MERI',
   MFCI = 'MFCI',
@@ -15,9 +15,13 @@ export enum InvariantType {
   ReebLandscape = 'reeb_landscape',
   CounterfactualDefect = 'counterfactual_defect',
   PathSignatureWellbeing = 'path_signature_wellbeing',
+  /** Bot-prevention layer 2: platform-level behavioral-authenticity health
+   *  (share of scoring weight from low-coherence / duplicated-behavior
+   *  accounts; behavior/authenticity.ts is the per-account mathematics). */
+  BehavioralAuthenticity = 'behavioral_authenticity',
 }
 
-/** All eleven type names, in registry order. */
+/** All twelve type names, in registry order. */
 export const INVARIANT_TYPE_NAMES = [
   InvariantType.MERI,
   InvariantType.MFCI,
@@ -30,6 +34,7 @@ export const INVARIANT_TYPE_NAMES = [
   InvariantType.ReebLandscape,
   InvariantType.CounterfactualDefect,
   InvariantType.PathSignatureWellbeing,
+  InvariantType.BehavioralAuthenticity,
 ] as const;
 
 /** Targets an invariant output can score (SPEC §22.1 + WS-H.1.1a). */

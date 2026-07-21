@@ -37,7 +37,7 @@ import {
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { AggregationWindowSize } from '../events/stores.js';
-import { PRIVACY_BUCKET, type SignalLedgerRecord } from '../events/stores.js';
+import { PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID, type SignalLedgerRecord } from '../events/stores.js';
 import type { IdentityServices } from '../identity/services.js';
 import {
   computeAggregationWindow,
@@ -53,6 +53,11 @@ import {
   detectCoordinatedBurst,
   detectHarassmentCascade,
 } from './anti-signals.js';
+import {
+  BEHAVIOR_LOOKBACK_MS,
+  foldActorBehaviorWindows,
+  runBehaviorAuthenticityJob,
+} from './behavior.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
 import { pwattRowForRanking } from './shadow.js';
 
@@ -214,6 +219,58 @@ async function emitThreadSafetyStateChanged(
 }
 
 /**
+ * A stable 16-hex identity of the scoring-relevant runtime config, stamped on
+ * every stored PWAtt row so the ranking feature store's `config_hash` VARIES
+ * with the config that produced a component — replay and audit can then tell
+ * differently-configured scores apart (WS-I.2.1c). EVERY input that changes a
+ * persisted component MUST appear here:
+ *  - `v0`/`v1`/`trustWeights` — the weights themselves;
+ *  - `burst`/`cascade` — the anti-signal DETECTORS, which decide whether a
+ *    burst/cascade fires (changing v0 dampening, the v1 anti_signal_factor, the
+ *    served components, and the freeze);
+ *  - `behavior` — the bot-prevention layer-2 authenticity settings, which scale
+ *    the applied trust factor (the overall floor + coherence/duplication tuning).
+ */
+export function pwattConfigHash(config: PwattRuntimeConfig): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        v0: config.v0,
+        v1: config.v1,
+        trustWeights: config.trustWeights,
+        burst: config.burst,
+        cascade: config.cascade,
+        behavior: config.behavior,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Direct / triggered scoring — the production volume-threshold trigger and the
+ * simulator, which score a window OUTSIDE the hourly scheduler tick. Refreshes
+ * the authenticity assessments (`runBehaviorAuthenticityJob`) BEFORE scoring, so
+ * the applied assessments and the behavior-inclusive `config_hash` agree on the
+ * ACTIVE behavior config — the same guarantee the tick gets by running the
+ * behavior job first. Without it, an early run after a behavior-config change
+ * would apply the prior thresholds while stamping the new hash until the next
+ * hourly tick. (The scheduler passes an already-refreshed config to
+ * `runPwattWindow` directly and must NOT double-run the population job.)
+ */
+export async function runTriggeredPwattWindow(
+  events: EventPipelineServices,
+  identity: IdentityServices,
+  startMs: number,
+  size: AggregationWindowSize,
+  nowMs: number = events.now(),
+): Promise<WindowScoringReport> {
+  const config = await loadPwattRuntimeConfig(events);
+  await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
+  return runPwattWindow(events, identity, startMs, size, config, nowMs);
+}
+
+/**
  * Score one completed window. Returns a summary report; every side effect is
  * an idempotent upsert.
  */
@@ -223,28 +280,10 @@ export async function runPwattWindow(
   startMs: number,
   size: AggregationWindowSize,
   preloadedConfig?: PwattRuntimeConfig,
+  nowMsOverride?: number,
 ): Promise<WindowScoringReport> {
   const config = preloadedConfig ?? (await loadPwattRuntimeConfig(events));
-  // A stable identity of the scoring-relevant runtime config, stamped on every
-  // stored PWAtt row so the ranking feature store's `config_hash` (derived from
-  // versionMetadata) VARIES with the applied weights/attenuation/trust — replay
-  // and audit can then tell which config produced a stored component (WS-I.2.1c).
-  const configHash = createHash('sha256')
-    .update(
-      JSON.stringify({
-        v0: config.v0,
-        v1: config.v1,
-        trustWeights: config.trustWeights,
-        // The anti-signal DETECTOR configs are part of the scoring identity too:
-        // they decide whether a burst/cascade fires, which changes v0 dampening,
-        // the v1 anti_signal_factor, the served components, and the freeze — so
-        // tuning either must change the replay/audit hash (WS-I.2.1c).
-        burst: config.burst,
-        cascade: config.cascade,
-      }),
-    )
-    .digest('hex')
-    .slice(0, 16);
+  const configHash = pwattConfigHash(config);
   const aggregation: WindowAggregationResult = await computeAggregationWindow(
     events,
     startMs,
@@ -262,6 +301,18 @@ export async function runPwattWindow(
     ledgerEntriesWritten: 0,
   };
 
+  // Bot-prevention layer 2: persist the per-ACTOR behavior snapshot for this
+  // window (only the 1h size — the canonical granularity, mirroring the
+  // ledger) BEFORE scoring, so the hourly authenticity job always sees the
+  // fold this run scored.  Idempotent upsert on (actor, window); the privacy
+  // bucket is never profiled (foldActorBehaviorWindows skips it).
+  if (size === '1h') {
+    const behaviorRecords = foldActorBehaviorWindows(aggregation);
+    if (behaviorRecords.length > 0) {
+      await events.behaviorStore.upsertWindows(behaviorRecords);
+    }
+  }
+
   // WS-O.4.5 — account-age trust factor of an actor (memoized across the window),
   // used for BOTH the burst-detection threshold AND the per-actor score scaling.
   // Anonymous (privacy-bucket) and unresolvable actors are treated as FULLY
@@ -270,16 +321,64 @@ export async function runPwattWindow(
   // reader's served PWAtt components must never depend on trust config. Only
   // RESOLVABLE fresh accounts lower the factor. Account age is the coarse,
   // non-financial signal MFCI already uses; no age ever leaves this function.
-  const nowMs = events.now();
+  //
+  // Bot-prevention layer 2 composes here: the actor's CURRENT behavioral-
+  // authenticity multiplier (behavior.ts; 1 when unassessed) scales the same
+  // factor, so a low-coherence or duplicated-behavior account both trips
+  // burst detection sooner AND earns proportionally less distribution power.
+  // The composite never reaches zero (config.behavior.overallFloor) —
+  // influence is reduced, never silenced — and it is a pure function of the
+  // actor's own organic behavior, so two behaviorally-identical accounts
+  // score identically (the WS-I.3 neutrality obligation).
+  const nowMs = nowMsOverride ?? events.now();
+  // Bot-prevention layer 2: pre-load the CURRENT authenticity multiplier for
+  // every profiled actor in the window in ONE batch read (rather than a point
+  // read per distinct actor), keyed off the aggregation the fold above just
+  // built. Absent actors default to a neutral 1.
+  const profiledActors = new Set<string>();
+  for (const item of aggregation.items.values()) {
+    for (const actorKey of item.actors.keys()) {
+      if (actorKey !== PRIVACY_BUCKET && actorKey !== PSEUDONYMOUS_USER_ID) {
+        profiledActors.add(actorKey);
+      }
+    }
+  }
+  const authenticityByActor = await events.behaviorStore.getAuthenticityMany([...profiledActors]);
+  // An assessment is only trustworthy while its evidence is still in the active
+  // evaluation window. An actor dormant PAST the behavior lookback is not
+  // recomputed (no current windows) yet survives to the 14-day assessment cutoff,
+  // so a stale score must NOT damp their fresh attention on return — ignore any
+  // assessment last computed before the lookback edge (WS-E BAI).
+  const assessmentFreshFromIso = new Date(nowMs - BEHAVIOR_LOOKBACK_MS).toISOString();
   const trustCache = new Map<string, number>();
   const actorTrust = async (actorKey: string): Promise<number> => {
-    if (actorKey === PRIVACY_BUCKET) return 1;
+    // The anonymity bucket and the deletion pseudonym are NEVER profiled and
+    // carry full trust (literal 1) — the same set the behavior fold skips.
+    if (actorKey === PRIVACY_BUCKET || actorKey === PSEUDONYMOUS_USER_ID) return 1;
     const cached = trustCache.get(actorKey);
     if (cached !== undefined) return cached;
     const user = await identity.store.getUser(actorKey);
-    const weight = user
-      ? accountTrustWeight((nowMs - Date.parse(user.createdAt)) / 86_400_000, config.trustWeights)
-      : 1;
+    // An UNRESOLVABLE actor is fully trusted (literal 1) — no age, and no
+    // authenticity applied: the behavior assessments are keyed by user id and
+    // purged with the account, so an unresolvable actor has none, and the
+    // doctrine is "only resolvable accounts lower the factor" (WS-O.4.5).
+    if (!user) {
+      trustCache.set(actorKey, 1);
+      return 1;
+    }
+    const ageWeight = accountTrustWeight(
+      (nowMs - Date.parse(user.createdAt)) / 86_400_000,
+      config.trustWeights,
+    );
+    const assessment = authenticityByActor.get(actorKey);
+    const authenticity =
+      assessment !== undefined && assessment.computedAt >= assessmentFreshFromIso
+        ? assessment.score
+        : 1;
+    const weight =
+      authenticity < 1
+        ? Math.max(config.behavior.overallFloor, ageWeight * authenticity)
+        : ageWeight;
     trustCache.set(actorKey, weight);
     return weight;
   };

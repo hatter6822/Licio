@@ -17,13 +17,14 @@ import { runRetentionSweeps } from '../events/retention.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import type { IdentityServices } from '../identity/services.js';
-import { loadPwattRuntimeConfig } from './config.js';
+import { runBehaviorAuthenticityJob } from './behavior.js';
+import { DEFAULT_PWATT_RUNTIME_CONFIG, loadPwattRuntimeConfig } from './config.js';
 import { runPwattWindow, windowsNeedingCompute } from './scoring.js';
 
 export const EVENT_PIPELINE_SCHEDULER_INTERVAL_MS = 60 * 60_000; // hourly
 export const EVENT_PIPELINE_JOB_LEASE = 'events_hourly';
 
-export type SchedulerTask = 'lease' | 'scoring' | 'retention' | 'reconcile';
+export type SchedulerTask = 'lease' | 'scoring' | 'behavior' | 'retention' | 'reconcile';
 
 /**
  * Reconcile the real-time acceleration layer against the durable aggregation
@@ -67,10 +68,34 @@ export async function runEventPipelineTick(
   onError: (err: unknown, task: SchedulerTask) => void = () => {},
   nowMs: number = events.now(),
 ): Promise<void> {
+  // Load once; fail closed to the reviewed defaults so a config-store hiccup
+  // never crashes the whole tick (the behavior job + retention still run).
+  let config = DEFAULT_PWATT_RUNTIME_CONFIG;
   try {
-    const config = await loadPwattRuntimeConfig(events);
+    config = await loadPwattRuntimeConfig(events);
+  } catch (err) {
+    onError(err, 'scoring');
+  }
+  // Bot-prevention layer 2: refresh every active actor's authenticity assessment
+  // (coherence + cross-account duplication clustering; behavior.ts) BEFORE
+  // scoring, so the scorer applies assessments computed with the CURRENT behavior
+  // config and stamps a `config_hash` that matches it — a behavior-config change
+  // takes effect THIS tick, not the next, and replay/audit metadata never
+  // misidentifies the calculation. It reads the snapshots PRIOR window runs
+  // upserted; this tick's own windows fold during scoring below and feed the next
+  // refresh. Its OWN try block — separate from scoring — so a single poison
+  // assessment can never starve scoring AND the snapshot/assessment retention
+  // pruning.
+  try {
+    await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
+  } catch (err) {
+    onError(err, 'behavior');
+  }
+  try {
     for (const window of await windowsNeedingCompute(events, nowMs)) {
-      await runPwattWindow(events, identity, window.startMs, window.size, config);
+      // Thread the tick's nowMs so account-age + assessment-freshness use the
+      // SAME clock the behavior job just ran on (consistent within the tick).
+      await runPwattWindow(events, identity, window.startMs, window.size, config, nowMs);
     }
   } catch (err) {
     onError(err, 'scoring');

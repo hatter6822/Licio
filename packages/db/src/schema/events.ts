@@ -202,7 +202,17 @@ export const aggregationWindows = pgTable(
   ],
 );
 
-/** The known invariant-type vocabulary at rest (11 WS-H + PWAtt shadow). */
+/** Render a string vocabulary as a parenthesized SQL `IN (...)` value list, so
+ *  a CHECK's allowed set is DERIVED from its single-source array rather than a
+ *  hand-copied literal that could drift. */
+function inList(values: readonly string[]) {
+  return sql`(${sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )})`;
+}
+
+/** The known invariant-type vocabulary at rest (12 WS-H + PWAtt shadow). */
 export const INVARIANT_TYPE_DB_VALUES = [
   'MERI',
   'MFCI',
@@ -215,6 +225,7 @@ export const INVARIANT_TYPE_DB_VALUES = [
   'reeb_landscape',
   'counterfactual_defect',
   'path_signature_wellbeing',
+  'behavioral_authenticity',
   'PWAtt_v0',
   'PWAtt_v1',
 ] as const;
@@ -285,13 +296,14 @@ export const invariantOutputs = pgTable(
     ),
     check('invariant_outputs_confidence', sql`${t.confidence} >= 0 and ${t.confidence} <= 1`),
     check('invariant_outputs_coverage', sql`${t.coverage} >= 0 and ${t.coverage} <= 1`),
-    check(
-      'invariant_outputs_type',
-      sql`${t.invariantType} in ('MERI', 'MFCI', 'GWEI', 'SCOI', 'PHI', 'hodge_tension', 'tropical_cascade', 'braid_dynamics', 'reeb_landscape', 'counterfactual_defect', 'path_signature_wellbeing', 'PWAtt_v0', 'PWAtt_v1')`,
-    ),
+    // The type/target vocabularies are DERIVED from the single-source arrays
+    // (no hand-maintained second literal that could drift). A hand-authored
+    // migration still writes the equivalent literal — a test pins that the
+    // rendered CHECK matches this list.
+    check('invariant_outputs_type', sql`${t.invariantType} in ${inList(INVARIANT_TYPE_DB_VALUES)}`),
     check(
       'invariant_outputs_target_type',
-      sql`${t.targetType} in ('story', 'thread', 'feed', 'room', 'cohort', 'session')`,
+      sql`${t.targetType} in ${inList(INVARIANT_TARGET_DB_VALUES)}`,
     ),
   ],
 );
@@ -384,6 +396,85 @@ export const consumerCheckpoints = pgTable('consumer_checkpoints', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Per-(actor, 1h window) behavior snapshot for the bot-prevention layer-2
+ * authenticity assessment (WS-E/WS-H BAI).  Derived from the SAME deduplicated
+ * per-item fold PWAtt scores — coarse §22.1 buckets only, nothing beyond what
+ * the aggregates already disclose.  Only IDENTIFIABLE actors are recorded
+ * (the coarse privacy-bucket actor is never profiled); rows die with the
+ * account (FK cascade for dev deletes; the WS-D deletion job purges
+ * explicitly, since production tombstones the users row) and are pruned past
+ * the assessment lookback.
+ */
+export const actorBehaviorWindows = pgTable(
+  'actor_behavior_windows',
+  {
+    actorRef: uuid('actor_ref')
+      .notNull()
+      .references(() => users.userId, { onDelete: 'cascade' }),
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    eventCount: integer('event_count').notNull(),
+    itemsTouched: integer('items_touched').notNull(),
+    /** Count of items by per-item MAX dwell bucket (coarse §22.1 buckets). */
+    dwellHistogram: jsonb('dwell_histogram').$type<Record<string, number>>().notNull(),
+    replyDepthHistogram: jsonb('reply_depth_histogram').$type<Record<string, number>>().notNull(),
+    returnHistogram: jsonb('return_histogram').$type<Record<string, number>>().notNull(),
+    sourceOpens: integer('source_opens').notNull(),
+    contextOpens: integer('context_opens').notNull(),
+    saves: integer('saves').notNull(),
+    contributions: integer('contributions').notNull(),
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.actorRef, t.windowStart] }),
+    index('actor_behavior_windows_start_idx').on(t.windowStart),
+    check(
+      'actor_behavior_windows_nonneg',
+      sql`${t.eventCount} >= 0 and ${t.itemsTouched} >= 0 and ${t.sourceOpens} >= 0 and ${t.contextOpens} >= 0 and ${t.saves} >= 0 and ${t.contributions} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * The current per-actor authenticity assessment (bot-prevention layer 2):
+ * the coherence multiplier, its components, and the near-duplicate cluster
+ * membership.  INTERNAL integrity state — never a public surface, never an
+ * export (the WS-J/WS-N anti-tipping-off posture for anti-abuse internals);
+ * consumed by PWAtt scoring as a bounded trust factor and by the BAI
+ * platform invariant as population statistics.
+ */
+export const actorAuthenticityScores = pgTable(
+  'actor_authenticity_scores',
+  {
+    actorRef: uuid('actor_ref')
+      .primaryKey()
+      .references(() => users.userId, { onDelete: 'cascade' }),
+    /** Effective multiplier (coherence × duplication, floored; (0, 1]). */
+    score: doublePrecision('score').notNull(),
+    /** Coherence composite before duplication ((0, 1]). */
+    coherence: doublePrecision('coherence').notNull(),
+    /** Per-component multipliers (dwell_variety, interaction_breadth, …). */
+    components: jsonb('components').$type<Record<string, number>>().notNull(),
+    /** Machine-readable component flags that fired. */
+    flags: jsonb('flags').$type<string[]>().notNull().default([]),
+    /** Scoring-topic events the assessment rests on. */
+    evidence: integer('evidence').notNull(),
+    /** Deterministic near-duplicate cluster id (null = unclustered). */
+    clusterId: text('cluster_id'),
+    clusterSize: integer('cluster_size').notNull().default(1),
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('actor_authenticity_cluster_idx').on(t.clusterId),
+    check('actor_authenticity_score_range', sql`${t.score} > 0 and ${t.score} <= 1`),
+    check('actor_authenticity_coherence_range', sql`${t.coherence} > 0 and ${t.coherence} <= 1`),
+    check(
+      'actor_authenticity_cluster_size',
+      sql`${t.clusterSize} >= 1 and (${t.clusterId} is not null or ${t.clusterSize} = 1)`,
+    ),
+  ],
+);
+
 export type EventRow = typeof events.$inferSelect;
 export type EventInsert = typeof events.$inferInsert;
 export type AttentionAggregateRow = typeof attentionAggregates.$inferSelect;
@@ -392,3 +483,5 @@ export type InvariantOutputRow = typeof invariantOutputs.$inferSelect;
 export type SignalLedgerEntryRow = typeof signalLedgerEntries.$inferSelect;
 export type ItemSafetyStateRow = typeof itemSafetyStates.$inferSelect;
 export type EventDeadLetterRow = typeof eventDeadLetters.$inferSelect;
+export type ActorBehaviorWindowRow = typeof actorBehaviorWindows.$inferSelect;
+export type ActorAuthenticityScoreRow = typeof actorAuthenticityScores.$inferSelect;

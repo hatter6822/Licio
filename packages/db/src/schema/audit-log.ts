@@ -87,6 +87,9 @@ export const auditEventTypeEnum = pgEnum('audit_event_type', [
   'compliance_policy_change',
   'disclosure_change',
   'compliance_config_change',
+  // WS-N.1.1f KYC verification standing (migration 0093 appends it last —
+  // `ALTER TYPE … ADD VALUE` appends, so the physical enum order matches here).
+  'kyc_verification_change',
 ]);
 
 export const auditLog = pgTable(

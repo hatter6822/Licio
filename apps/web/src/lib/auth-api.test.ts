@@ -4,7 +4,7 @@
 // anti-enumeration registration outcome, code normalization, and the
 // current-session revoke — against a mocked fetch (the same seam api.test.ts
 // uses).  The WebAuthn ceremony module is mocked; its own tests cover it.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetApiClientState } from './api.js';
 import {
   addEmail,
@@ -24,6 +24,7 @@ import {
   verifyEmail,
   verifyEmailLogin,
 } from './auth-api.js';
+import { resetSignupCaptcha } from './pow-captcha.js';
 
 vi.mock('./webauthn.js', () => ({
   createPasskey: vi.fn(),
@@ -74,8 +75,28 @@ function mockRoutes(routes: Record<string, (body: unknown) => Response>): void {
   }) as unknown as typeof fetch;
 }
 
+// A real, solvable sign-up proof-of-work challenge (secret number = 3): the
+// register flows fetch + solve it against the mocked route table, exercising
+// the full client path.  The signature is not client-verified (server-only).
+let captchaChallenge: Record<string, unknown>;
+beforeAll(async () => {
+  const salt = 'a'.repeat(32);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${salt}.3`));
+  const target = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  captchaChallenge = {
+    algorithm: 'SHA-256',
+    challenge_id: 'b'.repeat(32),
+    salt,
+    target,
+    max_number: 8,
+    signature: 'c'.repeat(64),
+    expires_at: new Date(Date.now() + 600_000).toISOString(),
+  };
+});
+
 beforeEach(() => {
   resetApiClientState();
+  resetSignupCaptcha();
   calls.length = 0;
 });
 
@@ -195,8 +216,9 @@ describe('passkey login', () => {
 });
 
 describe('registerWithEmail (anti-enumeration outcome)', () => {
-  it('returns the user when the registration minted a session', async () => {
+  it('solves the sign-up proof-of-work, attaches it, and returns the user when a session minted', async () => {
     mockRoutes({
+      'POST /v1/auth/captcha/challenge': () => jsonResponse(captchaChallenge),
       'POST /v1/auth/register': () => jsonResponse({ age_band: 'adult' }),
       'GET /v1/auth/status': () =>
         jsonResponse({
@@ -217,10 +239,15 @@ describe('registerWithEmail (anti-enumeration outcome)', () => {
       email: 'a@example.com',
     });
     expect(outcome.user?.handle).toBe('ada');
+    const register = calls.find((c) => c.url.includes('/v1/auth/register'));
+    // The REAL solve rode along: the brute-forced secret for the fixture is 3.
+    const registerBody = register?.body as { captcha?: { number?: number } } | undefined;
+    expect(registerBody?.captcha?.number).toBe(3);
   });
 
   it('returns null (neutral guidance) when no session appears', async () => {
     mockRoutes({
+      'POST /v1/auth/captcha/challenge': () => jsonResponse(captchaChallenge),
       'POST /v1/auth/register': () => jsonResponse({ age_band: 'adult' }),
       'GET /v1/auth/status': () => jsonResponse({ authenticated: false }),
     });
@@ -230,6 +257,31 @@ describe('registerWithEmail (anti-enumeration outcome)', () => {
       date_of_birth: '1990-01-01',
       email: 'taken@example.com',
     });
+    expect(outcome.user).toBeNull();
+  });
+
+  it('retries ONCE with a fresh solve when the server rejects the captcha', async () => {
+    let registerAttempts = 0;
+    mockRoutes({
+      'POST /v1/auth/captcha/challenge': () => jsonResponse(captchaChallenge),
+      'POST /v1/auth/register': () => {
+        registerAttempts += 1;
+        return registerAttempts === 1
+          ? jsonResponse(
+              { error: { code: 'captcha_invalid', message: 'Sign-up verification required.' } },
+              403,
+            )
+          : jsonResponse({ age_band: 'adult' });
+      },
+      'GET /v1/auth/status': () => jsonResponse({ authenticated: false }),
+    });
+    const outcome = await registerWithEmail({
+      handle: 'ada',
+      display_name: 'Ada',
+      date_of_birth: '1990-01-01',
+      email: 'a@example.com',
+    });
+    expect(registerAttempts).toBe(2);
     expect(outcome.user).toBeNull();
   });
 });

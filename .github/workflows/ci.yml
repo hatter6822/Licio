@@ -33,6 +33,9 @@ jobs:
       # production counterpart; every env key must be schema-validated or a
       # documented dev flag; production adapters hold no in-memory state.
       - run: pnpm check:prod-parity
+      # Bot-prevention layer 3: every governance-participation POST route
+      # enforces the KYC eligibility guard or carries a written justification.
+      - run: pnpm check:governance-kyc
       - run: pnpm check:no-raw-egress
       - run: pnpm check:no-applause
       - run: pnpm check:lcap-schema-egress

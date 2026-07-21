@@ -89,7 +89,15 @@ export default defineConfig({
       { test: { ...nodeProjectTest('lcap'), root: 'packages/lcap' } },
       { test: { ...nodeProjectTest('lcap-p2p'), root: 'packages/lcap-p2p' } },
       { test: { ...nodeProjectTest('private-p2p'), root: 'packages/private-p2p' } },
-      { test: { ...nodeProjectTest('api'), root: 'apps/api' } },
+      {
+        test: {
+          ...nodeProjectTest('api'),
+          root: 'apps/api',
+          // Migrate the gated integration DB ONCE before the parallel workers
+          // (avoids the concurrent-migrate DDL race on a fresh CI database).
+          globalSetup: ['./src/__tests__/global-db-setup.ts'],
+        },
+      },
       { test: { ...webProjectTest, root: 'apps/web' } },
       { test: { ...policyProjectTest, root: 'scripts' } },
     ],

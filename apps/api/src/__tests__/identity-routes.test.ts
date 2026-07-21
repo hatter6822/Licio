@@ -13,11 +13,13 @@ import {
   setIdentityServices,
 } from '../identity/services.js';
 import { createRegistrationOptions, verifyRegistration } from '../identity/webauthn.js';
+import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 
 let services: IdentityServices;
@@ -95,6 +97,7 @@ describe('POST /v1/auth/register (age gating)', () => {
         display_name: 'Kid',
         email: 'kid@example.com',
         date_of_birth: dob,
+        captcha: await signupCaptcha(app),
       }),
     });
     expect(res.status).toBe(403);
@@ -111,6 +114,7 @@ describe('POST /v1/auth/register (age gating)', () => {
         display_name: 'Adult',
         email: 'adult@example.com',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     expect(res.status).toBe(200);
@@ -130,6 +134,7 @@ describe('POST /v1/auth/register (age gating)', () => {
         display_name: 'Teen',
         email: 'teen@example.com',
         date_of_birth: dob,
+        captcha: await signupCaptcha(app),
       }),
     });
     const user = await services.store.getUserByHandle('teen1');
@@ -148,6 +153,7 @@ describe('POST /v1/auth/register (age gating)', () => {
         display_name: 'X',
         email: 'dup@example.com',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     expect(res.status).toBe(200); // identical to the success shape
@@ -369,6 +375,8 @@ describe('Sign-In with Ethereum (adult-only signup)', () => {
         handle: 'walletuser',
         display_name: 'Wallet',
         ...(dob ? { date_of_birth: dob } : {}),
+        // The account-minting branch requires the sign-up proof-of-work.
+        captcha: await signupCaptcha(app),
       }),
     });
   }

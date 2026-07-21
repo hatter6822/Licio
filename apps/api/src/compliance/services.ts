@@ -19,7 +19,7 @@ import {
   type KycVerificationLevel,
   TOPIC_REGISTRY,
 } from '@licio/shared';
-import type { PwattConfigStore } from '../events/stores.js';
+import { InMemoryPwattConfigStore, type PwattConfigStore } from '../events/stores.js';
 import type { CompliancePort } from '../knomosis/ports.js';
 import { runChainedUnit } from './audit.js';
 import { announceCaseCreated, type CaseDeps, createCaseInTx } from './cases.js';
@@ -58,6 +58,7 @@ import {
   InMemoryDisclosureAckStore,
   InMemoryDisclosureStore,
   InMemoryJurisdictionPolicyStore,
+  InMemoryKycVerificationStore,
   InMemoryLawfulAccessStore,
   InMemoryPolicyAuditStore,
   InMemoryPolicyInvalidationBroadcaster,
@@ -67,6 +68,7 @@ import {
   InMemoryVelocityStore,
   InMemoryWalletRiskPinStore,
   type JurisdictionPolicyStore,
+  type KycVerificationStore,
   type LawfulAccessStore,
   type PolicyAuditStore,
   type PolicyInvalidationBroadcaster,
@@ -97,6 +99,8 @@ export interface ComplianceServices {
   cases: ComplianceCaseStore;
   caseAudit: CaseAuditStore;
   declarations: RegionDeclarationStore;
+  /** KYC verification standing (WS-N.1.1f / bot-prevention layer 3). */
+  kyc: KycVerificationStore;
   disclosures: DisclosureStore;
   acks: DisclosureAckStore;
   pins: WalletRiskPinStore;
@@ -119,12 +123,12 @@ export interface ComplianceServices {
   /** WS-D age band (null = unknown; fails closed to not-adult). */
   ageBand: (userId: string) => Promise<AgeBand | null>;
   /**
-   * The user's established KYC level (WS-N.1.1f).  Always `'none'` today: no
-   * KYC partner is integrated (the tracked residual), and a level we cannot
-   * establish must not be assumed — a policy cell demanding `kyc_partner`
-   * therefore stays closed until the partner seam fills this in.  It is a
-   * closure, not a constant, so wiring that partner is one boot-time swap
-   * rather than a change to the engine.
+   * The user's established KYC level (WS-N.1.1f).  The DEFAULT reads the
+   * container's own `kyc` verification store — a reviewer-verified standing
+   * (the compliance-console workflow, or a partner adapter writing the same
+   * store) answers `kyc_partner`; anything else, including a read failure,
+   * fails closed to `'none'`.  It stays a closure so an external partner
+   * integration remains one boot-time swap rather than an engine change.
    */
   kycLevel: (userId: string) => Promise<KycVerificationLevel>;
   /** The single runtime crypto/governance flags (knomosis.* config). */
@@ -211,6 +215,7 @@ export function createInMemoryComplianceServices(
     cases,
     caseAudit,
     declarations: new InMemoryRegionDeclarationStore(),
+    kyc: new InMemoryKycVerificationStore(),
     disclosures: new InMemoryDisclosureStore(),
     acks: new InMemoryDisclosureAckStore(),
     pins,
@@ -225,6 +230,9 @@ export function createInMemoryComplianceServices(
 
     localeRegion: async () => null,
     ageBand: async () => null,
+    // Reads THROUGH the container so the production boot's Drizzle store swap
+    // (Object.assign with createDrizzleComplianceStores) is honoured; assigned
+    // after construction below because it closes over `services`.
     kycLevel: async () => 'none',
     knomosisFlags: () => ({ cryptoEnabled: false, governanceEnabled: false }),
     roomStorageMode: async () => null,
@@ -258,6 +266,19 @@ export function createInMemoryComplianceServices(
     alert: options.alert ?? ((event, meta) => log(`ALERT:${event}`, meta)),
     now,
     uuid: options.uuid ?? (() => randomUUID()),
+  };
+  // The DEFAULT kycLevel reads THROUGH the container (`services.kyc`), so the
+  // production boot's Drizzle store swap (Object.assign with
+  // createDrizzleComplianceStores) is honoured without a second closure swap.
+  // Any read failure fails closed to 'none' — a level we cannot establish is
+  // no level (WS-N.1.1f).
+  services.kycLevel = async (userId) => {
+    try {
+      const record = await services.kyc.get(userId);
+      return record?.status === 'verified' ? 'kyc_partner' : 'none';
+    } catch {
+      return 'none';
+    }
   };
   return services;
 }
@@ -692,10 +713,12 @@ export function buildComplianceExport(
 }
 
 /**
- * WS-D deletion sweep (WS-N.2.1a/d): declarations delete, acknowledgments
- * anonymize (consent evidence survives, unattributed), case subjects scrub
- * EXCEPT under a legal hold (the skip is audited on the case chain and the
- * data erases when the hold lapses), and the user's wallet pins purge.
+ * WS-D deletion sweep (WS-N.2.1a/d): declarations delete, the KYC standing
+ * deletes (it is the user's own state; the partner retains what its own
+ * regulation requires), acknowledgments anonymize (consent evidence survives,
+ * unattributed), case subjects scrub EXCEPT under a legal hold (the skip is
+ * audited on the case chain and the data erases when the hold lapses), and
+ * the user's wallet pins purge.
  */
 export function buildCompliancePurge(
   services: ComplianceServices,
@@ -703,6 +726,7 @@ export function buildCompliancePurge(
 ): (userId: string) => Promise<void> {
   return async (userId) => {
     await services.declarations.delete(userId);
+    await services.kyc.delete(userId);
     await services.acks.anonymizeUser(userId);
     await scrubUserSubjectForErasure(
       { caseDeps: buildCaseDeps(services), log: services.log },
@@ -745,4 +769,25 @@ export function complianceServicesConfigured(): boolean {
 export function resetComplianceServicesForTests(): void {
   singleton = null;
   disableEventDedup.clear();
+}
+
+/**
+ * TEST-ONLY bootstrap: ensure a compliance container exists so suites that
+ * exercise compliance-READING guards (the governance KYC-eligibility gate)
+ * without wiring the full WS-N fixture still resolve one.  A no-op outside
+ * NODE_ENV=test and when a container is already set — the strict production
+ * getter above is unchanged (a mis-wired boot still fails loudly).
+ */
+export function ensureComplianceServicesForTests(): ComplianceServices {
+  if (singleton === null) {
+    if (process.env['NODE_ENV'] !== 'test') {
+      throw new Error(
+        'Compliance services not configured — call setComplianceServices() at startup',
+      );
+    }
+    singleton = createInMemoryComplianceServices({
+      configStore: new InMemoryPwattConfigStore(),
+    });
+  }
+  return singleton;
 }

@@ -62,6 +62,7 @@ import {
 } from './compliance/services.js';
 import { registerDefaultConsumers } from './events/consumers.js';
 import {
+  DrizzleActorBehaviorStore,
   DrizzleAggregationWindowStore,
   DrizzleAttentionAggregateStore,
   DrizzleConsumerCheckpointStore,
@@ -284,7 +285,7 @@ import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
   startEventPipelineScheduler,
 } from './pwatt/scheduler.js';
-import { runPwattWindow } from './pwatt/scoring.js';
+import { runTriggeredPwattWindow } from './pwatt/scoring.js';
 import { DrizzleDecisionLogStore, DrizzleFeatureStore } from './ranking/drizzle-ranking-stores.js';
 import { createDefaultModerationStateProvider } from './ranking/safety-filter.js';
 import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
@@ -333,6 +334,16 @@ const identityServices = buildIdentityServicesFromEnv(env, {
     warn: (msg) => logger.warn(msg),
   }),
 });
+// Sign-up proof-of-work gate (bot-prevention layer 1): ON by default in every
+// environment.  SIGNUP_POW_MAX_NUMBER=0 is the explicit operator opt-out —
+// warn loudly, exactly like the mail-less opt-out, so a disabled gate can
+// never masquerade as a configured one.
+if (identityServices.config.signupPow.maxNumber === 0) {
+  logger.warn(
+    'Sign-up proof-of-work CAPTCHA is DISABLED (SIGNUP_POW_MAX_NUMBER=0): ' +
+      'account creation is not CPU-gated against bulk registration.',
+  );
+}
 // Event-pipeline services (WS-E): the in-memory base, with the Redis replay/
 // rate-limit/real-time adapters and the Drizzle durable stores swapped in
 // below (same adapter pattern as identity).
@@ -424,6 +435,10 @@ if (db) {
   eventServices.ledgerStore = new DrizzleSignalLedgerStore(db);
   eventServices.safetyStore = new DrizzleItemSafetyStateStore(db);
   eventServices.configStore = new DrizzlePwattConfigStore(db);
+  // Bot-prevention layer 2: durable per-actor behavior windows + authenticity
+  // assessments (the BAI inputs; rows cascade with the users row and both
+  // planes are pruned past the retention horizon by the hourly behavior job).
+  eventServices.behaviorStore = new DrizzleActorBehaviorStore(db);
   eventServices.deadLetters = new DrizzleDeadLetterStore(db);
   eventServices.checkpoints = new DrizzleConsumerCheckpointStore(db);
 }
@@ -440,8 +455,8 @@ registerDefaultConsumers(eventServices, {
   readTriggerThreshold: () => loadTriggerThreshold(eventServices),
   onVolumeTrigger: (itemId, windowStartMs) => {
     logger.info({ itemId, windowStartMs }, 'volume threshold reached: early PWAtt run');
-    void runPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch((err) =>
-      logger.error({ err, itemId }, 'triggered PWAtt window run failed'),
+    void runTriggeredPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch(
+      (err) => logger.error({ err, itemId }, 'triggered PWAtt window run failed'),
     );
   },
 });
@@ -1772,7 +1787,7 @@ startIngestionScheduler(
   { lease: makeJobLease() },
 );
 
-// Hourly WS-H batch tier: all eleven invariants, guarded + shadow-persisted,
+// Hourly WS-H batch tier: all twelve invariants, guarded + shadow-persisted,
 // with the nightly regression drift report at 00 UTC (WS-H.1.2d-2).
 startInvariantsScheduler(
   invariantServices,

@@ -16,17 +16,23 @@
 // hardening PR adds the scenario its defense makes pass.
 
 import {
+  type ActorBehaviorWindow,
   type AttributePermutation,
+  assessAuthenticity,
+  behaviorStreamText,
   buildMetricMeasureSpace,
   buildSparseTable,
   buildTimingMatrix,
   computeMeri,
   contextStateForScore,
   counterfactualInvarianceDefect,
+  DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG,
   detectNarrowLoop,
   detectSynchronizedCascade,
   detectThresholdHugging,
+  duplicationFactor,
   entropicGw,
+  estimateJaccard,
   evaluateReleaseGate,
   fiberTest,
   fiberTestMulti,
@@ -35,6 +41,7 @@ import {
   holonomy,
   type Matrix,
   type MeriCandidateInput,
+  minhashSignature,
   phiScore,
   type SheafStructure,
   scoiEnergy,
@@ -354,5 +361,84 @@ describe('ensemble: no single evasion zeroes the ensemble', () => {
       ['g3', 't1', 'b2', 'reply', 'y'],
     ]);
     expect(fiberTest(burst, 'target_concentration', SAMPLER).pHat).toBeLessThan(0.1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Attention-farming bots (BAI) — the rich-context dilemma: the §22.1 shape
+//    binds VARIETY, BREADTH, and RHYTHM into every aggregate, so a farming
+//    script must either emit a degenerate stream (each coherence tell fires)
+//    or faithfully reproduce human-shaped context — and reproducing it
+//    IDENTICALLY across a fleet trips the duplication signature instead.
+//    Evidence gates keep quiet real users untouchable. (Catalog §10.)
+// ---------------------------------------------------------------------------
+describe('ensemble: attention-farming bots cannot beat variety, rhythm, AND duplication at once', () => {
+  const botStream = (count: number): ActorBehaviorWindow[] =>
+    Array.from({ length: count }, (_, h) => ({
+      windowStart: new Date(Date.UTC(2026, 5, 1) + h * 3_600_000).toISOString(),
+      eventCount: 12,
+      itemsTouched: 12,
+      dwellHistogram: { extended: 12 },
+      replyDepthHistogram: {},
+      returnHistogram: {},
+      sourceOpens: 0,
+      contextOpens: 0,
+      saves: 0,
+      contributions: 0,
+    }));
+
+  it('a degenerate high-volume stream fires every coherence tell and floors the multiplier', () => {
+    const assessment = assessAuthenticity(botStream(72));
+    expect(assessment.flags).toEqual(
+      expect.arrayContaining(['dwell_variety', 'interaction_breadth', 'temporal_rhythm']),
+    );
+    expect(assessment.coherence).toBe(DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG.componentFloor);
+    expect(assessment.coherence).toBeGreaterThan(0); // damped, never silenced
+  });
+
+  it('humanizing the stream to evade coherence makes the FLEET near-duplicate instead', () => {
+    // The attacker scripts a human-shaped stream (varied dwell, mixed
+    // dimensions, bursty hours) — coherence clears it ...
+    const humanized = (offset: number): ActorBehaviorWindow[] =>
+      Array.from({ length: 60 }, (_, i) => ({
+        windowStart: new Date(
+          Date.UTC(2026, 5, 1) + (offset + i * 5 + (i % 3)) * 3_600_000,
+        ).toISOString(),
+        eventCount: 2 + (i % 5) * 3,
+        itemsTouched: 3,
+        dwellHistogram: [{ glance: 3 }, { short: 2, medium: 2 }, { medium: 1, long: 1 }][
+          i % 3
+        ] as Partial<Record<'glance' | 'short' | 'medium' | 'long' | 'extended', number>>,
+        replyDepthHistogram: i % 4 === 0 ? { shallow: 1 } : {},
+        returnHistogram: i % 5 === 0 ? { few: 1 } : {},
+        sourceOpens: i % 4 === 0 ? 1 : 0,
+        contextOpens: i % 6 === 0 ? 1 : 0,
+        saves: 0,
+        contributions: i % 7 === 0 ? 1 : 0,
+      }));
+    expect(assessAuthenticity(humanized(0)).coherence).toBe(1);
+    // ... but the SAME script on two accounts emits the same stream shape: the
+    // frozen MinHash family sees a near-duplicate pair, and the cluster
+    // collapse caps the fleet at ~one account of influence.
+    const a = minhashSignature(behaviorStreamText(humanized(0)));
+    const b = minhashSignature(behaviorStreamText(humanized(0)));
+    expect(estimateJaccard(a, b)).toBeGreaterThanOrEqual(
+      DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG.duplicationJaccard,
+    );
+    expect(4 * duplicationFactor(4)).toBe(1); // 4 clones ≈ 1 account
+    // Escaping duplication requires per-account BEHAVIORAL diversity — at
+    // which point the fleet is paying the full cost of emitting genuinely
+    // human-shaped, non-shared behavior, which is the deterrent.
+    const diverse = minhashSignature(behaviorStreamText(botStream(60)));
+    expect(estimateJaccard(a, diverse)).toBeLessThan(
+      DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG.duplicationJaccard,
+    );
+  });
+
+  it('evidence gates keep a quiet real reader untouchable', () => {
+    const lurker = botStream(3); // even a degenerate SHAPE at tiny volume
+    const assessment = assessAuthenticity(lurker);
+    expect(assessment.coherence).toBe(1);
+    expect(assessment.flags).toEqual([]);
   });
 });

@@ -376,10 +376,23 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 - **A KYC requirement is enforced, or the cell is closed.**  `kyc_policy` and
   the age gate's `assurance` were dead letters — nothing read them, so counsel
   could write "production_payments requires kyc_partner" and real funds would
-  flow to an unverified user. The engine now reads both, and since **no KYC
-  partner is integrated** (the tracked residual) a cell that demands one stays
-  closed with `verification_required`. `services.kycLevel` is the closure that
-  partner will fill in — one boot-time swap, no engine change.
+  flow to an unverified user. The engine reads both, and `services.kycLevel`
+  now resolves from the **KYC verification standing** (`kyc_verification`,
+  `services.kyc`, migration 0093): a reviewer-verified record answers
+  `kyc_partner`; anything else — pending, revoked, absent, or a store failure
+  — fails closed to `'none'` and the demanding cell stays
+  `verification_required`. The standing is written by the compliance console
+  (`GET/POST /v1/compliance/admin/kyc/:userId`, `requireCompliance`,
+  CAS-guarded like declaration review, audited as `kyc_verification_change`
+  with the subject on `targetRef`; the member reads their OWN standing at
+  `GET /v1/compliance/kyc`) — an external partner adapter WRITES the same
+  store (documents never touch Licio infrastructure), so that integration
+  stays one boot-time swap with no engine change. Deletion: the standing dies
+  with the account in `buildCompliancePurge`. Beyond the §22.2 cells, the
+  standing is the basis of **bot-prevention layer 3**: the governance
+  KYC-eligibility floor (`apps/api/src/governance/eligibility.ts` — KYC +
+  no open high/critical case + no high-risk wallet, fail-closed; the
+  `check:governance-kyc` CI gate proves route coverage).
 - **The port's args are required, not optional.**  `jurisdiction` takes
   `featureCell` and `asset`, and `fraudRisk` takes `reviewRef`, as **required
   properties with nullable values**. As optionals they were forgettable, and a
@@ -1186,11 +1199,13 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
    That is the intended launch posture; populating the matrix is a legal
    deliverable, not an engineering one.  **Closure:** the M4/M5 legal review
    alongside the WS-L external audit.
-2. **KYC-partner verification seam.**  Declaration verification is a manual
-   compliance-reviewer decision today; `kycPolicySchema` reserves the
-   partner-assisted path (documents never touch Licio infrastructure).
-   **Closure:** WS-N.1.1f partner integration when a real-funds region
-   requires it.
+2. **KYC-partner ADAPTER.**  The KYC verification standing, the reviewer
+   console that records partner outcomes, and every consumer (the §22.2
+   `kyc_policy` cells, the governance eligibility floor) are shipped and
+   live; what remains is the external partner API adapter that writes the
+   same `kyc_verification` store automatically (documents never touch Licio
+   infrastructure — the partner holds them).  **Closure:** WS-N.1.1f partner
+   integration when a real-funds region requires it.
 3. **Screening vendor.**  `HttpSanctionsProvider` implements the documented
    contract; pointing it at a production vendor (and mapping that vendor's
    response taxonomy) is deployment configuration.  **Closure:** before the
@@ -1198,3 +1213,14 @@ apps/web/src/i18n/catalogs/de.ts               -- the complete German
 4. **SAR filing is record-keeping, not transmission.**  The SAR store holds
    counsel-approved drafts and filing metadata; actual submission to a FIU
    goes through counsel's regulated channel, not an API.  Deliberate.
+5. **Region-declaration create is not yet conflict-only.**  The KYC store's
+   CREATE path is conflict-only (`onConflictDoNothing` / in-memory existence
+   guard), so two reviewers reading an absent standing cannot silently overwrite
+   each other — the loser gets `null` → `kyc_changed` (409).  The structurally
+   identical `RegionDeclarationStore` still `onConflictDoUpdate`s on create.
+   Production is unaffected — the declaration routes only take the create path
+   when `existing === null` and retry on a CAS miss — but a concurrent first
+   declaration for the SAME user could clobber (low risk: member-self-initiated,
+   one row per member, client-serialised).  **Closure:** align the declaration
+   store on the KYC conflict-only create (and migrate the one integration-test
+   create-to-overwrite fixture to the CAS-update path) in a WS-N follow-up.

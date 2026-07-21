@@ -101,6 +101,10 @@ export const AUDIT_EVENT_TYPES = [
   'compliance_policy_change',
   'disclosure_change',
   'compliance_config_change',
+  // WS-N.1.1f KYC verification standing (verify/reject/revoke — bot-prevention
+  // layer 3: the governance-participation eligibility basis). Appended last to
+  // match the DB physical order (`ALTER TYPE … ADD VALUE` appends; migration 0093).
+  'kyc_verification_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 /** The LIVE vocabulary — what a writer may append today. */

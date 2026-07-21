@@ -12,6 +12,7 @@
 //   • classification and retention tier are required on every row (storage-
 //     layer defense in depth, WS-E.3.1);
 //   • retention operations are batched and idempotent (WS-E.1.4).
+import type { ActorBehaviorWindow } from '@licio/invariants';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
 
 /** A stored event row (ISO timestamps; mirrors packages/db `events`). */
@@ -1011,5 +1012,151 @@ export class InMemoryConsumerCheckpointStore implements ConsumerCheckpointStore 
 
   async clear(): Promise<void> {
     this.#rows.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Actor behavior windows + authenticity assessments (bot-prevention layer 2).
+// ---------------------------------------------------------------------------
+
+/** One identifiable actor's behavior snapshot for one 1h window (the
+ *  @licio/invariants ActorBehaviorWindow shape keyed by the actor).  The
+ *  coarse privacy-bucket actor is NEVER recorded here. */
+export interface ActorBehaviorWindowRecord extends ActorBehaviorWindow {
+  actorRef: string;
+}
+
+/** The actor's current authenticity assessment (internal integrity state —
+ *  never a public surface, never part of a DSAR export: the WS-J/WS-N
+ *  anti-tipping-off posture for anti-abuse internals). */
+export interface ActorAuthenticityRecord {
+  actorRef: string;
+  /** Effective multiplier (coherence × duplication, floored; (0, 1]). */
+  score: number;
+  /** Coherence composite before duplication ((0, 1]). */
+  coherence: number;
+  components: Record<string, number>;
+  flags: string[];
+  evidence: number;
+  clusterId: string | null;
+  clusterSize: number;
+  computedAt: string;
+}
+
+export interface ActorBehaviorStore {
+  /** Idempotent per-(actor, window) upsert — window re-scores converge. */
+  upsertWindows(records: readonly ActorBehaviorWindowRecord[]): Promise<void>;
+  /** Every stored window at or after `sinceIso`, for the batch assessment. */
+  listWindowsSince(sinceIso: string): Promise<ActorBehaviorWindowRecord[]>;
+  /** Prune windows older than the assessment lookback; returns rows removed. */
+  deleteWindowsOlderThan(cutoffIso: string): Promise<number>;
+  upsertAuthenticity(records: readonly ActorAuthenticityRecord[]): Promise<void>;
+  getAuthenticity(actorRef: string): Promise<ActorAuthenticityRecord | null>;
+  /** Batch read for the window scorer (one round trip per window rather than
+   *  a point read per distinct actor). Absent actors are simply omitted. */
+  getAuthenticityMany(actorRefs: readonly string[]): Promise<Map<string, ActorAuthenticityRecord>>;
+  /** Every current assessment (the BAI platform-invariant input). */
+  listAuthenticity(): Promise<ActorAuthenticityRecord[]>;
+  /** Prune assessments not refreshed since `cutoffIso` (their actor went
+   *  dormant): keeps the population stats + table bounded to recently-active
+   *  actors, matching the window retention. Returns rows removed. */
+  deleteAuthenticityOlderThan(cutoffIso: string): Promise<number>;
+  /** Deletion-path purge: behavior state never outlives the account. */
+  purgeActor(actorRef: string): Promise<number>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryActorBehaviorStore implements ActorBehaviorStore {
+  readonly #windows = new Map<string, ActorBehaviorWindowRecord>();
+  readonly #scores = new Map<string, ActorAuthenticityRecord>();
+
+  #key(actorRef: string, windowStart: string): string {
+    return `${actorRef}|${windowStart}`;
+  }
+
+  async upsertWindows(records: readonly ActorBehaviorWindowRecord[]): Promise<void> {
+    for (const record of records) {
+      this.#windows.set(this.#key(record.actorRef, record.windowStart), structuredClone(record));
+    }
+  }
+
+  async listWindowsSince(sinceIso: string): Promise<ActorBehaviorWindowRecord[]> {
+    const since = Date.parse(sinceIso);
+    return [...this.#windows.values()]
+      .filter((w) => Date.parse(w.windowStart) >= since)
+      .sort(
+        (a, b) =>
+          a.actorRef.localeCompare(b.actorRef) || a.windowStart.localeCompare(b.windowStart),
+      )
+      .map((w) => structuredClone(w));
+  }
+
+  async deleteWindowsOlderThan(cutoffIso: string): Promise<number> {
+    const cutoff = Date.parse(cutoffIso);
+    let removed = 0;
+    for (const [key, row] of this.#windows) {
+      if (Date.parse(row.windowStart) < cutoff) {
+        this.#windows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  async upsertAuthenticity(records: readonly ActorAuthenticityRecord[]): Promise<void> {
+    for (const record of records) {
+      this.#scores.set(record.actorRef, structuredClone(record));
+    }
+  }
+
+  async getAuthenticity(actorRef: string): Promise<ActorAuthenticityRecord | null> {
+    const record = this.#scores.get(actorRef);
+    return record ? structuredClone(record) : null;
+  }
+
+  async getAuthenticityMany(
+    actorRefs: readonly string[],
+  ): Promise<Map<string, ActorAuthenticityRecord>> {
+    const out = new Map<string, ActorAuthenticityRecord>();
+    for (const actorRef of actorRefs) {
+      const record = this.#scores.get(actorRef);
+      if (record) out.set(actorRef, structuredClone(record));
+    }
+    return out;
+  }
+
+  async listAuthenticity(): Promise<ActorAuthenticityRecord[]> {
+    return [...this.#scores.values()]
+      .sort((a, b) => a.actorRef.localeCompare(b.actorRef))
+      .map((r) => structuredClone(r));
+  }
+
+  async deleteAuthenticityOlderThan(cutoffIso: string): Promise<number> {
+    const cutoff = Date.parse(cutoffIso);
+    let removed = 0;
+    for (const [key, row] of this.#scores) {
+      if (Date.parse(row.computedAt) < cutoff) {
+        this.#scores.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  async purgeActor(actorRef: string): Promise<number> {
+    let removed = 0;
+    for (const [key, row] of this.#windows) {
+      if (row.actorRef === actorRef) {
+        this.#windows.delete(key);
+        removed += 1;
+      }
+    }
+    if (this.#scores.delete(actorRef)) removed += 1;
+    return removed;
+  }
+
+  async clear(): Promise<void> {
+    this.#windows.clear();
+    this.#scores.clear();
   }
 }

@@ -154,6 +154,18 @@ email OTP, SIWE), drafts are encrypted at rest under a non-extractable
 AES-256-GCM key, DSAR exports are sealed before they touch object storage, and
 deletion runs a grace period followed by a hard purge.
 
+Bot prevention is layered the same privacy-preserving way (SPEC §25.5): a
+**self-hosted proof-of-work challenge** gates account creation (no third-party
+CAPTCHA, no interaction, no fingerprinting — solved silently in a Web Worker,
+with difficulty that rises under sign-up pressure); **behavioral-authenticity
+scoring** over the already-bucketed attention aggregates (dwell variety,
+interaction breadth, temporal rhythm, cross-account duplication clustering)
+damps automated accounts' ranking influence — evidence-gated, floored, never
+profiling anonymous readers — and reports platform health through the twelfth
+invariant; and **room governance is reserved for KYC-verified accounts** (the
+`check:governance-kyc` gate), so a bot fleet that slips the first two layers
+still cannot vote.
+
 ### It works offline, off-grid, and off-server
 
 Two decentralization planes extend the product without weakening server
@@ -379,6 +391,7 @@ The gates, grouped by what they defend:
 | Doctrine | Gates |
 | --- | --- |
 | No applause, no raw egress, no pay-to-rank | `check:no-applause` · `check:no-raw-egress` · `check:neutrality` |
+| Governance power needs a verified human | `check:governance-kyc` (every governance-participation route enforces the KYC eligibility floor) |
 | Private rooms leave nothing on the server | `check:no-p2p-server-content` · `check:no-private-cid-egress` · `check:private-rendezvous-schema` · `check:p2p-endpoint-rejections` · `check:p2p-ranking-exclusion` · `check:p2p-search-exclusion` · `check:private-bundle-transparency` |
 | Verified code only, everywhere it runs | `check:update-channel` · `check:sw` (post-build) · `lint:security` · `lint:lockfile` |
 | Dev never diverges from production | `check:prod-parity` (every in-memory adapter needs a boot-wired production counterpart; production adapters hold no in-memory state) |

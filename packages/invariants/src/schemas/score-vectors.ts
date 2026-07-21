@@ -172,6 +172,29 @@ export const pathSignatureScoreVectorSchema = z
   .strict();
 export type PathSignatureScoreVector = z.infer<typeof pathSignatureScoreVectorSchema>;
 
+/** Behavioral-authenticity platform health (bot-prevention layer 2): the
+ *  population-level view over the per-account assessments — how much of the
+ *  active identifiable population, and of the scoring weight it carries, is
+ *  low-coherence or duplicated-behavior.  Per-account scores never appear in
+ *  an invariant output (they are internal integrity state, not a surface). */
+export const behavioralAuthenticityScoreVectorSchema = z
+  .object({
+    /** Share of scored actors whose effective multiplier fell below 1. */
+    flagged_share: score01,
+    /** Share of assessed scoring weight removed by authenticity damping. */
+    damped_weight_share: score01,
+    /** Near-duplicate behavior clusters at or above the size threshold. */
+    cluster_count: nonNegativeInt,
+    largest_cluster_size: nonNegativeInt,
+    /** Actors with a current assessment (the denominator). */
+    scored_actors: nonNegativeInt,
+    median_score: score01,
+  })
+  .strict();
+export type BehavioralAuthenticityScoreVector = z.infer<
+  typeof behavioralAuthenticityScoreVectorSchema
+>;
+
 /** PWAtt (WS-E scorer): flat named numeric components — the OPEN fallback for
  *  any future PWAtt family (e.g. `PWAtt_v2`) not yet pinned below. */
 export const pwattScoreVectorSchema = z.record(z.string().min(1).max(64), z.number());
@@ -226,6 +249,7 @@ export const SCORE_VECTOR_SCHEMAS: Readonly<Record<InvariantType, z.ZodType>> = 
   [InvariantType.ReebLandscape]: reebScoreVectorSchema,
   [InvariantType.CounterfactualDefect]: cidScoreVectorSchema,
   [InvariantType.PathSignatureWellbeing]: pathSignatureScoreVectorSchema,
+  [InvariantType.BehavioralAuthenticity]: behavioralAuthenticityScoreVectorSchema,
 };
 
 /**
@@ -297,6 +321,10 @@ export const typedScoreVectorSchema = z.discriminatedUnion('invariant_type', [
   z.object({
     invariant_type: z.literal(InvariantType.PathSignatureWellbeing),
     score_vector: pathSignatureScoreVectorSchema,
+  }),
+  z.object({
+    invariant_type: z.literal(InvariantType.BehavioralAuthenticity),
+    score_vector: behavioralAuthenticityScoreVectorSchema,
   }),
 ]);
 export type TypedScoreVector = z.infer<typeof typedScoreVectorSchema>;

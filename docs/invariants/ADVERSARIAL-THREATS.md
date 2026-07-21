@@ -192,6 +192,37 @@ Every entry uses this fixed shape:
 
 ---
 
+## 10. Attention-farming bots (behavioral-authenticity evasion)
+
+- **Description.** A fleet of automated accounts farms ranking influence by
+  emitting §22.1 attention aggregates at scale — maximal dwell buckets on the
+  targeted items, around the clock, from many accounts (bot-prevention
+  layer 2; the sign-up proof-of-work bounds the fleet's creation rate but not
+  an aged fleet's behavior).
+- **Primary target.** PWAtt participation-weighted attention (the served v1
+  components) via fabricated-but-schema-valid aggregates.
+- **Evasion → caught by.** The rich §22.1 context is a **joint constraint**:
+  a degenerate stream (one dwell bucket, one interaction dimension, 24/7
+  metronomic volume) fires the BAI coherence tells (variety / breadth /
+  rhythm) and floors the actor's trust multiplier; humanizing the stream to
+  clear coherence means SCRIPTING it, and the same script across the fleet
+  makes the streams near-duplicates — the frozen MinHash family clusters them
+  and the collapse caps the fleet at ~one account of influence (k members ×
+  1/k). Escaping *both* requires per-account, human-shaped, non-shared
+  behavior sustained over weeks — the full cost of real users, which is the
+  deterrent. Lockstep timing residuals stay covered by MFCI synchrony (§1) and
+  Tropical (§4); the account-age trust weighting (§1) prices the fresh-fleet
+  variant.
+- **Seeding.** Degenerate 72-hour bot streams, an identically-scripted
+  "humanized" fleet, and a low-volume lurker, driven through the pure
+  `assessAuthenticity` / `behaviorStreamText` + MinHash mathematics.
+- **Expected detection.** All three coherence tells fire on the degenerate
+  stream (floored, never zero); the scripted fleet's streams exceed the
+  duplication threshold while a genuinely different stream does not; the
+  evidence gates leave the quiet lurker exactly neutral.
+
+---
+
 ## How the suite is run
 
 - **Named gate.** `pnpm check:adversarial` runs the ensemble spec; it is a CI

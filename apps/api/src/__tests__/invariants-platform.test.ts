@@ -84,7 +84,8 @@ describe('WS-H.1.2c fallback execution wrapper', () => {
       { storyId: '22222222-2222-4222-8222-222222222222', createdAt: '2026-06-11T10:00:00.000Z' },
     ];
     const failures: string[] = [];
-    for (const failing of [1, 2, 11]) {
+    // one, two, and ALL TWELVE invariants failing (the current family count).
+    for (const failing of [1, 2, 12]) {
       for (let i = 0; i < failing; i += 1) {
         const result = await runGuarded(
           runnerDeps(fixture),
@@ -107,7 +108,7 @@ describe('WS-H.1.2c fallback execution wrapper', () => {
         '11111111-1111-4111-8111-111111111111',
       ]);
     }
-    expect(failures.length).toBe(14);
+    expect(failures.length).toBe(15);
   });
 
   it('mapBounded respects the concurrency cap (batch back-pressure)', async () => {

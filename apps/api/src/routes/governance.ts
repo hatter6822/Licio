@@ -15,23 +15,13 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
+import { checkGovernanceEligibility } from '../governance/eligibility.js';
 import { getGovernanceService } from '../governance/services.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
-import { denyCapability, type StewardActor } from '../moderation/authz.js';
+import { denyCapability, stewardActorOf } from '../moderation/authz.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
-
-/** Build the WS-J steward actor from the auth context (platform-floor gate). */
-function stewardActorOf(auth: NonNullable<AuthEnv['Variables']['auth']>): StewardActor {
-  return {
-    userId: auth.userId,
-    platformRoles: auth.roles,
-    stewardRoles: auth.stewardRoles,
-    mfaActive: auth.mfaActive,
-    mfaVerified: auth.mfaVerified,
-  };
-}
 
 /** Ratification voting eligibility: an ACTIVE room member or a room steward. */
 async function isRoomMember(roomId: string, userId: string): Promise<boolean> {
@@ -140,6 +130,11 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3 (platform floor): only KYC-verified accounts
+          // participate in room governance — checked BEFORE membership so an
+          // unverified prober learns nothing about room composition.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const roomId = c.req.param('roomId');
           const { candidate_user_id } = c.req.valid('json');
           // Membership-gate the voter (the soft cross-context read); the candidate
@@ -155,7 +150,11 @@ export function createGovernanceRoutes() {
               403,
             );
           }
-          const candidateEligible = await isRoomMember(roomId, candidate_user_id);
+          // The seat itself is governance power: a candidate must hold the same
+          // KYC-verified standing as the voters electing them.
+          const candidateEligible =
+            (await isRoomMember(roomId, candidate_user_id)) &&
+            (await checkGovernanceEligibility(candidate_user_id)) === null;
           const result = await getGovernanceService().castVote(
             roomId,
             c.req.param('electionId'),
@@ -181,6 +180,9 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: proposing the room's model is governance power.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const { bundle, prompt_text } = c.req.valid('json');
           const result = await getGovernanceService().proposeModel(
             c.req.param('roomId'),
@@ -254,6 +256,9 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: opening a ratification is governance power.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const { law_pack_id } = c.req.valid('json');
           const roomId = c.req.param('roomId');
           // Pass the electorate reader as a callback so the service invokes it ONLY
@@ -286,6 +291,10 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: a ratification ballot is governance power —
+          // checked BEFORE membership so an unverified prober learns nothing.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const eligible = await isRoomMember(c.req.param('roomId'), auth.userId);
           const result = await getGovernanceService().castRatificationBallot(
             c.req.param('roomId'),
@@ -339,6 +348,9 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: proposing the agent's bounds is governance power.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const result = await getGovernanceService().proposeLawPack(
             c.req.param('roomId'),
             auth.userId,
@@ -366,6 +378,9 @@ export function createGovernanceRoutes() {
         async (c) => {
           const auth = c.get('auth');
           if (!auth) return c.json(deny('unauthorized', 'Authentication required.'), 401);
+          // Bot-prevention layer 3: lawmaking facilitation is governance power.
+          const denial = await checkGovernanceEligibility(auth.userId);
+          if (denial) return c.json({ error: denial }, 403);
           const roomId = c.req.param('roomId');
           const svc = getGovernanceService();
           const seat = await svc.getSeat(roomId);

@@ -53,13 +53,13 @@ describe('steward gating', () => {
 });
 
 describe('health + outputs + comparison', () => {
-  it('reports all eleven invariants with cards, tiers, and shadow status', async () => {
+  it('reports all twelve invariants with cards, tiers, and shadow status', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
     const response = await adminRequest(fixture, steward.cookie, '/health');
     expect(response.status).toBe(200);
     const body = (await response.json()) as { invariants: Array<Record<string, unknown>> };
-    expect(body.invariants).toHaveLength(11);
+    expect(body.invariants).toHaveLength(12);
     for (const entry of body.invariants) {
       expect(entry['shadow_status']).toBe('shadow');
       expect(entry['card']).toBeTruthy();

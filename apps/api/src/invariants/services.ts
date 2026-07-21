@@ -47,6 +47,7 @@ import {
 import { createPromotionService, type PromotionService } from './promotion.js';
 import { registerScoiBridgeConsumer } from './scoi-actions.js';
 import {
+  BehavioralAuthenticityService,
   BraidService,
   CidService,
   GLOBAL_FEED_TARGET_ID,
@@ -100,7 +101,8 @@ export interface InvariantPlatformServices {
   reeb: ReebService;
   cid: CidService;
   pathsig: PathSignatureService;
-  /** All eleven services, in registry order. */
+  bai: BehavioralAuthenticityService;
+  /** All twelve services, in registry order. */
   all(): ReadonlyArray<
     | MeriService
     | MfciService
@@ -113,6 +115,7 @@ export interface InvariantPlatformServices {
     | ReebService
     | CidService
     | PathSignatureService
+    | BehavioralAuthenticityService
   >;
   config: () => InvariantsRuntimeConfig;
   reloadConfig: () => Promise<InvariantsRuntimeConfig>;
@@ -187,6 +190,7 @@ export function createInMemoryInvariantServices(
     reeb: undefined as unknown as ReebService,
     cid: undefined as unknown as CidService,
     pathsig: undefined as unknown as PathSignatureService,
+    bai: undefined as unknown as BehavioralAuthenticityService,
     all() {
       return [
         services.meri,
@@ -200,6 +204,7 @@ export function createInMemoryInvariantServices(
         services.reeb,
         services.cid,
         services.pathsig,
+        services.bai,
       ];
     },
     config: () => runtimeConfig,
@@ -242,6 +247,7 @@ export function createInMemoryInvariantServices(
   services.reeb = new ReebService(deps);
   services.cid = new CidService(deps);
   services.pathsig = new PathSignatureService(deps);
+  services.bai = new BehavioralAuthenticityService(deps);
   return services;
 }
 

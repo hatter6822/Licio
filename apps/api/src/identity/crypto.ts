@@ -22,6 +22,7 @@ export const KEY_DOMAINS = {
   secretBox: 'licio:secret-box:v1',
   downloadToken: 'licio:download-token:v1',
   mediaToken: 'licio:media-token:v1',
+  powCaptcha: 'licio:pow-captcha:v1',
 } as const;
 export type KeyDomain = (typeof KEY_DOMAINS)[keyof typeof KEY_DOMAINS];
 

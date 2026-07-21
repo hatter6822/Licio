@@ -18,6 +18,7 @@ import {
   type CredentialListResponse,
   credentialListResponseSchema,
   genericAckSchema,
+  type PowSolution,
   registeredAgeBandSchema,
   type SecurityActivityEntry,
   type SessionSummary,
@@ -32,7 +33,8 @@ import {
   webauthnRegistrationResponseSchema,
 } from '@licio/shared';
 import { z } from 'zod';
-import { client, fetchAuthStatus, parseResponse } from './api.js';
+import { ApiClientError, client, fetchAuthStatus, parseResponse } from './api.js';
+import { takeSignupCaptcha } from './pow-captcha.js';
 import { createPasskey, getPasskeyAssertion } from './webauthn.js';
 
 // The options bodies are library-shaped (the server's @simplewebauthn output);
@@ -88,6 +90,29 @@ export interface SignupProfile {
   date_of_birth: string;
 }
 
+/**
+ * Run a sign-up attempt with a solved proof-of-work token attached (WS-D
+ * bot-prevention layer 1).  Tokens are single-use server-side; if the server
+ * rejects this one (raced expiry, replayed prime, difficulty raised under
+ * pressure), ONE fresh solve retries the attempt before surfacing the error.
+ * `undefined` when the gate is DISABLED (the solver returns null) — the field
+ * is then omitted from the request (JSON drops `undefined`) and the server
+ * verifies its absence as a no-op.
+ */
+async function withSignupCaptcha<T>(
+  attempt: (captcha: PowSolution | undefined) => Promise<T>,
+): Promise<T> {
+  try {
+    return await attempt((await takeSignupCaptcha()) ?? undefined);
+  } catch (error) {
+    const captchaRejected =
+      error instanceof ApiClientError &&
+      (error.code === 'captcha_required' || error.code === 'captcha_invalid');
+    if (!captchaRejected) throw error;
+    return attempt((await takeSignupCaptcha()) ?? undefined);
+  }
+}
+
 // --- Email one-time-code login (WS-D.1.4a) ----------------------------------
 
 /** Request a sign-in code.  Resolves identically whether the email exists. */
@@ -123,8 +148,14 @@ export async function loginWithPasskey(): Promise<UserContext> {
 
 /** Create a passkey-only account (no email PII at all). */
 export async function signupWithPasskey(profile: SignupProfile): Promise<UserContext> {
-  const optionsRes = await client.v1.auth.webauthn.signup.options.$post({ json: profile });
-  const options = await parseResponse(optionsRes, creationOptionsSchema);
+  // The proof-of-work gates the OPTIONS entry point; the verify step is bound
+  // to it through the single-use pending-signup record.
+  const options = await withSignupCaptcha(async (captcha) => {
+    const optionsRes = await client.v1.auth.webauthn.signup.options.$post({
+      json: { ...profile, captcha },
+    });
+    return parseResponse(optionsRes, creationOptionsSchema);
+  });
   const attestation = await createPasskey(
     options as unknown as PublicKeyCredentialCreationOptionsJSON,
   );
@@ -151,8 +182,10 @@ export interface EmailRegistrationOutcome {
 export async function registerWithEmail(
   input: SignupProfile & { email: string },
 ): Promise<EmailRegistrationOutcome> {
-  const res = await client.v1.auth.register.$post({ json: input });
-  await parseResponse(res, registeredAgeBandSchema);
+  await withSignupCaptcha(async (captcha) => {
+    const res = await client.v1.auth.register.$post({ json: { ...input, captcha } });
+    return parseResponse(res, registeredAgeBandSchema);
+  });
   const status = await fetchAuthStatus();
   return { user: status.authenticated ? status.user : null };
 }

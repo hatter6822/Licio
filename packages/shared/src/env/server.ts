@@ -140,6 +140,12 @@ export const serverEnvSchema = z.object({
   SES_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   SES_FROM_ADDRESS: z.string().min(3).optional(),
   SES_ENDPOINT: z.string().url({ message: 'SES_ENDPOINT must be a valid URL' }).optional(),
+  // WS-D sign-up proof-of-work CAPTCHA work factor (bot-prevention layer 1):
+  // the inclusive upper bound of the challenge search space (expected client
+  // solve = half of it).  Unset ⇒ the built-in default applies (enabled).
+  // 0 DISABLES the gate — an explicit, warned operator opt-out (the
+  // ALLOW_INSECURE_NULL_MAILER posture), never a silent fallback.
+  SIGNUP_POW_MAX_NUMBER: z.coerce.number().int().min(0).max(10_000_000).optional(),
   // Attention-ingestion per-user rate limits (WS-E.1.3c): env-driven so the
   // budgets are changeable without a redeploy. The client uploads on a 30 s
   // batched cadence (WS-C.4.4) = 2 req/min, 120 req/hr in steady state — so the

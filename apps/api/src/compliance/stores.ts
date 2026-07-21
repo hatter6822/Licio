@@ -359,6 +359,41 @@ export interface RegionDeclarationStore {
   delete(userId: string): Promise<boolean>;
 }
 
+// ---------------------------------------------------------------------------
+// KYC verification (WS-N.1.1f partner seam / bot-prevention layer 3).
+// ---------------------------------------------------------------------------
+
+export type KycVerificationStatus = 'pending' | 'verified' | 'revoked';
+
+/** A member's KYC verification standing.  ONLY an opaque evidence/partner
+ *  reference is stored — identity documents and PII never enter the platform
+ *  (the partner holds them; §19.1 minimization).  `verified` ⇔ the engine's
+ *  `kycLevel` answers `kyc_partner`; everything else is `none`. */
+export interface KycVerificationRecord {
+  userId: string;
+  status: KycVerificationStatus;
+  /** Opaque partner/case reference for the audit trail (never a document). */
+  evidenceRef: string | null;
+  verifiedAt: string | null;
+  verifiedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The decision's premises — the same CAS discipline as declarations: a
+ *  reviewer's verdict must not overwrite a record that changed under review. */
+export type KycPremises = Pick<KycVerificationRecord, 'status' | 'updatedAt'>;
+
+export interface KycVerificationStore {
+  get(userId: string): Promise<KycVerificationRecord | null>;
+  upsert(
+    record: KycVerificationRecord,
+    expected?: KycPremises,
+  ): Promise<KycVerificationRecord | null>;
+  /** Right-to-erasure / account deletion: the standing dies with the account. */
+  delete(userId: string): Promise<boolean>;
+}
+
 export interface DisclosureStore {
   /** Publish-immutable: an existing (id, region, version, locale) row throws. */
   publish(record: DisclosureVersionRecord): Promise<DisclosureVersionRecord>;
@@ -987,6 +1022,44 @@ export class InMemoryRegionDeclarationStore implements RegionDeclarationStore {
       ) {
         return null;
       }
+    }
+    this.#rows.set(record.userId, { ...record });
+    return { ...record };
+  }
+
+  async delete(userId: string): Promise<boolean> {
+    return this.#rows.delete(userId);
+  }
+}
+
+export class InMemoryKycVerificationStore implements KycVerificationStore {
+  readonly #rows = new Map<string, KycVerificationRecord>();
+
+  async get(userId: string): Promise<KycVerificationRecord | null> {
+    const row = this.#rows.get(userId);
+    return row ? { ...row } : null;
+  }
+
+  async upsert(
+    record: KycVerificationRecord,
+    expected?: KycPremises,
+  ): Promise<KycVerificationRecord | null> {
+    // CAS in both directions (mirrors the Drizzle adapter). With `expected`
+    // this is an UPDATE: a verdict against changed premises is refused. Without
+    // it this is a conflict-only CREATE: if a standing already exists the write
+    // is refused (`null`) so two concurrent initial `verify` decisions cannot
+    // overwrite each other — the loser is told the record changed (409).
+    if (expected !== undefined) {
+      const current = this.#rows.get(record.userId);
+      if (
+        current === undefined ||
+        current.status !== expected.status ||
+        current.updatedAt !== expected.updatedAt
+      ) {
+        return null;
+      }
+    } else if (this.#rows.has(record.userId)) {
+      return null;
     }
     this.#rows.set(record.userId, { ...record });
     return { ...record };

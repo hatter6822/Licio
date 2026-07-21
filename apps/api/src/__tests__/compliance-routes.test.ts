@@ -2796,3 +2796,102 @@ describe('the disabled-event dedup window is bounded (WS-N.1.1c memory safety)',
     expect(d2.size()).toBe(2); // still x + y, not grown
   });
 });
+
+describe('KYC verification review surface (WS-N.1.1f / bot-prevention layer 3)', () => {
+  it('reviewer verify → member sees verified standing; revoke reverts', async () => {
+    const reviewer = await seedReviewer();
+    const member = await seedUser({ handle: `m${randomUUID().slice(0, 8)}` });
+
+    // The member has no standing yet.
+    const before = await app().request(get('/v1/compliance/kyc', member.cookie));
+    expect(before.status).toBe(200);
+    expect(await before.json()).toEqual({ status: 'none', verified_at: null });
+
+    // Reviewer records a partner-verified outcome.
+    const verify = await app().request(
+      post(
+        `/v1/compliance/admin/kyc/${member.userId}`,
+        { decision: 'verify', note: 'partner ok' },
+        reviewer.cookie,
+      ),
+    );
+    expect(verify.status).toBe(200);
+    expect(((await verify.json()) as { kyc: { status: string } }).kyc.status).toBe('verified');
+
+    // The member's own view shows verified (never evidence/reviewer identity).
+    const after = await app().request(get('/v1/compliance/kyc', member.cookie));
+    const body = (await after.json()) as { status: string; verified_at: string | null };
+    expect(body.status).toBe('verified');
+    expect(body.verified_at).not.toBeNull();
+    expect(Object.keys(body).sort()).toEqual(['status', 'verified_at']);
+
+    // Revoke reverts the standing.
+    const revoke = await app().request(
+      post(
+        `/v1/compliance/admin/kyc/${member.userId}`,
+        { decision: 'revoke', note: 'lapsed' },
+        reviewer.cookie,
+      ),
+    );
+    expect(revoke.status).toBe(200);
+    expect(((await revoke.json()) as { kyc: { status: string } }).kyc.status).toBe('revoked');
+    // The member's own view reflects the revoked standing (honest, and the
+    // eligibility gate treats anything but `verified` as not-KYC).
+    const postRevoke = await app().request(get('/v1/compliance/kyc', member.cookie));
+    const revokedView = (await postRevoke.json()) as { status: string; verified_at: string | null };
+    expect(revokedView.status).toBe('revoked');
+    expect(revokedView.verified_at).toBeNull();
+  });
+
+  it('reject/revoke on a missing record 404s; verify creates it', async () => {
+    const reviewer = await seedReviewer();
+    const missing = randomUUID();
+    const reject = await app().request(
+      post(
+        `/v1/compliance/admin/kyc/${missing}`,
+        { decision: 'reject', note: 'n/a' },
+        reviewer.cookie,
+      ),
+    );
+    expect(reject.status).toBe(404);
+    // GET a non-existent record also 404s.
+    expect(
+      (await app().request(get(`/v1/compliance/admin/kyc/${missing}`, reviewer.cookie))).status,
+    ).toBe(404);
+  });
+
+  it('verify for a syntactically valid but NONEXISTENT user 404s (no orphan standing)', async () => {
+    const reviewer = await seedReviewer();
+    const ghost = randomUUID(); // a well-formed UUID, but no such user exists
+    const res = await app().request(
+      post(`/v1/compliance/admin/kyc/${ghost}`, { decision: 'verify', note: 'x' }, reviewer.cookie),
+    );
+    // The production `kyc_verification.user_id` FK would reject the insert (500)
+    // while the in-memory store would accept an orphan — masking it in tests.
+    // Resolving the target user first returns the route's normal 404 (dev↔prod
+    // parity) and creates NO standing.
+    expect(res.status).toBe(404);
+    expect(
+      (await app().request(get(`/v1/compliance/admin/kyc/${ghost}`, reviewer.cookie))).status,
+    ).toBe(404);
+  });
+
+  it('a non-compliance actor cannot review or read the admin record', async () => {
+    const user = await seedUser({ handle: `u${randomUUID().slice(0, 8)}` });
+    const subject = randomUUID();
+    expect(
+      (await app().request(get(`/v1/compliance/admin/kyc/${subject}`, user.cookie))).status,
+    ).toBe(403);
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/compliance/admin/kyc/${subject}`,
+            { decision: 'verify', note: 'x' },
+            user.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(403);
+  });
+});

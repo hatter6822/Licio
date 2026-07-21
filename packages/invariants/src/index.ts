@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+export * from './behavior/index.js';
 export * from './braid/index.js';
 export * from './cid/index.js';
 export * from './freshness/index.js';

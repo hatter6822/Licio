@@ -13,11 +13,13 @@ import { InMemoryRealtimeAggregator, type RealtimeAggregator } from './realtime.
 import { InMemoryReplayNonceStore, type ReplayNonceStore } from './replay.js';
 import { EventRouter } from './router.js';
 import {
+  type ActorBehaviorStore,
   type AggregationWindowStore,
   type AttentionAggregateStore,
   type ConsumerCheckpointStore,
   type DeadLetterStore,
   type EventStore,
+  InMemoryActorBehaviorStore,
   InMemoryAggregationWindowStore,
   InMemoryAttentionAggregateStore,
   InMemoryConsumerCheckpointStore,
@@ -71,6 +73,8 @@ export interface EventPipelineServices {
   ledgerStore: SignalLedgerStore;
   safetyStore: ItemSafetyStateStore;
   configStore: PwattConfigStore;
+  /** Bot-prevention layer 2: per-actor behavior windows + authenticity. */
+  behaviorStore: ActorBehaviorStore;
   checkpoints: ConsumerCheckpointStore;
   deadLetters: DeadLetterStore;
   replay: ReplayNonceStore;
@@ -132,6 +136,7 @@ export function createInMemoryEventPipelineServices(
     ledgerStore: new InMemorySignalLedgerStore(),
     safetyStore: new InMemoryItemSafetyStateStore(),
     configStore: new InMemoryPwattConfigStore(),
+    behaviorStore: new InMemoryActorBehaviorStore(),
     checkpoints: new InMemoryConsumerCheckpointStore(),
     deadLetters: new InMemoryDeadLetterStore(),
     replay: new InMemoryReplayNonceStore(),

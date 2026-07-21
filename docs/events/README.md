@@ -354,6 +354,30 @@ deadlines coupled to the owner's retention preference; pseudonymous actors
 get no ledger rows (nothing to link to). The web profile page renders the
 summary verbatim — qualitative wording only, never a number.
 
+**Behavioral authenticity (bot-prevention layer 2)**: the 1h window run also
+persists per-ACTOR behavior snapshots (`foldActorBehaviorWindows`,
+`pwatt/behavior.ts` — the SAME deduplicated fold, projected per actor:
+per-item MAX buckets counted into histograms; identifiable actors only, the
+privacy-bucket actor is NEVER profiled). The hourly job
+(`runBehaviorAuthenticityJob`, a `behavior` scheduler task after scoring)
+assesses every actor active in the 7-day lookback with the pure
+`@licio/invariants` behavior math — dwell-bucket variety, interaction
+breadth, temporal rhythm, all evidence-gated and floored — and clusters
+cross-account near-duplicate behavior streams (frozen MinHash family over
+`behaviorStreamText`, LSH candidates verified against the Jaccard threshold,
+deterministic cluster ids; k clones collapse to ~one account of influence).
+The effective multiplier upserts into `actor_authenticity_scores` and
+COMPOUNDS with the WS-O.4.5 account-age trust in `runPwattWindow`'s
+per-actor factor (floored at `behavior.overallFloor` — reduced, never
+silenced; unassessed actors are exactly neutral), so a low-authenticity
+fleet both trips burst detection sooner AND earns less served distribution
+power. Thresholds are runtime-tunable under the `behavior` pwatt_config key
+(validated, fail-closed to defaults). Snapshots prune past 14 days in the
+job; `purgeUserAttention` removes BOTH planes on attention reset/deletion
+(behavior state never outlives the attention data it derives from). The
+population view ships as the WS-H `behavioral_authenticity` invariant
+(docs/invariants/README.md#bai-inputs).
+
 ## Scheduler
 
 `startEventPipelineScheduler` mirrors the WS-D privacy scheduler: hourly

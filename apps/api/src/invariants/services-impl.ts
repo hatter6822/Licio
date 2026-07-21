@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-H — the eleven InvariantService implementations.
+// WS-H — the twelve InvariantService implementations.
 //
 // Each service conforms to the @licio/invariants `InvariantService`
 // interface: it ASSEMBLES inputs from the real WS-D/E/F/G stores (data.ts),
@@ -971,5 +971,98 @@ export class PathSignatureService extends BaseInvariantService {
       );
     }
     return out;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Behavioral Authenticity (BAI) — bot-prevention layer 2 platform health.
+// --------------------------------------------------------------------------
+
+export class BehavioralAuthenticityService extends BaseInvariantService {
+  readonly invariantType = InvariantType.BehavioralAuthenticity;
+  readonly tiers: TierDeclaration = { realtime: false, nearRealtime: false, batch: true };
+
+  async computeBatch(
+    _targets: readonly InvariantTarget[],
+    window: InvariantTimeWindow,
+  ): Promise<InvariantComputation[]> {
+    // The per-account assessments are computed by the WS-E behavior job
+    // (apps/api/src/pwatt/behavior.ts) from the actor behavior snapshots; this
+    // platform invariant reports the POPULATION view: how much of the active
+    // identifiable population — and of the scoring weight it carries — is
+    // low-coherence or duplicated-behavior. Per-account scores never leave
+    // this computation (internal integrity state, not a surface).
+    const target: InvariantTarget = { targetType: 'feed', targetId: GLOBAL_FEED_TARGET_ID };
+    const assessments = await this.deps.events.behaviorStore.listAuthenticity();
+    if (assessments.length === 0) {
+      // Cold start (and again after retention pruning): no identifiable actor
+      // carries a current assessment. Emit the schema-VALID neutral vector — an
+      // empty population has no low-authenticity share and no duplicate clusters
+      // — rather than `{}`, so this INSUFFICIENT_COVERAGE output actually
+      // persists (persistComputations drops a vector that fails the strict
+      // per-type schema) and stays visible to health/audit consumers.
+      // `scored_actors: 0` plus the reason code mark it degraded; median_score
+      // defaults to 1 (a vacuous population holds nothing suspect).
+      return [
+        this.computation(
+          target,
+          window,
+          {
+            flagged_share: 0,
+            damped_weight_share: 0,
+            cluster_count: 0,
+            largest_cluster_size: 0,
+            scored_actors: 0,
+            median_score: 1,
+          },
+          0,
+          0,
+          ['INSUFFICIENT_COVERAGE'],
+          null,
+        ),
+      ];
+    }
+    const flagged = assessments.filter((a) => a.score < 1);
+    const totalEvidence = assessments.reduce((sum, a) => sum + a.evidence, 0);
+    const dampedEvidence = assessments.reduce((sum, a) => sum + a.evidence * (1 - a.score), 0);
+    const clusters = new Map<string, number>();
+    for (const assessment of assessments) {
+      if (assessment.clusterId !== null) {
+        clusters.set(assessment.clusterId, assessment.clusterSize);
+      }
+    }
+    const sortedScores = assessments.map((a) => a.score).sort((a, b) => a - b);
+    const mid = Math.floor(sortedScores.length / 2);
+    // assessments.length >= 1 here (the empty case returned above), so mid and
+    // mid-1 are in range.
+    const medianScore =
+      sortedScores.length % 2 === 1
+        ? (sortedScores[mid] as number)
+        : ((sortedScores[mid - 1] as number) + (sortedScores[mid] as number)) / 2;
+    const flaggedShare = flagged.length / assessments.length;
+    const dampedWeightShare = totalEvidence > 0 ? dampedEvidence / totalEvidence : 0;
+    const largestClusterSize = Math.max(0, ...clusters.values());
+    return [
+      this.computation(
+        target,
+        window,
+        {
+          flagged_share: flaggedShare,
+          damped_weight_share: dampedWeightShare,
+          cluster_count: clusters.size,
+          largest_cluster_size: largestClusterSize,
+          scored_actors: assessments.length,
+          median_score: medianScore,
+        },
+        // Confidence grows with the assessed population; the assessments
+        // themselves are already evidence-gated per account.
+        Math.min(0.95, assessments.length / (assessments.length + 20)),
+        1,
+        [],
+        `${flagged.length} of ${assessments.length} assessed actors damped ` +
+          `(${(dampedWeightShare * 100).toFixed(1)}% of assessed weight); ` +
+          `${clusters.size} duplicate-behavior cluster(s), largest ${largestClusterSize}.`,
+      ),
+    ];
   }
 }

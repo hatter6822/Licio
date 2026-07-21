@@ -232,6 +232,37 @@ export const declarationVerifyRequestSchema = z
 export type DeclarationVerifyRequest = z.infer<typeof declarationVerifyRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// KYC verification (WS-N.1.1f partner seam / bot-prevention layer 3).  The
+// record carries ONLY an opaque evidence/partner reference — identity
+// documents and PII never enter the platform (the partner holds them).
+// ---------------------------------------------------------------------------
+
+export const kycVerificationStatusSchema = z.enum(['pending', 'verified', 'revoked']);
+export type KycVerificationStatus = z.infer<typeof kycVerificationStatusSchema>;
+
+/** The member's own view: their standing, never reviewer identity/evidence. */
+export const kycStatusResponseSchema = z
+  .object({
+    /** `none` = no verification record exists yet. */
+    status: z.union([kycVerificationStatusSchema, z.literal('none')]),
+    verified_at: z.string().datetime().nullable(),
+  })
+  .strict();
+export type KycStatusResponse = z.infer<typeof kycStatusResponseSchema>;
+
+export const kycReviewRequestSchema = z
+  .object({
+    // `verify` establishes `kyc_partner`; `reject` returns a pending record to
+    // unverified-pending closure; `revoke` removes a standing verification.
+    decision: z.enum(['verify', 'reject', 'revoke']),
+    /** Opaque partner/case reference for the audit trail (never a document). */
+    evidence_ref: z.string().min(1).max(256).optional(),
+    note: z.string().min(1).max(2000),
+  })
+  .strict();
+export type KycReviewRequest = z.infer<typeof kycReviewRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // Consumer risk disclosures (WS-N.1.2d) — versioned, localized, acknowledged.
 // ---------------------------------------------------------------------------
 

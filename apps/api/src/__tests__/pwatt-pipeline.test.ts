@@ -12,11 +12,20 @@ import { PWATT_V0_SHADOW_MODE } from '@licio/invariants';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
-import type { AggregationWindowRecord, NewStoredEvent } from '../events/stores.js';
+import type {
+  ActorBehaviorWindowRecord,
+  AggregationWindowRecord,
+  NewStoredEvent,
+} from '../events/stores.js';
 import { computeAggregationWindow, windowStartMs } from '../pwatt/aggregation.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { runEventPipelineTick } from '../pwatt/scheduler.js';
-import { resolveItemSafetyState, runPwattWindow, windowsNeedingCompute } from '../pwatt/scoring.js';
+import {
+  resolveItemSafetyState,
+  runPwattWindow,
+  runTriggeredPwattWindow,
+  windowsNeedingCompute,
+} from '../pwatt/scoring.js';
 import { assertRankingInputAllowed, RankingBoundaryViolation } from '../pwatt/shadow.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -560,6 +569,157 @@ describe('account-age trust weighting end-to-end (WS-O.4.5)', () => {
     // The anti-signal factor is 1 for both (no burst) — the difference is trust.
     expect(fresh?.scoreVector['anti_signal_factor']).toBe(1);
     expect(aged?.scoreVector['anti_signal_factor']).toBe(1);
+  });
+});
+
+describe('behavioral-authenticity damping is applied in the SAME tick (WS-E ordering)', () => {
+  /** 12 identical bot snapshots so the behavior job assesses + clusters a fleet. */
+  function botWindows(actorRef: string): ActorBehaviorWindowRecord[] {
+    return Array.from({ length: 12 }, (_, h) => ({
+      actorRef,
+      windowStart: new Date(T0 - (h + 1) * HOUR).toISOString(),
+      eventCount: 12,
+      itemsTouched: 12,
+      dwellHistogram: { extended: 12 },
+      replyDepthHistogram: {},
+      returnHistogram: {},
+      sourceOpens: 0,
+      contextOpens: 0,
+      saves: 0,
+      contributions: 0,
+    }));
+  }
+
+  it('a clone-fleet-attended item scores below a clean item run in the SAME tick', async () => {
+    // The behavior job now runs BEFORE scoring, so a fleet whose LOW authenticity
+    // is computed this tick damps its item's PWAtt components THIS tick — not the
+    // next. Two items, identical attention; the fleet's attenders carry a prior
+    // duplicated-behavior history, the clean item's do not.
+    const dampedStory = randomUUID();
+    const cleanStory = randomUUID();
+    const richItem = (storyId: string) => ({
+      story_id: storyId,
+      active_dwell_bucket: 'extended' as const,
+      source_opened: true,
+      context_opened: true,
+      reply_depth_bucket: 'shallow' as const,
+      return_visit_count_bucket: 'several' as const,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const fleet = await seedUserWithSession(fixture.identity, {
+        handle: `bfleet${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
+      await fixture.events.behaviorStore.upsertWindows(botWindows(fleet.userId));
+      await ingestAttention(fleet.userId, dampedStory, { items: [richItem(dampedStory)] });
+      const clean = await seedUserWithSession(fixture.identity, {
+        handle: `bclean${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
+      await ingestAttention(clean.userId, cleanStory, { items: [richItem(cleanStory)] });
+    }
+
+    // One tick: behavior job (assess the fleet low) THEN scoring (apply it).
+    await runEventPipelineTick(fixture.events, fixture.identity, () => {}, T0 + 2 * HOUR);
+
+    const damped = await fixture.events.invariantStore.latest('PWAtt_v1', dampedStory);
+    const clean = await fixture.events.invariantStore.latest('PWAtt_v1', cleanStory);
+    expect(asNumber(damped?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(clean?.scoreVector['active_attention'], 0),
+    );
+  });
+
+  it('the DIRECT/triggered path also refreshes assessments before scoring', async () => {
+    // The production volume trigger + the simulator score OUTSIDE the tick via
+    // runTriggeredPwattWindow, which must refresh assessments first — otherwise
+    // an early run applies stale thresholds under the new behavior-inclusive
+    // config_hash. Same observable: the fleet item is damped in the SAME run.
+    const dampedStory = randomUUID();
+    const cleanStory = randomUUID();
+    const richItem = (storyId: string) => ({
+      story_id: storyId,
+      active_dwell_bucket: 'extended' as const,
+      source_opened: true,
+      context_opened: true,
+      reply_depth_bucket: 'shallow' as const,
+      return_visit_count_bucket: 'several' as const,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const fleet = await seedUserWithSession(fixture.identity, {
+        handle: `tfleet${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
+      await fixture.events.behaviorStore.upsertWindows(botWindows(fleet.userId));
+      await ingestAttention(fleet.userId, dampedStory, { items: [richItem(dampedStory)] });
+      const clean = await seedUserWithSession(fixture.identity, {
+        handle: `tclean${i}`,
+        accountAgeMs: 500 * 24 * HOUR,
+      });
+      await ingestAttention(clean.userId, cleanStory, { items: [richItem(cleanStory)] });
+    }
+
+    // No prior behavior job: the wrapper runs it before scoring in ONE call.
+    await runTriggeredPwattWindow(fixture.events, fixture.identity, T0, '1h', T0 + 2 * HOUR);
+
+    const damped = await fixture.events.invariantStore.latest('PWAtt_v1', dampedStory);
+    const clean = await fixture.events.invariantStore.latest('PWAtt_v1', cleanStory);
+    expect(asNumber(damped?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(clean?.scoreVector['active_attention'], 0),
+    );
+  });
+
+  it('IGNORES a STALE assessment (dormant past the lookback), applies a fresh one', async () => {
+    const DAY = 24 * HOUR;
+    const now = fixture.events.now();
+    const richItem = (storyId: string) => ({
+      story_id: storyId,
+      active_dwell_bucket: 'extended' as const,
+      source_opened: true,
+      context_opened: true,
+      reply_depth_bucket: 'shallow' as const,
+      return_visit_count_bucket: 'several' as const,
+    });
+    const damped = (actorRef: string, computedAt: string) => ({
+      actorRef,
+      score: 0.25,
+      coherence: 0.25,
+      components: { dwell_variety: 0.25, interaction_breadth: 0.25, temporal_rhythm: 0.25 },
+      flags: ['dwell_variety'],
+      evidence: 100,
+      clusterId: null,
+      clusterSize: 1,
+      computedAt,
+    });
+    // Same age, same damped score — the ONLY difference is when it was computed.
+    const freshStory = randomUUID();
+    const fresh = await seedUserWithSession(fixture.identity, {
+      handle: 'sfresh',
+      accountAgeMs: 500 * DAY,
+    });
+    await fixture.events.behaviorStore.upsertAuthenticity([
+      damped(fresh.userId, new Date(now).toISOString()),
+    ]);
+    await ingestAttention(fresh.userId, freshStory, { items: [richItem(freshStory)] });
+
+    const staleStory = randomUUID();
+    const stale = await seedUserWithSession(fixture.identity, {
+      handle: 'sstale',
+      accountAgeMs: 500 * DAY,
+    });
+    await fixture.events.behaviorStore.upsertAuthenticity([
+      damped(stale.userId, new Date(now - 8 * DAY).toISOString()), // dormant > 7-day lookback
+    ]);
+    await ingestAttention(stale.userId, staleStory, { items: [richItem(staleStory)] });
+
+    // runPwattWindow directly (no behavior job to recompute the seeded scores).
+    await runPwattWindow(fixture.events, fixture.identity, T0, '1h');
+
+    const freshOut = await fixture.events.invariantStore.latest('PWAtt_v1', freshStory);
+    const staleOut = await fixture.events.invariantStore.latest('PWAtt_v1', staleStory);
+    // The fresh assessment damps; the stale one is ignored (scores as neutral).
+    expect(asNumber(freshOut?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(staleOut?.scoreVector['active_attention'], 0),
+    );
   });
 });
 

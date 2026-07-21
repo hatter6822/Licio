@@ -24,6 +24,7 @@ import {
   financialComplianceCases,
   jurisdictionFeaturePolicies,
   jurisdictionPolicyAudits,
+  kycVerifications,
   lawfulAccessRequests,
   regionDeclarations,
   sarReports,
@@ -55,6 +56,9 @@ import type {
   DisclosureVersionRecord,
   JurisdictionPolicyRow,
   JurisdictionPolicyStore,
+  KycPremises,
+  KycVerificationRecord,
+  KycVerificationStore,
   LawfulAccessRecord,
   LawfulAccessStore,
   PolicyAuditRecord,
@@ -919,6 +923,94 @@ export class DrizzleRegionDeclarationStore implements RegionDeclarationStore {
 }
 
 // ---------------------------------------------------------------------------
+// KYC verification standing (WS-N.1.1f / bot-prevention layer 3).
+// ---------------------------------------------------------------------------
+
+type KycRowDb = typeof kycVerifications.$inferSelect;
+
+function toKyc(row: KycRowDb): KycVerificationRecord {
+  return {
+    userId: row.userId,
+    status: row.status,
+    evidenceRef: row.evidenceRef,
+    verifiedAt: isoOrNull(row.verifiedAt),
+    verifiedBy: row.verifiedBy,
+    createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
+  };
+}
+
+export class DrizzleKycVerificationStore implements KycVerificationStore {
+  readonly #db: DbOrTx;
+  constructor(db: DbOrTx) {
+    this.#db = db;
+  }
+
+  async get(userId: string): Promise<KycVerificationRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(kycVerifications)
+      .where(eq(kycVerifications.userId, userId))
+      .limit(1);
+    return rows[0] ? toKyc(rows[0]) : null;
+  }
+
+  async upsert(
+    record: KycVerificationRecord,
+    expected?: KycPremises,
+  ): Promise<KycVerificationRecord | null> {
+    const values = {
+      userId: record.userId,
+      status: record.status,
+      evidenceRef: record.evidenceRef,
+      verifiedAt: record.verifiedAt === null ? null : new Date(record.verifiedAt),
+      verifiedBy: record.verifiedBy,
+      createdAt: new Date(record.createdAt),
+      updatedAt: new Date(record.updatedAt),
+    };
+    const set = {
+      status: values.status,
+      evidenceRef: values.evidenceRef,
+      verifiedAt: values.verifiedAt,
+      verifiedBy: values.verifiedBy,
+      updatedAt: values.updatedAt,
+    };
+    // CAS discipline in BOTH directions. With `expected` this is an UPDATE,
+    // never an upsert — a record deleted under review (the deletion purge) must
+    // not be resurrected by a stale reviewer decision. WITHOUT `expected` this
+    // is a CREATE, and it is conflict-only (`onConflictDoNothing`): if a row
+    // already exists it inserts nothing and returns null, so two reviewers who
+    // both read an absent standing and submit the only allowed initial decision
+    // (`verify`) concurrently cannot silently overwrite each other — the loser
+    // gets `null` and the route answers `kyc_changed` (409), same as a CAS miss.
+    const rows = await (expected === undefined
+      ? this.#db.insert(kycVerifications).values(values).onConflictDoNothing().returning()
+      : this.#db
+          .update(kycVerifications)
+          .set(set)
+          .where(
+            and(
+              eq(kycVerifications.userId, record.userId),
+              eq(kycVerifications.status, expected.status),
+              eq(kycVerifications.updatedAt, new Date(expected.updatedAt)),
+            ),
+          )
+          .returning());
+    const row = rows[0];
+    if (row === undefined) return null;
+    return toKyc(row);
+  }
+
+  async delete(userId: string): Promise<boolean> {
+    const rows = await this.#db
+      .delete(kycVerifications)
+      .where(eq(kycVerifications.userId, userId))
+      .returning({ userId: kycVerifications.userId });
+    return rows.length > 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Disclosures + acknowledgments (WS-N.1.2d).
 // ---------------------------------------------------------------------------
 
@@ -1503,6 +1595,7 @@ function complianceStoresOver(db: DbOrTx): ComplianceTxStores {
  */
 export function createDrizzleComplianceStores(db: Db): ComplianceTxStores & {
   declarations: DrizzleRegionDeclarationStore;
+  kyc: DrizzleKycVerificationStore;
   disclosures: DrizzleDisclosureStore;
   acks: DrizzleDisclosureAckStore;
   transactor: ComplianceTransactor;
@@ -1510,6 +1603,7 @@ export function createDrizzleComplianceStores(db: Db): ComplianceTxStores & {
   return {
     ...complianceStoresOver(db),
     declarations: new DrizzleRegionDeclarationStore(db),
+    kyc: new DrizzleKycVerificationStore(db),
     disclosures: new DrizzleDisclosureStore(db),
     acks: new DrizzleDisclosureAckStore(db),
     transactor: new DrizzleComplianceTransactor(db),

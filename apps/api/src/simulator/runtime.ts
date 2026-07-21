@@ -69,7 +69,7 @@ import { submitReport } from '../moderation/reports.js';
 import type { ModerationServices } from '../moderation/services.js';
 import { getModerationServices } from '../moderation/services.js';
 import { windowStartMs } from '../pwatt/aggregation.js';
-import { runPwattWindow } from '../pwatt/scoring.js';
+import { runTriggeredPwattWindow } from '../pwatt/scoring.js';
 import { serveFeed } from '../ranking/service.js';
 import type { RankingServices } from '../ranking/services.js';
 import { getRankingServices, refreshStoryFeatures } from '../ranking/services.js';
@@ -1984,7 +1984,7 @@ export class DevTrafficSimulator {
       // Score the CURRENT hour window directly (idempotent) so accumulated
       // attention becomes PWAtt output → invariant.run.completed → feature
       // refresh, without waiting for the window to close.
-      await runPwattWindow(events, identity, windowStartMs(nowMs, '1h'), '1h');
+      await runTriggeredPwattWindow(events, identity, windowStartMs(nowMs, '1h'), '1h');
       // Every few refreshes, run the full WS-H invariant batch (MERI/SCOI/...).
       if (this.#refreshCount % BATCH_EVERY_N_REFRESHES === 0) {
         await runBatchTier(invariants, events, ingestion, nowMs);

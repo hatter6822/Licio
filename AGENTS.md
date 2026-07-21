@@ -68,6 +68,9 @@ pnpm check:prod-parity              # the dev↔prod parity gate: every in-memor
                                     #   boot-wired production counterpart; every env key must be
                                     #   schema-validated or a documented dev flag; production
                                     #   adapters hold no in-memory state
+pnpm check:governance-kyc           # bot-prevention layer 3: every governance-participation POST
+                                    #   route enforces the KYC eligibility guard (or carries a
+                                    #   written allowlist justification)
 pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
 pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
 pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
@@ -152,37 +155,15 @@ first) before declaring a branch green, and run the FULL `pnpm lint` (the `pre-c
 only lints the *staged* files, so an unused import/var created in an unstaged file slips past
 it until `pre-push` / CI).
 
-After any source change, also run:
-
-* `pnpm lint:security` — catches `innerHTML`, `outerHTML`,
-  `document.write()`, `eval()`, `new Function()`, and `javascript:`
-  URLs that Biome 2.x cannot block at the AST level.
-* `pnpm check:deps` — fails if a workspace exceeds its dependency
-  budget (web < 15, api < 20 direct production deps).
-* `pnpm check:workspace-deps` — fails if a package imports across
-  a forbidden workspace boundary (e.g. web importing `@licio/db`).
-* `pnpm check:no-applause` — fails if like/vote/karma/reaction
-  affordances appear in `apps/web/src/components/` or `apps/web/src/routes/`
-  (the latter covers route-level page copy, e.g. the front-page framing).
-* `pnpm check:no-raw-egress` — fails if raw attention traces
-  (scrollX, clientY, dwellMs, etc.) appear in the signals layer or
-  if the signals layer imports anything other than the bucketed
-  aggregate uploader.
-* `pnpm check:update-channel` — fails if the WS-S.10 hardened
-  private-mode update path loses its verify-before-activate wiring:
-  the pure verifier (`@licio/shared/update`) must bind maintainer
-  signature + RFC 9162 transparency-log inclusion + the running-bundle
-  digest and expose the typed lock reasons; the client gate
-  (`apps/web/src/update`) must verify BEFORE unlock and lock the rooms
-  on any untrusted verdict; and the service worker must refuse a silent
-  takeover by an unverified bundle.
-
-After a production build (`pnpm --filter web build`):
-
-* `pnpm check:sw` — fails if the built service worker contains
-  remote `importScripts`, `eval()`, or `new Function()`.
-
-CI (`.github/workflows/ci.yml`) runs all of the above on every PR.
+After any source change, also run the gates relevant to what you touched
+(each is described under **Build and run → Security and static gates**
+above): `lint:security`, `check:deps`, and `check:workspace-deps` on any
+change; `check:no-applause` / `check:no-raw-egress` when touching
+components, routes, or the signals layer; `check:governance-kyc` when
+touching governance-participation routes; `check:update-channel` when
+touching the private-mode update path; and — after a production build
+(`pnpm --filter web build`) — `check:sw`.  CI runs all of the above on
+every PR.
 
 ## Source layout
 
@@ -236,7 +217,7 @@ licio/
 │   │       │                       (pay-to-rank firewall), realtime (HLL), retention
 │   │       ├── pwatt/           -- WS-E PWAtt scoring: aggregation, anti-signals,
 │   │       │                       scoring, shadow boundary, ranking-v0, scheduler
-│   │       ├── invariants/      -- WS-H platform: the 11 invariant services, runner,
+│   │       ├── invariants/      -- WS-H platform: the 12 invariant services, runner,
 │   │       │                       promotion gate, scheduler
 │   │       ├── ranking/         -- WS-I: retrievers, quotas, orchestrator, features,
 │   │       │                       safety-filter, killswitch, the 8-stage service
@@ -351,57 +332,14 @@ in `package.json`, so an override placed there is silently ignored.
 | `esbuild ^0.28.1` | dev-only toolchain; dedupes onto one audited line | bump with the Vite major |
 | `@noble/curves 2.0.1` + `@noble/ciphers 2.1.1` (EXACT) | `ts-mls@1.6.2` declares them as exact peers (KAT cross-checks guard the pin) | `ts-mls` widens its `@noble/*` peer range |
 
-## Reading large files
+## Reading and editing large files
 
-`docs/SPEC.md` and `docs/planning/00-index.md` (~994 tasks) are large.
-Read in chunks with `Read(file_path, offset=…, limit=500)` rather than
-the whole file.
-
-When editing, read the specific region around the target lines first
-(e.g., `offset=2580, limit=80`) so the `old_string` matches exactly.
-
-## Writing and editing files
-
-**Prefer the Edit tool for all changes to existing files**, regardless
-of size.  The Write tool replaces an entire file and is error-prone
-for files over ~100 lines.
-
-**Rules for large-file changes:**
-
-1. **Never rewrite a large file with Write.**  Use Edit with a
-   precise `old_string`/`new_string` pair.
-2. **One logical change per Edit call.**
-3. **Read before you edit** so the `old_string` matches exactly.
-4. **Adding large new sections:** break into multiple sequential Edit
-   calls, anchoring each to existing context.
-5. **Creating new large files:** use an initial Write (under 100
-   lines) followed by Edit appends, or a Bash heredoc.
-6. **Post-write verification:** spot-check the modified region and
-   the file's last few lines.
-
-## Handling large search and command output
-
-- **Grep**: cap with `head_limit`; use `output_mode:
-  "files_with_matches"` first, then drill in.
-- **Glob**: scope with `path` instead of searching the whole repo.
-- **Bash output**: pipe through `head` / `tail`.  For very large
-  output, redirect to a temp file and `Read` in chunks.
-
-**Rule of thumb:** if a command might return more than ~100 lines,
-limit it upfront.
-
-## Background-agent file-change protection
-
-Background agents run concurrently and may finish after the
-foreground agent has already modified the same files.
-
-1. **Never delegate file writes to a background agent for files you
-   may also edit.**
-2. **Partition files strictly** across parallel agents.
-3. **Use background agents only for read-only or independent-file
-   tasks.**
-4. **Check background results before acting on shared state.**
-5. **When in doubt, run in foreground.**
+`docs/SPEC.md` and `docs/planning/00-index.md` (~994 tasks) are large —
+`Read` them in chunks (`offset`/`limit`) rather than whole, and read the
+region around an edit target first so the `old_string` matches exactly.
+Prefer `Edit` over `Write` for existing files.  When parallel or
+background agents run, partition files strictly and never delegate a
+write for a file the foreground agent may also touch.
 
 ## Key conventions
 
@@ -567,30 +505,20 @@ Trusted-Types posture survives the WebView with no relaxation.
 
 ### CSRF protection
 
-Per-session single-use tokens (256-bit, `crypto.randomBytes(32)`),
-1-hour TTL, constant-time comparison (`crypto.timingSafeEqual`).
-**Mutations are serialized** through a promise chain on the client —
-each mutation fetches its own fresh token immediately before sending,
-preventing concurrent nonce sharing.  GETs bypass the chain.
+Per-session single-use tokens (256-bit, `crypto.randomBytes(32)`), 1-hour
+TTL, constant-time comparison (`crypto.timingSafeEqual`).  **Mutations are
+serialized** on the client — each fetches its own fresh token immediately
+before sending, preventing concurrent nonce sharing; GETs bypass the chain.
 
-Exempt paths: `/health`, `/api/security/csp-report`, `/v1/telemetry`
-(sendBeacon cannot set custom headers), `/v1/takedowns` (public copyright
-intake — no session to ride), and the decentralized-plane surfaces, all of
-which are session-less (the request carries no cookie for CSRF to ride) and
-individually rate-limited: the WS-R.12.4 native LCAP sync surface
-`/api/lcap/v2/{packs,pulse,exchange}` (device-COSE-authenticated content /
-public frontier reads; abuse bounded by each endpoint's own rate limit + the
-§27 caps + the graph guard), the WS-R.15.6a server-blind WebRTC signaling
-rendezvous `/api/lcap/v2/p2p/signal{,/poll}` (opaque sealed blob to/from an
-opaque peer key), the §29.8 device-signed bundle export
-`/api/lcap/v2/bundles/export` (a device-signed `export_request` capability is
-the authentication), and the WS-S.6.6 server-blind Private P2P rendezvous
-`/v1/private-rendezvous/{announce,poll,signal,signal/poll}` (opaque blind
-ids + ciphertext under a short TTL).  The web-UI
-`/api/lcap/v2/bundles/import` alias is NOT exempt — a session-bearing browser
-flow keeps the double-submit token.  `/v1/auth/*` and `/v1/privacy/*` are
-token-exempt but STILL Origin-checked (they rely on `SameSite=Strict` + the
-opaque session model + a per-flow `login_attempt_id`).
+Exempt paths are all session-less (no cookie for CSRF to ride) and
+individually rate-limited: `/health`, `/api/security/csp-report`,
+`/v1/telemetry`, `/v1/takedowns`, and the decentralized-plane surfaces
+(`/api/lcap/v2/{packs,pulse,exchange}`, the server-blind LCAP WebRTC
+rendezvous, the device-signed `/api/lcap/v2/bundles/export`, and the Private
+P2P rendezvous `/v1/private-rendezvous/*`).  The web-UI
+`/api/lcap/v2/bundles/import` alias is NOT exempt (session-bearing → keeps
+the double-submit token); `/v1/auth/*` and `/v1/privacy/*` are token-exempt
+but STILL Origin-checked.
 
 ### Cookie security
 
@@ -649,6 +577,27 @@ per window), and global per-endpoint fixed-window budgets
 deletion-cancel).  Overload → 429 + Retry-After.  Connection-level flood
 fairness is the edge/gateway's concern.
 
+### Bot prevention (three layers)
+
+Three independent, privacy-preserving layers (design detail in
+`docs/identity/README.md`, `docs/invariants/README.md`, and
+`docs/compliance/README.md`):
+
+1. **Sign-up proof-of-work CAPTCHA** — every account-minting entry point
+   requires a solved, single-use, HMAC-bound SHA-256 partial-preimage
+   challenge (`identity/pow-captcha.ts`, `lib/pow-captcha.ts`): no third
+   parties, no fingerprinting; difficulty scales with identity-free
+   sign-up pressure.  `SIGNUP_POW_MAX_NUMBER=0` is the operator opt-out.
+2. **Behavioral authenticity (BAI)** — server-side coherence scoring over
+   the already-bucketed §22.1 aggregates (`pwatt/behavior.ts`); a floored,
+   evidence-gated multiplier damps PWAtt trust (never zero, never boosts,
+   anonymity never profiled) and the `behavioral_authenticity` platform
+   invariant reports population health.  No new client collection.
+3. **KYC-gated governance** — room-governance participation requires a
+   reviewer-verified KYC standing + no compliance hold + no high-risk
+   wallet (`governance/eligibility.ts`, fail-closed; `check:governance-kyc`
+   is the structural CI gate).  Content participation is never KYC-gated.
+
 ## Linting limitations
 
 Biome 2.x does not support:
@@ -703,32 +652,21 @@ No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 
 ## Implementation roadmap
 
-The core specification defines 18 workstreams (WS-0 through WS-Q).
-WS-T (conversation as comments) and the cross-cutting **WS-U**
-(AI-governed-rooms redesign) extend the core spec.  Two **extension
-workstreams** — WS-R and WS-S — derive from the standalone
-`docs/OFFLINE_SPEC.md` (LCAP v0.2) and `docs/PRIVATE_SPEC.md`
-specifications rather than `docs/SPEC.md`.  Both are **launch-relevant
-and ship WITH the core product**, not deferred: WS-R was elevated to P1
-(the 2026-06 maintainer decision making the native courier + browser
-P2P/WebTransport/IPFS transports first-class), and **WS-S private P2P
-rooms (E2EE) are LAUNCH-BLOCKING** — they go live at the same time as
-the rest of Licio (the 2026-06 maintainer decision), so their completeness
-+ launch gates (`docs/PRIVATE_SPEC.md` §29) are part of the GA bar, not a
-post-M3 add-on.  **WS-U** is the maintainer's binding redesign of AI's
-role (`docs/planning/22-ai-governed-rooms.md`; SPEC §16.6/§24.6): every
-room has an **elected steward** whose only two powers are to propose a
-community-approved, member-downloadable AI **model** and its **prompt**
-(both ratified by a Knomosis member vote), and the approved **in-room AI
-agent** may then moderate, manage the room treasury, and facilitate
-lawmaking **within community-voted, kernel-enforced bounds, holding no
-keys, subordinate to a non-overridable platform legal floor**.  The
-bounded-autonomy runtime is SHIPPED (elections, model proposal/ratification,
-the LLM moderation model in its deterministic wrapper, lawmaking
-facilitation, the kernel-backed treasury core behind the fail-closed crypto
-flags); WS-U re-scopes WS-K into the platform evaluation/transparency
-substrate, amends WS-J/L/M, and preserves the pay-to-rank firewall and
-fail-closed crypto in full.
+The core specification defines 18 workstreams (WS-0 through WS-Q); WS-T
+(conversation as comments) and the cross-cutting **WS-U** (AI-governed-rooms
+redesign) extend it, and two **extension workstreams** — WS-R (LCAP v0.2)
+and WS-S (Private P2P rooms) — derive from `docs/OFFLINE_SPEC.md` and
+`docs/PRIVATE_SPEC.md`.  Both extensions ship WITH the core product, not
+deferred: WS-R is P1 (native courier + browser P2P/WebTransport/IPFS), and
+**WS-S is LAUNCH-BLOCKING** — its §29 launch gates are part of the GA bar.
+WS-U is the maintainer's binding redesign of AI's role (SPEC §16.6/§24.6):
+an **elected steward** proposes a member-downloadable AI **model + prompt**
+(Knomosis-ratified), and the approved **in-room agent** may moderate, manage
+the room treasury, and facilitate lawmaking **within community-voted,
+kernel-enforced bounds, holding no keys, under a non-overridable platform
+legal floor** — it re-scopes WS-K into the platform eval/transparency
+substrate and preserves the pay-to-rank firewall + fail-closed crypto in
+full (`docs/planning/22-ai-governed-rooms.md`, `docs/governance/README.md`).
 Status:
 
 | Workstream | Title | Status |
@@ -889,73 +827,31 @@ every match.
 
 ## Current development status
 
-**Vitest configuration.**  Twelve test projects: shared (node), db (node),
-invariants (node), ranking (node), ai-governance (node), governance (node),
-lcap (node), lcap-p2p (node), private-p2p (node), api (node), web (jsdom),
-policy (node).  Their
-settings live once in `vitest.shared.ts`; the root `vitest.config.ts`
-composes them into the unified `pnpm test` run + the cross-workspace V8
-coverage gate, and each workspace has a thin local `vitest.config.ts`
-re-using the same settings so `pnpm --filter <ws> test` runs standalone.
-Coverage threshold: 80% minimum for lines, functions, branches,
-and statements.
+**Vitest.**  Twelve node/jsdom test projects composed by the root
+`vitest.config.ts` from shared settings in `vitest.shared.ts`; each
+workspace has a thin local config so `pnpm --filter <ws> test` runs
+standalone.  Coverage gate: 80% minimum (lines, functions, branches,
+statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈8200 tests pass without
+**Test counts.**  `pnpm test` is the canonical query (≈8200 pass without
 the gated integration env; more with live Postgres/Redis).  Only monotonic
-growth is enforced — no gate pins the count and exact numbers drift, so the
-per-suite breakdown lives in each per-workstream `docs/*/README.md`, not here.
-Run one workspace with `pnpm --filter <ws> test`.
+growth is enforced — exact numbers drift, so the per-suite breakdown lives
+in each `docs/*/README.md`, not here.  WS-D/E/F/G/H/I/U and WS-R add
+**gated** Postgres+Redis integration suites that run only with
+`DATABASE_URL`/`REDIS_URL` set (CI provisions `pgvector/pgvector:pg16` +
+`redis:7`, so they run in CI and skip on a bare local run).
 
-WS-D, WS-E, WS-F, WS-G, WS-H, WS-I, WS-U, and WS-R (the LcapServerStore
-contract) add **gated** integration tests (Postgres + Redis) that run only
-when `DATABASE_URL` / `REDIS_URL` are set.
-CI's Test & Coverage job provisions `pgvector/pgvector:pg16` and `redis:7`
-service containers, so the gated suites RUN in CI; without the env vars
-(e.g. a bare local `pnpm test`) they skip.  The WS-F chain requires a
-pgvector-enabled Postgres (docker-compose ships `pgvector/pgvector:pg16`).
-See `docs/identity/README.md`, `docs/events/README.md`,
-`docs/ingestion/README.md`, `docs/forum/README.md`,
-`docs/invariants/README.md`, and `docs/ranking/README.md`.
-
-**E2E configuration.**  Playwright runs against Chromium, Firefox,
-and WebKit.  Base URL: `http://localhost:4173` (Vite preview).
-Fully parallel in local mode; single worker in CI with 2 retries.
-axe-core accessibility assertions on every page load.  Two configs:
+**E2E.**  Playwright over Chromium/Firefox/WebKit with axe-core assertions.
 `playwright.config.ts` is the frontend-only suite against the static
 preview; `playwright.bff.config.ts` (`pnpm --filter web test:e2e:bff`,
-spec glob `*.bff.spec.ts`) is the **BFF-in-the-loop** harness — it boots
-the in-memory API `e2e-server` (no Postgres/Redis) plus the preview with
-its API proxy enabled (`E2E_API_PROXY=1`) so the browser drives REAL
-authenticated flows over one same-origin host, using a test-only login
-route that mints a session cookie (gated to the e2e-server, never the
-production app).  Both run in CI's E2E job.
+`*.bff.spec.ts`) is the BFF-in-the-loop harness driving REAL authenticated
+flows against the in-memory `e2e-server`.  Both run in CI.
 
-**CI pipeline.**  `.github/workflows/ci.yml` runs 9 jobs on every PR:
-
-1. Lint & format (Biome + security lint + policy + the `check:prod-parity`
-   dev↔prod parity gate + no-raw-egress + no-applause + the WS-R.14.3
-   `check:lcap-schema-egress` LCAP doctrine gate + the WS-S.10.2b
-   `check:update-channel` verify-before-activate gate)
-2. Type check (strict-mode across all workspaces)
-3. Lockfile integrity
-4. Dependency budget
-5. Test & coverage (Vitest + V8 coverage + JUnit XML; Postgres/pgvector +
-   Redis service containers so the gated integration suites run too; plus
-   the named `check:neutrality` step — the ten WS-I.3 ranking-neutrality
-   tests as an explicit pay-to-rank gate on every PR — and the
-   `check:lcap-scheduler` step, the WS-R.5.4 LCAP lane anti-starvation gate)
-6. Build & size check (production build + bundle-size gate)
-7. E2E tests (Playwright, requires build)
-8. Security audit (`pnpm audit:advisories` — the lockfile posted to the npm
-   BULK advisory endpoint at the high/critical threshold; the registry
-   retired the classic endpoint `pnpm audit` itself calls — plus SBOM,
-   build validation, AGPL headers,
-   secret scanning, install-script detection)
-9. Native courier APK (WS-R.15.4a: builds the debug APK from the
-   unchanged web build behind the byte-identity no-fork gate)
-
-CodeQL (`.github/workflows/codeql.yml`) runs `security-extended`
-queries on push to main, PRs, and weekly.
+**CI.**  `.github/workflows/ci.yml` runs 9 jobs on every PR (lint/format +
+static gates, type check, lockfile, dep budget, test & coverage incl.
+`check:neutrality` + `check:lcap-scheduler`, build & size, E2E, security
+audit, native courier APK).  CodeQL (`codeql.yml`) runs `security-extended`
+on push to main, PRs, and weekly.
 
 ## Vulnerability reporting
 

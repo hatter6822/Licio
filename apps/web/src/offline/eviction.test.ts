@@ -92,10 +92,12 @@ describe('initEvictionDetection', () => {
     window.dispatchEvent(new Event('pageshow'));
     document.dispatchEvent(new Event('visibilitychange'));
 
-    // Let the coalesced probe resolve.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(onEvicted).toHaveBeenCalledTimes(1);
+    // Let the coalesced probe resolve. The probe is an async IndexedDB read, so
+    // under parallel load it can take more than one macrotask — wait for the
+    // callback rather than a fixed tick (the fixed tick was a load-sensitive
+    // flake). `waitFor` also holds the coalescing guarantee: a second probe
+    // would drive the count to 2 and it would never settle on 1.
+    await vi.waitFor(() => expect(onEvicted).toHaveBeenCalledTimes(1));
     teardown();
   });
 });

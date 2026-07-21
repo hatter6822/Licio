@@ -15,6 +15,8 @@ import {
   emailSchema,
   handleSchema,
   isMinorBand,
+  powCaptchaDisabledSchema,
+  powSolutionSchema,
   registeredAgeBandSchema,
   teenFloorPrivacySettings,
   webauthnRegisterVerifyRequestSchema,
@@ -23,6 +25,12 @@ import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { canResend, startEmailVerification, verifyEmailFactor } from '../identity/email-otp.js';
+import {
+  isPowCaptchaEnabled,
+  issuePowChallenge,
+  SignupPressure,
+  verifyPowSolution,
+} from '../identity/pow-captcha.js';
 import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, readSessionToken, rotateSession } from '../identity/sessions.js';
 import { createRegistrationOptions, verifyRegistration } from '../identity/webauthn.js';
@@ -48,6 +56,9 @@ const passkeySignupRequestSchema = z
     handle: handleSchema,
     display_name: z.string().min(1).max(80),
     date_of_birth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    /** Solved sign-up proof-of-work (WS-D bot-prevention layer 1); required
+     *  whenever the gate is enabled — checked before any store work. */
+    captcha: powSolutionSchema.optional(),
   })
   .strict();
 
@@ -66,12 +77,55 @@ const pendingSignupSchema = z
 type PendingSignup = z.infer<typeof pendingSignupSchema>;
 
 export function createRegisterRoutes(resolve: () => IdentityServices) {
-  // GLOBAL (identity-free) budget on unauthenticated account creation: bounds
+  // GLOBAL (identity-free) budget on unauthenticated ACCOUNT CREATION: bounds
   // signup spam per process without reading anything about the requester (§19.1).
   // The duplicate-email notice additionally sits under a per-mailbox cooldown.
   const signupLimit = rateLimit({ limit: 120, windowMs: 60_000 });
+  // The cheap PUBLIC captcha mint gets its OWN budget, SEPARATE from the
+  // account-creation redeems above: a header-less bot spamming /captcha/challenge
+  // must not exhaust the shared budget and 429 legitimate /register or
+  // /webauthn/signup/options (the redeem paths). A roomier mint budget absorbs
+  // a genuine user's prime-ahead + one retry without self-starvation.
+  const challengeMintLimit = rateLimit({ limit: 240, windowMs: 60_000 });
+  // Bot-prevention layer 1: the sign-up proof-of-work gate.  Every account-
+  // minting entry point below requires a solved, single-use challenge BEFORE
+  // any store lookup or mail send, so bulk registration pays CPU per account.
+  // Difficulty scales with process-wide issuance pressure (identity-free).
+  const signupPressure = new SignupPressure();
+  const requirePowCaptcha = async (
+    services: IdentityServices,
+    captcha: Parameters<typeof verifyPowSolution>[3],
+  ) =>
+    verifyPowSolution(
+      services.challenges,
+      services.config.masterSecret,
+      services.config.signupPow,
+      captcha,
+    );
   return (
     new Hono<AuthEnv>()
+      // --- Sign-up proof-of-work challenge (WS-D bot-prevention layer 1) ----
+      // POST (not GET): issuance writes the single-use store, and the CSRF
+      // middleware Origin-checks state-changing /v1/auth/* requests. When the
+      // gate is DISABLED (SIGNUP_POW_MAX_NUMBER=0, the operator opt-out) this
+      // issues NO puzzle and returns the disabled sentinel — the client then
+      // attaches no captcha and the redeem endpoints verify it as a no-op.
+      // (Issuing here would throw: max_number 0 fails the schema's `.positive()`.)
+      .post('/captcha/challenge', challengeMintLimit, async (c) => {
+        const services = resolve();
+        if (!isPowCaptchaEnabled(services.config.signupPow)) {
+          return c.json(powCaptchaDisabledSchema.parse({ disabled: true }));
+        }
+        const challenge = await issuePowChallenge(
+          services.challenges,
+          services.config.masterSecret,
+          services.config.signupPow,
+          { pressure: signupPressure },
+        );
+        // issuePowChallenge already returns a schema-validated PowChallenge.
+        return c.json(challenge);
+      })
+
       // --- Passkey-FIRST signup (WebAuthn primary) --------------------------
       .post(
         '/webauthn/signup/options',
@@ -80,6 +134,12 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         async (c) => {
           const services = resolve();
           const body = c.req.valid('json');
+          // Proof-of-work FIRST: nothing downstream (store lookups, challenge
+          // minting) is reachable without paying the per-account CPU cost.
+          const pow = await requirePowCaptcha(services, body.captcha);
+          if (!pow.ok) {
+            return c.json(err(pow.code, 'Sign-up verification required.'), 403);
+          }
           const gate = deriveAgeBand(body.date_of_birth);
           if (!gate.allowed) {
             return c.json(err('age_restricted', 'We are unable to create an account.'), 403);
@@ -200,6 +260,12 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
       .post('/register', signupLimit, zValidator('json', emailRegisterRequestSchema), async (c) => {
         const services = resolve();
         const body = c.req.valid('json');
+        // Proof-of-work FIRST — before the duplicate-email branch, so the
+        // anti-enumeration notice mail path also sits behind the CPU cost.
+        const pow = await requirePowCaptcha(services, body.captcha);
+        if (!pow.ok) {
+          return c.json(err(pow.code, 'Sign-up verification required.'), 403);
+        }
         const gate = deriveAgeBand(body.date_of_birth);
         if (!gate.allowed) {
           return c.json(err('age_restricted', 'We are unable to create an account.'), 403);

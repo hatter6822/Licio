@@ -60,6 +60,7 @@ import {
 } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import type { LensRecord, RoomRecord } from '../forum/stores.js';
+import { checkGovernanceEligibility } from '../governance/eligibility.js';
 import { getGovernanceService } from '../governance/services.js';
 import type { Role } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
@@ -72,6 +73,7 @@ import {
   requireUnrestricted,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
+import { isPlatformStaff } from '../moderation/authz.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = deny('not_found', 'Resource not found');
@@ -671,6 +673,13 @@ export function createRoomsRoutes() {
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
+          // Bot-prevention layer 3: a STEWARD rewriting the room's join/posting
+          // policy exercises governance power, so it clears the KYC floor;
+          // platform staff act as operators (enforcement) and are not gated.
+          if (!isPlatformStaff(auth)) {
+            const denial = await checkGovernanceEligibility(auth.userId);
+            if (denial) return c.json({ error: denial }, 403);
+          }
           const body = c.req.valid('json');
           const outcome = await updateRoomGovernanceSettings(
             forum,
@@ -702,6 +711,13 @@ export function createRoomsRoutes() {
           // Governance-capable steward only; others get 404 (no oracle).
           if (!(await isRoomSteward(forum, roomId, auth.userId, auth.roles))) {
             return c.json(notFound, 404);
+          }
+          // Bot-prevention layer 3: flipping room visibility is steward
+          // governance power → clears the KYC floor; platform staff (operators)
+          // are exempt (same discipline as the treasury/governance routes).
+          if (!isPlatformStaff(auth)) {
+            const denial = await checkGovernanceEligibility(auth.userId);
+            if (denial) return c.json({ error: denial }, 403);
           }
           const outcome = await changeRoomVisibility(
             forum,

@@ -18,6 +18,7 @@ import {
   type SourceOpenedAggregateEvent,
   sourceOpenedAggregateEventSchema,
 } from '@licio/shared';
+import { ensureComplianceServicesForTests } from '../compliance/services.js';
 import {
   createInMemoryEventPipelineServices,
   type EventPipelineServices,
@@ -36,6 +37,7 @@ export const TEST_IDENTITY_CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 
 export interface EventServicesFixture {
@@ -94,6 +96,11 @@ export async function seedUserWithSession(
     nowMs?: number;
     /** Override the seeded account's age (0 ⇒ created exactly "now"). */
     accountAgeMs?: number;
+    /** Seed a reviewer-verified KYC standing (bot-prevention layer 3).
+     *  Defaults TRUE — the standard test actor is fully capable, mirroring the
+     *  seeded webauthn credential + adult band; pass false to exercise the
+     *  governance-eligibility gate's denial path. */
+    kyc?: boolean;
   } = {},
 ): Promise<SeededUser> {
   const user = await identity.store.createUser(
@@ -118,6 +125,21 @@ export async function seedUserWithSession(
   );
   if (opts.steward || opts.admin) {
     await identity.store.setAuth(user.userId, { mfaEnabled: true });
+  }
+  if (opts.kyc !== false) {
+    // Bot-prevention layer 3: mark the actor KYC-verified in the SAME store
+    // the governance-eligibility guard reads (the compliance container; the
+    // test bootstrap creates one when the suite has not wired WS-N).
+    const nowIso = new Date().toISOString();
+    await ensureComplianceServicesForTests().kyc.upsert({
+      userId: user.userId,
+      status: 'verified',
+      evidenceRef: 'test-fixture',
+      verifiedAt: nowIso,
+      verifiedBy: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
   }
   await identity.store.addWebauthn({
     credentialId: `cred-${user.userId}`,
