@@ -43,6 +43,9 @@ export interface RetentionSweepReport {
   invariantOutputsDeleted: number;
   aggregationWindowsDeleted: number;
   moderationFlaggedForReview: number;
+  /** BAI state (behavior windows + authenticity scores) purged for `none`-
+   *  preference owners whose attention data does not outlive the ranking window. */
+  behaviorStatePurged: number;
 }
 
 /** The effective maximum window for a tier after jurisdiction overrides. */
@@ -89,6 +92,7 @@ export async function runRetentionSweeps(
     invariantOutputsDeleted: 0,
     aggregationWindowsDeleted: 0,
     moderationFlaggedForReview: 0,
+    behaviorStatePurged: 0,
   };
 
   // 1. attention_raw backstop (<= 7 days; rows should rarely exist at all).
@@ -139,6 +143,13 @@ export async function runRetentionSweeps(
         owner,
         new Date(now - RANKING_WINDOW_MS).toISOString(),
       );
+      // Bot-prevention layer 2: the derived behavior snapshots + authenticity
+      // assessment are attention-derived state, so for a `none`-preference owner
+      // (whose aggregates do not outlive the ranking window) they must NOT linger
+      // to the 14-day BAI horizon — same coupling as reset/deletion
+      // (`purgeUserAttention`). Honors the selected retention, and a `none` actor
+      // simply never accrues a persisted BAI signature.
+      report.behaviorStatePurged += await events.behaviorStore.purgeActor(owner);
     } else {
       const windowDays = Math.min(
         preference === 'minimal' ? aggregatedWindow.min : aggregatedWindow.max,

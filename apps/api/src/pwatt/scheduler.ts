@@ -76,22 +76,27 @@ export async function runEventPipelineTick(
   } catch (err) {
     onError(err, 'scoring');
   }
+  // Bot-prevention layer 2: refresh every active actor's authenticity assessment
+  // (coherence + cross-account duplication clustering; behavior.ts) BEFORE
+  // scoring, so the scorer applies assessments computed with the CURRENT behavior
+  // config and stamps a `config_hash` that matches it — a behavior-config change
+  // takes effect THIS tick, not the next, and replay/audit metadata never
+  // misidentifies the calculation. It reads the snapshots PRIOR window runs
+  // upserted; this tick's own windows fold during scoring below and feed the next
+  // refresh. Its OWN try block — separate from scoring — so a single poison
+  // assessment can never starve scoring AND the snapshot/assessment retention
+  // pruning.
+  try {
+    await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
+  } catch (err) {
+    onError(err, 'behavior');
+  }
   try {
     for (const window of await windowsNeedingCompute(events, nowMs)) {
       await runPwattWindow(events, identity, window.startMs, window.size, config);
     }
   } catch (err) {
     onError(err, 'scoring');
-  }
-  // Bot-prevention layer 2: refresh every active actor's authenticity
-  // assessment from the snapshots the window runs upsert (coherence +
-  // cross-account duplication clustering; behavior.ts). Its OWN try block —
-  // separate from scoring — so a single poison window can never starve the
-  // assessment refresh AND its snapshot/assessment retention pruning.
-  try {
-    await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
-  } catch (err) {
-    onError(err, 'behavior');
   }
   try {
     await runRetentionSweeps(events, identity, nowMs);
