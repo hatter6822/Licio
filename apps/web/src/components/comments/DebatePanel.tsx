@@ -12,26 +12,12 @@
 // no member vote or tally anywhere — the outcome is the room AI's
 // content-structural adjudication.
 import type { DebateArenaSummary } from '@licio/shared';
-import { useEffect, useState } from 'react';
+import { useNow } from '../../hooks/useNow.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { useOpenDebate } from '../debate/open-debate.js';
 import { Icon } from '../ui/Icon/index.js';
-
-/** How often the row countdowns re-render (minute-level labels). */
-const COUNTDOWN_TICK_MS = 30_000;
-
-/** The current time, re-sampled on a fixed cadence, so the row countdowns
- *  tick between the list's slow (60s/120s) poll refetches. */
-function useNow(tickMs: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), tickMs);
-    return () => clearInterval(id);
-  }, [tickMs]);
-  return now;
-}
 
 /** A coarse "Nh Nm left" countdown to a deadline; null once it has passed. */
 function remainingLabel(deadline: string, nowMs: number): string | null {
@@ -54,7 +40,7 @@ export function DebatePanel({
 }): React.ReactElement | null {
   const openDebate = useOpenDebate();
   const t = useT();
-  const now = useNow(COUNTDOWN_TICK_MS);
+  const now = useNow();
   const STATE_LABEL: Record<DebateArenaSummary['state'], string> = {
     open: t('debate.state.open', 'Live — both sides are making their case'),
     locked: t('debate.state.locked', 'Locked in — the final countdown to AI resolution'),

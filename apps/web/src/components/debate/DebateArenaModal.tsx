@@ -20,7 +20,8 @@ import {
   DEBATE_INACTIVITY_WINDOW_MS,
   DEBATE_POSITION_BODY_LIMIT,
 } from '@licio/shared';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
+import { useNow } from '../../hooks/useNow.js';
 import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useDebateStream } from '../../lib/debate-stream.js';
@@ -49,22 +50,6 @@ const COLLAPSE_CHARS = 420;
 /** Sources beyond this many stay behind the same expand. */
 const COLLAPSE_SOURCES = 2;
 
-/** How often live countdowns re-render. Minute-level labels only need a
- *  half-minute cadence — cheap, and a "2m remaining" can never sit stale
- *  until the next poll the way a render-once computation did. */
-const COUNTDOWN_TICK_MS = 30_000;
-
-/** The current time, re-sampled on a fixed cadence while mounted, so
- *  deadline-derived labels tick instead of freezing at first render. */
-function useNow(tickMs: number): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), tickMs);
-    return () => clearInterval(id);
-  }, [tickMs]);
-  return now;
-}
-
 function remaining(deadline: string, nowMs: number): { closed: boolean; label: string } {
   const ms = Date.parse(deadline) - nowMs;
   if (ms <= 0) return { closed: true, label: '' };
@@ -75,7 +60,7 @@ function remaining(deadline: string, nowMs: number): { closed: boolean; label: s
 }
 
 function Countdown({ deadline, label }: { deadline: string; label: string }): React.ReactElement {
-  const now = useNow(COUNTDOWN_TICK_MS);
+  const now = useNow();
   const t = useT();
   const r = remaining(deadline, now);
   return (
@@ -393,7 +378,7 @@ function ArgumentCard({
 function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactElement | null {
   const mutation = useOverrideDebateMutation(arena.debate_id);
   const t = useT();
-  const now = useNow(COUNTDOWN_TICK_MS);
+  const now = useNow();
   const [reason, setReason] = useState('');
   const [choice, setChoice] = useState<DebateWinner>(arena.winner ?? 'none');
   if (arena.verdict === null) return null;
@@ -583,7 +568,7 @@ const LazyDevFastForward = import.meta.env.DEV ? lazy(() => import('./DevFastFor
 export function DebateArenaContent({ debateId }: { debateId: string }): React.ReactElement {
   const query = useDebateQuery(debateId);
   const t = useT();
-  const now = useNow(COUNTDOWN_TICK_MS);
+  const now = useNow();
   const state = query.data?.debate.state;
   // Live co-visibility: stream while the arena is still active (a terminal
   // arena is static).  Each frame re-fetches the viewer's role-scoped view, so
