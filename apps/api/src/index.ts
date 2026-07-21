@@ -285,7 +285,7 @@ import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
   startEventPipelineScheduler,
 } from './pwatt/scheduler.js';
-import { runPwattWindow } from './pwatt/scoring.js';
+import { runTriggeredPwattWindow } from './pwatt/scoring.js';
 import { DrizzleDecisionLogStore, DrizzleFeatureStore } from './ranking/drizzle-ranking-stores.js';
 import { createDefaultModerationStateProvider } from './ranking/safety-filter.js';
 import { RANKING_SCHEDULER_INTERVAL_MS, startRankingScheduler } from './ranking/scheduler.js';
@@ -455,8 +455,8 @@ registerDefaultConsumers(eventServices, {
   readTriggerThreshold: () => loadTriggerThreshold(eventServices),
   onVolumeTrigger: (itemId, windowStartMs) => {
     logger.info({ itemId, windowStartMs }, 'volume threshold reached: early PWAtt run');
-    void runPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch((err) =>
-      logger.error({ err, itemId }, 'triggered PWAtt window run failed'),
+    void runTriggeredPwattWindow(eventServices, identityServices, windowStartMs, '1h').catch(
+      (err) => logger.error({ err, itemId }, 'triggered PWAtt window run failed'),
     );
   },
 });

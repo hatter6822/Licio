@@ -53,7 +53,7 @@ import {
   detectCoordinatedBurst,
   detectHarassmentCascade,
 } from './anti-signals.js';
-import { foldActorBehaviorWindows } from './behavior.js';
+import { foldActorBehaviorWindows, runBehaviorAuthenticityJob } from './behavior.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
 import { pwattRowForRanking } from './shadow.js';
 
@@ -241,6 +241,29 @@ export function pwattConfigHash(config: PwattRuntimeConfig): string {
     )
     .digest('hex')
     .slice(0, 16);
+}
+
+/**
+ * Direct / triggered scoring — the production volume-threshold trigger and the
+ * simulator, which score a window OUTSIDE the hourly scheduler tick. Refreshes
+ * the authenticity assessments (`runBehaviorAuthenticityJob`) BEFORE scoring, so
+ * the applied assessments and the behavior-inclusive `config_hash` agree on the
+ * ACTIVE behavior config — the same guarantee the tick gets by running the
+ * behavior job first. Without it, an early run after a behavior-config change
+ * would apply the prior thresholds while stamping the new hash until the next
+ * hourly tick. (The scheduler passes an already-refreshed config to
+ * `runPwattWindow` directly and must NOT double-run the population job.)
+ */
+export async function runTriggeredPwattWindow(
+  events: EventPipelineServices,
+  identity: IdentityServices,
+  startMs: number,
+  size: AggregationWindowSize,
+  nowMs: number = events.now(),
+): Promise<WindowScoringReport> {
+  const config = await loadPwattRuntimeConfig(events);
+  await runBehaviorAuthenticityJob(events, config.behavior, nowMs);
+  return runPwattWindow(events, identity, startMs, size, config);
 }
 
 /**

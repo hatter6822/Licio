@@ -20,7 +20,12 @@ import type {
 import { computeAggregationWindow, windowStartMs } from '../pwatt/aggregation.js';
 import { rankFrontPageV0 } from '../pwatt/ranking-v0.js';
 import { runEventPipelineTick } from '../pwatt/scheduler.js';
-import { resolveItemSafetyState, runPwattWindow, windowsNeedingCompute } from '../pwatt/scoring.js';
+import {
+  resolveItemSafetyState,
+  runPwattWindow,
+  runTriggeredPwattWindow,
+  windowsNeedingCompute,
+} from '../pwatt/scoring.js';
 import { assertRankingInputAllowed, RankingBoundaryViolation } from '../pwatt/shadow.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -610,6 +615,39 @@ describe('behavioral-authenticity damping is applied in the SAME tick (WS-E orde
 
     // One tick: behavior job (assess the fleet low) THEN scoring (apply it).
     await runEventPipelineTick(fixture.events, fixture.identity, () => {}, T0 + 2 * HOUR);
+
+    const damped = await fixture.events.invariantStore.latest('PWAtt_v1', dampedStory);
+    const clean = await fixture.events.invariantStore.latest('PWAtt_v1', cleanStory);
+    expect(asNumber(damped?.scoreVector['active_attention'], 1)).toBeLessThan(
+      asNumber(clean?.scoreVector['active_attention'], 0),
+    );
+  });
+
+  it('the DIRECT/triggered path also refreshes assessments before scoring', async () => {
+    // The production volume trigger + the simulator score OUTSIDE the tick via
+    // runTriggeredPwattWindow, which must refresh assessments first — otherwise
+    // an early run applies stale thresholds under the new behavior-inclusive
+    // config_hash. Same observable: the fleet item is damped in the SAME run.
+    const dampedStory = randomUUID();
+    const cleanStory = randomUUID();
+    const richItem = (storyId: string) => ({
+      story_id: storyId,
+      active_dwell_bucket: 'extended' as const,
+      source_opened: true,
+      context_opened: true,
+      reply_depth_bucket: 'shallow' as const,
+      return_visit_count_bucket: 'several' as const,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const fleet = await seedUserWithSession(fixture.identity, { handle: `tfleet${i}` });
+      await fixture.events.behaviorStore.upsertWindows(botWindows(fleet.userId));
+      await ingestAttention(fleet.userId, dampedStory, { items: [richItem(dampedStory)] });
+      const clean = await seedUserWithSession(fixture.identity, { handle: `tclean${i}` });
+      await ingestAttention(clean.userId, cleanStory, { items: [richItem(cleanStory)] });
+    }
+
+    // No prior behavior job: the wrapper runs it before scoring in ONE call.
+    await runTriggeredPwattWindow(fixture.events, fixture.identity, T0, '1h', T0 + 2 * HOUR);
 
     const damped = await fixture.events.invariantStore.latest('PWAtt_v1', dampedStory);
     const clean = await fixture.events.invariantStore.latest('PWAtt_v1', cleanStory);
