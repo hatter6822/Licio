@@ -782,6 +782,60 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
     expect(await stores.declarations.get(userId)).toBeNull();
   });
 
+  it('KYC verification upsert/get/CAS/delete against the live user FK (layer 3)', async () => {
+    const at = NOW();
+    // Create (no CAS): a reviewer verifies a member with no prior standing.
+    const verified = await stores.kyc.upsert({
+      userId,
+      status: 'verified',
+      evidenceRef: 'partner:fixture',
+      verifiedAt: NOW(),
+      verifiedBy: userId,
+      createdAt: at,
+      updatedAt: NOW(),
+    });
+    if (verified === null) throw new Error('kyc create returned null');
+    expect(verified.status).toBe('verified');
+    expect((await stores.kyc.get(userId))?.evidenceRef).toBe('partner:fixture');
+
+    // CAS on the timestamptz `updatedAt` WHERE clause: a stale-premise decision
+    // matches zero rows (the guarantee the review route rides).
+    expect(
+      await stores.kyc.upsert(
+        { ...verified, status: 'revoked', updatedAt: NOW() },
+        { status: 'pending', updatedAt: verified.updatedAt },
+      ),
+    ).toBeNull();
+    expect((await stores.kyc.get(userId))?.status).toBe('verified');
+
+    // …and a decision whose premises hold succeeds.
+    const revoked = await stores.kyc.upsert(
+      { ...verified, status: 'revoked', updatedAt: NOW() },
+      { status: verified.status, updatedAt: verified.updatedAt },
+    );
+    expect(revoked?.status).toBe('revoked');
+
+    // Delete, then a CAS against the MISSING row inserts nothing (no
+    // resurrection by a stale reviewer decision after the deletion purge).
+    expect(await stores.kyc.delete(userId)).toBe(true);
+    expect(await stores.kyc.get(userId)).toBeNull();
+    expect(
+      await stores.kyc.upsert(
+        {
+          userId,
+          status: 'verified',
+          evidenceRef: null,
+          verifiedAt: NOW(),
+          verifiedBy: null,
+          createdAt: at,
+          updatedAt: NOW(),
+        },
+        { status: 'revoked', updatedAt: NOW() },
+      ),
+    ).toBeNull();
+    expect(await stores.kyc.get(userId)).toBeNull();
+  });
+
   it('disclosures are publish-immutable; acks are idempotent and erased by NULLing only', async () => {
     const disclosureId = `risk-${randomUUID().slice(0, 8)}`;
     const version = {

@@ -25,6 +25,42 @@ Every account holds **at least one** method at all times (the `countAuthMethods`
 last-method guard). Email is optional, so a passkey-only or wallet-only account
 is valid and carries no email PII.
 
+## Sign-up proof-of-work CAPTCHA (bot-prevention layer 1)
+
+Every **account-minting** entry point — `POST /v1/auth/register`,
+`POST /v1/auth/webauthn/signup/options` (the passkey-signup entry; verify is
+bound to it through the single-use pending record), and the first-time-wallet
+branch of `POST /v1/auth/wallet/verify` — requires a solved sign-up
+proof-of-work challenge (`captcha` in the request body). Existing-account
+sign-in never pays it.
+
+This is the **most privacy-preserving CAPTCHA the architecture permits**: the
+`'self'`-only CSP and the no-third-party doctrine rule out every hosted
+CAPTCHA product, and a compute-bound challenge needs no visual/audio puzzle
+(fully accessible), no cookies, no fingerprinting, and no behavioral data —
+nothing about the requester is read or stored (§19.1). Scheme
+(ALTCHA-style): `POST /v1/auth/captcha/challenge` mints
+`SHA-256(salt || '.' || N)` for a secret `N ∈ [0, max_number]`, HMAC-signs the
+tuple under the `licio:pow-captcha:v1` domain key (`identity/crypto.ts`), and
+remembers the challenge id in the single-use `EphemeralStore` (the WebAuthn
+challenge pattern — Redis-backed in production). The browser brute-forces `N`
+in a Web Worker (`apps/web/src/lib/pow-captcha.ts`, primed while the user
+types, main-thread fallback with cooperative yielding); the server verifies
+with two hashes + one constant-time HMAC compare + one atomic `take`
+(single-use — cheap checks first, so a forged attempt never burns an
+outstanding challenge). Errors are typed (`captcha_required` /
+`captcha_invalid`) and the client transparently re-solves once.
+
+Difficulty: `SIGNUP_POW_MAX_NUMBER` (validated env; default 40 000 —
+sub-second on desktop; `0` is the LOUD operator opt-out, warned at boot like
+`ALLOW_INSECURE_NULL_MAILER`), scaled ×2/×4/×8 by the identity-free
+process-wide issuance pressure tracker (`SignupPressure`) so bulk
+registration pays more under attack. Tests run the REAL flow at a tiny work
+factor (`identity/__tests__/pow-captcha.test.ts`,
+`__tests__/signup-captcha.test.ts`; the shared `signupCaptcha` helper solves
+against the live app). SCOPE: sign-up only — the LCAP relay plane's
+no-proof-of-work doctrine (OFFLINE_SPEC §27.4) is untouched.
+
 ## Architecture
 
 The identity layer follows the codebase's **interface + in-memory adapter**

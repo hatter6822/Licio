@@ -10,6 +10,7 @@
 // server (WS-D.1.2b/1.3a).  SIWE messages are validated structurally here and
 // verified cryptographically by viem (WS-D.1.4c).
 import { z } from 'zod';
+import { powSolutionSchema } from './captcha.js';
 import { uuidSchema } from './common.js';
 import { sessionSummarySchema } from './identity-records.js';
 import { ageBandSchema, emailSchema, handleSchema, userPublicSchema } from './user.js';
@@ -53,6 +54,10 @@ export const emailRegisterRequestSchema = z
     display_name: z.string().min(1).max(80),
     email: emailSchema,
     date_of_birth: dateOfBirthSchema,
+    /** Solved sign-up proof-of-work (WS-D bot-prevention layer 1).  Optional in
+     *  the SCHEMA so the wire shape stays stable when the gate is disabled; the
+     *  route REQUIRES a valid solution whenever the gate is enabled. */
+    captcha: powSolutionSchema.optional(),
   })
   .strict();
 export type EmailRegisterRequest = z.infer<typeof emailRegisterRequestSchema>;
@@ -148,6 +153,9 @@ export const siweVerifyRequestSchema = z
     handle: handleSchema.optional(),
     display_name: z.string().min(1).max(80).optional(),
     date_of_birth: dateOfBirthSchema.optional(),
+    /** Solved sign-up proof-of-work — required only on the first-time wallet
+     *  SIGNUP branch (existing-wallet sign-in never pays it). */
+    captcha: powSolutionSchema.optional(),
   })
   .strict();
 export type SiweVerifyRequest = z.infer<typeof siweVerifyRequestSchema>;

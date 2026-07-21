@@ -638,6 +638,20 @@
       "when": 1783728000015,
       "tag": "0091_audit_index_hygiene",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1783728000016,
+      "tag": "0092_behavioral_authenticity",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1783728000017,
+      "tag": "0093_kyc_verification",
+      "breakpoints": true
     }
   ]
 }

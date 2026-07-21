@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// WS-H.1.2b — the eleven invariant cards.
+// WS-H.1.2b — the twelve invariant cards.
 //
 // Every card is validated against `invariantCardSchema` at boot (a malformed
 // card fails startup, not a 3am page) and snapshot-tested so an unreviewed
 // change fails CI. `shadow_status` here is the DOCUMENTED DEFAULT — the live
 // status is resolved from the append-only promotion record (WS-H.1.2e), and
-// all eleven ship in shadow.
+// all twelve ship in shadow.
 
 import { type InvariantCard, InvariantType, invariantCardSchema } from '@licio/invariants';
 
@@ -327,6 +327,40 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
       'Signatures are EXACT for piecewise-linear session paths (Chen’s identity, depth-3 truncation documented); classification thresholds are heuristic and logged for review.',
     shadow_status: 'shadow',
     dependencies: ['WS-E session event data (topic ordinals, action kinds, timing only)'],
+  }),
+  [InvariantType.BehavioralAuthenticity]: card({
+    invariant_type: InvariantType.BehavioralAuthenticity,
+    owner: OWNER,
+    version: '1.0.0',
+    input_schema: 'docs/invariants/README.md#bai-inputs',
+    output_schema: 'behavioralAuthenticityScoreVectorSchema (@licio/invariants)',
+    confidence_bounds: { min: 0.2, typical: 0.8, max: 0.95 },
+    coverage_bounds: { min_acceptable: 0.5, typical: 1 },
+    coverage_definition:
+      'Fraction of active identifiable actors in the lookback with a current authenticity assessment (the WS-E behavior job refreshes every active actor hourly, so coverage is normally 1).',
+    known_failure_modes: [
+      {
+        mode: 'assessment population too small (cold start, quiet instance)',
+        impact: 'population shares are dominated by a handful of accounts',
+        mitigation:
+          'confidence grows with the assessed population (n/(n+20)); zero assessments emit INSUFFICIENT_COVERAGE',
+      },
+      {
+        mode: 'a fleet mutates its stream shape per account (signature evasion)',
+        impact: 'duplication clustering misses the fleet',
+        mitigation:
+          'the per-account coherence components (variety/breadth/rhythm) still bind — evading them requires emitting genuinely human-shaped behavior, which is the desired cost; MFCI synchrony covers the lockstep-timing residual',
+      },
+    ],
+    fallback_behavior:
+      'On failure no assessment changes (PWAtt keeps the last stored multipliers; unassessed actors stay neutral 1); ranking omits BAI features.',
+    approximation_notes:
+      'Duplication candidates come from the frozen 128-hash MinHash family over the canonical behavior stream (32×4 LSH banding) and are VERIFIED against the estimated Jaccard threshold before clustering; the estimate carries the standard ±1/√128 error. Per-account multipliers are floored (never zero) and evidence-gated (quiet accounts stay neutral).',
+    shadow_status: 'shadow',
+    dependencies: [
+      'WS-E actor behavior snapshots (coarse §22.1 buckets only)',
+      'WS-E behavior authenticity job (pwatt/behavior.ts)',
+    ],
   }),
 };
 

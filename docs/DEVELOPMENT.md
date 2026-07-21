@@ -483,6 +483,7 @@ covered in detail in Section 16.
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
 | `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend (Ollama URL + `gpt-oss:20b`); every governed surface fails closed per call to its deterministic path until the runtime responds. `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify a real runtime with `pnpm setup:llm [--docker]`. Details: Section 16 |
 | `KNOMOSIS_GATEWAY_URL` + `KNOMOSIS_GATEWAY_TOKEN_FILE` group | The WS-L Knomosis gateway uses the deterministic in-memory `FakeKnomosisGateway` (fine for dev; no real substrate). Both must be set together to bind the real `HttpKnomosisGateway` (bearer token read from the file); if the pin declares more than one **active** deployment the server refuses to boot, since one gateway URL cannot route multiple deployments. The `knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys gate every WS-L endpoint and both default `false` + fail closed in **production**. For developer convenience a non-production (`pnpm dev`) boot DEFAULTS both keys **`true`** (so the wallet + governance-simulation surface is reachable out of the box) — but only when the key is not already explicitly set, so a durable (Redis-backed) dev config or an admin write still wins and can force fail-closed testing. Production is untouched: the flags stay `false` unless an operator flips them through the admin surface. The dev deployment is scoped to the **Knomosis L2 (chain `8357`)**, settling to its **Sepolia L1 (`11155111`)** — the SIWE wallet-link allowlist is both. The web client binds the link message to the Knomosis chain (`8357`) regardless of the extension's active network — override with `VITE_WALLET_CHAIN_ID` — so a dev wallet never signs a mainnet-scoped message. A non-production box also scopes the WS-D wallet **sign-in** allowlist to `[8357, 11155111]` (never mainnet); production keeps the multi-chain default |
+| `SIGNUP_POW_MAX_NUMBER` | The sign-up proof-of-work CAPTCHA (bot-prevention layer 1) runs at the built-in work factor (40 000 — the browser auto-solves in a Web Worker while you fill the create-account form; no interaction, sub-second on a desktop). Set a smaller number to speed up repeated manual sign-up testing, or `0` to disable the gate entirely (the API warns loudly at boot, like `ALLOW_INSECURE_NULL_MAILER`). Tests pin a tiny factor and run the real flow |
 | `LCAP_NETWORK_ID` | The WS-R LCAP network id defaults to `licio` (it scopes COSE domain separation + the acceptance log). Set it only to run a distinct LCAP network |
 | `LCAP_IPFS_GATEWAY_URL` + `LCAP_IPFS_PINNING_URL` group | The Gate-19 LCAP public-block → IPFS bridge (WS-R.15.7) is **off**: no publisher exists and the steward `public-bridge` publish/republish routes return 503 (fail-closed). Set **both** (all-or-none — a partial pair fails env validation at boot) to run the opt-in bridge; it also needs `DATABASE_URL` (always present in production) for the live takedown-oracle + §22.7 review-gate reads |
 
@@ -688,6 +689,21 @@ Licio is **passwordless by design**. There is no password field. Real users
 sign in with a passkey (WebAuthn), a one-time email code, or, for adults,
 Sign-In with Ethereum. Passkeys are bound to a physical device and cannot be
 pre-seeded, so these development accounts use the email one-time-code path.
+
+Two bot-prevention behaviors worth knowing during manual testing:
+
+- **Creating a new account** solves the sign-up proof-of-work CAPTCHA
+  automatically (a Web Worker, primed while you type — you should notice
+  nothing). See `SIGNUP_POW_MAX_NUMBER` in Section 7.4 to speed it up or
+  disable it.
+- **Room-governance participation** (electing a steward, ratification
+  ballots, proposals/votes/delegations) requires a **KYC-verified** account
+  (bot-prevention layer 3). Every seeded account below (and the demo author)
+  is seeded with a reviewer-verified KYC standing, so governance flows work
+  out of the box; an account you REGISTER yourself has none and will be
+  refused with `kyc_required` until you verify it through the compliance
+  console (`compliance@licio.test` → `POST /v1/compliance/admin/kyc/:userId`,
+  decision `verify`).
 
 | Role chip | Display name | Email | What it exercises |
 |-----------|--------------|-------|-------------------|

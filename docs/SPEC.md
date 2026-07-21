@@ -1692,7 +1692,7 @@ Because a PWA cannot use native attestation, abuse defense is server-side and be
 
 | Threat | Mitigation |
 |---|---|
-| Bot/sock accounts | Account-age and trust tiers, behavioral analysis, proof-of-work/turnstile challenges, MFCI, WebAuthn. |
+| Bot/sock accounts | The three bot-prevention layers below: the self-hosted sign-up proof-of-work challenge, account-age/trust tiers + behavioral-authenticity (BAI) analysis, and the KYC governance floor; plus MFCI and WebAuthn. |
 | Coordinated brigading | MFCI, tropical cascade, report-delay mechanisms. |
 | Duplicate spam | MERI, URL canonicalization, source lineage. |
 | Harassment raids | Safety queues, target protection, distribution freeze. |
@@ -1723,6 +1723,51 @@ account-age/progressive-trust weighting make disposable-account attacks
 expensive. The realistic goal is to make a successful attack expensive,
 multi-front, and human-detectable — not to make any invariant individually
 unbeatable.
+
+**Bot prevention (three layers).** Automated-account defense is layered so
+each layer prices a different stage of a bot operation, and all three respect
+the Section 19.1 posture (no network identity, no fingerprinting, no third
+parties):
+
+1. **Creation — the sign-up proof-of-work challenge.** Every account-minting
+   entry point (email registration, passkey signup, first-time wallet signup)
+   requires a solved, single-use, server-HMAC-bound SHA-256 partial-preimage
+   challenge. It is the privacy-preserving CAPTCHA this architecture permits:
+   the `'self'`-only CSP and the no-third-party doctrine rule out every hosted
+   CAPTCHA product, and a compute-bound challenge needs no interaction (fully
+   accessible), no cookies, and no behavioral data. The browser solves in a
+   Web Worker while the user fills the form (sub-second on desktop); the
+   server verifies with two hashes and one atomic single-use redemption, and
+   the work factor scales with identity-free, process-wide sign-up pressure —
+   bulk registration pays CPU per account, rising under attack. (Scoped to
+   sign-up: the LCAP relay plane's no-proof-of-work doctrine, OFFLINE_SPEC
+   §27.4, is untouched.)
+2. **Operation — behavioral authenticity (BAI).** The rich Section 22.1
+   context is a joint constraint automation must satisfy: per-account
+   coherence components (dwell-bucket variety, interaction breadth across the
+   aggregate's dimensions, temporal rhythm — humans are bursty and sleep) and
+   cross-account behavior-stream duplication (the frozen MinHash family over a
+   canonical stream serialization; near-duplicate fleets collapse to ~one
+   account of influence). All components are pure, deterministic,
+   evidence-gated (quiet accounts stay neutral), floored (influence is
+   reduced, never silenced), computed server-side from the ALREADY-bucketed
+   aggregates (no new client collection), and never profile the pseudonymous
+   privacy-bucket actor. The effective multiplier damps the PWAtt trust factor
+   (compounding with account-age trust in both burst detection and served
+   scoring), and the twelfth platform invariant (`behavioral_authenticity`)
+   reports population-level health (flagged share, damped weight share,
+   cluster census) through the standard WS-H shadow/promotion machinery.
+3. **Power — the KYC governance floor.** Room-governance participation
+   (steward elections and candidacy, model ratification, proposals, votes,
+   challenges, delegations, steward governance actions) requires a
+   reviewer-verified KYC standing (the WS-N.1.1f `kyc_partner` level — the
+   compliance standing that makes an account a capable Knomosis actor), no
+   open high/critical compliance case, and no high-risk linked wallet. The
+   gate is a fail-closed platform floor enforced at the route boundary before
+   the community-configurable Section 17.5 eligibility rules, structurally
+   guaranteed by the `check:governance-kyc` CI gate. Content participation
+   (reading, posting, commenting) is never KYC-gated; only governance power
+   is — a bot fleet that survives layers 1–2 still cannot vote.
 
 ## 25.6 Wallet, smart-contract, and Knomosis security
 

@@ -38,6 +38,10 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  checkGovernanceEligibility,
+  requireGovernanceEligibility,
+} from '../governance/eligibility.js';
+import {
   evaluateReadiness,
   type ReadinessDeps,
   requestModeTransition,
@@ -320,6 +324,9 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/proposals',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: creating a governance proposal (sim or
+        // production) is governance participation — KYC-verified accounts only.
+        requireGovernanceEligibility(),
         roomParam,
         // The body shape is MODE-DEPENDENT (sim template vs WS-M production
         // draft), so a loose object validator types the RPC client while the
@@ -412,6 +419,8 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/proposals/:proposalId/vote',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: voting is governance participation.
+        requireGovernanceEligibility(),
         proposalParams,
         zValidator('json', proposalVoteRequestSchema),
         async (c) => {
@@ -440,6 +449,8 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/proposals/:proposalId/execute',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: triggering execution is governance power.
+        requireGovernanceEligibility(),
         proposalParams,
         async (c) => {
           const auth = requireAuth(c);
@@ -508,6 +519,8 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/treasury/deposits',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: sim treasury practice is governance participation.
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', simTreasuryDepositRequestSchema),
         async (c) => {
@@ -596,6 +609,9 @@ export function createRoomGovernanceSimRoutes() {
         '/rooms/:roomId/governance/comprehension',
         authMiddleware(),
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: the comprehension quiz gates the member's
+        // FIRST governance action — the same eligibility bar applies to it.
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', comprehensionSubmitRequestSchema),
         async (c) => {
@@ -711,6 +727,13 @@ export function createRoomGovernanceSimRoutes() {
             (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId)))
           ) {
             return c.json(notFound, 404); // 404-over-403 (no steward oracle)
+          }
+          // Bot-prevention layer 3: a STEWARD driving a mode transition is
+          // exercising governance power and must hold the KYC bar; platform
+          // staff recovery edges are platform operations, not participation.
+          if (!platformStaff) {
+            const denial = await checkGovernanceEligibility(auth.userId);
+            if (denial) return c.json({ error: denial }, 403);
           }
           const body = c.req.valid('json');
           // WS-M.1.1b: the FULL edge table (rollbacks, production escalations,

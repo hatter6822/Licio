@@ -7,6 +7,9 @@
 // defaults (logged) — a misconfiguration can never silently rebalance
 // distribution (WS-E.2.3c).
 import {
+  type BehaviorAuthenticityConfig,
+  behaviorAuthenticityConfigSchema,
+  DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG,
   DEFAULT_PWATT_V0_CONFIG,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
   type PwattV0Config,
@@ -34,6 +37,8 @@ export interface PwattRuntimeConfig {
   cascade: CascadeDetectorConfig;
   /** Account-age progressive-trust weights (WS-O.4.5). */
   trustWeights: TrustWeights;
+  /** Bot-prevention layer 2: behavioral-authenticity thresholds (BAI). */
+  behavior: BehaviorAuthenticityConfig;
   /** Real-time event-count threshold that triggers an early aggregation run. */
   triggerThreshold: number;
 }
@@ -50,6 +55,7 @@ export const DEFAULT_PWATT_RUNTIME_CONFIG: PwattRuntimeConfig = {
   burst: DEFAULT_BURST_CONFIG,
   cascade: DEFAULT_CASCADE_CONFIG,
   trustWeights: DEFAULT_TRUST_WEIGHTS,
+  behavior: DEFAULT_BEHAVIOR_AUTHENTICITY_CONFIG,
   triggerThreshold: 500,
 };
 
@@ -183,6 +189,7 @@ export const PWATT_CONFIG_KEYS = [
   'burst',
   'cascade',
   'trust_weights',
+  'behavior',
   'trigger_threshold',
 ] as const;
 export type PwattConfigKey = (typeof PWATT_CONFIG_KEYS)[number];
@@ -327,6 +334,12 @@ export function validatePwattConfigValue(
         const parsed = trustWeightsSchema.safeParse(value);
         return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid trust weights');
       }
+      case 'behavior': {
+        const parsed = behaviorAuthenticityConfigSchema.safeParse(value);
+        return parsed.success
+          ? null
+          : (parsed.error.issues[0]?.message ?? 'invalid behavior config');
+      }
       case 'trigger_threshold': {
         const parsed = z.object({ value: z.number().int().min(1) }).safeParse(value);
         return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid threshold');
@@ -402,6 +415,13 @@ export async function loadPwattRuntimeConfig(
     const parsed = trustWeightsSchema.safeParse(trustWeights);
     if (parsed.success) config.trustWeights = parsed.data;
     else reject('trust_weights', parsed.error.issues[0]?.message ?? 'invalid');
+  }
+
+  const behavior = await events.configStore.get('behavior');
+  if (behavior) {
+    const parsed = behaviorAuthenticityConfigSchema.safeParse(behavior);
+    if (parsed.success) config.behavior = parsed.data;
+    else reject('behavior', parsed.error.issues[0]?.message ?? 'invalid');
   }
 
   const trigger = await events.configStore.get('trigger_threshold');

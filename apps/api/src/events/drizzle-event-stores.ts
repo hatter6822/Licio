@@ -10,6 +10,8 @@
 // Covered by gated integration tests (DATABASE_URL) that run the real
 // migration chain — the same policy as the WS-D Drizzle adapters.
 import {
+  actorAuthenticityScores,
+  actorBehaviorWindows,
   aggregationWindows,
   attentionAggregates,
   consumerCheckpoints,
@@ -24,6 +26,9 @@ import {
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import {
+  type ActorAuthenticityRecord,
+  type ActorBehaviorStore,
+  type ActorBehaviorWindowRecord,
   type AggregationWindowRecord,
   type AggregationWindowSize,
   type AggregationWindowStore,
@@ -1071,5 +1076,186 @@ export class DrizzleConsumerCheckpointStore implements ConsumerCheckpointStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(consumerCheckpoints);
+  }
+}
+
+export class DrizzleActorBehaviorStore implements ActorBehaviorStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  #toWindow(row: typeof actorBehaviorWindows.$inferSelect): ActorBehaviorWindowRecord {
+    return {
+      actorRef: row.actorRef,
+      windowStart: iso(row.windowStart),
+      eventCount: row.eventCount,
+      itemsTouched: row.itemsTouched,
+      dwellHistogram: row.dwellHistogram,
+      replyDepthHistogram: row.replyDepthHistogram,
+      returnHistogram: row.returnHistogram,
+      sourceOpens: row.sourceOpens,
+      contextOpens: row.contextOpens,
+      saves: row.saves,
+      contributions: row.contributions,
+    };
+  }
+
+  async upsertWindows(records: readonly ActorBehaviorWindowRecord[]): Promise<void> {
+    if (records.length === 0) return;
+    const now = new Date();
+    const values = records.map((record) => ({
+      actorRef: record.actorRef,
+      windowStart: new Date(record.windowStart),
+      eventCount: record.eventCount,
+      itemsTouched: record.itemsTouched,
+      dwellHistogram: record.dwellHistogram as Record<string, number>,
+      replyDepthHistogram: record.replyDepthHistogram as Record<string, number>,
+      returnHistogram: record.returnHistogram as Record<string, number>,
+      sourceOpens: record.sourceOpens,
+      contextOpens: record.contextOpens,
+      saves: record.saves,
+      contributions: record.contributions,
+      computedAt: now,
+    }));
+    // ONE multi-row upsert rather than N round trips (a hot 1h window has a
+    // row per distinct actor). `excluded` carries the incoming values.
+    await this.#db
+      .insert(actorBehaviorWindows)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [actorBehaviorWindows.actorRef, actorBehaviorWindows.windowStart],
+        set: {
+          eventCount: sql`excluded.event_count`,
+          itemsTouched: sql`excluded.items_touched`,
+          dwellHistogram: sql`excluded.dwell_histogram`,
+          replyDepthHistogram: sql`excluded.reply_depth_histogram`,
+          returnHistogram: sql`excluded.return_histogram`,
+          sourceOpens: sql`excluded.source_opens`,
+          contextOpens: sql`excluded.context_opens`,
+          saves: sql`excluded.saves`,
+          contributions: sql`excluded.contributions`,
+          computedAt: sql`excluded.computed_at`,
+        },
+      });
+  }
+
+  async listWindowsSince(sinceIso: string): Promise<ActorBehaviorWindowRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(actorBehaviorWindows)
+      .where(gte(actorBehaviorWindows.windowStart, new Date(sinceIso)))
+      .orderBy(asc(actorBehaviorWindows.actorRef), asc(actorBehaviorWindows.windowStart));
+    return rows.map((row) => this.#toWindow(row));
+  }
+
+  async deleteWindowsOlderThan(cutoffIso: string): Promise<number> {
+    const removed = await this.#db
+      .delete(actorBehaviorWindows)
+      .where(sql`${actorBehaviorWindows.windowStart} < ${cutoffIso}::timestamptz`)
+      .returning({ actorRef: actorBehaviorWindows.actorRef });
+    return removed.length;
+  }
+
+  async upsertAuthenticity(records: readonly ActorAuthenticityRecord[]): Promise<void> {
+    if (records.length === 0) return;
+    const values = records.map((record) => ({
+      actorRef: record.actorRef,
+      score: record.score,
+      coherence: record.coherence,
+      components: record.components,
+      flags: record.flags,
+      evidence: record.evidence,
+      clusterId: record.clusterId,
+      clusterSize: record.clusterSize,
+      computedAt: new Date(record.computedAt),
+    }));
+    // ONE multi-row upsert (a row per assessed actor per hourly job run).
+    await this.#db
+      .insert(actorAuthenticityScores)
+      .values(values)
+      .onConflictDoUpdate({
+        target: actorAuthenticityScores.actorRef,
+        set: {
+          score: sql`excluded.score`,
+          coherence: sql`excluded.coherence`,
+          components: sql`excluded.components`,
+          flags: sql`excluded.flags`,
+          evidence: sql`excluded.evidence`,
+          clusterId: sql`excluded.cluster_id`,
+          clusterSize: sql`excluded.cluster_size`,
+          computedAt: sql`excluded.computed_at`,
+        },
+      });
+  }
+
+  #toScore(row: typeof actorAuthenticityScores.$inferSelect): ActorAuthenticityRecord {
+    return {
+      actorRef: row.actorRef,
+      score: row.score,
+      coherence: row.coherence,
+      components: row.components,
+      flags: row.flags,
+      evidence: row.evidence,
+      clusterId: row.clusterId,
+      clusterSize: row.clusterSize,
+      computedAt: iso(row.computedAt),
+    };
+  }
+
+  async getAuthenticity(actorRef: string): Promise<ActorAuthenticityRecord | null> {
+    const [row] = await this.#db
+      .select()
+      .from(actorAuthenticityScores)
+      .where(eq(actorAuthenticityScores.actorRef, actorRef))
+      .limit(1);
+    return row ? this.#toScore(row) : null;
+  }
+
+  async getAuthenticityMany(
+    actorRefs: readonly string[],
+  ): Promise<Map<string, ActorAuthenticityRecord>> {
+    const out = new Map<string, ActorAuthenticityRecord>();
+    if (actorRefs.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(actorAuthenticityScores)
+      .where(inArray(actorAuthenticityScores.actorRef, [...actorRefs]));
+    for (const row of rows) out.set(row.actorRef, this.#toScore(row));
+    return out;
+  }
+
+  async listAuthenticity(): Promise<ActorAuthenticityRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(actorAuthenticityScores)
+      .orderBy(asc(actorAuthenticityScores.actorRef));
+    return rows.map((row) => this.#toScore(row));
+  }
+
+  async deleteAuthenticityOlderThan(cutoffIso: string): Promise<number> {
+    const removed = await this.#db
+      .delete(actorAuthenticityScores)
+      .where(sql`${actorAuthenticityScores.computedAt} < ${cutoffIso}::timestamptz`)
+      .returning({ actorRef: actorAuthenticityScores.actorRef });
+    return removed.length;
+  }
+
+  async purgeActor(actorRef: string): Promise<number> {
+    const windows = await this.#db
+      .delete(actorBehaviorWindows)
+      .where(eq(actorBehaviorWindows.actorRef, actorRef))
+      .returning({ actorRef: actorBehaviorWindows.actorRef });
+    const scores = await this.#db
+      .delete(actorAuthenticityScores)
+      .where(eq(actorAuthenticityScores.actorRef, actorRef))
+      .returning({ actorRef: actorAuthenticityScores.actorRef });
+    return windows.length + scores.length;
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(actorBehaviorWindows);
+    await this.#db.delete(actorAuthenticityScores);
   }
 }

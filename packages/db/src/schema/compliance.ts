@@ -87,6 +87,12 @@ export const declarationVerificationEnum = complianceSchema.enum(
   ['unverified', 'reviewer_verified'],
 );
 
+export const kycStatusEnum = complianceSchema.enum('kyc_verification_status', [
+  'pending',
+  'verified',
+  'revoked',
+]);
+
 export const sarStatusEnum = complianceSchema.enum('sar_status', ['draft', 'approved', 'filed']);
 
 export const lawfulAccessBasisEnum = complianceSchema.enum('lawful_access_basis', [
@@ -258,6 +264,29 @@ export const regionDeclarations = complianceSchema.table('region_declaration', {
     .notNull()
     .default('unverified'),
   /** Opaque evidence reference — never a raw document (data minimization). */
+  evidenceRef: text('evidence_ref'),
+  verifiedAt: tz('verified_at'),
+  verifiedBy: uuid('verified_by').references(() => users.userId, { onDelete: 'set null' }),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// WS-N.1.1f — KYC verification standing (bot-prevention layer 3).  One row per
+// user; deleted with the account (CASCADE — the standing is the user's own
+// state; the partner retains whatever its own regulation requires).  ONLY an
+// opaque evidence/partner reference is stored — identity documents and PII
+// never enter the platform (§19.1 minimization).  `verified` is the single
+// state the compliance engine's `kycLevel` maps to `kyc_partner`; everything
+// else fails closed to `none`.
+// ---------------------------------------------------------------------------
+
+export const kycVerifications = complianceSchema.table('kyc_verification', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.userId, { onDelete: 'cascade' }),
+  status: kycStatusEnum('status').notNull().default('pending'),
+  /** Opaque partner/case reference — never a raw document. */
   evidenceRef: text('evidence_ref'),
   verifiedAt: tz('verified_at'),
   verifiedBy: uuid('verified_by').references(() => users.userId, { onDelete: 'set null' }),

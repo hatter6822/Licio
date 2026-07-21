@@ -34,7 +34,7 @@ Two constraints govern everything here (SPEC §30.4, the M2 gate):
 | Pure mathematics | `packages/invariants/src/{math,meri,mfci,gwei,scoi,phi,hodge,tropical,braid,reeb,cid,pathsig}` | Deterministic, property-tested invariant math (no I/O, no clock, seeded randomness only) |
 | Schemas | `packages/invariants/src/schemas/` | Reason-code registry, per-type score-vector zod schemas (strict, snapshot-pinned), the invariant-card schema |
 | Platform contracts | `packages/invariants/src/platform/` | `InvariantService` interface, promotion checklist logic, envelope builders, synthetic datasets, the regression harness + pinned baselines |
-| Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the eleven service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
+| Services | `apps/api/src/invariants/` | Stores (+ Drizzle adapters), fail-closed config, the twelve service implementations, data assembly, the fallback runner, the promotion service, the lease-guarded scheduler, router consumers |
 | Routes | `apps/api/src/routes/invariants-admin.ts`, `invariants-public.ts` | Steward/analyst surface; public SCOI/MERI reads |
 | Tables | `packages/db/src/schema/{events,invariants}.ts` | `invariant_outputs` (envelope + CHECKs), `invariant_promotions`, `invariant_calibrations`, `invariant_run_metadata`, `mfci_cases`, `mfci_margins` (MFCI-4 conditioning records), `mfci_risk_states` (per-target continuity), `bridge_attempts` (WS-H.4.2d) |
 | Client | `apps/web/src/components/story/*`, `components/composer/ComposerAffordances/ContextWarning.tsx`, `signals/topic-loops.ts`, `signals/topic-dampening.ts` | Interpretation differences, the composer context warning, PHI v0 topic-frequency feed dampening + wellbeing controls (the MERI exposure label is no longer surfaced on feed cards) |
@@ -64,7 +64,7 @@ first-party with explicit tolerances and tests:
   function of (inputs, seed); production seeds derive from
   (target, window, version) so re-runs are idempotent.
 
-## The eleven invariants
+## The twelve invariants
 
 ### MERI — Matroid Exposure Rank (SPEC §7)
 
@@ -338,6 +338,49 @@ invariants are shadow-only. MFCI's own borderline targets are not re-routed
 (0.15), `thresholdHuggingMinPopulation` (12), `thresholdHuggingExcess` (2.5),
 all fail-closed under `invariants.*`.
 
+### BAI — Behavioral Authenticity (bot-prevention layer 2)
+
+The platform-level view of the per-account behavioral-authenticity system
+(SPEC §25.5 "Bot prevention"). The per-account mathematics is pure and lives
+in `packages/invariants/src/behavior/authenticity.ts`: three coherence
+components over an actor's per-1h-window behavior snapshots — **dwell-bucket
+variety** (normalized Shannon entropy of the pooled non-`none` per-item MAX
+dwell histogram; a degenerate single-bucket stream at volume is machine-like),
+**interaction breadth** (how many of the §22.1 context dimensions the stream
+ever exercises; high-volume single-dimension farming is context-free
+automation), and **temporal rhythm** (always-on flatness — humans sleep — and
+metronomic per-window volume, CV below the floor). Every component is total,
+deterministic (§30.6 replay), **evidence-gated** (below its floor it is
+NEUTRAL — a lurker is never damped), and floored (never zero). Cross-account
+**duplication** reuses the frozen 128-hash MinHash family over the canonical
+`behaviorStreamText` serialization (32×4 LSH banding for candidates, verified
+against the estimated-Jaccard threshold, union-find components, deterministic
+cluster ids); a cluster of k near-identical streams collapses to ~one account
+of influence (each member ×1/k, floored).
+
+The operational side is WS-E's: the window fold persists per-actor snapshots
+(1h grain, identifiable actors only — the privacy-bucket actor is NEVER
+profiled), and the hourly job (`apps/api/src/pwatt/behavior.ts`) assesses
+every active actor, clusters signatures, and upserts the effective
+multipliers PWAtt's trust factor consumes (compounding with account-age
+trust; floored at `overallFloor`, so influence is reduced, never silenced).
+Runtime thresholds live under the `behavior` pwatt_config key
+(`behaviorAuthenticityConfigSchema`, fail-closed to the reviewed defaults).
+
+#### BAI inputs
+
+The stored per-actor authenticity assessments (`actor_authenticity_scores`,
+written by the WS-E behavior job from `actor_behavior_windows` — both derive
+exclusively from the coarse §22.1 buckets; nothing beyond what the aggregates
+already disclose). The batch computation reports the POPULATION view over the
+global feed target: `flagged_share`, `damped_weight_share` (evidence-weighted
+share of assessed scoring weight removed by damping), the duplicate-behavior
+`cluster_count` and `largest_cluster_size`, `scored_actors`, and
+`median_score` (`behavioralAuthenticityScoreVectorSchema`). Zero assessments
+degrade to `INSUFFICIENT_COVERAGE`; per-account scores never appear in an
+invariant output (internal integrity state, the WS-J/WS-N anti-tipping-off
+posture — also excluded from DSAR exports, like MFCI case internals).
+
 ## Platform mechanics
 
 - **Fallback wrapper (WS-H.1.2c).** Every computation runs under
@@ -345,7 +388,7 @@ all fail-closed under `invariants.*`.
   (`TIMEOUT`/`COMPUTE_ERROR`, confidence 0, empty vector) + a gap record
   (structured log + `invariants.gap.<type>` metric + an
   `invariant_run_metadata` row). Ranking proceeds with failed invariants'
-  features OMITTED — never defaulted — proven with one, two, and all eleven
+  features OMITTED — never defaulted — proven with one, two, and all twelve
   failing.
 - **Tiers and back-pressure (WS-H.1.2f).** Services declare their tiers;
   batch-only invariants answer real-time calls with an honest degraded

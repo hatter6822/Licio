@@ -35,6 +35,7 @@ import {
   startEmailLogin,
   verifyEmailLogin,
 } from '../identity/email-otp.js';
+import { verifyPowSolution } from '../identity/pow-captcha.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import {
   buildSessionCookie,
@@ -375,6 +376,19 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         // New wallet signup is ADULT-ONLY and requires profile fields.
         if (!body.handle || !body.display_name || !body.date_of_birth) {
           return c.json(err('signup_required', 'Additional details required.'), 400);
+        }
+        // Bot-prevention layer 1: the ACCOUNT-MINTING branch requires a solved
+        // single-use proof-of-work.  Existing-wallet sign-in (above) never pays
+        // it — only new account creation does, matching /register and the
+        // passkey signup entry (identity/pow-captcha.ts).
+        const pow = await verifyPowSolution(
+          services.challenges,
+          services.config.masterSecret,
+          services.config.signupPow,
+          body.captcha,
+        );
+        if (!pow.ok) {
+          return c.json(err(pow.code, 'Sign-up verification required.'), 403);
         }
         const gate = deriveAgeBand(body.date_of_birth);
         if (!gate.allowed || isMinorBand(gate.band)) {

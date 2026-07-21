@@ -49,6 +49,10 @@ import {
   complianceServicesConfigured,
   getComplianceServices,
 } from '../compliance/services.js';
+import {
+  checkGovernanceEligibility,
+  requireGovernanceEligibility,
+} from '../governance/eligibility.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import { createLogger } from '../lib/logger.js';
 import {
@@ -164,6 +168,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/charter',
         authMiddleware(),
+        // Bot-prevention layer 3: drafting the room charter is governance power.
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', charterCreateRequestSchema),
         async (c) => {
@@ -233,6 +239,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/law-packs/wsm',
         authMiddleware(),
+        // Bot-prevention layer 3: registering law packs is governance power.
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', lawPackRegisterRequestSchema),
         async (c) => {
@@ -314,6 +322,8 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/law-packs/:lawPackId/adopt',
         authMiddleware(),
+        // Bot-prevention layer 3: adopting a law pack is governance power.
+        requireGovernanceEligibility(),
         zValidator('param', z.object({ roomId: uuidSchema, lawPackId: uuidSchema })),
         async (c) => {
           const auth = requireAuth(c);
@@ -365,6 +375,13 @@ export function createTreasuryGovernanceRoutes() {
           }
           if (!staff && !(await services.rooms.isSteward(roomId, auth.userId))) {
             return c.json(notFound, 404);
+          }
+          // Bot-prevention layer 3: a STEWARD attesting readiness exercises
+          // governance power (mirrors /governance/mode); platform staff attest
+          // as operators and are not gated.
+          if (!staff) {
+            const denial = await checkGovernanceEligibility(auth.userId);
+            if (denial) return c.json({ error: denial }, 403);
           }
           const result = await recordReadinessAttestation(services, {
             roomId,
@@ -454,6 +471,8 @@ export function createTreasuryGovernanceRoutes() {
         authMiddleware(),
         requireVerifiedAccount(),
         requireAdult(),
+        // Bot-prevention layer 3: provisioning the room treasury is governance power.
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', treasuryCreateRequestSchema),
         async (c) => {
@@ -912,6 +931,8 @@ export function createTreasuryGovernanceRoutes() {
         // real-asset governance act — verified account + adult gate required.
         requireVerifiedAccount(),
         requireAdult(),
+        // Bot-prevention layer 3: the wallet-signed vote IS governance power.
+        requireGovernanceEligibility(),
         zValidator('param', z.object({ roomId: uuidSchema, proposalId: uuidSchema })),
         zValidator('json', proposalSignRequestSchema),
         async (c) => {
@@ -948,6 +969,9 @@ export function createTreasuryGovernanceRoutes() {
         // but VERIFIED — an unverified throwaway must not stall a treasury
         // (one open challenge per member is capped in the service) (sweep).
         requireVerifiedAccount(),
+        // Bot-prevention layer 3: a challenge blocks a treasury execution —
+        // governance power, so the KYC bar applies.
+        requireGovernanceEligibility(),
         zValidator('param', z.object({ roomId: uuidSchema, proposalId: uuidSchema })),
         zValidator('json', proposalChallengeRequestSchema),
         async (c) => {
@@ -984,6 +1008,13 @@ export function createTreasuryGovernanceRoutes() {
           const auth = requireAuth(c);
           const gate = flagGate('governance');
           if (gate) return c.json(deny(gate.code, gate.message), 503);
+          // Bot-prevention layer 3: a STEWARD dismissing a challenge clears a
+          // real-asset execution blocker (governance power); platform staff
+          // resolving as operators are not gated (parity with /governance/mode).
+          if (!isPlatformStaff(auth)) {
+            const denial = await checkGovernanceEligibility(auth.userId);
+            if (denial) return c.json({ error: denial }, 403);
+          }
           const services = getTreasuryServices();
           const { roomId, challengeId } = c.req.valid('param');
           const body = c.req.valid('json');
@@ -1004,6 +1035,9 @@ export function createTreasuryGovernanceRoutes() {
       .post(
         '/rooms/:roomId/governance/delegations',
         authMiddleware(),
+        // Bot-prevention layer 3: delegating voting power is governance power
+        // (the delegate's own exercise of it is gated again at /sign).
+        requireGovernanceEligibility(),
         roomParam,
         zValidator('json', delegationCreateRequestSchema),
         async (c) => {

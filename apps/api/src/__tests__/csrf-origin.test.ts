@@ -18,6 +18,7 @@ const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 const APP_ORIGIN = 'https://app.licio.test';
 

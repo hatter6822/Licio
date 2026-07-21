@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@11.15.1",
@@ -44,6 +44,7 @@
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
     "check:prod-parity": "tsx scripts/check-prod-parity.ts",
+    "check:governance-kyc": "tsx scripts/check-governance-kyc.ts",
     "check:neutrality": "vitest run --project api src/__tests__/ranking-neutrality.test.ts",
     "check:lcap-scheduler": "tsx scripts/check-lcap-scheduler.ts",
     "check:adversarial": "vitest run --project api src/__tests__/invariants-ensemble-adversarial.test.ts",

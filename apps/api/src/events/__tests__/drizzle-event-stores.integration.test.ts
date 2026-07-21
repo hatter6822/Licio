@@ -20,6 +20,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DrizzleIdentityStore } from '../../identity/drizzle-store.js';
 import {
+  DrizzleActorBehaviorStore,
   DrizzleAggregationWindowStore,
   DrizzleAttentionAggregateStore,
   DrizzleConsumerCheckpointStore,
@@ -62,6 +63,7 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
   let config: DrizzlePwattConfigStore;
   let deadLetters: DrizzleDeadLetterStore;
   let checkpoints: DrizzleConsumerCheckpointStore;
+  let behavior: DrizzleActorBehaviorStore;
   let identity: DrizzleIdentityStore;
   let ownerId: string;
 
@@ -88,6 +90,7 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
     config = new DrizzlePwattConfigStore(db);
     deadLetters = new DrizzleDeadLetterStore(db);
     checkpoints = new DrizzleConsumerCheckpointStore(db);
+    behavior = new DrizzleActorBehaviorStore(db);
     identity = new DrizzleIdentityStore(db);
     const user = await identity.createUser({
       handle: `evt_${randomUUID().slice(0, 8)}`,
@@ -117,6 +120,7 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
     await config.clear();
     await deadLetters.clear();
     await checkpoints.clear();
+    await behavior.clear();
   });
 
   it('the events table is LIST-partitioned with one partition per tier + default', async () => {
@@ -370,5 +374,59 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
 
     await checkpoints.set('agg', new Date().toISOString());
     expect(await checkpoints.get('agg')).not.toBeNull();
+  });
+
+  it('actor behavior windows + authenticity round-trip, upsert, prune, and purge (BAI)', async () => {
+    const windowStart = new Date(Date.UTC(2026, 5, 10, 10)).toISOString();
+    const snapshot = {
+      actorRef: ownerId,
+      windowStart,
+      eventCount: 7,
+      itemsTouched: 3,
+      dwellHistogram: { short: 2, long: 1 },
+      replyDepthHistogram: { shallow: 1 },
+      returnHistogram: {},
+      sourceOpens: 1,
+      contextOpens: 0,
+      saves: 1,
+      contributions: 2,
+    };
+    await behavior.upsertWindows([snapshot]);
+    // Idempotent upsert on (actor, window): a re-score converges.
+    await behavior.upsertWindows([{ ...snapshot, eventCount: 9 }]);
+    const stored = await behavior.listWindowsSince(new Date(0).toISOString());
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ actorRef: ownerId, eventCount: 9, itemsTouched: 3 });
+    expect(stored[0]?.dwellHistogram).toEqual({ short: 2, long: 1 });
+
+    // Retention prune deletes strictly-older windows only.
+    const staleStart = new Date(Date.parse(windowStart) - 15 * DAY).toISOString();
+    await behavior.upsertWindows([{ ...snapshot, windowStart: staleStart }]);
+    expect(
+      await behavior.deleteWindowsOlderThan(new Date(Date.parse(windowStart) - DAY).toISOString()),
+    ).toBe(1);
+    expect(await behavior.listWindowsSince(new Date(0).toISOString())).toHaveLength(1);
+
+    const assessment = {
+      actorRef: ownerId,
+      score: 0.25,
+      coherence: 0.25,
+      components: { dwell_variety: 0.25, interaction_breadth: 1, temporal_rhythm: 1 },
+      flags: ['dwell_variety'],
+      evidence: 120,
+      clusterId: null,
+      clusterSize: 1,
+      computedAt: new Date().toISOString(),
+    };
+    await behavior.upsertAuthenticity([assessment]);
+    // Upsert replaces the current assessment (one row per actor).
+    await behavior.upsertAuthenticity([{ ...assessment, score: 0.5, coherence: 0.5 }]);
+    expect((await behavior.getAuthenticity(ownerId))?.score).toBe(0.5);
+    expect(await behavior.listAuthenticity()).toHaveLength(1);
+
+    // Deletion-path purge removes BOTH planes for the actor.
+    expect(await behavior.purgeActor(ownerId)).toBe(2);
+    expect(await behavior.getAuthenticity(ownerId)).toBeNull();
+    expect(await behavior.listWindowsSince(new Date(0).toISOString())).toHaveLength(0);
   });
 });

@@ -285,8 +285,12 @@ export async function purgeUserAttention(
   const eventsDeleted = await events.eventStore.deleteByOwner(userId, ATTENTION_TIERS);
   const aggregatesDeleted = await events.attentionStore.deleteByUser(userId);
   const ledgerDeleted = await events.ledgerStore.deleteByUser(userId);
+  // Bot-prevention layer 2: the derived behavior snapshots + authenticity
+  // assessment are attention-derived state and die with the attention data —
+  // on BOTH modes (a reset must not leave a profile of deleted history).
+  const behaviorDeleted = await events.behaviorStore.purgeActor(userId);
   const detached = mode === 'delete' ? await events.eventStore.anonymizeOwner(userId) : 0;
-  return eventsDeleted + aggregatesDeleted + ledgerDeleted + detached;
+  return eventsDeleted + aggregatesDeleted + ledgerDeleted + behaviorDeleted + detached;
 }
 
 /**

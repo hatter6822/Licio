@@ -29,6 +29,7 @@ import {
   type SubmissionMetadata,
   topicIdForSlug,
 } from '@licio/shared';
+import { complianceServicesConfigured, getComplianceServices } from '../compliance/services.js';
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
@@ -195,6 +196,28 @@ export async function seedForumDemoData(
       emailVerified: true,
       emailVerifiedAt: new Date(backdated).toISOString(),
     });
+  }
+
+  // Bot-prevention layer 3 (dev UX): every named dev account + the demo author
+  // carries a reviewer-verified KYC standing so room-governance participation
+  // (elections, ratifications, proposals) is exercisable on a `pnpm dev` box —
+  // the same REAL store + guard production uses, seeded rather than bypassed.
+  // Fail-soft when a suite seeds forum data without the WS-N container.
+  if (complianceServicesConfigured()) {
+    const kyc = getComplianceServices().kyc;
+    const backdatedIso = new Date(backdated).toISOString();
+    for (const userId of [SEED_USER.userId, ...DEV_ACCOUNTS.map((a) => a.userId)]) {
+      if ((await kyc.get(userId)) !== null) continue;
+      await kyc.upsert({
+        userId,
+        status: 'verified',
+        evidenceRef: 'dev-seed',
+        verifiedAt: backdatedIso,
+        verifiedBy: null,
+        createdAt: backdatedIso,
+        updatedAt: backdatedIso,
+      });
+    }
   }
 
   await forum.rooms.insert({

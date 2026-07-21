@@ -417,16 +417,20 @@ describe('WS-N compliance context isolation (WS-N.2.2d)', () => {
     expect(result.unclassified).toEqual(['compliance.new_unclassified']);
   });
 
-  it('classification covers exactly the migration-0088 table set', async () => {
-    const { readFile } = await import('node:fs/promises');
+  it('classification covers exactly the compliance tables the FULL migration chain creates', async () => {
+    // Scans EVERY migration (not just 0088, where the schema landed): a
+    // compliance table added by any later migration — e.g. 0093's
+    // kyc_verification — must be classified, or this parity fails.
+    const { readdir, readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
-    const sql = await readFile(
-      join(import.meta.dirname, '../../drizzle/0088_ws_n_compliance.sql'),
-      'utf8',
-    );
+    const drizzleDir = join(import.meta.dirname, '../../drizzle');
     const created = new Set<string>();
-    for (const match of sql.matchAll(/CREATE TABLE "compliance"\."([^"]+)"/g)) {
-      if (match[1]) created.add(`compliance.${match[1]}`);
+    for (const file of await readdir(drizzleDir)) {
+      if (!file.endsWith('.sql')) continue;
+      const sql = await readFile(join(drizzleDir, file), 'utf8');
+      for (const match of sql.matchAll(/CREATE TABLE "compliance"\."([^"]+)"/g)) {
+        if (match[1]) created.add(`compliance.${match[1]}`);
+      }
     }
     expect([...created].sort()).toEqual([...COMPLIANCE_CONTEXT_TABLES].sort());
   });

@@ -49,6 +49,14 @@ exports[`score-vector schemas (WS-H.1.1d) > score-vector shapes are pinned by sn
     "scoi",
     "structural_obstruction",
   ],
+  "behavioral_authenticity": [
+    "cluster_count",
+    "damped_weight_share",
+    "flagged_share",
+    "largest_cluster_size",
+    "median_score",
+    "scored_actors",
+  ],
   "braid_dynamics": [
     "crossing_number",
     "crossing_rate",

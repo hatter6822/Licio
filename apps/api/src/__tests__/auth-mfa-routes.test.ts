@@ -15,11 +15,13 @@ import {
 } from '../identity/services.js';
 import { createSession } from '../identity/sessions.js';
 import { base32Decode, totp } from '../identity/totp.js';
+import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 let services: IdentityServices;
 
@@ -45,7 +47,12 @@ async function signup(handle: string) {
   const opt = await app.request('/v1/auth/webauthn/signup/options', {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ handle, display_name: handle, date_of_birth: '1990-01-01' }),
+    body: JSON.stringify({
+      handle,
+      display_name: handle,
+      date_of_birth: '1990-01-01',
+      captcha: await signupCaptcha(app),
+    }),
   });
   const options = await readJson<{ challenge: string }>(opt);
   const verify = await app.request('/v1/auth/webauthn/signup/verify', {

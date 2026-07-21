@@ -35,7 +35,7 @@ Three constraints govern everything here:
    pre-lift posture: the safe fallback ranker is provably score-blind (the
    WS-E fallback-invariance tests pin ordering with, without, and with
    mutated PWAtt scores).
-3. **The eleven invariants remain promotion-gated (WS-H.1.2e).** Every
+3. **The twelve invariants remain promotion-gated (WS-H.1.2e).** Every
    invariant-derived penalty (pM/pH/pT/pR) and constraint (MFCI exclusion,
    PHI diversification, GWEI deployment gate, MERI effects) applies only
    when `effectsEnabled(invariantType)` — otherwise it is computed and

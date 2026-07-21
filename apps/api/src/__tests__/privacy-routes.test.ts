@@ -17,11 +17,13 @@ import {
   type RecordingMailer,
   setIdentityServices,
 } from '../identity/services.js';
+import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 
 let services: IdentityServices;
@@ -434,6 +436,7 @@ describe('development-only verification shortcut (POST /v1/auth/dev/verify)', ()
         display_name: 'Dev User',
         email,
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     expect(reg.status).toBe(200);

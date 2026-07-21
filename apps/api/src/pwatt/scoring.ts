@@ -37,7 +37,7 @@ import {
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { AggregationWindowSize } from '../events/stores.js';
-import { PRIVACY_BUCKET, type SignalLedgerRecord } from '../events/stores.js';
+import { PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID, type SignalLedgerRecord } from '../events/stores.js';
 import type { IdentityServices } from '../identity/services.js';
 import {
   computeAggregationWindow,
@@ -53,6 +53,7 @@ import {
   detectCoordinatedBurst,
   detectHarassmentCascade,
 } from './anti-signals.js';
+import { foldActorBehaviorWindows } from './behavior.js';
 import { loadPwattRuntimeConfig, type PwattRuntimeConfig } from './config.js';
 import { pwattRowForRanking } from './shadow.js';
 
@@ -262,6 +263,18 @@ export async function runPwattWindow(
     ledgerEntriesWritten: 0,
   };
 
+  // Bot-prevention layer 2: persist the per-ACTOR behavior snapshot for this
+  // window (only the 1h size — the canonical granularity, mirroring the
+  // ledger) BEFORE scoring, so the hourly authenticity job always sees the
+  // fold this run scored.  Idempotent upsert on (actor, window); the privacy
+  // bucket is never profiled (foldActorBehaviorWindows skips it).
+  if (size === '1h') {
+    const behaviorRecords = foldActorBehaviorWindows(aggregation);
+    if (behaviorRecords.length > 0) {
+      await events.behaviorStore.upsertWindows(behaviorRecords);
+    }
+  }
+
   // WS-O.4.5 — account-age trust factor of an actor (memoized across the window),
   // used for BOTH the burst-detection threshold AND the per-actor score scaling.
   // Anonymous (privacy-bucket) and unresolvable actors are treated as FULLY
@@ -270,16 +283,54 @@ export async function runPwattWindow(
   // reader's served PWAtt components must never depend on trust config. Only
   // RESOLVABLE fresh accounts lower the factor. Account age is the coarse,
   // non-financial signal MFCI already uses; no age ever leaves this function.
+  //
+  // Bot-prevention layer 2 composes here: the actor's CURRENT behavioral-
+  // authenticity multiplier (behavior.ts; 1 when unassessed) scales the same
+  // factor, so a low-coherence or duplicated-behavior account both trips
+  // burst detection sooner AND earns proportionally less distribution power.
+  // The composite never reaches zero (config.behavior.overallFloor) —
+  // influence is reduced, never silenced — and it is a pure function of the
+  // actor's own organic behavior, so two behaviorally-identical accounts
+  // score identically (the WS-I.3 neutrality obligation).
   const nowMs = events.now();
+  // Bot-prevention layer 2: pre-load the CURRENT authenticity multiplier for
+  // every profiled actor in the window in ONE batch read (rather than a point
+  // read per distinct actor), keyed off the aggregation the fold above just
+  // built. Absent actors default to a neutral 1.
+  const profiledActors = new Set<string>();
+  for (const item of aggregation.items.values()) {
+    for (const actorKey of item.actors.keys()) {
+      if (actorKey !== PRIVACY_BUCKET && actorKey !== PSEUDONYMOUS_USER_ID) {
+        profiledActors.add(actorKey);
+      }
+    }
+  }
+  const authenticityByActor = await events.behaviorStore.getAuthenticityMany([...profiledActors]);
   const trustCache = new Map<string, number>();
   const actorTrust = async (actorKey: string): Promise<number> => {
-    if (actorKey === PRIVACY_BUCKET) return 1;
+    // The anonymity bucket and the deletion pseudonym are NEVER profiled and
+    // carry full trust (literal 1) — the same set the behavior fold skips.
+    if (actorKey === PRIVACY_BUCKET || actorKey === PSEUDONYMOUS_USER_ID) return 1;
     const cached = trustCache.get(actorKey);
     if (cached !== undefined) return cached;
     const user = await identity.store.getUser(actorKey);
-    const weight = user
-      ? accountTrustWeight((nowMs - Date.parse(user.createdAt)) / 86_400_000, config.trustWeights)
-      : 1;
+    // An UNRESOLVABLE actor is fully trusted (literal 1) — no age, and no
+    // authenticity applied: the behavior assessments are keyed by user id and
+    // purged with the account, so an unresolvable actor has none, and the
+    // doctrine is "only resolvable accounts lower the factor" (WS-O.4.5).
+    if (!user) {
+      trustCache.set(actorKey, 1);
+      return 1;
+    }
+    const ageWeight = accountTrustWeight(
+      (nowMs - Date.parse(user.createdAt)) / 86_400_000,
+      config.trustWeights,
+    );
+    const authenticity = authenticityByActor.get(actorKey)?.score ?? 1;
+    const weight =
+      authenticity < 1
+        ? Math.max(config.behavior.overallFloor, ageWeight * authenticity)
+        : ageWeight;
     trustCache.set(actorKey, weight);
     return weight;
   };

@@ -16,7 +16,28 @@ The bounded-autonomy runtime, deterministic and gate-green, across four layers:
 | Production store binding | `apps/api/src/governance/drizzle-governance-stores.ts` (gated; bound at boot when `DATABASE_URL` is set) | **Shipped** |
 | Runtime service | `apps/api/src/governance/` | **Shipped (Stages 1-3, 5-core)** |
 | HTTP surface | `apps/api/src/routes/governance.ts` (mounted in `v1.ts`); seat bootstrap on room create | **Shipped** |
+| KYC eligibility floor (bot-prevention layer 3) | `apps/api/src/governance/eligibility.ts` + the `check:governance-kyc` CI gate | **Shipped** |
 | Web surface | `apps/web/src/components/governance/` (mounted on the room page) | **Shipped** |
+
+**The KYC eligibility floor.**  Every governance-PARTICIPATION mutation —
+steward-election votes (voter AND candidate), model proposal, ratification
+open/ballot, law-pack proposal/registration/adoption, lawmaking facilitation,
+sim + production proposals/votes/execution, the comprehension quiz, charter
+drafts, treasury provisioning, wallet-signed proposal signatures, challenges,
+delegations, and steward-driven mode transitions — first passes
+`checkGovernanceEligibility` / `requireGovernanceEligibility()`: a
+reviewer-verified KYC standing (the WS-N.1.1f `kyc_partner` level, read
+through the compliance container), no open high/critical compliance case
+(the same anti-tipping-off query the availability engine uses), and no
+HIGH-risk linked wallet.  Fail-closed on every unknown; denials are typed
+(`kyc_required` / `compliance_hold` / `wallet_risk` /
+`eligibility_unavailable`).  This is a PLATFORM floor enforced BEFORE the
+community-configurable §17.5 eligibility rules and is not law-pack
+overridable — the same posture as the non-overridable legal floor.  Platform
+enforcement (agent freeze/unfreeze, clawback, staff recovery edges) and the
+member safety valves justified in `scripts/check-governance-kyc.ts` are
+deliberately outside it; content participation is never KYC-gated.  The CI
+gate fails any new governance POST route that ships unclassified.
 
 ### `@licio/governance` (pure domain, I/O-free, never depends on `@licio/db`)
 

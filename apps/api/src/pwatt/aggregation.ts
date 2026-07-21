@@ -64,6 +64,9 @@ function maxBucket<T extends string>(order: readonly T[], a: T, b: T): T {
 
 /** Mutable per-(actor, item) fold state. */
 interface ActorFold {
+  /** Scoring-topic events this actor contributed on this item (feeds the
+   *  bot-prevention layer-2 behavior snapshot; buckets stay deduped). */
+  eventCount: number;
   dwellBucket: DwellBucket;
   branchDepthBucket: ReplyDepthBucket;
   returnVisitBucket: ReturnVisitBucket;
@@ -103,6 +106,7 @@ export const SCORING_TOPICS = [
 
 function emptyActor(): ActorFold {
   return {
+    eventCount: 0,
     dwellBucket: 'none',
     branchDepthBucket: 'none',
     returnVisitBucket: 'none',
@@ -155,6 +159,7 @@ export async function computeAggregationWindow(
         const item = itemOf(entry.story_id);
         item.eventCount += 1;
         const actor = actorOf(item, actorKey);
+        actor.eventCount += 1;
         actor.dwellBucket = maxBucket(DWELL_BUCKETS, actor.dwellBucket, entry.active_dwell_bucket);
         actor.branchDepthBucket = maxBucket(
           REPLY_DEPTH_BUCKETS,
@@ -176,6 +181,7 @@ export async function computeAggregationWindow(
       const item = itemOf(event.story_id);
       item.eventCount += 1;
       const actor = actorOf(item, actorKeyOfPayload(row.payload));
+      actor.eventCount += 1;
       // The §5.3 clickbait guardrail (WS-E.1.1b): a bounce, AND the
       // bounce-adjacent `brief` dwell bucket, earn zero source weight — only
       // a moderate/extended non-bounce visit is a meaningful open.
@@ -188,7 +194,9 @@ export async function computeAggregationWindow(
       const event = row.payload as unknown as ContentSavedAggregateEvent;
       const item = itemOf(event.story_id);
       item.eventCount += 1;
-      actorOf(item, actorKeyOfPayload(row.payload)).saved = true;
+      const actor = actorOf(item, actorKeyOfPayload(row.payload));
+      actor.eventCount += 1;
+      actor.saved = true;
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
         thread_id: string;
@@ -200,6 +208,7 @@ export async function computeAggregationWindow(
       const item = itemOf(payload.thread_id);
       item.eventCount += 1;
       const actor = actorOf(item, payload.user_id);
+      actor.eventCount += 1;
       actor.contributions[payload.contribution_type] =
         (actor.contributions[payload.contribution_type] ?? 0) + 1;
       // Source-free accusation (WS-E.2.2b): a direct accusation with no

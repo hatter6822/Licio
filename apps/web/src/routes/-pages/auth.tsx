@@ -26,6 +26,7 @@ import {
   startEmailLogin,
   verifyEmailLogin,
 } from '../../lib/auth-api.js';
+import { primeSignupCaptcha } from '../../lib/pow-captcha.js';
 import { cancelAccountDeletion, fetchDeletionStatus } from '../../lib/privacy-api.js';
 import { isWebAuthnAvailable } from '../../lib/webauthn.js';
 import { sanitizeRedirect } from '../../routing/guards.js';
@@ -55,6 +56,14 @@ function messageFor(error: unknown, t: Translate): string {
         return t('login.error.handleTaken', 'That handle is unavailable.');
       case 'age_restricted':
         return t('login.error.ageRestricted', 'We are unable to create an account.');
+      case 'captcha_required':
+      case 'captcha_invalid':
+        // The flows auto-solve and retry once; reaching the UI means both
+        // attempts were rejected (offline, or a device without WebCrypto).
+        return t(
+          'login.error.captcha',
+          'We could not verify your device automatically. Check your connection and try again.',
+        );
       default:
         return error.message;
     }
@@ -176,6 +185,14 @@ function CreateAccountPanel({ onSignedIn }: PanelProps): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const passkeysAvailable = isWebAuthnAvailable();
+
+  // Bot-prevention layer 1: start fetching + solving the sign-up proof-of-work
+  // in a Web Worker the moment this panel mounts, so the one-time CPU cost
+  // overlaps with the user typing and submission stays instant.  Silent and
+  // privacy-free: pure CPU over server-supplied random bytes, no user data.
+  useEffect(() => {
+    primeSignupCaptcha();
+  }, []);
 
   const profile = { handle, display_name: displayName, date_of_birth: dateOfBirth };
   const profileReady = handle.length >= 3 && displayName.length > 0 && dateOfBirth.length === 10;

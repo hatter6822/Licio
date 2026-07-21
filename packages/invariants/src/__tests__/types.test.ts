@@ -12,18 +12,19 @@ describe('InvariantType', () => {
     expect(InvariantType.PHI).toBe('PHI');
   });
 
-  it('has the six supporting invariant types (WS-H.1.1a)', () => {
+  it('has the seven supporting invariant types (WS-H.1.1a + BAI)', () => {
     expect(InvariantType.HodgeTension).toBe('hodge_tension');
     expect(InvariantType.TropicalCascade).toBe('tropical_cascade');
     expect(InvariantType.BraidDynamics).toBe('braid_dynamics');
     expect(InvariantType.ReebLandscape).toBe('reeb_landscape');
     expect(InvariantType.CounterfactualDefect).toBe('counterfactual_defect');
     expect(InvariantType.PathSignatureWellbeing).toBe('path_signature_wellbeing');
+    expect(InvariantType.BehavioralAuthenticity).toBe('behavioral_authenticity');
   });
 
-  it('has exactly 11 values, mirrored by INVARIANT_TYPE_NAMES', () => {
+  it('has exactly 12 values, mirrored by INVARIANT_TYPE_NAMES', () => {
     const values = Object.values(InvariantType);
-    expect(values).toHaveLength(11);
+    expect(values).toHaveLength(12);
     expect([...INVARIANT_TYPE_NAMES]).toEqual(values);
   });
 

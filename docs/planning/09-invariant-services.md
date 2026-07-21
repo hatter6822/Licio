@@ -8,6 +8,13 @@
 
 All 11 invariants run in shadow before affecting ranking. Each output carries confidence, coverage, reason codes, and fallback behavior (Sections 21.4, 30.4). The five core invariants -- MERI, MFCI, GWEI, SCOI, PHI -- provide the primary mathematical guardrails for ranking, fairness, context integrity, coordination detection, and path-dependent steering. Six supporting invariants -- Hodge, Tropical, Braid, Reeb, CID, and Path-signature -- add complementary signals without overcomplicating the user experience. Every invariant ships as a confidence-bearing service with the same discipline: versioned outputs, invariant cards, graceful fallback, and regression testing on synthetic datasets.
 
+> **Note (bot-prevention layer 2).** A **12th** platform invariant,
+> `behavioral_authenticity` (BAI), was later added by the bot-prevention work.
+> It reports population-level behavioral-authenticity health (SPEC §25.5);
+> its regression is the pure property suite in `packages/invariants/src/behavior/`
+> rather than a WS-H synthetic dataset, so the "11"/"synthetic dataset" counts
+> below describe the ORIGINAL WS-H set. See `docs/invariants/README.md#bai-inputs`.
+
 ### Cross-cutting invariant contracts
 
 Every task in this workstream upholds the following non-negotiable contracts. They are restated here so each task can reference them rather than repeat them, and they are enforced by the platform tasks in WS-H.1.

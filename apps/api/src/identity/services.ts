@@ -11,6 +11,11 @@ import type { AuthMethodInventory } from './auth-methods.js';
 import { type EphemeralStore, InMemoryEphemeralStore } from './ephemeral-store.js';
 import { SesMailer, type SesMailerConfig } from './mailer-ses.js';
 import { InMemoryObjectStore, type ObjectStore } from './object-store.js';
+import {
+  DEFAULT_SIGNUP_POW_MAX_NUMBER,
+  type PowCaptchaConfig,
+  TEST_SIGNUP_POW_MAX_NUMBER,
+} from './pow-captcha.js';
 import { AuthRateLimiter, InMemoryAuthRateLimitStore } from './rate-limit-auth.js';
 import { createLocalSecretBox, type SecretBox } from './secrets.js';
 import type { AlertTransports } from './security-alerts.js';
@@ -24,6 +29,9 @@ export interface IdentityConfig {
   masterSecret: string;
   webauthn: WebAuthnConfig;
   siwe: SiweConfig;
+  /** Sign-up proof-of-work CAPTCHA work factor (identity/pow-captcha.ts);
+   *  0 = explicitly disabled. */
+  signupPow: PowCaptchaConfig;
 }
 
 /** Outbound code/alert delivery.  Production wires SMTP/push; tests record. */
@@ -255,6 +263,7 @@ export function identityConfigFromEnv(env: {
   CORS_ORIGIN: string;
   CHAIN_RPC_URLS?: string | undefined;
   NODE_ENV?: string | undefined;
+  SIGNUP_POW_MAX_NUMBER?: number | undefined;
 }): IdentityConfig {
   const origin = env.CORS_ORIGIN.replace(/\/$/, '');
   const host = (() => {
@@ -273,6 +282,14 @@ export function identityConfigFromEnv(env: {
       chainAllowlist:
         env.NODE_ENV === 'production' ? [...DEFAULT_CHAIN_ALLOWLIST] : [...DEV_CHAIN_ALLOWLIST],
       chainRpcUrls: parseChainRpcUrls(env.CHAIN_RPC_URLS),
+    },
+    signupPow: {
+      // The gate is ON by default in every environment (production-complete
+      // posture); 0 is the explicit operator opt-out.  Tests run the REAL flow
+      // at a negligible work factor.
+      maxNumber:
+        env.SIGNUP_POW_MAX_NUMBER ??
+        (env.NODE_ENV === 'test' ? TEST_SIGNUP_POW_MAX_NUMBER : DEFAULT_SIGNUP_POW_MAX_NUMBER),
     },
   };
 }
@@ -303,6 +320,7 @@ const TEST_CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: TEST_SIGNUP_POW_MAX_NUMBER },
 };
 
 export function getIdentityServices(): IdentityServices {
@@ -333,6 +351,7 @@ export function buildIdentityServicesFromEnv(
     CORS_ORIGIN: string;
     CHAIN_RPC_URLS?: string | undefined;
     NODE_ENV?: string | undefined;
+    SIGNUP_POW_MAX_NUMBER?: number | undefined;
   },
   adapters?: Partial<
     Pick<

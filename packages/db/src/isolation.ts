@@ -117,6 +117,9 @@ export const COMPLIANCE_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'compliance.financial_compliance_case',
   'compliance.compliance_case_audit',
   'compliance.region_declaration',
+  // WS-N.1.1f KYC verification standing (migration 0093; bot-prevention
+  // layer 3 / the governance eligibility basis).
+  'compliance.kyc_verification',
   'compliance.disclosure_version',
   'compliance.disclosure_acknowledgment',
   'compliance.wallet_risk_pin',
@@ -151,6 +154,10 @@ export const RANKING_CONTEXT_TABLES: ReadonlySet<Relation> = new Set<Relation>([
   'public.signal_ledger_entries',
   'public.item_safety_states',
   'public.pwatt_config',
+  // Bot-prevention layer 2 (migration 0092): per-actor behavior snapshots +
+  // authenticity assessments feed PWAtt trust — pay-to-rank BFS targets.
+  'public.actor_behavior_windows',
+  'public.actor_authenticity_scores',
   'public.event_dead_letters',
   'public.consumer_checkpoints',
   // WS-F content/ingestion/search tables (WS-F.2.5b): everything stories,

@@ -11,11 +11,13 @@ import {
   setIdentityServices,
 } from '../identity/services.js';
 import { createSession } from '../identity/sessions.js';
+import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
   masterSecret: 'test-master-secret-at-least-32-characters-long',
   webauthn: { rpName: 'Licio', rpID: 'localhost', origin: 'http://localhost' },
   siwe: { domain: 'localhost', uri: 'http://localhost', chainAllowlist: [1] },
+  signupPow: { maxNumber: 16 },
 };
 const RP = CONFIG.webauthn.rpID;
 const ORIGIN = CONFIG.webauthn.origin;
@@ -44,7 +46,12 @@ async function passkeySignup(handle: string, dob = '1990-01-01') {
   const opt = await app.request('/v1/auth/webauthn/signup/options', {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ handle, display_name: handle, date_of_birth: dob }),
+    body: JSON.stringify({
+      handle,
+      display_name: handle,
+      date_of_birth: dob,
+      captcha: await signupCaptcha(app),
+    }),
   });
   const attempt = cookie(opt, '__Host-pksignup');
   const options = await readJson<{ challenge: string }>(opt);
@@ -93,7 +100,12 @@ describe('passkey-first signup', () => {
     const res = await app.request('/v1/auth/webauthn/signup/options', {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ handle: 'kid', display_name: 'Kid', date_of_birth: dob }),
+      body: JSON.stringify({
+        handle: 'kid',
+        display_name: 'Kid',
+        date_of_birth: dob,
+        captcha: await signupCaptcha(app),
+      }),
     });
     expect(res.status).toBe(403);
   });
@@ -104,7 +116,12 @@ describe('passkey-first signup', () => {
     const res = await app.request('/v1/auth/webauthn/signup/options', {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ handle: 'taken', display_name: 'Dup', date_of_birth: '1990-01-01' }),
+      body: JSON.stringify({
+        handle: 'taken',
+        display_name: 'Dup',
+        date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
+      }),
     });
     expect(res.status).toBe(409);
   });
@@ -119,6 +136,7 @@ describe('passkey-first signup', () => {
         handle: 'forged',
         display_name: 'Forged',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     const attempt = cookie(opt, '__Host-pksignup');
@@ -142,7 +160,13 @@ describe('email factor verify/resend gating', () => {
     const res = await app.request('/v1/auth/register', {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ handle, display_name: handle, email, date_of_birth: '1990-01-01' }),
+      body: JSON.stringify({
+        handle,
+        display_name: handle,
+        email,
+        date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
+      }),
     });
     return cookie(res, '__Host-sid');
   }
@@ -409,6 +433,7 @@ describe('email issuance cooldown (anti-mail-bombing, §19.1-aligned)', () => {
           display_name: 'Dup',
           email: 'dup@example.com',
           date_of_birth: '1990-01-01',
+          captcha: await signupCaptcha(app),
         }),
       });
       expect(res.status).toBe(200); // generic success — no enumeration
@@ -474,6 +499,7 @@ describe('email account recovery + pending email change', () => {
         display_name: 'S',
         email: 'stranded@example.com',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     const userId = (await services.store.getUserByEmail('stranded@example.com'))?.userId as string;
@@ -511,6 +537,7 @@ describe('email account recovery + pending email change', () => {
         display_name: 'C',
         email: 'old@example.com',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     let sid = cookie(reg, '__Host-sid');
@@ -564,6 +591,7 @@ describe('email account recovery + pending email change', () => {
         display_name: 'V',
         email: 'a@example.com',
         date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
       }),
     });
     let sid = cookie(reg, '__Host-sid');
