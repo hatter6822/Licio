@@ -83,6 +83,14 @@ export const PURITY_ALLOWLIST: Array<{ file: string; needle: string; reason: str
       'per-channel SUBSCRIBE-ack promises (subscribe resolves only after Redis acks, closing ' +
       'the snapshot/live race) — connection-local handshake state, not replicated state',
   },
+  {
+    file: 'ai-governance/model-hub.ts',
+    needle: '#cache = new Map',
+    reason:
+      'bounded TTL cache of THIRD-PARTY hub metadata (huggingface.co reads) — evictable by ' +
+      'design, never domain state: a restart merely re-fetches, and the durable candidacy ' +
+      'record is the hub_verification snapshot on the governance model row',
+  },
 ];
 
 // ---------------------------------------------------------------------------

@@ -116,7 +116,7 @@ export const stewardGovernanceVotes = knomosisSchema.table(
 );
 export type StewardGovernanceVoteRow = typeof stewardGovernanceVotes.$inferSelect;
 
-/** A steward-proposed, content-addressed governance model (WS-U.2.1a; SPEC §16.6, §24.2). */
+/** A member-proposed, content-addressed governance model (WS-U.2.1a; SPEC §16.6, §24.2). */
 export const roomGovernanceModels = knomosisSchema.table(
   'room_governance_model',
   {
@@ -130,10 +130,20 @@ export const roomGovernanceModels = knomosisSchema.table(
     }),
     status: roomModelStatusEnum('status').notNull().default('proposed'),
     evaluationRef: uuid('evaluation_ref'), // soft ref to the WS-K evaluation decision
-    // The ModerationProposer.backendId that ran this model's admission gate (WS-U
-    // ADR-9 review): moderation refuses to run under a different backend than the
+    // The MODERATION backend that ran this model's admission gate (WS-U ADR-9
+    // review): moderation refuses to run under a different backend than the
     // one that admitted the model. Null until admitted / for a backendId-less proposer.
     admittedBackendId: text('admitted_backend_id'),
+    // The ADJUDICATION backend pinned at admission (the moderation/adjudication
+    // role split, migration 0094): set when the bundle requests `debate.judge`
+    // and the adjudication validity probe passed; the room's LLM debate leg
+    // refuses to run under a different backend. Null on pre-split rows (the
+    // scheduler's repin sweep heals them).
+    admittedAdjudicationBackendId: text('admitted_adjudication_backend_id'),
+    // WS-U model candidacy: the hub-verified metadata snapshots for the
+    // bundle's member-selected huggingface.co model references, captured at
+    // propose time (transparency/audit). Null when the bundle selects none.
+    hubVerification: jsonb('hub_verification'),
     createdAt: tz('created_at').notNull().defaultNow(),
   },
   (t) => [
@@ -177,7 +187,7 @@ export const modelRatificationChoiceEnum = knomosisSchema.enum('model_ratificati
 ]);
 
 /**
- * A member ratification vote that ADOPTS a steward-proposed, platform-eligible
+ * A member ratification vote that ADOPTS a member-proposed, platform-eligible
  * model (SPEC §16.6/§24.6). The model activates only on a quorum-meeting
  * approving majority at settle (fail-safe otherwise). The bounds being ratified
  * are the `law_pack_id` snapshot; the settled `tally` survives voter erasure.

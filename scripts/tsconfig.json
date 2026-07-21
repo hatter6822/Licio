@@ -1,0 +1,18 @@
+{
+  // Typecheck for the LLM tooling scripts (they run under tsx, OUTSIDE the
+  // `tsc -b` workspace graph — a wrong import or argument shape here would
+  // otherwise only surface at runtime on an operator's machine; a debate
+  // fixture once shipped missing a required field exactly this way). noEmit +
+  // standalone: the `.js`-extension relative imports into apps/api/src and
+  // packages/*/src resolve to the TypeScript SOURCES (TS's built-in .js→.ts
+  // mapping under moduleResolution "bundler"), so the transitive closure is
+  // re-checked here with the same strict flag set — a few seconds, no build
+  // order, no emit. Widening `include` to the check-* gates is a one-line
+  // change. Wired into `pnpm typecheck` / `typecheck:ci` at the root.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["setup-local-llm.ts", "bench-local-llm.ts"]
+}

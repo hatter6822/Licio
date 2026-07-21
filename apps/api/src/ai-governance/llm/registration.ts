@@ -19,6 +19,7 @@ import {
   modelCardSchema,
   riskAssessmentRefFor,
 } from '@licio/ai-governance';
+import type { HubModelRef } from '@licio/shared';
 import { type HarnessRunInput, runEvaluationHarness } from '../harness.js';
 import type { ModelIdentity } from '../models.js';
 import { configHash } from '../output-records.js';
@@ -26,12 +27,24 @@ import { deployModel, type RegistryDeps, registerModel } from '../registry.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmBackend, GovernanceLlmSettings } from './config.js';
 import { DEBATE_SYSTEM_PROMPT_VERSION } from './debate.js';
+import { GUARD_FORMAT_VERSION, type ModerationOutputFormat } from './guard-format.js';
 import { MODERATION_SYSTEM_PROMPT_VERSION } from './moderation.js';
 import { GOVERNANCE_LLM_SYSTEM_PROMPT_VERSION } from './provider.js';
 import { LAWMAKING_SUMMARY_QUALITY_GATE_VERSION } from './quality.js';
 
 /** The lineage record backing the LLM backend (no Licio data trains either). */
 export const GOVERNANCE_LLM_LINEAGE_ID = 'llm-provider-corpus';
+
+/**
+ * The ADMISSION-PIN composition — the ONE format `evaluateModel` records and
+ * every live surface compares (`admittedBackendId` / the adjudication pin).
+ * Composed here, next to the identities it names, so the format can never
+ * drift between the minting and the comparing sites (drift would fail every
+ * governed room closed with no error).
+ */
+export function llmBackendId(identity: ModelIdentity): string {
+  return `llm:${identity.name}`;
+}
 
 /** The governance identity of the LLM-backed summariser. The runtime surface
  *  (backend kind, model id, output ceiling, prompt + gate versions — and the
@@ -71,13 +84,26 @@ export function buildGovernanceLlmIdentity(
   };
 }
 
+/** The moderation-lane config fields the OUTPUT FORMAT contributes: the
+ *  completion dialect is part of the decision surface (a guard-native parse
+ *  and a schema-guided JSON verdict are different behaviours), so switching it
+ *  mints a new identity that re-clears the WS-K gate. */
+function moderationFormatConfig(format: ModerationOutputFormat): Record<string, unknown> {
+  return {
+    output_format: format,
+    ...(format === 'qwen3guard' ? { guard_format_version: GUARD_FORMAT_VERSION } : {}),
+  };
+}
+
 /** The governance identity of the LLM-backed in-room moderation MODEL (WS-U
  *  ADR-9) — a `toxicity_safety_triage` classifier whose classification the
  *  deterministic wrapper bounds (escalate-to-review ceiling + capability clamp).
- *  One registry identity per backend (as with the summariser). */
+ *  One registry identity per (backend, config) — the moderation-lane model and
+ *  its output format both fold into the hash. */
 export function buildGovernanceModerationProposerIdentity(
   settings: GovernanceLlmSettings,
   backend: GovernanceLlmBackend,
+  format: ModerationOutputFormat,
 ): ModelIdentity {
   const config = {
     method: backend.kind === 'anthropic' ? 'hosted-llm' : 'local-llm',
@@ -85,6 +111,7 @@ export function buildGovernanceModerationProposerIdentity(
     model_id: settings.modelId,
     max_output_tokens: settings.maxOutputTokens,
     system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
+    ...moderationFormatConfig(format),
     ...(backend.kind === 'local' ? { local_base_url: backend.baseUrl } : {}),
     // Part of the decision surface (a different effort ⇒ different behaviour ⇒
     // a new identity that re-clears the WS-K gate); omitted when never sent.
@@ -99,6 +126,70 @@ export function buildGovernanceModerationProposerIdentity(
     useCaseId: 'toxicity_safety_triage',
     modalities: ['classification'],
     promptTemplateId: 'governance-moderation-llm/v1',
+    config,
+  };
+}
+
+/** The hub-model config fields a ROOM-SELECTED candidate contributes: the
+ *  immutable hub revision replaces the runtime URL as the pinned decision
+ *  surface — the catalog locates the serving runtime dynamically, and WHAT
+ *  model judged (repo + revision + served id) is what provenance must pin. */
+function hubRefConfig(ref: HubModelRef, servedModelId: string): Record<string, unknown> {
+  return {
+    method: 'local-llm',
+    provider: 'local',
+    model_id: servedModelId,
+    hub_source: ref.source,
+    hub_repo_id: ref.repoId,
+    hub_revision: ref.revision,
+  };
+}
+
+/** The governance identity of a ROOM-SELECTED hub moderation model (WS-U model
+ *  candidacy): the steward picked this model for the room's MODERATION role;
+ *  admission evaluates it through the same floor-safety machinery, and this
+ *  config-hashed identity is the admission pin (`llm:<name>`). */
+export function buildRoomHubModerationIdentity(
+  settings: GovernanceLlmSettings,
+  ref: HubModelRef,
+  format: ModerationOutputFormat,
+): ModelIdentity {
+  const config = {
+    ...hubRefConfig(ref, settings.modelId),
+    max_output_tokens: settings.maxOutputTokens,
+    system_prompt_version: MODERATION_SYSTEM_PROMPT_VERSION,
+    ...moderationFormatConfig(format),
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
+  };
+  return {
+    name: `governance-moderation-llm-hub-${configHash(config).slice(0, 12)}`,
+    version: '1.0.0',
+    useCaseId: 'toxicity_safety_triage',
+    modalities: ['classification'],
+    promptTemplateId: 'governance-moderation-llm/v1',
+    config,
+  };
+}
+
+/** The governance identity of a ROOM-SELECTED hub ADJUDICATION model (WS-U
+ *  model candidacy): the steward picked this model for the room's debate
+ *  adjudication role (`debate.judge`). */
+export function buildRoomHubDebateJudgeIdentity(
+  settings: GovernanceLlmSettings,
+  ref: HubModelRef,
+): ModelIdentity {
+  const config = {
+    ...hubRefConfig(ref, settings.modelId),
+    max_output_tokens: settings.maxOutputTokens,
+    system_prompt_version: DEBATE_SYSTEM_PROMPT_VERSION,
+    ...(settings.reasoningEffort !== null ? { reasoning_effort: settings.reasoningEffort } : {}),
+  };
+  return {
+    name: `governance-debate-llm-hub-${configHash(config).slice(0, 12)}`,
+    version: '1.0.0',
+    useCaseId: 'debate_adjudication',
+    modalities: ['classification'],
+    promptTemplateId: 'governance-debate-llm/v1',
     config,
   };
 }

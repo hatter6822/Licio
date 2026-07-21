@@ -43,16 +43,16 @@ describe('GovernanceService error paths', () => {
   it('proposeModel guards: invalid bundle and duplicate digest', async () => {
     const svc = make();
     await svc.bootstrapSeat('r', 's');
-    expect((await svc.proposeModel('r', 's', { not: 'a bundle' }, 'p')).ok).toBe(false);
-    expect((await svc.proposeModel('r', 's', bundle(), 'p')).ok).toBe(true);
-    expect((await svc.proposeModel('r', 's', bundle(), 'p')).ok).toBe(false); // duplicate digest
+    expect((await svc.proposeModel('r', 's', { not: 'a bundle' }, 'p', true)).ok).toBe(false);
+    expect((await svc.proposeModel('r', 's', bundle(), 'p', true)).ok).toBe(true);
+    expect((await svc.proposeModel('r', 's', bundle(), 'p', true)).ok).toBe(false); // duplicate digest
   });
 
   it('evaluate/approve guards', async () => {
     const svc = make();
     await svc.bootstrapSeat('r', 's');
     expect((await svc.evaluateModel('missing')).ok).toBe(false); // not_found
-    const p = await svc.proposeModel('r', 's', bundle(), 'p');
+    const p = await svc.proposeModel('r', 's', bundle(), 'p', true);
     const id = p.ok ? p.value.modelId : '';
     expect((await svc.approveModel('r', 'missing', null, null)).ok).toBe(false); // not_found
     expect((await svc.approveModel('r', id, null, null)).ok).toBe(false); // not_eligible (un-evaluated)
@@ -69,7 +69,7 @@ describe('GovernanceService error paths', () => {
       proposedAt: '2026-06-19T00:00:00.000Z',
     };
     expect((await svc.executeTreasuryAction('r', input)).ok).toBe(false); // no_agent
-    const p = await svc.proposeModel('r', 's', bundle(), 'p'); // no gateway capability
+    const p = await svc.proposeModel('r', 's', bundle(), 'p', true); // no gateway capability
     const id = p.ok ? p.value.modelId : '';
     await svc.evaluateModel(id);
     await svc.approveModel('r', id, null, null);

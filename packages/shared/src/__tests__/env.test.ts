@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { validateClientEnv, validateServerEnv } from '../env/index.js';
+import {
+  parseGovernanceExtraRuntimeUrls,
+  parseGovernanceModelHubAliases,
+  validateClientEnv,
+  validateServerEnv,
+} from '../env/index.js';
 
 describe('validateServerEnv', () => {
   const validEnv = {
@@ -348,6 +353,90 @@ describe('validateServerEnv', () => {
         ANTHROPIC_API_KEY: 'k',
       }),
     ).not.toThrow();
+  });
+
+  it('validates the per-ROLE lane keys (the moderation/adjudication split)', () => {
+    // Per-lane URLs are loopback-enforced exactly like the legacy key.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_MODERATION_URL: 'http://127.0.0.1:8001/v1',
+        GOVERNANCE_LLM_ADJUDICATION_URL: 'http://127.0.0.1:8002/v1',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_ADJUDICATION_URL: 'http://192.168.1.20:8002/v1',
+      }),
+    ).toThrow(/GOVERNANCE_LLM_ADJUDICATION_URL must point at the loopback/);
+    // Blank per-lane model overrides fail fast (never a silent default swap).
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_MODERATION_MODEL: '   ' }),
+    ).toThrow(/GOVERNANCE_LLM_MODERATION_MODEL must be non-empty/);
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_MODERATION_MODEL: 'Qwen/Qwen3Guard-Gen-4B',
+        GOVERNANCE_LLM_ADJUDICATION_MODEL: 'Qwen/Qwen3.6-27B',
+      }),
+    ).not.toThrow();
+    // The moderation format is a closed enum.
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_MODERATION_FORMAT: 'guard' }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_LLM_MODERATION_FORMAT: 'yaml' }),
+    ).toThrow();
+    // EVERY extra-runtime entry is loopback-enforced with the shared predicate.
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_EXTRA_RUNTIME_URLS: 'http://127.0.0.1:9001/v1, http://localhost:9002/v1',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_LLM_EXTRA_RUNTIME_URLS: 'http://127.0.0.1:9001/v1,http://10.0.0.2:9002/v1',
+      }),
+    ).toThrow(/loopback/);
+    expect(parseGovernanceExtraRuntimeUrls(undefined)).toEqual([]);
+    expect(
+      parseGovernanceExtraRuntimeUrls(' http://127.0.0.1:9001/v1 ,, http://localhost:9002/v1 '),
+    ).toEqual(['http://127.0.0.1:9001/v1', 'http://localhost:9002/v1']);
+  });
+
+  it('validates the model-hub keys (metadata-only huggingface.co candidacy)', () => {
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_MODEL_HUB: 'off' })).not.toThrow();
+    expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_MODEL_HUB: 'maybe' })).toThrow();
+    expect(() => validateServerEnv({ ...validEnv, HF_TOKEN: 'hf_test' })).not.toThrow();
+    expect(() => validateServerEnv({ ...validEnv, HF_TOKEN: '' })).toThrow();
+  });
+
+  it('parses + validates the operator-attested served-id aliases (fail-fast at startup)', () => {
+    expect(parseGovernanceModelHubAliases(undefined).size).toBe(0);
+    const aliases = parseGovernanceModelHubAliases(
+      ' Qwen/Qwen3Guard-Gen-4B=guard-gguf:q8 ,, Qwen/Qwen3Guard-Gen-4B=hf.co/mradermacher/Qwen3Guard-Gen-4B-GGUF:Q8_0 , Qwen/Qwen3.6-27B=q3.6 ',
+    );
+    expect(aliases.get('Qwen/Qwen3Guard-Gen-4B')).toEqual(
+      new Set(['guard-gguf:q8', 'hf.co/mradermacher/Qwen3Guard-Gen-4B-GGUF:Q8_0']),
+    );
+    expect(aliases.get('Qwen/Qwen3.6-27B')).toEqual(new Set(['q3.6']));
+    // Malformed entries (no '=', a non-repo-id left side, an empty served id)
+    // throw — and env validation surfaces them at startup, not at first propose.
+    for (const bad of ['no-equals', 'not-a-repo=x', 'Qwen/Qwen3.6-27B=']) {
+      expect(() => parseGovernanceModelHubAliases(bad)).toThrow(/owner\/repo=servedModelId/);
+    }
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_MODEL_HUB_ALIASES: 'Qwen/Qwen3Guard-Gen-4B=guard-gguf:q8',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_MODEL_HUB_ALIASES: 'no-equals' }),
+    ).toThrow(/owner\/repo=servedModelId/);
   });
 });
 

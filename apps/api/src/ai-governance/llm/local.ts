@@ -51,12 +51,19 @@ export type FetchLike = (
   },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
+/** Normalize an operator-configured base URL (drop trailing slashes) — shared
+ *  by every consumer that joins a path onto it (the completion client, the
+ *  runtime catalog's /models probe, the setup/bench tooling). */
+export function stripTrailingSlashes(url: string): string {
+  let base = url;
+  while (base.endsWith('/')) base = base.slice(0, -1);
+  return base;
+}
+
 /** Join the operator-configured base URL (e.g. http://127.0.0.1:11434/v1)
  *  with the chat-completions path, tolerating trailing slashes. */
 export function localChatCompletionsUrl(baseUrl: string): string {
-  let base = baseUrl;
-  while (base.endsWith('/')) base = base.slice(0, -1);
-  return `${base}/chat/completions`;
+  return `${stripTrailingSlashes(baseUrl)}/chat/completions`;
 }
 
 /** Metadata-only observability hook for the negotiation latches below. */
@@ -119,14 +126,23 @@ export function createLocalCompletion(
         // Reasoning-model latency lever. Config-hashed into the identity, so
         // changing the DECLARED value re-clears the WS-K gate. Null ⇒ not sent.
         ...(effort !== null && !effortRejected ? { reasoning_effort: effort } : {}),
+        // Guard-profile moderation calls omit the system turn AND the schema
+        // constraint — the guard model's chat template owns the framing and its
+        // native Safety/Categories block is parsed instead (guard-format.ts).
         messages: [
-          { role: 'system', content: request.system },
+          ...(request.system !== undefined && request.system.length > 0
+            ? [{ role: 'system', content: request.system }]
+            : []),
           { role: 'user', content: request.user },
         ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: { name: 'lawmaking_summary', strict: true, schema: request.jsonSchema },
-        },
+        ...(request.jsonSchema !== undefined
+          ? {
+              response_format: {
+                type: 'json_schema',
+                json_schema: { name: 'governed_output', strict: true, schema: request.jsonSchema },
+              },
+            }
+          : {}),
       }),
       signal: AbortSignal.timeout(request.timeoutMs ?? settings.timeoutMs),
     });

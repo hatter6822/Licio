@@ -666,6 +666,8 @@ describe('extended readiness (WS-M.1.2e)', () => {
       status: 'proposed',
       evaluationRef: null,
       admittedBackendId: null,
+      admittedAdjudicationBackendId: null,
+      hubVerification: null,
       createdAt: '2026-07-01T00:00:00.000Z',
     });
     items = (await evaluateWsmReadiness(deps, ROOM, STEWARD, 'testnet')).items;

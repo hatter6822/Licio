@@ -38,8 +38,8 @@
     "check:sw": "tsx scripts/check-sw-security.ts",
     "lint:lockfile": "tsx scripts/check-lockfile.ts",
     "audit:advisories": "tsx scripts/audit-advisories.ts --audit-level=high",
-    "typecheck": "tsc -b",
-    "typecheck:ci": "tsc -b --force",
+    "typecheck": "tsc -b && tsc -p scripts",
+    "typecheck:ci": "tsc -b --force && tsc -p scripts",
     "check:deps": "tsx scripts/check-dep-budget.ts",
     "check:workspace-deps": "tsx scripts/check-workspace-deps.ts",
     "check:policy": "tsx scripts/check-policy.ts",
@@ -56,6 +56,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.4",
+    "@types/node": "^26.1.1",
     "@vitest/coverage-v8": "^4.1.10",
     "lefthook": "^2.1.10",
     "node-html-parser": "^9.0.0",

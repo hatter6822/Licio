@@ -138,7 +138,7 @@ async function activate(svc: GovernanceService, capabilities: string[]): Promise
   await svc.bootstrapSeat(ROOM, STEWARD);
   const lp = await svc.proposeLawPack(ROOM, STEWARD, lawPack(capabilities));
   if (!lp.ok) throw new Error('law-pack');
-  const proposed = await svc.proposeModel(ROOM, STEWARD, bundle(capabilities), 'be civil');
+  const proposed = await svc.proposeModel(ROOM, STEWARD, bundle(capabilities), 'be civil', true);
   if (!proposed.ok) throw new Error('propose');
   await svc.evaluateModel(proposed.value.modelId);
   const approved = await svc.approveModel(ROOM, proposed.value.modelId, null, lp.value.lawPackId);
@@ -469,7 +469,13 @@ describe('GovernanceService admission — a transient outage is retryable, never
     };
     const h = makeService(flakyAdmission);
     await h.svc.bootstrapSeat(ROOM, STEWARD);
-    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    const proposed = await h.svc.proposeModel(
+      ROOM,
+      STEWARD,
+      bundle(['moderate.flag']),
+      'be civil',
+      true,
+    );
     if (!proposed.ok) throw new Error('propose');
 
     // Admission during the outage ⇒ retryable `evaluating`, NOT a permanent `rejected`
@@ -496,7 +502,13 @@ describe('GovernanceService admission — a transient outage is retryable, never
     };
     const h = makeService(overMod);
     await h.svc.bootstrapSeat(ROOM, STEWARD);
-    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    const proposed = await h.svc.proposeModel(
+      ROOM,
+      STEWARD,
+      bundle(['moderate.flag']),
+      'be civil',
+      true,
+    );
     if (!proposed.ok) throw new Error('propose');
     const res = await h.svc.evaluateModel(proposed.value.modelId);
     expect(res.ok && res.value.status).toBe('rejected');
@@ -512,7 +524,13 @@ describe('GovernanceService admission — a transient outage is retryable, never
     };
     const h = makeService(unclassifiable);
     await h.svc.bootstrapSeat(ROOM, STEWARD);
-    const proposed = await h.svc.proposeModel(ROOM, STEWARD, bundle(['moderate.flag']), 'be civil');
+    const proposed = await h.svc.proposeModel(
+      ROOM,
+      STEWARD,
+      bundle(['moderate.flag']),
+      'be civil',
+      true,
+    );
     if (!proposed.ok) throw new Error('propose');
     const res = await h.svc.evaluateModel(proposed.value.modelId);
     expect(res.ok && res.value.status).toBe('rejected'); // definitive, not `evaluating`

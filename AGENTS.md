@@ -41,86 +41,48 @@ corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); in-memory + seeds demo data (no DB/Redis);
-                                    #   the DEV-ONLY simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
-pnpm setup:llm                      # provision + verify the REAL local governance-LLM runtime (pulls the
-                                    #   default model; --docker also starts the Compose `llm` profile ollama)
-pnpm bench:llm                      # race local models through the REAL governed surfaces (latency +
-                                    #   validity per model; native-probe diagnosis for broken pairings)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeded demo data; the DEV-ONLY
+                                    #   simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
+pnpm setup:llm                      # provision + verify the REAL local governance-LLM lanes (moderation
+                                    #   Qwen3Guard-Gen-4B @ :8001, adjudication Qwen3.6-27B @ :8002; vLLM
+                                    #   default; --docker = Compose `llm` profile; --runtime ollama = single-URL alt)
+pnpm bench:llm                      # race local models through the REAL governed surfaces, per role
+                                    #   (--role moderation|adjudication|all; guard models use their native dialect)
 pnpm build                          # shared → db/invariants → web/api
-pnpm test                           # Vitest across all workspaces (80% coverage gate)
-pnpm test -- --coverage             # with coverage report
-pnpm test:e2e                       # Playwright E2E (Chromium, Firefox, WebKit)
-pnpm --filter web test:e2e:bff      # BFF-in-the-loop authenticated E2E (in-memory API)
-pnpm lint                           # Biome check (format + lint)
-pnpm lint:fix                       # auto-fix lint issues
-pnpm typecheck                      # TypeScript strict-mode across all workspaces
+pnpm test                           # Vitest across all workspaces (80% coverage gate); -- --coverage for the report
+pnpm test:e2e                       # Playwright E2E (Chromium/Firefox/WebKit); web test:e2e:bff = authenticated BFF harness
+pnpm lint / lint:fix                # Biome check / auto-fix
+pnpm typecheck                      # TypeScript strict-mode (tsc -b; see the cache warning below)
 
-# Security and static gates.
-pnpm lint:security                  # innerHTML, eval, javascript: URL scan
+# Security and static gates (what each enforces lives in its scripts/check-*.ts header).
+pnpm lint:security                  # innerHTML/eval/javascript:-URL scan
 pnpm lint:lockfile                  # lockfile integrity
-pnpm audit:advisories               # dependency advisories via the npm BULK endpoint
-                                    #   (the retired-classic-endpoint `pnpm audit` replacement)
-pnpm check:deps                     # dependency-budget enforcement
-pnpm check:workspace-deps           # workspace boundary enforcement (pkg.json + imports)
-pnpm check:policy                   # doctrine/policy document validation
-pnpm check:prod-parity              # the dev↔prod parity gate: every in-memory adapter needs a
-                                    #   boot-wired production counterpart; every env key must be
-                                    #   schema-validated or a documented dev flag; production
-                                    #   adapters hold no in-memory state
-pnpm check:governance-kyc           # bot-prevention layer 3: every governance-participation POST
-                                    #   route enforces the KYC eligibility guard (or carries a
-                                    #   written allowlist justification)
-pnpm check:neutrality               # the ten WS-I.3 ranking-neutrality tests
-pnpm check:adversarial              # the WS-O.4.5 ensemble adversarial suite
-pnpm check:lcap-scheduler           # the WS-R.5.4 LCAP lane anti-starvation gate
-pnpm check:lcap-p2p-split           # the WS-R.15.8 gate: apps/web imports @licio/lcap-p2p only dynamically
-pnpm check:private-p2p-split        # WS-S.2.1 gate: apps/web imports @licio/private-p2p only dynamically
+pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
+pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
+pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
+pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
+pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
+pnpm check:lcap-scheduler           # WS-R lane anti-starvation
+pnpm check:lcap-p2p-split           # web imports @licio/lcap-p2p only dynamically (private-p2p-split: same for WS-S)
 pnpm check:lcap-schema-egress       # no IP/location/attention/applause field in any LCAP schema
-pnpm check:no-p2p-server-content    # WS-S.1.5: a Private P2P room places NO content on the server (umbrella)
-pnpm check:no-private-cid-egress    # WS-S.1.5: no public IPFS gateway / public routing for a private CID
-pnpm check:private-rendezvous-schema # WS-S.1.5: the §8.1 column denylist on the stub/rendezvous tables
-pnpm check:private-bundle-transparency # WS-S.1.5: the private bundle loads no dynamic remote code
-pnpm check:p2p-endpoint-rejections  # WS-S.1.5: submission/contribution/feed reject p2p rooms
-pnpm check:p2p-ranking-exclusion    # WS-S.1.5: every retriever predicates storage_mode='server'
-pnpm check:p2p-search-exclusion     # WS-S.1.5: server search indexes/serves only server rooms
-pnpm check:p2p-mls-wrapper          # WS-S.3.1a: ts-mls is imported ONLY via the reviewed MLS wrapper
-pnpm check:update-channel           # WS-S.10.2b: the private-mode bundle is signature + transparency-log + digest verified BEFORE activation (untrusted ⇒ rooms locked)
-pnpm check:no-applause              # no likes/votes/karma/reactions in components + routes + LCAP + private-p2p
-pnpm check:no-raw-egress            # no raw attention traces leaving the browser (+ the LCAP + private-p2p planes)
-pnpm check:knomosis-pins            # WS-L.1.1a: every non-local Knomosis deployment pins real finality values (sentinel commit/manifest rejected outside `local`)
-pnpm check:sw                       # SW security scan (run after build)
+pnpm check:no-p2p-server-content    # WS-S umbrella: no private-room content on the server; siblings:
+                                    #   no-private-cid-egress, private-rendezvous-schema, private-bundle-transparency,
+                                    #   p2p-endpoint-rejections, p2p-ranking-exclusion, p2p-search-exclusion, p2p-mls-wrapper
+pnpm check:update-channel           # private-mode bundle verified BEFORE activation (untrusted ⇒ rooms locked)
+pnpm check:no-applause              # no likes/votes/karma/reactions anywhere user-facing
+pnpm check:no-raw-egress            # no raw attention traces leave the browser (all planes)
+pnpm check:knomosis-pins            # non-local Knomosis deployments pin real finality values
+pnpm check:sw                       # service-worker security scan (run after a web build)
+pnpm run sbom                       # CycloneDX SBOM (`run` required — pnpm 11's builtin `sbom` shadows it)
 
-# Supply chain and build validation.
-pnpm run sbom                       # CycloneDX SBOM (includes transitive deps; `run` is
-                                    #   required — pnpm 11's builtin `sbom` shadows the bare name)
-pnpm clean                          # remove build artifacts
-
-# Database (development).  Migrations are HAND-AUTHORED (SQL + a
-# drizzle/meta/_journal.json entry — docs/DEVELOPMENT.md §15): the tracked
-# meta snapshots are far behind the chain, so db:generate would diff against
-# stale state and emit a garbage migration — do not run it here.
+# Database (development). Migrations are HAND-AUTHORED (SQL + a drizzle/meta/_journal.json
+# entry — docs/DEVELOPMENT.md §15). NEVER run db:generate here: the tracked meta snapshots
+# lag the chain and it would emit a garbage migration.
 pnpm db:migrate                     # run Drizzle migrations
 pnpm db:push                        # push schema directly (development only)
 
-# Per-workspace.
-pnpm --filter web dev               # Vite dev server (port 5173)
-pnpm --filter api dev               # Hono BFF dev server (port 3001)
-pnpm --filter web build             # production web build
-pnpm --filter api build             # production API build
-pnpm --filter web gen:tokens        # regenerate design tokens CSS from SSOT
-pnpm --filter web test:e2e          # Playwright E2E tests
-pnpm --filter @licio/shared build   # build shared package
-pnpm --filter @licio/db build       # build database package
-pnpm --filter @licio/invariants build  # build invariants package
-pnpm --filter @licio/ranking build  # build ranking package
-pnpm --filter @licio/ai-governance build  # build AI-governance package
-pnpm --filter @licio/governance build  # build AI-governed-rooms domain package
-pnpm --filter @licio/lcap build     # build LCAP offline-availability protocol core
-pnpm --filter @licio/lcap-p2p build # build the optional WebRTC/IPFS transport carriers
-pnpm --filter @licio/private-p2p build # build the WS-S Private P2P rooms domain (canonical encoding + schemas)
-pnpm --filter courier build         # WS-R.15.4a native courier: no-fork gate + cap sync + debug APK (needs the Android SDK + JDK 21; web build must precede)
-pnpm --filter courier test:unit     # courier Layer-1+2 JVM unit tests (pure framing + Robolectric plugin-contract) — NO emulator, NO radio, NO root
+# Per-workspace: `pnpm --filter <ws> <script>` (dev/build/test per workspace; web also has
+# gen:tokens + test:e2e; courier build needs the Android SDK + JDK 21 after a web build).
 ```
 
 `package.json` (root and per-workspace) is the source of truth for
@@ -456,8 +418,11 @@ write for a file the foreground agent may also touch.
 
 ## Security architecture
 
-The application implements **defense-in-depth** across seven layers.
-Every layer is enforced by both runtime guards and CI static gates.
+Defense-in-depth across seven layers, each enforced by BOTH runtime guards
+and CI static gates.  The full design (exact CSP/header/cookie strings, the
+draft-crypto and signal-privacy mechanics) is owned by `docs/SPEC.md` and
+`docs/pwa-client/README.md` — this file keeps only what changes how you
+write code here.
 
 | Layer | Mechanism | Enforced by | Key file(s) |
 |-------|-----------|-------------|-------------|
@@ -469,165 +434,51 @@ Every layer is enforced by both runtime guards and CI static gates.
 | Resilience | Eviction detection, quarantine, rage-loop dampening | Unit + E2E tests | `offline/eviction.ts`, `signals/return-tracker.ts` |
 | Service worker | Same-origin importScripts, TT policy injection | `check:sw` CI gate | `scripts/inject-sw-trusted-types.ts` |
 
-### Trusted Types
+Working rules that follow from it:
 
-Three named policies (`default`, `dompurify`, `licio-ugc`) plus the
-SW-injected default policy.  The client default policy validates
-script URLs via **origin comparison** (`new URL(url,
-location.origin).origin === location.origin`), not prefix matching —
-this prevents subdomain spoofing and protocol-relative bypasses.
-`licio-ugc` is the WS-G UGC sanitizer policy: DOMPurify returns
-TrustedHTML under it, and its `createScriptURL` throws
-unconditionally (UGC can never mint a script URL).
-
-### CSP directives
-
-```
-default-src 'self'; script-src 'self'; style-src 'self';
-img-src 'self' data:; font-src 'self'; connect-src 'self';
-worker-src 'self'; manifest-src 'self'; frame-ancestors 'self';
-object-src 'none'; base-uri 'self'; form-action 'self';
-trusted-types default dompurify licio-ugc;
-require-trusted-types-for 'script';
-report-uri /api/security/csp-report; report-to csp-endpoint
-```
-
-No `'unsafe-inline'`, no `'unsafe-eval'`.  Violation reports are
-ingested at `/api/security/csp-report`.
-
-The same policy is ALSO delivered as a `<meta http-equiv="Content-Security-Policy">`
-in `apps/web/index.html` (the enforceable-in-meta directives only — `frame-ancestors` /
-`report-uri` / `report-to` are header-only and omitted).  On the web it is redundant with
-the header (identical policy → no behaviour change); it is the **sole CSP/Trusted-Types
-source in the WS-R.15.4a native courier WebView**, which serves the same bundled assets
-from `https://localhost` with no server headers, so the `script-src`/`object-src`/
-Trusted-Types posture survives the WebView with no relaxation.
-
-### CSRF protection
-
-Per-session single-use tokens (256-bit, `crypto.randomBytes(32)`), 1-hour
-TTL, constant-time comparison (`crypto.timingSafeEqual`).  **Mutations are
-serialized** on the client — each fetches its own fresh token immediately
-before sending, preventing concurrent nonce sharing; GETs bypass the chain.
-
-Exempt paths are all session-less (no cookie for CSRF to ride) and
-individually rate-limited: `/health`, `/api/security/csp-report`,
-`/v1/telemetry`, `/v1/takedowns`, and the decentralized-plane surfaces
-(`/api/lcap/v2/{packs,pulse,exchange}`, the server-blind LCAP WebRTC
-rendezvous, the device-signed `/api/lcap/v2/bundles/export`, and the Private
-P2P rendezvous `/v1/private-rendezvous/*`).  The web-UI
-`/api/lcap/v2/bundles/import` alias is NOT exempt (session-bearing → keeps
-the double-submit token); `/v1/auth/*` and `/v1/privacy/*` are token-exempt
-but STILL Origin-checked.
-
-### Cookie security
-
-```
-__Host-session={id}; HttpOnly; Secure; SameSite=Strict; Path=/
-```
-
-`__Host-` prefix enforces HTTPS-only, no subdomain sharing, root path.
-
-### Draft encryption
-
-AES-256-GCM with a **non-extractable** `CryptoKey` persisted directly
-in IndexedDB (`licio-keys` database, separate from ciphertext).  The
-key's raw bytes are never serialized — `crypto.subtle.exportKey()`
-rejects, and there is no JWK at rest.  Fresh 96-bit IV per encryption.
-Decrypted payloads are zod-validated at the trust boundary.  Fallback
-to plaintext when Web Crypto is unavailable (availability >
-confidentiality, SPEC Section 6.9).
-
-### Attention signal privacy
-
-Raw engagement events (scroll positions, mouse coordinates, dwell
-milliseconds) are **processed entirely in-browser** and discarded.
-Only bucketed aggregates (`AttentionAggregate`, Section 22.1) cross
-the network boundary.  The `assertNoRawEgress` guard traverses every
-aggregate object before upload, throwing on any forbidden key.  The
-CI gate `check:no-raw-egress` scans source for forbidden network
-primitives and raw-trace field names.
-
-Rage-loop dampening uses **permanent forfeiture**: once a burst is
-detected (>= 3 returns within 90 minutes), the `forfeited` counter is
-set and never decrements — hostile returns can never resurrect.
-
-### Additional security headers
-
-```
-Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-X-Content-Type-Options: nosniff
-X-Frame-Options: SAMEORIGIN
-Referrer-Policy: strict-origin-when-cross-origin
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Resource-Policy: same-origin
-Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(),
-  usb=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=(),
-  serial=(), midi=()
-```
-
-### Rate limiting (identity-free, SPEC §19.1)
-
-The application never reads the client network address — no per-IP state
-of any kind, enforced by a static test (`no-client-address.test.ts`).
-Abuse control is layered as: per-account progressive lockouts (keyed by a
-non-reversible account ref), per-target cooldowns (one email per mailbox
-per window), and global per-endpoint fixed-window budgets
-(`/v1/telemetry`, `/api/security/csp-report`, auth minting/signup,
-deletion-cancel).  Overload → 429 + Retry-After.  Connection-level flood
-fairness is the edge/gateway's concern.
-
-### Bot prevention (three layers)
-
-Three independent, privacy-preserving layers (design detail in
-`docs/identity/README.md`, `docs/invariants/README.md`, and
-`docs/compliance/README.md`):
-
-1. **Sign-up proof-of-work CAPTCHA** — every account-minting entry point
-   requires a solved, single-use, HMAC-bound SHA-256 partial-preimage
-   challenge (`identity/pow-captcha.ts`, `lib/pow-captcha.ts`): no third
-   parties, no fingerprinting; difficulty scales with identity-free
-   sign-up pressure.  `SIGNUP_POW_MAX_NUMBER=0` is the operator opt-out.
-2. **Behavioral authenticity (BAI)** — server-side coherence scoring over
-   the already-bucketed §22.1 aggregates (`pwatt/behavior.ts`); a floored,
-   evidence-gated multiplier damps PWAtt trust (never zero, never boosts,
-   anonymity never profiled) and the `behavioral_authenticity` platform
-   invariant reports population health.  No new client collection.
-3. **KYC-gated governance** — room-governance participation requires a
-   reviewer-verified KYC standing + no compliance hold + no high-risk
-   wallet (`governance/eligibility.ts`, fail-closed; `check:governance-kyc`
-   is the structural CI gate).  Content participation is never KYC-gated.
+- **CSP has no `'unsafe-inline'`/`'unsafe-eval'` and `connect-src 'self'`** —
+  the browser NEVER talks to a third party; anything external (e.g. the
+  huggingface.co model-hub metadata) is proxied through the BFF.  The same
+  policy ships as a `<meta>` tag in `index.html`: redundant on the web,
+  load-bearing in the native courier WebView (no server headers there).
+- **Trusted Types**: three named policies (`default`, `dompurify`,
+  `licio-ugc`); the default policy validates script URLs by ORIGIN
+  comparison, and `licio-ugc`'s `createScriptURL` throws unconditionally.
+- **CSRF**: per-session single-use tokens; the web client SERIALIZES
+  mutations (each fetches a fresh token).  Exempt paths are session-less
+  and individually rate-limited; `/v1/auth/*` + `/v1/privacy/*` are
+  token-exempt but still Origin-checked.
+- **Identity-free rate limiting (SPEC §19.1)**: the application never reads
+  the client network address (enforced by `no-client-address.test.ts`).
+  Budgets are per-account, per-target, or global fixed-window — never per-IP.
+- **Bot prevention, three layers**: (1) sign-up proof-of-work CAPTCHA
+  (`identity/pow-captcha.ts`; `SIGNUP_POW_MAX_NUMBER=0` opts out, warned);
+  (2) behavioral-authenticity damping over the already-bucketed aggregates
+  (`pwatt/behavior.ts` — never zero, never boosts, no new collection);
+  (3) KYC-gated GOVERNANCE participation (`governance/eligibility.ts`,
+  fail-closed; `check:governance-kyc` is the structural gate).  Content
+  participation is never KYC-gated.
+- **Governance LLM egress**: the `local` backend is LOOPBACK-ONLY (enforced
+  at env validation AND the pure resolver; `redirect: 'error'` on every
+  local fetch); the hosted `anthropic` backend is an explicit, boot-logged
+  operator opt-in.  Model-hub reads are metadata-only against the fixed
+  huggingface.co host, never room content.
 
 ## Linting limitations
 
-Biome 2.x does not support:
+Biome 2.x cannot express `noConsole`, `noRestrictedSyntax` (innerHTML /
+outerHTML / document.write), or `javascript:` URL blocking — those are
+covered by `pnpm lint:security` + `scripts/validate-build.ts`.  Use pino
+for server-side logging.
 
-- `noConsole` / `noConsoleLog` — console usage is not blocked by the
-  linter; use pino for server-side logging.
-- `noRestrictedSyntax` — cannot block `innerHTML`, `outerHTML`, or
-  `document.write()` at the AST level; these are caught by
-  `pnpm lint:security` instead.
-- `javascript:` URL blocking — caught by `pnpm lint:security` and
-  `scripts/validate-build.ts`.
+## TypeScript + toolchain notes
 
-## TypeScript 6+ notes
-
-- TypeScript 7 is the native (non-JS) compiler; `tsc -b` project builds
-  behave as before, but `.tsbuildinfo` caches from 6.x are not reused —
-  the first post-upgrade `pnpm typecheck` recompiles everything.
-- TypeScript 6 defaults `types` to `[]` — ambient `@types/*` packages
-  must be explicitly listed in each workspace `tsconfig.json` via
-  `"types": ["node"]`.
-- `esModuleInterop` is always enabled and cannot be set to `false`.
-- `moduleResolution: "classic"` has been removed (this project uses
-  `"bundler"`).
-
-## Vite 8 notes
-
-- Vite 8 uses Rolldown as the bundler; `rollupOptions.output.manualChunks`
-  must be a function (object form is no longer supported).
-- Biome v2 config uses `css.parser.tailwindDirectives: true` for
-  Tailwind CSS v4 `@utility` / `@import "tailwindcss"` directives.
+- TypeScript 6+ defaults `types` to `[]` — ambient `@types/*` packages must
+  be listed per workspace (`"types": ["node"]`); `esModuleInterop` is
+  always on and cannot be disabled; `moduleResolution` is `"bundler"`.
+- Vite 8 uses Rolldown: `rollupOptions.output.manualChunks` must be a
+  FUNCTION (object form removed).  Biome reads Tailwind v4 directives via
+  `css.parser.tailwindDirectives: true`.
 
 ## Key dependencies
 
@@ -660,13 +511,18 @@ and WS-S (Private P2P rooms) — derive from `docs/OFFLINE_SPEC.md` and
 deferred: WS-R is P1 (native courier + browser P2P/WebTransport/IPFS), and
 **WS-S is LAUNCH-BLOCKING** — its §29 launch gates are part of the GA bar.
 WS-U is the maintainer's binding redesign of AI's role (SPEC §16.6/§24.6):
-an **elected steward** proposes a member-downloadable AI **model + prompt**
-(Knomosis-ratified), and the approved **in-room agent** may moderate, manage
-the room treasury, and facilitate lawmaking **within community-voted,
-kernel-enforced bounds, holding no keys, under a non-overridable platform
-legal floor** — it re-scopes WS-K into the platform eval/transparency
-substrate and preserves the pay-to-rank firewall + fail-closed crypto in
-full (`docs/planning/22-ai-governed-rooms.md`, `docs/governance/README.md`).
+any **governance-eligible member** proposes a member-downloadable AI
+**model + prompt** (optionally selecting revision-pinned huggingface.co
+models per governed role), the **members** adopt it by Knomosis-ratified
+vote, and the **elected steward VALIDATES** — the ratification-opening gate,
+the improper-vote cancel, and the post-hoc overrules; the last line of
+defence, never the author. The approved **in-room agent** may moderate,
+manage the room treasury, and facilitate lawmaking **within
+community-voted, kernel-enforced bounds, holding no keys, under a
+non-overridable platform legal floor** — it re-scopes WS-K into the
+platform eval/transparency substrate and preserves the pay-to-rank
+firewall + fail-closed crypto in full
+(`docs/planning/22-ai-governed-rooms.md`, `docs/governance/README.md`).
 Status:
 
 | Workstream | Title | Status |
@@ -682,10 +538,10 @@ Status:
 | WS-H | Invariant services (MERI, MFCI, SCOI, GWEI, PHI) | Complete |
 | WS-I | Ranking and distribution | Complete |
 | WS-J | Trust, safety, and abuse operations | Complete (residuals tracked, `docs/trust-safety/README.md`) |
-| WS-K | AI and model governance | Complete (residuals tracked, `docs/ai-governance/README.md`); **re-scoped by WS-U** into the platform eval/transparency substrate for community room models |
-| WS-L | Knomosis and wallets | Complete (residuals tracked, `docs/knomosis/README.md`); all behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags |
-| WS-M | Treasury and governance | Complete (residuals tracked, `docs/treasury/README.md`); all behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags — governance lifecycle + live readiness, charters, law-packs, the real-asset treasury + payment intents + three-source reconciliation, deadline-driven proposals with wallet-signed voting/challenges, grants/delegations/budgets, the hash-chained audit log, and the web lifecycle/treasury/proposal surfaces |
-| WS-N | Compliance | Complete (residuals tracked, `docs/compliance/README.md`) — the identity-free (§19.1 declared-region) jurisdiction engine over the ratified cell vocabulary, the real `CompliancePort` (sanctions screening, velocity/high-value fraud verdicts, wallet risk), the guarded case system + fraud queue, SAR/lawful-access records, risk disclosures + the intent-create ack gate, hash-chained erasure-safe audit, retention sweeps; fail-closed with ZERO policies populated until counsel authors them |
+| WS-K | AI and model governance | Complete (residuals: `docs/ai-governance/README.md`); **re-scoped by WS-U** into the platform eval/transparency substrate |
+| WS-L | Knomosis and wallets | Complete (residuals: `docs/knomosis/README.md`); behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags |
+| WS-M | Treasury and governance | Complete (residuals: `docs/treasury/README.md`); behind the fail-closed `cryptoEnabled`/`governanceEnabled` flags |
+| WS-N | Compliance | Complete (residuals: `docs/compliance/README.md`); fail-closed with ZERO policies populated until counsel authors them |
 | WS-O | Security and reliability | Planned (WS-O.4.5 adversarial hardening shipped) |
 | WS-P | Experimentation and launch | Planned |
 | WS-Q | Content–room ownership and visibility | Complete |
@@ -833,7 +689,7 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈8200 pass without
+**Test counts.**  `pnpm test` is the canonical query (≈8400 pass without
 the gated integration env; more with live Postgres/Redis).  Only monotonic
 growth is enforced — exact numbers drift, so the per-suite breakdown lives
 in each `docs/*/README.md`, not here.  WS-D/E/F/G/H/I/U and WS-R add

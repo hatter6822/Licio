@@ -52,6 +52,7 @@ function request(overrides: Partial<LawmakingSummaryRequest> = {}): LawmakingSum
     roomPromptText: 'Be concise and cite the room charter.',
     promptTemplate: 'Lead with what changes for members.',
     summaryStyle: 'neutral_brief',
+    adjudicationRef: null,
     ...overrides,
   };
 }
@@ -294,5 +295,64 @@ describe('governance LLM provider — breaker + budget bounds (ADR-6)', () => {
     h.advance(3_600_001);
     const summary = await h.provider.summarizeProposal(request());
     expect(summary.proposalId).toBe('prop-1');
+  });
+});
+
+describe('room hub adjudication model (WS-U model candidacy — the summariser rides the adjudication lane)', () => {
+  const REF = {
+    source: 'huggingface',
+    repoId: 'Qwen/Qwen3.6-27B',
+    revision: 'c'.repeat(40),
+  } as const;
+
+  it('a ratified adjudication selection serves the room summary under ITS identity; the lane never runs', async () => {
+    const h = makeHarness();
+    const roomRequests: LlmCompletionRequest[] = [];
+    const provider = createGovernanceLlmNlProvider({
+      services: h.services,
+      settings: SETTINGS,
+      identity: buildGovernanceLlmIdentity(SETTINGS, BACKEND),
+      complete: async (req) => {
+        h.requests.push(req);
+        return { stopReason: 'end_turn', text: JSON.stringify(GOOD_DRAFT) };
+      },
+      roomModels: {
+        resolveModeration: async () => null,
+        resolveAdjudication: async () => ({
+          complete: async (req) => {
+            roomRequests.push(req);
+            return { stopReason: 'end_turn', text: JSON.stringify(GOOD_DRAFT) };
+          },
+          settings: SETTINGS,
+          identity: {
+            name: 'governance-summarizer-hub-abcdefabcdef',
+            version: '1.0.0',
+            useCaseId: 'governance_assistance',
+            modalities: ['generation'],
+            promptTemplateId: 'governance-summarizer-llm/lawmaking-v1',
+            config: { model_id: 'Qwen/Qwen3.6-27B' },
+          },
+          backendId: 'llm:governance-summarizer-hub-abcdefabcdef',
+          format: 'json',
+        }),
+      },
+    });
+    const summary = await provider.summarizeProposal(request({ adjudicationRef: REF }));
+    expect(summary.proposalId).toBe('prop-1');
+    expect(roomRequests).toHaveLength(1); // the ROOM model served it…
+    expect(h.requests).toHaveLength(0); // …never the lane
+    const records = await h.services.outputRecords.listByModel(
+      'governance-summarizer-hub-abcdefabcdef',
+      '1.0.0',
+    );
+    expect(records).toHaveLength(1); // provenance names the ROOM model
+  });
+
+  it('an unresolvable selection throws room_model_unavailable (⇒ the deterministic summary), never a lane fallback', async () => {
+    const h = makeHarness(); // no roomModels resolver wired
+    await expect(
+      h.provider.summarizeProposal(request({ adjudicationRef: REF })),
+    ).rejects.toMatchObject({ name: 'GovernanceLlmError', code: 'room_model_unavailable' });
+    expect(h.requests).toHaveLength(0); // the lane completion was never consulted
   });
 });

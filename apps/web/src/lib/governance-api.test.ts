@@ -77,13 +77,17 @@ describe('governance client flows', () => {
     expect(res.seat?.holder_user_id).toBe(UUID_USER);
   });
 
-  it('fetches the "governed by" agent view', async () => {
+  it('fetches the "governed by" agent view (incl. the per-role model selection)', async () => {
     mockRoutes({
       'GET /v1/rooms/r1/governance/agent': () =>
         jsonResponse({
           active: true,
           frozen: false,
           model_id: UUID_MODEL,
+          model_selection: {
+            moderation: { repo_id: 'Qwen/Qwen3Guard-Gen-4B', revision: 'a'.repeat(40) },
+            adjudication: null,
+          },
           granted: ['moderate.remove'],
           recent_actions: [],
         }),
@@ -91,6 +95,8 @@ describe('governance client flows', () => {
     const res = await fetchGovernedBy('r1');
     expect(res.active).toBe(true);
     expect(res.granted).toEqual(['moderate.remove']);
+    expect(res.model_selection?.moderation?.repo_id).toBe('Qwen/Qwen3Guard-Gen-4B');
+    expect(res.model_selection?.adjudication).toBeNull();
   });
 
   it('lists models and downloads one', async () => {

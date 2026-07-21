@@ -176,8 +176,9 @@ export function checkLawmakingSummaryQuality(
   // Grounding: the draft's content tokens must overwhelmingly come from the
   // proposal. Both sides are stopword-filtered, so filler words neither help
   // nor hurt the fraction. A token is grounded on an EXACT match or a shared
-  // lexical stem (one token is a prefix of the other, ≥ 5 shared characters) —
-  // inflection (`adopting`/`adopt`, `subscribers`/`subscriber`) is not
+  // lexical stem — both tokens ≥ 5 chars AND (one is a full prefix of the
+  // other, or the two share a ≥ 6-char leading stem) — so inflection
+  // (`adopting`/`adopt`, `subscribers`/`subscriber`) is not
   // hallucination, while genuinely foreign words share no stem and still count
   // against the draft (gate v2).
   const proposalContent = contentTokens(input.proposalText);

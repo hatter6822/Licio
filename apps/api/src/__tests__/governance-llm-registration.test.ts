@@ -139,7 +139,7 @@ describe('ensureGovernanceLlmDeployed (the real WS-K gate)', () => {
   });
 
   it('deploys the in-room moderation model through the same gate with its own identity + card', async () => {
-    const identity = buildGovernanceModerationProposerIdentity(SETTINGS, ANTHROPIC);
+    const identity = buildGovernanceModerationProposerIdentity(SETTINGS, ANTHROPIC, 'json');
     expect(identity.name).toMatch(/^governance-moderation-llm-anthropic-[0-9a-f]{12}$/);
     expect(identity.useCaseId).toBe('toxicity_safety_triage');
     expect(identity.modalities).toEqual(['classification']);

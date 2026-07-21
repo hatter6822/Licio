@@ -99,7 +99,7 @@ export function GovernedByPanel({
         <p className="mt-2 text-sm text-ink-muted">
           {t(
             'room.governance.baseline',
-            "This room runs on Licio's platform moderation baseline. Members can elect a steward to propose a community-approved AI model that moderates the room within community-voted, kernel-enforced limits.",
+            "This room runs on Licio's platform moderation baseline. Any member can propose an AI model for the room; the community votes on it, and an elected steward validates the process. An approved model moderates the room within community-voted, kernel-enforced limits.",
           )}
         </p>
       ) : (
@@ -126,6 +126,50 @@ export function GovernedByPanel({
               "An elected community has approved an in-room AI agent. It acts only within powers the community granted, holds no keys, and every action is appealable to Licio's human stewards — the platform's non-overridable legal floor.",
             )}
           </p>
+
+          <div>
+            <h3 className="text-sm font-medium">
+              {t('room.governance.models.heading', 'Models governing this room')}
+            </h3>
+            <ul
+              className="mt-1 flex flex-col gap-1 text-sm"
+              aria-label={t('room.governance.models.label', 'Per-role governing models')}
+            >
+              {(
+                [
+                  ['moderation', t('room.governance.models.moderation', 'Moderation')],
+                  ['adjudication', t('room.governance.models.adjudication', 'Adjudication')],
+                ] as const
+              ).map(([role, label]) => {
+                const ref = query.data.model_selection?.[role] ?? null;
+                return (
+                  <li key={role} className="flex flex-wrap items-center gap-2">
+                    <span className="text-ink-muted">{label}:</span>
+                    {ref ? (
+                      <>
+                        <span className="font-mono text-xs">{ref.repo_id}</span>
+                        <Badge tone="info">
+                          {t('room.governance.models.pinned', 'pinned')} {ref.revision.slice(0, 12)}
+                        </Badge>
+                        {ref.served_model_id ? (
+                          // A runtime id differing from the verified repo is
+                          // surfaced, never hidden behind the repo id.
+                          <Badge tone="neutral">
+                            {t('room.governance.models.servedAs', 'served as')}{' '}
+                            {ref.served_model_id}
+                          </Badge>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span>
+                        {t('room.governance.models.platformDefault', 'Platform default model')}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
 
           <div>
             <h3 className="text-sm font-medium">

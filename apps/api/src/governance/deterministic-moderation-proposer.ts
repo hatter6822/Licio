@@ -46,7 +46,19 @@ export function createDeterministicModerationProposer(): ModerationProposer {
   return {
     kind: 'deterministic',
     backendId: 'deterministic',
+    async resolveBackendId(ref) {
+      // A hub model selection cannot run under the fixed deterministic
+      // classifier — it stays unresolvable (admission retryable, live surface
+      // fail-closed) until an LLM lane can actually serve the selected model.
+      return ref === null ? 'deterministic' : null;
+    },
     async propose(request) {
+      if (request.modelRef !== null) {
+        // Honest refusal, not a silent stand-in: sampling the deterministic
+        // classifier in place of the member-selected hub model would admit a
+        // bundle on behaviour the room never ratified.
+        return { status: 'unavailable', code: 'room_model_unavailable' };
+      }
       return classifyDeterministic(request.context);
     },
   };

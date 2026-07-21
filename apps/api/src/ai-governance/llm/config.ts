@@ -1,38 +1,59 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-U ADR-9 fail-closed enablement + settings for the LLM-backed governance
-// NL provider. TWO backends exist behind the same governed seam:
+// surfaces. TWO backends exist behind the same governed seam:
 //   - 'anthropic' — the hosted Claude API (official SDK); requires
 //     ANTHROPIC_API_KEY. Sends governed-room proposal text off-host, making
 //     the vendor an operator-chosen data processor — never a silent or
 //     mandatory dependency (boot logs it loudly). Always an EXPLICIT opt-in.
-//   - 'local'     — a SAME-HOST inference server speaking the OpenAI-compatible
-//     /chat/completions protocol (llama.cpp server, Ollama, vLLM, LM Studio).
-//     GOVERNANCE_LLM_LOCAL_URL (loopback-only, so "local" provably means no
-//     third-party egress) defaults to the Ollama loopback endpoint and
-//     GOVERNANCE_LLM_MODEL to the reviewed default local model below.
+//   - 'local'     — SAME-HOST inference servers speaking the OpenAI-compatible
+//     /chat/completions protocol. vLLM is the reviewed DEFAULT runtime
+//     (provisioned by `pnpm setup:llm` / the compose `llm` profile); Ollama,
+//     llama.cpp server, and LM Studio are supported operator alternatives.
+//     Every URL is loopback-only, so "local" provably means no third-party
+//     egress.
+//
+// THE ROLE SPLIT (the 2026-07 revision): the backend runs TWO model LANES,
+// because the governed roles fail differently — an over/under-blocking safety
+// classifier is a moderation failure mode, a shallow-reasoning generalist an
+// adjudication one:
+//   - the MODERATION lane (the in-room moderation model) defaults to the
+//     Qwen3Guard generative safety classifier;
+//   - the ADJUDICATION lane (the WS-T debate adjudicator AND the advisory
+//     lawmaking summariser — both generalist-reasoning surfaces) defaults to
+//     the Qwen3.6 generalist.
+// Lane precedence: per-lane env key → legacy single-lane key (both lanes; the
+// single-runtime posture, e.g. one Ollama serving both models from one URL) →
+// the reviewed per-lane default below.
+//
 // Environment defaults (the 2026-07-09 maintainer decisions, revised):
 //   - PRODUCTION runs the COMPLETE feature by default: an unset
 //     GOVERNANCE_LLM_PROVIDER resolves to the 'local' backend with the
 //     defaults above — production is never silently LESS capable than
-//     development. If the runtime is absent, every governed surface fails
-//     CLOSED at call time to its reviewed deterministic path (summary
-//     fallback, platform-baseline moderation + deferred re-moderation, the
+//     development. If a runtime is absent, every governed surface fails
+//     CLOSED at call time to its deterministic path (summary fallback,
+//     platform-baseline moderation + deferred re-moderation, the
 //     deterministic debate adjudicator), and recovers when it appears.
 //   - DEVELOPMENT with an unset provider resolves to `not_requested` here;
 //     the dev boot then wires the DEV-ONLY simulated loopback runtime through
-//     this same decision (simulator/governance-llm.ts), so dev fakes the
-//     feature rather than running less of it.
+//     this same decision (simulator/governance-llm.ts) into BOTH lanes, so
+//     dev fakes the feature rather than running less of it.
 //   - GOVERNANCE_LLM_PROVIDER=deterministic is the explicit opt-out anywhere.
 // Any INVALID explicit value still resolves to the deterministic default, so
 // a misconfiguration can never silently enable an unintended backend (the
 // house fail-closed config posture).
 
 import { isLoopbackHttpUrl } from '@licio/shared/env';
+import { type ModerationOutputFormat, resolveModerationOutputFormat } from './guard-format.js';
+
+/** The two governed model lanes (the moderation/adjudication role split). The
+ *  lawmaking summariser rides the adjudication lane — drafting a neutral
+ *  summary is generalist reasoning, not safety triage. */
+export type GovernanceLlmRole = 'moderation' | 'adjudication';
 
 export interface GovernanceLlmSettings {
   /** Model id — a Claude model for 'anthropic' (default claude-opus-4-8), the
-   *  local runtime's model name for 'local' (required; no default exists). */
+   *  local runtime's served model name for 'local' (per-lane defaults below). */
   modelId: string;
   /** Hard per-response output-token ceiling. */
   maxOutputTokens: number;
@@ -65,16 +86,14 @@ export interface GovernanceLlmSettings {
   /** Seconds the breaker stays open before a half-open retry. */
   breakerCooldownSeconds: number;
   /** LOCAL backend only: the OpenAI-compatible `reasoning_effort` sent with
-   *  every completion. The default local model (gpt-oss) is a REASONING model
-   *  whose latency is dominated by thinking tokens; `low` cuts a verdict's
-   *  wall-clock ~30% on the reviewed default stack (measured on Ollama), and
-   *  `none` disables thinking entirely — the unlock for the qwen3 family,
-   *  whose thinking otherwise exhausts the output budget (measured: a valid
-   *  1.4s verdict at `none` vs an empty-content failure at `low`). The
-   *  deterministic gates judge every output regardless. The completion layer
-   *  NEGOTIATES per runtime: a 400-rejected field is retried without and
-   *  latched; a thinking-exhausted response retries once at `none` and
-   *  latches (both logged + counted — never silent). Null ⇒ the field is
+   *  every completion. Reasoning models' latency is dominated by thinking
+   *  tokens; `low` cuts a verdict's wall-clock materially and `none` disables
+   *  thinking entirely — the unlock for the qwen3 family, whose thinking
+   *  otherwise exhausts the output budget. The deterministic gates judge every
+   *  output regardless. The completion layer NEGOTIATES per runtime: a
+   *  400-rejected field is retried without and latched (e.g. the non-thinking
+   *  Qwen3Guard line); a thinking-exhausted response retries once at `none`
+   *  and latches (both logged + counted — never silent). Null ⇒ the field is
    *  never sent (always null for the hosted backend; the explicit `off`). */
   reasoningEffort: 'none' | 'low' | 'medium' | 'high' | null;
 }
@@ -92,31 +111,59 @@ export const DEFAULT_GOVERNANCE_LLM_SETTINGS: GovernanceLlmSettings = {
   reasoningEffort: null,
 };
 
-/** The reviewed default `reasoning_effort` for the LOCAL backend (paired with
- *  the default gpt-oss model; measured ~30% latency cut per verdict at
- *  unchanged gate outcomes). GOVERNANCE_LLM_REASONING_EFFORT overrides
- *  ('off' ⇒ never send the field). */
+/** The reviewed default `reasoning_effort` for the LOCAL backend (measured
+ *  latency cut per verdict at unchanged gate outcomes on reasoning models;
+ *  auto-negotiated away on models that reject or exhaust it).
+ *  GOVERNANCE_LLM_REASONING_EFFORT overrides ('off' ⇒ never send the field). */
 export const DEFAULT_GOVERNANCE_LLM_LOCAL_REASONING_EFFORT = 'low' as const;
 
-/** The default 'local' base URL: the Ollama loopback endpoint (the most common
- *  local runtime; llama.cpp/vLLM/LM Studio operators set their own URL). */
-export const DEFAULT_GOVERNANCE_LLM_LOCAL_URL = 'http://127.0.0.1:11434/v1';
+/** The reviewed default MODERATION-lane model: the Qwen3Guard generative
+ *  safety classifier (Apache-2.0, 4B — single-GPU class). A guard model is a
+ *  purpose-trained safety triage: its failure modes (over/under-blocking on a
+ *  fixed taxonomy) are the moderation-shaped ones, and the proposer speaks its
+ *  NATIVE Safety/Categories dialect (guard-format.ts) rather than forcing
+ *  schema-guided JSON onto it. Operators override per deployment; the model id
+ *  is folded into the lane's registry identity, so a swap mints a new identity
+ *  that re-clears the WS-K gate and forces re-admission. */
+export const DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID = 'Qwen/Qwen3Guard-Gen-4B';
 
-/** The reviewed DEFAULT LOCAL MODEL both production and development use when
- *  GOVERNANCE_LLM_MODEL is unset for the 'local' backend: gpt-oss:20b — an
- *  Apache-2.0 open-weight reasoning model that Ollama, vLLM, llama.cpp and
- *  LM Studio all serve, strong at the strict-JSON structured outputs the three
- *  governed surfaces require, and small enough (MoE, ~16 GB) for a single
- *  production host. Operators override it per deployment; the model id is
- *  folded into each registry identity's config hash, so a swap mints a new
- *  identity that re-clears the WS-K gate. */
-export const DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID = 'gpt-oss:20b';
+/** The reviewed default ADJUDICATION-lane model (also serves the lawmaking
+ *  summariser): the Qwen3.6 generalist (Apache-2.0, 27B) — debate adjudication
+ *  and neutral summarisation are reasoning tasks a guard classifier cannot do.
+ *  Same override/identity discipline as the moderation lane. */
+export const DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID = 'Qwen/Qwen3.6-27B';
+
+/** The default per-lane 'local' base URLs: two loopback vLLM instances (vLLM
+ *  serves ONE model per instance, so the two lanes get one each — the compose
+ *  `llm` profile provisions exactly these). Operators running a multiplexing
+ *  runtime (Ollama serves many models from one URL) point both lanes at it via
+ *  GOVERNANCE_LLM_LOCAL_URL or the per-lane URL keys. */
+export const DEFAULT_GOVERNANCE_LLM_MODERATION_URL = 'http://127.0.0.1:8001/v1';
+export const DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL = 'http://127.0.0.1:8002/v1';
+
+/** The conventional loopback URL of the OLLAMA alternative runtime (the
+ *  single-URL multiplexing option `pnpm setup:llm --runtime ollama`
+ *  provisions; docs + scripts reference it — NOT a lane default). */
+export const OLLAMA_LOOPBACK_URL = 'http://127.0.0.1:11434/v1';
+
+/** The DEV-ONLY simulated runtime's model id (the simulator serves all three
+ *  governed surfaces under it; defined here so production modules — the boot
+ *  rewrite, the runtime catalog's dev wildcard — never import simulator code). */
+export const SIMULATED_GOVERNANCE_LLM_MODEL_ID = 'licio-governance-sim';
 
 /** The transport a decision selected (the key/URL live here, NEVER in the
  *  model-identity config that gets hashed into output records). */
 export type GovernanceLlmBackend =
   | { kind: 'anthropic'; apiKey: string }
   | { kind: 'local'; baseUrl: string };
+
+/** One resolved model lane: the transport plus the lane's settings (whose
+ *  `modelId`/`reasoningEffort` are lane-specific; the budget/breaker numbers
+ *  are the shared reviewed defaults). */
+export interface GovernanceLlmLane {
+  backend: GovernanceLlmBackend;
+  settings: GovernanceLlmSettings;
+}
 
 export interface GovernanceLlmEnvInput {
   /** GOVERNANCE_LLM_PROVIDER — 'anthropic' or 'local' opts in explicitly;
@@ -126,12 +173,26 @@ export interface GovernanceLlmEnvInput {
   provider: string | undefined;
   /** ANTHROPIC_API_KEY (anthropic backend). */
   apiKey: string | undefined;
-  /** GOVERNANCE_LLM_MODEL (optional for both backends: anthropic defaults to
-   *  the reviewed Claude model; local to DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID). */
+  /** GOVERNANCE_LLM_MODEL — the LEGACY single-lane model override; applies to
+   *  BOTH lanes when the per-lane keys are unset (the single-runtime posture). */
   modelId?: string | undefined;
-  /** GOVERNANCE_LLM_LOCAL_URL (local backend; loopback-only OpenAI-compatible
-   *  base URL; defaults to DEFAULT_GOVERNANCE_LLM_LOCAL_URL). */
+  /** GOVERNANCE_LLM_LOCAL_URL — the LEGACY single-lane URL override; applies to
+   *  BOTH lanes when the per-lane URL keys are unset. Loopback-only. */
   localBaseUrl?: string | undefined;
+  /** GOVERNANCE_LLM_MODERATION_MODEL / GOVERNANCE_LLM_ADJUDICATION_MODEL —
+   *  per-lane model overrides (highest precedence). */
+  moderationModelId?: string | undefined;
+  adjudicationModelId?: string | undefined;
+  /** GOVERNANCE_LLM_MODERATION_URL / GOVERNANCE_LLM_ADJUDICATION_URL —
+   *  per-lane 'local' base URLs (highest precedence; loopback-only). */
+  moderationUrl?: string | undefined;
+  adjudicationUrl?: string | undefined;
+  /** GOVERNANCE_LLM_EXTRA_RUNTIME_URLS (parsed) — additional loopback runtime
+   *  base URLs the room-model resolver may locate ratified hub models on. */
+  extraRuntimeUrls?: readonly string[] | undefined;
+  /** GOVERNANCE_LLM_MODERATION_FORMAT — 'json' | 'guard' | 'auto' (default:
+   *  auto-detect guard-family models by id; invalid values auto-detect). */
+  moderationFormat?: string | undefined;
   /** GOVERNANCE_LLM_MODERATION — 'off' keeps the deterministic default
    *  moderation proposer even when a backend is configured (the backend then
    *  serves only the other surfaces). Any other value (incl. absent) uses the
@@ -149,9 +210,8 @@ export interface GovernanceLlmEnvInput {
   debateBudgetPerHour?: number | undefined;
   /** GOVERNANCE_LLM_REASONING_EFFORT — the local backend's `reasoning_effort`
    *  ('none'|'low'|'medium'|'high'; 'off' ⇒ never send the field). Unset ⇒
-   *  the reviewed default ('low', paired with the default gpt-oss model; the
-   *  completion layer auto-negotiates `none` for thinking-exhausting models).
-   *  Ignored for the hosted backend. */
+   *  the reviewed default ('low'; the completion layer auto-negotiates per
+   *  model family). Applies to both lanes; ignored for the hosted backend. */
   reasoningEffort?: string | undefined;
   /** NODE_ENV — drives the production-complete default above. Absent ⇒ treated
    *  as non-production (no silent default backend). */
@@ -167,8 +227,16 @@ export type GovernanceLlmDecision =
   | { enabled: false; reason: GovernanceLlmDisabledReason }
   | {
       enabled: true;
-      backend: GovernanceLlmBackend;
-      settings: GovernanceLlmSettings;
+      /** The two resolved model lanes. The lawmaking summariser uses the
+       *  adjudication lane (generalist reasoning). */
+      lanes: { moderation: GovernanceLlmLane; adjudication: GovernanceLlmLane };
+      /** The moderation lane's completion dialect ('auto' resolved against the
+       *  lane's model id — guard-family models get their native profile). */
+      moderationFormat: ModerationOutputFormat;
+      /** The deduplicated loopback runtime base URLs (lane URLs + extras) the
+       *  room-model resolver may probe for ratified hub models; empty for the
+       *  hosted backend (hub models are local-runtime-only). */
+      runtimeUrls: string[];
       /** Whether the LLM is the in-room moderation model (ON unless
        *  GOVERNANCE_LLM_MODERATION=off — then the deterministic default proposer
        *  is used and the backend serves the other surfaces only). */
@@ -196,39 +264,93 @@ export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): Gove
     return { enabled: false, reason: 'not_requested' };
   }
 
-  const settings = { ...DEFAULT_GOVERNANCE_LLM_SETTINGS };
+  const shared = { ...DEFAULT_GOVERNANCE_LLM_SETTINGS };
   if (
     input.debateBudgetPerHour !== undefined &&
     Number.isInteger(input.debateBudgetPerHour) &&
     input.debateBudgetPerHour > 0
   ) {
-    settings.maxDebateJudgementsPerHour = input.debateBudgetPerHour;
+    shared.maxDebateJudgementsPerHour = input.debateBudgetPerHour;
   }
-  const modelId = input.modelId?.trim();
+  const legacyModelId = input.modelId?.trim();
+  const moderationModelOverride = input.moderationModelId?.trim();
+  const adjudicationModelOverride = input.adjudicationModelId?.trim();
   const llmModeration = input.moderation?.trim().toLowerCase() !== 'off';
   const llmDebate = input.debate?.trim().toLowerCase() !== 'off';
   const flags = { llmModeration, llmDebate, providerDefaulted };
+  const formatInput = ((): 'auto' | 'json' | 'guard' | undefined => {
+    const value = input.moderationFormat?.trim().toLowerCase();
+    return value === 'json' || value === 'guard' || value === 'auto' ? value : undefined;
+  })();
 
   if (provider === 'anthropic') {
     const apiKey = input.apiKey?.trim() ?? '';
     if (apiKey.length === 0) return { enabled: false, reason: 'missing_api_key' };
-    if (modelId) settings.modelId = modelId;
-    return { enabled: true, backend: { kind: 'anthropic', apiKey }, settings, ...flags };
+    const backend: GovernanceLlmBackend = { kind: 'anthropic', apiKey };
+    const moderationModel =
+      moderationModelOverride || legacyModelId || DEFAULT_GOVERNANCE_LLM_SETTINGS.modelId;
+    const adjudicationModel =
+      adjudicationModelOverride || legacyModelId || DEFAULT_GOVERNANCE_LLM_SETTINGS.modelId;
+    return {
+      enabled: true,
+      lanes: {
+        moderation: { backend, settings: { ...shared, modelId: moderationModel } },
+        adjudication: { backend, settings: { ...shared, modelId: adjudicationModel } },
+      },
+      // A forced `guard` override is IGNORED under the hosted backend: no
+      // hosted Claude model speaks the Qwen3Guard block, so honouring it would
+      // pin every moderation call into a parse-fail → deferred-re-moderation
+      // loop. Auto-detection (which resolves hosted models to 'json') applies.
+      moderationFormat: resolveModerationOutputFormat(
+        moderationModel,
+        formatInput === 'guard' ? undefined : formatInput,
+      ),
+      runtimeUrls: [],
+      ...flags,
+    };
   }
 
-  // 'local': the loopback-only same-host backend. URL + model both carry
-  // reviewed defaults (the Ollama loopback endpoint + the default local model),
-  // so `GOVERNANCE_LLM_PROVIDER=local` alone — or the production default — is a
-  // complete configuration. A PROVIDED URL is still loopback-enforced.
-  const baseUrl = input.localBaseUrl?.trim() || DEFAULT_GOVERNANCE_LLM_LOCAL_URL;
-  if (!isLoopbackHttpUrl(baseUrl)) return { enabled: false, reason: 'local_url_not_loopback' };
-  settings.modelId = modelId || DEFAULT_GOVERNANCE_LLM_LOCAL_MODEL_ID;
+  // 'local': the loopback-only same-host backend. Every lane URL + model
+  // carries a reviewed default (the two vLLM lane instances + the Qwen pair),
+  // so `GOVERNANCE_LLM_PROVIDER=local` alone — or the production default — is
+  // a complete configuration. EVERY provided URL is still loopback-enforced.
+  const legacyUrl = input.localBaseUrl?.trim();
+  const moderationUrl =
+    input.moderationUrl?.trim() || legacyUrl || DEFAULT_GOVERNANCE_LLM_MODERATION_URL;
+  const adjudicationUrl =
+    input.adjudicationUrl?.trim() || legacyUrl || DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL;
+  const extras = (input.extraRuntimeUrls ?? [])
+    .map((url) => url.trim())
+    .filter((u) => u.length > 0);
+  for (const url of [moderationUrl, adjudicationUrl, ...extras]) {
+    if (!isLoopbackHttpUrl(url)) return { enabled: false, reason: 'local_url_not_loopback' };
+  }
   const effort = input.reasoningEffort?.trim().toLowerCase();
-  settings.reasoningEffort =
+  const reasoningEffort =
     effort === 'off'
       ? null
       : effort === 'none' || effort === 'low' || effort === 'medium' || effort === 'high'
         ? effort
         : DEFAULT_GOVERNANCE_LLM_LOCAL_REASONING_EFFORT;
-  return { enabled: true, backend: { kind: 'local', baseUrl }, settings, ...flags };
+  const moderationModel =
+    moderationModelOverride || legacyModelId || DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID;
+  const adjudicationModel =
+    adjudicationModelOverride || legacyModelId || DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID;
+  const runtimeUrls = [...new Set([moderationUrl, adjudicationUrl, ...extras])];
+  return {
+    enabled: true,
+    lanes: {
+      moderation: {
+        backend: { kind: 'local', baseUrl: moderationUrl },
+        settings: { ...shared, modelId: moderationModel, reasoningEffort },
+      },
+      adjudication: {
+        backend: { kind: 'local', baseUrl: adjudicationUrl },
+        settings: { ...shared, modelId: adjudicationModel, reasoningEffort },
+      },
+    },
+    moderationFormat: resolveModerationOutputFormat(moderationModel, formatInput),
+    runtimeUrls,
+    ...flags,
+  };
 }

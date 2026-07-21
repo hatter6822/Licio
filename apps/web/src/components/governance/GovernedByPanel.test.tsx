@@ -63,6 +63,14 @@ describe('GovernedByPanel', () => {
       data: {
         active: true,
         model_id: 'm-1',
+        model_selection: {
+          moderation: {
+            repo_id: 'Qwen/Qwen3Guard-Gen-8B',
+            revision: 'a'.repeat(40),
+            served_model_id: 'guard-gguf:q8',
+          },
+          adjudication: null,
+        },
         granted: ['moderate.remove', 'moderate.flag'],
         recent_actions: [
           {
@@ -82,6 +90,13 @@ describe('GovernedByPanel', () => {
     expect(screen.getByText('Flag for human review')).toBeInTheDocument();
     expect(screen.getByText(/excessive links/i)).toBeInTheDocument();
     expect(screen.getByText('Irreversible')).toBeInTheDocument();
+    // The per-role model transparency: the ratified hub selection shows its
+    // revision pin; an unselected role names the platform default.
+    expect(screen.getByText('Qwen/Qwen3Guard-Gen-8B')).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`pinned ${'a'.repeat(12)}`))).toBeInTheDocument();
+    // A runtime id differing from the verified repo is surfaced, never hidden.
+    expect(screen.getByText(/served as guard-gguf:q8/)).toBeInTheDocument();
+    expect(screen.getByText('Platform default model')).toBeInTheDocument();
     // The non-overridable human floor is named.
     expect(screen.getByText(/human\s+stewards/i)).toBeInTheDocument();
     expect(

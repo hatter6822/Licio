@@ -2,17 +2,21 @@
 //
 // DEV-ONLY simulated local governance-LLM runtime (NEVER in production). A
 // zero-dependency node:http server, bound to the loopback interface only, that
-// speaks the same OpenAI-compatible /chat/completions protocol as the real
-// `local` runtimes (llama.cpp server, Ollama, vLLM, LM Studio) — so the boot
-// wiring can point the UNCHANGED WS-U ADR-9 `local` backend seam
-// (`ai-governance/llm/local.ts`) at it and the ENTIRE governed LLM path runs on
-// a bare `pnpm dev` box: WS-K registration + admission + the deploy gate, the
-// pre-execution guard, the strict output schemas, the §24.5 summary quality
-// gate, per-room budgets + the circuit breaker, immutable AIOutputRecords, the
-// deterministic moderation wrapper (escalate-to-review ceiling + capability
-// clamp), and deferred re-moderation. Nothing here shortcuts that machinery:
-// this module only ANSWERS the protocol; every guarantee stays enforced by the
-// real path on the client side.
+// speaks the same OpenAI-compatible protocol as the real `local` runtimes
+// (vLLM, Ollama, llama.cpp server, LM Studio): POST /chat/completions for all
+// three governed surfaces — including the schema-less GUARD dialect (a bare
+// user turn answered with the native Safety:/Categories: block), so
+// guard-family hub candidacy works in dev — plus GET /v1/models (the standard
+// listing the runtime catalog probes; seeing the sim id there activates the
+// catalog's dev wildcard). The boot wiring points the UNCHANGED WS-U ADR-9
+// `local` backend seam (`ai-governance/llm/local.ts`) at it and the ENTIRE
+// governed LLM path runs on a bare `pnpm dev` box: WS-K registration +
+// admission + the deploy gate, the pre-execution guard, the strict output
+// schemas, the §24.5 summary quality gate, per-room budgets + the circuit
+// breaker, immutable AIOutputRecords, the deterministic moderation wrapper
+// (escalate-to-review ceiling + capability clamp), and deferred re-moderation.
+// Nothing here shortcuts that machinery: this module only ANSWERS the
+// protocol; every guarantee stays enforced by the real path on the client side.
 //
 // The "model" is a deterministic template classifier/summariser (no weights, no
 // randomness, no clock), so dev behaviour is reproducible and the k-of-N
@@ -36,10 +40,14 @@
 import { createServer, type Server } from 'node:http';
 import { MODERATION_ACTIONS, type ModerationAction } from '@licio/governance';
 import { z } from 'zod';
+import { SIMULATED_GOVERNANCE_LLM_MODEL_ID } from '../ai-governance/llm/config.js';
 
 /** The model name the simulated runtime serves (the boot wiring passes it as
- *  GOVERNANCE_LLM_MODEL, so the registry identity names the simulator openly). */
-export const SIMULATED_GOVERNANCE_LLM_MODEL_ID = 'licio-governance-sim';
+ *  GOVERNANCE_LLM_MODEL, so the registry identity names the simulator openly).
+ *  DEFINED in llm/config.ts — the runtime catalog's dev wildcard needs it
+ *  without importing simulator code — and re-exported here for the dev boot's
+ *  dynamic import. */
+export { SIMULATED_GOVERNANCE_LLM_MODEL_ID };
 
 /** Fixed default port so the config-hashed registry identity (which folds in
  *  the loopback base URL) stays STABLE across dev reboots — a persistent dev
@@ -484,6 +492,37 @@ export function simulateChatCompletion(payload: unknown): SimulatedChatResponse 
     return completion(request.model, 'This contribution seems fine to me.', 'stop');
   }
 
+  // The GUARD dialect (the moderation lane's Qwen3Guard-family profile): NO
+  // response_format and no system turn — the request is the bare contribution
+  // text, and the reply is the native `Safety:/Categories:` block. Without
+  // this branch, a guard-family hub selection in `pnpm dev` (which the
+  // catalog's wildcard resolves to this simulator) would 400 forever and the
+  // candidacy flow the wildcard exists for would be dead for exactly the
+  // project's flagship moderation family. The ladder reuses
+  // `classifySimulatedModeration` so both dialects classify identically.
+  if (request.response_format === undefined) {
+    const forced = forcedModerationAction(user);
+    const action =
+      forced ??
+      classifySimulatedModeration({
+        text: user,
+        // The guard dialect carries no context framing — derive the link
+        // count from the text itself (deterministic; mirrors what a guard
+        // model "sees") and neutralize the author-history heuristics.
+        linkCount: user.split('http').length - 1,
+        authorAccountAgeDays: 365,
+        authorNewToRoom: false,
+        priorRemovalsInRoom: 0,
+      }).action;
+    const block =
+      action === 'allow'
+        ? 'Safety: Safe\nCategories: None'
+        : action === 'warn'
+          ? 'Safety: Controversial\nCategories: Unethical Acts'
+          : 'Safety: Unsafe\nCategories: Violent';
+    return completion(request.model, block, 'stop');
+  }
+
   // Surface detection: the response_format schema names the governed surface
   // (the moderation verdict has `action`; the lawmaking summary has `headline`).
   const properties = request.response_format?.json_schema.schema['properties'];
@@ -597,6 +636,17 @@ export async function startSimulatedGovernanceLlm(
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
+    // The standard OpenAI-compatible model listing (what `GET /v1/models`
+    // answers on vLLM/Ollama too): the runtime catalog probes it — seeing the
+    // sim id here is what activates the catalog's DEV wildcard, so the full
+    // hub-candidacy flow is exercisable under `pnpm dev` with zero setup.
+    if (req.method === 'GET' && (req.url ?? '').endsWith('/models')) {
+      respond(200, {
+        object: 'list',
+        data: [{ id: SIMULATED_GOVERNANCE_LLM_MODEL_ID, object: 'model' }],
+      });
+      return;
+    }
     if (req.method !== 'POST') {
       respond(405, { error: { message: 'method not allowed' } });
       return;

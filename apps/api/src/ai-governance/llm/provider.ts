@@ -28,6 +28,7 @@ import { recordAiOutput } from '../output-records.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmSettings } from './config.js';
 import { checkLawmakingSummaryQuality } from './quality.js';
+import type { ResolvedRoomModel, RoomModelResolver } from './room-models.js';
 
 /** Bumped whenever PLATFORM_SYSTEM_PROMPT changes (pinned via the identity
  *  config into every AIOutputRecord's config hash). */
@@ -71,6 +72,11 @@ export type GovernanceLlmFailureCode =
   | 'truncated'
   | 'invalid_output'
   | 'quality'
+  // The bundle's member-selected hub adjudication model is not currently
+  // resolvable (runtime down / model unprovisioned / WS-K gate refusal) — the
+  // deterministic summary serves; NEVER a silent fallback onto the lane model
+  // the room did not ratify (WS-U model candidacy).
+  | 'room_model_unavailable'
   // The output-record store faulted AFTER a valid completion — counted toward
   // the breaker (like the moderation/debate legs) so a record-store outage
   // trips it instead of spending a full completion on every retry forever.
@@ -88,10 +94,16 @@ export class GovernanceLlmError extends Error {
 
 /** The narrow completion seam (tests inject a fake; boot injects the SDK). */
 export interface LlmCompletionRequest {
-  system: string;
+  /** The system prompt. OMITTED for guard-profile moderation calls — a guard
+   *  model's chat template owns the framing, and injected policy prose would
+   *  itself be classified as content (guard-format.ts). */
+  system?: string;
   user: string;
   maxOutputTokens: number;
-  jsonSchema: Record<string, unknown>;
+  /** The strict structured-output schema. OMITTED for guard-profile calls —
+   *  the guard's native Safety/Categories block is parsed instead of forcing
+   *  schema-guided decoding onto a model not trained for it. */
+  jsonSchema?: Record<string, unknown>;
   /** Per-call transport timeout override (the inline moderation path passes its
    *  tighter bound); falls back to the backend's configured timeout. */
   timeoutMs?: number;
@@ -120,6 +132,26 @@ export class RoomHourlyBudget {
     window.count += 1;
     return true;
   }
+}
+
+/**
+ * A per-identity breaker pool (the role split): each model identity trips its
+ * OWN breaker, so a broken room-selected candidate never degrades the lane or
+ * other rooms' surfaces. Shared by all three governed surfaces — one
+ * implementation, one semantics. Bounded by the distinct-identity count.
+ */
+export function createBreakerPool(
+  threshold: number,
+  cooldownMs: number,
+): (identityName: string) => ConsecutiveFailureBreaker {
+  const breakers = new Map<string, ConsecutiveFailureBreaker>();
+  return (identityName) => {
+    const existing = breakers.get(identityName);
+    if (existing) return existing;
+    const built = new ConsecutiveFailureBreaker(threshold, cooldownMs);
+    breakers.set(identityName, built);
+    return built;
+  };
 }
 
 /** Consecutive-failure breaker: opens at the threshold, half-opens after the
@@ -223,17 +255,24 @@ export interface GovernanceLlmProviderDeps {
   settings: GovernanceLlmSettings;
   identity: ModelIdentity;
   complete: LlmCompletion;
+  /** WS-U model candidacy: resolves a room-selected hub ADJUDICATION model to
+   *  a live governed completion (the summariser rides the adjudication lane).
+   *  Absent ⇒ room selections are unresolvable and the deterministic summary
+   *  serves those rooms. */
+  roomModels?: RoomModelResolver;
 }
 
 /** Build the governed hosted-LLM provider over an injected completion seam. */
 export function createGovernanceLlmNlProvider(
   deps: GovernanceLlmProviderDeps,
 ): GovernanceNlProvider {
-  const { services, settings, identity } = deps;
-  const budget = new RoomHourlyBudget(settings.maxCallsPerRoomPerHour);
-  const breaker = new ConsecutiveFailureBreaker(
-    settings.breakerFailureThreshold,
-    settings.breakerCooldownSeconds * 1000,
+  const { services, settings: laneSettings, identity: laneIdentity } = deps;
+  const budget = new RoomHourlyBudget(laneSettings.maxCallsPerRoomPerHour);
+  // One breaker PER model identity (as in the moderation/debate legs): a
+  // broken room-selected hub model trips its own breaker, never the lane's.
+  const breakerFor = createBreakerPool(
+    laneSettings.breakerFailureThreshold,
+    laneSettings.breakerCooldownSeconds * 1000,
   );
 
   const fail = (code: GovernanceLlmFailureCode, message: string, meta: Record<string, unknown>) => {
@@ -246,6 +285,28 @@ export function createGovernanceLlmNlProvider(
     kind: 'llm',
     async summarizeProposal(request) {
       const meta = { room_id: request.roomId, proposal_id: request.proposal.proposalId };
+
+      // Resolve the EFFECTIVE model: the room's ratified hub adjudication
+      // selection when the bundle carries one, else the platform lane. An
+      // unresolvable selection throws (⇒ the deterministic summary serves) —
+      // never a silent fallback onto a model the room did not ratify.
+      let effective: Pick<ResolvedRoomModel, 'complete' | 'settings' | 'identity'> = {
+        complete: deps.complete,
+        settings: laneSettings,
+        identity: laneIdentity,
+      };
+      if (request.adjudicationRef !== null) {
+        const resolved = deps.roomModels
+          ? await deps.roomModels.resolveAdjudication(request.adjudicationRef)
+          : null;
+        if (resolved === null) {
+          throw fail('room_model_unavailable', 'room adjudication model unresolvable', meta);
+        }
+        effective = resolved;
+      }
+      const { complete, settings, identity } = effective;
+      const breaker = breakerFor(identity.name);
+
       if (!breaker.allowed(services.now())) {
         services.metrics.increment('ai.governance.llm.skipped.breaker_open');
         throw new GovernanceLlmError('breaker_open', 'LLM circuit breaker is open');
@@ -271,7 +332,7 @@ export function createGovernanceLlmNlProvider(
 
       let completion: LlmCompletionResult;
       try {
-        completion = await deps.complete({
+        completion = await complete({
           system: buildSystemPrompt(request),
           user: buildUserPrompt(request),
           maxOutputTokens: settings.maxOutputTokens,
@@ -361,9 +422,15 @@ export function createAnthropicCompletion(
       {
         model: settings.modelId,
         max_tokens: request.maxOutputTokens,
-        system: request.system,
+        // Both fields are omitted (never sent empty) for guard-profile calls —
+        // the model's own template frames the classification (guard-format.ts).
+        ...(request.system !== undefined && request.system.length > 0
+          ? { system: request.system }
+          : {}),
         messages: [{ role: 'user', content: request.user }],
-        output_config: { format: { type: 'json_schema', schema: request.jsonSchema } },
+        ...(request.jsonSchema !== undefined
+          ? { output_config: { format: { type: 'json_schema', schema: request.jsonSchema } } }
+          : {}),
       },
       // Per-call timeout override (the inline moderation path passes a tighter one).
       request.timeoutMs !== undefined ? { timeout: request.timeoutMs } : undefined,
