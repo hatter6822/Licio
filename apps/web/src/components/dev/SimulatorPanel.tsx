@@ -12,7 +12,7 @@
 // ranked-position movement, and honest pipeline-rejection tallies — never a
 // popularity score.
 
-import type { SimulatorScenarioId, SimulatorStatus } from '@licio/shared';
+import type { SimulatorGovernanceLlm, SimulatorScenarioId, SimulatorStatus } from '@licio/shared';
 import { SIMULATOR_MAX_SPEED, SIMULATOR_MIN_SPEED } from '@licio/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -44,6 +44,104 @@ function movementLabel(
   if (previous > position) return { text: `up ${previous - position}`, tone: 'up' };
   if (previous < position) return { text: `down ${position - previous}`, tone: 'down' };
   return { text: 'held', tone: 'same' };
+}
+
+const LLM_ROLE_LABELS = {
+  moderation: 'Moderation lane',
+  adjudication: 'Adjudication lane',
+} as const;
+
+const LLM_SURFACE_LABELS = {
+  moderation: 'in-room moderation',
+  debate: 'debate adjudication',
+  summary: 'lawmaking summaries',
+} as const;
+
+const LLM_FALLBACK_LABELS = {
+  platform_baseline: 'the WS-J platform baseline',
+  deterministic_mlp: 'the deterministic MLP adjudicator',
+  deterministic_summary: 'the deterministic summary',
+} as const;
+
+const LLM_DISABLED_COPY = {
+  not_requested:
+    'No LLM backend is configured (GOVERNANCE_LLM_PROVIDER=deterministic, or a test boot) — every governed surface runs its deterministic path.',
+  missing_api_key:
+    'The anthropic backend was requested without ANTHROPIC_API_KEY — the backend is disabled (fail-closed) and every governed surface runs its deterministic path.',
+  local_url_not_loopback:
+    'A configured local runtime URL is not loopback — the backend is disabled (fail-closed) and every governed surface runs its deterministic path.',
+} as const;
+
+/** The "is the AI actually running?" card: per role lane, which runtime serves
+ *  it (real local / hosted / the dev simulated stand-in), the model, the
+ *  moderation dialect, and each governed surface's active/fallback state. */
+function GovernanceLlmCard({ llm }: { llm: SimulatorGovernanceLlm }): React.ReactElement {
+  return (
+    <Card>
+      <h2 className="text-sm font-semibold text-ink">Governance AI runtime</h2>
+      {llm.enabled && llm.lanes.length > 0 ? (
+        <>
+          <p className="mt-1 text-xs text-ink-muted">
+            {llm.provider_defaulted
+              ? 'The local backend defaulted in (no GOVERNANCE_LLM_PROVIDER set): real runtimes are preferred per lane; the dev simulated runtime stands in for any lane whose runtime is not serving its model.'
+              : 'Backend selected explicitly via GOVERNANCE_LLM_PROVIDER.'}
+          </p>
+          <ul className="mt-3 flex flex-col gap-3">
+            {llm.lanes.map((lane) => (
+              <li
+                key={lane.role}
+                className="rounded-md border border-line bg-surface p-3 neu-inset"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-ink">{LLM_ROLE_LABELS[lane.role]}</span>
+                  <Badge
+                    tone={
+                      lane.simulated ? 'info' : lane.backend === 'local' ? 'success' : 'warning'
+                    }
+                  >
+                    {lane.simulated
+                      ? 'Simulated runtime'
+                      : lane.backend === 'local'
+                        ? 'Local runtime'
+                        : 'Hosted (Anthropic)'}
+                  </Badge>
+                  {lane.format !== null ? (
+                    <Badge tone="neutral">
+                      {lane.format === 'qwen3guard' ? 'guard dialect' : 'JSON dialect'}
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-xs text-ink-muted">
+                  <code className="text-ink">{lane.model_id}</code>
+                  {lane.base_url !== null ? (
+                    <>
+                      {' at '}
+                      <code className="text-ink">{lane.base_url}</code>
+                    </>
+                  ) : null}
+                </p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  {lane.surfaces
+                    .map((s) =>
+                      s.active
+                        ? `${LLM_SURFACE_LABELS[s.surface]} (active; falls back to ${LLM_FALLBACK_LABELS[s.fallback]} per failed call)`
+                        : `${LLM_SURFACE_LABELS[s.surface]} (inactive — ${LLM_FALLBACK_LABELS[s.fallback]} serves)`,
+                    )
+                    .join(' · ')}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-ink-muted">
+          {llm.reason !== null
+            ? LLM_DISABLED_COPY[llm.reason]
+            : 'The governance AI status is not available from this API boot.'}
+        </p>
+      )}
+    </Card>
+  );
 }
 
 function CounterTile({
@@ -223,6 +321,9 @@ export function SimulatorPanel(): React.ReactElement {
           {status.story_cap_reached ? ' (reached — authors idle)' : ''}.
         </p>
       </Card>
+
+      {/* Governance AI runtime (WS-U ADR-9 — which runtime serves each lane) */}
+      <GovernanceLlmCard llm={status.governance_llm} />
 
       {/* Challenge-resolution throughput (WS-T corrections → debate arenas) */}
       <Card>

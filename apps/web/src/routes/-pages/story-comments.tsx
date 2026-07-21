@@ -289,7 +289,7 @@ function StoryCommentsContent({
         ) : null}
 
         {story.data ? <DisputeBanner status={story.data.dispute_status} /> : null}
-        {debates.data ? <DebatePanel debates={debates.data.debates} /> : null}
+        <DebatePanel debates={debates.data?.debates} error={debates.isError} />
         <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />
 
         {comments.isError ? (

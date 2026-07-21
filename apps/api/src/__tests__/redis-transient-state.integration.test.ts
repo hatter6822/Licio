@@ -286,6 +286,7 @@ describe.skipIf(!REDIS_URL)('Redis transient-state adapters (live Redis)', () =>
         rationale: null,
         confidence: null,
         ai_output_id: null,
+        adjudicator: null,
         verdict_at: null,
         override_deadline_at: null,
         overridden_by_handle: null,

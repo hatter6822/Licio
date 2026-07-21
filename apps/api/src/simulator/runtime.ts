@@ -2159,6 +2159,33 @@ export class DevTrafficSimulator {
     for (const arena of this.#trackedArenas.values()) {
       if (arena.phase === 'open') openArenas += 1;
     }
+    // The boot-resolved governed-LLM lane assignment (WS-U ADR-9): mapped onto
+    // the wire shape so the dev panel can state per lane whether the REAL
+    // runtime or the simulated stand-in serves it (config only, never a key).
+    const llmStatus = aiGov?.llmStatus;
+    const governanceLlm: SimulatorStatus['governance_llm'] =
+      llmStatus === undefined
+        ? { enabled: false, reason: null, provider_defaulted: false, lanes: [] }
+        : llmStatus.enabled
+          ? {
+              enabled: true,
+              reason: null,
+              provider_defaulted: llmStatus.providerDefaulted,
+              lanes: [llmStatus.lanes.moderation, llmStatus.lanes.adjudication].map((lane) => ({
+                role: lane.role,
+                backend: lane.backend,
+                model_id: lane.modelId,
+                base_url: lane.baseUrl,
+                simulated: lane.simulated,
+                format: lane.format,
+                surfaces: lane.surfaces.map((s) => ({
+                  surface: s.surface,
+                  active: s.active,
+                  fallback: s.fallback,
+                })),
+              })),
+            }
+          : { enabled: false, reason: llmStatus.reason, provider_defaulted: false, lanes: [] };
     return {
       running: this.#running,
       scenario: this.#scenario,
@@ -2220,6 +2247,7 @@ export class DevTrafficSimulator {
             (this.#metricBaseline.get(FORUM_AGENT_METRIC) ?? 0),
         ),
       },
+      governance_llm: governanceLlm,
       scenarios: [...SCENARIO_INFOS],
     };
   }

@@ -121,6 +121,53 @@ export const simulatorScenarioInfoSchema = z
   .strict();
 export type SimulatorScenarioInfo = z.infer<typeof simulatorScenarioInfoSchema>;
 
+/** One governed-LLM lane's boot-resolved runtime assignment (WS-U ADR-9
+ *  observability — configuration only, never a key). */
+export const simulatorLlmLaneSchema = z
+  .object({
+    role: z.enum(['moderation', 'adjudication']),
+    backend: z.enum(['local', 'anthropic']),
+    model_id: z.string().min(1).max(200),
+    /** The loopback base URL ('local' backend); null for the hosted backend. */
+    base_url: z.string().min(1).max(200).nullable(),
+    /** True when the DEV simulated runtime stands in for this lane (real
+     *  runtimes are preferred whenever they serve the lane's model). */
+    simulated: z.boolean(),
+    /** The moderation lane's completion dialect; null on the adjudication lane. */
+    format: z.enum(['json', 'qwen3guard']).nullable(),
+    /** The governed surfaces this lane serves, each with whether its LLM leg
+     *  is ACTIVE this boot and the deterministic fallback that serves when it
+     *  is not (or when a call fails — the always-on fail-closed floor). */
+    surfaces: z
+      .array(
+        z
+          .object({
+            surface: z.enum(['moderation', 'debate', 'summary']),
+            active: z.boolean(),
+            fallback: z.enum(['platform_baseline', 'deterministic_mlp', 'deterministic_summary']),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(3),
+  })
+  .strict();
+export type SimulatorLlmLane = z.infer<typeof simulatorLlmLaneSchema>;
+
+/** The governed-LLM boot status (the dev panel's "is the AI running?" card). */
+export const simulatorGovernanceLlmSchema = z
+  .object({
+    enabled: z.boolean(),
+    /** Why no backend runs, when enabled=false (null while enabled). */
+    reason: z.enum(['not_requested', 'missing_api_key', 'local_url_not_loopback']).nullable(),
+    /** True when the backend defaulted in (no explicit GOVERNANCE_LLM_PROVIDER). */
+    provider_defaulted: z.boolean(),
+    /** The two role lanes (moderation first); empty when disabled. */
+    lanes: z.array(simulatorLlmLaneSchema).max(2),
+  })
+  .strict();
+export type SimulatorGovernanceLlm = z.infer<typeof simulatorGovernanceLlmSchema>;
+
 /** GET /v1/dev/simulator/status response. */
 export const simulatorStatusSchema = z
   .object({
@@ -222,6 +269,10 @@ export const simulatorStatusSchema = z
         agent_escalations: countSchema,
       })
       .strict(),
+    /** The boot-resolved governed-LLM lane assignment (which backend/model
+     *  each role lane runs, whether the DEV simulated runtime stands in, and
+     *  which governed surfaces are active with their fallbacks). */
+    governance_llm: simulatorGovernanceLlmSchema,
     scenarios: z.array(simulatorScenarioInfoSchema).min(1),
   })
   .strict();

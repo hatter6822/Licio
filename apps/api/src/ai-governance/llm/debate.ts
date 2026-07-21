@@ -37,6 +37,7 @@ import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmSettings } from './config.js';
 import { createBreakerPool, type LlmCompletion, RoomHourlyBudget } from './provider.js';
 import type { ResolvedRoomModel, RoomModelResolver } from './room-models.js';
+import { collapseWhitespace, truncateAtWord } from './text.js';
 
 /** Bumped whenever DEBATE_SYSTEM_PROMPT changes (pinned via the identity
  *  config into every AIOutputRecord's config hash). */
@@ -147,31 +148,6 @@ export function buildDebateUserPrompt(input: DebateJudgeInput): string {
     sideBlock('challenger', input.challenger),
     '</debate>',
   ].join('\n');
-}
-
-/** ReDoS-free whitespace collapse (no regex over model output). */
-function collapseWhitespace(text: string): string {
-  const parts: string[] = [];
-  let cur = '';
-  for (const ch of text) {
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
-      if (cur.length > 0) {
-        parts.push(cur);
-        cur = '';
-      }
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.length > 0) parts.push(cur);
-  return parts.join(' ');
-}
-
-function truncateAtWord(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const cut = text.slice(0, max);
-  const lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
 }
 
 /**

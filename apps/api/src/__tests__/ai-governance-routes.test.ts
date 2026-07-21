@@ -87,6 +87,61 @@ describe('WS-K routes', () => {
     expect(body.inventory.use_cases).toHaveLength(9);
   });
 
+  it('serves the boot-resolved governed-LLM lane status to the AI team (WS-U ADR-9 observability)', async () => {
+    const aiTeam = await seedUserWithSession(forum.identity, { admin: true });
+    const regular = await seedUserWithSession(forum.identity);
+
+    // Unset (a test boot that wired no decision) answers null, never a 500.
+    const unset = await app.request(
+      jsonReq('/v1/ai/admin/governance/llm', 'GET', undefined, aiTeam.cookie),
+    );
+    expect(unset.status).toBe(200);
+    expect(await unset.json()).toEqual({ status: null });
+
+    ai.llmStatus = {
+      enabled: true,
+      providerDefaulted: true,
+      lanes: {
+        moderation: {
+          role: 'moderation',
+          backend: 'local',
+          modelId: 'licio-governance-sim',
+          baseUrl: 'http://127.0.0.1:3117/v1',
+          simulated: true,
+          format: 'json',
+          surfaces: [{ surface: 'moderation', active: true, fallback: 'platform_baseline' }],
+        },
+        adjudication: {
+          role: 'adjudication',
+          backend: 'local',
+          modelId: 'Qwen/Qwen3.6-27B',
+          baseUrl: 'http://127.0.0.1:8002/v1',
+          simulated: false,
+          format: null,
+          surfaces: [
+            { surface: 'debate', active: true, fallback: 'deterministic_mlp' },
+            { surface: 'summary', active: true, fallback: 'deterministic_summary' },
+          ],
+        },
+      },
+    };
+    const res = await app.request(
+      jsonReq('/v1/ai/admin/governance/llm', 'GET', undefined, aiTeam.cookie),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      status: { enabled: boolean; lanes: { moderation: { simulated: boolean } } };
+    };
+    expect(body.status.enabled).toBe(true);
+    expect(body.status.lanes.moderation.simulated).toBe(true);
+
+    // AI-team gated like the rest of the admin surface.
+    expect(
+      (await app.request(jsonReq('/v1/ai/admin/governance/llm', 'GET', undefined, regular.cookie)))
+        .status,
+    ).toBe(403);
+  });
+
   it('lets the AI team deprecate a model and read the blocked-invocation audit', async () => {
     const aiTeam = await seedUserWithSession(forum.identity, { admin: true });
     const dep = await app.request(

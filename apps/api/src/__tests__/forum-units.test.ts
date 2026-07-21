@@ -288,6 +288,7 @@ describe('WS-T — live debate arena broadcaster', () => {
     rationale: null,
     confidence: null,
     ai_output_id: null,
+    adjudicator: null,
     verdict_at: null,
     override_deadline_at: null,
     overridden_by_handle: null,

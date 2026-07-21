@@ -17,12 +17,18 @@ import { ProhibitedUseGuard } from './ai-governance/guard.js';
 import {
   type GovernanceLlmEnvInput,
   type GovernanceLlmLane,
+  type GovernanceLlmLaneStatus,
   resolveGovernanceLlmDecision,
 } from './ai-governance/llm/config.js';
 import {
   createAdjudicationAdmission,
   createGovernanceLlmDebateJudge,
 } from './ai-governance/llm/debate.js';
+import {
+  type DevSimulatedLanes,
+  devSimulatedLanes,
+  overlaySimulatedLanes,
+} from './ai-governance/llm/dev-lanes.js';
 import { createLocalCompletion } from './ai-governance/llm/local.js';
 import { createGovernanceLlmModerationProposer } from './ai-governance/llm/moderation.js';
 import {
@@ -38,7 +44,7 @@ import {
   llmBackendId,
 } from './ai-governance/llm/registration.js';
 import { createRoomModelResolver } from './ai-governance/llm/room-models.js';
-import { createRuntimeCatalog } from './ai-governance/llm/runtime-catalog.js';
+import { createRuntimeCatalog, probeLaneRuntime } from './ai-governance/llm/runtime-catalog.js';
 import { HttpModelHubClient } from './ai-governance/model-hub.js';
 import {
   AI_GOVERNANCE_SCHEDULER_INTERVAL_MS,
@@ -1505,16 +1511,24 @@ if (env.GOVERNANCE_MODEL_HUB !== 'off') {
     'WS-U model hub disabled (GOVERNANCE_MODEL_HUB=off) — member hub-model search is off and hub-referencing bundles are rejected at propose time',
   );
 }
-// DEV ONLY: the simulated local governance-LLM runtime. When the operator has
-// made NO backend choice on a development box, start the deterministic loopback
-// OpenAI-compatible simulator and route the UNCHANGED `local` backend seam at
-// it — so `pnpm dev` exercises the full governed LLM path (WS-K admission, the
-// strict schemas + quality gate, budgets/breaker, AIOutputRecords, the
+// DEV ONLY: prefer REAL local runtimes, simulate exactly what is missing.
+// Development resolves the SAME 'local' backend default as production (the
+// two vLLM lanes — the vLLM-default-everywhere posture), so a dev box whose
+// runtimes are provisioned (`pnpm setup:llm`) runs the real feature with zero
+// configuration. The boot probes each lane's (URL, model) pair via the
+// standard /v1/models listing; ONLY a lane not actually serving its model is
+// pointed at the DEV-ONLY simulated loopback runtime
+// (simulator/governance-llm.ts) — so `pnpm dev` always has live AI moderation
+// and adjudication, exercising the full governed LLM path (WS-K admission,
+// the strict schemas + quality gate, budgets/breaker, AIOutputRecords, the
 // moderation wrapper + deferred re-moderation) with zero setup and zero
 // egress. Any EXPLICIT GOVERNANCE_LLM_PROVIDER value wins ('deterministic'
-// opts back out entirely), LICIO_LLM_SIM=off (or 0) disables it, and it is
-// NEVER constructed in production (NODE_ENV gate here + a guard in the module)
-// — the same posture as the dev traffic simulator and FakeKnomosisGateway.
+// opts back out entirely), LICIO_LLM_SIM=off (or 0) disables the simulated
+// stand-in (dev then fails closed per call exactly like production), and the
+// simulator is NEVER constructed in production (NODE_ENV gate here + a guard
+// in the module) — the same posture as the dev traffic simulator and
+// FakeKnomosisGateway.
+let devSimulatedLaneFlags: DevSimulatedLanes | null = null;
 if (
   env.NODE_ENV === 'development' &&
   env.GOVERNANCE_LLM_PROVIDER === undefined &&
@@ -1522,48 +1536,79 @@ if (
   process.env['LICIO_LLM_SIM'] !== '0'
 ) {
   try {
-    const { SIMULATED_GOVERNANCE_LLM_MODEL_ID, startSimulatedGovernanceLlm } = await import(
-      './simulator/governance-llm.js'
-    );
-    const requestedPort = Number.parseInt(process.env['LICIO_LLM_SIM_PORT'] ?? '', 10);
-    const simulated = await startSimulatedGovernanceLlm({
-      ...(Number.isInteger(requestedPort) && requestedPort > 0 ? { port: requestedPort } : {}),
-      log: (event, meta) => logger.info(meta, event),
-    });
-    governanceLlmEnvInput = {
-      ...governanceLlmEnvInput,
-      provider: 'local',
-      localBaseUrl: simulated.baseUrl,
-      modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID,
-      // The overlay must also CLEAR any leftover per-lane keys: they outrank
-      // the legacy keys, and a stale GOVERNANCE_LLM_MODERATION_URL exported in
-      // a dev shell would silently point one lane away from the simulator —
-      // "the simulated runtime serves all three surfaces from one URL" must
-      // hold whenever the simulator was chosen.
-      moderationModelId: undefined,
-      adjudicationModelId: undefined,
-      moderationUrl: undefined,
-      adjudicationUrl: undefined,
-      // The simulated runtime is cost-free, so the ADR-6 debate budget must
-      // never cap a dev challenge-resolution throughput run (env still wins).
-      debateBudgetPerHour: env.GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR ?? 100_000,
-    };
+    const provisional = resolveGovernanceLlmDecision(governanceLlmEnvInput);
     if (
-      env.GOVERNANCE_LLM_MODERATION_URL !== undefined ||
-      env.GOVERNANCE_LLM_ADJUDICATION_URL !== undefined ||
-      env.GOVERNANCE_LLM_MODERATION_MODEL !== undefined ||
-      env.GOVERNANCE_LLM_ADJUDICATION_MODEL !== undefined
+      provisional.enabled &&
+      provisional.lanes.moderation.backend.kind === 'local' &&
+      provisional.lanes.adjudication.backend.kind === 'local'
     ) {
-      logger.warn(
-        'dev simulated governance LLM: ignoring the per-lane GOVERNANCE_LLM_* overrides (the simulator serves all surfaces from one URL). Set GOVERNANCE_LLM_PROVIDER=local to use them against real runtimes.',
-      );
+      const [moderationProbe, adjudicationProbe] = await Promise.all([
+        probeLaneRuntime(
+          provisional.lanes.moderation.backend.baseUrl,
+          provisional.lanes.moderation.settings.modelId,
+        ),
+        probeLaneRuntime(
+          provisional.lanes.adjudication.backend.baseUrl,
+          provisional.lanes.adjudication.settings.modelId,
+        ),
+      ]);
+      devSimulatedLaneFlags = devSimulatedLanes({
+        moderation: moderationProbe,
+        adjudication: adjudicationProbe,
+      });
+      if (devSimulatedLaneFlags.moderation || devSimulatedLaneFlags.adjudication) {
+        const { startSimulatedGovernanceLlm } = await import('./simulator/governance-llm.js');
+        const requestedPort = Number.parseInt(process.env['LICIO_LLM_SIM_PORT'] ?? '', 10);
+        const sim = await startSimulatedGovernanceLlm({
+          ...(Number.isInteger(requestedPort) && requestedPort > 0 ? { port: requestedPort } : {}),
+          log: (event, meta) => logger.info(meta, event),
+        });
+        governanceLlmEnvInput = overlaySimulatedLanes(
+          governanceLlmEnvInput,
+          devSimulatedLaneFlags,
+          sim.baseUrl,
+        );
+        logger.warn(
+          {
+            moderation: devSimulatedLaneFlags.moderation
+              ? { simulated: true, probe: moderationProbe }
+              : {
+                  simulated: false,
+                  baseUrl: provisional.lanes.moderation.backend.baseUrl,
+                  modelId: provisional.lanes.moderation.settings.modelId,
+                },
+            adjudication: devSimulatedLaneFlags.adjudication
+              ? { simulated: true, probe: adjudicationProbe }
+              : {
+                  simulated: false,
+                  baseUrl: provisional.lanes.adjudication.backend.baseUrl,
+                  modelId: provisional.lanes.adjudication.settings.modelId,
+                },
+            simBaseUrl: sim.baseUrl,
+          },
+          'DEV governance LLM: the simulated runtime stands in for each lane above whose real runtime is not serving its model (development only; never in production). Provision the real lanes with `pnpm setup:llm` and restart, disable the stand-in with LICIO_LLM_SIM=off, or choose a backend explicitly via GOVERNANCE_LLM_PROVIDER.',
+        );
+      } else {
+        logger.info(
+          {
+            moderation: {
+              baseUrl: provisional.lanes.moderation.backend.baseUrl,
+              modelId: provisional.lanes.moderation.settings.modelId,
+            },
+            adjudication: {
+              baseUrl: provisional.lanes.adjudication.backend.baseUrl,
+              modelId: provisional.lanes.adjudication.settings.modelId,
+            },
+          },
+          'DEV governance LLM: real local runtimes are serving BOTH role lanes — running the real feature (the simulated runtime is not needed this boot)',
+        );
+      }
     }
-    logger.warn(
-      { baseUrl: simulated.baseUrl, modelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID },
-      'DEV simulated governance LLM runtime started (development only; never in production). Disable with LICIO_LLM_SIM=off, or choose a real backend via GOVERNANCE_LLM_PROVIDER.',
-    );
   } catch (err) {
-    logger.warn({ err }, 'dev simulated governance LLM wiring skipped (non-fatal)');
+    logger.warn(
+      { err },
+      'dev governance LLM lane probing / simulated-runtime wiring skipped (non-fatal; lanes fail closed per call until their runtimes respond)',
+    );
   }
 }
 const governanceLlmDecision = resolveGovernanceLlmDecision(governanceLlmEnvInput);
@@ -1703,11 +1748,64 @@ if (governanceLlmDecision.enabled) {
     }
   }
 
-  if (providerDefaulted) {
-    // The production-complete default: no explicit provider was configured, so
+  // The boot-resolved lane status (WS-U ADR-9 observability): the first-class
+  // "is the AI actually running?" answer — served by the AI-team admin surface
+  // (/v1/ai/admin/governance/llm) and the dev simulator status panel.
+  const laneStatus = (
+    role: 'moderation' | 'adjudication',
+    lane: GovernanceLlmLane,
+  ): Omit<GovernanceLlmLaneStatus, 'format' | 'surfaces'> => ({
+    role,
+    backend: lane.backend.kind,
+    modelId: lane.settings.modelId,
+    baseUrl: lane.backend.kind === 'local' ? lane.backend.baseUrl : null,
+    simulated:
+      (role === 'moderation'
+        ? devSimulatedLaneFlags?.moderation
+        : devSimulatedLaneFlags?.adjudication) ?? false,
+  });
+  aiGovernanceServices.llmStatus = {
+    enabled: true,
+    providerDefaulted,
+    lanes: {
+      moderation: {
+        ...laneStatus('moderation', lanes.moderation),
+        format: moderationFormat,
+        surfaces: [
+          {
+            surface: 'moderation',
+            active: governanceModerationProposer !== undefined,
+            fallback: 'platform_baseline',
+          },
+        ],
+      },
+      adjudication: {
+        ...laneStatus('adjudication', lanes.adjudication),
+        format: null,
+        surfaces: [
+          {
+            surface: 'debate',
+            active: aiGovernanceServices.llmDebateJudge !== undefined,
+            fallback: 'deterministic_mlp',
+          },
+          {
+            surface: 'summary',
+            active: governanceNlProvider !== undefined,
+            fallback: 'deterministic_summary',
+          },
+        ],
+      },
+    },
+  };
+
+  if (providerDefaulted && devSimulatedLaneFlags === null) {
+    // The complete-feature default outside the dev stand-in path (production,
+    // or dev with LICIO_LLM_SIM=off): no explicit provider was configured, so
     // the 'local' backend defaults in. Tell the operator EXACTLY what runtime
     // is expected where — until it is running, every governed surface fails
     // closed per call to its deterministic path and recovers automatically.
+    // (The dev stand-in path already logged its per-lane real/simulated
+    // assignment above.)
     logger.warn(
       {
         moderation: {
@@ -1721,7 +1819,7 @@ if (governanceLlmDecision.enabled) {
           modelId: lanes.adjudication.settings.modelId,
         },
       },
-      'WS-U governance LLM: production defaulted to the loopback-local backend with the two role lanes above — provision them with `pnpm setup:llm` (vLLM default; `--runtime ollama` for the single-URL alternative), or set GOVERNANCE_LLM_PROVIDER explicitly (deterministic opts out). Until a lane responds, its governed surfaces fail closed to their deterministic paths and recover automatically.',
+      'WS-U governance LLM: defaulted to the loopback-local backend with the two role lanes above — provision them with `pnpm setup:llm` (vLLM default; `--runtime ollama` for the single-URL alternative), or set GOVERNANCE_LLM_PROVIDER explicitly (deterministic opts out). Until a lane responds, its governed surfaces fail closed to their deterministic paths and recover automatically.',
     );
   }
   if (lanes.moderation.backend.kind === 'anthropic') {
@@ -1736,6 +1834,11 @@ if (governanceLlmDecision.enabled) {
       'WS-U governance LLM: hosted backend enabled — governed-room content is sent to the external model API (operator-chosen data processor); use GOVERNANCE_LLM_PROVIDER=local to keep content on-host',
     );
   }
+} else {
+  // Observability parity for the disabled decision: the status surface states
+  // WHY no LLM backend runs (explicit deterministic opt-out, a missing
+  // anthropic key, or a non-loopback local URL) instead of answering nothing.
+  aiGovernanceServices.llmStatus = { enabled: false, reason: governanceLlmDecision.reason };
 }
 
 setGovernanceService(

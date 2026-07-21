@@ -41,8 +41,10 @@ corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); in-memory + seeded demo data; the DEV-ONLY
-                                    #   simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeded demo data. The governance
+                                    #   LLM defaults to the local vLLM lanes in dev AND prod; the dev boot
+                                    #   probes each lane and the DEV-ONLY simulated runtime stands in per
+                                    #   absent lane (LICIO_LLM_SIM=off disables the stand-in)
 pnpm setup:llm                      # provision + verify the REAL local governance-LLM lanes (moderation
                                     #   Qwen3Guard-Gen-4B @ :8001, adjudication Qwen3.6-27B @ :8002; vLLM
                                     #   default; --docker = Compose `llm` profile; --runtime ollama = single-URL alt)

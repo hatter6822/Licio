@@ -41,6 +41,7 @@ import { createServer, type Server } from 'node:http';
 import { MODERATION_ACTIONS, type ModerationAction } from '@licio/governance';
 import { z } from 'zod';
 import { SIMULATED_GOVERNANCE_LLM_MODEL_ID } from '../ai-governance/llm/config.js';
+import { collapseWhitespace, countTokens, truncateAtWord } from '../ai-governance/llm/text.js';
 
 /** The model name the simulated runtime serves (the boot wiring passes it as
  *  GOVERNANCE_LLM_MODEL, so the registry identity names the simulator openly).
@@ -68,34 +69,9 @@ const chatCompletionRequestSchema = z.object({
     .optional(),
 });
 
-// --- deterministic text utilities (ReDoS-free: no regex over governed text) --
-
-function collapseWhitespace(text: string): string {
-  const parts: string[] = [];
-  let cur = '';
-  for (const ch of text) {
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
-      if (cur.length > 0) {
-        parts.push(cur);
-        cur = '';
-      }
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.length > 0) parts.push(cur);
-  return parts.join(' ');
-}
-
-/** Truncate at a word boundary WITHOUT adding an ellipsis, so every token in
- *  the output still appears verbatim in the input (the summary stays fully
- *  grounded under the §24.5 gate's token check). */
-function truncateAtWord(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const cut = text.slice(0, max);
-  const lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
-}
+// Deterministic text utilities (ReDoS-free): shared with the real gates via
+// ai-governance/llm/text.ts, so the simulated model's whitespace/truncation
+// semantics can never drift from the §24.5 gate that judges its output.
 
 // --- failure-injection markers ----------------------------------------------
 
@@ -314,21 +290,6 @@ export interface SimulatedDebateSide {
   safeSourceCount: number;
   rebuts: boolean;
   summaryTokens: number;
-}
-
-function countTokens(text: string): number {
-  let count = 0;
-  let inWord = false;
-  for (const ch of text) {
-    const ws =
-      ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v';
-    if (ws) inWord = false;
-    else if (!inWord) {
-      count += 1;
-      inWord = true;
-    }
-  }
-  return count;
 }
 
 export function parseDebate(userPrompt: string): {

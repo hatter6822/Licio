@@ -16,6 +16,7 @@ import {
 } from './config.js';
 import type { LlmDebateJudge } from './debate.js';
 import { ProhibitedUseGuard } from './guard.js';
+import type { GovernanceLlmStatusReport } from './llm/config.js';
 import { AiGovernanceMetrics } from './metrics.js';
 import type { ModelHubClient } from './model-hub.js';
 import { PassthroughTranslationProvider, type TranslationProvider } from './models.js';
@@ -80,6 +81,11 @@ export interface AiGovernanceServices {
    *  Observability only — the proposer itself lives in the GovernanceService
    *  deps; the dev simulator's moderation pulse reports this flag. */
   llmModerationActive?: boolean | undefined;
+  /** The boot-resolved governed-LLM lane status (WS-U ADR-9 observability):
+   *  which backend/model each role lane runs, whether the DEV simulator
+   *  stands in, and which governed surfaces are active. Set at boot; served
+   *  by the AI-team admin surface and the dev simulator status. */
+  llmStatus?: GovernanceLlmStatusReport | undefined;
   /** WS-U model candidacy: the huggingface.co metadata client (set at boot
    *  unless GOVERNANCE_MODEL_HUB=off). Serves the /v1/model-hub candidacy
    *  search surface and the GovernanceService's propose-time candidate

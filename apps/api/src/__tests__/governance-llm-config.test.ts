@@ -41,42 +41,45 @@ describe('resolveGovernanceLlmDecision (fail-closed)', () => {
     }
   });
 
-  it('PRODUCTION defaults an unset provider to the local backend with the TWO reviewed lane defaults (the production-complete posture)', () => {
-    const decision = resolveGovernanceLlmDecision({
-      provider: undefined,
-      apiKey: undefined,
-      nodeEnv: 'production',
-    });
-    expect(decision.enabled).toBe(true);
-    if (decision.enabled) {
-      expect(decision.lanes.moderation.backend).toEqual({
-        kind: 'local',
-        baseUrl: DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
+  it('PRODUCTION and DEVELOPMENT default an unset provider to the local backend with the TWO reviewed lane defaults (the vLLM-default-everywhere posture)', () => {
+    for (const nodeEnv of ['production', 'development'] as const) {
+      const decision = resolveGovernanceLlmDecision({
+        provider: undefined,
+        apiKey: undefined,
+        nodeEnv,
       });
-      expect(decision.lanes.moderation.settings.modelId).toBe(
-        DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID,
-      );
-      expect(decision.lanes.adjudication.backend).toEqual({
-        kind: 'local',
-        baseUrl: DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
-      });
-      expect(decision.lanes.adjudication.settings.modelId).toBe(
-        DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID,
-      );
-      // The moderation default is a guard model ⇒ the guard-native dialect.
-      expect(decision.moderationFormat).toBe('qwen3guard');
-      // Both lane URLs are probeable by the room-model resolver.
-      expect(decision.runtimeUrls).toEqual([
-        DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
-        DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
-      ]);
-      expect(decision.providerDefaulted).toBe(true);
-      // All three governed surfaces default on.
-      expect(decision.llmModeration).toBe(true);
-      expect(decision.llmDebate).toBe(true);
+      expect(decision.enabled).toBe(true);
+      if (decision.enabled) {
+        expect(decision.lanes.moderation.backend).toEqual({
+          kind: 'local',
+          baseUrl: DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
+        });
+        expect(decision.lanes.moderation.settings.modelId).toBe(
+          DEFAULT_GOVERNANCE_LLM_MODERATION_MODEL_ID,
+        );
+        expect(decision.lanes.adjudication.backend).toEqual({
+          kind: 'local',
+          baseUrl: DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
+        });
+        expect(decision.lanes.adjudication.settings.modelId).toBe(
+          DEFAULT_GOVERNANCE_LLM_ADJUDICATION_MODEL_ID,
+        );
+        // The moderation default is a guard model ⇒ the guard-native dialect.
+        expect(decision.moderationFormat).toBe('qwen3guard');
+        // Both lane URLs are probeable by the room-model resolver.
+        expect(decision.runtimeUrls).toEqual([
+          DEFAULT_GOVERNANCE_LLM_MODERATION_URL,
+          DEFAULT_GOVERNANCE_LLM_ADJUDICATION_URL,
+        ]);
+        expect(decision.providerDefaulted).toBe(true);
+        // All three governed surfaces default on.
+        expect(decision.llmModeration).toBe(true);
+        expect(decision.llmDebate).toBe(true);
+      }
     }
-    // Non-production never silently defaults (dev wires the simulator at boot).
-    for (const nodeEnv of [undefined, 'development', 'test']) {
+    // Test runs (and an absent NODE_ENV) never silently default — a test
+    // process must not grow a default backend.
+    for (const nodeEnv of [undefined, 'test']) {
       expect(
         resolveGovernanceLlmDecision({ provider: undefined, apiKey: undefined, nodeEnv }),
       ).toEqual({ enabled: false, reason: 'not_requested' });

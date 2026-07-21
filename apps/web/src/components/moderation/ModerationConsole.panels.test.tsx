@@ -352,9 +352,30 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(await screen.findByText(/report queue is clear/i)).toBeInTheDocument();
   });
 
-  it('renders the access notice for a non-forbidden queue error too', async () => {
+  it('a NON-forbidden queue error renders an honest retryable error, never the access notice', async () => {
+    // A 500/network failure must not tell an authorized steward their role
+    // lost access (the old conflation) — it is a transient error with a retry.
     vi.mocked(api.fetchReportQueue).mockRejectedValue(
       new ApiClientError('server_error', 'boom', 500),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.getByText(/not a permissions problem/i)).toBeInTheDocument();
+    expect(screen.queryByText(/does not have access/i)).not.toBeInTheDocument();
+    // Retry re-runs the failed query against a recovered API.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue({
+      emergency: [],
+      standard: [],
+      filtered_total: 0,
+      next_cursor: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(/report queue is clear/i)).toBeInTheDocument();
+  });
+
+  it('a FORBIDDEN queue error still renders the access notice', async () => {
+    vi.mocked(api.fetchReportQueue).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
     );
     render(<ModerationConsole />, { wrapper: Providers });
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();

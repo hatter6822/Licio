@@ -483,7 +483,7 @@ async function main(): Promise<void> {
     info(`  GOVERNANCE_LLM_ADJUDICATION_MODEL=${lanes.adjudication.settings.modelId}`);
   }
   info(
-    '(production defaults to the local backend; dev: set GOVERNANCE_LLM_PROVIDER=local to prefer it over the simulator)',
+    '(production AND development default to the local backend; a `pnpm dev` boot probes these lanes and prefers them automatically — restart it to pick the runtimes up. The dev simulated runtime only stands in for a lane whose runtime is not serving its model.)',
   );
 }
 

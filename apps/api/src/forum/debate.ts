@@ -38,6 +38,8 @@ import {
   debateArenaSummarySchema,
   MAX_CITATIONS,
 } from '@licio/shared';
+import { DEBATE_ADJUDICATOR } from '../ai-governance/models.js';
+import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { mapBounded } from '../lib/concurrency.js';
 import type {
   DebateArenaRecord,
@@ -1282,6 +1284,33 @@ export async function readDebateArenaContent(
   return { target, correction };
 }
 
+/**
+ * Which adjudicator LEG produced an AI verdict (SPEC §24.1 provenance for the
+ * arena banner). Derived from the immutable AIOutputRecord the verdict pinned
+ * — the single source of truth for what model judged — via an EXACT identity
+ * comparison against the deterministic MLP (`DEBATE_ADJUDICATOR.name`): any
+ * other identity for this record is a governed LLM model by construction (the
+ * two legs are the only writers of debate verdicts). An AI verdict with NO
+ * record is the fail-closed inconclusive default ('unavailable'); a record
+ * that cannot be resolved right now yields null (honest unknown), never a
+ * guess.
+ */
+async function resolveAdjudicatorLeg(
+  arena: DebateArenaRecord,
+): Promise<'model' | 'deterministic' | 'unavailable' | null> {
+  if (arena.verdict === null || arena.decidedBy !== 'ai') return null;
+  if (arena.aiOutputId === null) return 'unavailable';
+  const aiGov = tryGetAiGovernanceServices();
+  if (aiGov === null) return null;
+  try {
+    const record = await aiGov.outputRecords.get(arena.aiOutputId);
+    if (record === null) return null;
+    return record.model_name === DEBATE_ADJUDICATOR.name ? 'deterministic' : 'model';
+  } catch {
+    return null;
+  }
+}
+
 /** Project an arena record to its public wire shape for `viewerUserId`. */
 export async function toDebateArenaPublic(
   arena: DebateArenaRecord,
@@ -1290,10 +1319,11 @@ export async function toDebateArenaPublic(
   viewerIsSteward: boolean,
   content: DebateArenaContent,
 ): Promise<DebateArenaPublic> {
-  const [incumbentAuthor, challengerAuthor, overriddenBy] = await Promise.all([
+  const [incumbentAuthor, challengerAuthor, overriddenBy, adjudicator] = await Promise.all([
     resolveAuthor(arena.incumbentUserId),
     resolveAuthor(arena.challengerUserId),
     resolveAuthor(arena.overriddenByUserId),
+    resolveAdjudicatorLeg(arena),
   ]);
   const viewerRole: DebateViewerRole =
     viewerUserId !== null && arena.incumbentUserId === viewerUserId
@@ -1337,6 +1367,7 @@ export async function toDebateArenaPublic(
     rationale: arena.rationale,
     confidence: arena.confidence,
     ai_output_id: arena.aiOutputId,
+    adjudicator,
     verdict_at: arena.verdictAt,
     override_deadline_at: arena.overrideDeadlineAt,
     overridden_by_handle: overriddenBy?.handle ?? null,

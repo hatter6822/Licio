@@ -21,7 +21,7 @@ import type {
   RatificationViewResponse,
 } from '@licio/shared';
 import { hubModelRefSchema } from '@licio/shared';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
@@ -598,6 +598,20 @@ function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
   const [promptText, setPromptText] = useState(STARTER_PROMPT);
   const [error, setError] = useState<string | null>(null);
 
+  // Live structural feedback on the hand-edited bundle: the parser's own
+  // message (position and all) surfaces inline AS the member types, instead of
+  // a generic rejection only at submit time. The full bundle-schema validation
+  // stays server-side at propose time (fail-closed); this only catches the
+  // "not even JSON" class early.
+  const bundleJsonError = useMemo((): string | null => {
+    try {
+      JSON.parse(bundleText);
+      return null;
+    } catch (e) {
+      return e instanceof SyntaxError ? e.message : 'invalid JSON';
+    }
+  }, [bundleText]);
+
   function submit(event: React.FormEvent): void {
     event.preventDefault();
     setError(null);
@@ -650,6 +664,13 @@ function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
         onChange={(e) => setBundleText(e.target.value)}
         rows={12}
         textareaClassName="font-mono text-xs"
+        {...(bundleJsonError !== null
+          ? {
+              error: t('room.governance.propose.jsonSyntax', 'Not valid JSON: {detail}', {
+                detail: bundleJsonError,
+              }),
+            }
+          : {})}
         helperText={t(
           'room.governance.propose.bundleHelp',
           'A declarative, downloadable model bundle — no code runs. The moderation prompt guides the in-room model; the platform bounds every action it can take. Members verify the digest.',
@@ -670,7 +691,11 @@ function ProposeForm({ roomId }: { roomId: string }): React.ReactElement {
       />
       {error ? <p className="text-error-on-soft text-sm">{error}</p> : null}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" variant="primary" disabled={propose.isPending}>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={propose.isPending || bundleJsonError !== null}
+        >
           {t('room.governance.propose.submit', 'Submit proposal')}
         </Button>
         <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
