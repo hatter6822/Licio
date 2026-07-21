@@ -79,6 +79,36 @@ export function denyCapability(
   return null;
 }
 
+/** The auth-context fields a {@link StewardActor} is built from.  Structural on
+ *  purpose — it lets this domain module stay free of the route/middleware
+ *  `AuthEnv` type while still being the single source of `stewardActorOf` /
+ *  `isPlatformStaff` for every governance route file. */
+export interface StewardAuthContext {
+  userId: string;
+  roles: readonly Role[];
+  stewardRoles: readonly StewardRoleId[];
+  mfaActive: boolean;
+  mfaVerified: boolean;
+}
+
+/** Map an authenticated context to its {@link StewardActor}. */
+export function stewardActorOf(auth: StewardAuthContext): StewardActor {
+  return {
+    userId: auth.userId,
+    platformRoles: auth.roles,
+    stewardRoles: auth.stewardRoles,
+    mfaActive: auth.mfaActive,
+    mfaVerified: auth.mfaVerified,
+  };
+}
+
+/** Platform staff = the WS-J `restrict` capability (the platform legal floor):
+ *  operators who act on rooms as enforcement, exempt from the KYC governance
+ *  floor that gates community participants. */
+export function isPlatformStaff(auth: StewardAuthContext): boolean {
+  return denyCapability(stewardActorOf(auth), 'restrict') === null;
+}
+
 /** Resolve whether the actor may access a queue (null ⇒ allowed). */
 export function denyQueue(actor: StewardActor, queue: ModerationQueue): CapabilityDenial | null {
   if (!actor.mfaActive || !actor.mfaVerified) {

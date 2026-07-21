@@ -16,11 +16,15 @@ import { resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** The route files that own governance-participation surfaces. */
+/** The route files that own governance-participation surfaces.  `rooms.ts` is
+ *  mostly membership/content (allowlisted below), but it owns the steward
+ *  join/posting-policy + visibility writes — governance rule-changes that MUST
+ *  clear the KYC floor — so the whole file is scanned to keep that structural. */
 export const GOVERNANCE_ROUTE_FILES = [
   'apps/api/src/routes/governance.ts',
   'apps/api/src/routes/room-governance.ts',
   'apps/api/src/routes/treasury-governance.ts',
+  'apps/api/src/routes/rooms.ts',
 ] as const;
 
 const GUARD_TOKENS = ['requireGovernanceEligibility(', 'checkGovernanceEligibility('] as const;
@@ -104,6 +108,57 @@ export const ALLOWLIST: ReadonlyArray<{ file: string; path: string; reason: stri
       'WITHDRAWING delegated power (owner/staff) — a member whose KYC lapsed must still be able ' +
       'to revoke power they delegated while verified',
   },
+  // --- rooms.ts: membership + content + lifecycle (NOT governance rule-making) --
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms',
+    reason: 'room CREATION is a content act (WS-G.2.3c) — content participation is never KYC-gated',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/join',
+    reason:
+      'subscribe (POST) / unsubscribe (DELETE): joining or leaving a room is membership, not ' +
+      'governance participation — never KYC-gated',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/lens',
+    reason: 'selecting the lens one posts under is a per-member content preference, not governance',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/join-requests/:requestId',
+    reason:
+      'a steward approving/denying a JOIN REQUEST is membership curation (who may enter), not a ' +
+      'governance rule-change/vote — the same tier as accepting a subscription',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/lenses',
+    reason: 'creating a lens is CONTENT (WS-Q.3.2, tier two), not a governance mutation',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/migration/export',
+    reason:
+      'server→Private-P2P room MIGRATION (WS-S.9) is an owner/steward room-LIFECYCLE operation, ' +
+      'not a governance vote/proposal/law; export merely bundles the room for the member device',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/migration/freeze',
+    reason:
+      'room-lifecycle migration step (freeze writes before purge) — server-enforced destructive ' +
+      'sequencing, not governance participation',
+  },
+  {
+    file: 'apps/api/src/routes/rooms.ts',
+    path: '/rooms/:roomId/migration/purge',
+    reason:
+      'room-lifecycle migration step (server-enforced purge after freeze) — not governance ' +
+      'participation',
+  },
 ];
 
 /** Strip // and /* comments (string-literal aware) so prose never satisfies —
@@ -176,9 +231,10 @@ const MUTATION_METHODS = new Set(['post', 'put', 'patch', 'delete']);
  * puts each `.post(`/`.get(` at the start of its own line, so a handler-body
  * `c.get('auth')` or `map.get(key)` can never cut a segment. A mid-line route
  * registration would evade line-anchoring, so `runGovernanceKycGate` ALSO
- * cross-checks the raw `.post(` count (POST is the only method that never
- * appears in a handler body here) and FAILS on any unclassifiable occurrence —
- * fail closed, not silently skipped.
+ * cross-checks the raw count of EVERY mutation verb (`.post(`/`.put(`/`.patch(`/
+ * `.delete(` — none of which appears in a handler body in these route files)
+ * against the line-anchored extraction and FAILS on any unclassifiable
+ * occurrence — fail closed, not silently skipped.
  */
 export function extractMutationRoutes(file: string, source: string): MutationRoute[] {
   const stripped = stripComments(source);
@@ -200,9 +256,20 @@ export function extractMutationRoutes(file: string, source: string): MutationRou
   return routes;
 }
 
-/** Count non-overlapping `.post(` occurrences in the comment-stripped source. */
-function countRawPost(source: string): number {
-  return (stripComments(source).match(/\.post\(/g) ?? []).length;
+/** Count `.verb(` occurrences per mutation method in the comment-stripped
+ *  source.  In these route files a mutation verb only ever appears as a route
+ *  registration (never a handler-body method call — no `db.delete(...)` /
+ *  `map.delete('k')` etc.), so a raw count that exceeds the line-anchored
+ *  extraction means a registration is written mid-line where the gate cannot
+ *  see it.  Reconciling EVERY verb (not just POST) closes the gap where a
+ *  mid-line `.patch(`/`.delete(`/`.put(` would ship ungated with a green gate. */
+function countRawMutations(source: string): Map<string, number> {
+  const stripped = stripComments(source);
+  const counts = new Map<string, number>();
+  for (const verb of MUTATION_METHODS) {
+    counts.set(verb, (stripped.match(new RegExp(`\\.${verb}\\(`, 'g')) ?? []).length);
+  }
+  return counts;
 }
 
 export function runGovernanceKycGate(
@@ -213,17 +280,20 @@ export function runGovernanceKycGate(
   for (const file of GOVERNANCE_ROUTE_FILES) {
     const source = read(file);
     const routes = extractMutationRoutes(file, source);
-    // Fail-closed style guard: every `.post(` in the file must be a
-    // line-anchored route we extracted. A mid-line `.post(` (a non-chain-style
-    // registration) would otherwise ship ungated with a green gate.
-    const rawPost = countRawPost(source);
-    const extractedPost = routes.filter((r) => r.method === 'post').length;
-    if (rawPost !== extractedPost) {
-      issues.push(
-        `${file}: found ${rawPost} \`.post(\` occurrence(s) but classified ${extractedPost} — a ` +
-          'route is not at line-start (the required Hono chain style), so the gate cannot see it. ' +
-          'Put each `.post(` at the start of its own line.',
-      );
+    // Fail-closed style guard: for EVERY mutation verb, each `.verb(` in the
+    // file must be a line-anchored route we extracted. A mid-line registration
+    // (any non-chain-style verb) would otherwise ship ungated with a green gate.
+    const rawCounts = countRawMutations(source);
+    for (const verb of MUTATION_METHODS) {
+      const raw = rawCounts.get(verb) ?? 0;
+      const extracted = routes.filter((r) => r.method === verb).length;
+      if (raw !== extracted) {
+        issues.push(
+          `${file}: found ${raw} \`.${verb}(\` occurrence(s) but classified ${extracted} — a ` +
+            `${verb.toUpperCase()} route is not at line-start (the required Hono chain style), so ` +
+            'the gate cannot see it. Put each mutation registration at the start of its own line.',
+        );
+      }
     }
     for (const route of routes) {
       if (route.guarded) continue;

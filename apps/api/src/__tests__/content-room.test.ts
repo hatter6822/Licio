@@ -170,6 +170,43 @@ describe('WS-Q.2.1 submission guards', () => {
     expect(asMember.status).toBe(200);
   });
 
+  it('bot-prevention layer 3: an unverified (non-KYC) steward is refused settings + visibility (kyc_required)', async () => {
+    const jsonReq = (method: string, path: string, body: unknown, cookie: string) =>
+      new Request(`http://localhost${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify(body),
+      });
+    const pub = await makeRoom('public');
+    // A platform steward whose KYC standing is NOT verified: a steward exercises
+    // governance power, so the platform KYC floor must refuse the rule-change.
+    const unverified = await seedUserWithSession(fixture.identity, {
+      handle: 'nokyc-steward',
+      steward: true,
+      kyc: false,
+    });
+    const settings = await app().request(
+      jsonReq(
+        'PATCH',
+        `/v1/rooms/${pub}/settings`,
+        { posting_policy: 'experts_and_stewards' },
+        unverified.cookie,
+      ),
+    );
+    expect(settings.status).toBe(403);
+    expect(((await settings.json()) as { error: { code: string } }).error.code).toBe(
+      'kyc_required',
+    );
+
+    const visibility = await app().request(
+      jsonReq('POST', `/v1/rooms/${pub}/visibility`, { visibility: 'private' }, unverified.cookie),
+    );
+    expect(visibility.status).toBe(403);
+    expect(((await visibility.json()) as { error: { code: string } }).error.code).toBe(
+      'kyc_required',
+    );
+  });
+
   it('p2p stubs expose NO server steward-action surface — lens create, settings, and visibility 404 even for admin (WS-S §8)', async () => {
     const patchJson = (path: string, body: unknown, cookie: string) =>
       new Request(`http://localhost${path}`, {

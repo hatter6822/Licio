@@ -63,6 +63,12 @@ export function createRoutes() {
 }
 `;
 
+const midLineDelete = `
+export function createRoutes() {
+  return new Hono().delete('/rooms/:roomId/sneaky/:id', authMiddleware(), (c) => c.json({}));
+}
+`;
+
 describe('extractMutationRoutes', () => {
   it('keeps a segment intact across handler-body c.get(...) calls', () => {
     const routes = extractMutationRoutes('f.ts', guarded);
@@ -103,6 +109,18 @@ describe('runGovernanceKycGate', () => {
     );
     // The raw-count cross-check catches the unclassifiable occurrence.
     expect(issues.some((issue) => issue.includes('not at line-start'))).toBe(true);
+  });
+
+  it('FAILS CLOSED on a mid-line non-POST mutation too (the per-verb cross-check)', () => {
+    // Before the cross-check covered every verb, a mid-line `.delete(`/`.patch(`
+    // evaded BOTH the line-anchored extraction and the POST-only raw count —
+    // shipping ungated with a green gate.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? midLineDelete : 'export const nothing = 1;',
+    );
+    expect(
+      issues.some((issue) => issue.includes('not at line-start') && issue.includes('`.delete(')),
+    ).toBe(true);
   });
 
   it('flags an unguarded non-POST governance mutation (DELETE)', () => {

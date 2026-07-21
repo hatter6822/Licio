@@ -11,8 +11,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { ingestAttentionEvents } from '../events/ingest.js';
 import { purgeUserAttention } from '../events/retention.js';
 import { type ActorBehaviorWindowRecord, PSEUDONYMOUS_USER_ID } from '../events/stores.js';
-import { BEHAVIOR_WINDOW_RETENTION_MS, runBehaviorAuthenticityJob } from '../pwatt/behavior.js';
-import { runPwattWindow } from '../pwatt/scoring.js';
+import {
+  BEHAVIOR_WINDOW_RETENTION_MS,
+  MAX_BUCKET_PAIRWISE,
+  runBehaviorAuthenticityJob,
+} from '../pwatt/behavior.js';
+import { DEFAULT_PWATT_RUNTIME_CONFIG } from '../pwatt/config.js';
+import { pwattConfigHash, runPwattWindow } from '../pwatt/scoring.js';
 import {
   attentionEvent,
   type EventServicesFixture,
@@ -185,6 +190,27 @@ describe('runBehaviorAuthenticityJob (assessment + duplication clustering)', () 
     await runBehaviorAuthenticityJob(fixture.events, CONFIG, nowMs);
     const rerun = await fixture.events.behaviorStore.getAuthenticity(clones[0] as string);
     expect(rerun?.clusterId).toBe(cloneScores[0]?.clusterId);
+  });
+
+  it('clusters an OVERSIZED clone fleet via the bounded representative path', async () => {
+    // More identical actors than MAX_BUCKET_PAIRWISE: they all land in ONE LSH
+    // bucket, which now takes the O(n) representative path instead of O(n²)
+    // all-pairs (the fleet cannot weaponise the scan to stall the job). They
+    // must STILL collapse into a single component — the guard bounds cost
+    // WITHOUT losing detection of the very fleet it protects against.
+    const fleetSize = MAX_BUCKET_PAIRWISE + 16;
+    const fleet = Array.from({ length: fleetSize }, () => randomUUID());
+    const windows: ActorBehaviorWindowRecord[] = [];
+    for (const member of fleet) {
+      for (let h = 0; h < 72; h += 1) windows.push(botWindow(member, h));
+    }
+    await fixture.events.behaviorStore.upsertWindows(windows);
+    const report = await runBehaviorAuthenticityJob(fixture.events, CONFIG, T0 + 73 * HOUR);
+    expect(report.clusterCount).toBe(1);
+    expect(report.largestClusterSize).toBe(fleetSize);
+    const member = await fixture.events.behaviorStore.getAuthenticity(fleet[0] as string);
+    expect(member?.clusterSize).toBe(fleetSize);
+    expect(member?.flags).toContain('behavior_duplication');
   });
 
   it('prunes snapshots past the retention horizon', async () => {
@@ -407,5 +433,21 @@ describe('purgeUserAttention removes both behavior planes', () => {
         (w) => w.actorRef === user.userId,
       ),
     ).toBe(false);
+  });
+});
+
+describe('pwattConfigHash — behavioral-authenticity settings are part of the identity', () => {
+  it('is stable for an unchanged config, and MOVES when behavior tuning changes', () => {
+    const base = DEFAULT_PWATT_RUNTIME_CONFIG;
+    expect(pwattConfigHash(base)).toBe(pwattConfigHash(base));
+    // Re-tuning the authenticity floor changes the trust factor applied to every
+    // scored actor — and thus persisted PWAtt components — so the replay/audit
+    // hash MUST change with it (else two differently-configured scores are
+    // indistinguishable, WS-I.2.1c).
+    const retuned = {
+      ...base,
+      behavior: { ...base.behavior, overallFloor: base.behavior.overallFloor + 0.05 },
+    };
+    expect(pwattConfigHash(retuned)).not.toBe(pwattConfigHash(base));
   });
 });

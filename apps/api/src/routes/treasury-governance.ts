@@ -62,7 +62,7 @@ import {
   requireAuth,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
-import { denyCapability, type StewardActor } from '../moderation/authz.js';
+import { isPlatformStaff } from '../moderation/authz.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { createCharterVersion } from '../treasury/charter.js';
 import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
@@ -95,21 +95,6 @@ const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
 
 const roomParam = zValidator('param', z.object({ roomId: uuidSchema }));
-
-function stewardActorOf(auth: NonNullable<AuthEnv['Variables']['auth']>): StewardActor {
-  return {
-    userId: auth.userId,
-    platformRoles: auth.roles,
-    stewardRoles: auth.stewardRoles,
-    mfaActive: auth.mfaActive,
-    mfaVerified: auth.mfaVerified,
-  };
-}
-
-/** Platform staff = the WS-J `restrict` capability (the platform legal floor). */
-function isPlatformStaff(auth: NonNullable<AuthEnv['Variables']['auth']>): boolean {
-  return denyCapability(stewardActorOf(auth), 'restrict') === null;
-}
 
 function tgError(
   c: { json: (body: unknown, status: never) => Response },

@@ -19,20 +19,9 @@ import { checkGovernanceEligibility } from '../governance/eligibility.js';
 import { getGovernanceService } from '../governance/services.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
-import { denyCapability, type StewardActor } from '../moderation/authz.js';
+import { denyCapability, stewardActorOf } from '../moderation/authz.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
-
-/** Build the WS-J steward actor from the auth context (platform-floor gate). */
-function stewardActorOf(auth: NonNullable<AuthEnv['Variables']['auth']>): StewardActor {
-  return {
-    userId: auth.userId,
-    platformRoles: auth.roles,
-    stewardRoles: auth.stewardRoles,
-    mfaActive: auth.mfaActive,
-    mfaVerified: auth.mfaVerified,
-  };
-}
 
 /** Ratification voting eligibility: an ACTIVE room member or a room steward. */
 async function isRoomMember(roomId: string, userId: string): Promise<boolean> {

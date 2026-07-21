@@ -215,6 +215,35 @@ async function emitThreadSafetyStateChanged(
 }
 
 /**
+ * A stable 16-hex identity of the scoring-relevant runtime config, stamped on
+ * every stored PWAtt row so the ranking feature store's `config_hash` VARIES
+ * with the config that produced a component — replay and audit can then tell
+ * differently-configured scores apart (WS-I.2.1c). EVERY input that changes a
+ * persisted component MUST appear here:
+ *  - `v0`/`v1`/`trustWeights` — the weights themselves;
+ *  - `burst`/`cascade` — the anti-signal DETECTORS, which decide whether a
+ *    burst/cascade fires (changing v0 dampening, the v1 anti_signal_factor, the
+ *    served components, and the freeze);
+ *  - `behavior` — the bot-prevention layer-2 authenticity settings, which scale
+ *    the applied trust factor (the overall floor + coherence/duplication tuning).
+ */
+export function pwattConfigHash(config: PwattRuntimeConfig): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        v0: config.v0,
+        v1: config.v1,
+        trustWeights: config.trustWeights,
+        burst: config.burst,
+        cascade: config.cascade,
+        behavior: config.behavior,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
  * Score one completed window. Returns a summary report; every side effect is
  * an idempotent upsert.
  */
@@ -226,26 +255,7 @@ export async function runPwattWindow(
   preloadedConfig?: PwattRuntimeConfig,
 ): Promise<WindowScoringReport> {
   const config = preloadedConfig ?? (await loadPwattRuntimeConfig(events));
-  // A stable identity of the scoring-relevant runtime config, stamped on every
-  // stored PWAtt row so the ranking feature store's `config_hash` (derived from
-  // versionMetadata) VARIES with the applied weights/attenuation/trust — replay
-  // and audit can then tell which config produced a stored component (WS-I.2.1c).
-  const configHash = createHash('sha256')
-    .update(
-      JSON.stringify({
-        v0: config.v0,
-        v1: config.v1,
-        trustWeights: config.trustWeights,
-        // The anti-signal DETECTOR configs are part of the scoring identity too:
-        // they decide whether a burst/cascade fires, which changes v0 dampening,
-        // the v1 anti_signal_factor, the served components, and the freeze — so
-        // tuning either must change the replay/audit hash (WS-I.2.1c).
-        burst: config.burst,
-        cascade: config.cascade,
-      }),
-    )
-    .digest('hex')
-    .slice(0, 16);
+  const configHash = pwattConfigHash(config);
   const aggregation: WindowAggregationResult = await computeAggregationWindow(
     events,
     startMs,

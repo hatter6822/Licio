@@ -57,6 +57,16 @@ export const BEHAVIOR_WINDOW_RETENTION_MS = 14 * 24 * 3_600_000;
  *  sustained shared shape to be a fleet. */
 export const MIN_SIGNATURE_WINDOWS = 12;
 
+/** Above this many candidates in ONE LSH bucket, drop from O(n²) all-pairs to
+ *  O(n) representative comparison.  A legitimate bucket (genuine near-duplicate
+ *  humans sharing a whole band's minhashes) is tiny; a bucket far larger is a
+ *  coordinated fleet emitting one stream — the very pattern this job assesses,
+ *  which must not be able to weaponise the pairwise scan to stall the hourly job
+ *  before retention/reconciliation run.  Identical members still collapse into
+ *  one component via the representative; near-duplicate sub-groups still cluster
+ *  through their other bands' (small) buckets. */
+export const MAX_BUCKET_PAIRWISE = 64;
+
 function increment<K extends string>(
   histogram: Partial<Record<K, number>>,
   bucket: K | undefined,
@@ -196,6 +206,22 @@ export async function runBehaviorAuthenticityJob(
     });
   });
   for (const bucket of buckets.values()) {
+    if (bucket.length > MAX_BUCKET_PAIRWISE) {
+      // Oversized bucket ⇒ coordinated fleet: verify each member against the
+      // bucket's first (a representative) and union the matches — O(n), not the
+      // O(n²) all-pairs the fleet is trying to weaponise. Identical streams all
+      // collapse into one component; genuine sub-groups still cluster via their
+      // other bands' small buckets.
+      const rep = bucket[0] as number;
+      const sigRep = signatures.get(eligible[rep] as string) as Uint32Array;
+      for (let k = 1; k < bucket.length; k += 1) {
+        const b = bucket[k] as number;
+        if (unionFind.find(rep) === unionFind.find(b)) continue;
+        const sigB = signatures.get(eligible[b] as string) as Uint32Array;
+        if (estimateJaccard(sigRep, sigB) >= config.duplicationJaccard) unionFind.union(rep, b);
+      }
+      continue;
+    }
     for (let i = 0; i < bucket.length; i += 1) {
       for (let j = i + 1; j < bucket.length; j += 1) {
         const a = bucket[i] as number;
