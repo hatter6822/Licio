@@ -1552,11 +1552,11 @@ if (
           provisional.lanes.adjudication.settings.modelId,
         ),
       ]);
-      devSimulatedLaneFlags = devSimulatedLanes({
+      const probedLanes = devSimulatedLanes({
         moderation: moderationProbe,
         adjudication: adjudicationProbe,
       });
-      if (devSimulatedLaneFlags.moderation || devSimulatedLaneFlags.adjudication) {
+      if (probedLanes.moderation || probedLanes.adjudication) {
         const { startSimulatedGovernanceLlm } = await import('./simulator/governance-llm.js');
         const requestedPort = Number.parseInt(process.env['LICIO_LLM_SIM_PORT'] ?? '', 10);
         const sim = await startSimulatedGovernanceLlm({
@@ -1565,19 +1565,25 @@ if (
         });
         governanceLlmEnvInput = overlaySimulatedLanes(
           governanceLlmEnvInput,
-          devSimulatedLaneFlags,
+          probedLanes,
           sim.baseUrl,
         );
+        // Committed ONLY after the simulator is live AND the overlay applied:
+        // a failed simulator start lands in the catch below with these flags
+        // still null, so the status surfaces keep reporting the real
+        // (fail-closed) lanes — never a simulated runtime that is not
+        // actually serving.
+        devSimulatedLaneFlags = probedLanes;
         logger.warn(
           {
-            moderation: devSimulatedLaneFlags.moderation
+            moderation: probedLanes.moderation
               ? { simulated: true, probe: moderationProbe }
               : {
                   simulated: false,
                   baseUrl: provisional.lanes.moderation.backend.baseUrl,
                   modelId: provisional.lanes.moderation.settings.modelId,
                 },
-            adjudication: devSimulatedLaneFlags.adjudication
+            adjudication: probedLanes.adjudication
               ? { simulated: true, probe: adjudicationProbe }
               : {
                   simulated: false,
@@ -1589,6 +1595,7 @@ if (
           'DEV governance LLM: the simulated runtime stands in for each lane above whose real runtime is not serving its model (development only; never in production). Provision the real lanes with `pnpm setup:llm` and restart, disable the stand-in with LICIO_LLM_SIM=off, or choose a backend explicitly via GOVERNANCE_LLM_PROVIDER.',
         );
       } else {
+        devSimulatedLaneFlags = probedLanes;
         logger.info(
           {
             moderation: {

@@ -54,7 +54,11 @@ export const DEV_SIMULATED_DEBATE_BUDGET_PER_HOUR = 100_000;
  * in the resolver, so setting them here redirects EXACTLY the simulated lanes
  * — a stale legacy `GOVERNANCE_LLM_LOCAL_URL` in a dev shell cannot pull a
  * simulated lane back off the simulator, and a live lane's own per-lane
- * overrides keep applying verbatim.
+ * overrides keep applying verbatim. The PROVIDER is deliberately left
+ * untouched: this overlay only runs when it is unset, and the resolver
+ * already defaults development to 'local' — so `providerDefaulted` keeps
+ * reporting TRUE and the status surfaces state honestly that the backend
+ * defaulted in rather than being an explicit operator choice.
  */
 export function overlaySimulatedLanes(
   envInput: GovernanceLlmEnvInput,
@@ -64,7 +68,6 @@ export function overlaySimulatedLanes(
   if (!simulated.moderation && !simulated.adjudication) return envInput;
   return {
     ...envInput,
-    provider: 'local',
     ...(simulated.moderation
       ? { moderationUrl: simBaseUrl, moderationModelId: SIMULATED_GOVERNANCE_LLM_MODEL_ID }
       : {}),

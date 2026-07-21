@@ -64,6 +64,23 @@ describe('overlaySimulatedLanes', () => {
     ).toBe(envInput);
   });
 
+  it('leaves the PROVIDER untouched, so `providerDefaulted` stays honest (the backend defaulted in — it was never an explicit choice)', () => {
+    const overlaid = overlaySimulatedLanes(
+      devEnvInput(),
+      { moderation: true, adjudication: true },
+      SIM_URL,
+    );
+    expect(overlaid.provider).toBeUndefined();
+    const decision = resolveGovernanceLlmDecision(overlaid);
+    expect(decision.enabled).toBe(true);
+    if (decision.enabled) expect(decision.providerDefaulted).toBe(true);
+    const partial = resolveGovernanceLlmDecision(
+      overlaySimulatedLanes(devEnvInput(), { moderation: true, adjudication: false }, SIM_URL),
+    );
+    expect(partial.enabled).toBe(true);
+    if (partial.enabled) expect(partial.providerDefaulted).toBe(true);
+  });
+
   it('both lanes dead ⇒ both lanes resolve onto the simulator (single URL, sim model, raised debate budget)', () => {
     const decision = resolveGovernanceLlmDecision(
       overlaySimulatedLanes(devEnvInput(), { moderation: true, adjudication: true }, SIM_URL),
