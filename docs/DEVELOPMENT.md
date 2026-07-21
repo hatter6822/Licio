@@ -1516,6 +1516,11 @@ loopback runtimes (`GET /v1/models` over the lane URLs +
 admission retryable and the live surfaces fail closed — provision the model
 (an extra vLLM instance, or an Ollama pull of a GGUF build with
 `servedModelId` set in the ref) and the scheduler's retry sweeps recover it.
+A `servedModelId` other than the repo id itself must be **operator-attested**
+(`GOVERNANCE_MODEL_HUB_ALIASES`, comma-separated `owner/repo=servedModelId`
+pairs) or the propose is rejected `hub_served_id_not_attested` — the hub
+cannot vouch for what a local runtime alias serves, so the operator who
+provisioned it attests the binding (fail-closed).
 In `pnpm dev`, the simulated runtime stands in for any selection (under its
 own served id), so the whole candidacy flow works with zero setup.
 

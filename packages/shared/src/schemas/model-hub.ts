@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-U model-hub wire contracts: the HuggingFace model-candidacy vocabulary.
-// A steward may select ANY public huggingface.co model as a room's candidate
-// moderation or adjudication model (SPEC §24.6; docs/governance/README.md).
+// Any governance-eligible member may select ANY public huggingface.co model as
+// a room's candidate moderation or adjudication model (SPEC §24.6;
+// docs/governance/README.md).
 // The reference is REVISION-PINNED (a 40-hex commit sha, immutable on the hub)
 // so the exact weights a community ratifies are reproducible and auditable —
 // the same hash-pin discipline as the policy-bundle artifact digest. The BFF
@@ -47,7 +48,11 @@ export const hubModelRefSchema = z
     revision: hubRevisionSchema,
     /** The id the LOCAL runtime serves the model under when it differs from the
      *  repo id (vLLM defaults to the repo id; an Ollama pull of a GGUF build
-     *  gets an `hf.co/...` name). Defaults to `repoId` when omitted. */
+     *  gets an `hf.co/...` name). Defaults to `repoId` when omitted. The hub
+     *  cannot vouch for what a runtime alias actually serves, so a value other
+     *  than the repo id itself is accepted at propose time only when the
+     *  OPERATOR attests the pair (`GOVERNANCE_MODEL_HUB_ALIASES`) — otherwise
+     *  the propose fails `hub_served_id_not_attested` (fail-closed). */
     servedModelId: z.string().min(1).max(256).optional(),
   })
   .strict();

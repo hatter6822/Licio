@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from 'zod';
+import { hubRepoIdSchema } from '../schemas/model-hub.js';
 
 /** The S3 group is all-or-none; a partial group is a deployment mistake. */
 const S3_REQUIRED_KEYS = [
@@ -227,11 +228,21 @@ export const serverEnvSchema = z.object({
   // detects guard-family models by model id.
   GOVERNANCE_LLM_MODERATION_FORMAT: z.enum(['auto', 'json', 'guard']).optional(),
   // WS-U model-hub candidacy (SPEC §24.6): server-side huggingface.co METADATA
-  // reads only (steward model search + revision-pinned candidate verification;
+  // reads only (member model search + revision-pinned candidate verification;
   // never any room content, never any user identifier). 'off' disables the
   // /v1/model-hub surface AND rejects hub-referencing bundles at propose time
   // (fail-closed, never a silently unverified candidate).
   GOVERNANCE_MODEL_HUB: z.enum(['on', 'off']).optional(),
+  // OPERATOR-ATTESTED served-id aliases for hub candidates. A member bundle
+  // may pin a hub repo while naming the DIFFERENT id the local runtime serves
+  // that model under (`servedModelId`, e.g. an Ollama GGUF re-serve). The BFF
+  // cannot cryptographically bind a runtime alias to a hub revision, so an
+  // alias is accepted only when the operator — who provisioned the runtime and
+  // knows what each id serves — attests the pair here: comma-separated
+  // `owner/repo=servedModelId` entries. A `servedModelId` equal to the repo id
+  // needs no attestation; any other un-attested alias is rejected at propose
+  // time (`hub_served_id_not_attested`, fail-closed).
+  GOVERNANCE_MODEL_HUB_ALIASES: z.string().min(1).optional(),
   // Optional huggingface.co API token (server-side only; rate-limit headroom
   // for the metadata reads). Gated models are rejected as candidates
   // regardless — the token never widens what a room may select.
@@ -367,6 +378,40 @@ export function parseGovernanceExtraRuntimeUrls(raw: string | undefined): string
   return urls;
 }
 
+/** Parse the operator-attested hub served-id aliases
+ *  (`GOVERNANCE_MODEL_HUB_ALIASES`, comma-separated `owner/repo=servedModelId`
+ *  entries) into a repo-id → served-id-set map. Unset ⇒ an empty map, under
+ *  which only a `servedModelId` equal to its repo id passes propose-time
+ *  verification. Throws on any malformed entry (env validation surfaces it). */
+export function parseGovernanceModelHubAliases(
+  raw: string | undefined,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const aliases = new Map<string, Set<string>>();
+  if (raw === undefined) return aliases;
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  for (const entry of entries) {
+    const eq = entry.indexOf('=');
+    const repoId = eq === -1 ? '' : entry.slice(0, eq).trim();
+    const servedId = eq === -1 ? '' : entry.slice(eq + 1).trim();
+    if (
+      !hubRepoIdSchema.safeParse(repoId).success ||
+      servedId.length === 0 ||
+      servedId.length > 256
+    ) {
+      throw new Error(
+        `GOVERNANCE_MODEL_HUB_ALIASES entry "${entry}" must be "owner/repo=servedModelId"`,
+      );
+    }
+    const set = aliases.get(repoId) ?? new Set<string>();
+    set.add(servedId);
+    aliases.set(repoId, set);
+  }
+  return aliases;
+}
+
 /** Infrastructure + secrets that MUST be configured in production but may be
  *  omitted in development/test (where the in-memory stores + dev defaults take
  *  over). Listed here so the refinement and the dev-default transform agree. */
@@ -446,6 +491,19 @@ export const serverEnvSchemaRefined = serverEnvSchema
           message:
             err instanceof Error ? err.message : 'GOVERNANCE_LLM_EXTRA_RUNTIME_URLS is invalid',
           path: ['GOVERNANCE_LLM_EXTRA_RUNTIME_URLS'],
+        });
+      }
+    }
+    // A malformed alias attestation must fail at startup, not at first propose
+    // (where it would read as a spurious `hub_served_id_not_attested`).
+    if (env.GOVERNANCE_MODEL_HUB_ALIASES !== undefined) {
+      try {
+        parseGovernanceModelHubAliases(env.GOVERNANCE_MODEL_HUB_ALIASES);
+      } catch (err) {
+        ctx.addIssue({
+          code: 'custom',
+          message: err instanceof Error ? err.message : 'GOVERNANCE_MODEL_HUB_ALIASES is invalid',
+          path: ['GOVERNANCE_MODEL_HUB_ALIASES'],
         });
       }
     }

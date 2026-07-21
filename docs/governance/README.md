@@ -95,10 +95,16 @@ gate fails any new governance POST route that ships unclassified.
   bundle may carry a per-role `modelSelection` — REVISION-PINNED huggingface.co references for
   the room's MODERATION and/or ADJUDICATION model (any public, text-capable
   hub model; the propose form's model picker or a hand-authored block). Every reference is
-  **verified against the hub at propose time** (existence at the pin, not
-  gated/private, a candidate pipeline; the verified snapshot is stored on the
-  model row for transparency; no verifier ⇒ `hub_disabled`, fail-closed — see
-  `GOVERNANCE_MODEL_HUB`). Admission then evaluates **the selected model
+  **verified against the hub at propose time** (existence at the pin — the
+  revision endpoint must ECHO the pinned commit sha, a missing/malformed echo
+  is `invalid_response`; not gated/private; a candidate pipeline; the verified
+  snapshot is stored on the model row for transparency; no verifier ⇒
+  `hub_disabled`, fail-closed — see `GOVERNANCE_MODEL_HUB`). A ref's
+  `servedModelId` (the id the LOCAL runtime serves the model under, e.g. an
+  Ollama GGUF re-serve) is accepted only when it equals the repo id or the
+  operator attests the pair (`GOVERNANCE_MODEL_HUB_ALIASES`; otherwise
+  `hub_served_id_not_attested`) — the hub cannot vouch for a runtime alias,
+  so the party who provisioned the runtime does. Admission then evaluates **the selected model
   itself**: the moderation candidate is **sampled k-of-N** over the platform
   floor-safety eval set and must land in the platform `[min,max]` severity
   band on every fixture (catching under- and over-moderation), beneath —

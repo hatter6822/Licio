@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseGovernanceExtraRuntimeUrls,
+  parseGovernanceModelHubAliases,
   validateClientEnv,
   validateServerEnv,
 } from '../env/index.js';
@@ -411,6 +412,31 @@ describe('validateServerEnv', () => {
     expect(() => validateServerEnv({ ...validEnv, GOVERNANCE_MODEL_HUB: 'maybe' })).toThrow();
     expect(() => validateServerEnv({ ...validEnv, HF_TOKEN: 'hf_test' })).not.toThrow();
     expect(() => validateServerEnv({ ...validEnv, HF_TOKEN: '' })).toThrow();
+  });
+
+  it('parses + validates the operator-attested served-id aliases (fail-fast at startup)', () => {
+    expect(parseGovernanceModelHubAliases(undefined).size).toBe(0);
+    const aliases = parseGovernanceModelHubAliases(
+      ' Qwen/Qwen3Guard-Gen-4B=guard-gguf:q8 ,, Qwen/Qwen3Guard-Gen-4B=hf.co/mradermacher/Qwen3Guard-Gen-4B-GGUF:Q8_0 , Qwen/Qwen3.6-27B=q3.6 ',
+    );
+    expect(aliases.get('Qwen/Qwen3Guard-Gen-4B')).toEqual(
+      new Set(['guard-gguf:q8', 'hf.co/mradermacher/Qwen3Guard-Gen-4B-GGUF:Q8_0']),
+    );
+    expect(aliases.get('Qwen/Qwen3.6-27B')).toEqual(new Set(['q3.6']));
+    // Malformed entries (no '=', a non-repo-id left side, an empty served id)
+    // throw — and env validation surfaces them at startup, not at first propose.
+    for (const bad of ['no-equals', 'not-a-repo=x', 'Qwen/Qwen3.6-27B=']) {
+      expect(() => parseGovernanceModelHubAliases(bad)).toThrow(/owner\/repo=servedModelId/);
+    }
+    expect(() =>
+      validateServerEnv({
+        ...validEnv,
+        GOVERNANCE_MODEL_HUB_ALIASES: 'Qwen/Qwen3Guard-Gen-4B=guard-gguf:q8',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateServerEnv({ ...validEnv, GOVERNANCE_MODEL_HUB_ALIASES: 'no-equals' }),
+    ).toThrow(/owner\/repo=servedModelId/);
   });
 });
 

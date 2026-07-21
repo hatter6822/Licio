@@ -21,7 +21,7 @@ import type {
   RatificationViewResponse,
 } from '@licio/shared';
 import { hubModelRefSchema } from '@licio/shared';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
@@ -427,7 +427,26 @@ function HubModelPicker({
   const [results, setResults] = useState<ModelHubSearchResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** A pin whose merge outcome has not been REPORTED yet. The merge itself runs
+   *  inside a functional updater (against the latest text), so its outcome
+   *  cannot be read synchronously at the call site — React may run the updater
+   *  after `pick` returns. The outcome is instead derived HERE, from the
+   *  committed `bundleText` the updater produced: the pin either reads back
+   *  from the text (success) or the text was not valid JSON and the merge
+   *  could not apply (report it — never silently pretend the model pinned). */
+  const [pendingPin, setPendingPin] = useState<{ repoId: string; revision: string } | null>(null);
   const current = selectionOf(bundleText, hubRole);
+  useEffect(() => {
+    if (pendingPin === null) return;
+    const applied = selectionOf(bundleText, hubRole);
+    if (applied?.repoId === pendingPin.repoId && applied?.revision === pendingPin.revision) {
+      setResults(null); // the pin visibly applied — collapse the search results
+      setError(null);
+    } else {
+      setError(t('room.governance.propose.invalidJson', 'The model must be valid JSON.'));
+    }
+    setPendingPin(null);
+  }, [bundleText, hubRole, pendingPin, t]);
   const roleLabel =
     hubRole === 'moderation'
       ? t('room.governance.hub.roleModeration', 'Moderation model')
@@ -460,24 +479,18 @@ function HubModelPicker({
       // Merge against the LATEST text (never the render-time snapshot): the
       // author may have kept editing — or the other picker merged — while the
       // pin resolved, and a stale-snapshot write would silently revert them.
-      let mergeFailed = false;
-      onBundleText((prev) => {
-        const merged = mergeSelection(prev, hubRole, {
-          source: 'huggingface',
-          repoId: metadata.repo_id,
-          revision: metadata.revision,
-        });
-        if (merged === null) {
-          mergeFailed = true;
-          return prev;
-        }
-        return merged;
-      });
-      if (mergeFailed) {
-        setError(t('room.governance.propose.invalidJson', 'The model must be valid JSON.'));
-        return;
-      }
-      setResults(null);
+      // The updater stays PURE (no out-of-band flags — React runs it after this
+      // function returns); the reporting effect above derives success/failure
+      // from the committed text once the update lands.
+      onBundleText(
+        (prev) =>
+          mergeSelection(prev, hubRole, {
+            source: 'huggingface',
+            repoId: metadata.repo_id,
+            revision: metadata.revision,
+          }) ?? prev,
+      );
+      setPendingPin({ repoId: metadata.repo_id, revision: metadata.revision });
     } catch (e) {
       setError(
         e instanceof ApiClientError

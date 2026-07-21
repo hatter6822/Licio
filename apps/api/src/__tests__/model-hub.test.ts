@@ -165,6 +165,22 @@ describe('HttpModelHubClient.verify (pinned-revision candidacy)', () => {
     await expect(
       new HttpModelHubClient({ fetchImpl: wrongSha.fetchImpl }).verify(REF),
     ).rejects.toMatchObject({ code: 'revision_mismatch' });
+    // A revision response that does not echo a well-formed commit sha proves
+    // nothing about the pin — verify fails closed rather than accepting it.
+    const missingSha = fakeFetch(() => ({
+      status: 200,
+      body: { ...MODEL_ITEM, sha: undefined },
+    }));
+    await expect(
+      new HttpModelHubClient({ fetchImpl: missingSha.fetchImpl }).verify(REF),
+    ).rejects.toMatchObject({ code: 'invalid_response' });
+    const malformedSha = fakeFetch(() => ({
+      status: 200,
+      body: { ...MODEL_ITEM, sha: 'not-a-sha' },
+    }));
+    await expect(
+      new HttpModelHubClient({ fetchImpl: malformedSha.fetchImpl }).verify(REF),
+    ).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
   it('TTL-caches successful reads (a second verify makes no second request)', async () => {

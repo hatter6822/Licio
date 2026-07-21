@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
 import { type PrivacyClassification, type RetentionTier, stewardRolesQueues } from '@licio/shared';
-import { parseGovernanceExtraRuntimeUrls, validateServerEnv } from '@licio/shared/env';
+import {
+  parseGovernanceExtraRuntimeUrls,
+  parseGovernanceModelHubAliases,
+  validateServerEnv,
+} from '@licio/shared/env';
 import { createDrizzleAiGovernanceStores } from './ai-governance/drizzle-ai-governance-stores.js';
 import { ProhibitedUseGuard } from './ai-governance/guard.js';
 import {
@@ -1498,7 +1502,7 @@ if (env.GOVERNANCE_MODEL_HUB !== 'off') {
   });
 } else {
   logger.warn(
-    'WS-U model hub disabled (GOVERNANCE_MODEL_HUB=off) — steward hub-model search is off and hub-referencing bundles are rejected at propose time',
+    'WS-U model hub disabled (GOVERNANCE_MODEL_HUB=off) — member hub-model search is off and hub-referencing bundles are rejected at propose time',
   );
 }
 // DEV ONLY: the simulated local governance-LLM runtime. When the operator has
@@ -1748,11 +1752,14 @@ setGovernanceService(
     ...(governanceNlProvider ? { nlProvider: governanceNlProvider } : {}),
     ...(governanceModerationProposer ? { moderationProposer: governanceModerationProposer } : {}),
     // The adjudication lane's admission pin + probe (the role split) and the
-    // hub verifier for steward model candidacy — both fail closed when absent.
+    // hub verifier for member model candidacy — both fail closed when absent.
     ...(governanceAdjudicationBackend
       ? { adjudicationBackend: governanceAdjudicationBackend }
       : {}),
     ...(aiGovernanceServices.modelHub ? { modelHub: aiGovernanceServices.modelHub } : {}),
+    // Operator-attested served-id aliases: a bundle servedModelId differing
+    // from its repo id is accepted only when listed here (fail-closed).
+    hubServedModelAliases: parseGovernanceModelHubAliases(env.GOVERNANCE_MODEL_HUB_ALIASES),
     // Observability: record every decided in-room moderation (proposed vs the
     // wrapper-bounded action) to the WS-K moderation decision log.
     onModerationDecided: (record) => {

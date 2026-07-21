@@ -83,6 +83,7 @@ function make(over: {
   hub?: boolean;
   hubError?: ModelHubError;
   flipPinDuringSampling?: boolean;
+  aliases?: ReadonlyMap<string, ReadonlySet<string>>;
 }) {
   const resolvable = { current: over.resolvable ?? true };
   const adjudication = { ok: over.adjudicationOk ?? true, probes: 0 };
@@ -118,6 +119,7 @@ function make(over: {
             },
           },
         }),
+    ...(over.aliases ? { hubServedModelAliases: over.aliases } : {}),
   });
   return { svc, stores, resolvable, adjudication, lanePin, misclassify };
 }
@@ -182,6 +184,44 @@ describe('propose-time hub verification (fail-closed)', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.code).toBe(expected);
     }
+  });
+
+  it('a servedModelId other than the repo id needs the operator-attested alias (fail-closed)', async () => {
+    // Un-attested: a verified benign repo must never label an arbitrary
+    // locally-served model in the transparency record.
+    const { svc } = make({});
+    await svc.bootstrapSeat('r', 's');
+    const refused = await svc.proposeModel(
+      'r',
+      's',
+      bundle({ modelSelection: { moderation: { ...MOD_REF, servedModelId: 'other:latest' } } }),
+      'p',
+      true,
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.code).toBe('hub_served_id_not_attested');
+    // Spelling out the repo id itself adds nothing — no attestation needed.
+    const equal = await svc.proposeModel(
+      'r',
+      's',
+      bundle({ modelSelection: { moderation: { ...MOD_REF, servedModelId: MOD_REF.repoId } } }),
+      'p',
+      true,
+    );
+    expect(equal.ok).toBe(true);
+    // The operator-attested alias (e.g. an Ollama GGUF re-serve) passes.
+    const attested = make({
+      aliases: new Map([[MOD_REF.repoId, new Set(['guard-gguf:q8'])]]),
+    });
+    await attested.svc.bootstrapSeat('r', 's');
+    const accepted = await attested.svc.proposeModel(
+      'r',
+      's',
+      bundle({ modelSelection: { moderation: { ...MOD_REF, servedModelId: 'guard-gguf:q8' } } }),
+      'p',
+      true,
+    );
+    expect(accepted.ok).toBe(true);
   });
 
   it('stores the verified per-role snapshots on the model row (transparency)', async () => {

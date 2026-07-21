@@ -101,6 +101,13 @@ export interface GovernanceServiceDeps {
   modelHub?: {
     verify(ref: HubModelRef): Promise<HubModelMetadata>;
   };
+  /** WS-U model candidacy: OPERATOR-ATTESTED served-id aliases
+   *  (`GOVERNANCE_MODEL_HUB_ALIASES`, repo id → served-id set). A bundle
+   *  `servedModelId` differing from its repo id is accepted only when attested
+   *  here — the operator provisioned the runtimes and is the only party who
+   *  knows what each alias actually serves; the hub cannot vouch for the
+   *  binding. Absent ⇒ empty (only repo-id-equal served ids pass). */
+  hubServedModelAliases?: ReadonlyMap<string, ReadonlySet<string>>;
   /** The ADJUDICATION lane's admission pin + validity probe (wired at boot when
    *  the LLM debate adjudicator is enabled). `backendId` resolves the pin for a
    *  bundle's adjudication selection (null ref ⇒ the platform adjudication
@@ -1841,6 +1848,22 @@ export class GovernanceService {
     }
     const verified: NonNullable<ModelRecord['hubVerification']> = {};
     for (const [role, ref] of refs) {
+      // The served-id override names what the LOCAL runtime will execute, and
+      // the hub cannot vouch for that binding — an arbitrary override could
+      // pair a verified benign repo with any other locally-served model and
+      // mislabel it in the transparency record. Any override other than the
+      // repo id itself therefore requires the operator's attested alias
+      // (fail-closed; the runtime set is operator-provisioned).
+      if (ref.servedModelId !== undefined && ref.servedModelId !== ref.repoId) {
+        const attested =
+          this.deps.hubServedModelAliases?.get(ref.repoId)?.has(ref.servedModelId) === true;
+        if (!attested) {
+          return err(
+            'hub_served_id_not_attested',
+            `The ${role} model's servedModelId is not an operator-attested alias of ${ref.repoId}.`,
+          );
+        }
+      }
       try {
         verified[role] = await hub.verify(ref);
       } catch (error) {

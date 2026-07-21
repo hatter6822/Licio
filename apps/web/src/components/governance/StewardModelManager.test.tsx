@@ -379,4 +379,55 @@ describe('StewardModelManager (WS-U §16.6)', () => {
     const cleared = JSON.parse(bundleBox.value) as { modelSelection?: unknown };
     expect(cleared.modelSelection).toBeUndefined();
   });
+
+  it('reports a pin the merge could not apply (invalid bundle JSON) instead of silently pretending it pinned', async () => {
+    const SHA = 'f'.repeat(40);
+    hubSearch.mockResolvedValue({
+      results: [
+        {
+          repo_id: 'Qwen/Qwen3Guard-Gen-8B',
+          pipeline_tag: 'text-generation',
+          license: 'apache-2.0',
+          gated: false,
+        },
+      ],
+    });
+    hubResolve.mockResolvedValue({
+      metadata: {
+        repo_id: 'Qwen/Qwen3Guard-Gen-8B',
+        revision: SHA,
+        pipeline_tag: 'text-generation',
+        license: 'apache-2.0',
+        parameter_count: 8_000_000_000,
+        fetched_at: '2026-07-01T00:00:00.000Z',
+      },
+    });
+    signInAs('steward-1');
+    seatHeldBy('steward-1');
+    modelsList([]);
+    openVote(null);
+    render(<StewardModelManager roomId="r1" />);
+    fireEvent.click(screen.getByRole('button', { name: /propose a model/i }));
+
+    // The author breaks the bundle JSON (mid-edit) before the pin lands — the
+    // asynchronous merge then CANNOT apply, and the picker must say so rather
+    // than clear the results as if the model were pinned.
+    const bundleBox = screen.getByLabelText(/policy bundle/i) as HTMLTextAreaElement;
+    fireEvent.change(bundleBox, { target: { value: '{ not valid json' } });
+    fireEvent.change(
+      screen.getByRole('searchbox', { name: /search huggingface\.co models for moderation/i }),
+      { target: { value: 'qwen guard' } },
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: /^search$/i })[0] as HTMLElement);
+    await waitFor(() => expect(hubSearch).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /^select$/i }));
+
+    // The failure is REPORTED, the text is untouched, and the result list
+    // stays (the author can fix the JSON and select again).
+    await waitFor(() =>
+      expect(screen.getByText(/the model must be valid json/i)).toBeInTheDocument(),
+    );
+    expect(bundleBox.value).toBe('{ not valid json');
+    expect(screen.getByRole('button', { name: /^select$/i })).toBeInTheDocument();
+  });
 });

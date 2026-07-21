@@ -49,6 +49,9 @@ export interface GovernanceServiceOptions {
    *  huggingface.co client unless GOVERNANCE_MODEL_HUB=off; absent ⇒
    *  hub-referencing bundles are rejected `hub_disabled`, fail-closed). */
   modelHub?: GovernanceServiceDeps['modelHub'];
+  /** Operator-attested served-id aliases (`GOVERNANCE_MODEL_HUB_ALIASES`);
+   *  absent ⇒ empty (only repo-id-equal served ids pass propose verification). */
+  hubServedModelAliases?: GovernanceServiceDeps['hubServedModelAliases'];
   /** The ADJUDICATION lane's admission pin + validity probe (boot wires it when
    *  the LLM debate adjudicator is enabled; absent ⇒ no adjudication pin is
    *  recorded and the debate-leg pin gate is skipped — the test posture). */
@@ -71,6 +74,7 @@ export function createGovernanceService(opts: GovernanceServiceOptions = {}): Go
     ...(opts.onModerationDeferred ? { onModerationDeferred: opts.onModerationDeferred } : {}),
     ...(opts.onModerationDecided ? { onModerationDecided: opts.onModerationDecided } : {}),
     ...(opts.modelHub ? { modelHub: opts.modelHub } : {}),
+    ...(opts.hubServedModelAliases ? { hubServedModelAliases: opts.hubServedModelAliases } : {}),
     ...(opts.adjudicationBackend ? { adjudicationBackend: opts.adjudicationBackend } : {}),
   });
 }

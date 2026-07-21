@@ -6,6 +6,7 @@ export type { ServerEnv } from './server.js';
 export {
   isLoopbackHttpUrl,
   parseGovernanceExtraRuntimeUrls,
+  parseGovernanceModelHubAliases,
   serverEnvSchema,
   validateServerEnv,
 } from './server.js';

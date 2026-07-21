@@ -252,9 +252,17 @@ export class HttpModelHubClient implements ModelHubClient {
     const item = await this.#candidateItem(
       `${HUB_BASE_URL}/api/models/${repoId}/revision/${revision}`,
     );
-    // Defensive: the revision endpoint echoes the resolved commit; a mismatch
-    // would mean the pin does not denote what the hub served.
-    if (item.sha !== undefined && item.sha !== ref.revision) {
+    // The revision endpoint must ECHO the resolved commit. A response without
+    // a well-formed sha carries no evidence that the served snapshot is the
+    // requested immutable commit, so it is refused outright (fail-closed,
+    // symmetric with `resolve`) — acceptance requires the echo to equal the pin.
+    if (item.sha === undefined || !/^[0-9a-f]{40}$/.test(item.sha)) {
+      throw new ModelHubError(
+        'invalid_response',
+        'hub did not echo a resolvable commit for the pin',
+      );
+    }
+    if (item.sha !== ref.revision) {
       throw new ModelHubError('revision_mismatch', 'hub resolved a different commit for the pin');
     }
     return this.#metadata(repoId, ref.revision, item);
