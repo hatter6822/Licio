@@ -94,6 +94,55 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect((await store.getActiveForComment(ctx.targetId))?.debateId).toBe(arena?.debateId);
   });
 
+  it('pinnedStoryChallenger returns only the LIVE story challenger, never a settled one', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    // A settled INCONCLUSIVE story challenge (challenger A) is NOT pinnable.
+    const settled = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx.challengerId,
+        state: 'resolved',
+        verdict: 'inconclusive',
+        resolvedAt: '2026-07-06T00:00:00.000Z',
+      }),
+    );
+    expect(settled).not.toBeNull();
+    expect(await store.pinnedStoryChallenger(ctx.storyId)).toBeNull();
+    // A LIVE story challenge (challenger B) now pins — and ONLY it, so the
+    // settled correction keeps its chronological place (the Codex edge case).
+    const live = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx.challenger2Id,
+        state: 'open',
+      }),
+    );
+    expect(live).not.toBeNull();
+    expect(await store.pinnedStoryChallenger(ctx.storyId)).toBe(ctx.challenger2Id);
+  });
+
+  it('pinnedStoryChallenger returns a challenger that PREVAILED (resolved corrected)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const won = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: ctx.challengerId,
+        state: 'resolved',
+        verdict: 'corrected',
+        winner: 'challenger',
+        decidedBy: 'ai',
+        resolvedAt: '2026-07-06T00:00:00.000Z',
+      }),
+    );
+    expect(won).not.toBeNull();
+    expect(await store.pinnedStoryChallenger(ctx.storyId)).toBe(ctx.challengerId);
+  });
+
   it('lists arenas by party and anonymizes the party out (DSAR §19.3)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();

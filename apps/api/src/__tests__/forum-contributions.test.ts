@@ -241,6 +241,30 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(corr.status).toBe(200);
   });
 
+  it('the corrections filter enumerates comment-target corrections (now nested), not just roots', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const comment = await createOk(contributionBody('comment', threadId));
+    // A correction targeting the COMMENT (nests under it) and one targeting the STORY (root).
+    const commentCorrection = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    const storyCorrection = await createOk(contributionBody('correction', threadId, { storyId }));
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string; type: string }[] };
+    const ids = new Set(body.comments.map((c) => c.contribution_id));
+    // BOTH appear — the comment-target correction now threads under its target,
+    // so root-only enumeration would have dropped it (regression guard).
+    expect(ids.has(commentCorrection.contribution_id)).toBe(true);
+    expect(ids.has(storyCorrection.contribution_id)).toBe(true);
+    expect(body.comments.every((c) => c.type === 'correction')).toBe(true);
+  });
+
   it('a story correction opens a story arena, marks the story under_debate, and reads back', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';

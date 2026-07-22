@@ -8,12 +8,7 @@
 // assembled server-side from REPLY_PREVIEW-bounded fetches, then projected
 // holistically (one visibility pass, one child-count batch, one author/media
 // batch) so the recursion never fans out into N+1 round-trips.
-import {
-  type CommentItem,
-  type ContributionDisputeStatus,
-  type ContributionPublic,
-  isAnimatableImage,
-} from '@licio/shared';
+import { type CommentItem, type ContributionPublic, isAnimatableImage } from '@licio/shared';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { MediaUrlMinter } from '../lib/media-urls.js';
 import type { ForumServices } from './services.js';
@@ -54,10 +49,12 @@ export interface CommentPageOptions {
   /** Focused (rooted) mode: list this comment's direct replies instead of the
    *  thread's top-level roots, and return the comment itself as `anchor`. */
   parentId?: string;
-  /** WS-T — the thread's story dispute posture.  While the story is
-   *  `under_debate` (a live challenge) or `incorrect` (a challenge prevailed), a
-   *  story-target correction pins to the TOP of the unrooted section. */
-  storyDisputeStatus?: ContributionDisputeStatus;
+  /** WS-T — the id of the story's currently pinnable challenger correction (the
+   *  live arena's challenger, or the one that prevailed and made the story
+   *  `incorrect`).  That correction pins to the TOP of the unrooted section;
+   *  null/absent ⇒ no pin. Scoped by identity, so a settled inconclusive/
+   *  withdrawn story correction never pins. */
+  pinnedCorrectionId?: string | null;
   restrictedMedia: boolean;
   mintMediaUrl: MediaUrlMinter;
 }
@@ -72,17 +69,13 @@ export interface CommentPageResult {
 }
 
 /**
- * Map a section filter to `listRoots` options.  The "Sources" view is every
- * SOURCED root (a comment carrying ≥1 citation), matching the client's
- * "Sourced" badge; the store's `sourced` predicate expresses that.
- * "Corrections" stays a plain type filter. */
-function rootFilterOptions(filter: CommentFilter | undefined): {
-  types?: readonly 'correction'[];
-  sourced?: boolean;
-} {
-  if (filter === 'sources') return { sourced: true };
-  if (filter === 'corrections') return { types: ['correction'] };
-  return {};
+ * Map the `listRoots`-backed section filter to store options.  The "Sources"
+ * view is every SOURCED root (a comment carrying ≥1 citation), matching the
+ * client's "Sourced" badge; the store's `sourced` predicate expresses that.
+ * ("Corrections" is NOT here — it enumerates every correction thread-wide via
+ * `listByThread`, since a comment-target correction is no longer a root.) */
+function rootFilterOptions(filter: CommentFilter | undefined): { sourced?: boolean } {
+  return filter === 'sources' ? { sourced: true } : {};
 }
 
 export function commentMediaOf(
@@ -306,13 +299,11 @@ export async function commentPage(
     rootFound,
   });
 
-  // WS-T — pin a live/won story-target correction to the TOP of the section: the
-  // story is `under_debate` (a challenge is live) or `incorrect` (a challenge
-  // prevailed). Only the UNROOTED section pins (a story correction is a root); a
+  // WS-T — the story's currently pinnable challenger correction pins to the TOP
+  // of the section (the caller resolves its identity from the live/prevailed
+  // arena). Only the UNROOTED section pins (a story correction is a root); a
   // focused (rooted) sub-thread view never lists a story-target root.
-  const pinStoryChallengers =
-    opts.parentId === undefined &&
-    (opts.storyDisputeStatus === 'under_debate' || opts.storyDisputeStatus === 'incorrect');
+  const pinnedCorrectionId = opts.parentId === undefined ? (opts.pinnedCorrectionId ?? null) : null;
 
   // Keyset position (an unknown / foreign cursor restarts — defensive, never an error).
   // The cursor row's SECTION RANK is carried so the pinned story challenge stays on
@@ -324,7 +315,7 @@ export async function commentPage(
       after = {
         createdAt: last.createdAt,
         id: last.contributionId,
-        sectionRank: sectionRankOf(last, pinStoryChallengers),
+        sectionRank: sectionRankOf(last, pinnedCorrectionId),
       };
   }
 
@@ -341,7 +332,6 @@ export async function commentPage(
     anchorRecord = record;
   }
 
-  const rootFilter = rootFilterOptions(opts.filter);
   const rootRecords = anchorRecord
     ? await bundle.forum.contributions.listChildren(anchorRecord.contributionId, {
         states: RENDERABLE_STATES,
@@ -349,14 +339,26 @@ export async function commentPage(
         limit: pageSize + 1,
         order: opts.order,
       })
-    : await bundle.forum.contributions.listRoots(threadId, {
-        ...rootFilter,
-        states: RENDERABLE_STATES,
-        after,
-        limit: pageSize + 1,
-        order: opts.order,
-        pinStoryChallengers,
-      });
+    : opts.filter === 'corrections'
+      ? // The "Corrections" view enumerates EVERY correction in the thread. A
+        // comment-target correction now threads UNDER the comment it corrects
+        // (server-derived parent), so root-only enumeration (`listRoots`) would
+        // hide it — list by thread instead so both comment- and story-target
+        // corrections appear, chronologically.
+        await bundle.forum.contributions.listByThread(threadId, {
+          types: ['correction'],
+          states: RENDERABLE_STATES,
+          after,
+          limit: pageSize + 1,
+        })
+      : await bundle.forum.contributions.listRoots(threadId, {
+          ...rootFilterOptions(opts.filter),
+          states: RENDERABLE_STATES,
+          after,
+          limit: pageSize + 1,
+          order: opts.order,
+          pinnedCorrectionId,
+        });
 
   const hasMore = rootRecords.length > pageSize;
   const page = rootRecords.slice(0, pageSize);

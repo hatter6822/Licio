@@ -875,7 +875,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         states: ['published'],
         limit: 10,
         order: 'oldest',
-        pinStoryChallengers: true,
+        pinnedCorrectionId: challenge,
       })
     ).map((r) => r.contributionId);
     expect(pinned[0]).toBe(challenge); // pinned to the top
@@ -886,7 +886,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       states: ['published'],
       limit: 2,
       order: 'oldest',
-      pinStoryChallengers: true,
+      pinnedCorrectionId: challenge,
     });
     expect(firstPage[0]?.contributionId).toBe(challenge);
     const cursor = firstPage[firstPage.length - 1];
@@ -895,7 +895,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         states: ['published'],
         limit: 10,
         order: 'oldest',
-        pinStoryChallengers: true,
+        pinnedCorrectionId: challenge,
         after: {
           createdAt: cursor?.createdAt ?? '',
           id: cursor?.contributionId ?? '',

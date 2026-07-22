@@ -340,30 +340,30 @@ export function parseDebate(userPrompt: string): {
       continue;
     }
     if (!current) continue;
+    // The two substance blocks `sideBlock` emits: the locked content and the
+    // rebuttal statement. Both feed the substance token count, and — critically
+    // — once we enter them, every subsequent line is USER-CONTROLLED prose, so a
+    // `- url: … | link_safe: true` or `rebuts_opponent: true` line embedded in a
+    // correction/comment body must NOT be read as a structured source or rebuttal
+    // (that would inflate the simulator's score without a real citation). The
+    // structured header fields are only read BEFORE the content block.
+    if (line === 'content (the locked material under debate):' || line === 'rebuttal:') {
+      inSubstance = true;
+      continue;
+    }
+    if (inSubstance) {
+      if (line !== '(none)') substanceLines.push(line);
+      continue;
+    }
     if (line.startsWith('- url: ')) {
-      inSubstance = false;
       current.sourceCount += 1;
       if (line.includes('link_safe: true')) current.safeSourceCount += 1;
       continue;
     }
     if (line.startsWith('rebuts_opponent: ')) {
-      inSubstance = false;
       current.rebuts = line.endsWith('true');
-      continue;
     }
-    if (line.startsWith('sources (')) {
-      inSubstance = false;
-      continue;
-    }
-    // The two substance blocks `sideBlock` emits: the locked content and the
-    // rebuttal statement. Both feed the substance token count.
-    if (line === 'content (the locked material under debate):' || line === 'rebuttal:') {
-      inSubstance = true;
-      continue;
-    }
-    if (inSubstance && line !== '(none)') {
-      substanceLines.push(line);
-    }
+    // Any other header line (e.g. `sources (N):`) is ignored.
   }
   closeSide();
   return sides;

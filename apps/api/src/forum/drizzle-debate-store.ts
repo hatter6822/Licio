@@ -608,6 +608,27 @@ export class DrizzleDebateStore implements DebateStore {
     return out;
   }
 
+  async pinnedStoryChallenger(storyId: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ challenger: debateArenasTable.challengerContributionId })
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.targetType, 'story'),
+          eq(debateArenasTable.storyId, storyId),
+          or(
+            inArray(debateArenasTable.state, [...NON_RESOLVED]),
+            and(
+              eq(debateArenasTable.state, 'resolved'),
+              eq(debateArenasTable.verdict, 'corrected'),
+            ),
+          ),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.challenger ?? null;
+  }
+
   async countActiveForStory(storyId: string): Promise<number> {
     const rows = await this.#db
       .select({ value: count() })

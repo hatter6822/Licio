@@ -78,14 +78,14 @@ function isoOrNull(value: Date | null): string | null {
 
 // WS-T: the section rank key (0 = pinned-top, 1 = normal, 2 = sunk).  Mirrors
 // `sectionRankOf` in the in-memory adapter EXACTLY: an `incorrect` row sinks to
-// the bottom (a debate's loser stays visible-but-sunk); when
-// `pinStoryChallengers`, a live/won story-target correction pins to the top so a
-// reader sees the challenge first.  The `incorrect` branch is checked first, so
-// a LOST story challenge (itself `incorrect`) sinks rather than pinning.
-function sectionRankExpr(pinStoryChallengers: boolean): SQL {
-  const pinBranch: SQL = pinStoryChallengers
-    ? sql`when ${contributionsTable.type} = 'correction' and ${contributionsTable.metadata} ->> 'target_story_id' is not null then 0 `
-    : sql``;
+// the bottom (a debate's loser stays visible-but-sunk); the ONE `pinnedCorrectionId`
+// (the story's live/prevailed challenger) pins to the top.  The `incorrect`
+// branch is checked first (defensive — a pinned challenger is never `incorrect`).
+function sectionRankExpr(pinnedCorrectionId: string | null): SQL {
+  const pinBranch: SQL =
+    pinnedCorrectionId !== null
+      ? sql`when ${contributionsTable.contributionId} = ${pinnedCorrectionId} then 0 `
+      : sql``;
   return sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 2 ${pinBranch}else 1 end)`;
 }
 
@@ -103,10 +103,10 @@ const CITED_EXPR = sql`(coalesce(jsonb_array_length(${contributionsTable.citatio
 function sectionKeyset(
   after: CreatedAtCursor,
   order: 'newest' | 'oldest' | undefined,
-  pinStoryChallengers: boolean,
+  pinnedCorrectionId: string | null,
 ): SQL {
   const cs = after.sectionRank ?? 1;
-  const rank = sectionRankExpr(pinStoryChallengers);
+  const rank = sectionRankExpr(pinnedCorrectionId);
   const chrono =
     order === 'newest'
       ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${after.createdAt}::timestamptz, ${after.id}::uuid)`
@@ -118,7 +118,7 @@ function sectionKeyset(
  *  per order. */
 function sectionOrderBy(
   order: 'newest' | 'oldest' | undefined,
-  pinStoryChallengers: boolean,
+  pinnedCorrectionId: string | null,
 ): SQL[] {
   const created =
     order === 'newest' ? desc(contributionsTable.createdAt) : asc(contributionsTable.createdAt);
@@ -126,7 +126,7 @@ function sectionOrderBy(
     order === 'newest'
       ? desc(contributionsTable.contributionId)
       : asc(contributionsTable.contributionId);
-  return [sql`${sectionRankExpr(pinStoryChallengers)} asc`, created, id];
+  return [sql`${sectionRankExpr(pinnedCorrectionId)} asc`, created, id];
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ export class DrizzleContributionStore implements ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
-      pinStoryChallengers?: boolean;
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]> {
     const conditions = [
@@ -300,7 +300,7 @@ export class DrizzleContributionStore implements ContributionStore {
     // composite keyset is (section rank, created_at, id).  Mixed directions
     // (rank asc, chronological per order) cannot be one row-value tuple, so the
     // cursor decomposes into rank-then-chronological.
-    const pin = opts.pinStoryChallengers ?? false;
+    const pin = opts.pinnedCorrectionId ?? null;
     if (opts.after) conditions.push(sectionKeyset(opts.after, opts.order, pin));
     const rows = await this.#db
       .select()
@@ -325,12 +325,12 @@ export class DrizzleContributionStore implements ContributionStore {
     // A nested `incorrect` reply sinks among its siblings too (default newest);
     // nested replies never pin (a story correction is a root), so pass `false`.
     const order = opts.order ?? 'newest';
-    if (opts.after) conditions.push(sectionKeyset(opts.after, order, false));
+    if (opts.after) conditions.push(sectionKeyset(opts.after, order, null));
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(...sectionOrderBy(order, false))
+      .orderBy(...sectionOrderBy(order, null))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }

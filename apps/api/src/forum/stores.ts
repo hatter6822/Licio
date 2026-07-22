@@ -213,9 +213,10 @@ export interface ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
-      /** WS-T — pin a live/won story-target correction to the TOP of the
-       *  section (true when the story is `under_debate` or `incorrect`). */
-      pinStoryChallengers?: boolean;
+      /** WS-T — the id of the story's currently pinnable challenger correction
+       *  (the live arena's challenger, or the one that prevailed): it pins to
+       *  the TOP.  Null/absent ⇒ no pin. */
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]>;
   /** Direct children only.  Defaults to newest-first (the inline reply
@@ -502,28 +503,24 @@ function beforeCursor(row: { createdAt: string }, id: string, cursor: CreatedAtC
 /**
  * The section rank of a root/reply within its comment section:
  *   0 = PINNED to the top, 1 = normal, 2 = SUNK to the bottom.
- *  • A sourced correction that challenges the STORY pins to the top WHILE the
- *    story is under a live challenge or has been adjudicated `incorrect`
- *    (`pinStoryChallengers`) — so a reader sees the challenge, and the prevailing
- *    correction, first.
+ *  • The ONE story-target correction that opened the story's currently pinnable
+ *    challenge — its id is `pinnedCorrectionId` (the live arena's challenger, or
+ *    the challenger that prevailed and made the story `incorrect`) — pins to the
+ *    top, so a reader sees the live/winning challenge first. Identity-scoped by
+ *    design: a settled inconclusive/withdrawn story correction is NOT the
+ *    pinned id, so it keeps its chronological place.
  *  • Any row the debate found `incorrect` — a target proven wrong, OR a
  *    challenge the adjudicator RULED AGAINST — sinks to the bottom,
  *    visible-but-sunk.
- *  Checked in that order: a LOST story challenge is itself `incorrect`, so it
- *  sinks (2) rather than pinning. Pins apply to ROOTS only (a story correction
- *  is a root); pass `pinStoryChallengers = false` for nested replies. */
+ *  Checked in that order: `incorrect` wins over the pin (a pinned challenger is
+ *  never `incorrect`, but the guard is defensive). Pins apply to ROOTS only;
+ *  pass `pinnedCorrectionId = null` for nested replies. */
 export function sectionRankOf(
-  record: Pick<ContributionRecord, 'disputeStatus' | 'type' | 'metadata'>,
-  pinStoryChallengers: boolean,
+  record: Pick<ContributionRecord, 'disputeStatus' | 'contributionId'>,
+  pinnedCorrectionId: string | null,
 ): 0 | 1 | 2 {
   if (record.disputeStatus === 'incorrect') return 2;
-  if (
-    pinStoryChallengers &&
-    record.type === 'correction' &&
-    record.metadata.target_story_id !== undefined
-  ) {
-    return 0;
-  }
+  if (pinnedCorrectionId !== null && record.contributionId === pinnedCorrectionId) return 0;
   return 1;
 }
 
@@ -546,9 +543,9 @@ function bySectionThenOrder(
   a: ContributionRecord,
   b: ContributionRecord,
   order: 'newest' | 'oldest' | undefined,
-  pinStoryChallengers: boolean,
+  pinnedCorrectionId: string | null,
 ): number {
-  const delta = sectionRankOf(a, pinStoryChallengers) - sectionRankOf(b, pinStoryChallengers);
+  const delta = sectionRankOf(a, pinnedCorrectionId) - sectionRankOf(b, pinnedCorrectionId);
   if (delta !== 0) return delta;
   const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
   return order === 'newest' ? -chrono : chrono;
@@ -559,9 +556,9 @@ function afterSectionCursor(
   row: ContributionRecord,
   after: CreatedAtCursor,
   order: 'newest' | 'oldest' | undefined,
-  pinStoryChallengers: boolean,
+  pinnedCorrectionId: string | null,
 ): boolean {
-  const s = sectionRankOf(row, pinStoryChallengers);
+  const s = sectionRankOf(row, pinnedCorrectionId);
   const cs = after.sectionRank ?? 1;
   // A row in a LATER rank group is always after the cursor (the whole earlier
   // group precedes it); an earlier group is never after.
@@ -671,14 +668,15 @@ export class InMemoryContributionStore implements ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
-      /** WS-T — pin a live/won story-target correction to the TOP of the
-       *  section (the story is `under_debate` or `incorrect`). */
-      pinStoryChallengers?: boolean;
+      /** WS-T — the id of the story's currently pinnable challenger correction
+       *  (the live arena's challenger, or the one that prevailed): it pins to the
+       *  TOP.  Null ⇒ no pin. */
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]> {
     const types = opts.types ? new Set(opts.types) : null;
     const states = opts.states ? new Set(opts.states) : null;
-    const pin = opts.pinStoryChallengers ?? false;
+    const pin = opts.pinnedCorrectionId ?? null;
     const rows = [...this.#rows.values()]
       .filter(
         (row) =>
@@ -712,11 +710,11 @@ export class InMemoryContributionStore implements ContributionStore {
           row.parentContributionId === parentContributionId &&
           (states === null || states.has(row.moderationState)) &&
           // Nested replies never pin (a story correction is a root), so pass
-          // `false`: only the `incorrect` sink applies among siblings.
-          (!opts.after || afterSectionCursor(row, opts.after, order, false)),
+          // `null`: only the `incorrect` sink applies among siblings.
+          (!opts.after || afterSectionCursor(row, opts.after, order, null)),
       )
       // A nested `incorrect` reply sinks among its siblings too (WS-T).
-      .sort((a, b) => bySectionThenOrder(a, b, order, false));
+      .sort((a, b) => bySectionThenOrder(a, b, order, null));
     return rows.slice(0, opts.limit);
   }
 

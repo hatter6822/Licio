@@ -500,6 +500,16 @@ export function createForumRoutes() {
             bundle.forum.debates.countActiveForStory(storyId),
             bundle.forum.contributions.countByDisputeStatus(thread.threadId, 'incorrect'),
           ]);
+          // WS-T — resolve the story's currently pinnable challenger correction
+          // (the live arena's challenger, or the one that prevailed and made the
+          // story `incorrect`) so ONLY that correction pins to the top; a settled
+          // inconclusive/withdrawn story correction never re-pins. Unrooted view
+          // only (a story correction is a root).
+          const pinnedCorrectionId =
+            root === undefined &&
+            (story.disputeStatus === 'under_debate' || story.disputeStatus === 'incorrect')
+              ? await bundle.forum.debates.pinnedStoryChallenger(storyId)
+              : null;
           const page = await commentPage(bundle, thread.threadId, userId, resolveAuthor, {
             cursor: cursor ?? null,
             order,
@@ -508,10 +518,7 @@ export function createForumRoutes() {
             ...(filter !== undefined && root === undefined ? { filter } : {}),
             depth,
             ...(root !== undefined ? { parentId: root } : {}),
-            // WS-T — pin a live/won story-target correction to the top of the
-            // unrooted section while the story is under_debate / incorrect
-            // (an absent dispute posture is `none` — no pin).
-            storyDisputeStatus: story.disputeStatus ?? 'none',
+            pinnedCorrectionId,
             restrictedMedia: story.visibility === 'room_only',
             mintMediaUrl: makeMediaUrlMinter(),
           });
