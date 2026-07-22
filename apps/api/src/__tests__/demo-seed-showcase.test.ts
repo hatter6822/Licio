@@ -11,6 +11,11 @@
 import { handleSchema, type ThreadListResponse, threadListResponseSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../ai-governance/services.js';
+import { buildDebateJudgeRunner } from '../forum/debate-scheduler.js';
 import { userMayPostTopLevel } from '../forum/rooms.js';
 import { createGovernanceService } from '../governance/services.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
@@ -34,6 +39,12 @@ let fx: RankingFixture;
 
 beforeEach(async () => {
   fx = freshRankingServices();
+  // WS-T: wire the REAL governed adjudicator (the guard → MLP floor chain the
+  // production boot wires) so the seeded dispute showcase resolves S11 (upheld →
+  // "Validated") and S4 (corrected → "Incorrect") through the genuine judge —
+  // not the fail-closed inconclusive default of the bare fixture.
+  setAiGovernanceServices(createInMemoryAiGovernanceServices(fx.events));
+  fx.forum.debateJudge = buildDebateJudgeRunner(fx.forum.now);
   await seedForumDemoData(fx.forum, fx.ingestion, fx.identity.store);
   await seedOperationalSignals(fx.events, fx.invariants, fx.identity, fx.ingestion);
 });

@@ -8,11 +8,21 @@
 // assembled server-side from REPLY_PREVIEW-bounded fetches, then projected
 // holistically (one visibility pass, one child-count batch, one author/media
 // batch) so the recursion never fans out into N+1 round-trips.
-import { type CommentItem, type ContributionPublic, isAnimatableImage } from '@licio/shared';
+import {
+  type CommentItem,
+  type ContributionDisputeStatus,
+  type ContributionPublic,
+  isAnimatableImage,
+} from '@licio/shared';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { MediaUrlMinter } from '../lib/media-urls.js';
 import type { ForumServices } from './services.js';
-import type { ContributionRecord, CreatedAtCursor, UploadRecord } from './stores.js';
+import {
+  type ContributionRecord,
+  type CreatedAtCursor,
+  sectionRankOf,
+  type UploadRecord,
+} from './stores.js';
 import {
   type AuthorResolver,
   toContributionPublic,
@@ -44,6 +54,10 @@ export interface CommentPageOptions {
   /** Focused (rooted) mode: list this comment's direct replies instead of the
    *  thread's top-level roots, and return the comment itself as `anchor`. */
   parentId?: string;
+  /** WS-T — the thread's story dispute posture.  While the story is
+   *  `under_debate` (a live challenge) or `incorrect` (a challenge prevailed), a
+   *  story-target correction pins to the TOP of the unrooted section. */
+  storyDisputeStatus?: ContributionDisputeStatus;
   restrictedMedia: boolean;
   mintMediaUrl: MediaUrlMinter;
 }
@@ -165,6 +179,11 @@ interface ProjectCtx {
   media: ReadonlyMap<string, NonNullable<ContributionPublic['media']>>;
   /** WS-T — contribution id → the open debate arena challenging it (if any). */
   activeDebates: ReadonlyMap<string, string>;
+  /** WS-T — correction contribution id → the arena it OPENED (any state), so the
+   *  correction always resolves its `debate_arena_id` back-reference even after
+   *  the arena resolves and independently of whether the write path persisted it
+   *  onto the stored metadata. */
+  correctionArenas: ReadonlyMap<string, string>;
 }
 
 async function buildProjectCtx(
@@ -193,12 +212,21 @@ async function buildProjectCtx(
   const disputedIds = rendered
     .filter((record) => record.disputeStatus === 'under_debate')
     .map((record) => record.contributionId);
-  const [childCounts, authorEntries, media, activeDebates] = await Promise.all([
+  // WS-T — the arena each rendered correction opened (any state), so the
+  // correction's `debate_arena_id` back-reference always resolves — including
+  // after the debate resolves, where the target carries no active_debate_id.
+  const correctionIds = rendered
+    .filter((record) => record.type === 'correction')
+    .map((record) => record.contributionId);
+  const [childCounts, authorEntries, media, activeDebates, correctionArenas] = await Promise.all([
     bundle.forum.contributions.childCounts(unique.map((record) => record.contributionId)),
     Promise.all(authorIds.map(async (id) => [id, await resolveAuthor(id)] as const)),
     resolveMedia(bundle, rendered, opts.mintMediaUrl, opts.restrictedMedia),
     disputedIds.length > 0
       ? bundle.forum.debates.activeDebateIdsForContributions(disputedIds)
+      : Promise.resolve(new Map<string, string>()),
+    correctionIds.length > 0
+      ? bundle.forum.debates.debateIdsForCorrections(correctionIds)
       : Promise.resolve(new Map<string, string>()),
   ]);
   return {
@@ -208,6 +236,7 @@ async function buildProjectCtx(
     authors: new Map(authorEntries),
     media,
     activeDebates,
+    correctionArenas,
   };
 }
 
@@ -228,8 +257,21 @@ function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {
     ? null
     : (ctx.activeDebates.get(node.record.contributionId) ?? null);
   const withDebate = activeDebateId !== null ? { ...base, active_debate_id: activeDebateId } : base;
+  // WS-T — a correction always carries the `debate_arena_id` of the arena it
+  // opened (live OR resolved), so the client links it to its debate even when
+  // the write path did not persist that back-reference onto the stored metadata.
+  const correctionArenaId =
+    !tombstone && node.record.type === 'correction'
+      ? (node.record.metadata.debate_arena_id ??
+        ctx.correctionArenas.get(node.record.contributionId) ??
+        null)
+      : null;
+  const withArena =
+    correctionArenaId !== null && withDebate.metadata.debate_arena_id == null
+      ? { ...withDebate, metadata: { ...withDebate.metadata, debate_arena_id: correctionArenaId } }
+      : withDebate;
   const media = tombstone ? undefined : ctx.media.get(node.record.contributionId);
-  const head = media ? { ...withDebate, media } : withDebate;
+  const head = media ? { ...withArena, media } : withArena;
   const replies = node.children
     .map((child) => projectNode(child, ctx))
     .filter((child): child is CommentItem => child !== null);
@@ -264,9 +306,17 @@ export async function commentPage(
     rootFound,
   });
 
+  // WS-T — pin a live/won story-target correction to the TOP of the section: the
+  // story is `under_debate` (a challenge is live) or `incorrect` (a challenge
+  // prevailed). Only the UNROOTED section pins (a story correction is a root); a
+  // focused (rooted) sub-thread view never lists a story-target root.
+  const pinStoryChallengers =
+    opts.parentId === undefined &&
+    (opts.storyDisputeStatus === 'under_debate' || opts.storyDisputeStatus === 'incorrect');
+
   // Keyset position (an unknown / foreign cursor restarts — defensive, never an error).
-  // The cursor row's dispute sink is carried so `incorrect` comments stay pinned to
-  // the bottom of the section across pagination (WS-T).
+  // The cursor row's SECTION RANK is carried so the pinned story challenge stays on
+  // top and `incorrect` rows stay sunk to the bottom across pagination (WS-T).
   let after: CreatedAtCursor | null = null;
   if (opts.cursor !== null) {
     const last = await bundle.forum.contributions.getById(opts.cursor);
@@ -274,7 +324,7 @@ export async function commentPage(
       after = {
         createdAt: last.createdAt,
         id: last.contributionId,
-        disputeSink: last.disputeStatus === 'incorrect' ? 1 : 0,
+        sectionRank: sectionRankOf(last, pinStoryChallengers),
       };
   }
 
@@ -305,6 +355,7 @@ export async function commentPage(
         after,
         limit: pageSize + 1,
         order: opts.order,
+        pinStoryChallengers,
       });
 
   const hasMore = rootRecords.length > pageSize;

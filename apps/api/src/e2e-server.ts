@@ -34,6 +34,7 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
+import { buildDebateJudgeRunner } from './forum/debate-scheduler.js';
 import {
   createInMemoryForumServices,
   registerForumConsumers,
@@ -206,6 +207,11 @@ setAiGovernanceServices(aiGovernanceServices);
 registerAiGovernanceConsumers(eventServices, aiGovernanceServices, (storyId) =>
   refreshStoryFeatures(rankingServices, storyId),
 );
+// WS-T: judge debate arenas through the REAL guard → (LLM leg, if wired) → MLP
+// fallback chain, exactly as the production boot does (index.ts) — so the
+// seeded dispute showcase and any correction filed in the harness resolve to a
+// genuine adjudicator verdict, never the fail-closed inconclusive default.
+forumServices.debateJudge = buildDebateJudgeRunner(forumServices.now);
 
 // WS-S.6.6 — force the IN-MEMORY server-blind rendezvous store.  The harness sets a DUMMY
 // DATABASE_URL to satisfy the env validator, but `getRendezvousService()`'s `buildStore()` keys off

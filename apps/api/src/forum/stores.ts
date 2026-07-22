@@ -150,8 +150,11 @@ export interface UploadRecord {
 export interface CreatedAtCursor {
   createdAt: string;
   id: string;
-  /** 0 = non-incorrect (sorts first), 1 = incorrect (pinned last). */
-  disputeSink?: 0 | 1;
+  /** Section rank of the cursor row: 0 = pinned-top (a live/won story
+   *  challenge), 1 = normal, 2 = sunk-bottom (`incorrect`). Carried so the
+   *  composite keyset resumes in the right rank group across pages; reads that
+   *  do not order by rank leave it unset (treated as 1 — normal). */
+  sectionRank?: 0 | 1 | 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,9 @@ export interface ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
+      /** WS-T — pin a live/won story-target correction to the TOP of the
+       *  section (true when the story is `under_debate` or `incorrect`). */
+      pinStoryChallengers?: boolean;
     },
   ): Promise<ContributionRecord[]>;
   /** Direct children only.  Defaults to newest-first (the inline reply
@@ -491,11 +497,34 @@ function beforeCursor(row: { createdAt: string }, id: string, cursor: CreatedAtC
   return row.createdAt < cursor.createdAt || (row.createdAt === cursor.createdAt && id < cursor.id);
 }
 
-// --- WS-T: `incorrect` comments sink to the bottom of a section --------------
+// --- WS-T: section ordering — pin story challenges, sink `incorrect` rows -----
 
-/** The dispute sink rank: `incorrect` sorts LAST; everything else first. */
-function disputeSinkOf(record: { disputeStatus: ContributionDisputeStatus }): 0 | 1 {
-  return record.disputeStatus === 'incorrect' ? 1 : 0;
+/**
+ * The section rank of a root/reply within its comment section:
+ *   0 = PINNED to the top, 1 = normal, 2 = SUNK to the bottom.
+ *  • A sourced correction that challenges the STORY pins to the top WHILE the
+ *    story is under a live challenge or has been adjudicated `incorrect`
+ *    (`pinStoryChallengers`) — so a reader sees the challenge, and the prevailing
+ *    correction, first.
+ *  • Any row the debate found `incorrect` — a target proven wrong, OR a
+ *    challenge the adjudicator RULED AGAINST — sinks to the bottom,
+ *    visible-but-sunk.
+ *  Checked in that order: a LOST story challenge is itself `incorrect`, so it
+ *  sinks (2) rather than pinning. Pins apply to ROOTS only (a story correction
+ *  is a root); pass `pinStoryChallengers = false` for nested replies. */
+export function sectionRankOf(
+  record: Pick<ContributionRecord, 'disputeStatus' | 'type' | 'metadata'>,
+  pinStoryChallengers: boolean,
+): 0 | 1 | 2 {
+  if (record.disputeStatus === 'incorrect') return 2;
+  if (
+    pinStoryChallengers &&
+    record.type === 'correction' &&
+    record.metadata.target_story_id !== undefined
+  ) {
+    return 0;
+  }
+  return 1;
 }
 
 /**
@@ -507,30 +536,34 @@ function isSourcedRow(record: Pick<ContributionRecord, 'type' | 'citations'>): b
 }
 
 /**
- * Section ordering: `incorrect` rows ALWAYS after non-incorrect ones, then the
- * chosen chronological direction WITHIN each sink group (newest → descending,
- * oldest/default → ascending).  Keeps a debate's loser visible-but-sunk.
+ * Section ordering: by section rank (pinned story challenge first, then normal,
+ * then `incorrect` rows sunk to the bottom), then the chosen chronological
+ * direction WITHIN each rank group (newest → descending, oldest/default →
+ * ascending).  Keeps a live/won story challenge on top and a debate's loser
+ * visible-but-sunk.
  */
-function bySinkThenOrder(
+function bySectionThenOrder(
   a: ContributionRecord,
   b: ContributionRecord,
   order: 'newest' | 'oldest' | undefined,
+  pinStoryChallengers: boolean,
 ): number {
-  const delta = disputeSinkOf(a) - disputeSinkOf(b);
+  const delta = sectionRankOf(a, pinStoryChallengers) - sectionRankOf(b, pinStoryChallengers);
   if (delta !== 0) return delta;
   const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
   return order === 'newest' ? -chrono : chrono;
 }
 
-/** Composite keyset: is `row` strictly after the cursor in sink-then-order? */
-function afterSinkCursor(
+/** Composite keyset: is `row` strictly after the cursor in section-then-order? */
+function afterSectionCursor(
   row: ContributionRecord,
   after: CreatedAtCursor,
   order: 'newest' | 'oldest' | undefined,
+  pinStoryChallengers: boolean,
 ): boolean {
-  const s = disputeSinkOf(row);
-  const cs = after.disputeSink ?? 0;
-  // A row in a LATER sink group is always after the cursor (the whole earlier
+  const s = sectionRankOf(row, pinStoryChallengers);
+  const cs = after.sectionRank ?? 1;
+  // A row in a LATER rank group is always after the cursor (the whole earlier
   // group precedes it); an earlier group is never after.
   if (s !== cs) return s > cs;
   return order === 'newest'
@@ -638,10 +671,14 @@ export class InMemoryContributionStore implements ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
+      /** WS-T — pin a live/won story-target correction to the TOP of the
+       *  section (the story is `under_debate` or `incorrect`). */
+      pinStoryChallengers?: boolean;
     },
   ): Promise<ContributionRecord[]> {
     const types = opts.types ? new Set(opts.types) : null;
     const states = opts.states ? new Set(opts.states) : null;
+    const pin = opts.pinStoryChallengers ?? false;
     const rows = [...this.#rows.values()]
       .filter(
         (row) =>
@@ -650,10 +687,11 @@ export class InMemoryContributionStore implements ContributionStore {
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
           (opts.sourced !== true || isSourcedRow(row)) &&
-          (!opts.after || afterSinkCursor(row, opts.after, opts.order)),
+          (!opts.after || afterSectionCursor(row, opts.after, opts.order, pin)),
       )
-      // `incorrect` roots sink to the bottom (WS-T), then chronological per order.
-      .sort((a, b) => bySinkThenOrder(a, b, opts.order));
+      // Pinned story challenge first, `incorrect` roots sunk last (WS-T), then
+      // chronological per order.
+      .sort((a, b) => bySectionThenOrder(a, b, opts.order, pin));
     return rows.slice(0, opts.limit);
   }
 
@@ -673,10 +711,12 @@ export class InMemoryContributionStore implements ContributionStore {
         (row) =>
           row.parentContributionId === parentContributionId &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after || afterSinkCursor(row, opts.after, order)),
+          // Nested replies never pin (a story correction is a root), so pass
+          // `false`: only the `incorrect` sink applies among siblings.
+          (!opts.after || afterSectionCursor(row, opts.after, order, false)),
       )
       // A nested `incorrect` reply sinks among its siblings too (WS-T).
-      .sort((a, b) => bySinkThenOrder(a, b, order));
+      .sort((a, b) => bySectionThenOrder(a, b, order, false));
     return rows.slice(0, opts.limit);
   }
 

@@ -284,14 +284,26 @@ export function draftSimulatedSummary(proposal: SimulatedProposal): {
 // --- the debate-adjudication surface ------------------------------------------
 
 /** One parsed side of the `<debate>` block (`ai-governance/llm/debate.ts`
- *  buildDebateUserPrompt). */
+ *  buildDebateUserPrompt). `substanceTokens` is the side's LOCKED content PLUS
+ *  its rebuttal statement (the real judge's substance feature), so it mirrors
+ *  the MLP rubric `substance = tokens(content) + tokens(summary)`. */
 export interface SimulatedDebateSide {
   sourceCount: number;
   safeSourceCount: number;
   rebuts: boolean;
-  summaryTokens: number;
+  substanceTokens: number;
 }
 
+/**
+ * Parse the two `<position>` blocks of the real debate prompt. The parser is
+ * kept in LOCKSTEP with `sideBlock` in `ai-governance/llm/debate.ts`: it reads
+ * `rebuts_opponent:`, counts the `- url:` source lines (and their link-safety),
+ * and accumulates the substance from BOTH the `content (…)` and `rebuttal:`
+ * blocks the builder emits (a `(none)` placeholder carries none). An earlier
+ * parser looked for a `summary:` line the builder no longer emits, so the
+ * substance signal was silently dead — this reads the current format so the
+ * simulated adjudicator weighs substance exactly as the deterministic rubric.
+ */
 export function parseDebate(userPrompt: string): {
   incumbent: SimulatedDebateSide;
   challenger: SimulatedDebateSide;
@@ -300,16 +312,16 @@ export function parseDebate(userPrompt: string): {
     sourceCount: 0,
     safeSourceCount: 0,
     rebuts: false,
-    summaryTokens: 0,
+    substanceTokens: 0,
   });
   const sides = { incumbent: emptySide(), challenger: emptySide() };
   let current: SimulatedDebateSide | null = null;
-  let inSummary = false;
-  let summaryLines: string[] = [];
+  let inSubstance = false;
+  const substanceLines: string[] = [];
   const closeSide = () => {
-    if (current) current.summaryTokens = countTokens(summaryLines.join('\n'));
-    summaryLines = [];
-    inSummary = false;
+    if (current) current.substanceTokens = countTokens(substanceLines.join('\n'));
+    substanceLines.length = 0;
+    inSubstance = false;
   };
   for (const line of userPrompt.split('\n')) {
     if (line === '<position side="incumbent">') {
@@ -328,21 +340,29 @@ export function parseDebate(userPrompt: string): {
       continue;
     }
     if (!current) continue;
-    if (inSummary) {
-      summaryLines.push(line);
-      continue;
-    }
-    if (line === 'summary:') {
-      inSummary = true;
+    if (line.startsWith('- url: ')) {
+      inSubstance = false;
+      current.sourceCount += 1;
+      if (line.includes('link_safe: true')) current.safeSourceCount += 1;
       continue;
     }
     if (line.startsWith('rebuts_opponent: ')) {
+      inSubstance = false;
       current.rebuts = line.endsWith('true');
       continue;
     }
-    if (line.startsWith('- url: ')) {
-      current.sourceCount += 1;
-      if (line.includes('link_safe: true')) current.safeSourceCount += 1;
+    if (line.startsWith('sources (')) {
+      inSubstance = false;
+      continue;
+    }
+    // The two substance blocks `sideBlock` emits: the locked content and the
+    // rebuttal statement. Both feed the substance token count.
+    if (line === 'content (the locked material under debate):' || line === 'rebuttal:') {
+      inSubstance = true;
+      continue;
+    }
+    if (inSubstance && line !== '(none)') {
+      substanceLines.push(line);
     }
   }
   closeSide();
@@ -381,7 +401,7 @@ export function assessSimulatedDebate(sides: {
   const score = (s: SimulatedDebateSide): number => {
     const sourceScore = Math.min(s.sourceCount / 5, 1);
     const safeRate = s.sourceCount > 0 ? s.safeSourceCount / s.sourceCount : 0;
-    const substance = Math.min(s.summaryTokens / 200, 1);
+    const substance = Math.min(s.substanceTokens / 200, 1);
     return 0.45 * sourceScore + 0.2 * safeRate + 0.15 * (s.rebuts ? 1 : 0) + 0.2 * substance;
   };
   const zI = score(sides.incumbent);

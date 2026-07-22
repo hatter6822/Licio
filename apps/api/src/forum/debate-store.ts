@@ -236,6 +236,12 @@ export interface DebateStore {
   listPastOverrideDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
   /** Map contribution id → active debate id (for the comment projection). */
   activeDebateIdsForContributions(ids: readonly string[]): Promise<Map<string, string>>;
+  /** Map CORRECTION (challenger) contribution id → the debate id it opened, in
+   *  ANY state (open OR resolved).  The comment projection's back-reference so a
+   *  correction always links to its arena — not only while the arena is live —
+   *  making a resolved debate discoverable from the correction that opened it.
+   *  A correction opens exactly one arena, so the mapping is one-to-one. */
+  debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>>;
   /** Count active arenas for a story's threads (the overview `debates_count`). */
   countActiveForStory(storyId: string): Promise<number>;
   /** Batched story-card signal: live (non-terminal) COMMENT-target arenas per
@@ -645,6 +651,17 @@ export class InMemoryDebateStore implements DebateStore {
         NON_RESOLVED.has(row.state)
       ) {
         out.set(row.targetContributionId, row.debateId);
+      }
+    }
+    return out;
+  }
+
+  async debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>> {
+    const wanted = new Set(ids);
+    const out = new Map<string, string>();
+    for (const row of this.#rows.values()) {
+      if (wanted.has(row.challengerContributionId)) {
+        out.set(row.challengerContributionId, row.debateId);
       }
     }
     return out;

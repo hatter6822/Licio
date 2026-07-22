@@ -380,6 +380,12 @@ export async function createContribution(
   // story root (the thread's story).  The schema's superRefine guarantees the
   // exactly-one shape; here we validate existence/consistency.  A correction may
   // not target its own author's tombstone or a removed row.
+  //
+  // A correction to a COMMENT is a CHILD of the comment it corrects: it threads
+  // UNDER its target so it renders nested at what it challenges, not as a
+  // detached root comment.  These carry the derived parent/path used at insert.
+  let correctionParentId: string | undefined;
+  let correctionPath: string[] | undefined;
   if (request.type === 'correction') {
     if (request.target_contribution_id !== undefined) {
       const target = await forum.contributions.getById(request.target_contribution_id);
@@ -402,6 +408,19 @@ export async function createContribution(
       if (target.disputeStatus === 'incorrect') {
         return invalid('target_already_incorrect', 'This comment was already found incorrect.');
       }
+      // Thread the correction UNDER its target (it is a child of the comment it
+      // corrects).  The depth cap still applies; the block gate is the
+      // story-owner check below (a sourced correction that opens an adjudicated
+      // debate is not a social reply, so it is not gated by the target author's
+      // block, matching a root correction's existing behaviour).
+      if (target.path.length + 1 > MAX_CONTRIBUTION_DEPTH) {
+        return invalid(
+          'max_depth_exceeded',
+          'This comment is too deeply nested to correct in place.',
+        );
+      }
+      correctionParentId = target.contributionId;
+      correctionPath = [...target.path, target.contributionId];
     } else if (request.target_story_id !== undefined) {
       if (request.target_story_id !== thread.storyId) {
         return invalid('invalid_target', "A story correction must target the thread's story.");
@@ -537,9 +556,11 @@ export async function createContribution(
       'target_claim_id' in request && request.target_claim_id !== undefined
         ? request.target_claim_id
         : null,
-    parentContributionId: request.parent_contribution_id ?? null,
+    // A comment-target correction threads UNDER its target (correctionParentId/
+    // Path); every other contribution uses the generic reply parent/path.
+    parentContributionId: correctionParentId ?? request.parent_contribution_id ?? null,
     clientDraftId: request.client_draft_id,
-    path: parentPath,
+    path: correctionPath ?? parentPath,
     moderationState,
   });
   if (!inserted.ok) {

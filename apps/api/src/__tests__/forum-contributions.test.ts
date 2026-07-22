@@ -129,6 +129,56 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(target?.disputeStatus).toBe('under_debate');
   });
 
+  it('threads a comment-target correction UNDER the comment it corrects (a child, not a root)', async () => {
+    const root = await createOk(contributionBody('comment', threadId));
+    const reply = await createOk(
+      contributionBody('comment', threadId, { parentId: root.contribution_id }),
+    );
+    // The correction targets a NESTED reply (depth 1); it must thread one level
+    // deeper, directly under the comment it corrects — never at the thread root.
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: reply.contribution_id }),
+    );
+    expect(correction.parent_contribution_id).toBe(reply.contribution_id);
+    expect(correction.depth).toBe(reply.depth + 1);
+    // The correction is served as a child of its target in the comment tree.
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.path.at(-1)).toBe(reply.contribution_id);
+  });
+
+  it('keeps a STORY-target correction at the thread root (no comment parent)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    // A story correction corrects the brief itself, not a comment, so it is a
+    // root contribution — the opposite of a comment-target correction.
+    expect(correction.parent_contribution_id).toBeNull();
+    expect(correction.depth).toBe(0);
+  });
+
+  it('pins a live story-target correction to the TOP of the section (above newer comments)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    // Two ordinary roots first, then the story challenge LAST (the newest root).
+    await createOk(contributionBody('comment', threadId));
+    nowMs += 60_000;
+    await createOk(contributionBody('comment', threadId));
+    nowMs += 60_000;
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    // Default order is OLDEST-first, so the newest correction would sort LAST —
+    // but while the story is under_debate the challenge pins to the very top.
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { contribution_id: string; type: string }[];
+    };
+    expect(body.comments).toHaveLength(3);
+    expect(body.comments[0]?.contribution_id).toBe(correction.contribution_id);
+    expect(body.comments[0]?.type).toBe('correction');
+  });
+
   it('refuses a second correction against a comment already under debate (422)', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('correction', threadId, { targetId: comment.contribution_id }));

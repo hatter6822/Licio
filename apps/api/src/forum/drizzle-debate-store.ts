@@ -594,6 +594,20 @@ export class DrizzleDebateStore implements DebateStore {
     return out;
   }
 
+  async debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (ids.length === 0) return out;
+    const rows = await this.#db
+      .select({
+        challengerContributionId: debateArenasTable.challengerContributionId,
+        debateId: debateArenasTable.debateId,
+      })
+      .from(debateArenasTable)
+      .where(inArray(debateArenasTable.challengerContributionId, [...ids]));
+    for (const row of rows) out.set(row.challengerContributionId, row.debateId);
+    return out;
+  }
+
   async countActiveForStory(storyId: string): Promise<number> {
     const rows = await this.#db
       .select({ value: count() })

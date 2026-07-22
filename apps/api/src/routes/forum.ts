@@ -508,6 +508,10 @@ export function createForumRoutes() {
             ...(filter !== undefined && root === undefined ? { filter } : {}),
             depth,
             ...(root !== undefined ? { parentId: root } : {}),
+            // WS-T — pin a live/won story-target correction to the top of the
+            // unrooted section while the story is under_debate / incorrect
+            // (an absent dispute posture is `none` — no pin).
+            storyDisputeStatus: story.disputeStatus ?? 'none',
             restrictedMedia: story.visibility === 'room_only',
             mintMediaUrl: makeMediaUrlMinter(),
           });

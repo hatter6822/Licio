@@ -645,6 +645,22 @@ and finishes with `Server started`. The PWA renders **demo feed fixtures** immed
 so you see real end-to-end pages before submitting anything; content you
 create through the UI then flows through the same production read paths.
 
+Two development-only simulators come up with the same boot, so every automated
+production system has something to act on out of the box — **no external
+services, no API keys, nothing to configure**:
+
+- The **traffic simulator** generates continuous persona-shaped activity
+  through the real pipelines (feed ranking reorders, discussions cascade,
+  reports and corrections arrive). See §10 → *Continuous traffic simulation*.
+- The **simulated governance-LLM runtime** stands in for any governed-LLM lane
+  whose real runtime is absent, so **AI moderation, debate adjudication, and
+  lawmaking summaries all run** on a bare box — through the identical governed
+  path production uses. See §10 and §16.
+
+So a fresh `pnpm dev` already exercises ranking, AI moderation, AI adjudication,
+in-room governance/voting, and (client-side) private rooms — §10 is the guide to
+watching each one run.
+
 Confirm the API is up:
 
 ```sh
@@ -688,18 +704,38 @@ evaluate the product experience rather than just verify the toolchain.
 ### The community-governed room (WS-U)
 
 The *Elections & Governance* room ships **governed** by a community-approved AI
-agent so the AI-governed-rooms surfaces render real data:
+agent so the AI-governed-rooms surfaces render real data. Open the room, then
+its **governance modal** (`/rooms/$roomId?governance=<tab>`, tabs *Overview /
+Models & voting / Settings*):
 
-- Any visitor sees the **"How this room is governed"** panel — the active model,
-  the powers the community granted it (here, *Flag for human review*), a recent
-  agent action, and a one-click download of the content-addressed model artifact.
-- Sign in as **`steward@licio.test`** (the room's elected steward) to see the
-  **governance model manager**: the proposal registry, the *Propose a model*
-  form (a MEMBER power — any joined member sees it too; the picker can select
-  huggingface.co models per role), and the steward's validation powers (open
-  the ratification vote on an eligible proposal; cancel an improper open one).
+- **Overview** — any visitor sees the **"How this room is governed"** panel: the
+  active model, the powers the community granted it (here, *Flag for human
+  review*), a recent agent action, and a one-click download of the
+  content-addressed model artifact.
+- **Models & voting** — the seed leaves a **second model ("v2") in OPEN
+  ratification**, so the member voting UI is live on first boot. Sign in as any
+  KYC-verified member (every seeded account qualifies — see the note below) and
+  **cast a ratification ballot** on it; the tally is a Knomosis-ratified vote,
+  not applause (there is no like/score anywhere). This tab also carries the
+  *Propose a model* form — a MEMBER power, so any joined member sees it; the
+  picker can select revision-pinned huggingface.co models per governed role.
+- **Steward validation** — signed in as **`steward@licio.test`** (the room's
+  elected steward), the same tab exposes the steward's validation powers: open
+  the ratification vote on an eligible proposal, cancel an improper open one,
+  and (post-hoc) overrule. The steward is the *last* line of defence, never the
+  author — members propose and adopt; the steward validates.
+- **Room treasury & lifecycle (WS-M)** — the *Models & voting* tab also hosts
+  the treasury/governance-lifecycle panels (mode & readiness, the proposal
+  lifecycle, deposits); a real-asset room's proposals are wallet-signed
+  (EIP-712) end to end.
 - A platform steward (`admin@licio.test`) can pause the room's agent via the
   floor-freeze control; the panel then shows the floor-paused state.
+
+Elections themselves run through the lease-guarded governance-elections
+scheduler (one of the schedulers §9 lists), and the seed grants every dev
+account a reviewer-verified KYC standing so ballots, proposals, and delegations
+are not refused with `kyc_required` (bot-prevention layer 3 — see the account
+note below).
 
 ### Seeded role accounts
 
@@ -823,6 +859,44 @@ posture: sourced discussions (S1, S13, S22), a live story-level challenge
 (S9, "Challenged"), a live comment arena (S10, hourglass), a validated
 comment (S11, check), an incorrect comment (S4, X), and a story under
 coordination review (S19, "Under review").
+
+The four dispute postures are **not** hand-written tags. The seed opens a real
+debate arena for each seeded correction through the same `maybeEnterDebate`
+path a live challenge fires, and for the two *resolved* postures it runs the
+**real governed adjudicator** — the local LLM lane, or its deterministic MLP
+fallback on a bare box — then finalizes the verdict, exactly as production
+does. S11's incumbent defends the certified-totals cross-check with the
+stronger sourced case, so the adjudicator **upholds** it → *Validated*; S4's
+incumbent forfeits the national-spec claim, so the better-sourced challenger
+prevails → *Incorrect*. The tags a tester sees on first boot were earned by the
+same judge the running simulator and real users invoke — never a fixture. And
+every correction, seeded or live, is anchored to what it corrects: a
+**comment-target** correction threads **directly under the comment it
+corrects** (a child of its target — the server derives the parent, so it is
+never a detached root post), and a **story-target** correction (which
+challenges the whole story, so it has no comment parent and is a root post)
+carries a prominent **"Challenges this story"** callout in the story's own
+warning "Challenged" dispute language, naming the challenged passage. Either way
+it links to its arena, so a "Correction"-badged comment is never a floating
+claim: open the debate to read the challenged material, both sides' sources, and
+the adjudicator's verdict + rationale.
+
+The debate outcome also drives **ordering**, so the section reflects the
+challenge's standing:
+
+- A **story-target** challenge **pins to the top** of the comment section for
+  the duration of the debate (`under_debate`) and stays pinned if it **prevails**
+  (the story is then adjudicated `incorrect` and, in the feed, sunk to the strict
+  bottom below every non-disputed story — the maximal, deterministic demotion,
+  kept visible for the record).
+- A challenge the adjudicator **rules against** is itself marked `incorrect`
+  and **sinks to the bottom** of its section (its callout reads as a settled
+  failure), symmetric with a target proven wrong — a false correction is
+  demoted whether it challenged the story or a comment.
+
+So on a fresh boot S9's chart-label challenge sits at the very top of its
+comments (the arena is live), while a challenge that lost would sit at the
+bottom marked *Incorrect*.
 
 The invariant signals are computed through the same WS-H/WS-E paths used by
 production code, not hand-authored fixtures:
