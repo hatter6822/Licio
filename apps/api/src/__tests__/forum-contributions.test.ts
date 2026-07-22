@@ -265,6 +265,55 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(body.comments.every((c) => c.type === 'correction')).toBe(true);
   });
 
+  it('the corrections filter lists a correction-of-a-correction ONCE (no duplication)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const comment = await createOk(contributionBody('comment', threadId));
+    const c1 = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    // A correction that targets ANOTHER correction — it nests under c1.
+    const c2 = await createOk(
+      contributionBody('correction', threadId, { targetId: c1.contribution_id }),
+    );
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string }[] };
+    const ids = body.comments.map((c) => c.contribution_id);
+    // Both appear EXACTLY once — c2 nests under c1 but is flattened, not rendered
+    // twice (listed thread-wide AND materialized as c1's child).
+    expect(ids.filter((id) => id === c1.contribution_id)).toHaveLength(1);
+    expect(ids.filter((id) => id === c2.contribution_id)).toHaveLength(1);
+  });
+
+  it('the corrections filter honors the requested order (newest first)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const commentA = await createOk(contributionBody('comment', threadId));
+    const commentB = await createOk(contributionBody('comment', threadId));
+    const older = await createOk(
+      contributionBody('correction', threadId, { targetId: commentA.contribution_id }),
+    );
+    nowMs += 60_000; // the second correction is strictly newer
+    const newer = await createOk(
+      contributionBody('correction', threadId, { targetId: commentB.contribution_id }),
+    );
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections&order=newest`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string }[] };
+    const ids = body.comments.map((c) => c.contribution_id);
+    // Newest-first: the later correction precedes the earlier one.
+    expect(ids.indexOf(newer.contribution_id)).toBeLessThan(ids.indexOf(older.contribution_id));
+  });
+
   it('a story correction opens a story arena, marks the story under_debate, and reads back', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';

@@ -344,12 +344,15 @@ export async function commentPage(
         // comment-target correction now threads UNDER the comment it corrects
         // (server-derived parent), so root-only enumeration (`listRoots`) would
         // hide it — list by thread instead so both comment- and story-target
-        // corrections appear, chronologically.
+        // corrections appear, in the requested chronological order. Each is
+        // projected FLAT (depth 0 below), so a correction that itself targets
+        // another correction never appears twice (once listed, once nested).
         await bundle.forum.contributions.listByThread(threadId, {
           types: ['correction'],
           states: RENDERABLE_STATES,
           after,
           limit: pageSize + 1,
+          order: opts.order,
         })
       : await bundle.forum.contributions.listRoots(threadId, {
           ...rootFilterOptions(opts.filter),
@@ -364,7 +367,12 @@ export async function commentPage(
   const page = rootRecords.slice(0, pageSize);
   const lastFetched = page[page.length - 1];
 
-  const forest = await Promise.all(page.map((record) => fetchRawNode(bundle, record, opts.depth)));
+  // The "Corrections" view lists each correction FLAT (no reply subtree): a
+  // correction that targets ANOTHER correction is a child of it, so materializing
+  // subtrees would render it twice (once listed thread-wide, once nested). The
+  // main + focused views keep their nested reply layers.
+  const forestDepth = opts.filter === 'corrections' ? 0 : opts.depth;
+  const forest = await Promise.all(page.map((record) => fetchRawNode(bundle, record, forestDepth)));
   const allRecords: ContributionRecord[] = [];
   for (const node of forest) collectRecords(node, allRecords);
   if (anchorRecord) allRecords.push(anchorRecord);

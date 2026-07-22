@@ -122,8 +122,11 @@ describe('demo seed — the feed shows every card signal', () => {
     expect(items.some((i) => i.sources_count > 0)).toBe(true);
     // S10 — a live comment arena (the hourglass tally).
     expect(byId.get(S(10))?.corrections.active).toBeGreaterThanOrEqual(1);
-    // S11 — a challenged-and-upheld comment (the ✓ tally).
+    // S11 — a challenged-and-upheld COMMENT (the ✓ tally). The rejected
+    // challenger correction is itself marked incorrect + sunk, but it is a
+    // CORRECTION, so it must NOT inflate the "corrected comments" (✗) tally.
     expect(byId.get(S(11))?.corrections.validated).toBeGreaterThanOrEqual(1);
+    expect(byId.get(S(11))?.corrections.incorrect).toBe(0);
     // S4 — a correction prevailed against a comment (the ✗ tally).
     expect(byId.get(S(4))?.corrections.incorrect).toBeGreaterThanOrEqual(1);
     // S9 — the story itself is challenged (the dispute badge, not the tally:

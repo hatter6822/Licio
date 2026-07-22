@@ -199,6 +199,8 @@ export interface ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      /** Chronological direction (default `oldest` — ascending). */
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]>;
   /** Top-level comment roots only, keyset-paginated. */
@@ -243,8 +245,6 @@ export interface ContributionStore {
     threadId: string,
     states: readonly ContributionModerationState[],
   ): Promise<Partial<Record<ContributionType, number>>>;
-  /** WS-T — count a thread's contributions in the given dispute status. */
-  countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number>;
   /** WS-T — count a thread's SOURCED contributions (comments carrying ≥1
    *  citation) in the given states — the "Sources" overview count. */
   countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
@@ -629,19 +629,27 @@ export class InMemoryContributionStore implements ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]> {
     const types = opts.types ? new Set(opts.types) : null;
     const states = opts.states ? new Set(opts.states) : null;
+    const newest = opts.order === 'newest';
     return [...this.#rows.values()]
       .filter(
         (row) =>
           row.threadId === threadId &&
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after || afterCursor(row, row.contributionId, opts.after)),
+          (!opts.after ||
+            (newest
+              ? beforeCursor(row, row.contributionId, opts.after)
+              : afterCursor(row, row.contributionId, opts.after))),
       )
-      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
+      .sort((a, b) => {
+        const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
+        return newest ? -chrono : chrono;
+      })
       .slice(0, opts.limit);
   }
 
@@ -731,14 +739,6 @@ export class InMemoryContributionStore implements ContributionStore {
     return counts;
   }
 
-  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
-    let count = 0;
-    for (const row of this.#rows.values()) {
-      if (row.threadId === threadId && row.disputeStatus === status) count += 1;
-    }
-    return count;
-  }
-
   async countSourced(
     threadId: string,
     states: readonly ContributionModerationState[],
@@ -764,8 +764,15 @@ export class InMemoryContributionStore implements ContributionStore {
         counts.set(row.threadId, entry);
       }
       if (isSourcedRow(row)) entry.sourced += 1;
-      if (row.disputeStatus === 'validated') entry.validated += 1;
-      else if (row.disputeStatus === 'incorrect') entry.incorrect += 1;
+      // The §5.6 tally is "COMMENTS challenged and validated / corrected as
+      // incorrect" — the challenged targets, never the CORRECTION rows. A
+      // rejected challenge is a `correction` marked `incorrect` (visible-but-sunk
+      // in its section), but it is not a comment a correction prevailed against,
+      // so it must not inflate this tally.
+      if (row.type === 'comment') {
+        if (row.disputeStatus === 'validated') entry.validated += 1;
+        else if (row.disputeStatus === 'incorrect') entry.incorrect += 1;
+      }
     }
     return counts;
   }

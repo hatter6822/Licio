@@ -234,8 +234,10 @@ export class DrizzleContributionStore implements ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]> {
+    const newest = opts.order === 'newest';
     const conditions = [eq(contributionsTable.threadId, threadId)];
     if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
     if (opts.states) {
@@ -245,14 +247,19 @@ export class DrizzleContributionStore implements ContributionStore {
       // ISO string + explicit cast — a raw Date in a sql`` fragment is not
       // serializable by the postgres-js driver (gated-test-proven).
       conditions.push(
-        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+        newest
+          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
+          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(asc(contributionsTable.createdAt), asc(contributionsTable.contributionId))
+      .orderBy(
+        newest ? desc(contributionsTable.createdAt) : asc(contributionsTable.createdAt),
+        newest ? desc(contributionsTable.contributionId) : asc(contributionsTable.contributionId),
+      )
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -354,19 +361,6 @@ export class DrizzleContributionStore implements ContributionStore {
     return counts;
   }
 
-  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
-    const rows = await this.#db
-      .select({ value: count() })
-      .from(contributionsTable)
-      .where(
-        and(
-          eq(contributionsTable.threadId, threadId),
-          eq(contributionsTable.disputeStatus, status),
-        ),
-      );
-    return rows[0]?.value ?? 0;
-  }
-
   async countSourced(
     threadId: string,
     states: readonly ContributionModerationState[],
@@ -387,18 +381,21 @@ export class DrizzleContributionStore implements ContributionStore {
   async cardSignalCounts(threadIds: readonly string[]): Promise<Map<string, ThreadSignalCounts>> {
     if (threadIds.length === 0) return new Map();
     // One conditional-aggregation GROUP BY for the whole feed page — the batch
-    // replacement for the per-story countSourced/countByDisputeStatus round
-    // trips.  Published-only, mirroring the in-memory adapter exactly.
+    // tally the single-story overview reads too.  Published-only, mirroring the
+    // in-memory adapter exactly.  The validated/incorrect tallies count the
+    // challenged COMMENTS (`type = 'comment'`), never the CORRECTION rows: a
+    // rejected challenge is a `correction` marked `incorrect` (sunk in its
+    // section) but is not a comment a correction prevailed against.
     const rows = await this.#db
       .select({
         threadId: contributionsTable.threadId,
         sourced: sql`count(*) filter (where ${SOURCED_EXPR})`.mapWith(Number),
         validated:
-          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'validated')`.mapWith(
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'validated' and ${contributionsTable.type} = 'comment')`.mapWith(
             Number,
           ),
         incorrect:
-          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'incorrect')`.mapWith(
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'incorrect' and ${contributionsTable.type} = 'comment')`.mapWith(
             Number,
           ),
       })
