@@ -546,6 +546,168 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     );
   });
 
+  it('PostgresSearchIndex: comment + room corpora, WS-T weighting, exclusions', async () => {
+    const { DrizzleContributionStore, DrizzleRoomStore } = await import(
+      '../forum/drizzle-forum-stores.js'
+    );
+    const contributions = new DrizzleContributionStore(db);
+    const roomStore = new DrizzleRoomStore(db);
+    const host = await stories.createWithThread(
+      storyInput({ title: 'Estuary sensor mesh live' }),
+      randomUUID(),
+    );
+    if (!host.ok) throw new Error('setup failed');
+
+    const comment = async (
+      body: string,
+      moderationState: 'published' | 'hidden' = 'published',
+      authorUserId: string | null = null,
+    ): Promise<string> => {
+      const outcome = await contributions.insert({
+        contributionId: randomUUID(),
+        threadId: host.thread.threadId,
+        userId: authorUserId,
+        type: 'comment',
+        body,
+        citations: [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `it-${randomUUID()}`,
+        path: [],
+        moderationState,
+      });
+      if (!outcome.ok) throw new Error('comment setup failed');
+      return outcome.contribution.contributionId;
+    };
+
+    // Identical bodies ⇒ identical ts_rank_cd; only the WS-T boost and the
+    // recency tiebreak can separate them.
+    const validated = await comment('The brackishline reading stands confirmed.');
+    const newer = await comment('The brackishline reading stands confirmed.');
+    const hidden = await comment('The brackishline reading is moderator hidden.', 'hidden');
+    const incorrect = await comment('The brackishline reading was refuted.');
+    await contributions.setDisputeStatus(validated, 'validated');
+    await contributions.setDisputeStatus(incorrect, 'incorrect');
+
+    const pubRoom = await roomStore.insert({
+      roomId: randomUUID(),
+      name: `Brackishline commons ${randomUUID().slice(0, 6)}`,
+      slug: `brackishline-${randomUUID().slice(0, 8)}`,
+      description: 'Estuary telemetry discussions.',
+      roomType: 'global_topic',
+      visibility: 'public',
+      joinModel: 'open',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    const privRoom = await roomStore.insert({
+      roomId: randomUUID(),
+      name: `Brackishline private ${randomUUID().slice(0, 6)}`,
+      slug: `brackishpriv-${randomUUID().slice(0, 8)}`,
+      description: null,
+      roomType: 'global_topic',
+      visibility: 'private',
+      joinModel: 'request_approval',
+      postingPolicy: 'all_members',
+      createdBy: null,
+      governanceMode: 'ordinary',
+      charterSummary: null,
+      typeMetadata: {},
+      latestActivityAt: null,
+    });
+    if (!pubRoom.ok || !privRoom.ok) throw new Error('room setup failed');
+
+    try {
+      const page = await search.search({ q: 'brackishline', limit: 20, prefix: false });
+      const ids = page.items.map((i) => i.id);
+      // Comment hit shape: parent story title + story_id, bounded snippet.
+      const hit = page.items.find((i) => i.id === validated);
+      expect(hit?.result_type).toBe('comment');
+      expect(hit?.story_id).toBe(host.story.storyId);
+      expect(hit?.title).toBe('Estuary sensor mesh live');
+      expect(hit?.dispute_status).toBe('validated');
+      // WS-T: the validated (older) comment outranks the newer identical one…
+      expect(ids.indexOf(validated)).toBeLessThan(ids.indexOf(newer));
+      // …and hidden / adjudicated-incorrect rows never surface.
+      expect(ids).not.toContain(hidden);
+      expect(ids).not.toContain(incorrect);
+      // Rooms: the public room surfaces (shape: no story), the private never.
+      const roomHit = page.items.find((i) => i.id === pubRoom.room.roomId);
+      expect(roomHit?.result_type).toBe('room');
+      expect(roomHit?.story_id).toBeNull();
+      expect(roomHit?.dispute_status).toBe('none');
+      expect(ids).not.toContain(privRoom.room.roomId);
+
+      // Comment matching is BODY-only: a story-title token hits no comment.
+      const estuary = await search.search({ q: 'estuary', limit: 20, prefix: false });
+      expect(estuary.items.some((i) => i.result_type === 'comment')).toBe(false);
+      // (description text matches the public room via its own tsvector)
+      expect(estuary.items.some((i) => i.id === pubRoom.room.roomId)).toBe(true);
+
+      // Room-scoped search covers the room's comments, never room records.
+      const scoped = await search.search({
+        q: 'brackishline',
+        room: roomId,
+        limit: 20,
+        prefix: false,
+      });
+      expect(scoped.items.some((i) => i.id === validated)).toBe(true);
+      expect(scoped.items.some((i) => i.result_type === 'room')).toBe(false);
+
+      // WS-J.1.2 against the REAL SQL: a viewer's hidden (blocked∪muted)
+      // author is excluded from the comment corpus; null-author (tombstoned)
+      // rows are untouched by the predicate.
+      const authored = await comment(
+        'The brackishline reading has an authored addendum.',
+        'published',
+        submitterId,
+      );
+      const openView = await search.search({ q: 'brackishline', limit: 20, prefix: false });
+      expect(openView.items.some((i) => i.id === authored)).toBe(true);
+      const hiddenView = await search.search(
+        { q: 'brackishline', limit: 20, prefix: false },
+        { hiddenAuthorIds: new Set([submitterId]) },
+      );
+      expect(hiddenView.items.some((i) => i.id === authored)).toBe(false);
+      // The tombstone-authored rows (userId null) survive the hide set.
+      expect(hiddenView.items.some((i) => i.id === validated)).toBe(true);
+
+      // Tamper hardening AGAINST THE REAL SQL: a cursor whose created_at/id
+      // components are garbage must decode to null (page one) — never reach
+      // the ::timestamptz/::uuid casts and become a SQL error.
+      const tampered = Buffer.from('1|garbage|not-a-uuid', 'utf8').toString('base64url');
+      const replayed = await search.search({
+        q: 'brackishline',
+        limit: 20,
+        prefix: false,
+        cursor: tampered,
+      });
+      // Identical to the fresh first page (openView is the current no-cursor
+      // baseline for the same query/limit).
+      expect(replayed.items.map((i) => i.id)).toEqual(openView.items.map((i) => i.id));
+
+      // Date filters bind on the comment corpus (real SQL path).
+      const future = await search.search({
+        q: 'brackishline',
+        limit: 20,
+        prefix: false,
+        date_from: '2099-01-01T00:00:00.000Z',
+      });
+      expect(future.items).toHaveLength(0);
+    } finally {
+      const dbSchema = await import('@licio/db');
+      const { inArray } = await import('drizzle-orm');
+      await db
+        .delete(dbSchema.rooms)
+        .where(inArray(dbSchema.rooms.roomId, [pubRoom.room.roomId, privRoom.room.roomId]));
+    }
+  });
+
   it('listThreads: global keyset (most-recent-first), hidden stories excluded', async () => {
     // Two visible conversations and one whose story is taken down.
     const older = await stories.createWithThread(storyInput({ title: 'LT older' }), randomUUID());

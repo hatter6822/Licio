@@ -203,6 +203,8 @@ describe('search scoring + cursor math (WS-F.3.1a/b)', () => {
     language: 'en',
     createdAt: '2026-06-11T00:00:00.000Z',
     visible: true,
+    authorUserId: null,
+    disputeStatus: 'none' as const,
     roomId: null,
     storyVisibility: 'public' as const,
     roomVisibility: 'public' as const,
@@ -231,6 +233,14 @@ describe('search scoring + cursor math (WS-F.3.1a/b)', () => {
     });
     expect(decodeSearchCursor('!!!not-a-cursor')).toBeNull();
     expect(decodeSearchCursor(Buffer.from('a|b').toString('base64url'))).toBeNull();
+    // EVERY component is validated — a tampered created_at/id must reject the
+    // cursor (the Drizzle adapter binds them into ::timestamptz/::uuid casts;
+    // passing garbage through would be a caller-triggerable SQL error).
+    expect(decodeSearchCursor(Buffer.from(`1|garbage|${doc.id}`).toString('base64url'))).toBeNull();
+    expect(
+      decodeSearchCursor(Buffer.from(`1|${doc.createdAt}|not-a-uuid`).toString('base64url')),
+    ).toBeNull();
+    expect(decodeSearchCursor(Buffer.from('NaN|x|y').toString('base64url'))).toBeNull();
   });
 
   it('the index hides invisible docs and paginates a stable total order', async () => {

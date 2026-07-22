@@ -791,6 +791,32 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(walked).not.toContain(hidden.contributionId); // states filter bites
   });
 
+  it('listRecent serves the newest-first unified-search corpus read, unfiltered', async () => {
+    const stories = new DrizzleStoryStore(db);
+    const recentThreadId = await seedThread(stories);
+    const insertRow = async (over: Partial<Pick<ContributionRecord, 'moderationState'>> = {}) => {
+      const outcome = await contributions.insert(
+        contributionInput({ threadId: recentThreadId, ...over }),
+      );
+      if (!outcome.ok) throw new Error('listRecent setup failed');
+      return outcome.contribution;
+    };
+    const older = await insertRow();
+    const nonPublished = await insertRow({ moderationState: 'hidden' });
+    const newest = await insertRow();
+
+    // The table is shared with other suites, so assertions are made relative
+    // to MY rows: newest-first ordering, no state filtering (the SEARCH layer
+    // owns the visibility predicates — a filtering listRecent would silently
+    // shrink the corpus), and the bound respected.
+    const ids = (await contributions.listRecent(10_000)).map((row) => row.contributionId);
+    expect(ids.indexOf(newest.contributionId)).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf(older.contributionId)).toBeGreaterThan(ids.indexOf(newest.contributionId));
+    expect(ids).toContain(nonPublished.contributionId);
+    expect((await contributions.listRecent(1)).length).toBeLessThanOrEqual(1);
+    expect(await contributions.listRecent(0)).toEqual([]);
+  });
+
   it('cardSignalCounts batches the §5.6 signals with one grouped read, published-only', async () => {
     const stories = new DrizzleStoryStore(db);
     const signalThreadId = await seedThread(stories);

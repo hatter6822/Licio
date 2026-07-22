@@ -264,6 +264,10 @@ export interface ContributionStore {
     after?: CreatedAtCursor | null;
     limit: number;
   }): Promise<ContributionRecord[]>;
+  /** WS-F.3.1a — newest-first contributions ACROSS ALL THREADS, bounded: the
+   *  unified-search corpus read (visibility/moderation/dispute predicates are
+   *  applied by the search layer, which needs the row's own state to do so). */
+  listRecent(limit: number): Promise<ContributionRecord[]>;
   /** Child counts for the given parents (published children only). */
   childCounts(contributionIds: readonly string[]): Promise<Map<string, number>>;
   /** Update body/citations/metadata, snapshotting the previous values into
@@ -804,6 +808,16 @@ export class InMemoryContributionStore implements ContributionStore {
           a.contributionId.localeCompare(b.contributionId),
       )
       .slice(0, opts.limit);
+  }
+
+  async listRecent(limit: number): Promise<ContributionRecord[]> {
+    return [...this.#rows.values()]
+      .sort(
+        (a, b) =>
+          b.createdAt.localeCompare(a.createdAt) ||
+          b.contributionId.localeCompare(a.contributionId),
+      )
+      .slice(0, Math.max(0, limit));
   }
 
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {

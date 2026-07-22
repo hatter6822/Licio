@@ -61,6 +61,9 @@ const DEFAULTS: UIPersisted = {
 
 export interface UIState extends UIPersisted {
   sheet: SheetState;
+  /** Transient: whether the public-content search modal is open (WS-F.3.1b
+   *  reader surface). Never persisted — a reload never reopens it. */
+  searchOpen: boolean;
   setTheme: (theme: ThemePreference) => void;
   setReducedMotion: (motion: MotionPreference) => void;
   setFeedMode: (mode: FeedMode) => void;
@@ -68,6 +71,9 @@ export interface UIState extends UIPersisted {
   toggleFocusMode: () => void;
   openSheet: (id: string) => void;
   closeSheet: () => void;
+  openSearch: () => void;
+  closeSearch: () => void;
+  toggleSearch: () => void;
 }
 
 function persistSlice(state: UIState): void {
@@ -89,6 +95,7 @@ function persistSlice(state: UIState): void {
 export const useUIStore = create<UIState>((set, get) => ({
   ...(normalizePersisted(loadPersisted(PERSIST)) ?? DEFAULTS),
   sheet: { open: false, id: null },
+  searchOpen: false,
   setTheme: (theme) => {
     applyTheme(theme);
     set({ theme });
@@ -116,6 +123,9 @@ export const useUIStore = create<UIState>((set, get) => ({
   },
   openSheet: (id) => set({ sheet: { open: true, id } }),
   closeSheet: () => set({ sheet: { open: false, id: null } }),
+  openSearch: () => set({ searchOpen: true }),
+  closeSearch: () => set({ searchOpen: false }),
+  toggleSearch: () => set({ searchOpen: !get().searchOpen }),
 }));
 
 /**

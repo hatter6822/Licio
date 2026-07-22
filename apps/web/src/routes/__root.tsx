@@ -8,12 +8,14 @@
 // it is not double-wrapped.
 import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-router';
 import { useEffect } from 'react';
+import { SearchModalHost } from '../components/search/SearchModal/index.js';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { BottomNav, defaultNavItems } from '../components/ui/BottomNav/index.js';
 import { BrandLogo } from '../components/ui/BrandLogo/index.js';
 import { OfflineState } from '../components/ui/OfflineState/index.js';
 import { useToast } from '../components/ui/Toast/index.js';
 import { useOnlineStatus } from '../hooks/useOnlineStatus.js';
+import { useSearchHotkey } from '../hooks/useSearchHotkey.js';
 import { useT } from '../i18n/index.js';
 import { EVICTION_EVENT } from '../lib/bootstrap.js';
 import { useFeatureFlagsRefresh } from '../lib/queries.js';
@@ -113,6 +115,9 @@ function activeTabId(pathname: string): string {
 function RootLayout(): React.ReactElement {
   const t = useT();
   useRuntimeToasts();
+  // Global Ctrl/Cmd+K toggles the public-content search modal (WS-F.3.1b);
+  // the modal host below mounts it lazily on first open.
+  useSearchHotkey();
   // Keep feature flags fresh app-wide so a §21.3 jurisdiction disable
   // (crypto/governance off for a region) takes effect without a full reload.
   useFeatureFlagsRefresh();
@@ -159,6 +164,7 @@ function RootLayout(): React.ReactElement {
           the device is offline (the cache still serves what it has). */}
       {!online && <OfflineState className="mb-4" headingLevel={2} />}
       <Outlet />
+      <SearchModalHost />
     </AppShell>
   );
 }

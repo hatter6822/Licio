@@ -57,7 +57,10 @@ import { isUniqueViolation } from '../lib/pg-errors.js';
 import {
   decodeSearchCursor,
   encodeSearchCursor,
+  SEARCH_COMMENT_SNIPPET_LENGTH,
+  SEARCH_VALIDATED_BOOST,
   type SearchIndex,
+  type SearchViewerContext,
   tokenizeQuery,
 } from './search.js';
 import type {
@@ -1554,9 +1557,17 @@ export class PostgresSearchIndex implements SearchIndex {
 
   async search(
     request: SearchRequest,
+    viewer?: SearchViewerContext,
   ): Promise<{ items: SearchResult[]; nextCursor: string | null }> {
     const tokens = tokenizeQuery(request.q);
     if (tokens.length === 0) return { items: [], nextCursor: null };
+    // WS-J.1.2 — the viewer's blocked∪muted authors, bound as a uuid[] param
+    // for the comment branch (the only author-filtered corpus, mirroring the
+    // comment read path's viewerHideSet enforcement).
+    const hiddenAuthorIds =
+      viewer?.hiddenAuthorIds !== undefined && viewer.hiddenAuthorIds.size > 0
+        ? [...viewer.hiddenAuthorIds]
+        : null;
     const tsquery = buildTsQuery(tokens, request.prefix === true);
     const cursor = request.cursor !== undefined ? decodeSearchCursor(request.cursor) : null;
     const fetch = request.limit + 1;
@@ -1564,7 +1575,12 @@ export class PostgresSearchIndex implements SearchIndex {
     // rows index `simple` — `to_tsquery(simple) || to_tsquery(english)` is the
     // tsquery OR, so either representation matches.
     const match = sql`(to_tsquery('simple', ${tsquery}) || to_tsquery('english', ${tsquery}))`;
-    const types = request.type !== undefined ? [request.type] : ['story', 'claim'];
+    const types: readonly string[] = request.type ?? ['story', 'claim', 'comment', 'room'];
+    // WS-T validation weighting (identical to the in-memory index): a
+    // `validated` story/comment multiplies its textual relevance; an
+    // `incorrect` one is excluded outright by the per-branch predicate below.
+    const validatedBoost = (disputeCol: ReturnType<typeof sql>) =>
+      sql`(case when ${disputeCol} = 'validated' then ${SEARCH_VALIDATED_BOOST}::float8 else 1.0 end)`;
 
     // WS-Q.2.5a/b — two-tier visibility. Room-scoped (`?room=`): only this
     // room's pool (the route enforced the read bar). Global: only PUBLIC
@@ -1585,13 +1601,15 @@ export class PostgresSearchIndex implements SearchIndex {
         : sql`(${col} is null or exists (select 1 from stories sv join rooms rv on rv.room_id = sv.room_id where sv.story_id = ${col} and sv.hidden_state is null and sv.visibility = 'public' and rv.visibility = 'public' and rv.storage_mode = 'server'))`;
 
     const rows: Array<{
-      result_type: 'story' | 'claim';
+      result_type: 'story' | 'claim' | 'comment' | 'room';
       id: string;
       story_id: string | null;
       title: string;
       snippet: string | null;
       relevance: number;
       created_at: Date;
+      /** `incorrect` never appears — every branch filters it out. */
+      dispute_status: 'none' | 'under_debate' | 'validated';
     }> = [];
 
     const cursorPredicate = (
@@ -1608,6 +1626,9 @@ export class PostgresSearchIndex implements SearchIndex {
     if (types.includes('story')) {
       const filters = [
         sql`s.hidden_state is null`,
+        // WS-T: an adjudicated-incorrect story stays readable in place but is
+        // never surfaced as a search result.
+        sql`s.dispute_status <> 'incorrect'`,
         sql`s.search_tsv @@ ${match}`,
         storyVisibilityFilter,
       ];
@@ -1621,14 +1642,16 @@ export class PostgresSearchIndex implements SearchIndex {
       }
       if (request.date_to !== undefined)
         filters.push(sql`s.created_at < ${request.date_to}::timestamptz`);
+      const storyRank = sql`(ts_rank_cd(s.search_tsv, ${match}) * ${validatedBoost(sql`s.dispute_status`)})::float8`;
       const storyRows = (await this.#db.execute(sql`
         select 'story' as result_type, s.story_id as id, s.story_id as story_id,
                s.title as title, s.excerpt as snippet,
-               ts_rank_cd(s.search_tsv, ${match})::float8 as relevance,
-               s.created_at as created_at
+               ${storyRank} as relevance,
+               s.created_at as created_at,
+               s.dispute_status as dispute_status
         from stories s
         where ${sql.join(filters, sql` and `)}
-          and ${cursorPredicate(sql`ts_rank_cd(s.search_tsv, ${match})::float8`, sql`s.created_at`, sql`s.story_id`)}
+          and ${cursorPredicate(storyRank, sql`s.created_at`, sql`s.story_id`)}
         order by relevance desc, created_at desc, id desc
         limit ${fetch}
       `)) as unknown as typeof rows;
@@ -1654,7 +1677,8 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'claim' as result_type, c.claim_id as id, c.story_id as story_id,
                c.canonical_text as title, null as snippet,
                ts_rank_cd(c.search_tsv, ${match})::float8 as relevance,
-               c.created_at as created_at
+               c.created_at as created_at,
+               'none' as dispute_status
         from claims c
         where ${sql.join(filters, sql` and `)}
           and ${cursorPredicate(sql`ts_rank_cd(c.search_tsv, ${match})::float8`, sql`c.created_at`, sql`c.claim_id`)}
@@ -1662,6 +1686,106 @@ export class PostgresSearchIndex implements SearchIndex {
         limit ${fetch}
       `)) as unknown as typeof rows;
       rows.push(...claimRows);
+    }
+
+    // Comments (forum contributions, WS-F.3.1a unified corpus). Matching is
+    // over the comment BODY only (a generated column indexes its own row); the
+    // hit carries its parent story's title for display and its story_id as the
+    // navigation key. The visibility bar mirrors threadReadableToUser: the row
+    // is `published`, its thread is not moderation-removed (item-safety), and
+    // its owning story is not hidden — plus the same two-tier room predicate
+    // stories use (the shared `storyVisibilityFilter` references the joined
+    // `s` alias). Like claims, the corpus is skipped under story-only filters
+    // (topic/source/language describe stories, not comments).
+    if (
+      types.includes('comment') &&
+      request.topic_id === undefined &&
+      request.source_id === undefined &&
+      request.language === undefined
+    ) {
+      const filters = [
+        sql`c.moderation_state = 'published'`,
+        // WS-T: an adjudicated-incorrect comment (or a failed correction)
+        // stays visible-but-sunk in its section, never a search result.
+        sql`c.dispute_status <> 'incorrect'`,
+        sql`c.search_tsv @@ ${match}`,
+        sql`s.hidden_state is null`,
+        sql`not exists (select 1 from item_safety_states iss where iss.item_id = c.thread_id and iss.safety_state = 'removed')`,
+        storyVisibilityFilter,
+      ];
+      if (hiddenAuthorIds !== null) {
+        // Tombstoned (null) authors are never in a hide set; keep them served.
+        // Each id binds as its OWN scalar parameter (sql.join) — the raw-sql
+        // template does not serialize a JS array into a Postgres array
+        // literal (gated-test-proven: `any($n::uuid[])` malforms).
+        filters.push(
+          sql`(c.user_id is null or c.user_id not in (${sql.join(
+            hiddenAuthorIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}))`,
+        );
+      }
+      if (request.date_from !== undefined) {
+        filters.push(sql`c.created_at >= ${request.date_from}::timestamptz`);
+      }
+      if (request.date_to !== undefined)
+        filters.push(sql`c.created_at < ${request.date_to}::timestamptz`);
+      const commentRank = sql`(ts_rank_cd(c.search_tsv, ${match}) * ${validatedBoost(sql`c.dispute_status`)})::float8`;
+      const commentRows = (await this.#db.execute(sql`
+        select 'comment' as result_type, c.contribution_id as id, t.story_id as story_id,
+               s.title as title, left(c.body, ${SEARCH_COMMENT_SNIPPET_LENGTH}) as snippet,
+               ${commentRank} as relevance,
+               c.created_at as created_at,
+               c.dispute_status as dispute_status
+        from contributions c
+        join threads t on t.thread_id = c.thread_id
+        join stories s on s.story_id = t.story_id
+        where ${sql.join(filters, sql` and `)}
+          and ${cursorPredicate(commentRank, sql`c.created_at`, sql`c.contribution_id`)}
+        order by relevance desc, created_at desc, id desc
+        limit ${fetch}
+      `)) as unknown as typeof rows;
+      rows.push(...commentRows);
+    }
+
+    // Rooms (WS-F.3.1a unified corpus): name/description/charter of PUBLIC
+    // `server` rooms only — a private room's shell is reached through the
+    // rooms directory (tier-one existence), never global content search, and
+    // a p2p room never surfaces from the server at all (§23.6). A room-scoped
+    // query searches the room's CONTENT, so the rooms corpus is skipped there
+    // (mirrored in the in-memory index), and like claims it is skipped under
+    // story-only filters.
+    if (
+      types.includes('room') &&
+      !roomScoped &&
+      request.topic_id === undefined &&
+      request.source_id === undefined &&
+      request.language === undefined
+    ) {
+      const filters = [
+        sql`r.visibility = 'public'`,
+        sql`r.storage_mode = 'server'`,
+        sql`r.search_tsv @@ ${match}`,
+      ];
+      if (request.date_from !== undefined) {
+        filters.push(sql`r.created_at >= ${request.date_from}::timestamptz`);
+      }
+      if (request.date_to !== undefined)
+        filters.push(sql`r.created_at < ${request.date_to}::timestamptz`);
+      const roomRank = sql`ts_rank_cd(r.search_tsv, ${match})::float8`;
+      const roomRows = (await this.#db.execute(sql`
+        select 'room' as result_type, r.room_id as id, null as story_id,
+               r.name as title, r.description as snippet,
+               ${roomRank} as relevance,
+               r.created_at as created_at,
+               'none' as dispute_status
+        from rooms r
+        where ${sql.join(filters, sql` and `)}
+          and ${cursorPredicate(roomRank, sql`r.created_at`, sql`r.room_id`)}
+        order by relevance desc, created_at desc, id desc
+        limit ${fetch}
+      `)) as unknown as typeof rows;
+      rows.push(...roomRows);
     }
 
     // Merge with the SAME total order as the in-memory index, then page.
@@ -1681,6 +1805,7 @@ export class PostgresSearchIndex implements SearchIndex {
       relevance: Number(row.relevance),
       created_at:
         row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      dispute_status: row.dispute_status,
     }));
     const last = items.at(-1);
     const nextCursor =

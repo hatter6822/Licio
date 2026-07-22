@@ -7,6 +7,8 @@ import { DEFAULT_FEED_MODE, type FeedMode } from '@licio/shared';
 
 export const queryKeys = {
   feed: (mode: FeedMode = DEFAULT_FEED_MODE) => ['feed', mode] as const,
+  /** WS-F.3.1b public-content search (the modal); keyed by filter then query. */
+  search: (q: string, filter = 'all') => ['search', filter, q] as const,
   story: (storyId: string) => ['story', storyId] as const,
   storyInterpretations: (storyId: string) => ['story', storyId, 'interpretations'] as const,
   storyComments: (
