@@ -15,8 +15,20 @@
 // strings are tokenized, never concatenated into SQL.
 import type { ContributionDisputeStatus, SearchRequest, SearchResult } from '@licio/shared';
 
+/** The resolved (optional) viewer, threaded through by the route — NEVER part
+ *  of the wire request. WS-J.1.2: comment hits by a blocked∪muted author are
+ *  excluded for that viewer, mirroring the comment read path's enforcement
+ *  (viewerHideSet + visibleRows) so search can't resurface what the
+ *  destination surface hides (and then 404 on click-through). */
+export interface SearchViewerContext {
+  hiddenAuthorIds?: ReadonlySet<string>;
+}
+
 export interface SearchIndex {
-  search(request: SearchRequest): Promise<{ items: SearchResult[]; nextCursor: string | null }>;
+  search(
+    request: SearchRequest,
+    viewer?: SearchViewerContext,
+  ): Promise<{ items: SearchResult[]; nextCursor: string | null }>;
 }
 
 /** Unicode-aware tokenization — the ONLY thing a user query is turned into.
@@ -85,6 +97,12 @@ export interface SearchDocument {
   /** Display-only title override (a comment hit shows its parent story's
    *  title). Falls back to `title` when absent. */
   displayTitle?: string;
+  /** The author the WS-J.1.2 viewer hide set keys on. Set ONLY for comment
+   *  documents (contribution.userId; null = tombstoned author): the comment
+   *  read path is the surface that block/mute-filters by author, and search
+   *  mirrors exactly that — story/claim/room documents carry null and are
+   *  never author-filtered (their read surfaces aren't either). */
+  authorUserId: string | null;
   /** WS-T dispute posture. `incorrect` documents are EXCLUDED at query time
    *  (adjudicated-incorrect content never surfaces in search); `validated`
    *  earns the SEARCH_VALIDATED_BOOST multiplier. Claims and rooms carry
@@ -159,12 +177,22 @@ export class InMemorySearchIndex implements SearchIndex {
     this.#documents = documents;
   }
 
-  async search(request: SearchRequest) {
+  async search(request: SearchRequest, viewer?: SearchViewerContext) {
     const tokens = tokenizeQuery(request.q);
     const cursor = request.cursor !== undefined ? decodeSearchCursor(request.cursor) : null;
+    const hiddenAuthors = viewer?.hiddenAuthorIds;
     const scored: Array<{ doc: SearchDocument; relevance: number }> = [];
     for (const doc of await this.#documents()) {
       if (!doc.visible) continue;
+      // WS-J.1.2 — the viewer's blocked∪muted authors never surface (comment
+      // documents only; every other type carries a null author by design).
+      if (
+        hiddenAuthors !== undefined &&
+        doc.authorUserId !== null &&
+        hiddenAuthors.has(doc.authorUserId)
+      ) {
+        continue;
+      }
       // WS-S.1.4 — server search NEVER returns Private P2P content (§23.6); a
       // p2p doc should never be indexed, so this is defense in depth at query.
       if (doc.roomStorageMode !== 'server') continue;

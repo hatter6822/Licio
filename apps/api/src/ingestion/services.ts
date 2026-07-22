@@ -167,11 +167,12 @@ interface StoryDocMeta {
   roomId: string | null;
   storyVisibility: 'public' | 'room_only';
   roomVisibility: 'public' | 'private';
-  /** WS-S.1.4 — every search doc is built from a SERVER story row (a Private
-   *  P2P room has no server stories, the §8 non-storage contract enforced at
-   *  submission), so this is `server` by construction; the InMemorySearchIndex
-   *  filter (and the Drizzle adapter's `storage_mode='server'` predicate) is the
-   *  live type-level backstop (§23.6). */
+  /** WS-S.1.4 — DERIVED from the resolved home room (never assumed): a p2p
+   *  or unresolvable association fails closed to `p2p`, which the query-time
+   *  storage guard excludes everywhere — so a corrupt or migration-transient
+   *  p2p room/story link cannot surface even through room-scoped search, the
+   *  same live backstop the Drizzle adapter's `storage_mode='server'` join
+   *  predicate provides (§23.6). */
   roomStorageMode: 'server' | 'p2p';
 }
 
@@ -186,11 +187,13 @@ const FREE_DOC_META: StoryDocMeta = {
 };
 
 /** What the forum boot supplies the in-memory search index per query (ONE
- *  room scan serves both): the WS-Q.2.5a story-doc room-visibility resolution
- *  and the WS-F.3.1a comment + room documents. */
+ *  room scan serves both): the WS-Q.2.5a/WS-S.1.4 story-doc room resolution
+ *  (visibility AND storage mode) and the WS-F.3.1a comment + room documents. */
 export interface ForumSearchCorpus {
-  /** Fail-closed resolution: a story whose room is absent reads as `private`. */
-  roomVisibilityById: Map<string, 'public' | 'private'>;
+  /** Fail-closed resolution: a story whose room is absent reads as
+   *  `private` + `p2p` — excluded from every tier, exactly like an
+   *  unresolvable comment document. */
+  roomMetaById: Map<string, { visibility: 'public' | 'private'; storageMode: 'server' | 'p2p' }>;
   documents: SearchDocument[];
 }
 
@@ -203,17 +206,20 @@ export function buildSearchDocuments(
 ): () => Promise<SearchDocument[]> {
   return async () => {
     const documents: SearchDocument[] = [];
-    const { roomVisibilityById: roomVis, documents: forumDocuments } = await forumCorpus();
+    const { roomMetaById, documents: forumDocuments } = await forumCorpus();
     const storyMeta = new Map<string, StoryDocMeta>();
     for (const story of await allStories()) {
+      const roomMeta = roomMetaById.get(story.roomId);
       const meta: StoryDocMeta = {
         visible: story.hiddenState === null,
         roomId: story.roomId,
         storyVisibility: story.visibility,
-        roomVisibility: roomVis.get(story.roomId) ?? 'private',
-        // A story row only ever belongs to a server room (p2p rooms reject
-        // submission, WS-S.1.3); the query filter excludes anything else.
-        roomStorageMode: 'server',
+        roomVisibility: roomMeta?.visibility ?? 'private',
+        // Submission rejects p2p rooms (WS-S.1.3), so this is `server` for
+        // every legitimate row — but it is DERIVED, not assumed, so the
+        // query-time storage guard stays live against a corrupt or
+        // migration-transient association (fail-closed `p2p` = excluded).
+        roomStorageMode: roomMeta?.storageMode ?? 'p2p',
       };
       storyMeta.set(story.storyId, meta);
       documents.push({
@@ -223,6 +229,7 @@ export function buildSearchDocuments(
         title: story.title,
         body: `${story.excerpt ?? ''} ${story.publisher ?? ''} ${story.author ?? ''}`,
         snippet: story.excerpt,
+        authorUserId: null,
         disputeStatus: story.disputeStatus ?? 'none',
         topicIds: story.topicIds,
         sourceId: story.sourceId,
@@ -245,6 +252,7 @@ export function buildSearchDocuments(
         title: claim.canonicalText,
         body: claim.canonicalText,
         snippet: null,
+        authorUserId: null,
         // WS-T does not adjudicate claims (claim_status is the separate
         // MERI/corroboration lifecycle; `retracted` is the exclusion below).
         disputeStatus: 'none',
@@ -308,7 +316,7 @@ export function createInMemoryIngestionServices(
   // hook the forum boot sets (default fail-closed: all rooms unknown ⇒
   // private ⇒ nothing surfaces globally until wired; corpus empty).
   let forumCorpusProvider: () => Promise<ForumSearchCorpus> = async () => ({
-    roomVisibilityById: new Map(),
+    roomMetaById: new Map(),
     documents: [],
   });
   // WS-K §24.1 — late-bound uploaded-caption reader (uploads live in the forum,

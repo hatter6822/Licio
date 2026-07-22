@@ -561,11 +561,12 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     const comment = async (
       body: string,
       moderationState: 'published' | 'hidden' = 'published',
+      authorUserId: string | null = null,
     ): Promise<string> => {
       const outcome = await contributions.insert({
         contributionId: randomUUID(),
         threadId: host.thread.threadId,
-        userId: null,
+        userId: authorUserId,
         type: 'comment',
         body,
         citations: [],
@@ -658,6 +659,24 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       expect(scoped.items.some((i) => i.id === validated)).toBe(true);
       expect(scoped.items.some((i) => i.result_type === 'room')).toBe(false);
 
+      // WS-J.1.2 against the REAL SQL: a viewer's hidden (blocked∪muted)
+      // author is excluded from the comment corpus; null-author (tombstoned)
+      // rows are untouched by the predicate.
+      const authored = await comment(
+        'The brackishline reading has an authored addendum.',
+        'published',
+        submitterId,
+      );
+      const openView = await search.search({ q: 'brackishline', limit: 20, prefix: false });
+      expect(openView.items.some((i) => i.id === authored)).toBe(true);
+      const hiddenView = await search.search(
+        { q: 'brackishline', limit: 20, prefix: false },
+        { hiddenAuthorIds: new Set([submitterId]) },
+      );
+      expect(hiddenView.items.some((i) => i.id === authored)).toBe(false);
+      // The tombstone-authored rows (userId null) survive the hide set.
+      expect(hiddenView.items.some((i) => i.id === validated)).toBe(true);
+
       // Tamper hardening AGAINST THE REAL SQL: a cursor whose created_at/id
       // components are garbage must decode to null (page one) — never reach
       // the ::timestamptz/::uuid casts and become a SQL error.
@@ -668,7 +687,9 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
         prefix: false,
         cursor: tampered,
       });
-      expect(replayed.items.map((i) => i.id)).toEqual(page.items.map((i) => i.id));
+      // Identical to the fresh first page (openView is the current no-cursor
+      // baseline for the same query/limit).
+      expect(replayed.items.map((i) => i.id)).toEqual(openView.items.map((i) => i.id));
 
       // Date filters bind on the comment corpus (real SQL path).
       const future = await search.search({

@@ -299,8 +299,11 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     ingestion.setSearchForumCorpusProvider(async () => {
       const documents: SearchDocument[] = [];
       const rooms = await services.rooms.list({ limit: ROOM_RESOLUTION_LIMIT });
-      const roomVisibilityById = new Map(
-        rooms.map((room) => [room.roomId, room.visibility] as const),
+      const roomMetaById = new Map(
+        rooms.map(
+          (room) =>
+            [room.roomId, { visibility: room.visibility, storageMode: room.storageMode }] as const,
+        ),
       );
       const roomById = new Map(rooms.map((room) => [room.roomId, room] as const));
       for (const room of rooms) {
@@ -311,6 +314,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
           title: room.name,
           body: `${room.description ?? ''} ${room.charterSummary ?? ''}`,
           snippet: room.description,
+          authorUserId: null,
           // WS-T adjudicates stories/comments, never rooms.
           disputeStatus: 'none',
           topicIds: [],
@@ -370,6 +374,9 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
           // adapters serving the same snippet through astral-plane characters.
           snippet: [...contribution.body].slice(0, SEARCH_COMMENT_SNIPPET_LENGTH).join(''),
           displayTitle: story.title,
+          // WS-J.1.2 — the viewer hide set keys on this (blocked∪muted
+          // authors' comments never surface for that viewer).
+          authorUserId: contribution.userId,
           disputeStatus: contribution.disputeStatus,
           topicIds: [],
           sourceId: null,
@@ -389,7 +396,7 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
           roomStorageMode: room?.storageMode ?? 'p2p',
         });
       }
-      return { roomVisibilityById, documents };
+      return { roomMetaById, documents };
     });
   }
 

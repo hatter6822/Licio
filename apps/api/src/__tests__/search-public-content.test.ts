@@ -107,8 +107,13 @@ interface SearchItem {
 
 async function search(
   query: string,
+  cookie?: string,
 ): Promise<{ status: number; items: SearchItem[]; nextCursor: string | null }> {
-  const res = await app().request(new Request(`http://localhost/v1/search?${query}`));
+  const res = await app().request(
+    new Request(`http://localhost/v1/search?${query}`, {
+      ...(cookie !== undefined ? { headers: { cookie } } : {}),
+    }),
+  );
   if (res.status !== 200) return { status: res.status, items: [], nextCursor: null };
   const body = (await res.json()) as { items: SearchItem[]; nextCursor: string | null };
   return { status: 200, ...body };
@@ -244,6 +249,87 @@ describe('rooms in the unified corpus (WS-F.3.1a)', () => {
     const scoped = await search(`q=ferrocline&room=${story.roomId}`);
     expect(scoped.items.some((item) => item.result_type === 'room')).toBe(false);
     expect(scoped.items.some((item) => item.id === storyId)).toBe(true);
+  });
+});
+
+describe('WS-J.1.2 viewer block/mute filtering (comment corpus)', () => {
+  it("excludes a blocked∪muted author's comments for THAT viewer only, never their stories", async () => {
+    const viewer = await seedUserWithSession(fixture.identity);
+    const storyId = await submitStory({ title: 'Glintharbor survey published' });
+    const commentId = await addComment(storyId, 'The glintharbor figures check out.');
+    // The author of both is the shared `author` fixture; the viewer hides them.
+    fixture.forum.relationshipReader = {
+      setsFor: async (userId) =>
+        userId === viewer.userId
+          ? { blocked: new Set([author.userId]), muted: new Set<string>() }
+          : { blocked: new Set<string>(), muted: new Set<string>() },
+      interactionBlocked: async () => false,
+    };
+
+    // Anonymous readers and non-blocking viewers still see the comment…
+    expect((await search('q=glintharbor')).items.some((i) => i.id === commentId)).toBe(true);
+    // …the blocking viewer does not (the comment read path's hide set,
+    // mirrored — search must not resurface what the destination hides)…
+    const viewed = await search('q=glintharbor', viewer.cookie);
+    expect(viewed.items.some((i) => i.id === commentId)).toBe(false);
+    // …and ONLY the comment corpus is author-filtered: the same author's
+    // story stays served (story surfaces are not block/mute-filtered).
+    expect(viewed.items.some((i) => i.id === storyId)).toBe(true);
+  });
+});
+
+describe('WS-S storage-mode guard (defense in depth)', () => {
+  it('a corrupt p2p room/story association never surfaces, even room-scoped', async () => {
+    const p2pRoom = await makeRoom({
+      name: 'Driftcell p2p room',
+      visibility: 'private',
+      storageMode: 'p2p',
+    });
+    // Bypass the submission guards deliberately (they reject p2p rooms) —
+    // this is the corrupt / migration-transient association the query-time
+    // guard must fail closed on, now DERIVED per room instead of assumed.
+    const outcome = await fixture.ingestion.stories.createWithThread(
+      {
+        storyId: randomUUID(),
+        canonicalUrl: null,
+        title: 'Driftcell anomaly report',
+        titleHash: randomUUID().replaceAll('-', ''),
+        submittedBy: author.userId,
+        sourceId: null,
+        roomId: p2pRoom,
+        visibility: 'public',
+        mediaUploadRef: null,
+        canonicalPublicStoryId: null,
+        language: 'en',
+        topicIds: [],
+        locationScope: null,
+        sensitivityLabels: ['none'],
+        lifecycleState: 'submitted',
+        submissionType: 'original_brief',
+        submissionMetadata: { submission_type: 'original_brief', body: 'Driftcell body.' },
+        excerpt: 'Driftcell body.',
+        publisher: null,
+        author: null,
+        publishedAt: null,
+        mediaType: null,
+        extractionState: 'not_applicable',
+        hiddenState: null,
+      },
+      randomUUID(),
+    );
+    expect(outcome.ok).toBe(true);
+
+    expect((await search('q=driftcell')).items).toHaveLength(0);
+    // Room-scoped through the INDEX directly (the route's read bar already
+    // 404s a private p2p room; the index-level storage guard must hold on
+    // its own — parity with the Drizzle adapter's storage_mode join).
+    const scoped = await fixture.ingestion.searchIndex.search({
+      q: 'driftcell',
+      room: p2pRoom,
+      prefix: false,
+      limit: 10,
+    });
+    expect(scoped.items).toHaveLength(0);
   });
 });
 

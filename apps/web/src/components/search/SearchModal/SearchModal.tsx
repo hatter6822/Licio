@@ -198,7 +198,14 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
             aria-label={t('search.inputLabel', 'Search public content')}
             placeholder={t('search.placeholder', 'Search stories, comments, and rooms…')}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              setInput(event.target.value);
+              // An edited query invalidates any prior selection IMMEDIATELY:
+              // placeholderData keeps the old result set rendered through the
+              // debounce, and Enter must never activate a result the reader
+              // selected under the previous query.
+              setActiveIndex(-1);
+            }}
             onKeyDown={onInputKeyDown}
             autoComplete="off"
             autoCorrect="off"

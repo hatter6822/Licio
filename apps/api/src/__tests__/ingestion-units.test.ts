@@ -203,6 +203,7 @@ describe('search scoring + cursor math (WS-F.3.1a/b)', () => {
     language: 'en',
     createdAt: '2026-06-11T00:00:00.000Z',
     visible: true,
+    authorUserId: null,
     disputeStatus: 'none' as const,
     roomId: null,
     storyVisibility: 'public' as const,

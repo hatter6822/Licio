@@ -141,6 +141,19 @@ describe('SearchModal (WS-F.3.1b)', () => {
     });
   });
 
+  it('clears the active selection the moment the query is edited (no stale Enter target)', async () => {
+    renderModal();
+    const { user, input } = await typeQuery('reservoir');
+    await screen.findByRole('option', { name: /Reservoir level fell in May/ });
+    await user.keyboard('{ArrowDown}');
+    expect(input.getAttribute('aria-activedescendant')).toBeTruthy();
+    // Editing the query invalidates the selection IMMEDIATELY — before the
+    // debounced replacement request resolves (placeholderData keeps the old
+    // list rendered), Enter must not activate the prior query's result.
+    await user.type(input, 'x');
+    expect(input.getAttribute('aria-activedescendant')).toBeNull();
+  });
+
   it('opens a comment at its permalink and a room at its page on click', async () => {
     const first = renderModal();
     const { user } = await typeQuery('reservoir');

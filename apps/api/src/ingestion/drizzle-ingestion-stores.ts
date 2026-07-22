@@ -60,6 +60,7 @@ import {
   SEARCH_COMMENT_SNIPPET_LENGTH,
   SEARCH_VALIDATED_BOOST,
   type SearchIndex,
+  type SearchViewerContext,
   tokenizeQuery,
 } from './search.js';
 import type {
@@ -1556,9 +1557,17 @@ export class PostgresSearchIndex implements SearchIndex {
 
   async search(
     request: SearchRequest,
+    viewer?: SearchViewerContext,
   ): Promise<{ items: SearchResult[]; nextCursor: string | null }> {
     const tokens = tokenizeQuery(request.q);
     if (tokens.length === 0) return { items: [], nextCursor: null };
+    // WS-J.1.2 — the viewer's blocked∪muted authors, bound as a uuid[] param
+    // for the comment branch (the only author-filtered corpus, mirroring the
+    // comment read path's viewerHideSet enforcement).
+    const hiddenAuthorIds =
+      viewer?.hiddenAuthorIds !== undefined && viewer.hiddenAuthorIds.size > 0
+        ? [...viewer.hiddenAuthorIds]
+        : null;
     const tsquery = buildTsQuery(tokens, request.prefix === true);
     const cursor = request.cursor !== undefined ? decodeSearchCursor(request.cursor) : null;
     const fetch = request.limit + 1;
@@ -1704,6 +1713,18 @@ export class PostgresSearchIndex implements SearchIndex {
         sql`not exists (select 1 from item_safety_states iss where iss.item_id = c.thread_id and iss.safety_state = 'removed')`,
         storyVisibilityFilter,
       ];
+      if (hiddenAuthorIds !== null) {
+        // Tombstoned (null) authors are never in a hide set; keep them served.
+        // Each id binds as its OWN scalar parameter (sql.join) — the raw-sql
+        // template does not serialize a JS array into a Postgres array
+        // literal (gated-test-proven: `any($n::uuid[])` malforms).
+        filters.push(
+          sql`(c.user_id is null or c.user_id not in (${sql.join(
+            hiddenAuthorIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}))`,
+        );
+      }
       if (request.date_from !== undefined) {
         filters.push(sql`c.created_at >= ${request.date_from}::timestamptz`);
       }

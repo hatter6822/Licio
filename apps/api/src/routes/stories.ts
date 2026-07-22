@@ -30,6 +30,7 @@ import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
 import { roomContentVisibleToUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
+import { viewerHideSet } from '../forum/threads.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
@@ -226,27 +227,38 @@ export function createStoriesRoutes() {
         zValidator('query', searchRequestSchema),
         async (c) => {
           const ingestion = getIngestionServices();
+          const forum = getForumServices();
           const query = c.req.valid('query');
+          // Resolve the OPTIONAL viewer once: the room read bar and the
+          // WS-J.1.2 comment hide set both key off it. Anonymous callers are
+          // always served (never rejected) — userId stays null on any failure.
+          const identity = getIdentityServices();
+          const token = readSessionToken(c.req.header('cookie'));
+          let userId: string | null = null;
+          if (token) {
+            try {
+              userId = (await validateSession(identity.sessions, token))?.record.user_id ?? null;
+            } catch {
+              userId = null;
+            }
+          }
           // WS-Q.2.5b — a room-scoped query must pass the room read bar first
           // (existence is tier one; CONTENT search is tier two → 404 otherwise).
           if (query.room !== undefined) {
-            const forum = getForumServices();
-            const identity = getIdentityServices();
-            const token = readSessionToken(c.req.header('cookie'));
-            let userId: string | null = null;
-            if (token) {
-              try {
-                userId = (await validateSession(identity.sessions, token))?.record.user_id ?? null;
-              } catch {
-                userId = null;
-              }
-            }
             const room = await forum.rooms.getById(query.room);
             if (room === null || !(await roomContentVisibleToUser(forum, room, userId))) {
               return c.json(deny('not_found', 'Resource not found'), 404);
             }
           }
-          const result = await ingestion.searchIndex.search(query);
+          // WS-J.1.2 — a blocked∪muted author's comments never surface for
+          // this viewer: the SAME hide set the comment read path enforces
+          // (viewerHideSet + visibleRows), so search cannot resurface what
+          // the destination surface hides.
+          const hide = await viewerHideSet({ forum, ingestion }, userId);
+          const result = await ingestion.searchIndex.search(
+            query,
+            hide !== undefined ? { hiddenAuthorIds: hide } : undefined,
+          );
           ingestion.metrics.increment('search.requests');
           return c.json(
             searchResponseSchema.parse({ items: result.items, nextCursor: result.nextCursor }),
