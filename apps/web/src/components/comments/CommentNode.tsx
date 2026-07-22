@@ -11,7 +11,11 @@
 // Meta is a single line, and actions are inline text links rather than chunky
 // buttons.  When a thread continues past the view's depth budget the node links
 // into the dedicated page re-rooted at that comment instead of nesting further.
-import { type CommentItem as CommentItemType, resolveLegacyBareCitations } from '@licio/shared';
+import {
+  type CommentItem as CommentItemType,
+  type ContributionDisputeStatus,
+  resolveLegacyBareCitations,
+} from '@licio/shared';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
@@ -68,6 +72,81 @@ function ContinueThreadLink({
   );
 }
 
+/**
+ * A story-target correction challenges the WHOLE story (the thread's parent),
+ * not a comment, so it is a ROOT post rather than a nested reply.  Its callout
+ * denotes the story-level challenge and opens the debate in one click, and its
+ * tone tracks the challenge's ACTUAL standing (server-derived — never inferred
+ * from the correction's own status alone):
+ *   • ACTIVE (live, or prevailed → story `incorrect`, `story_challenge_active`):
+ *     the story is challenged now → prominent warning "Challenges this story",
+ *     pinned to the top of the section;
+ *   • RULED AGAINST (the correction is `incorrect`): a settled failure —
+ *     "did not hold" (neutral); it is sunk to the bottom;
+ *   • otherwise SETTLED (inconclusive/withdrawn — no longer the active
+ *     challenge): a neutral "closed" callout, never a live-challenge warning.
+ * Falls back to a non-interactive note when no arena resolved (graceful).
+ */
+function StoryChallengeCallout({
+  excerpt,
+  debateId,
+  active,
+  disputeStatus,
+  onOpen,
+}: {
+  excerpt: string | null;
+  debateId: string | null;
+  active: boolean;
+  disputeStatus: ContributionDisputeStatus;
+  onOpen: (debateId: string) => void;
+}): React.ReactElement {
+  const label = active
+    ? 'Challenges this story'
+    : disputeStatus === 'incorrect'
+      ? 'This challenge to the story did not hold'
+      : 'This challenge to the story is closed';
+  const calloutClass = cn(
+    'flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-2.5 py-1.5 text-left text-sm',
+    active
+      ? 'border-warning/40 bg-warning-soft text-warning-on-soft'
+      : 'border-line bg-surface text-ink-muted',
+  );
+  const body = (
+    <>
+      <Icon name="flag" className="size-3.5 shrink-0" aria-hidden />
+      <span className="font-semibold">{label}</span>
+      {active && excerpt !== null ? <span className="opacity-90">— “{excerpt}”</span> : null}
+      {debateId !== null ? (
+        <span className="ml-auto inline-flex items-center gap-1 font-medium">
+          View debate
+          <Icon name="chevron-right" className="size-3.5" aria-hidden />
+        </span>
+      ) : null}
+    </>
+  );
+  if (debateId === null) {
+    return (
+      <div role="note" className={calloutClass}>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      onClick={() => onOpen(debateId)}
+      className={cn(
+        calloutClass,
+        'transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+        active ? 'hover:border-warning/70' : 'hover:border-line-strong',
+      )}
+    >
+      {body}
+    </button>
+  );
+}
+
 export function CommentNode({
   storyId,
   comment,
@@ -105,6 +184,44 @@ export function CommentNode({
       className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}
     >
       <CommentHeader comment={comment} />
+      {/* WS-T — a correction always denotes WHAT it challenges and links to its
+          debate arena (live or resolved), so it is never a floating claim:
+          • a COMMENT-target correction threads directly UNDER the comment it
+            corrects (server-derived parent), so its placement IS the denotation;
+            a muted line adds the debate link.
+          • a STORY-target correction challenges the whole story (the thread's
+            parent) and is a ROOT post, so it carries a prominent, warning-toned
+            callout that opens the debate in one click. */}
+      {comment.type === 'correction' ? (
+        comment.metadata.target_story_id ? (
+          <StoryChallengeCallout
+            excerpt={comment.metadata.target_text_excerpt ?? null}
+            debateId={comment.metadata.debate_arena_id ?? null}
+            active={comment.story_challenge_active ?? false}
+            disputeStatus={comment.dispute_status}
+            onOpen={openDebate}
+          />
+        ) : (
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm text-ink-muted">
+            <Icon name="pencil" className="size-3.5 shrink-0" aria-hidden />
+            <span>Correcting the comment above</span>
+            {comment.metadata.debate_arena_id ? (
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                className={commentActionClass}
+                onClick={() => {
+                  const arenaId = comment.metadata.debate_arena_id;
+                  if (arenaId) openDebate(arenaId);
+                }}
+              >
+                <Icon name="chevron-right" className="size-3.5" aria-hidden />
+                View debate
+              </button>
+            ) : null}
+          </p>
+        )
+      ) : null}
       {comment.body.length > 0 ? (
         <div className={disputed ? 'opacity-75' : undefined}>
           <UgcBody markdown={comment.body} compact />

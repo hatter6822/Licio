@@ -291,6 +291,12 @@ export const contributionPublicSchema = z
     dispute_status: contributionDisputeStatusSchema.default('none'),
     /** The open debate arena challenging this contribution, if any. */
     active_debate_id: uuidSchema.nullable().default(null),
+    /** WS-T — true only for a STORY-target correction that is the story's
+     *  CURRENT challenge: live (arena open) or prevailed (story `incorrect`).
+     *  Absent/false for a comment, a non-challenge, or a settled
+     *  inconclusive/withdrawn story challenge, so the UI renders those as a
+     *  closed challenge rather than an active one. */
+    story_challenge_active: z.boolean().optional(),
     edited: z.boolean(),
     created_at: isoTimestampSchema,
     updated_at: isoTimestampSchema,

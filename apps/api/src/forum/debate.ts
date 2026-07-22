@@ -845,6 +845,15 @@ export async function finalizeDebate(
   } else if (arena.targetType === 'story') {
     await deps.setStoryDispute(arena.storyId, resolvedStatus);
   }
+  // A challenge the adjudicator RULED AGAINST (`upheld` — the incumbent
+  // prevailed) is a false correction: tag the CHALLENGER `incorrect` so it takes
+  // the same visible-but-sunk demotion a target proven wrong does (the comment
+  // section sinks it to the bottom). Applies to BOTH story- and comment-target
+  // challenges. `corrected`/`inconclusive` — and the concession/withdrawal
+  // paths, which never reach finalize — leave the challenger untouched.
+  if (arena.verdict === 'upheld') {
+    await deps.contributions.setDisputeStatus(arena.challengerContributionId, 'incorrect');
+  }
   const updated = await deps.debates.setState(debateId, 'resolved', resolvedAt);
   if (updated === null) return null;
   deps.log('forum.debate_resolved', {

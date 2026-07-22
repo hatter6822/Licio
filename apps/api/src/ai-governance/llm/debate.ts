@@ -122,6 +122,24 @@ export function buildDebateSystemPrompt(room?: DebateRoomConditioning): string {
   return sections.join('\n\n');
 }
 
+/**
+ * Frame the USER-CONTROLLED blocks (the locked content + the rebuttal) so no
+ * line can be mistaken for a structural marker — `<position …>`, `</position>`,
+ * `content (…)`, `rebuttal:`, `- url:`, `rebuts_opponent:`.  Each line is
+ * indented, which the exact/prefix line matches a line parser uses never
+ * satisfy, so a correction/rebuttal body containing `</position>` + a forged
+ * `<position …>` header can no longer close the real side and inject a fake
+ * one (structural prompt-injection hardening; the DEV simulator's line parser
+ * was the concrete victim).  The indent is leading whitespace, so it adds no
+ * substance tokens and reads as a quoted block to a model.
+ */
+function frameUserBlock(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n');
+}
+
 function sideBlock(name: 'incumbent' | 'challenger', side: DebateJudgeSideInput): string {
   const sources = side.sources.map(
     (s) =>
@@ -133,9 +151,9 @@ function sideBlock(name: 'incumbent' | 'challenger', side: DebateJudgeSideInput)
     `sources (${side.sources.length}):`,
     ...(sources.length > 0 ? sources : ['(none)']),
     'content (the locked material under debate):',
-    side.content.length > 0 ? side.content.slice(0, CONTENT_MAX_CHARS) : '(none)',
+    side.content.length > 0 ? frameUserBlock(side.content.slice(0, CONTENT_MAX_CHARS)) : '(none)',
     'rebuttal:',
-    side.summary.length > 0 ? side.summary.slice(0, SUMMARY_MAX_CHARS) : '(none)',
+    side.summary.length > 0 ? frameUserBlock(side.summary.slice(0, SUMMARY_MAX_CHARS)) : '(none)',
     '</position>',
   ].join('\n');
 }

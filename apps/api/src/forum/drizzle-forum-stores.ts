@@ -76,9 +76,18 @@ function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 
-// WS-T: the section sink key (`incorrect` = 1, else 0).  `incorrect` comments
-// sort AFTER everything else so a debate's loser stays visible-but-sunk.
-const SINK_EXPR = sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 1 else 0 end)`;
+// WS-T: the section rank key (0 = pinned-top, 1 = normal, 2 = sunk).  Mirrors
+// `sectionRankOf` in the in-memory adapter EXACTLY: an `incorrect` row sinks to
+// the bottom (a debate's loser stays visible-but-sunk); the ONE `pinnedCorrectionId`
+// (the story's live/prevailed challenger) pins to the top.  The `incorrect`
+// branch is checked first (defensive — a pinned challenger is never `incorrect`).
+function sectionRankExpr(pinnedCorrectionId: string | null): SQL {
+  const pinBranch: SQL =
+    pinnedCorrectionId !== null
+      ? sql`when ${contributionsTable.contributionId} = ${pinnedCorrectionId} then 0 `
+      : sql``;
+  return sql`(case when ${contributionsTable.disputeStatus} = 'incorrect' then 2 ${pinBranch}else 1 end)`;
+}
 
 // WS-T: a SOURCED root — a comment carrying ≥1 citation.  Mirrors `isSourcedRow`
 // in the in-memory adapter exactly.
@@ -88,27 +97,36 @@ const SOURCED_EXPR = sql`(${contributionsTable.type} = 'comment' and coalesce(js
 // corrections — a correction always carries ≥ 1 citation by schema).
 const CITED_EXPR = sql`(coalesce(jsonb_array_length(${contributionsTable.citations}), 0) > 0)`;
 
-/** Composite keyset over (sink, created_at, id): rows strictly after `after`.
- *  Mixed directions (sink asc, chronological per order) can't be a single
- *  row-value tuple, so the cursor decomposes into sink-then-chronological. */
-function sinkKeyset(after: CreatedAtCursor, order: 'newest' | 'oldest' | undefined): SQL {
-  const cs = after.disputeSink ?? 0;
+/** Composite keyset over (section rank, created_at, id): rows strictly after
+ *  `after`.  Mixed directions (rank asc, chronological per order) can't be a
+ *  single row-value tuple, so the cursor decomposes into rank-then-chronological. */
+function sectionKeyset(
+  after: CreatedAtCursor,
+  order: 'newest' | 'oldest' | undefined,
+  pinnedCorrectionId: string | null,
+): SQL {
+  const cs = after.sectionRank ?? 1;
+  const rank = sectionRankExpr(pinnedCorrectionId);
   const chrono =
     order === 'newest'
       ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${after.createdAt}::timestamptz, ${after.id}::uuid)`
       : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${after.createdAt}::timestamptz, ${after.id}::uuid)`;
-  return sql`(${SINK_EXPR} > ${cs} or (${SINK_EXPR} = ${cs} and ${chrono}))`;
+  return sql`(${rank} > ${cs} or (${rank} = ${cs} and ${chrono}))`;
 }
 
-/** Section ORDER BY: sink asc (incorrect last), then chronological per order. */
-function sinkOrderBy(order: 'newest' | 'oldest' | undefined): SQL[] {
+/** Section ORDER BY: rank asc (pin first, incorrect last), then chronological
+ *  per order. */
+function sectionOrderBy(
+  order: 'newest' | 'oldest' | undefined,
+  pinnedCorrectionId: string | null,
+): SQL[] {
   const created =
     order === 'newest' ? desc(contributionsTable.createdAt) : asc(contributionsTable.createdAt);
   const id =
     order === 'newest'
       ? desc(contributionsTable.contributionId)
       : asc(contributionsTable.contributionId);
-  return [sql`${SINK_EXPR} asc`, created, id];
+  return [sql`${sectionRankExpr(pinnedCorrectionId)} asc`, created, id];
 }
 
 // ---------------------------------------------------------------------------
@@ -216,8 +234,10 @@ export class DrizzleContributionStore implements ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]> {
+    const newest = opts.order === 'newest';
     const conditions = [eq(contributionsTable.threadId, threadId)];
     if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
     if (opts.states) {
@@ -227,14 +247,19 @@ export class DrizzleContributionStore implements ContributionStore {
       // ISO string + explicit cast — a raw Date in a sql`` fragment is not
       // serializable by the postgres-js driver (gated-test-proven).
       conditions.push(
-        sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
+        newest
+          ? sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`
+          : sql`(${contributionsTable.createdAt}, ${contributionsTable.contributionId}) > (${opts.after.createdAt}::timestamptz, ${opts.after.id}::uuid)`,
       );
     }
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(asc(contributionsTable.createdAt), asc(contributionsTable.contributionId))
+      .orderBy(
+        newest ? desc(contributionsTable.createdAt) : asc(contributionsTable.createdAt),
+        newest ? desc(contributionsTable.contributionId) : asc(contributionsTable.contributionId),
+      )
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -268,6 +293,7 @@ export class DrizzleContributionStore implements ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]> {
     const conditions = [
@@ -277,16 +303,17 @@ export class DrizzleContributionStore implements ContributionStore {
     if (opts.types) conditions.push(inArray(contributionsTable.type, [...opts.types]));
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
     if (opts.sourced === true) conditions.push(SOURCED_EXPR);
-    // WS-T: `incorrect` roots sink to the bottom of the section — the composite
-    // keyset is (sink, created_at, id); the (thread, dispute_status, created) index
-    // supports it.  Mixed directions (sink asc, chronological per order) cannot be
-    // one row-value tuple, so the cursor decomposes into sink-then-chronological.
-    if (opts.after) conditions.push(sinkKeyset(opts.after, opts.order));
+    // WS-T: pinned story challenge first, `incorrect` roots sunk last — the
+    // composite keyset is (section rank, created_at, id).  Mixed directions
+    // (rank asc, chronological per order) cannot be one row-value tuple, so the
+    // cursor decomposes into rank-then-chronological.
+    const pin = opts.pinnedCorrectionId ?? null;
+    if (opts.after) conditions.push(sectionKeyset(opts.after, opts.order, pin));
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(...sinkOrderBy(opts.order))
+      .orderBy(...sectionOrderBy(opts.order, pin))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -302,14 +329,15 @@ export class DrizzleContributionStore implements ContributionStore {
   ): Promise<ContributionRecord[]> {
     const conditions = [eq(contributionsTable.parentContributionId, parentContributionId)];
     if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
-    // A nested `incorrect` reply sinks among its siblings too (default newest).
+    // A nested `incorrect` reply sinks among its siblings too (default newest);
+    // nested replies never pin (a story correction is a root), so pass `false`.
     const order = opts.order ?? 'newest';
-    if (opts.after) conditions.push(sinkKeyset(opts.after, order));
+    if (opts.after) conditions.push(sectionKeyset(opts.after, order, null));
     const rows = await this.#db
       .select()
       .from(contributionsTable)
       .where(and(...conditions))
-      .orderBy(...sinkOrderBy(order))
+      .orderBy(...sectionOrderBy(order, null))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -333,19 +361,6 @@ export class DrizzleContributionStore implements ContributionStore {
     return counts;
   }
 
-  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
-    const rows = await this.#db
-      .select({ value: count() })
-      .from(contributionsTable)
-      .where(
-        and(
-          eq(contributionsTable.threadId, threadId),
-          eq(contributionsTable.disputeStatus, status),
-        ),
-      );
-    return rows[0]?.value ?? 0;
-  }
-
   async countSourced(
     threadId: string,
     states: readonly ContributionModerationState[],
@@ -366,18 +381,21 @@ export class DrizzleContributionStore implements ContributionStore {
   async cardSignalCounts(threadIds: readonly string[]): Promise<Map<string, ThreadSignalCounts>> {
     if (threadIds.length === 0) return new Map();
     // One conditional-aggregation GROUP BY for the whole feed page — the batch
-    // replacement for the per-story countSourced/countByDisputeStatus round
-    // trips.  Published-only, mirroring the in-memory adapter exactly.
+    // tally the single-story overview reads too.  Published-only, mirroring the
+    // in-memory adapter exactly.  The validated/incorrect tallies count the
+    // challenged COMMENTS (`type = 'comment'`), never the CORRECTION rows: a
+    // rejected challenge is a `correction` marked `incorrect` (sunk in its
+    // section) but is not a comment a correction prevailed against.
     const rows = await this.#db
       .select({
         threadId: contributionsTable.threadId,
         sourced: sql`count(*) filter (where ${SOURCED_EXPR})`.mapWith(Number),
         validated:
-          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'validated')`.mapWith(
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'validated' and ${contributionsTable.type} = 'comment')`.mapWith(
             Number,
           ),
         incorrect:
-          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'incorrect')`.mapWith(
+          sql`count(*) filter (where ${contributionsTable.disputeStatus} = 'incorrect' and ${contributionsTable.type} = 'comment')`.mapWith(
             Number,
           ),
       })
@@ -517,6 +535,17 @@ export class DrizzleContributionStore implements ContributionStore {
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {
+    // Merge the key into the jsonb metadata (`||`), preserving every other field.
+    await this.#db
+      .update(contributionsTable)
+      .set({
+        metadata: sql`${contributionsTable.metadata} || ${JSON.stringify({ debate_arena_id: debateArenaId })}::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(eq(contributionsTable.contributionId, contributionId));
   }
 
   async purgeForRollback(contributionId: string): Promise<void> {

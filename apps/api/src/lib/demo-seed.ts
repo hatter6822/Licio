@@ -19,8 +19,6 @@ import {
   attentionAggregateEventSchema,
   type ContributionMetadata,
   type ContributionType,
-  DEBATE_EDIT_WINDOW_MS,
-  DEBATE_LIVE_WINDOW_MS,
   defaultPersonalizationSettings,
   defaultPrivacySettings,
   type LocationScope,
@@ -33,6 +31,13 @@ import { complianceServicesConfigured, getComplianceServices } from '../complian
 import { attentionPurgeAfterIso } from '../events/privacy-gate.js';
 import type { EventPipelineServices } from '../events/services.js';
 import type { NewStoredEvent } from '../events/stores.js';
+import {
+  finalizeDebate,
+  judgeDebateArena,
+  maybeEnterDebate,
+  postDebatePosition,
+} from '../forum/debate.js';
+import { buildDebateDeps } from '../forum/debate-scheduler.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import { AlwaysGrantJobLeaseStore, type JobLeaseStore } from '../identity/job-lease.js';
@@ -1335,9 +1340,11 @@ export async function seedForumDemoData(
       citations: [{ url: 'https://example.org/grid/normalized-series' }],
     },
     {
+      // A STORY-target correction is a ROOT contribution (it corrects the brief
+      // itself, not a comment), exactly as the real create path threads it — so
+      // it is NOT nested under a comment the way a comment-target correction is.
       type: 'correction',
       author: maya,
-      parent: 1,
       body: 'The first peak was Tuesday, not Monday — the labels in the chart are off by a day.',
       citations: [{ url: 'https://example.org/grid/raw-readings', title: 'Raw interval readings' }],
       // Formally targets the STORY (the brief's own chart) — the WS-T dispute
@@ -1652,29 +1659,58 @@ export async function seedForumDemoData(
   ]);
 
   // -------------------------------------------------------------------------
-  // WS-T dispute showcase: the §5.6 corrections tally + dispute badges render
-  // from real adjudication state, so seed each posture through the same stores
-  // the debate lifecycle writes (the tags below are exactly what
-  // maybeEnterDebate / finalizeDebate would have left behind):
-  //   • S(9)  — the chart-label correction challenges the STORY: a LIVE
-  //             story-target arena ⇒ the story badge reads "Challenged".
-  //   • S(10) — a cited correction challenges a comment's confounder claim:
-  //             a LIVE comment arena ⇒ the card tally shows an hourglass.
-  //   • S(11) — the certified-totals cross-check was challenged and UPHELD ⇒
-  //             a "Validated" comment (the ✓ tally).
-  //   • S(4)  — a correction PREVAILED against the national-spec claim ⇒ an
-  //             "Incorrect" comment, kept visible but sunk (the ✗ tally).
-  // Live-arena deadlines are freshly stamped, so the dev debate scheduler
-  // treats them as newly opened rather than instantly due.
+  // WS-T dispute showcase: four sourced corrections, each driven through the
+  // SAME machinery a live challenge runs — the correction opens a REAL arena
+  // (`maybeEnterDebate`), the incumbent defends or forfeits, and the terminal
+  // two are decided by the REAL governed adjudicator (`judgeDebateArena` → the
+  // local LLM lane, or its deterministic MLP fallback when no lane is serving)
+  // and finalized (`finalizeDebate`).  NOTHING here hand-writes an arena, a
+  // verdict, or a dispute tag: the source disparity below steers a deterministic
+  // outcome under the adjudicator's content-structural rubric, and finalize
+  // applies whatever tag the real verdict earns — exactly as production does.
+  // The four postures the §5.6 tally + dispute badges then render:
+  //   • S(9)  — the chart-label correction challenges the STORY ⇒ a LIVE
+  //             story-target arena; the story badge reads "Challenged".
+  //   • S(10) — a cited correction challenges a comment's confounder claim ⇒
+  //             a LIVE comment arena; the card tally shows an hourglass.
+  //   • S(11) — the incumbent DEFENDS the certified-totals cross-check with the
+  //             stronger sourced case ⇒ the adjudicator UPHOLDS it: a
+  //             "Validated" comment (the ✓ tally).
+  //   • S(4)  — the incumbent FORFEITS the national-spec claim ⇒ the
+  //             better-sourced challenger prevails: an "Incorrect" comment, kept
+  //             visible but sunk (the ✗ tally).
   // -------------------------------------------------------------------------
+  const debateDeps = buildDebateDeps(forum, ingestion);
+
+  // Insert one published sourced correction (the challenger's underlying
+  // material).  The arena id is pre-minted and stamped into the correction's
+  // metadata so the thread reader links the correction to the arena it opened —
+  // the same `debate_arena_id` back-reference the real create path writes once
+  // the arena opens.
   const seedCorrection = async (spec: {
     n: number;
     threadId: string;
     author: string;
     body: string;
     citations: Cite[];
-    metadata: ContributionMetadata;
+    target: { comment: string } | { story: string };
+    arenaId: string;
   }): Promise<string> => {
+    const metadata: ContributionMetadata =
+      'comment' in spec.target
+        ? { target_contribution_id: spec.target.comment, debate_arena_id: spec.arenaId }
+        : { target_story_id: spec.target.story, debate_arena_id: spec.arenaId };
+    // A comment-target correction threads UNDER the comment it corrects (it is a
+    // child of its target, exactly as the real create path now derives it); a
+    // story-target correction is a root contribution.
+    let parentContributionId: string | null = null;
+    let path: string[] = [];
+    if ('comment' in spec.target) {
+      const target = await forum.contributions.getById(spec.target.comment);
+      if (target === null) throw new Error(`seed correction target ${spec.target.comment} missing`);
+      parentContributionId = target.contributionId;
+      path = [...target.path, target.contributionId];
+    }
     await forum.contributions.insert({
       contributionId: C(spec.n),
       threadId: spec.threadId,
@@ -1682,90 +1718,74 @@ export async function seedForumDemoData(
       type: 'correction',
       body: spec.body,
       citations: spec.citations,
-      metadata: spec.metadata,
+      metadata,
       targetClaimId: null,
-      parentContributionId: null,
+      parentContributionId,
       clientDraftId: `seed-${C(spec.n)}`,
-      path: [],
+      path,
       moderationState: 'published',
     });
     return C(spec.n);
   };
-  const openSeedArena = async (spec: {
-    debateId: string;
-    storyId: string;
-    threadId: string;
-    targetContributionId: string | null;
-    challengerContributionId: string;
-    challengerUserId: string;
-    challengerSummary: string;
-    challengerCitations: Cite[];
-  }): Promise<void> => {
-    const story = await ingestion.stories.getById(spec.storyId);
-    const openedAt = new Date(forum.now());
-    const after = (ms: number): string => new Date(openedAt.getTime() + ms).toISOString();
-    const incumbentUserId =
-      spec.targetContributionId === null
-        ? (story?.submittedBy ?? null)
-        : ((await forum.contributions.getById(spec.targetContributionId))?.userId ?? null);
-    await forum.debates.open({
-      debateId: spec.debateId,
-      storyId: spec.storyId,
-      threadId: spec.threadId,
-      roomId: story?.roomId ?? null,
-      targetType: spec.targetContributionId === null ? 'story' : 'comment',
-      targetContributionId: spec.targetContributionId,
-      challengerContributionId: spec.challengerContributionId,
-      incumbentUserId,
-      challengerUserId: spec.challengerUserId,
-      state: 'open',
-      positions: {
-        incumbent: { summary: '', citations: [], updatedAt: null },
-        challenger: {
-          summary: spec.challengerSummary,
-          citations: spec.challengerCitations,
-          updatedAt: openedAt.toISOString(),
-        },
+
+  // Open the REAL arena for an already-inserted correction, through the SAME
+  // `maybeEnterDebate` path a live correction fires: the incumbent (the target's
+  // author), the edit/resolve windows, and the target's `under_debate` tag are
+  // exactly what production writes.
+  const openArena = async (
+    correctionId: string,
+    arenaId: string,
+    storyId: string,
+  ): Promise<void> => {
+    const correction = await forum.contributions.getById(correctionId);
+    if (correction === null) throw new Error(`seed correction ${correctionId} missing`);
+    const story = await ingestion.stories.getById(storyId);
+    const arena = await maybeEnterDebate(
+      debateDeps,
+      {
+        contributionId: correction.contributionId,
+        threadId: correction.threadId,
+        storyId,
+        roomId: story?.roomId ?? null,
+        userId: correction.userId,
+        body: correction.body,
+        citations: correction.citations,
+        metadata: correction.metadata,
       },
-      editDeadlineAt: after(DEBATE_EDIT_WINDOW_MS),
-      resolveDueAt: after(DEBATE_LIVE_WINDOW_MS),
-      lockedAt: null,
-      lockedContent: null,
-      incumbentLastActiveAt: openedAt.toISOString(),
-      challengerLastActiveAt: openedAt.toISOString(),
-      verdict: null,
-      winner: null,
-      decidedBy: null,
-      rationale: null,
-      confidence: null,
-      aiOutputId: null,
-      verdictAt: null,
-      overrideDeadlineAt: null,
-      overriddenByUserId: null,
-      overrideReason: null,
-      resolvedAt: null,
-    });
+      arenaId,
+    );
+    if (arena === null) throw new Error(`seed arena ${arenaId} did not open`);
   };
 
-  // S(9): the existing chart-label correction C(142) argues in a live
-  // story-target arena — the story itself is "Challenged".
-  await openSeedArena({
-    debateId: DEBATE(1),
-    storyId: S(9),
-    threadId: T(9),
-    targetContributionId: null,
-    challengerContributionId: C(142),
-    challengerUserId: maya,
-    challengerSummary:
-      'The raw interval readings put the first peak on Tuesday; the chart labels are off by a day.',
-    challengerCitations: [
-      { url: 'https://example.org/grid/raw-readings', title: 'Raw interval readings' },
-    ],
-  });
-  await ingestion.stories.update(S(9), { disputeStatus: 'under_debate' });
+  // Resolve an open arena through the REAL adjudicator: post the incumbent's
+  // rebuttal (when the author defends), then run the genuine judge → finalize
+  // path.  The verdict is whatever the governed adjudicator returns over the
+  // sourced material — never hand-written.  `judgeDebateArena` locks the open
+  // arena itself; `finalizeDebate` applies the terminal dispute tag.
+  const resolveArena = async (
+    arenaId: string,
+    rebuttal: { incumbentUserId: string; summary: string; citations: Cite[] } | null,
+  ): Promise<void> => {
+    if (rebuttal !== null) {
+      const posted = await postDebatePosition(debateDeps, arenaId, rebuttal.incumbentUserId, {
+        summary: rebuttal.summary,
+        citations: rebuttal.citations,
+      });
+      if (!posted.ok) {
+        throw new Error(`seed rebuttal for ${arenaId} rejected (${posted.reason})`);
+      }
+    }
+    await judgeDebateArena(debateDeps, arenaId);
+    await finalizeDebate(debateDeps, arenaId);
+  };
 
-  // S(10): a live COMMENT arena — the confounder claim C(161) is challenged.
-  const tariffCorrection = await seedCorrection({
+  // S(9): the chart-label correction C(142) (created in the T(9) thread above,
+  // already carrying target_story_id=S(9) + debate_arena_id=DEBATE(1)) opens a
+  // LIVE story-target arena — the story reads "Challenged".
+  await openArena(C(142), DEBATE(1), S(9));
+
+  // S(10): a LIVE comment arena — the confounder claim C(161) is challenged.
+  await seedCorrection({
     n: 380,
     threadId: T(10),
     author: samd,
@@ -1773,25 +1793,15 @@ export async function seedForumDemoData(
     citations: [
       { url: 'https://example.org/climate/neighbor-levy', title: 'Neighboring levy filing' },
     ],
-    metadata: { target_contribution_id: C(161), debate_arena_id: DEBATE(2) },
+    target: { comment: C(161) },
+    arenaId: DEBATE(2),
   });
-  await openSeedArena({
-    debateId: DEBATE(2),
-    storyId: S(10),
-    threadId: T(10),
-    targetContributionId: C(161),
-    challengerContributionId: tariffCorrection,
-    challengerUserId: samd,
-    challengerSummary:
-      'The comparison market is not tariff-free: an equivalent levy took effect the same quarter.',
-    challengerCitations: [
-      { url: 'https://example.org/climate/neighbor-levy', title: 'Neighboring levy filing' },
-    ],
-  });
-  await forum.contributions.setDisputeStatus(C(161), 'under_debate');
+  await openArena(C(380), DEBATE(2), S(10));
 
-  // S(11): a challenge that DID NOT hold — the cross-check C(182) stands as
-  // accurate ("Validated", the terminal tag finalizeDebate writes on upheld).
+  // S(11): the incumbent (C(182)'s author) DEFENDS with the stronger sourced
+  // case (four independent sources vs the challenger's one) — the real
+  // adjudicator upholds the cross-check, so it is tagged "Validated" (challenged
+  // and proven accurate; still re-challengeable on new evidence).
   await seedCorrection({
     n: 381,
     threadId: T(11),
@@ -1800,11 +1810,29 @@ export async function seedForumDemoData(
     citations: [
       { url: 'https://example.org/elections/count-order', title: 'Count-order schedule' },
     ],
-    metadata: { target_contribution_id: C(182) },
+    target: { comment: C(182) },
+    arenaId: DEBATE(3),
   });
-  await forum.contributions.setDisputeStatus(C(182), 'validated');
+  await openArena(C(381), DEBATE(3), S(11));
+  await resolveArena(DEBATE(3), {
+    incumbentUserId: samd, // C(182)'s author defends the cross-check
+    summary:
+      'The certified totals were cross-checked precinct by precinct against three independent registries; the match holds across both early- and late-count precincts, so the sample generalizes.',
+    citations: [
+      {
+        url: 'https://precinct-registry.example/certified/cross-check',
+        title: 'Independent precinct registry',
+      },
+      { url: 'https://county-clerk.example/audit/late-count', title: 'Late-count audit' },
+      {
+        url: 'https://elections-board.example/methodology/certification',
+        title: 'Certification methodology',
+      },
+    ],
+  });
 
-  // S(4): a correction that PREVAILED — the national-spec claim C(102) is
+  // S(4): the incumbent FORFEITS (no rebuttal) — the real adjudicator finds for
+  // the better-sourced challenger, so the national-spec claim C(102) is tagged
   // "Incorrect": kept fully visible, demoted to the bottom of its section.
   await seedCorrection({
     n: 382,
@@ -1812,11 +1840,17 @@ export async function seedForumDemoData(
     author: lena,
     body: 'The adjustment model matches the SUPERSEDED 2019 specification — the current national model added two covariates.',
     citations: [
-      { url: 'https://example.org/standards/readmission-model-v2', title: 'Current model spec' },
+      { url: 'https://standards-board.example/readmission-model/v2', title: 'Current model spec' },
+      {
+        url: 'https://model-registry.example/readmission/changelog',
+        title: 'Model changelog',
+      },
     ],
-    metadata: { target_contribution_id: C(102) },
+    target: { comment: C(102) },
+    arenaId: DEBATE(4),
   });
-  await forum.contributions.setDisputeStatus(C(102), 'incorrect');
+  await openArena(C(382), DEBATE(4), S(4));
+  await resolveArena(DEBATE(4), null); // a true forfeit — the incumbent posts no rebuttal
 
   // MinHash signatures for every seeded story (over the title + excerpt). These
   // are the SAME signatures the WS-F dedup pipeline writes, so the REAL MERI

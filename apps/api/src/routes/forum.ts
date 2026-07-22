@@ -494,12 +494,26 @@ export function createForumRoutes() {
           if (!story || !thread) return c.json(notFound, 404);
           if (!(await threadReadableToUser(bundle, thread, userId))) return c.json(notFound, 404);
           const resolveAuthor = makeAuthorResolver(identity);
-          const [counts, sourcesCount, debatesCount, incorrectCount] = await Promise.all([
+          const [counts, sourcesCount, debatesCount, cardCounts] = await Promise.all([
             bundle.forum.contributions.countByType(thread.threadId, ['published']),
             bundle.forum.contributions.countSourced(thread.threadId, ['published']),
             bundle.forum.debates.countActiveForStory(storyId),
-            bundle.forum.contributions.countByDisputeStatus(thread.threadId, 'incorrect'),
+            // The §5.6 "corrected as incorrect" tally counts challenged COMMENTS
+            // only (not rejected CORRECTION challengers) — the same batched
+            // signal the feed cards use, so the overview and the card agree.
+            bundle.forum.contributions.cardSignalCounts([thread.threadId]),
           ]);
+          const incorrectCount = cardCounts.get(thread.threadId)?.incorrect ?? 0;
+          // WS-T — resolve the story's currently pinnable challenger correction
+          // (the live arena's challenger, or the one that prevailed and made the
+          // story `incorrect`) so ONLY that correction pins to the top; a settled
+          // inconclusive/withdrawn story correction never re-pins. Unrooted view
+          // only (a story correction is a root).
+          const pinnedCorrectionId =
+            root === undefined &&
+            (story.disputeStatus === 'under_debate' || story.disputeStatus === 'incorrect')
+              ? await bundle.forum.debates.pinnedStoryChallenger(storyId)
+              : null;
           const page = await commentPage(bundle, thread.threadId, userId, resolveAuthor, {
             cursor: cursor ?? null,
             order,
@@ -508,6 +522,7 @@ export function createForumRoutes() {
             ...(filter !== undefined && root === undefined ? { filter } : {}),
             depth,
             ...(root !== undefined ? { parentId: root } : {}),
+            pinnedCorrectionId,
             restrictedMedia: story.visibility === 'room_only',
             mintMediaUrl: makeMediaUrlMinter(),
           });

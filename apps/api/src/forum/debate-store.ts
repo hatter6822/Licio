@@ -236,6 +236,18 @@ export interface DebateStore {
   listPastOverrideDeadline(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
   /** Map contribution id → active debate id (for the comment projection). */
   activeDebateIdsForContributions(ids: readonly string[]): Promise<Map<string, string>>;
+  /** Map CORRECTION (challenger) contribution id → the debate id it opened, in
+   *  ANY state (open OR resolved).  The comment projection's back-reference so a
+   *  correction always links to its arena — not only while the arena is live —
+   *  making a resolved debate discoverable from the correction that opened it.
+   *  A correction opens exactly one arena, so the mapping is one-to-one. */
+  debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>>;
+  /** WS-T — the challenger contribution id of the story's CURRENTLY pinnable
+   *  challenge: the arena that is live (non-resolved) OR resolved `corrected`
+   *  (the challenge that made the story `incorrect`).  Null when none — so a
+   *  settled inconclusive/withdrawn story correction never pins.  At most one
+   *  arena qualifies (one live per target; a story is corrected at most once). */
+  pinnedStoryChallenger(storyId: string): Promise<string | null>;
   /** Count active arenas for a story's threads (the overview `debates_count`). */
   countActiveForStory(storyId: string): Promise<number>;
   /** Batched story-card signal: live (non-terminal) COMMENT-target arenas per
@@ -648,6 +660,27 @@ export class InMemoryDebateStore implements DebateStore {
       }
     }
     return out;
+  }
+
+  async debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>> {
+    const wanted = new Set(ids);
+    const out = new Map<string, string>();
+    for (const row of this.#rows.values()) {
+      if (wanted.has(row.challengerContributionId)) {
+        out.set(row.challengerContributionId, row.debateId);
+      }
+    }
+    return out;
+  }
+
+  async pinnedStoryChallenger(storyId: string): Promise<string | null> {
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'story' || row.storyId !== storyId) continue;
+      const live = NON_RESOLVED.has(row.state);
+      const won = row.state === 'resolved' && row.verdict === 'corrected';
+      if (live || won) return row.challengerContributionId;
+    }
+    return null;
   }
 
   async countActiveForStory(storyId: string): Promise<number> {

@@ -324,6 +324,162 @@ describe('CommentSection', () => {
     expect(screen.getByRole('button', { name: 'Correct' })).toBeDisabled();
   });
 
+  it('WS-T — a correction states what it corrects and links to its arena (comment target)', () => {
+    const arenaId = '99999999-9999-4999-8999-999999999999';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The adjustment model matches the superseded 2019 specification.',
+            metadata: {
+              target_contribution_id: '77777777-7777-4777-8777-777777777777',
+              debate_arena_id: arenaId,
+            },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    // A "Correction"-badged post is never a floating claim: it names its target
+    // (a comment-target correction threads under the comment it corrects) and
+    // opens the arena that shows the challenged material + the verdict.
+    expect(screen.getByText('Correcting the comment above')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /view debate/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      to: string;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.to).toBe('.');
+    expect(call.search({})).toEqual({ debate: arenaId });
+  });
+
+  it('WS-T — a story-target correction opens the debate from its prominent story-challenge callout', () => {
+    const arenaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The chart labels are off by a day.',
+            story_challenge_active: true, // live/prevailed → the active challenge
+            metadata: {
+              target_story_id: storyId,
+              debate_arena_id: arenaId,
+              target_text_excerpt: 'Monday evening peak',
+            },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    // A story correction challenges the WHOLE story (a root post), so it carries
+    // a prominent "Challenges this story" callout — not the muted comment line —
+    // that names the challenged passage and opens the arena in one click.
+    expect(screen.getByText('Challenges this story')).toBeInTheDocument();
+    expect(screen.getByText(/Monday evening peak/)).toBeInTheDocument();
+    expect(screen.queryByText('Correcting the story')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /challenges this story/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      to: string;
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.to).toBe('.');
+    expect(call.search({})).toEqual({ debate: arenaId });
+  });
+
+  it('WS-T — an active story-challenge callout with no arena is a non-interactive note (no dead link)', () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The chart labels are off by a day.',
+            story_challenge_active: true,
+            metadata: { target_story_id: storyId }, // no debate_arena_id
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    expect(screen.getByText('Challenges this story')).toBeInTheDocument();
+    // No arena ⇒ a non-interactive note, never a dead button/link.
+    expect(
+      screen.queryByRole('button', { name: /challenges this story|view debate/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('View debate')).not.toBeInTheDocument();
+  });
+
+  it('WS-T — a SETTLED-inconclusive story challenge reads as closed, not an active challenge', () => {
+    const arenaId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The chart labels are off by a day.',
+            // Not the active challenge (story back to none), and not incorrect.
+            story_challenge_active: false,
+            metadata: { target_story_id: storyId, debate_arena_id: arenaId },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    // A finished, inconclusive challenge is NOT presented as a live challenge.
+    expect(screen.getByText('This challenge to the story is closed')).toBeInTheDocument();
+    expect(screen.queryByText('Challenges this story')).not.toBeInTheDocument();
+    // The resolved debate is still openable.
+    fireEvent.click(screen.getByRole('button', { name: /closed/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.search({})).toEqual({ debate: arenaId });
+  });
+
+  it('WS-T — a LOST story challenge (marked incorrect) reads as a settled failure', () => {
+    const arenaId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The chart labels are off by a day.',
+            dispute_status: 'incorrect',
+            metadata: { target_story_id: storyId, debate_arena_id: arenaId },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    // A challenge the adjudicator ruled against reads as a settled failure, not
+    // the active warning callout — but the arena stays viewable.
+    expect(screen.getByText('This challenge to the story did not hold')).toBeInTheDocument();
+    expect(screen.queryByText('Challenges this story')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /did not hold/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.search({})).toEqual({ debate: arenaId });
+    // The header still carries the "Incorrect" dispute badge.
+    expect(screen.getByText('Incorrect')).toBeInTheDocument();
+  });
+
   it('renders loading, error, and empty states without applause affordances', () => {
     queryState = { isLoading: true };
     const { rerender } = renderSection();

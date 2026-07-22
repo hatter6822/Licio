@@ -462,7 +462,8 @@ describe('WS-T debate arena lifecycle', () => {
       after: {
         createdAt: cursorRow?.createdAt ?? '',
         id: cursorRow?.contributionId ?? '',
-        disputeSink: cursorRow?.disputeStatus === 'incorrect' ? 1 : 0,
+        // Section rank without pinning: normal = 1, incorrect (sunk) = 2.
+        sectionRank: cursorRow?.disputeStatus === 'incorrect' ? 2 : 1,
       },
     });
     expect(ids(page2)).toEqual([b]); // the incorrect root, after the clean ones
@@ -509,14 +510,11 @@ describe('WS-T debate arena lifecycle', () => {
     expect(storyDisputes.get(STORY)).toBe('incorrect');
   });
 
-  it('tags an UPHELD target `validated` (challenged and proven accurate)', async () => {
+  it('tags an UPHELD target `validated` and the LOSING challenger `incorrect`', async () => {
     const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
     const debateId = randomUUID();
-    await maybeEnterDebate(
-      deps,
-      correctionInput(await seedCorrection(targetId), targetId),
-      debateId,
-    );
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
     // The judge rules for the INCUMBENT — the challenge does not hold.
     deps.runJudge = async () => ({
       verdict: {
@@ -534,8 +532,11 @@ describe('WS-T debate arena lifecycle', () => {
     expect(judged?.verdict).toBe('upheld');
     clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
     await finalizeDebate(deps, debateId);
-    // Not `incorrect`, not cleared to `none` — proven accurate.
+    // The target is proven accurate (not `incorrect`, not cleared to `none`).
     expect((await contributions.getById(targetId))?.disputeStatus).toBe('validated');
+    // The false challenge is itself marked `incorrect` — it takes the demotion
+    // (sinks to the bottom of the section), symmetric with a target proven wrong.
+    expect((await contributions.getById(correctionId))?.disputeStatus).toBe('incorrect');
   });
 
   it('does NOT tag a SELF-targeted upheld arena `validated` (no boost farming)', async () => {

@@ -11,6 +11,11 @@
 import { handleSchema, type ThreadListResponse, threadListResponseSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../ai-governance/services.js';
+import { buildDebateJudgeRunner } from '../forum/debate-scheduler.js';
 import { userMayPostTopLevel } from '../forum/rooms.js';
 import { createGovernanceService } from '../governance/services.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
@@ -34,6 +39,12 @@ let fx: RankingFixture;
 
 beforeEach(async () => {
   fx = freshRankingServices();
+  // WS-T: wire the REAL governed adjudicator (the guard → MLP floor chain the
+  // production boot wires) so the seeded dispute showcase resolves S11 (upheld →
+  // "Validated") and S4 (corrected → "Incorrect") through the genuine judge —
+  // not the fail-closed inconclusive default of the bare fixture.
+  setAiGovernanceServices(createInMemoryAiGovernanceServices(fx.events));
+  fx.forum.debateJudge = buildDebateJudgeRunner(fx.forum.now);
   await seedForumDemoData(fx.forum, fx.ingestion, fx.identity.store);
   await seedOperationalSignals(fx.events, fx.invariants, fx.identity, fx.ingestion);
 });
@@ -111,8 +122,11 @@ describe('demo seed — the feed shows every card signal', () => {
     expect(items.some((i) => i.sources_count > 0)).toBe(true);
     // S10 — a live comment arena (the hourglass tally).
     expect(byId.get(S(10))?.corrections.active).toBeGreaterThanOrEqual(1);
-    // S11 — a challenged-and-upheld comment (the ✓ tally).
+    // S11 — a challenged-and-upheld COMMENT (the ✓ tally). The rejected
+    // challenger correction is itself marked incorrect + sunk, but it is a
+    // CORRECTION, so it must NOT inflate the "corrected comments" (✗) tally.
     expect(byId.get(S(11))?.corrections.validated).toBeGreaterThanOrEqual(1);
+    expect(byId.get(S(11))?.corrections.incorrect).toBe(0);
     // S4 — a correction prevailed against a comment (the ✗ tally).
     expect(byId.get(S(4))?.corrections.incorrect).toBeGreaterThanOrEqual(1);
     // S9 — the story itself is challenged (the dispute badge, not the tally:

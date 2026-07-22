@@ -12,7 +12,12 @@ import { type CommentItem, type ContributionPublic, isAnimatableImage } from '@l
 import type { IngestionServices } from '../ingestion/services.js';
 import type { MediaUrlMinter } from '../lib/media-urls.js';
 import type { ForumServices } from './services.js';
-import type { ContributionRecord, CreatedAtCursor, UploadRecord } from './stores.js';
+import {
+  type ContributionRecord,
+  type CreatedAtCursor,
+  sectionRankOf,
+  type UploadRecord,
+} from './stores.js';
 import {
   type AuthorResolver,
   toContributionPublic,
@@ -44,6 +49,12 @@ export interface CommentPageOptions {
   /** Focused (rooted) mode: list this comment's direct replies instead of the
    *  thread's top-level roots, and return the comment itself as `anchor`. */
   parentId?: string;
+  /** WS-T — the id of the story's currently pinnable challenger correction (the
+   *  live arena's challenger, or the one that prevailed and made the story
+   *  `incorrect`).  That correction pins to the TOP of the unrooted section;
+   *  null/absent ⇒ no pin. Scoped by identity, so a settled inconclusive/
+   *  withdrawn story correction never pins. */
+  pinnedCorrectionId?: string | null;
   restrictedMedia: boolean;
   mintMediaUrl: MediaUrlMinter;
 }
@@ -58,17 +69,13 @@ export interface CommentPageResult {
 }
 
 /**
- * Map a section filter to `listRoots` options.  The "Sources" view is every
- * SOURCED root (a comment carrying ≥1 citation), matching the client's
- * "Sourced" badge; the store's `sourced` predicate expresses that.
- * "Corrections" stays a plain type filter. */
-function rootFilterOptions(filter: CommentFilter | undefined): {
-  types?: readonly 'correction'[];
-  sourced?: boolean;
-} {
-  if (filter === 'sources') return { sourced: true };
-  if (filter === 'corrections') return { types: ['correction'] };
-  return {};
+ * Map the `listRoots`-backed section filter to store options.  The "Sources"
+ * view is every SOURCED root (a comment carrying ≥1 citation), matching the
+ * client's "Sourced" badge; the store's `sourced` predicate expresses that.
+ * ("Corrections" is NOT here — it enumerates every correction thread-wide via
+ * `listByThread`, since a comment-target correction is no longer a root.) */
+function rootFilterOptions(filter: CommentFilter | undefined): { sourced?: boolean } {
+  return filter === 'sources' ? { sourced: true } : {};
 }
 
 export function commentMediaOf(
@@ -165,6 +172,15 @@ interface ProjectCtx {
   media: ReadonlyMap<string, NonNullable<ContributionPublic['media']>>;
   /** WS-T — contribution id → the open debate arena challenging it (if any). */
   activeDebates: ReadonlyMap<string, string>;
+  /** WS-T — correction contribution id → the arena it OPENED (any state), so the
+   *  correction always resolves its `debate_arena_id` back-reference even after
+   *  the arena resolves and independently of whether the write path persisted it
+   *  onto the stored metadata. */
+  correctionArenas: ReadonlyMap<string, string>;
+  /** WS-T — the story's CURRENT challenger correction id (live or prevailed), so
+   *  its node reports `story_challenge_active`; a settled inconclusive/withdrawn
+   *  story challenge is not this id and renders as closed. Null in focused views. */
+  pinnedCorrectionId: string | null;
 }
 
 async function buildProjectCtx(
@@ -193,12 +209,21 @@ async function buildProjectCtx(
   const disputedIds = rendered
     .filter((record) => record.disputeStatus === 'under_debate')
     .map((record) => record.contributionId);
-  const [childCounts, authorEntries, media, activeDebates] = await Promise.all([
+  // WS-T — the arena each rendered correction opened (any state), so the
+  // correction's `debate_arena_id` back-reference always resolves — including
+  // after the debate resolves, where the target carries no active_debate_id.
+  const correctionIds = rendered
+    .filter((record) => record.type === 'correction')
+    .map((record) => record.contributionId);
+  const [childCounts, authorEntries, media, activeDebates, correctionArenas] = await Promise.all([
     bundle.forum.contributions.childCounts(unique.map((record) => record.contributionId)),
     Promise.all(authorIds.map(async (id) => [id, await resolveAuthor(id)] as const)),
     resolveMedia(bundle, rendered, opts.mintMediaUrl, opts.restrictedMedia),
     disputedIds.length > 0
       ? bundle.forum.debates.activeDebateIdsForContributions(disputedIds)
+      : Promise.resolve(new Map<string, string>()),
+    correctionIds.length > 0
+      ? bundle.forum.debates.debateIdsForCorrections(correctionIds)
       : Promise.resolve(new Map<string, string>()),
   ]);
   return {
@@ -208,6 +233,9 @@ async function buildProjectCtx(
     authors: new Map(authorEntries),
     media,
     activeDebates,
+    correctionArenas,
+    // The pin applies to the unrooted section only (a story correction is a root).
+    pinnedCorrectionId: opts.parentId === undefined ? (opts.pinnedCorrectionId ?? null) : null,
   };
 }
 
@@ -228,8 +256,31 @@ function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {
     ? null
     : (ctx.activeDebates.get(node.record.contributionId) ?? null);
   const withDebate = activeDebateId !== null ? { ...base, active_debate_id: activeDebateId } : base;
+  // WS-T — a correction always carries the `debate_arena_id` of the arena it
+  // opened (live OR resolved), so the client links it to its debate even when
+  // the write path did not persist that back-reference onto the stored metadata.
+  const correctionArenaId =
+    !tombstone && node.record.type === 'correction'
+      ? (node.record.metadata.debate_arena_id ??
+        ctx.correctionArenas.get(node.record.contributionId) ??
+        null)
+      : null;
+  const withArena =
+    correctionArenaId !== null && withDebate.metadata.debate_arena_id == null
+      ? { ...withDebate, metadata: { ...withDebate.metadata, debate_arena_id: correctionArenaId } }
+      : withDebate;
+  // WS-T — a STORY-target correction is the story's ACTIVE challenge only when it
+  // is the pinned challenger (live, or prevailed → story `incorrect`); a settled
+  // inconclusive/withdrawn one is not, so the UI renders it as a closed challenge.
+  const withStanding =
+    !tombstone &&
+    node.record.type === 'correction' &&
+    node.record.metadata.target_story_id !== undefined &&
+    node.record.contributionId === ctx.pinnedCorrectionId
+      ? { ...withArena, story_challenge_active: true }
+      : withArena;
   const media = tombstone ? undefined : ctx.media.get(node.record.contributionId);
-  const head = media ? { ...withDebate, media } : withDebate;
+  const head = media ? { ...withStanding, media } : withStanding;
   const replies = node.children
     .map((child) => projectNode(child, ctx))
     .filter((child): child is CommentItem => child !== null);
@@ -264,9 +315,15 @@ export async function commentPage(
     rootFound,
   });
 
+  // WS-T — the story's currently pinnable challenger correction pins to the TOP
+  // of the section (the caller resolves its identity from the live/prevailed
+  // arena). Only the UNROOTED section pins (a story correction is a root); a
+  // focused (rooted) sub-thread view never lists a story-target root.
+  const pinnedCorrectionId = opts.parentId === undefined ? (opts.pinnedCorrectionId ?? null) : null;
+
   // Keyset position (an unknown / foreign cursor restarts — defensive, never an error).
-  // The cursor row's dispute sink is carried so `incorrect` comments stay pinned to
-  // the bottom of the section across pagination (WS-T).
+  // The cursor row's SECTION RANK is carried so the pinned story challenge stays on
+  // top and `incorrect` rows stay sunk to the bottom across pagination (WS-T).
   let after: CreatedAtCursor | null = null;
   if (opts.cursor !== null) {
     const last = await bundle.forum.contributions.getById(opts.cursor);
@@ -274,7 +331,7 @@ export async function commentPage(
       after = {
         createdAt: last.createdAt,
         id: last.contributionId,
-        disputeSink: last.disputeStatus === 'incorrect' ? 1 : 0,
+        sectionRank: sectionRankOf(last, pinnedCorrectionId),
       };
   }
 
@@ -291,7 +348,6 @@ export async function commentPage(
     anchorRecord = record;
   }
 
-  const rootFilter = rootFilterOptions(opts.filter);
   const rootRecords = anchorRecord
     ? await bundle.forum.contributions.listChildren(anchorRecord.contributionId, {
         states: RENDERABLE_STATES,
@@ -299,19 +355,40 @@ export async function commentPage(
         limit: pageSize + 1,
         order: opts.order,
       })
-    : await bundle.forum.contributions.listRoots(threadId, {
-        ...rootFilter,
-        states: RENDERABLE_STATES,
-        after,
-        limit: pageSize + 1,
-        order: opts.order,
-      });
+    : opts.filter === 'corrections'
+      ? // The "Corrections" view enumerates EVERY correction in the thread. A
+        // comment-target correction now threads UNDER the comment it corrects
+        // (server-derived parent), so root-only enumeration (`listRoots`) would
+        // hide it — list by thread instead so both comment- and story-target
+        // corrections appear, in the requested chronological order. Each is
+        // projected FLAT (depth 0 below), so a correction that itself targets
+        // another correction never appears twice (once listed, once nested).
+        await bundle.forum.contributions.listByThread(threadId, {
+          types: ['correction'],
+          states: RENDERABLE_STATES,
+          after,
+          limit: pageSize + 1,
+          order: opts.order,
+        })
+      : await bundle.forum.contributions.listRoots(threadId, {
+          ...rootFilterOptions(opts.filter),
+          states: RENDERABLE_STATES,
+          after,
+          limit: pageSize + 1,
+          order: opts.order,
+          pinnedCorrectionId,
+        });
 
   const hasMore = rootRecords.length > pageSize;
   const page = rootRecords.slice(0, pageSize);
   const lastFetched = page[page.length - 1];
 
-  const forest = await Promise.all(page.map((record) => fetchRawNode(bundle, record, opts.depth)));
+  // The "Corrections" view lists each correction FLAT (no reply subtree): a
+  // correction that targets ANOTHER correction is a child of it, so materializing
+  // subtrees would render it twice (once listed thread-wide, once nested). The
+  // main + focused views keep their nested reply layers.
+  const forestDepth = opts.filter === 'corrections' ? 0 : opts.depth;
+  const forest = await Promise.all(page.map((record) => fetchRawNode(bundle, record, forestDepth)));
   const allRecords: ContributionRecord[] = [];
   for (const node of forest) collectRecords(node, allRecords);
   if (anchorRecord) allRecords.push(anchorRecord);

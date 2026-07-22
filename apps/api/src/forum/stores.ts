@@ -150,8 +150,11 @@ export interface UploadRecord {
 export interface CreatedAtCursor {
   createdAt: string;
   id: string;
-  /** 0 = non-incorrect (sorts first), 1 = incorrect (pinned last). */
-  disputeSink?: 0 | 1;
+  /** Section rank of the cursor row: 0 = pinned-top (a live/won story
+   *  challenge), 1 = normal, 2 = sunk-bottom (`incorrect`). Carried so the
+   *  composite keyset resumes in the right rank group across pages; reads that
+   *  do not order by rank leave it unset (treated as 1 — normal). */
+  sectionRank?: 0 | 1 | 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +199,8 @@ export interface ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      /** Chronological direction (default `oldest` — ascending). */
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]>;
   /** Top-level comment roots only, keyset-paginated. */
@@ -210,6 +215,10 @@ export interface ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
+      /** WS-T — the id of the story's currently pinnable challenger correction
+       *  (the live arena's challenger, or the one that prevailed): it pins to
+       *  the TOP.  Null/absent ⇒ no pin. */
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]>;
   /** Direct children only.  Defaults to newest-first (the inline reply
@@ -236,8 +245,6 @@ export interface ContributionStore {
     threadId: string,
     states: readonly ContributionModerationState[],
   ): Promise<Partial<Record<ContributionType, number>>>;
-  /** WS-T — count a thread's contributions in the given dispute status. */
-  countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number>;
   /** WS-T — count a thread's SOURCED contributions (comments carrying ≥1
    *  citation) in the given states — the "Sources" overview count. */
   countSourced(threadId: string, states: readonly ContributionModerationState[]): Promise<number>;
@@ -278,6 +285,11 @@ export interface ContributionStore {
     contributionId: string,
     status: ContributionDisputeStatus,
   ): Promise<ContributionRecord | null>;
+  /** WS-T — persist the `debate_arena_id` back-reference onto a correction's
+   *  stored metadata once its arena opens, so EVERY projection path (comment
+   *  page, live SSE replay) serves the "View debate" link, not just the create
+   *  response.  A no-op for an unknown id. */
+  setDebateArena(contributionId: string, debateArenaId: string): Promise<void>;
   /** WS-J.2.6 compensation: HARD-delete a just-created contribution when the
    *  safety intake that should hide it fails.  Reverses the insert — including
    *  the `client_draft_id` dedup mapping — so the client's retry recreates BOTH
@@ -491,11 +503,30 @@ function beforeCursor(row: { createdAt: string }, id: string, cursor: CreatedAtC
   return row.createdAt < cursor.createdAt || (row.createdAt === cursor.createdAt && id < cursor.id);
 }
 
-// --- WS-T: `incorrect` comments sink to the bottom of a section --------------
+// --- WS-T: section ordering — pin story challenges, sink `incorrect` rows -----
 
-/** The dispute sink rank: `incorrect` sorts LAST; everything else first. */
-function disputeSinkOf(record: { disputeStatus: ContributionDisputeStatus }): 0 | 1 {
-  return record.disputeStatus === 'incorrect' ? 1 : 0;
+/**
+ * The section rank of a root/reply within its comment section:
+ *   0 = PINNED to the top, 1 = normal, 2 = SUNK to the bottom.
+ *  • The ONE story-target correction that opened the story's currently pinnable
+ *    challenge — its id is `pinnedCorrectionId` (the live arena's challenger, or
+ *    the challenger that prevailed and made the story `incorrect`) — pins to the
+ *    top, so a reader sees the live/winning challenge first. Identity-scoped by
+ *    design: a settled inconclusive/withdrawn story correction is NOT the
+ *    pinned id, so it keeps its chronological place.
+ *  • Any row the debate found `incorrect` — a target proven wrong, OR a
+ *    challenge the adjudicator RULED AGAINST — sinks to the bottom,
+ *    visible-but-sunk.
+ *  Checked in that order: `incorrect` wins over the pin (a pinned challenger is
+ *  never `incorrect`, but the guard is defensive). Pins apply to ROOTS only;
+ *  pass `pinnedCorrectionId = null` for nested replies. */
+export function sectionRankOf(
+  record: Pick<ContributionRecord, 'disputeStatus' | 'contributionId'>,
+  pinnedCorrectionId: string | null,
+): 0 | 1 | 2 {
+  if (record.disputeStatus === 'incorrect') return 2;
+  if (pinnedCorrectionId !== null && record.contributionId === pinnedCorrectionId) return 0;
+  return 1;
 }
 
 /**
@@ -507,30 +538,34 @@ function isSourcedRow(record: Pick<ContributionRecord, 'type' | 'citations'>): b
 }
 
 /**
- * Section ordering: `incorrect` rows ALWAYS after non-incorrect ones, then the
- * chosen chronological direction WITHIN each sink group (newest → descending,
- * oldest/default → ascending).  Keeps a debate's loser visible-but-sunk.
+ * Section ordering: by section rank (pinned story challenge first, then normal,
+ * then `incorrect` rows sunk to the bottom), then the chosen chronological
+ * direction WITHIN each rank group (newest → descending, oldest/default →
+ * ascending).  Keeps a live/won story challenge on top and a debate's loser
+ * visible-but-sunk.
  */
-function bySinkThenOrder(
+function bySectionThenOrder(
   a: ContributionRecord,
   b: ContributionRecord,
   order: 'newest' | 'oldest' | undefined,
+  pinnedCorrectionId: string | null,
 ): number {
-  const delta = disputeSinkOf(a) - disputeSinkOf(b);
+  const delta = sectionRankOf(a, pinnedCorrectionId) - sectionRankOf(b, pinnedCorrectionId);
   if (delta !== 0) return delta;
   const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
   return order === 'newest' ? -chrono : chrono;
 }
 
-/** Composite keyset: is `row` strictly after the cursor in sink-then-order? */
-function afterSinkCursor(
+/** Composite keyset: is `row` strictly after the cursor in section-then-order? */
+function afterSectionCursor(
   row: ContributionRecord,
   after: CreatedAtCursor,
   order: 'newest' | 'oldest' | undefined,
+  pinnedCorrectionId: string | null,
 ): boolean {
-  const s = disputeSinkOf(row);
-  const cs = after.disputeSink ?? 0;
-  // A row in a LATER sink group is always after the cursor (the whole earlier
+  const s = sectionRankOf(row, pinnedCorrectionId);
+  const cs = after.sectionRank ?? 1;
+  // A row in a LATER rank group is always after the cursor (the whole earlier
   // group precedes it); an earlier group is never after.
   if (s !== cs) return s > cs;
   return order === 'newest'
@@ -599,19 +634,27 @@ export class InMemoryContributionStore implements ContributionStore {
       states?: readonly ContributionModerationState[];
       after?: CreatedAtCursor | null;
       limit: number;
+      order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]> {
     const types = opts.types ? new Set(opts.types) : null;
     const states = opts.states ? new Set(opts.states) : null;
+    const newest = opts.order === 'newest';
     return [...this.#rows.values()]
       .filter(
         (row) =>
           row.threadId === threadId &&
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after || afterCursor(row, row.contributionId, opts.after)),
+          (!opts.after ||
+            (newest
+              ? beforeCursor(row, row.contributionId, opts.after)
+              : afterCursor(row, row.contributionId, opts.after))),
       )
-      .sort((a, b) => byCreatedAtThenId(a, b, a.contributionId, b.contributionId))
+      .sort((a, b) => {
+        const chrono = byCreatedAtThenId(a, b, a.contributionId, b.contributionId);
+        return newest ? -chrono : chrono;
+      })
       .slice(0, opts.limit);
   }
 
@@ -638,10 +681,15 @@ export class InMemoryContributionStore implements ContributionStore {
       after?: CreatedAtCursor | null;
       limit: number;
       order?: 'newest' | 'oldest';
+      /** WS-T — the id of the story's currently pinnable challenger correction
+       *  (the live arena's challenger, or the one that prevailed): it pins to the
+       *  TOP.  Null ⇒ no pin. */
+      pinnedCorrectionId?: string | null;
     },
   ): Promise<ContributionRecord[]> {
     const types = opts.types ? new Set(opts.types) : null;
     const states = opts.states ? new Set(opts.states) : null;
+    const pin = opts.pinnedCorrectionId ?? null;
     const rows = [...this.#rows.values()]
       .filter(
         (row) =>
@@ -650,10 +698,11 @@ export class InMemoryContributionStore implements ContributionStore {
           (types === null || types.has(row.type)) &&
           (states === null || states.has(row.moderationState)) &&
           (opts.sourced !== true || isSourcedRow(row)) &&
-          (!opts.after || afterSinkCursor(row, opts.after, opts.order)),
+          (!opts.after || afterSectionCursor(row, opts.after, opts.order, pin)),
       )
-      // `incorrect` roots sink to the bottom (WS-T), then chronological per order.
-      .sort((a, b) => bySinkThenOrder(a, b, opts.order));
+      // Pinned story challenge first, `incorrect` roots sunk last (WS-T), then
+      // chronological per order.
+      .sort((a, b) => bySectionThenOrder(a, b, opts.order, pin));
     return rows.slice(0, opts.limit);
   }
 
@@ -673,10 +722,12 @@ export class InMemoryContributionStore implements ContributionStore {
         (row) =>
           row.parentContributionId === parentContributionId &&
           (states === null || states.has(row.moderationState)) &&
-          (!opts.after || afterSinkCursor(row, opts.after, order)),
+          // Nested replies never pin (a story correction is a root), so pass
+          // `null`: only the `incorrect` sink applies among siblings.
+          (!opts.after || afterSectionCursor(row, opts.after, order, null)),
       )
       // A nested `incorrect` reply sinks among its siblings too (WS-T).
-      .sort((a, b) => bySinkThenOrder(a, b, order));
+      .sort((a, b) => bySectionThenOrder(a, b, order, null));
     return rows.slice(0, opts.limit);
   }
 
@@ -691,14 +742,6 @@ export class InMemoryContributionStore implements ContributionStore {
       counts[row.type] = (counts[row.type] ?? 0) + 1;
     }
     return counts;
-  }
-
-  async countByDisputeStatus(threadId: string, status: ContributionDisputeStatus): Promise<number> {
-    let count = 0;
-    for (const row of this.#rows.values()) {
-      if (row.threadId === threadId && row.disputeStatus === status) count += 1;
-    }
-    return count;
   }
 
   async countSourced(
@@ -726,8 +769,15 @@ export class InMemoryContributionStore implements ContributionStore {
         counts.set(row.threadId, entry);
       }
       if (isSourcedRow(row)) entry.sourced += 1;
-      if (row.disputeStatus === 'validated') entry.validated += 1;
-      else if (row.disputeStatus === 'incorrect') entry.incorrect += 1;
+      // The §5.6 tally is "COMMENTS challenged and validated / corrected as
+      // incorrect" — the challenged targets, never the CORRECTION rows. A
+      // rejected challenge is a `correction` marked `incorrect` (visible-but-sunk
+      // in its section), but it is not a comment a correction prevailed against,
+      // so it must not inflate this tally.
+      if (row.type === 'comment') {
+        if (row.disputeStatus === 'validated') entry.validated += 1;
+        else if (row.disputeStatus === 'incorrect') entry.incorrect += 1;
+      }
     }
     return counts;
   }
@@ -824,6 +874,13 @@ export class InMemoryContributionStore implements ContributionStore {
     row.disputeStatus = status;
     row.updatedAt = iso(this.#now);
     return row;
+  }
+
+  async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return;
+    row.metadata = { ...row.metadata, debate_arena_id: debateArenaId };
+    row.updatedAt = iso(this.#now);
   }
 
   async purgeForRollback(contributionId: string): Promise<void> {

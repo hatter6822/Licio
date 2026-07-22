@@ -129,6 +129,56 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(target?.disputeStatus).toBe('under_debate');
   });
 
+  it('threads a comment-target correction UNDER the comment it corrects (a child, not a root)', async () => {
+    const root = await createOk(contributionBody('comment', threadId));
+    const reply = await createOk(
+      contributionBody('comment', threadId, { parentId: root.contribution_id }),
+    );
+    // The correction targets a NESTED reply (depth 1); it must thread one level
+    // deeper, directly under the comment it corrects — never at the thread root.
+    const correction = await createOk(
+      contributionBody('correction', threadId, { targetId: reply.contribution_id }),
+    );
+    expect(correction.parent_contribution_id).toBe(reply.contribution_id);
+    expect(correction.depth).toBe(reply.depth + 1);
+    // The correction is served as a child of its target in the comment tree.
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.path.at(-1)).toBe(reply.contribution_id);
+  });
+
+  it('keeps a STORY-target correction at the thread root (no comment parent)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    // A story correction corrects the brief itself, not a comment, so it is a
+    // root contribution — the opposite of a comment-target correction.
+    expect(correction.parent_contribution_id).toBeNull();
+    expect(correction.depth).toBe(0);
+  });
+
+  it('pins a live story-target correction to the TOP of the section (above newer comments)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    // Two ordinary roots first, then the story challenge LAST (the newest root).
+    await createOk(contributionBody('comment', threadId));
+    nowMs += 60_000;
+    await createOk(contributionBody('comment', threadId));
+    nowMs += 60_000;
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    // Default order is OLDEST-first, so the newest correction would sort LAST —
+    // but while the story is under_debate the challenge pins to the very top.
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { contribution_id: string; type: string }[];
+    };
+    expect(body.comments).toHaveLength(3);
+    expect(body.comments[0]?.contribution_id).toBe(correction.contribution_id);
+    expect(body.comments[0]?.type).toBe('correction');
+  });
+
   it('refuses a second correction against a comment already under debate (422)', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
     await createOk(contributionBody('correction', threadId, { targetId: comment.contribution_id }));
@@ -191,6 +241,79 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(corr.status).toBe(200);
   });
 
+  it('the corrections filter enumerates comment-target corrections (now nested), not just roots', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const comment = await createOk(contributionBody('comment', threadId));
+    // A correction targeting the COMMENT (nests under it) and one targeting the STORY (root).
+    const commentCorrection = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    const storyCorrection = await createOk(contributionBody('correction', threadId, { storyId }));
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string; type: string }[] };
+    const ids = new Set(body.comments.map((c) => c.contribution_id));
+    // BOTH appear — the comment-target correction now threads under its target,
+    // so root-only enumeration would have dropped it (regression guard).
+    expect(ids.has(commentCorrection.contribution_id)).toBe(true);
+    expect(ids.has(storyCorrection.contribution_id)).toBe(true);
+    expect(body.comments.every((c) => c.type === 'correction')).toBe(true);
+  });
+
+  it('the corrections filter lists a correction-of-a-correction ONCE (no duplication)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const comment = await createOk(contributionBody('comment', threadId));
+    const c1 = await createOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    // A correction that targets ANOTHER correction — it nests under c1.
+    const c2 = await createOk(
+      contributionBody('correction', threadId, { targetId: c1.contribution_id }),
+    );
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string }[] };
+    const ids = body.comments.map((c) => c.contribution_id);
+    // Both appear EXACTLY once — c2 nests under c1 but is flattened, not rendered
+    // twice (listed thread-wide AND materialized as c1's child).
+    expect(ids.filter((id) => id === c1.contribution_id)).toHaveLength(1);
+    expect(ids.filter((id) => id === c2.contribution_id)).toHaveLength(1);
+  });
+
+  it('the corrections filter honors the requested order (newest first)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const commentA = await createOk(contributionBody('comment', threadId));
+    const commentB = await createOk(contributionBody('comment', threadId));
+    const older = await createOk(
+      contributionBody('correction', threadId, { targetId: commentA.contribution_id }),
+    );
+    nowMs += 60_000; // the second correction is strictly newer
+    const newer = await createOk(
+      contributionBody('correction', threadId, { targetId: commentB.contribution_id }),
+    );
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments?filter=corrections&order=newest`, {
+        headers: { cookie },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { comments: { contribution_id: string }[] };
+    const ids = body.comments.map((c) => c.contribution_id);
+    // Newest-first: the later correction precedes the earlier one.
+    expect(ids.indexOf(newer.contribution_id)).toBeLessThan(ids.indexOf(older.contribution_id));
+  });
+
   it('a story correction opens a story arena, marks the story under_debate, and reads back', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';
@@ -213,6 +336,52 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
       new Request(`http://local/v1/debates/${randomUUID()}`, { headers: { cookie } }),
     );
     expect(missing.status).toBe(404);
+  });
+
+  it('forces a story-target correction to the ROOT even when a parent_contribution_id is sent', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const parent = await createOk(contributionBody('comment', threadId));
+    // The shared schema permits a parent alongside target_story_id — the server
+    // must IGNORE it so the story challenge stays a root (visible in listRoots +
+    // findable by the story-challenge pin).
+    const correction = await createOk({
+      ...contributionBody('correction', threadId, { storyId }),
+      parent_contribution_id: parent.contribution_id,
+    });
+    expect(correction.parent_contribution_id).toBeNull();
+    expect(correction.depth).toBe(0);
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.parentContributionId).toBeNull();
+    expect(stored?.path).toEqual([]);
+  });
+
+  it('marks a LIVE story-target correction story_challenge_active in the section', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { contribution_id: string; story_challenge_active?: boolean }[];
+    };
+    const node = body.comments.find((c) => c.contribution_id === correction.contribution_id);
+    // The live challenger is the story's current challenge ⇒ active.
+    expect(node?.story_challenge_active).toBe(true);
+  });
+
+  it('persists debate_arena_id onto the STORED correction (every projection serves it)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const arenaId = correction.metadata.debate_arena_id;
+    expect(arenaId).toBeDefined();
+    // The back-reference is on the STORED record — not just the create response —
+    // so the comment page AND the live SSE replay both link to the debate.
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.metadata.debate_arena_id).toBe(arenaId);
   });
 
   it('the debate scheduler judges + finalizes a story arena past its deadlines', async () => {

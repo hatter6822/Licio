@@ -594,6 +594,41 @@ export class DrizzleDebateStore implements DebateStore {
     return out;
   }
 
+  async debateIdsForCorrections(ids: readonly string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (ids.length === 0) return out;
+    const rows = await this.#db
+      .select({
+        challengerContributionId: debateArenasTable.challengerContributionId,
+        debateId: debateArenasTable.debateId,
+      })
+      .from(debateArenasTable)
+      .where(inArray(debateArenasTable.challengerContributionId, [...ids]));
+    for (const row of rows) out.set(row.challengerContributionId, row.debateId);
+    return out;
+  }
+
+  async pinnedStoryChallenger(storyId: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ challenger: debateArenasTable.challengerContributionId })
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.targetType, 'story'),
+          eq(debateArenasTable.storyId, storyId),
+          or(
+            inArray(debateArenasTable.state, [...NON_RESOLVED]),
+            and(
+              eq(debateArenasTable.state, 'resolved'),
+              eq(debateArenasTable.verdict, 'corrected'),
+            ),
+          ),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.challenger ?? null;
+  }
+
   async countActiveForStory(storyId: string): Promise<number> {
     const rows = await this.#db
       .select({ value: count() })
