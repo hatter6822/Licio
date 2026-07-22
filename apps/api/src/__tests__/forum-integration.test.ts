@@ -830,6 +830,83 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(await contributions.cardSignalCounts([])).toEqual(new Map());
   });
 
+  it('listRoots section ordering: pins a story-target correction, sinks `incorrect` (Drizzle SQL)', async () => {
+    const stories = new DrizzleStoryStore(db);
+    const orderThreadId = await seedThread(stories);
+    const mk = async (
+      over: Partial<
+        Pick<ContributionRecord, 'type' | 'citations' | 'metadata' | 'moderationState'>
+      > = {},
+    ): Promise<string> => {
+      const outcome = await contributions.insert(
+        contributionInput({ threadId: orderThreadId, ...over }),
+      );
+      if (!outcome.ok) throw new Error('ordering insert failed');
+      return outcome.contribution.contributionId;
+    };
+    await mk(); // normal root a
+    await mk(); // normal root b
+    // A STORY-target correction (its metadata carries target_story_id).
+    const challenge = await mk({
+      type: 'correction',
+      citations: [{ url: 'https://example.org/challenge' }],
+      metadata: { target_story_id: randomUUID() },
+    });
+    const wrong = await mk(); // a root the debate found incorrect
+    await contributions.setDisputeStatus(wrong, 'incorrect');
+
+    // Without pinning: the `incorrect` root sinks to the bottom; the correction
+    // is treated as a normal root (neither pinned nor sunk).
+    const noPin = (
+      await contributions.listRoots(orderThreadId, {
+        states: ['published'],
+        limit: 10,
+        order: 'oldest',
+      })
+    ).map((r) => r.contributionId);
+    expect(noPin[noPin.length - 1]).toBe(wrong); // incorrect sunk last
+    expect(noPin.indexOf(challenge)).toBeGreaterThanOrEqual(0);
+    expect(noPin.indexOf(challenge)).toBeLessThan(noPin.length - 1); // not pinned, not sunk
+
+    // With pinning: the story-target correction pins to the TOP; the `incorrect`
+    // root stays sunk at the bottom.
+    const pinned = (
+      await contributions.listRoots(orderThreadId, {
+        states: ['published'],
+        limit: 10,
+        order: 'oldest',
+        pinStoryChallengers: true,
+      })
+    ).map((r) => r.contributionId);
+    expect(pinned[0]).toBe(challenge); // pinned to the top
+    expect(pinned[pinned.length - 1]).toBe(wrong); // incorrect still sunk
+
+    // The composite keyset resumes in the right rank group across pages.
+    const firstPage = await contributions.listRoots(orderThreadId, {
+      states: ['published'],
+      limit: 2,
+      order: 'oldest',
+      pinStoryChallengers: true,
+    });
+    expect(firstPage[0]?.contributionId).toBe(challenge);
+    const cursor = firstPage[firstPage.length - 1];
+    const secondPage = (
+      await contributions.listRoots(orderThreadId, {
+        states: ['published'],
+        limit: 10,
+        order: 'oldest',
+        pinStoryChallengers: true,
+        after: {
+          createdAt: cursor?.createdAt ?? '',
+          id: cursor?.contributionId ?? '',
+          sectionRank: 1, // the cursor row (a normal root) is rank 1
+        },
+      })
+    ).map((r) => r.contributionId);
+    expect(secondPage).not.toContain(challenge); // the pinned rank-0 row is behind us
+    expect(secondPage[secondPage.length - 1]).toBe(wrong); // incorrect still last
+  });
+
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
     const room = roomInput();
     expect((await roomsStore.insert(room)).ok).toBe(true);
