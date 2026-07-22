@@ -1479,9 +1479,11 @@ reverse:
 #                               # lanes (RDNA tag default; VLLM_ROCM_IMAGE
 #                               # overrides for CDNA). On a 24 GB consumer card
 #                               # override VLLM_ADJUDICATION_MODEL (the 27B
-#                               # default doesn't fit) and re-balance
-#                               # VLLM_*_GPU_FRACTION (0.42/0.50 measured on
-#                               # a 24 GB RX 7900 XTX)
+#                               # default doesn't fit; the bench-selected
+#                               # 24 GB model is Qwen/Qwen3-4B-Instruct-2507,
+#                               # see the GPU-sizing note in §17.7) and
+#                               # re-balance VLLM_*_GPU_FRACTION (0.42/0.50
+#                               # measured on a 24 GB RX 7900 XTX)
 #      pnpm setup:llm --runtime ollama --docker
 #                               # the single-URL ALTERNATIVE: one Ollama serves
 #                               # GGUF builds of both lane models from :11434
@@ -2051,6 +2053,17 @@ Operational rules — Section 16 has the full tuning detail:
   `rocm/vllm` build of the same two lanes (identical protocol, ports,
   verification) — gfx110X image tag by default (Radeon RX 7900 class),
   `VLLM_ROCM_IMAGE` selects the broader rdna tag or the cdna datacenter tags.
+  **24 GB single-card sizing (measured, RX 7900 XTX, `pnpm bench:llm`):** the
+  co-resident pair that fits alongside the guard (fractions 0.42/0.50) is
+  `VLLM_ADJUDICATION_MODEL=Qwen/Qwen3-4B-Instruct-2507` — bench-selected over
+  the alternatives: 0.93 s warm debate verdicts / 0.36 s effective in the
+  4-wide burst / 0.52 s §24.5-clean summaries, correct canonical-fixture
+  direction, non-thinking (no `reasoning_effort` negotiation edge). The
+  official `Qwen/Qwen3-8B-AWQ` also verifies end-to-end (AWQ works on ROCm;
+  3.35 s warm debate — generic int4 kernels) as a raw-capacity alternative;
+  `Qwen3-14B-AWQ` and the 27B default cannot serve the required 8192 context
+  co-resident on 24 GB (measured KV shortfall), and the 27B runs here only as
+  the documented Q4_K_M GGUF via the `llm-ollama` profile (4.84 s warm).
 - **On the Ollama alternative, match the runtime to the platform's fan-out:**
   `OLLAMA_NUM_PARALLEL=4` (debate adjudications fan out 4-wide),
   `OLLAMA_KEEP_ALIVE=-1`, and `OLLAMA_CONTEXT_LENGTH=8192` — the Compose

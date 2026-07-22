@@ -161,7 +161,10 @@ services:
   # reservation. Model defaults are IDENTICAL to
   # the `llm` profile (the reviewed lane pair) — on a 24 GB consumer card the
   # 27B adjudication default does not fit: override VLLM_ADJUDICATION_MODEL
-  # (e.g. Qwen/Qwen3-4B-Instruct-2507) and re-balance the GPU fractions
+  # with the bench-selected Qwen/Qwen3-4B-Instruct-2507 (measured optimal for
+  # this envelope; Qwen/Qwen3-8B-AWQ is the verified alternative, and
+  # 14B-AWQ/27B cannot serve the 8192 context co-resident — see
+  # docs/DEVELOPMENT.md §17.7) and re-balance the GPU fractions
   # (e.g. 0.42 / 0.50, measured on a 24 GB RX 7900 XTX — the guard's 4B bf16
   # weights plus the 8192-context KV cache exceed the 0.25 default's budget).
   vllm-moderation-rocm:
