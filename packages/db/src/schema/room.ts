@@ -22,6 +22,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { tsvector } from './_custom.js';
 import { users } from './user.js';
 
 export const roomTypeEnum = pgEnum('room_type', [
@@ -134,8 +135,22 @@ export const rooms = pgTable(
     migratedToRoomId: text('migrated_to_room_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * WS-F.3.1a generated full-text column (unified public-content search):
+     * name at weight A (the title analogue), description + charter summary at
+     * B. Only PUBLIC `server` rooms are ever served from it — the query-side
+     * predicate, mirrored in the in-memory index (WS-S §23.6). STORED +
+     * GIN-indexed below (migration 0095).
+     */
+    searchTsv: tsvector('search_tsv').generatedAlwaysAs(
+      (): ReturnType<typeof sql> => sql`
+        setweight(to_tsvector('simple', coalesce(name, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(description, '') || ' ' || coalesce(charter_summary, '')), 'B')
+      `,
+    ),
   },
   (t) => [
+    index('rooms_search_gin').using('gin', t.searchTsv),
     uniqueIndex('rooms_type_slug_uq').on(t.roomType, t.slug),
     /** Race-safe duplicate-name detection (the API maps violations to 409). */
     uniqueIndex('rooms_type_name_uq').on(t.roomType, sql`lower(${t.name})`),

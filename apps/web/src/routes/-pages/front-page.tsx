@@ -8,6 +8,7 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
 import { FeedModeSwitcher } from '../../components/feed/FeedModeSwitcher/index.js';
 import { SectionEndpoint } from '../../components/feed/SectionEndpoint/index.js';
+import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { BrandLogo } from '../../components/ui/BrandLogo/index.js';
 import { useT } from '../../i18n/index.js';
@@ -19,13 +20,11 @@ import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
 /**
- * WS-Q.5.4b — front-page framing. The front page shows PUBLIC stories earning
- * the most meaningful, participation-weighted attention — never popularity.
+ * WS-Q.5.4b — the empty-state copy is the front page's only self-description
+ * (the ranked feed speaks for itself; explanatory framing chrome was removed).
  * Deliberately free of any applause vocabulary (no likes/votes/upvotes/karma);
- * the FRONT_PAGE_COPY no-applause test pins this.
+ * the front-page-copy no-applause test pins this.
  */
-export const FRONT_PAGE_FRAMING =
-  'Public stories earning the most meaningful, participation-weighted attention — never by popularity.';
 export const FRONT_PAGE_EMPTY_DESCRIPTION =
   'When stories arrive, the most thoughtfully discussed appear here — ranked by participation-weighted attention, never by popularity.';
 
@@ -92,6 +91,10 @@ export function FrontPage(): React.ReactElement {
       </div>
       <PageScaffold
         title={t('nav.frontPage', 'Front Page')}
+        // The search button stands in for the visible title (the brand mark +
+        // nav state already name this page); the sr-only <h1> keeps the
+        // accessible heading and the WS-B.1.6 focus target — see PageHeader.
+        titleReplacement={<SearchButton />}
         actions={<FeedModeSwitcher value={mode} onValueChange={onModeChange} />}
         query={feedQuery}
         isEmpty={(data) => data.length === 0}
@@ -100,9 +103,6 @@ export function FrontPage(): React.ReactElement {
       >
         {(data) => (
           <ul className="flex flex-col gap-3">
-            <li>
-              <p className="text-ink-muted text-sm">{t('feed.framing', FRONT_PAGE_FRAMING)}</p>
-            </li>
             {data.map((item) => (
               <StoryFeedLink key={item.story_id} item={item} />
             ))}

@@ -616,11 +616,6 @@ export function DebateArenaContent({ debateId }: { debateId: string }): React.Re
     <div className="flex flex-col gap-4">
       <header className="flex flex-col gap-1">
         <p className="text-sm text-ink-muted">
-          {t(
-            'debate.intro',
-            "A sourced correction of a {target}. The room's AI weighs both sides' content and sources — this is not a vote.",
-            { target: arena.target_type },
-          )}{' '}
           {/* Announce lifecycle transitions (poll/stream-driven) to assistive
               tech — the state text changes in place, so it needs a live region. */}
           <span aria-live="polite">{stateLabel[arena.state]}.</span>

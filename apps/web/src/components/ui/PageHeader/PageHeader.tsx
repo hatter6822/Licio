@@ -12,6 +12,12 @@ export interface PageHeaderProps {
   onBack?: () => void;
   /** Contextual actions rendered at the inline-end. */
   actions?: ReactNode;
+  /**
+   * Replace the VISIBLE title with this content (e.g. the front page's search
+   * button). The <h1> stays in the DOM screen-reader-only, so the page keeps
+   * its accessible heading AND the WS-B.1.6 route-change focus target.
+   */
+  titleReplacement?: ReactNode;
   className?: string;
 }
 
@@ -24,6 +30,7 @@ export function PageHeader({
   title,
   onBack,
   actions,
+  titleReplacement,
   className,
 }: PageHeaderProps): React.ReactElement {
   const t = useT();
@@ -39,7 +46,14 @@ export function PageHeader({
           <Icon name="arrow-left" />
         </Button>
       ) : null}
-      <h1 className="flex-1 truncate text-lg font-semibold text-ink">{title}</h1>
+      {titleReplacement !== undefined ? (
+        <>
+          <h1 className="sr-only">{title}</h1>
+          <div className="flex flex-1 items-center gap-2">{titleReplacement}</div>
+        </>
+      ) : (
+        <h1 className="flex-1 truncate text-lg font-semibold text-ink">{title}</h1>
+      )}
       {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
     </div>
   );

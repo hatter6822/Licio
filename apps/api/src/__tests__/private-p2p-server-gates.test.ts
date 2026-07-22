@@ -155,6 +155,7 @@ describe('WS-S.1.4 server search exclusion', () => {
       language: 'en',
       createdAt: '2026-06-22T00:00:00.000Z',
       visible: true,
+      disputeStatus: 'none' as const,
       roomId: randomUUID(),
       storyVisibility: 'public' as const,
       roomVisibility: 'public' as const,

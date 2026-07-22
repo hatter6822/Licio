@@ -439,6 +439,15 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listRecent(limit: number): Promise<ContributionRecord[]> {
+    const rows = await this.#db
+      .select()
+      .from(contributionsTable)
+      .orderBy(desc(contributionsTable.createdAt), desc(contributionsTable.contributionId))
+      .limit(Math.max(0, limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async childCounts(contributionIds: readonly string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     for (const id of contributionIds) counts.set(id, 0);

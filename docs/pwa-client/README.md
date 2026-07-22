@@ -135,6 +135,26 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   redirect to `/stories/$storyId#comments` when readable. `room_only` items and
   private-room conversations remain reachable only through their room/content
   surfaces, never through a global conversation tab.
+- **Search modal (WS-F.3.1b reader surface):** the front-page banner replaces
+  its visually redundant "Front Page" title with a small circular
+  looking-glass button (the `<h1>` stays in the DOM screen-reader-only, so the
+  page keeps its accessible heading AND the WS-B.1.6 route-change focus
+  target — `PageHeader`'s `titleReplacement` slot). The button — and a global
+  **Ctrl/Cmd+K** hotkey (`useSearchHotkey`, mounted in the root layout) —
+  toggles a transient UI-store flag that mounts `SearchModal` **lazily**
+  (`SearchModalHost`; the modal chunk never enters the initial bundle). The
+  modal is a top-anchored command palette over `GET /v1/search`
+  (`type=story,comment,room` — every client-reachable public plane): a
+  debounced (250 ms) ARIA **combobox** with a virtual-focus listbox
+  (`aria-activedescendant`, MultiSelect's option pattern), per-type sections,
+  type-filter chips, query-term highlighting (plain-text `<mark>` nodes —
+  never markup), the shared `DisputeBadge` on WS-T `validated`/`under_debate`
+  hits (`incorrect` is server-filtered), `EmptyState`/`ErrorState`/loading
+  states, a polite live region announcing the result tally, and kbd-hint
+  footer. Result activation routes to `/stories/$storyId`,
+  `/stories/$storyId/comments?root=<id>` (comment permalinks), or
+  `/rooms/$roomId`. Global search serves only public content from public
+  rooms — the WS-Q boundary is server-side; the modal adds no ranking input.
 - **Code splitting (WS-C.1.1c):** `autoCodeSplitting` makes every route's
   component its own on-demand chunk behind a Skeleton fallback. The initial JS
   payload stays within the Section 6.10 budget (CI gate:
@@ -174,7 +194,8 @@ version mismatch is discarded and the store falls back to its defaults.
 - **`useUIStore` (1.3b):** theme, reduced-motion, feed mode (the §11.6 sort
   orders `best`/`rising`/`sources`/`debates`/`new`; a legacy persisted value
   normalizes forward on rehydration instead of discarding the slice), focus
-  mode, sheet.
+  mode, sheet, and the transient `searchOpen` flag behind the search modal
+  (never persisted — a reload never reopens it).
   The accessibility-adapter surface — applies `data-theme` / `data-motion` to
   `<html>` for the WS-B token layer.
 - **`useFeatureFlagStore` (1.3c):** `cryptoEnabled` / `governanceEnabled` /
@@ -538,8 +559,12 @@ server's bars, it does not re-decide them.
 - **Author visibility control** (`components/story/AuthorVisibilityControl`,
   owner-only on the story page): narrow always; widen only from a public room; a
   widen collision (409) links to the existing public story.
-- **Front-page framing** affirms participation-weighted attention, never
-  popularity (no applause vocabulary; a copy test pins it).
+- **Front-page copy** is minimal by design: the always-visible framing line
+  and the debate explainers (comment-section panel intro, arena-modal intro)
+  were removed as redundant chrome — the surfaces are self-describing. The
+  remaining self-description (the empty-state copy) affirms
+  participation-weighted attention, never popularity (no applause
+  vocabulary; a copy test pins it).
 - **Offline** (`offline/db.ts` at `DB_VERSION` 2): the version bump evicts the
   read-model cache (stale pre-WS-Q server shapes) while PRESERVING user data —
   drafts, the pending queue, saved stories, and the signal ledger are never

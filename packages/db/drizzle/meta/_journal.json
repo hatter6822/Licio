@@ -659,6 +659,13 @@
       "when": 1783728000018,
       "tag": "0094_governance_lane_pins",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1783728000019,
+      "tag": "0095_search_public_content",
+      "breakpoints": true
     }
   ]
 }

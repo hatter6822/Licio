@@ -76,12 +76,6 @@ export function DebatePanel({
           ? t('debate.panel.one', '1 active debate')
           : t('debate.panel.many', '{count} active debates', { count: debates.length })}
       </h3>
-      <p className="text-sm text-ink-muted">
-        {t(
-          'debate.panel.intro',
-          "A sourced correction opened an open debate — the room's AI weighs both sides' sources. This is not a vote. Open one to watch it as it happens.",
-        )}
-      </p>
       <ul className="flex flex-col gap-2">
         {debates.map((debate) => {
           const countdown =

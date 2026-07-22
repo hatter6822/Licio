@@ -279,26 +279,49 @@ exclude the query target and removed content.
 
 ## Search (WS-F.3.1)
 
-Generated STORED `tsvector` columns on `stories` (title A, excerpt B,
-publisher+author C — weighting integration-tested: title hits outrank
-excerpt hits), `claims` (text A) and `evidence_cards` (note A, citation B),
-each GIN-indexed.  Language awareness: rows index under the `english`
-configuration when `language LIKE 'en%'` and `simple` otherwise (constant
-config per CASE branch keeps the expression immutable); queries match
-`to_tsquery('simple', q) || to_tsquery('english', q)` so either
-representation hits.
+The unified index covers **all public content**: generated STORED `tsvector`
+columns on `stories` (title A, excerpt B, publisher+author C — weighting
+integration-tested: title hits outrank excerpt hits), `claims` (text A),
+`evidence_cards` (note A, citation B), `contributions` (body B — a generated
+column can reference only its own row, so a comment hit matches on its body
+alone and carries its parent story's title/id for display + navigation), and
+`rooms` (name A, description+charter B; migration 0095).  All GIN-indexed.
+Language awareness: story rows index under the `english` configuration when
+`language LIKE 'en%'` and `simple` otherwise (constant config per CASE branch
+keeps the expression immutable; comment/room rows carry no language tag and
+index `simple`); queries match `to_tsquery('simple', q) ||
+to_tsquery('english', q)` so either representation hits.
 
 User input is tokenized to `[\p{L}\p{N}]+` only and each token quoted into
 the tsquery (no operator/quote character can survive tokenization —
 injection-safe by construction; prefix mode adds `:*` to the last token for
-typeahead).  Filters: type, topic, source, language, date range.  Ordering
-is relevance (ts_rank_cd) → recency → id, with keyset pagination (the cursor
-encodes the triple).  Visibility is server-side: takedown/safety-hidden
-stories, retracted claims/evidence, and claims of hidden stories never
-appear.  No financial signal exists in any input (no-pay-to-rank, §13.6).
+typeahead).  Filters: type (a CSV list over story/claim/comment/room),
+topic, source, language, date range.  Ordering is relevance (ts_rank_cd,
+multiplied by `SEARCH_VALIDATED_BOOST` for WS-T `validated` stories/comments
+— a content-integrity weight, never applause) → recency → id, with keyset
+pagination (the cursor encodes the triple).  Visibility is server-side:
+takedown/safety-hidden stories, retracted claims/evidence, non-`published`
+or thread-removed (item-safety) comments, private/p2p rooms, and — per WS-T
+— **adjudicated-`incorrect` stories and comments** never appear (incorrect
+content stays readable in place, sunk, but is filtered out of search
+entirely).  A room-scoped query (`?room=`) searches the room's stories +
+comments behind the read bar and never returns room records; results carry
+`dispute_status` so the client badges validated/challenged hits.  No
+financial signal exists in any input (no-pay-to-rank, §13.6).
 
 The in-memory `InMemorySearchIndex` mirrors the SQL semantics exactly (same
-weights, same total order) so unit tests and the Postgres adapter agree.
+weights, same boost, same total order, same wire bounds) so unit tests and
+the Postgres adapter agree; the forum boot supplies the room-visibility
+resolution AND the comment/room corpus through ONE late-bound
+`setSearchForumCorpusProvider` hook — a single room scan per query, so
+story and comment coordinates resolve from the same room set (fail-closed:
+empty map + empty corpus until wired).  Client-supplied cursors are fully
+validated on decode (finite relevance, parseable created_at, UUID id) — a
+tampered cursor serves page one instead of reaching the SQL casts.  The
+reader surface is the WS-C search modal (`SearchModal` + the front-page
+banner's circular search button + Ctrl/Cmd+K), which consumes the typed RPC
+contract with `type=story,comment,room` — claims stay an internal model
+with no client destination.
 
 ## Source model (WS-F.2)
 
@@ -469,11 +492,13 @@ through the same `applyLifecycleTrigger` seam.
   seams (`ClaimExtractor`, `detectLanguage`/`classifySensitivity` fallbacks,
   `EMBEDDING_MODEL_REGISTRY`).
 - **Client surfaces**: the WS-G composer ships CONTRIBUTION submission
-  end-to-end; the story-URL submission UI and the search page still need to
-  consume the typed RPC contract (WS-C follow-ups); browser-level E2E for
-  the submission flow needs the BFF-in-the-loop harness (WS-P, the WS-D
-  precedent) — the CSRF token round-trip is integration-tested at the
-  full-app level meanwhile.
+  end-to-end, and the search modal (WS-C) consumes the typed `GET /v1/search`
+  contract over the unified public-content corpus (CLOSED — the banner
+  search button + Ctrl/Cmd+K modal, with mocked and BFF-in-the-loop E2E);
+  the story-URL submission UI still needs to consume the typed RPC contract
+  (WS-C follow-up); browser-level E2E for the submission flow needs the
+  BFF-in-the-loop harness (WS-P, the WS-D precedent) — the CSRF token
+  round-trip is integration-tested at the full-app level meanwhile.
 - **Claims stay an INTERNAL model**: the story page's "Independent sources"
   drawer and its two reads (`GET /v1/stories/:id/claims` + the WS-H
   `/independent-sources` lineage read) were REMOVED — comment-centric

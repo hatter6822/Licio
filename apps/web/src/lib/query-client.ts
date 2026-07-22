@@ -58,6 +58,8 @@ export function createAppQueryClient(): QueryClient {
 /** Per-data-class stale/gc overrides (WS-C.1.2 cache-policy table). */
 export const cachePolicy = {
   feed: { staleTime: 30_000, gcTime: 5 * 60_000 },
+  /** Search results: feed-fresh, short-lived (queries are transient). */
+  search: { staleTime: 30_000, gcTime: 2 * 60_000 },
   thread: { staleTime: 60_000, gcTime: 10 * 60_000 },
   room: { staleTime: 60_000, gcTime: 10 * 60_000 },
   profile: { staleTime: 5 * 60_000, gcTime: 30 * 60_000 },

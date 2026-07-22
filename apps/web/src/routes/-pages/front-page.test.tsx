@@ -38,9 +38,11 @@ vi.mock('../../signals/topic-loops.js', () => ({
   getTopicLoopTracker: () => ({ topicMultipliers: () => new Map() }),
 }));
 
+const openSearch = vi.hoisted(() => vi.fn());
 vi.mock('../../stores/index.js', () => ({
-  useUIStore: (sel: (s: { feedMode: string; setFeedMode: () => void }) => unknown) =>
-    sel({ feedMode: 'best', setFeedMode: vi.fn() }),
+  useUIStore: (
+    sel: (s: { feedMode: string; setFeedMode: () => void; openSearch: () => void }) => unknown,
+  ) => sel({ feedMode: 'best', setFeedMode: vi.fn(), openSearch }),
   useAuthStore: (sel: (s: { status: string }) => unknown) => sel({ status: 'anonymous' }),
 }));
 
@@ -82,6 +84,22 @@ beforeEach(() => {
   dampenFeed.mockClear();
 });
 afterEach(() => vi.clearAllMocks());
+
+describe('FrontPage banner (WS-F.3.1b search affordance)', () => {
+  it('replaces the visible title with the circular search button, keeping an sr-only <h1>', async () => {
+    feed.mockReturnValue(infiniteFeed());
+    render(<FrontPage />);
+    // The heading survives screen-reader-only (WS-B.1.6 route focus target)…
+    const heading = screen.getByRole('heading', { level: 1, name: 'Front Page' });
+    expect(heading.className.split(/\s+/)).toContain('sr-only');
+    // …and the looking-glass button opens the search modal in its place.
+    const button = screen.getByRole('button', { name: 'Search' });
+    expect(button).toHaveAttribute('aria-haspopup', 'dialog');
+    const { default: userEvent } = await import('@testing-library/user-event');
+    await userEvent.setup().click(button);
+    expect(openSearch).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('FrontPage pagination (WS-B.2.8b explicit continuation)', () => {
   it('renders the flattened feed items', () => {

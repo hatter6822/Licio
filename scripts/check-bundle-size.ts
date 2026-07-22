@@ -11,9 +11,13 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // route-level lazy loading"): the entry script plus every chunk index.html
 // preloads — what a first paint actually downloads.  Lazy route chunks are
 // NOT initial payload, but their sum is still bounded (the total budget) so
-// unbounded app growth has a brake too.
+// unbounded app growth has a brake too.  The total is a RATCHET: it moves
+// only by an explicit, reviewed adjustment when an audited feature ships,
+// and always stays within ~3 KiB of the measured build so silent growth
+// keeps failing fast.  (Last adjusted for the WS-F.3.1b unified-search
+// modal — a lazy ~4 KiB chunk; initial payload unaffected at ~164 KiB.)
 const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
-const TOTAL_JS_BUDGET_BYTES = 320 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 324 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 // WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily

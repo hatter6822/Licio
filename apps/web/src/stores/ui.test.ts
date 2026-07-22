@@ -132,6 +132,20 @@ describe('ui store feed mode, focus mode, sheet', () => {
     const raw = JSON.parse(localStorage.getItem('licio:ui') ?? '{}');
     expect(raw.state?.sheet).toBeUndefined();
   });
+
+  it('opens, toggles, and closes the search modal without persisting it', async () => {
+    const { useUIStore } = await freshUI();
+    expect(useUIStore.getState().searchOpen).toBe(false);
+    useUIStore.getState().openSearch();
+    expect(useUIStore.getState().searchOpen).toBe(true);
+    useUIStore.getState().toggleSearch();
+    expect(useUIStore.getState().searchOpen).toBe(false);
+    useUIStore.getState().toggleSearch();
+    useUIStore.getState().closeSearch();
+    expect(useUIStore.getState().searchOpen).toBe(false);
+    const raw = JSON.parse(localStorage.getItem('licio:ui') ?? '{}');
+    expect(raw.state?.searchOpen).toBeUndefined();
+  });
 });
 
 describe('ui store rehydration', () => {

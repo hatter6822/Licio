@@ -86,6 +86,20 @@ describe('PageHeader (WS-B.1.5)', () => {
     expect(onBack).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
   });
+
+  it('titleReplacement keeps the <h1> screen-reader-only (WS-B.1.6 focus target)', () => {
+    render(
+      <PageHeader
+        title="Front Page"
+        titleReplacement={<button type="button">Open search</button>}
+      />,
+    );
+    // The heading survives for AT + the route-change focus target…
+    const heading = screen.getByRole('heading', { level: 1, name: 'Front Page' });
+    expect(heading.className.split(/\s+/)).toContain('sr-only');
+    // …and the replacement control renders in its visual slot.
+    expect(screen.getByRole('button', { name: 'Open search' })).toBeInTheDocument();
+  });
 });
 
 describe('ScrollArea + SafeArea (WS-B.1.5)', () => {

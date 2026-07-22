@@ -22,6 +22,9 @@ export interface PageScaffoldProps<T> {
   title: string;
   onBack?: () => void;
   actions?: ReactNode;
+  /** Passed through to PageHeader: swap the visible title for this content
+   *  (the <h1> stays screen-reader-only — see PageHeaderProps). */
+  titleReplacement?: ReactNode;
   query: QueryLike<T>;
   /** Predicate that returns true when `data` should render the empty state. */
   isEmpty?: (data: T) => boolean;
@@ -34,6 +37,7 @@ export function PageScaffold<T>({
   title,
   onBack,
   actions,
+  titleReplacement,
   query,
   isEmpty,
   emptyTitle,
@@ -43,7 +47,12 @@ export function PageScaffold<T>({
   const t = useT();
   return (
     <>
-      <PageHeader title={title} {...(onBack ? { onBack } : {})} {...(actions ? { actions } : {})} />
+      <PageHeader
+        title={title}
+        {...(onBack ? { onBack } : {})}
+        {...(actions ? { actions } : {})}
+        {...(titleReplacement !== undefined ? { titleReplacement } : {})}
+      />
       <div className="mx-auto w-full max-w-2xl p-4">
         {query.isLoading ? (
           <LoadingState />

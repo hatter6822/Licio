@@ -11,7 +11,9 @@ import type { ContributionType, IntegritySignalDetectedEvent } from '@licio/shar
 import { InMemorySlidingWindowStore, type SlidingWindowStore } from '../events/ingest-limiter.js';
 import type { EventPipelineServices } from '../events/services.js';
 import { getIdentityServices } from '../identity/services.js';
+import { SEARCH_COMMENT_SNIPPET_LENGTH, type SearchDocument } from '../ingestion/search.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
@@ -268,23 +270,126 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     });
   }
 
-  // WS-Q.2.5a — wire the in-memory global-search room-visibility resolver now
-  // that the room store exists (ingestion was constructed first). The Drizzle
-  // search adapter resolves this with a SQL join instead.
   if (ingestion) {
-    ingestion.setSearchRoomVisibilityProvider(async () => {
-      const map = new Map<string, 'public' | 'private'>();
-      for (const room of await services.rooms.list({ limit: 100_000 })) {
-        map.set(room.roomId, room.visibility);
-      }
-      return map;
-    });
     // WS-K §24.1 — let the §14.2 pipeline read an uploaded WebVTT caption track's
     // text (uploads live here, in the forum). A caption-only video then gets its
     // sensitivity labels / claims / excerpt / freshness, not only its topics.
     ingestion.setCaptionTextReader(async (uploadId) => {
       const bytes = await services.uploads.getBytes(uploadId);
       return bytes === null ? null : captionTextFromVtt(bytes);
+    });
+    // WS-Q.2.5a + WS-F.3.1a — supply everything the in-memory unified search
+    // needs from the forum, from ONE room scan per query: the room-visibility
+    // resolution for STORY documents and the comment + room documents. One
+    // fetch means story and comment coordinates resolve from the SAME room
+    // set — no asymmetric fail-closed edge between the two. Documents carry
+    // their own visibility / dispute coordinates; the index applies the
+    // predicates at query time (so moderation, WS-T outcomes, and
+    // room-visibility changes take effect immediately — the corpus is a live
+    // projection, never a stale snapshot). The Drizzle search adapter reads
+    // these tables with SQL joins instead, and the production boot replaces
+    // the index wholesale, so this provider only ever serves the in-memory
+    // (dev/test/E2E) index.
+    //
+    // Bounds: rooms use the WS-Q resolution bound (a fail-closed map must be
+    // as complete as possible — an evicted room would HIDE its stories);
+    // contributions use the per-corpus document bound (stories/claims parity).
+    const ROOM_RESOLUTION_LIMIT = 100_000;
+    const SEARCH_CORPUS_LIMIT = 10_000;
+    ingestion.setSearchForumCorpusProvider(async () => {
+      const documents: SearchDocument[] = [];
+      const rooms = await services.rooms.list({ limit: ROOM_RESOLUTION_LIMIT });
+      const roomVisibilityById = new Map(
+        rooms.map((room) => [room.roomId, room.visibility] as const),
+      );
+      const roomById = new Map(rooms.map((room) => [room.roomId, room] as const));
+      for (const room of rooms) {
+        documents.push({
+          resultType: 'room',
+          id: room.roomId,
+          storyId: null,
+          title: room.name,
+          body: `${room.description ?? ''} ${room.charterSummary ?? ''}`,
+          snippet: room.description,
+          // WS-T adjudicates stories/comments, never rooms.
+          disputeStatus: 'none',
+          topicIds: [],
+          sourceId: null,
+          language: null,
+          createdAt: room.createdAt,
+          visible: true,
+          roomId: room.roomId,
+          // A room record has no item tier of its own — the constant `public`
+          // coordinate defers entirely to the room axis below, so only PUBLIC
+          // `server` rooms ever surface (private/p2p shells are reached via
+          // the rooms directory, never global content search).
+          storyVisibility: 'public',
+          roomVisibility: room.visibility,
+          roomStorageMode: room.storageMode,
+        });
+      }
+      const contributions = await services.contributions.listRecent(SEARCH_CORPUS_LIMIT);
+      const threadCache = new Map<string, ThreadShellRecord | null>();
+      const storyCache = new Map<string, StoryRecord | null>();
+      const threadRemovedCache = new Map<string, boolean>();
+      for (const contribution of contributions) {
+        let thread = threadCache.get(contribution.threadId);
+        if (thread === undefined) {
+          thread = await ingestion.stories.getThreadById(contribution.threadId);
+          threadCache.set(contribution.threadId, thread);
+        }
+        if (thread === null) continue;
+        let story = storyCache.get(thread.storyId);
+        if (story === undefined) {
+          story = await ingestion.stories.getById(thread.storyId);
+          storyCache.set(thread.storyId, story);
+        }
+        if (story === null) continue;
+        let threadRemoved = threadRemovedCache.get(contribution.threadId);
+        if (threadRemoved === undefined) {
+          // A WS-J moderation removal on the thread (item-safety `removed`)
+          // hides every direct read — search must match (threadReadableToUser).
+          threadRemoved =
+            options.events !== undefined &&
+            (await options.events.safetyStore.get(contribution.threadId))?.safetyState ===
+              'removed';
+          threadRemovedCache.set(contribution.threadId, threadRemoved);
+        }
+        const room = roomById.get(story.roomId);
+        documents.push({
+          resultType: 'comment',
+          id: contribution.contributionId,
+          storyId: story.storyId,
+          // A Postgres generated column indexes only its OWN row, so a comment
+          // matches on its body alone; the parent story's title is display-only
+          // (the story corpus covers title matches).
+          title: '',
+          body: contribution.body,
+          // Code-POINT slice: Postgres `left(body, N)` counts characters, JS
+          // `String.slice` counts UTF-16 units — the spread keeps the two
+          // adapters serving the same snippet through astral-plane characters.
+          snippet: [...contribution.body].slice(0, SEARCH_COMMENT_SNIPPET_LENGTH).join(''),
+          displayTitle: story.title,
+          disputeStatus: contribution.disputeStatus,
+          topicIds: [],
+          sourceId: null,
+          language: null,
+          createdAt: contribution.createdAt,
+          // Published + thread not moderation-removed + owning story not
+          // hidden — the threadReadableToUser bar; the two-tier coordinates
+          // below carry the room/item arm.
+          visible:
+            contribution.moderationState === 'published' &&
+            !threadRemoved &&
+            story.hiddenState === null,
+          roomId: story.roomId,
+          storyVisibility: story.visibility,
+          // Fail closed on an unresolved room, exactly like the global gate.
+          roomVisibility: room?.visibility ?? 'private',
+          roomStorageMode: room?.storageMode ?? 'p2p',
+        });
+      }
+      return { roomVisibilityById, documents };
     });
   }
 

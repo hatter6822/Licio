@@ -52,6 +52,7 @@ import {
 } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
+import { MODAL_SEARCH_TYPES, SEARCH_MIN_QUERY_LENGTH, searchContent } from './search-api.js';
 import * as treasuryApi from './treasury-api.js';
 import * as wallet from './wallet-api.js';
 
@@ -71,6 +72,30 @@ export function useFeedQuery(mode?: FeedMode) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     ...cachePolicy.feed,
+  });
+}
+
+/** The search modal's type filter: everything reachable, or one content plane. */
+export type SearchTypeFilter = 'all' | 'story' | 'comment' | 'room';
+
+/**
+ * Public-content search (WS-F.3.1b, the search modal). Debouncing is the
+ * caller's concern; this hook queries once the (trimmed) input clears the
+ * minimum length, keeps the previous page rendered while the next loads
+ * (placeholderData), and aborts the in-flight fetch when the key changes.
+ * Lives here (with every other hook) rather than in a lazy-side module: the
+ * measured total-JS cost is LOWER in the shared queries chunk than isolated
+ * in the modal chunk (the schema chain dedupes against zod glue already
+ * here), and the initial payload stays well under the §6.10 budget.
+ */
+export function useSearchQuery(q: string, filter: SearchTypeFilter = 'all') {
+  return useQuery({
+    queryKey: queryKeys.search(q, filter),
+    queryFn: ({ signal }) =>
+      searchContent(q, filter === 'all' ? MODAL_SEARCH_TYPES : [filter], signal),
+    enabled: q.length >= SEARCH_MIN_QUERY_LENGTH,
+    placeholderData: keepPreviousData,
+    ...cachePolicy.search,
   });
 }
 

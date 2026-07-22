@@ -30,6 +30,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { tsvector } from './_custom.js';
 import { claims } from './claim.js';
 import { threads } from './thread.js';
 import { users } from './user.js';
@@ -97,8 +98,19 @@ export const contributions = pgTable(
     disputeStatus: contributionDisputeStatusEnum('dispute_status').notNull().default('none'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * WS-F.3.1a generated full-text column (unified public-content search).
+     * Body-only at weight B — a generated column can reference only its OWN
+     * row, so a comment hit never matches on its parent story's title (the
+     * story corpus covers that); `simple` config (a comment carries no
+     * language tag). STORED + GIN-indexed below (migration 0095).
+     */
+    searchTsv: tsvector('search_tsv').generatedAlwaysAs(
+      (): ReturnType<typeof sql> => sql`setweight(to_tsvector('simple', coalesce(body, '')), 'B')`,
+    ),
   },
   (t) => [
+    index('contributions_search_gin').using('gin', t.searchTsv),
     index('contributions_thread_idx').on(t.threadId),
     index('contributions_user_idx').on(t.userId),
     index('contributions_parent_idx').on(t.parentContributionId),

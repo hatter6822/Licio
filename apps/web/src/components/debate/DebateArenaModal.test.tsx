@@ -130,7 +130,9 @@ describe('DebateArenaModal', () => {
     );
     // The Sheet carries the accessible dialog title; the arena body loads inside.
     expect(screen.getByRole('heading', { name: 'Debate arena' })).toBeInTheDocument();
-    expect(screen.getByText(/this is not a vote/i)).toBeInTheDocument();
+    // The state line (a live region) is the header's only remaining copy —
+    // the explanatory intro was removed as redundant chrome.
+    expect(screen.getByText(/Live — both sides are making their case/)).toBeInTheDocument();
     rerender(<DebateArenaModal debateId={null} onClose={onClose} />);
     expect(screen.queryByRole('heading', { name: 'Debate arena' })).not.toBeInTheDocument();
   });
@@ -169,7 +171,6 @@ describe('DebateArenaContent', () => {
 
   it('shows the live state, the challenger draft, both countdowns, and no vote (observer view)', () => {
     renderArena();
-    expect(screen.getByText(/this is not a vote/i)).toBeInTheDocument();
     expect(screen.getByText(/Live — both sides are making their case/)).toBeInTheDocument();
     expect(screen.getByText(/Editing window:/)).toBeInTheDocument();
     // Both sides last edited 30m ago, so the expedited idle path resolves
