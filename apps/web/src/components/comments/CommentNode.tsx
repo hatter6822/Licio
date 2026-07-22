@@ -74,42 +74,48 @@ function ContinueThreadLink({
 
 /**
  * A story-target correction challenges the WHOLE story (the thread's parent),
- * not a comment, so it is a ROOT post rather than a nested reply — and it PINS
- * to the top of the section while the challenge is live or has prevailed (the
- * server orders it there).  This callout denotes the story-level challenge and
- * opens the debate in one click:
- *   • a LIVE or PREVAILING challenge reads in the story's warning "Challenged"
- *     dispute tone;
- *   • a challenge the adjudicator RULED AGAINST is marked `incorrect` and sunk
- *     to the bottom, so its callout reads as a settled failure (neutral) — the
- *     header's "Incorrect" badge carries the outcome.
+ * not a comment, so it is a ROOT post rather than a nested reply.  Its callout
+ * denotes the story-level challenge and opens the debate in one click, and its
+ * tone tracks the challenge's ACTUAL standing (server-derived — never inferred
+ * from the correction's own status alone):
+ *   • ACTIVE (live, or prevailed → story `incorrect`, `story_challenge_active`):
+ *     the story is challenged now → prominent warning "Challenges this story",
+ *     pinned to the top of the section;
+ *   • RULED AGAINST (the correction is `incorrect`): a settled failure —
+ *     "did not hold" (neutral); it is sunk to the bottom;
+ *   • otherwise SETTLED (inconclusive/withdrawn — no longer the active
+ *     challenge): a neutral "closed" callout, never a live-challenge warning.
  * Falls back to a non-interactive note when no arena resolved (graceful).
  */
 function StoryChallengeCallout({
   excerpt,
   debateId,
+  active,
   disputeStatus,
   onOpen,
 }: {
   excerpt: string | null;
   debateId: string | null;
+  active: boolean;
   disputeStatus: ContributionDisputeStatus;
   onOpen: (debateId: string) => void;
 }): React.ReactElement {
-  const failed = disputeStatus === 'incorrect';
+  const label = active
+    ? 'Challenges this story'
+    : disputeStatus === 'incorrect'
+      ? 'This challenge to the story did not hold'
+      : 'This challenge to the story is closed';
   const calloutClass = cn(
     'flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-2.5 py-1.5 text-left text-sm',
-    failed
-      ? 'border-line bg-surface text-ink-muted'
-      : 'border-warning/40 bg-warning-soft text-warning-on-soft',
+    active
+      ? 'border-warning/40 bg-warning-soft text-warning-on-soft'
+      : 'border-line bg-surface text-ink-muted',
   );
   const body = (
     <>
       <Icon name="flag" className="size-3.5 shrink-0" aria-hidden />
-      <span className="font-semibold">
-        {failed ? 'This challenge to the story did not hold' : 'Challenges this story'}
-      </span>
-      {!failed && excerpt !== null ? <span className="opacity-90">— “{excerpt}”</span> : null}
+      <span className="font-semibold">{label}</span>
+      {active && excerpt !== null ? <span className="opacity-90">— “{excerpt}”</span> : null}
       {debateId !== null ? (
         <span className="ml-auto inline-flex items-center gap-1 font-medium">
           View debate
@@ -133,7 +139,7 @@ function StoryChallengeCallout({
       className={cn(
         calloutClass,
         'transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-        failed ? 'hover:border-line-strong' : 'hover:border-warning/70',
+        active ? 'hover:border-warning/70' : 'hover:border-line-strong',
       )}
     >
       {body}
@@ -191,6 +197,7 @@ export function CommentNode({
           <StoryChallengeCallout
             excerpt={comment.metadata.target_text_excerpt ?? null}
             debateId={comment.metadata.debate_arena_id ?? null}
+            active={comment.story_challenge_active ?? false}
             disputeStatus={comment.dispute_status}
             onOpen={openDebate}
           />

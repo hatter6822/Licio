@@ -338,6 +338,52 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(missing.status).toBe(404);
   });
 
+  it('forces a story-target correction to the ROOT even when a parent_contribution_id is sent', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const parent = await createOk(contributionBody('comment', threadId));
+    // The shared schema permits a parent alongside target_story_id — the server
+    // must IGNORE it so the story challenge stays a root (visible in listRoots +
+    // findable by the story-challenge pin).
+    const correction = await createOk({
+      ...contributionBody('correction', threadId, { storyId }),
+      parent_contribution_id: parent.contribution_id,
+    });
+    expect(correction.parent_contribution_id).toBeNull();
+    expect(correction.depth).toBe(0);
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.parentContributionId).toBeNull();
+    expect(stored?.path).toEqual([]);
+  });
+
+  it('marks a LIVE story-target correction story_challenge_active in the section', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { contribution_id: string; story_challenge_active?: boolean }[];
+    };
+    const node = body.comments.find((c) => c.contribution_id === correction.contribution_id);
+    // The live challenger is the story's current challenge ⇒ active.
+    expect(node?.story_challenge_active).toBe(true);
+  });
+
+  it('persists debate_arena_id onto the STORED correction (every projection serves it)', async () => {
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const correction = await createOk(contributionBody('correction', threadId, { storyId }));
+    const arenaId = correction.metadata.debate_arena_id;
+    expect(arenaId).toBeDefined();
+    // The back-reference is on the STORED record — not just the create response —
+    // so the comment page AND the live SSE replay both link to the debate.
+    const stored = await fixture.forum.contributions.getById(correction.contribution_id);
+    expect(stored?.metadata.debate_arena_id).toBe(arenaId);
+  });
+
   it('the debate scheduler judges + finalizes a story arena past its deadlines', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';

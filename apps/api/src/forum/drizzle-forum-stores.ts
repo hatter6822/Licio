@@ -537,6 +537,17 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {
+    // Merge the key into the jsonb metadata (`||`), preserving every other field.
+    await this.#db
+      .update(contributionsTable)
+      .set({
+        metadata: sql`${contributionsTable.metadata} || ${JSON.stringify({ debate_arena_id: debateArenaId })}::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(eq(contributionsTable.contributionId, contributionId));
+  }
+
   async purgeForRollback(contributionId: string): Promise<void> {
     // Reverse the insert: drop the contribution row (its edit-history rows
     // cascade).  Deleting the row also clears the `client_draft_id` dedup key,

@@ -365,6 +365,7 @@ describe('CommentSection', () => {
           comment({
             type: 'correction',
             body: 'The chart labels are off by a day.',
+            story_challenge_active: true, // live/prevailed → the active challenge
             metadata: {
               target_story_id: storyId,
               debate_arena_id: arenaId,
@@ -393,13 +394,14 @@ describe('CommentSection', () => {
     expect(call.search({})).toEqual({ debate: arenaId });
   });
 
-  it('WS-T — a story-challenge callout with no arena is a non-interactive note (no dead link)', () => {
+  it('WS-T — an active story-challenge callout with no arena is a non-interactive note (no dead link)', () => {
     queryState = {
       data: {
         comments: [
           comment({
             type: 'correction',
             body: 'The chart labels are off by a day.',
+            story_challenge_active: true,
             metadata: { target_story_id: storyId }, // no debate_arena_id
           }),
         ],
@@ -415,6 +417,36 @@ describe('CommentSection', () => {
       screen.queryByRole('button', { name: /challenges this story|view debate/i }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText('View debate')).not.toBeInTheDocument();
+  });
+
+  it('WS-T — a SETTLED-inconclusive story challenge reads as closed, not an active challenge', () => {
+    const arenaId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            type: 'correction',
+            body: 'The chart labels are off by a day.',
+            // Not the active challenge (story back to none), and not incorrect.
+            story_challenge_active: false,
+            metadata: { target_story_id: storyId, debate_arena_id: arenaId },
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 1 },
+      },
+    };
+    renderSection();
+    // A finished, inconclusive challenge is NOT presented as a live challenge.
+    expect(screen.getByText('This challenge to the story is closed')).toBeInTheDocument();
+    expect(screen.queryByText('Challenges this story')).not.toBeInTheDocument();
+    // The resolved debate is still openable.
+    fireEvent.click(screen.getByRole('button', { name: /closed/i }));
+    const call = navigateMock.mock.calls.at(-1)?.[0] as {
+      search: (prev: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(call.search({})).toEqual({ debate: arenaId });
   });
 
   it('WS-T — a LOST story challenge (marked incorrect) reads as a settled failure', () => {

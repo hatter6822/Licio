@@ -907,6 +907,29 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(secondPage[secondPage.length - 1]).toBe(wrong); // incorrect still last
   });
 
+  it('setDebateArena merges debate_arena_id into stored metadata, preserving other keys (Drizzle)', async () => {
+    const stories = new DrizzleStoryStore(db);
+    const t = await seedThread(stories);
+    const targetStoryId = randomUUID();
+    const inserted = await contributions.insert(
+      contributionInput({
+        threadId: t,
+        type: 'correction',
+        citations: [{ url: 'https://example.org/c' }],
+        metadata: { target_story_id: targetStoryId, target_text_excerpt: 'a passage' },
+      }),
+    );
+    if (!inserted.ok) throw new Error('correction insert failed');
+    const arenaId = randomUUID();
+    await contributions.setDebateArena(inserted.contribution.contributionId, arenaId);
+    const reloaded = await contributions.getById(inserted.contribution.contributionId);
+    // The back-reference is persisted (the `||` jsonb merge), and every other
+    // metadata key is preserved — so a fresh read/SSE replay serves "View debate".
+    expect(reloaded?.metadata.debate_arena_id).toBe(arenaId);
+    expect(reloaded?.metadata.target_story_id).toBe(targetStoryId);
+    expect(reloaded?.metadata.target_text_excerpt).toBe('a passage');
+  });
+
   it('listThreadsByRoom pages by the descending keyset exactly once', async () => {
     const room = roomInput();
     expect((await roomsStore.insert(room)).ok).toBe(true);

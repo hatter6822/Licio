@@ -381,11 +381,14 @@ export async function createContribution(
   // exactly-one shape; here we validate existence/consistency.  A correction may
   // not target its own author's tombstone or a removed row.
   //
-  // A correction to a COMMENT is a CHILD of the comment it corrects: it threads
-  // UNDER its target so it renders nested at what it challenges, not as a
-  // detached root comment.  These carry the derived parent/path used at insert.
-  let correctionParentId: string | undefined;
-  let correctionPath: string[] | undefined;
+  // A correction's placement is DERIVED from its target, never the client's
+  // `parent_contribution_id` (the shared schema permits sending one): a
+  // COMMENT-target correction threads UNDER the comment it corrects (a child of
+  // what it challenges), while a STORY-target correction is a ROOT (it corrects
+  // the story, which has no comment parent) — so it stays in `listRoots` and the
+  // story-challenge pin finds it. `undefined` ⇒ not a correction (use the
+  // generic reply parent/path); `{ id: null }` ⇒ a correction forced to root.
+  let correctionParent: { id: string | null; path: string[] } | undefined;
   if (request.type === 'correction') {
     if (request.target_contribution_id !== undefined) {
       const target = await forum.contributions.getById(request.target_contribution_id);
@@ -419,8 +422,10 @@ export async function createContribution(
           'This comment is too deeply nested to correct in place.',
         );
       }
-      correctionParentId = target.contributionId;
-      correctionPath = [...target.path, target.contributionId];
+      correctionParent = {
+        id: target.contributionId,
+        path: [...target.path, target.contributionId],
+      };
     } else if (request.target_story_id !== undefined) {
       if (request.target_story_id !== thread.storyId) {
         return invalid('invalid_target', "A story correction must target the thread's story.");
@@ -436,6 +441,9 @@ export async function createContribution(
       if (storyDispute === 'incorrect') {
         return invalid('target_already_incorrect', 'This story was already found incorrect.');
       }
+      // A story correction is ALWAYS a root — never nested under a client-supplied
+      // parent — so it appears in the top-level section and the pin can find it.
+      correctionParent = { id: null, path: [] };
     }
   }
 
@@ -556,11 +564,15 @@ export async function createContribution(
       'target_claim_id' in request && request.target_claim_id !== undefined
         ? request.target_claim_id
         : null,
-    // A comment-target correction threads UNDER its target (correctionParentId/
-    // Path); every other contribution uses the generic reply parent/path.
-    parentContributionId: correctionParentId ?? request.parent_contribution_id ?? null,
+    // A correction uses its DERIVED placement (comment target → nested under it;
+    // story target → root); every other contribution uses the generic reply
+    // parent/path from `parent_contribution_id`.
+    parentContributionId:
+      correctionParent !== undefined
+        ? correctionParent.id
+        : (request.parent_contribution_id ?? null),
     clientDraftId: request.client_draft_id,
-    path: correctionPath ?? parentPath,
+    path: correctionParent !== undefined ? correctionParent.path : parentPath,
     moderationState,
   });
   if (!inserted.ok) {
@@ -782,6 +794,11 @@ export async function createContribution(
         debateArenaId,
       );
       if (openedArena !== null) {
+        // PERSIST the back-reference onto the stored record so EVERY projection
+        // path serves the "View debate" link (the comment page AND the live SSE
+        // replay, which reads stored rows directly) — not only this create
+        // response.  Also reflect it on the returned record for the response.
+        await forum.contributions.setDebateArena(contribution.contributionId, openedArena.debateId);
         contribution.metadata.debate_arena_id = openedArena.debateId;
       }
     } catch (err) {

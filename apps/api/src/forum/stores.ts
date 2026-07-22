@@ -285,6 +285,11 @@ export interface ContributionStore {
     contributionId: string,
     status: ContributionDisputeStatus,
   ): Promise<ContributionRecord | null>;
+  /** WS-T — persist the `debate_arena_id` back-reference onto a correction's
+   *  stored metadata once its arena opens, so EVERY projection path (comment
+   *  page, live SSE replay) serves the "View debate" link, not just the create
+   *  response.  A no-op for an unknown id. */
+  setDebateArena(contributionId: string, debateArenaId: string): Promise<void>;
   /** WS-J.2.6 compensation: HARD-delete a just-created contribution when the
    *  safety intake that should hide it fails.  Reverses the insert — including
    *  the `client_draft_id` dedup mapping — so the client's retry recreates BOTH
@@ -869,6 +874,13 @@ export class InMemoryContributionStore implements ContributionStore {
     row.disputeStatus = status;
     row.updatedAt = iso(this.#now);
     return row;
+  }
+
+  async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return;
+    row.metadata = { ...row.metadata, debate_arena_id: debateArenaId };
+    row.updatedAt = iso(this.#now);
   }
 
   async purgeForRollback(contributionId: string): Promise<void> {

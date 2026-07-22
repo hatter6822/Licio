@@ -177,6 +177,10 @@ interface ProjectCtx {
    *  the arena resolves and independently of whether the write path persisted it
    *  onto the stored metadata. */
   correctionArenas: ReadonlyMap<string, string>;
+  /** WS-T — the story's CURRENT challenger correction id (live or prevailed), so
+   *  its node reports `story_challenge_active`; a settled inconclusive/withdrawn
+   *  story challenge is not this id and renders as closed. Null in focused views. */
+  pinnedCorrectionId: string | null;
 }
 
 async function buildProjectCtx(
@@ -230,6 +234,8 @@ async function buildProjectCtx(
     media,
     activeDebates,
     correctionArenas,
+    // The pin applies to the unrooted section only (a story correction is a root).
+    pinnedCorrectionId: opts.parentId === undefined ? (opts.pinnedCorrectionId ?? null) : null,
   };
 }
 
@@ -263,8 +269,18 @@ function projectNode(node: RawNode, ctx: ProjectCtx): CommentItem | null {
     correctionArenaId !== null && withDebate.metadata.debate_arena_id == null
       ? { ...withDebate, metadata: { ...withDebate.metadata, debate_arena_id: correctionArenaId } }
       : withDebate;
+  // WS-T — a STORY-target correction is the story's ACTIVE challenge only when it
+  // is the pinned challenger (live, or prevailed → story `incorrect`); a settled
+  // inconclusive/withdrawn one is not, so the UI renders it as a closed challenge.
+  const withStanding =
+    !tombstone &&
+    node.record.type === 'correction' &&
+    node.record.metadata.target_story_id !== undefined &&
+    node.record.contributionId === ctx.pinnedCorrectionId
+      ? { ...withArena, story_challenge_active: true }
+      : withArena;
   const media = tombstone ? undefined : ctx.media.get(node.record.contributionId);
-  const head = media ? { ...withArena, media } : withArena;
+  const head = media ? { ...withStanding, media } : withStanding;
   const replies = node.children
     .map((child) => projectNode(child, ctx))
     .filter((child): child is CommentItem => child !== null);
