@@ -20,6 +20,7 @@ import type {
   ModerationReasonCode,
 } from '@licio/shared';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
@@ -89,6 +90,13 @@ const slaTone: Record<string, string> = {
 
 function isForbidden(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403;
+}
+
+/** A TRUE authentication failure (the api client has already flipped the auth
+ *  store to session-expired for it): retrying cannot succeed until the steward
+ *  signs in again, so it must never render as a transient error. */
+function isUnauthenticated(error: unknown): boolean {
+  return error instanceof ApiClientError && error.status === 401;
 }
 
 /**
@@ -219,12 +227,30 @@ function AccessNotice(): React.ReactElement {
   );
 }
 
+/** The session lapsed mid-use (401 — the api client already flipped the auth
+ *  store to `session-expired`; the route guards redirect on the next protected
+ *  navigation). Say so and point at sign-in — never "retry". */
+function SessionExpiredNotice(): React.ReactElement {
+  const t = useT();
+  return (
+    <p className="rounded-md border border-line bg-canvas p-4 text-ink-muted">
+      {t('console.sessionExpired', 'Your session has expired.')}{' '}
+      <Link to="/login" className="font-medium text-primary-on-soft underline hover:no-underline">
+        {t('console.signInAgain', 'Sign in again')}
+      </Link>{' '}
+      {t('console.sessionExpiredTail', 'to continue reviewing.')}
+    </p>
+  );
+}
+
 /**
  * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome (the
- * access notice), while any other failure — network, 5xx, malformed payload —
- * is a transient error with a retry. Collapsing both into the access notice
- * told a fully-authorized steward their role lost access whenever the API
- * blipped, which is both wrong and alarming.
+ * access notice), a 401 is an AUTHENTICATION outcome (the session lapsed —
+ * sign in again; retrying cannot succeed), and only everything else —
+ * network, 5xx, malformed payload — is a transient error with a retry.
+ * Collapsing these told a fully-authorized steward their role lost access
+ * whenever the API blipped, or that an expired session was "not a
+ * permissions problem, retry", both wrong.
  */
 function PanelError({
   error,
@@ -235,6 +261,7 @@ function PanelError({
 }): React.ReactElement {
   const t = useT();
   if (isForbidden(error)) return <AccessNotice />;
+  if (isUnauthenticated(error)) return <SessionExpiredNotice />;
   return (
     <ErrorState
       title={t('console.panelError', 'This console section could not load')}
@@ -374,7 +401,9 @@ function CaseReviewDialog({
         <p role="alert" className="text-error">
           {isForbidden(review.error)
             ? t('console.caseForbidden', 'Your role cannot open this case for review.')
-            : t('console.caseReviewError', 'Could not load this case for review.')}
+            : isUnauthenticated(review.error)
+              ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
+              : t('console.caseReviewError', 'Could not load this case for review.')}
         </p>
       ) : null}
       {data ? (
@@ -944,7 +973,9 @@ function AppealReviewDialog({
       ) : null}
       {review.isError ? (
         <p className="text-error">
-          {t('console.appealReviewError', 'Could not load this appeal for review.')}
+          {isUnauthenticated(review.error)
+            ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
+            : t('console.appealReviewError', 'Could not load this appeal for review.')}
         </p>
       ) : null}
       {data ? (

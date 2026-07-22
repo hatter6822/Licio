@@ -1478,12 +1478,13 @@ reverse:
 #                               # official rocm/vllm build of the SAME two vLLM
 #                               # lanes (RDNA tag default; VLLM_ROCM_IMAGE
 #                               # overrides for CDNA). On a 24 GB consumer card
-#                               # override VLLM_ADJUDICATION_MODEL (the 27B
-#                               # default doesn't fit; the bench-selected
-#                               # 24 GB model is Qwen/Qwen3-4B-Instruct-2507,
-#                               # see the GPU-sizing note in §17.7) and
-#                               # re-balance VLLM_*_GPU_FRACTION (0.42/0.50
-#                               # measured on a 24 GB RX 7900 XTX)
+#                               # (24 GB cards: the 27B default doesn't fit —
+#                               # set GOVERNANCE_LLM_ADJUDICATION_MODEL to the
+#                               # bench-selected Qwen/Qwen3-4B-Instruct-2507;
+#                               # the compose lane FOLLOWS that same key, so
+#                               # served + requested models stay in lockstep —
+#                               # and re-balance VLLM_*_GPU_FRACTION, 0.42/0.50
+#                               # measured on an RX 7900 XTX; §17.7)
 #      pnpm setup:llm --runtime ollama --docker
 #                               # the single-URL ALTERNATIVE: one Ollama serves
 #                               # GGUF builds of both lane models from :11434
@@ -2055,7 +2056,11 @@ Operational rules — Section 16 has the full tuning detail:
   `VLLM_ROCM_IMAGE` selects the broader rdna tag or the cdna datacenter tags.
   **24 GB single-card sizing (measured, RX 7900 XTX, `pnpm bench:llm`):** the
   co-resident pair that fits alongside the guard (fractions 0.42/0.50) is
-  `VLLM_ADJUDICATION_MODEL=Qwen/Qwen3-4B-Instruct-2507` — bench-selected over
+  `GOVERNANCE_LLM_ADJUDICATION_MODEL=Qwen/Qwen3-4B-Instruct-2507` — set the
+  ONE governance key: the API boot, `pnpm setup:llm`, and the compose lane
+  (whose model resolves `VLLM_*_MODEL → GOVERNANCE_LLM_*_MODEL → default`)
+  all follow it, so the served and requested models cannot drift apart.
+  Bench-selected over
   the alternatives: 0.93 s warm debate verdicts / 0.36 s effective in the
   4-wide burst / 0.52 s §24.5-clean summaries, correct canonical-fixture
   direction, non-thinking (no `reasoning_effort` negotiation edge). The

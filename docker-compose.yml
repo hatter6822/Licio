@@ -57,7 +57,10 @@ services:
   # compose override setting CUDA_VISIBLE_DEVICES per service (and may raise
   # the fractions to 0.9). Size the adjudication card for the 27B default, or
   # override VLLM_ADJUDICATION_MODEL / add a quantization flag for your
-  # hardware. The single-URL CPU-friendly alternative is the `llm-ollama`
+  # hardware. Each lane's model resolves VLLM_*_MODEL →
+  # GOVERNANCE_LLM_*_MODEL → the reviewed default, so the governance key the
+  # API resolves also drives what the container serves. The single-URL
+  # CPU-friendly alternative is the `llm-ollama`
   # profile below (`pnpm setup:llm --runtime ollama --docker`).
   vllm-moderation:
     # Pin to digest in production for reproducibility: docker pull vllm/vllm-openai:v0.25.1 && docker inspect --format='{{index .RepoDigests 0}}' vllm/vllm-openai:v0.25.1
@@ -65,9 +68,9 @@ services:
     profiles: ["llm"]
     command:
       - "--model"
-      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      - "${VLLM_MODERATION_MODEL:-${GOVERNANCE_LLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}}"
       - "--served-model-name"
-      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      - "${VLLM_MODERATION_MODEL:-${GOVERNANCE_LLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}}"
       # Right-size the context for the governed surfaces (prompts ≤ ~2.5k
       # tokens; the guard classifies one contribution at a time).
       - "--max-model-len"
@@ -113,9 +116,9 @@ services:
     profiles: ["llm"]
     command:
       - "--model"
-      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "${VLLM_ADJUDICATION_MODEL:-${GOVERNANCE_LLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}}"
       - "--served-model-name"
-      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "${VLLM_ADJUDICATION_MODEL:-${GOVERNANCE_LLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}}"
       - "--max-model-len"
       - "8192"
       # The single-GPU co-residency split (see the header comment).
@@ -159,23 +162,28 @@ services:
   # `cdna` tags for MI200/MI300 datacenter hosts). ROCm containers need the
   # kfd/dri devices + video/render groups instead of the NVIDIA device
   # reservation. Model defaults are IDENTICAL to
-  # the `llm` profile (the reviewed lane pair) — on a 24 GB consumer card the
-  # 27B adjudication default does not fit: override VLLM_ADJUDICATION_MODEL
-  # with the bench-selected Qwen/Qwen3-4B-Instruct-2507 (measured optimal for
-  # this envelope; Qwen/Qwen3-8B-AWQ is the verified alternative, and
-  # 14B-AWQ/27B cannot serve the 8192 context co-resident — see
-  # docs/DEVELOPMENT.md §17.7) and re-balance the GPU fractions
-  # (e.g. 0.42 / 0.50, measured on a 24 GB RX 7900 XTX — the guard's 4B bf16
-  # weights plus the 8192-context KV cache exceed the 0.25 default's budget).
+  # the `llm` profile (the reviewed lane pair). Each lane's model resolves
+  # VLLM_*_MODEL → GOVERNANCE_LLM_*_MODEL → the reviewed default, so setting
+  # the ONE governance key the API boot and `pnpm setup:llm` already resolve
+  # keeps the served model and the requested model in lockstep by
+  # construction (VLLM_*_MODEL stays a container-only override). On a 24 GB
+  # consumer card the 27B adjudication default does not fit: set
+  # GOVERNANCE_LLM_ADJUDICATION_MODEL to the bench-selected
+  # Qwen/Qwen3-4B-Instruct-2507 (measured optimal for this envelope;
+  # Qwen/Qwen3-8B-AWQ is the verified alternative, and 14B-AWQ/27B cannot
+  # serve the 8192 context co-resident — see docs/DEVELOPMENT.md §17.7) and
+  # re-balance the GPU fractions (0.42 / 0.50, measured on a 24 GB
+  # RX 7900 XTX — the guard's 4B bf16 weights plus the 8192-context KV cache
+  # exceed the 0.25 default's budget).
   vllm-moderation-rocm:
     image: "${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.13.0_gfx110X-all_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1}"
     profiles: ["llm-rocm"]
     command:
       - "vllm"
       - "serve"
-      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      - "${VLLM_MODERATION_MODEL:-${GOVERNANCE_LLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}}"
       - "--served-model-name"
-      - "${VLLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}"
+      - "${VLLM_MODERATION_MODEL:-${GOVERNANCE_LLM_MODERATION_MODEL:-Qwen/Qwen3Guard-Gen-4B}}"
       - "--max-model-len"
       - "8192"
       - "--gpu-memory-utilization"
@@ -218,9 +226,9 @@ services:
     command:
       - "vllm"
       - "serve"
-      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "${VLLM_ADJUDICATION_MODEL:-${GOVERNANCE_LLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}}"
       - "--served-model-name"
-      - "${VLLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}"
+      - "${VLLM_ADJUDICATION_MODEL:-${GOVERNANCE_LLM_ADJUDICATION_MODEL:-Qwen/Qwen3.6-27B}}"
       - "--max-model-len"
       - "8192"
       - "--gpu-memory-utilization"

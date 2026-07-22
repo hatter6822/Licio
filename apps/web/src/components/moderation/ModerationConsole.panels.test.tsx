@@ -24,6 +24,24 @@ import { I18nProvider } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { ToastProvider } from '../ui/Toast/index.js';
 
+// The console links to /login from the session-expired notice; render Link as
+// a plain anchor (the StoryFeedLink test pattern — no router in these tests).
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    children,
+    to,
+    className,
+  }: {
+    children?: ReactNode;
+    to?: string;
+    className?: string;
+  }) => (
+    <a href={to ?? '#'} className={className}>
+      {children}
+    </a>
+  ),
+}));
+
 vi.mock('../../lib/safety-api.js', () => ({
   fetchReportQueue: vi.fn(),
   fetchCase: vi.fn(),
@@ -379,6 +397,19 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     );
     render(<ModerationConsole />, { wrapper: Providers });
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
+  });
+
+  it('an EXPIRED session (401) renders the sign-in-again notice, never the retryable error', async () => {
+    // The api client flips the auth store to session-expired on a true 401 —
+    // retrying cannot succeed, so the panel must say sign in, not "retry".
+    vi.mocked(api.fetchReportQueue).mockRejectedValue(
+      new ApiClientError('unauthenticated', 'session expired', 401),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/session has expired/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /sign in again/i })).toHaveAttribute('href', '/login');
+    expect(screen.queryByText(/not a permissions problem/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
   });
 
   it('surfaces an error toast when an action is forbidden', async () => {
