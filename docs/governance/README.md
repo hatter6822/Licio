@@ -385,12 +385,17 @@ hypothetical `knomosis → public.rooms` FK is caught.
   per-model circuit breakers, registered/deployed through the real WS-K gate
   (one registry identity per backend+config), and recorded as an immutable
   `AIOutputRecord`.
-  Fail-closed and never silent: PRODUCTION defaults an unset
-  `GOVERNANCE_LLM_PROVIDER` to the loopback-`local` backend (the
-  production-complete posture; development wires the DEV-ONLY simulated
-  runtime instead), `deterministic` is the explicit opt-out, and every
+  Fail-closed and never silent: PRODUCTION **and DEVELOPMENT** default an
+  unset `GOVERNANCE_LLM_PROVIDER` to the loopback-`local` backend (the
+  vLLM-default-everywhere posture; the dev boot probes each lane and the
+  DEV-ONLY simulated runtime stands in per lane whose real runtime is not
+  serving its model — real runtimes are always preferred),
+  `deterministic` is the explicit opt-out, and every
   governed surface fails closed per call to its deterministic path until its
-  lane responds. The hosted backend stays an explicit opt-in whose
+  lane responds. The boot records a per-lane status summary
+  (`AiGovernanceServices.llmStatus`) served to the AI team at
+  `GET /v1/ai/admin/governance/llm` — the first-class "is the AI actually
+  running?" answer. The hosted backend stays an explicit opt-in whose
   data-processor egress is boot-logged loudly; the `local` backend is
   loopback-enforced so content stays on-host (see `docs/DEVELOPMENT.md` §16). **The in-room moderation MODEL
   is the wrapped LLM** (ADR-9, revised — the deterministic policy-DSL and the

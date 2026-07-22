@@ -96,8 +96,9 @@ guard, the governed models, and a module singleton for routes.
   the translation-provider seam.
 - `llm/` — the REAL model backends (WS-U ADR-9, the ROLE-SPLIT revision), all
   behind the unchanged registry/guard/output-record surface: `config.ts`
-  (fail-closed enablement; PRODUCTION defaults an unset provider to the
-  loopback-`local` backend running TWO model LANES — the roles fail
+  (fail-closed enablement; PRODUCTION **and DEVELOPMENT** default an unset
+  provider to the loopback-`local` backend running TWO model LANES — the
+  vLLM-default-everywhere posture; the roles fail
   differently, so each gets a model selected for its failure mode: the
   MODERATION lane defaults to the `Qwen/Qwen3Guard-Gen-4B` guard safety
   classifier on the vLLM instance at `127.0.0.1:8001/v1`, and the
@@ -108,7 +109,17 @@ guard, the governed models, and a module singleton for routes.
   stays an explicit opt-in; the `GOVERNANCE_LLM_MODERATION` +
   `GOVERNANCE_LLM_DEBATE` per-surface off-switches; the config-hashed local
   `reasoning_effort` latency lever, reviewed default `low`, env-overridable
-  incl. `off`), `guard-format.ts` (the moderation-lane OUTPUT DIALECTS:
+  incl. `off`; also the boot-resolved `GovernanceLlmStatusReport` types — the
+  per-lane observability summary the boot records into
+  `AiGovernanceServices.llmStatus`, served to the AI team at
+  `GET /v1/ai/admin/governance/llm` and to the dev simulator panel),
+  `dev-lanes.ts` (the DEV boot's PURE per-lane substitution plan: which
+  probed lanes the simulated runtime stands in for, and the env-input overlay
+  whose per-lane keys outrank stale legacy keys; no simulator import, no
+  I/O), `text.ts` (the shared ReDoS-free whitespace/token/truncation
+  utilities every model-influenced-text consumer uses — the quality gate, the
+  debate shell, the dev simulated runtime — one implementation so semantics
+  can never drift), `guard-format.ts` (the moderation-lane OUTPUT DIALECTS:
   guard-family models are spoken to in their NATIVE `Safety:/Categories:`
   block — no system prompt, no schema-guided decoding — with a tolerant
   parser + a versioned deterministic taxonomy→action mapping; generalists get
@@ -158,12 +169,15 @@ guard, the governed models, and a module singleton for routes.
   wrapper-bounded action, metadata only) is logged to the in-memory
   `ModerationDecisionLog` (`stores.ts`), read by the AI team at `GET
   /v1/ai/admin/governance/moderation/:roomId`.
-  In **development** (`pnpm dev`), when no backend is configured, the boot
-  auto-starts the DEV-ONLY **simulated local runtime**
+  In **development** (`pnpm dev`), when no backend is chosen explicitly, the
+  boot PROBES each defaulted lane's runtime and prefers the REAL one whenever
+  it serves the lane's model; for each absent lane it auto-starts (once) the
+  DEV-ONLY **simulated local runtime**
   (`apps/api/src/simulator/governance-llm.ts`) — a deterministic loopback
   OpenAI-compatible server wired through this unchanged `local` seam, so the
   full governed path (admission, gates, budgets, records, wrapper, deferred
-  re-moderation) runs with zero setup; see `docs/DEVELOPMENT.md` §16 for the
+  re-moderation) runs with zero setup and AI moderation/adjudication are live
+  on every dev boot; see `docs/DEVELOPMENT.md` §16 for the
   knobs + failure-injection markers.  Never constructed in production.
 - `model-hub.ts` — the huggingface.co METADATA client (a sibling of `llm/`)
   behind the member model search + propose-time candidate verification:

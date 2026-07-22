@@ -20,6 +20,7 @@ import type {
   ModerationReasonCode,
 } from '@licio/shared';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
@@ -40,8 +41,10 @@ import {
   resolveIncident,
 } from '../../lib/safety-api.js';
 import { REPORT_REASONS_BY_CODE } from '../safety/report-reasons.js';
+import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Dialog } from '../ui/Dialog/index.js';
+import { ErrorState } from '../ui/ErrorState/index.js';
 import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
@@ -51,6 +54,23 @@ const REASON_OPTIONS = [...REPORT_REASONS_BY_CODE.values()].map((r) => ({
   value: r.code,
   label: `${r.code} — ${r.label}`,
 }));
+
+/** Humanize a ratified WS-A reason code for display: the taxonomy label with
+ *  the code kept alongside (stewards cross-reference codes in audit exports),
+ *  falling back to the bare code for anything outside the taxonomy. */
+function reasonLabel(code: string): string {
+  const reason = REPORT_REASONS_BY_CODE.get(code as ModerationReasonCode);
+  return reason ? `${reason.label} (${code})` : code;
+}
+
+/** Human names for the invariant signals (SPEC §7–§12) — the console must not
+ *  surface bare acronyms a rotating steward has to memorize. */
+const SIGNAL_LABELS: Record<'mfci' | 'scoi' | 'phi' | 'hodge', string> = {
+  mfci: 'Coordination (MFCI)',
+  scoi: 'Context obstruction (SCOI)',
+  phi: 'Preference holonomy (PHI)',
+  hodge: 'Hodge tension',
+};
 
 /** Modify-decision target actions (the server enforces strict de-escalation; a
  *  non-de-escalating choice is rejected with 400). */
@@ -70,6 +90,13 @@ const slaTone: Record<string, string> = {
 
 function isForbidden(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403;
+}
+
+/** A TRUE authentication failure (the api client has already flipped the auth
+ *  store to session-expired for it): retrying cannot succeed until the steward
+ *  signs in again, so it must never render as a transient error. */
+function isUnauthenticated(error: unknown): boolean {
+  return error instanceof ApiClientError && error.status === 401;
 }
 
 /**
@@ -200,6 +227,54 @@ function AccessNotice(): React.ReactElement {
   );
 }
 
+/** The session lapsed mid-use (401 — the api client already flipped the auth
+ *  store to `session-expired`; the route guards redirect on the next protected
+ *  navigation). Say so and point at sign-in — never "retry". */
+function SessionExpiredNotice(): React.ReactElement {
+  const t = useT();
+  return (
+    <p className="rounded-md border border-line bg-canvas p-4 text-ink-muted">
+      {t('console.sessionExpired', 'Your session has expired.')}{' '}
+      <Link to="/login" className="font-medium text-primary-on-soft underline hover:no-underline">
+        {t('console.signInAgain', 'Sign in again')}
+      </Link>{' '}
+      {t('console.sessionExpiredTail', 'to continue reviewing.')}
+    </p>
+  );
+}
+
+/**
+ * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome (the
+ * access notice), a 401 is an AUTHENTICATION outcome (the session lapsed —
+ * sign in again; retrying cannot succeed), and only everything else —
+ * network, 5xx, malformed payload — is a transient error with a retry.
+ * Collapsing these told a fully-authorized steward their role lost access
+ * whenever the API blipped, or that an expired session was "not a
+ * permissions problem, retry", both wrong.
+ */
+function PanelError({
+  error,
+  onRetry,
+}: {
+  error: unknown;
+  onRetry: () => void;
+}): React.ReactElement {
+  const t = useT();
+  if (isForbidden(error)) return <AccessNotice />;
+  if (isUnauthenticated(error)) return <SessionExpiredNotice />;
+  return (
+    <ErrorState
+      title={t('console.panelError', 'This console section could not load')}
+      description={t(
+        'console.panelErrorDetail',
+        'The request failed — this is not a permissions problem. Retry, and check that the API is reachable.',
+      )}
+      headingLevel={3}
+      onRetry={onRetry}
+    />
+  );
+}
+
 function ReportQueuePanel(): React.ReactElement {
   const t = useT();
   const [openCase, setOpenCase] = useState<string | null>(null);
@@ -210,7 +285,7 @@ function ReportQueuePanel(): React.ReactElement {
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
-  if (queue.isError) return <AccessNotice />;
+  if (queue.isError) return <PanelError error={queue.error} onRetry={() => void queue.refetch()} />;
   const rows: ModerationCaseRow[] =
     queue.data?.pages.flatMap((p) => [...p.emergency, ...p.standard]) ?? [];
   return (
@@ -227,9 +302,12 @@ function ReportQueuePanel(): React.ReactElement {
               className="flex w-full items-center justify-between rounded-md border border-line bg-canvas p-3 text-start hover:bg-surface"
             >
               <span className="flex flex-col">
-                <span className="font-medium text-ink">
-                  {row.routed_to === 'emergency' ? '🚨 ' : ''}
-                  {row.reason_codes.join(', ')}
+                <span className="flex flex-wrap items-center gap-1.5 font-medium text-ink">
+                  {/* Text-carried emergency marker (never an emoji glyph alone). */}
+                  {row.routed_to === 'emergency' ? (
+                    <Badge tone="error">{t('console.emergency', 'Emergency')}</Badge>
+                  ) : null}
+                  {row.reason_codes.map(reasonLabel).join(', ')}
                 </span>
                 <span className="text-xs text-ink-muted">
                   {t('console.severity', 'Severity')}: {row.severity} · {row.report_count}{' '}
@@ -319,6 +397,15 @@ function CaseReviewDialog({
       {review.isLoading ? (
         <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
       ) : null}
+      {review.isError ? (
+        <p role="alert" className="text-error">
+          {isForbidden(review.error)
+            ? t('console.caseForbidden', 'Your role cannot open this case for review.')
+            : isUnauthenticated(review.error)
+              ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
+              : t('console.caseReviewError', 'Could not load this case for review.')}
+        </p>
+      ) : null}
       {data ? (
         <div className="flex flex-col gap-4">
           <section aria-label={t('console.reports', 'Reports')}>
@@ -328,7 +415,7 @@ function CaseReviewDialog({
             <ul className="mt-1 flex flex-col gap-1 text-sm">
               {data.reports.map((r) => (
                 <li key={r.report_id} className="rounded bg-surface p-2">
-                  <span className="font-medium text-ink">{r.reason_code}</span>
+                  <span className="font-medium text-ink">{reasonLabel(r.reason_code)}</span>
                   {r.context ? <span className="text-ink-muted"> — {r.context}</span> : null}
                   {r.reporter_handle ? (
                     <span className="ml-1 text-xs text-ink-muted">({r.reporter_handle})</span>
@@ -361,7 +448,7 @@ function CaseReviewDialog({
             <ul className="mt-1 grid grid-cols-2 gap-1 text-xs">
               {(['mfci', 'scoi', 'phi', 'hodge'] as const).map((k) => (
                 <li key={k} className="rounded bg-surface p-1">
-                  {k.toUpperCase()}:{' '}
+                  {SIGNAL_LABELS[k]}:{' '}
                   {data.invariant_signals[k].available
                     ? (data.invariant_signals[k].state ?? '—')
                     : t('console.signalUnavailable', 'unavailable')}
@@ -535,7 +622,7 @@ function SourcesPanel(): React.ReactElement {
       if (duplicate) refresh();
     },
   });
-  if (queue.isError) return <AccessNotice />;
+  if (queue.isError) return <PanelError error={queue.error} onRetry={() => void queue.refetch()} />;
   const rows = queue.data?.pages.flatMap((p) => p.items) ?? [];
   const decisionRows = decisions.data?.pages.flatMap((p) => p.items) ?? [];
   return (
@@ -652,7 +739,9 @@ function SourcesPanel(): React.ReactElement {
               {d.citation_url ? (
                 <span className="break-all text-ink-muted"> · {d.citation_url}</span>
               ) : null}
-              {d.reason_code ? <span className="text-ink-muted"> · {d.reason_code}</span> : null}
+              {d.reason_code ? (
+                <span className="text-ink-muted"> · {reasonLabel(d.reason_code)}</span>
+              ) : null}
               <span className="text-ink-muted">
                 {' '}
                 · {d.decided_by_handle ?? t('console.system', 'system')} ·{' '}
@@ -774,7 +863,9 @@ function AppealsPanel(): React.ReactElement {
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
-  if (appeals.isError) return <AccessNotice />;
+  if (appeals.isError) {
+    return <PanelError error={appeals.error} onRetry={() => void appeals.refetch()} />;
+  }
   const items = appeals.data?.pages.flatMap((p) => p.items) ?? [];
   return (
     <div className="flex flex-col gap-2">
@@ -793,7 +884,7 @@ function AppealsPanel(): React.ReactElement {
                 {a.is_ban_appeal ? `(${t('console.banAppeal', 'ban appeal')})` : ''}
               </span>
               <span className={`text-xs ${slaTone[a.sla_state] ?? 'text-ink-muted'}`}>
-                SLA: {a.sla_state}
+                {t('console.sla', 'SLA')}: {a.sla_state}
               </span>
             </span>
             {/* No inline decide here: the decision is made from the review dialog,
@@ -882,7 +973,9 @@ function AppealReviewDialog({
       ) : null}
       {review.isError ? (
         <p className="text-error">
-          {t('console.appealReviewError', 'Could not load this appeal for review.')}
+          {isUnauthenticated(review.error)
+            ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
+            : t('console.appealReviewError', 'Could not load this appeal for review.')}
         </p>
       ) : null}
       {data ? (
@@ -893,7 +986,7 @@ function AppealReviewDialog({
             </h3>
             <p className="text-sm text-ink">
               {data.original_action}
-              {data.original_reason_code ? ` · ${data.original_reason_code}` : ''}
+              {data.original_reason_code ? ` · ${reasonLabel(data.original_reason_code)}` : ''}
             </p>
             <p className="text-xs text-ink-muted">
               {t('console.appealDecidedBy', 'Decided by')}:{' '}
@@ -1047,7 +1140,9 @@ function IncidentsPanel(): React.ReactElement {
         tone: 'error',
       }),
   });
-  if (incidents.isError) return <AccessNotice />;
+  if (incidents.isError) {
+    return <PanelError error={incidents.error} onRetry={() => void incidents.refetch()} />;
+  }
   const items = incidents.data?.pages.flatMap((p) => p.incidents) ?? [];
   return (
     <div className="flex flex-col gap-2">
@@ -1123,7 +1218,7 @@ function AuditPanel(): React.ReactElement {
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
-  if (audit.isError) return <AccessNotice />;
+  if (audit.isError) return <PanelError error={audit.error} onRetry={() => void audit.refetch()} />;
   const items = audit.data?.pages.flatMap((p) => p.items) ?? [];
   return (
     <ul className="flex flex-col gap-1 text-sm">
@@ -1131,7 +1226,7 @@ function AuditPanel(): React.ReactElement {
         <li key={entry.audit_id} className="rounded bg-surface p-2">
           <span className="font-medium text-ink">{entry.action}</span>
           {entry.reason_code ? (
-            <span className="text-ink-muted"> · {entry.reason_code}</span>
+            <span className="text-ink-muted"> · {reasonLabel(entry.reason_code)}</span>
           ) : null}
           <span className="text-ink-muted">
             {' '}

@@ -26,18 +26,25 @@
 // single-runtime posture, e.g. one Ollama serving both models from one URL) →
 // the reviewed per-lane default below.
 //
-// Environment defaults (the 2026-07-09 maintainer decisions, revised):
-//   - PRODUCTION runs the COMPLETE feature by default: an unset
-//     GOVERNANCE_LLM_PROVIDER resolves to the 'local' backend with the
-//     defaults above — production is never silently LESS capable than
-//     development. If a runtime is absent, every governed surface fails
-//     CLOSED at call time to its deterministic path (summary fallback,
-//     platform-baseline moderation + deferred re-moderation, the
-//     deterministic debate adjudicator), and recovers when it appears.
-//   - DEVELOPMENT with an unset provider resolves to `not_requested` here;
-//     the dev boot then wires the DEV-ONLY simulated loopback runtime through
-//     this same decision (simulator/governance-llm.ts) into BOTH lanes, so
-//     dev fakes the feature rather than running less of it.
+// Environment defaults (the 2026-07-09 maintainer decisions, revised again
+// 2026-07-21 — the vLLM-default-everywhere revision):
+//   - PRODUCTION **and** DEVELOPMENT run the COMPLETE feature by default: an
+//     unset GOVERNANCE_LLM_PROVIDER resolves to the 'local' backend with the
+//     defaults above (the two vLLM lanes) in BOTH environments — the same
+//     runtime posture everywhere, so dev exercises exactly what production
+//     runs. If a runtime is absent, every governed surface fails CLOSED at
+//     call time to its deterministic path (summary fallback, platform-baseline
+//     moderation + deferred re-moderation, the deterministic debate
+//     adjudicator), and recovers when it appears.
+//   - The DEV BOOT additionally probes each defaulted lane's runtime and
+//     points any lane that is NOT actually serving its model at the DEV-ONLY
+//     simulated loopback runtime (simulator/governance-llm.ts) — real vLLM
+//     lanes are preferred whenever they are up, and the simulator stands in
+//     per lane otherwise, so `pnpm dev` always has live AI moderation and
+//     adjudication with zero setup. LICIO_LLM_SIM=off disables the stand-in
+//     (dev then behaves exactly like production: fail closed per call).
+//   - Test runs (NODE_ENV=test / unset) resolve to `not_requested` — a test
+//     process never grows a silent default backend.
 //   - GOVERNANCE_LLM_PROVIDER=deterministic is the explicit opt-out anywhere.
 // Any INVALID explicit value still resolves to the deterministic default, so
 // a misconfiguration can never silently enable an unintended backend (the
@@ -168,8 +175,9 @@ export interface GovernanceLlmLane {
 export interface GovernanceLlmEnvInput {
   /** GOVERNANCE_LLM_PROVIDER — 'anthropic' or 'local' opts in explicitly;
    *  'deterministic' opts out explicitly; UNSET defaults to 'local' in
-   *  production (the production-complete default) and to `not_requested`
-   *  elsewhere (the dev boot then wires the simulated runtime). */
+   *  production AND development (the vLLM-default-everywhere posture; the dev
+   *  boot then substitutes the simulated runtime per lane whose real runtime
+   *  is absent) and to `not_requested` elsewhere (tests). */
   provider: string | undefined;
   /** ANTHROPIC_API_KEY (anthropic backend). */
   apiKey: string | undefined;
@@ -251,14 +259,62 @@ export type GovernanceLlmDecision =
       providerDefaulted: boolean;
     };
 
+/** One governed surface's boot outcome on a lane (admitted + wired, or which
+ *  fallback serves instead). */
+export interface GovernanceLlmSurfaceStatus {
+  surface: 'moderation' | 'debate' | 'summary';
+  /** True when the LLM leg is admitted + wired for this surface this boot;
+   *  false ⇒ the deterministic path serves it entirely (opt-out or WS-K
+   *  admission refusal — `fallback` names it). */
+  active: boolean;
+  /** The deterministic path that serves when the LLM leg is inactive OR fails
+   *  a call (always-on fail-closed floor). */
+  fallback: 'platform_baseline' | 'deterministic_mlp' | 'deterministic_summary';
+}
+
+/** One lane's boot-resolved, observability-only status (never a key). */
+export interface GovernanceLlmLaneStatus {
+  role: GovernanceLlmRole;
+  backend: 'anthropic' | 'local';
+  modelId: string;
+  /** The loopback base URL ('local' backend); null for the hosted backend. */
+  baseUrl: string | null;
+  /** True when the DEV simulated runtime stands in for this lane (never true
+   *  in production — the simulator refuses to start there). */
+  simulated: boolean;
+  /** The moderation lane's completion dialect; null on the adjudication lane. */
+  format: ModerationOutputFormat | null;
+  surfaces: GovernanceLlmSurfaceStatus[];
+}
+
+/** The boot-resolved governed-LLM status summary: what backend/model each
+ *  lane runs, whether the DEV simulator stands in, and which governed
+ *  surfaces are active. Set ONCE at boot (it reports wiring, not liveness —
+ *  per-call health lives in the breaker/metrics); served by the AI-team admin
+ *  surface and the dev simulator status so "is the AI actually running?" has
+ *  a first-class answer. */
+export type GovernanceLlmStatusReport =
+  | { enabled: false; reason: GovernanceLlmDisabledReason }
+  | {
+      enabled: true;
+      /** True when the backend defaulted in (no explicit provider). */
+      providerDefaulted: boolean;
+      lanes: { moderation: GovernanceLlmLaneStatus; adjudication: GovernanceLlmLaneStatus };
+    };
+
 /** Resolve the boot-time enablement decision (pure; unit-tested fail-closed). */
 export function resolveGovernanceLlmDecision(input: GovernanceLlmEnvInput): GovernanceLlmDecision {
-  // The production-complete default: an UNSET provider means the operator made
-  // no choice — production then runs the full 'local' feature (deterministic
-  // paths remain the per-call fail-closed fallback); anything explicit — the
-  // 'deterministic' opt-out and every invalid value included — never defaults.
+  // The complete-feature default: an UNSET provider means the operator made no
+  // choice — production AND development then run the full 'local' feature (the
+  // vLLM-default-everywhere posture; deterministic paths remain the per-call
+  // fail-closed fallback, and the dev boot substitutes the simulated runtime
+  // per absent lane); anything explicit — the 'deterministic' opt-out and
+  // every invalid value included — never defaults. Test runs never default.
   const provider =
-    input.provider === undefined && input.nodeEnv === 'production' ? 'local' : input.provider;
+    input.provider === undefined &&
+    (input.nodeEnv === 'production' || input.nodeEnv === 'development')
+      ? 'local'
+      : input.provider;
   const providerDefaulted = provider !== input.provider;
   if (provider !== 'anthropic' && provider !== 'local') {
     return { enabled: false, reason: 'not_requested' };

@@ -24,6 +24,24 @@ import { I18nProvider } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { ToastProvider } from '../ui/Toast/index.js';
 
+// The console links to /login from the session-expired notice; render Link as
+// a plain anchor (the StoryFeedLink test pattern — no router in these tests).
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    children,
+    to,
+    className,
+  }: {
+    children?: ReactNode;
+    to?: string;
+    className?: string;
+  }) => (
+    <a href={to ?? '#'} className={className}>
+      {children}
+    </a>
+  ),
+}));
+
 vi.mock('../../lib/safety-api.js', () => ({
   fetchReportQueue: vi.fn(),
   fetchCase: vi.fn(),
@@ -352,12 +370,46 @@ describe('ReportQueuePanel + CaseReviewDialog', () => {
     expect(await screen.findByText(/report queue is clear/i)).toBeInTheDocument();
   });
 
-  it('renders the access notice for a non-forbidden queue error too', async () => {
+  it('a NON-forbidden queue error renders an honest retryable error, never the access notice', async () => {
+    // A 500/network failure must not tell an authorized steward their role
+    // lost access (the old conflation) — it is a transient error with a retry.
     vi.mocked(api.fetchReportQueue).mockRejectedValue(
       new ApiClientError('server_error', 'boom', 500),
     );
     render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.getByText(/not a permissions problem/i)).toBeInTheDocument();
+    expect(screen.queryByText(/does not have access/i)).not.toBeInTheDocument();
+    // Retry re-runs the failed query against a recovered API.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue({
+      emergency: [],
+      standard: [],
+      filtered_total: 0,
+      next_cursor: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(/report queue is clear/i)).toBeInTheDocument();
+  });
+
+  it('a FORBIDDEN queue error still renders the access notice', async () => {
+    vi.mocked(api.fetchReportQueue).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
     expect(await screen.findByText(/does not have access/i)).toBeInTheDocument();
+  });
+
+  it('an EXPIRED session (401) renders the sign-in-again notice, never the retryable error', async () => {
+    // The api client flips the auth store to session-expired on a true 401 —
+    // retrying cannot succeed, so the panel must say sign in, not "retry".
+    vi.mocked(api.fetchReportQueue).mockRejectedValue(
+      new ApiClientError('unauthenticated', 'session expired', 401),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/session has expired/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /sign in again/i })).toHaveAttribute('href', '/login');
+    expect(screen.queryByText(/not a permissions problem/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
   });
 
   it('surfaces an error toast when an action is forbidden', async () => {

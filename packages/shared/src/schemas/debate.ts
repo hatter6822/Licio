@@ -243,6 +243,14 @@ export const debateArenaPublicSchema = z
     confidence: z.number().min(0).max(1).nullable(),
     /** The immutable AIOutputRecord id backing the verdict (audit trail). */
     ai_output_id: z.string().min(1).max(128).nullable(),
+    /** Which adjudicator leg produced an AI verdict (SPEC §24.1 provenance —
+     *  the arena states honestly whether the governed model or its fail-closed
+     *  floor judged): 'model' = the governed LLM adjudicator; 'deterministic'
+     *  = the pinned-weights MLP fallback; 'unavailable' = no adjudicator could
+     *  run (the debate resolved inconclusive by the fail-closed default).
+     *  Null while unjudged, when a steward/concession decided, or when the
+     *  backing record cannot be resolved. */
+    adjudicator: z.enum(['model', 'deterministic', 'unavailable']).nullable(),
     verdict_at: isoTimestampSchema.nullable(),
     /** verdict + 24h; a steward override is rejected after this instant. */
     override_deadline_at: isoTimestampSchema.nullable(),

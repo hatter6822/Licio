@@ -21,6 +21,8 @@ import {
   DEBATE_POSITION_BODY_LIMIT,
 } from '@licio/shared';
 import { lazy, Suspense, useState } from 'react';
+import { useNow } from '../../hooks/useNow.js';
+import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useDebateStream } from '../../lib/debate-stream.js';
 import {
@@ -34,31 +36,38 @@ import { AiLabel } from '../ai/index.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
+import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
 import { Icon } from '../ui/Icon/index.js';
+import { Input } from '../ui/Input/index.js';
+import { RadioGroup } from '../ui/RadioGroup/index.js';
 import { Sheet } from '../ui/Sheet/index.js';
-
-const badge = 'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide';
+import { TextArea } from '../ui/TextArea/index.js';
 
 /** Bodies longer than this render clamped with a "Show more" expand. */
 const COLLAPSE_CHARS = 420;
 /** Sources beyond this many stay behind the same expand. */
 const COLLAPSE_SOURCES = 2;
 
-function remaining(deadline: string): { closed: boolean; label: string } {
-  const ms = Date.parse(deadline) - Date.now();
+function remaining(deadline: string, nowMs: number): { closed: boolean; label: string } {
+  const ms = Date.parse(deadline) - nowMs;
   if (ms <= 0) return { closed: true, label: '' };
+  if (ms < 60_000) return { closed: false, label: '<1m' };
   const hours = Math.floor(ms / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
   return { closed: false, label: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m` };
 }
 
 function Countdown({ deadline, label }: { deadline: string; label: string }): React.ReactElement {
-  const r = remaining(deadline);
+  const now = useNow();
+  const t = useT();
+  const r = remaining(deadline, now);
   return (
     <p className="text-sm text-ink-muted">
-      {r.closed ? `${label} closed` : `${label}: ${r.label} remaining`}
+      {r.closed
+        ? t('debate.countdown.closed', '{label} closed', { label })
+        : t('debate.countdown.remaining', '{label}: {time} remaining', { label, time: r.label })}
     </p>
   );
 }
@@ -116,6 +125,7 @@ function ClampedContent({
   title?: string | null;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
+  const t = useT();
   const collapsible = body.length > COLLAPSE_CHARS || citations.length > COLLAPSE_SOURCES;
   return (
     <div className="flex flex-col gap-2">
@@ -128,7 +138,7 @@ function ClampedContent({
           />
         </div>
       ) : title == null ? (
-        <p className="text-sm text-ink-muted italic">No content.</p>
+        <p className="text-sm text-ink-muted italic">{t('debate.noContent', 'No content.')}</p>
       ) : null}
       <SourceList heading={heading} citations={citations} expanded={expanded || !collapsible} />
       {collapsible ? (
@@ -138,7 +148,7 @@ function ClampedContent({
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
-          {expanded ? 'Show less' : 'Show more'}
+          {expanded ? t('debate.showLess', 'Show less') : t('debate.showMore', 'Show more')}
         </button>
       ) : null}
     </div>
@@ -157,6 +167,7 @@ function ContentCard({
   author: string;
   content: DebateContent | null;
 }): React.ReactElement {
+  const t = useT();
   return (
     <section className="flex flex-col gap-2" aria-label={`${heading} content`}>
       <header className="flex flex-wrap items-baseline justify-between gap-2">
@@ -164,23 +175,21 @@ function ContentCard({
           {heading} <span className="font-normal normal-case">· {author}</span>
         </h3>
         {content !== null ? (
-          <span
-            className={cn(
-              badge,
-              content.locked
-                ? 'border-line text-ink-muted'
-                : 'border-primary/40 text-primary-on-soft',
-            )}
-          >
-            {content.locked ? 'Locked in' : 'Live'}
-          </span>
+          <Badge tone={content.locked ? 'neutral' : 'info'}>
+            {content.locked ? t('debate.lockedIn', 'Locked in') : t('debate.live', 'Live')}
+          </Badge>
         ) : null}
       </header>
       {content === null ? (
-        <p className="text-sm text-ink-muted italic">This content is no longer available.</p>
+        <p className="text-sm text-ink-muted italic">
+          {t('debate.contentGone', 'This content is no longer available.')}
+        </p>
       ) : content.removed ? (
         <p className="text-sm text-ink-muted italic">
-          This content is not currently shown (removed or held for review).
+          {t(
+            'debate.contentWithheld',
+            'This content is not currently shown (removed or held for review).',
+          )}
         </p>
       ) : (
         <ClampedContent
@@ -209,13 +218,17 @@ function ArgumentCard({
   windowOpen: boolean;
 }): React.ReactElement {
   const mutation = usePostDebatePositionMutation(debateId);
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [summary, setSummary] = useState(position.summary);
   const [sources, setSources] = useState<string[]>(position.citations.map((c) => c.url));
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const heading = position.side === 'incumbent' ? 'Incumbent rebuttal' : 'Challenger argument';
+  const heading =
+    position.side === 'incumbent'
+      ? t('debate.incumbentRebuttal', 'Incumbent rebuttal')
+      : t('debate.challengerArgument', 'Challenger argument');
 
   // Seed the draft from the CURRENT position at edit-entry, not only at first
   // mount: the position can change under a mounted card (a save from another
@@ -234,7 +247,7 @@ function ArgumentCard({
     const url = draft.trim();
     if (!url) return;
     if (!citationUrlSchema.safeParse(url).success) {
-      setError('Enter a valid http(s) or doi: link.');
+      setError(t('debate.sourceInvalid', 'Enter a valid http(s) or doi: link.'));
       return;
     }
     if (!sources.includes(url)) setSources((prev) => [...prev, url]);
@@ -244,11 +257,11 @@ function ArgumentCard({
 
   const save = (): void => {
     if (summary.trim().length === 0) {
-      setError('A position summary is required.');
+      setError(t('debate.summaryRequired', 'A position summary is required.'));
       return;
     }
     if (sources.length === 0) {
-      setError('A debate position needs at least one source.');
+      setError(t('debate.sourceRequired', 'A debate position needs at least one source.'));
       return;
     }
     mutation.mutate(
@@ -266,7 +279,9 @@ function ArgumentCard({
         <h4 className="text-sm font-semibold uppercase tracking-wide text-ink-muted">{heading}</h4>
         {editable && windowOpen && !editing ? (
           <Button type="button" variant="ghost" onClick={startEditing}>
-            {position.submitted ? 'Edit' : 'Post your case'}
+            {position.submitted
+              ? t('debate.edit', 'Edit')
+              : t('debate.postYourCase', 'Post your case')}
           </Button>
         ) : null}
       </header>
@@ -275,15 +290,20 @@ function ArgumentCard({
         <div className="flex flex-col gap-2">
           <MarkdownEditor
             id={`debate-${position.side}`}
-            label={`Your ${heading.toLowerCase()} case`}
+            label={t('debate.caseEditorLabel', 'Your {heading} case', {
+              heading: heading.toLowerCase(),
+            })}
             value={summary}
             onChange={setSummary}
             compact
             maxLength={DEBATE_POSITION_BODY_LIMIT}
-            placeholder="Make your strongest, best-sourced case…"
+            placeholder={t('debate.casePlaceholder', 'Make your strongest, best-sourced case…')}
           />
           {sources.length > 0 ? (
-            <ul className="flex flex-col gap-1" aria-label="Your sources">
+            <ul
+              className="flex flex-col gap-1"
+              aria-label={t('debate.yourSources', 'Your sources')}
+            >
               {sources.map((url) => (
                 <li key={url} className="flex items-center gap-1.5 text-sm">
                   <Icon name="quote" className="size-3.5 shrink-0 text-ink-muted" aria-hidden />
@@ -292,18 +312,20 @@ function ArgumentCard({
                     type="button"
                     className="shrink-0 rounded px-1 text-sm text-ink-muted hover:text-error"
                     onClick={() => setSources((prev) => prev.filter((s) => s !== url))}
-                    aria-label={`Remove ${url}`}
+                    aria-label={t('debate.removeSource', 'Remove {url}', { url })}
                   >
-                    Remove
+                    {t('debate.remove', 'Remove')}
                   </button>
                 </li>
               ))}
             </ul>
           ) : null}
           <div className="flex items-end gap-2">
-            <input
+            <Input
               type="url"
               inputMode="url"
+              label={t('debate.addSource', 'Add a source')}
+              hideLabel
               value={draft}
               onChange={(e) => {
                 setDraft(e.currentTarget.value);
@@ -315,9 +337,8 @@ function ArgumentCard({
                   addSource();
                 }
               }}
-              placeholder="Add a source"
-              aria-label="Add a source"
-              className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              placeholder={t('debate.addSource', 'Add a source')}
+              className="flex-1"
             />
             <Button
               type="button"
@@ -325,7 +346,7 @@ function ArgumentCard({
               onClick={addSource}
               disabled={draft.trim().length === 0}
             >
-              Add
+              {t('debate.add', 'Add')}
             </Button>
           </div>
           {error ? (
@@ -335,17 +356,19 @@ function ArgumentCard({
           ) : null}
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={() => setEditing(false)}>
-              Cancel
+              {t('debate.cancel', 'Cancel')}
             </Button>
             <Button type="button" variant="primary" loading={mutation.isPending} onClick={save}>
-              Save position
+              {t('debate.savePosition', 'Save position')}
             </Button>
           </div>
         </div>
       ) : position.submitted ? (
         <ClampedContent body={position.summary} citations={position.citations} heading={heading} />
       ) : (
-        <p className="text-sm text-ink-muted italic">No statement posted yet.</p>
+        <p className="text-sm text-ink-muted italic">
+          {t('debate.noStatement', 'No statement posted yet.')}
+        </p>
       )}
     </section>
   );
@@ -354,40 +377,53 @@ function ArgumentCard({
 /** The AI verdict banner + the steward's full-overrule control (24h window). */
 function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactElement | null {
   const mutation = useOverrideDebateMutation(arena.debate_id);
+  const t = useT();
+  const now = useNow();
   const [reason, setReason] = useState('');
   const [choice, setChoice] = useState<DebateWinner>(arena.winner ?? 'none');
   if (arena.verdict === null) return null;
 
-  const tone =
-    arena.verdict === 'corrected'
-      ? 'border-error/60 text-error'
-      : arena.verdict === 'upheld'
-        ? 'border-primary/40 text-primary-on-soft'
-        : 'border-line text-ink-muted';
+  const tone: 'error' | 'info' | 'neutral' =
+    arena.verdict === 'corrected' ? 'error' : arena.verdict === 'upheld' ? 'info' : 'neutral';
   const label =
     arena.verdict === 'corrected'
-      ? 'Corrected — the challenger prevailed'
+      ? t('debate.verdict.corrected', 'Corrected — the challenger prevailed')
       : arena.verdict === 'upheld'
-        ? 'Upheld — the incumbent stands'
-        : 'Inconclusive';
+        ? t('debate.verdict.upheld', 'Upheld — the incumbent stands')
+        : t('debate.verdict.inconclusive', 'Inconclusive');
+  // Provenance-honest decider copy (SPEC §24.1): when the AI decided, state
+  // WHICH adjudicator leg — the governed model, its deterministic fallback,
+  // or the fail-closed default when no adjudicator could run at all.
+  const decider =
+    arena.decided_by === 'steward'
+      ? t('debate.decidedBy.steward', 'the room steward')
+      : arena.decided_by === 'concession'
+        ? t('debate.decidedBy.concession', "the incumbent's concession")
+        : arena.adjudicator === 'deterministic'
+          ? t('debate.decidedBy.aiDeterministic', "the room's AI (deterministic fallback)")
+          : arena.adjudicator === 'unavailable'
+            ? t(
+                'debate.decidedBy.aiUnavailable',
+                'the fail-closed default — no adjudicator was available',
+              )
+            : t('debate.decidedBy.ai', "the room's AI");
   const overrideOpen =
     arena.viewer_role === 'steward' &&
     arena.state === 'judged' &&
     arena.override_deadline_at !== null &&
-    Date.parse(arena.override_deadline_at) > Date.now();
+    Date.parse(arena.override_deadline_at) > now;
 
   return (
     <div className={cn('flex flex-col gap-2 p-3', raisedSurface)}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className={cn(badge, tone)}>{label}</span>
+        <Badge tone={tone}>{label}</Badge>
         <span className="text-sm text-ink-muted">
-          Decided by{' '}
-          {arena.decided_by === 'steward'
-            ? 'the room steward'
-            : arena.decided_by === 'concession'
-              ? "the incumbent's concession"
-              : "the room's AI"}
-          {arena.confidence !== null ? ` · ${Math.round(arena.confidence * 100)}% confidence` : ''}
+          {t('debate.decidedBy', 'Decided by {decider}', { decider })}
+          {arena.confidence !== null
+            ? ` · ${t('debate.confidence', '{pct}% confidence', {
+                pct: Math.round(arena.confidence * 100),
+              })}`
+            : ''}
         </span>
       </div>
       {arena.rationale ? (
@@ -401,7 +437,9 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
       ) : null}
       {arena.overridden_by_handle ? (
         <p className="text-sm text-ink-muted">
-          Overruled by steward {arena.overridden_by_handle}
+          {t('debate.overruledBy', 'Overruled by steward {handle}', {
+            handle: arena.overridden_by_handle,
+          })}
           {arena.override_reason ? `: ${arena.override_reason}` : ''}
         </p>
       ) : null}
@@ -414,29 +452,26 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
             if (reason.trim().length === 0) return;
             mutation.mutate({ winner: choice, reason: reason.trim() });
           }}
-          aria-label="Steward override"
+          aria-label={t('debate.stewardOverride', 'Steward override')}
         >
-          <p className="text-sm font-medium text-ink">Overrule the verdict (steward)</p>
-          <div className="flex flex-wrap gap-2">
-            {(['incumbent', 'challenger', 'none'] as const).map((w) => (
-              <label key={w} className="flex items-center gap-1 text-sm text-ink">
-                <input
-                  type="radio"
-                  name="override-winner"
-                  checked={choice === w}
-                  onChange={() => setChoice(w)}
-                />
-                {w === 'none' ? 'Inconclusive' : w === 'incumbent' ? 'Uphold' : 'Correct'}
-              </label>
-            ))}
-          </div>
-          <textarea
+          <RadioGroup
+            label={t('debate.overruleLabel', 'Overrule the verdict (steward)')}
+            name="override-winner"
+            value={choice}
+            onValueChange={(value) => setChoice(value as DebateWinner)}
+            options={[
+              { value: 'incumbent', label: t('debate.overrule.uphold', 'Uphold') },
+              { value: 'challenger', label: t('debate.overrule.correct', 'Correct') },
+              { value: 'none', label: t('debate.overrule.inconclusive', 'Inconclusive') },
+            ]}
+          />
+          <TextArea
+            label={t('debate.overruleReason', 'Reason for overruling')}
             value={reason}
             maxLength={1000}
+            required
             onChange={(e) => setReason(e.currentTarget.value)}
-            placeholder="Reason for overruling (required)…"
-            aria-label="Reason for overruling"
-            className="min-h-16 rounded-md border border-line bg-surface p-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+            placeholder={t('debate.overruleReasonPlaceholder', 'Reason for overruling (required)…')}
           />
           <div className="flex justify-end">
             <Button
@@ -445,7 +480,7 @@ function VerdictPanel({ arena }: { arena: DebateArenaPublic }): React.ReactEleme
               loading={mutation.isPending}
               disabled={reason.trim().length === 0}
             >
-              Overrule verdict
+              {t('debate.overruleSubmit', 'Overrule verdict')}
             </Button>
           </div>
         </form>
@@ -466,20 +501,31 @@ function PartyExitControl({
   const role = arena.viewer_role;
   const isChallenger = role === 'challenger';
   const mutation = useCloseDebateMutation(debateId, isChallenger ? 'withdraw' : 'concede');
+  const t = useT();
   const [confirming, setConfirming] = useState(false);
   if (arena.state !== 'open' || (role !== 'challenger' && role !== 'incumbent')) return null;
   return (
     <div
       role="group"
       className="flex flex-wrap items-center gap-2"
-      aria-label={isChallenger ? 'Withdraw the correction' : 'Concede the challenge'}
+      aria-label={
+        isChallenger
+          ? t('debate.withdrawLabel', 'Withdraw the correction')
+          : t('debate.concedeLabel', 'Concede the challenge')
+      }
     >
       {confirming ? (
         <>
           <span className="text-sm text-ink">
             {isChallenger
-              ? 'Withdraw the correction? The debate closes with no verdict.'
-              : 'Concede? The correction prevails and your content is tagged Incorrect.'}
+              ? t(
+                  'debate.withdrawConfirm',
+                  'Withdraw the correction? The debate closes with no verdict.',
+                )
+              : t(
+                  'debate.concedeConfirm',
+                  'Concede? The correction prevails and your content is tagged Incorrect.',
+                )}
           </span>
           <Button
             type="button"
@@ -487,20 +533,25 @@ function PartyExitControl({
             loading={mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {isChallenger ? 'Withdraw' : 'Concede'}
+            {isChallenger ? t('debate.withdraw', 'Withdraw') : t('debate.concede', 'Concede')}
           </Button>
           <Button type="button" variant="ghost" onClick={() => setConfirming(false)}>
-            Keep debating
+            {t('debate.keepDebating', 'Keep debating')}
           </Button>
         </>
       ) : (
         <Button type="button" variant="ghost" onClick={() => setConfirming(true)}>
-          {isChallenger ? 'Withdraw the correction…' : 'Concede the challenge…'}
+          {isChallenger
+            ? t('debate.withdrawEllipsis', 'Withdraw the correction…')
+            : t('debate.concedeEllipsis', 'Concede the challenge…')}
         </Button>
       )}
       {mutation.isError ? (
         <p role="alert" className="text-sm text-error">
-          This debate can no longer be changed — the material may already be locked in.
+          {t(
+            'debate.closeRejected',
+            'This debate can no longer be changed — the material may already be locked in.',
+          )}
         </p>
       ) : null}
     </div>
@@ -516,25 +567,34 @@ const LazyDevFastForward = import.meta.env.DEV ? lazy(() => import('./DevFastFor
 /** The modal body (exported for tests; the Sheet host is below). */
 export function DebateArenaContent({ debateId }: { debateId: string }): React.ReactElement {
   const query = useDebateQuery(debateId);
+  const t = useT();
+  const now = useNow();
   const state = query.data?.debate.state;
   // Live co-visibility: stream while the arena is still active (a terminal
   // arena is static).  Each frame re-fetches the viewer's role-scoped view, so
   // each side sees the other's current material as it changes (backs the poll).
   useDebateStream(debateId, state !== 'resolved' && state !== 'withdrawn');
 
-  if (query.isLoading) return <p className="text-sm text-ink-muted">Loading the debate…</p>;
+  if (query.isLoading) {
+    return <p className="text-sm text-ink-muted">{t('debate.loading', 'Loading the debate…')}</p>;
+  }
   if (query.isError || !query.data) {
-    return <ErrorState title="Debate unavailable" description="This debate could not be loaded." />;
+    return (
+      <ErrorState
+        title={t('debate.error.title', 'Debate unavailable')}
+        description={t('debate.error.description', 'This debate could not be loaded.')}
+      />
+    );
   }
   const arena = query.data.debate;
-  const windowOpen = arena.state === 'open' && Date.parse(arena.edit_deadline_at) > Date.now();
+  const windowOpen = arena.state === 'open' && Date.parse(arena.edit_deadline_at) > now;
   const stateLabel: Record<DebateArenaPublic['state'], string> = {
-    open: 'Live — both sides are making their case',
-    locked: 'Locked in — the final countdown to AI resolution',
-    awaiting_verdict: "In the room's AI resolution queue",
-    judged: 'Judged — steward may overrule',
-    resolved: 'Resolved',
-    withdrawn: 'Withdrawn by the challenger — no verdict',
+    open: t('debate.state.open', 'Live — both sides are making their case'),
+    locked: t('debate.state.locked', 'Locked in — the final countdown to AI resolution'),
+    awaiting_verdict: t('debate.state.awaiting', "In the room's AI resolution queue"),
+    judged: t('debate.state.judged', 'Judged — steward may overrule'),
+    resolved: t('debate.state.resolved', 'Resolved'),
+    withdrawn: t('debate.state.withdrawn', 'Withdrawn by the challenger — no verdict'),
   };
   // The expedited path: the debate queues one inactivity window after the
   // LAST edit from either side (whichever comes before the 23h schedule).
@@ -543,41 +603,79 @@ export function DebateArenaContent({ debateId }: { debateId: string }): React.Re
     Date.parse(arena.challenger_last_active_at),
   );
   const idleQueueAt = new Date(lastActiveMs + DEBATE_INACTIVITY_WINDOW_MS).toISOString();
-  const idle = remaining(idleQueueAt);
+  const idle = remaining(idleQueueAt, now);
   const idleBeforeSchedule = windowOpen && idleQueueAt < arena.edit_deadline_at;
 
+  const unknownAuthor = t('debate.unknownAuthor', 'Unknown');
   const incumbentAuthor =
-    arena.incumbent.author_display_name ?? arena.incumbent.author_handle ?? 'Unknown';
+    arena.incumbent.author_display_name ?? arena.incumbent.author_handle ?? unknownAuthor;
   const challengerAuthor =
-    arena.challenger.author_display_name ?? arena.challenger.author_handle ?? 'Unknown';
+    arena.challenger.author_display_name ?? arena.challenger.author_handle ?? unknownAuthor;
 
   return (
     <div className="flex flex-col gap-4">
       <header className="flex flex-col gap-1">
         <p className="text-sm text-ink-muted">
-          A sourced correction of a {arena.target_type}. The room's AI weighs both sides' content
-          and sources — this is not a vote. {stateLabel[arena.state]}.
+          {t(
+            'debate.intro',
+            "A sourced correction of a {target}. The room's AI weighs both sides' content and sources — this is not a vote.",
+            { target: arena.target_type },
+          )}{' '}
+          {/* Announce lifecycle transitions (poll/stream-driven) to assistive
+              tech — the state text changes in place, so it needs a live region. */}
+          <span aria-live="polite">{stateLabel[arena.state]}.</span>
         </p>
         {windowOpen ? (
           <>
-            <Countdown deadline={arena.edit_deadline_at} label="Editing window" />
+            <Countdown
+              deadline={arena.edit_deadline_at}
+              label={t('debate.countdown.editing', 'Editing window')}
+            />
             {idleBeforeSchedule ? (
               <p className="text-sm text-ink-muted">
-                Resolves early once both sides stay idle for an hour
-                {idle.closed ? ' (queueing imminently)' : ` (~${idle.label} unless someone edits)`}.
+                {idle.closed
+                  ? t(
+                      'debate.idleImminent',
+                      'Resolves early once both sides stay idle for an hour (queueing imminently).',
+                    )
+                  : t(
+                      'debate.idleCountdown',
+                      'Resolves early once both sides stay idle for an hour (~{time} unless someone edits).',
+                      { time: idle.label },
+                    )}
               </p>
             ) : null}
           </>
         ) : null}
         {arena.state === 'locked' ? (
-          <Countdown deadline={arena.resolve_due_at} label="AI resolution" />
+          <Countdown
+            deadline={arena.resolve_due_at}
+            label={t('debate.countdown.resolution', 'AI resolution')}
+          />
+        ) : null}
+        {arena.state === 'awaiting_verdict' ? (
+          <p role="status" className="flex items-center gap-2 text-sm text-ink-muted">
+            <Icon name="refresh" className="size-3.5 animate-spin" aria-hidden />
+            {t(
+              'debate.adjudicating',
+              'The adjudicator is reviewing both positions — the verdict appears here.',
+            )}
+          </p>
         ) : null}
         {arena.state === 'judged' && arena.override_deadline_at ? (
-          <Countdown deadline={arena.override_deadline_at} label="Steward-override window" />
+          <Countdown
+            deadline={arena.override_deadline_at}
+            label={t('debate.countdown.override', 'Steward-override window')}
+          />
         ) : null}
       </header>
 
-      <VerdictPanel arena={arena} />
+      {/* A persistent polite live region: the verdict banner mounts INSIDE it
+          when the verdict arrives over the poll/stream, so screen-reader users
+          hear the outcome without a focus change. */}
+      <div aria-live="polite">
+        <VerdictPanel arena={arena} />
+      </div>
 
       {/* The side-by-side comparison: each side's REAL material, clamped to a
           short preview that expands, with its argument statement beneath. */}
@@ -585,7 +683,9 @@ export function DebateArenaContent({ debateId }: { debateId: string }): React.Re
         <div className={cn('flex flex-col gap-3 p-3', raisedSurface)}>
           <ContentCard
             heading={
-              arena.target_type === 'story' ? 'The challenged story' : 'The challenged comment'
+              arena.target_type === 'story'
+                ? t('debate.challengedStory', 'The challenged story')
+                : t('debate.challengedComment', 'The challenged comment')
             }
             author={incumbentAuthor}
             content={arena.target_content}
@@ -599,7 +699,7 @@ export function DebateArenaContent({ debateId }: { debateId: string }): React.Re
         </div>
         <div className={cn('flex flex-col gap-3 p-3', raisedSurface)}>
           <ContentCard
-            heading="The correction"
+            heading={t('debate.theCorrection', 'The correction')}
             author={challengerAuthor}
             content={arena.correction_content}
           />
@@ -634,9 +734,15 @@ export function DebateArenaModal({
   debateId: string | null;
   onClose: () => void;
 }): React.ReactElement | null {
+  const t = useT();
   if (debateId === null) return null;
   return (
-    <Sheet open onClose={onClose} title="Debate arena" className="max-w-3xl">
+    <Sheet
+      open
+      onClose={onClose}
+      title={t('debate.arenaTitle', 'Debate arena')}
+      className="max-w-3xl"
+    >
       {/* Keyed by the debate: switching `?debate=` while the sheet stays
           mounted (e.g. browser back/forward between two arenas) remounts the
           content, so edit drafts and expand state never leak across arenas. */}

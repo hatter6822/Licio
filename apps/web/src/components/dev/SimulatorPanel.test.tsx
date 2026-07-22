@@ -125,6 +125,34 @@ function status(over: Partial<SimulatorStatus> = {}): SimulatorStatus {
       guard_blocked: 0,
       agent_escalations: 3,
     },
+    governance_llm: {
+      enabled: true,
+      reason: null,
+      provider_defaulted: true,
+      lanes: [
+        {
+          role: 'moderation',
+          backend: 'local',
+          model_id: 'licio-governance-sim',
+          base_url: 'http://127.0.0.1:3117/v1',
+          simulated: true,
+          format: 'json',
+          surfaces: [{ surface: 'moderation', active: true, fallback: 'platform_baseline' }],
+        },
+        {
+          role: 'adjudication',
+          backend: 'local',
+          model_id: 'Qwen/Qwen3.6-27B',
+          base_url: 'http://127.0.0.1:8002/v1',
+          simulated: false,
+          format: null,
+          surfaces: [
+            { surface: 'debate', active: true, fallback: 'deterministic_mlp' },
+            { surface: 'summary', active: true, fallback: 'deterministic_summary' },
+          ],
+        },
+      ],
+    },
     scenarios: [
       { id: 'steady', label: 'Steady community', description: 'A balanced day.' },
       { id: 'breaking_news', label: 'Breaking story', description: 'A developing story.' },
@@ -163,6 +191,45 @@ describe('SimulatorPanel', () => {
     expect(screen.getByText('In-room moderation')).toBeInTheDocument();
     expect(screen.getByText('Model proposals')).toBeInTheDocument();
     expect(screen.getByText(/8 allow, 1 warn, 2 flag for review/)).toBeInTheDocument();
+  });
+
+  it('renders the governance AI runtime card with per-lane real/simulated assignment', async () => {
+    vi.mocked(api.fetchSimulatorStatus).mockResolvedValue(status());
+    render(
+      <Providers>
+        <SimulatorPanel />
+      </Providers>,
+    );
+    expect(await screen.findByText('Governance AI runtime')).toBeInTheDocument();
+    // The moderation lane runs the simulated stand-in; the adjudication lane
+    // is a real local runtime — both stated per lane, with model + URL.
+    expect(screen.getByText('Moderation lane')).toBeInTheDocument();
+    expect(screen.getByText('Simulated runtime')).toBeInTheDocument();
+    expect(screen.getByText('licio-governance-sim')).toBeInTheDocument();
+    expect(screen.getByText('Adjudication lane')).toBeInTheDocument();
+    expect(screen.getByText('Local runtime')).toBeInTheDocument();
+    expect(screen.getByText('Qwen/Qwen3.6-27B')).toBeInTheDocument();
+    expect(screen.getByText(/debate adjudication \(active/)).toBeInTheDocument();
+  });
+
+  it('states why the governance AI is disabled when no backend runs', async () => {
+    vi.mocked(api.fetchSimulatorStatus).mockResolvedValue(
+      status({
+        governance_llm: {
+          enabled: false,
+          reason: 'not_requested',
+          provider_defaulted: false,
+          lanes: [],
+        },
+      }),
+    );
+    render(
+      <Providers>
+        <SimulatorPanel />
+      </Providers>,
+    );
+    expect(await screen.findByText('Governance AI runtime')).toBeInTheDocument();
+    expect(screen.getByText(/No LLM backend is configured/)).toBeInTheDocument();
   });
 
   it('shows the unavailable state when the surface is absent', async () => {

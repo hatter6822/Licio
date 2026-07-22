@@ -69,6 +69,12 @@ function status(): SimulatorStatus {
       guard_blocked: 0,
       agent_escalations: 0,
     },
+    governance_llm: {
+      enabled: false,
+      reason: 'not_requested',
+      provider_defaulted: false,
+      lanes: [],
+    },
     scenarios: [{ id: 'steady', label: 'Steady', description: 'A balanced day.' }],
   };
 }

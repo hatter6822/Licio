@@ -72,6 +72,48 @@ function modelsUrl(baseUrl: string): string {
   return `${stripTrailingSlashes(baseUrl)}/models`;
 }
 
+/** One boot-time lane-liveness verdict (the dev vLLM-preference probe). */
+export type LaneRuntimeProbe =
+  /** The runtime answers /models AND lists the lane's model — completions
+   *  against this (URL, model) pair can succeed. */
+  | 'live'
+  /** The runtime answers /models but does NOT list the lane's model (e.g. an
+   *  Ollama that has not pulled it, or a vLLM serving something else) — every
+   *  completion would 404, so the lane is not usable as configured. */
+  | 'no_model'
+  /** Nothing (parseable) is listening at the URL. */
+  | 'down';
+
+/**
+ * Probe whether a loopback runtime is LIVE for a lane — listening at `baseUrl`
+ * and actually serving `modelId` (the standard `GET /v1/models` listing every
+ * supported runtime exposes). Used by the DEV boot to prefer real lanes over
+ * the simulated runtime, and honest about the middle state: a listening
+ * runtime without the model is `no_model`, not `live` — a lane pointed at it
+ * would fail every completion. One-shot (no cache): boot probes once.
+ */
+export async function probeLaneRuntime(
+  baseUrl: string,
+  modelId: string,
+  options: { fetchImpl?: CatalogFetchLike; timeoutMs?: number } = {},
+): Promise<LaneRuntimeProbe> {
+  const fetchImpl: CatalogFetchLike = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? 1_500;
+  try {
+    const response = await fetchImpl(modelsUrl(baseUrl), {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'error',
+    });
+    if (!response.ok) return 'down';
+    const parsed = modelListSchema.parse(await response.json());
+    return parsed.data.some((entry) => entry.id === modelId) ? 'live' : 'no_model';
+  } catch {
+    return 'down';
+  }
+}
+
 export function createRuntimeCatalog(options: RuntimeCatalogOptions): RuntimeCatalog {
   const fetchImpl: CatalogFetchLike = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;

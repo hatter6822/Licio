@@ -8,7 +8,7 @@
 // steward's propose/approve powers live elsewhere. No applause primitives.
 
 import { useState } from 'react';
-import { useT } from '../../i18n/index.js';
+import { formatDate, useI18n, useT } from '../../i18n/index.js';
 import { ApiClientError } from '../../lib/api.js';
 import { downloadGovernanceModel } from '../../lib/governance-api.js';
 import { downloadModelBundle } from '../../lib/governance-download.js';
@@ -55,6 +55,7 @@ export function GovernedByPanel({
   embedded = false,
 }: GovernedByPanelProps): React.ReactElement {
   const t = useT();
+  const { locale } = useI18n();
   const query = useGovernedByQuery(roomId, enabled);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
@@ -208,13 +209,21 @@ export function GovernedByPanel({
               <ul className="mt-1 flex flex-col gap-2">
                 {query.data.recent_actions.map((action) => (
                   <li key={action.action_id} className="neu-inset rounded-lg p-3 text-sm">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Badge tone="neutral">{action.action_type}</Badge>
                       {!action.reversible ? (
                         <Badge tone="warning">
                           {t('room.governance.actions.irreversible', 'Irreversible')}
                         </Badge>
                       ) : null}
+                      {/* When it happened — a "recent actions" list without
+                          time reads as current no matter how stale it is. */}
+                      <time dateTime={action.created_at} className="text-xs text-ink-muted">
+                        {formatDate(new Date(action.created_at), locale, {
+                          dateStyle: 'medium',
+                          timeStyle: 'short',
+                        })}
+                      </time>
                     </div>
                     <p className="mt-1 text-ink-muted">{action.statement_of_reasons}</p>
                   </li>

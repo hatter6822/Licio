@@ -96,6 +96,7 @@ function arena(over: Partial<DebateArenaPublic> = {}): DebateArenaPublic {
     rationale: null,
     confidence: null,
     ai_output_id: null,
+    adjudicator: null,
     verdict_at: null,
     override_deadline_at: null,
     overridden_by_handle: null,
@@ -388,15 +389,71 @@ describe('DebateArenaContent', () => {
     // Overruling requires a reason.
     fireEvent.click(screen.getByRole('button', { name: 'Overrule verdict' }));
     expect(overrideMutate).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText('Reason for overruling'), {
+    fireEvent.change(screen.getByLabelText(/Reason for overruling/), {
       target: { value: 'The challenger misread the record.' },
     });
-    fireEvent.click(screen.getByLabelText('Uphold'));
+    fireEvent.click(screen.getByRole('radio', { name: 'Uphold' }));
     fireEvent.click(screen.getByRole('button', { name: 'Overrule verdict' }));
     expect(overrideMutate).toHaveBeenCalledWith({
       winner: 'incumbent',
       reason: 'The challenger misread the record.',
     });
+  });
+
+  it('states the adjudicator leg honestly: model, deterministic fallback, and unavailable', () => {
+    // The governed model decided.
+    queryState = {
+      data: {
+        debate: arena({
+          state: 'resolved',
+          verdict: 'upheld',
+          winner: 'incumbent',
+          decided_by: 'ai',
+          adjudicator: 'model',
+          resolved_at: '2026-07-06T00:00:00.000Z',
+          edit_deadline_at: PAST,
+        }),
+      },
+    };
+    const first = renderArena();
+    expect(screen.getByText(/Decided by the room's AI/)).toBeInTheDocument();
+    expect(screen.queryByText(/deterministic fallback/)).not.toBeInTheDocument();
+    first.unmount();
+
+    // The pinned-weights MLP fallback decided — say so, never pretend the model ran.
+    queryState = {
+      data: {
+        debate: arena({
+          state: 'resolved',
+          verdict: 'upheld',
+          winner: 'incumbent',
+          decided_by: 'ai',
+          adjudicator: 'deterministic',
+          resolved_at: '2026-07-06T00:00:00.000Z',
+          edit_deadline_at: PAST,
+        }),
+      },
+    };
+    const second = renderArena();
+    expect(screen.getByText(/the room's AI \(deterministic fallback\)/)).toBeInTheDocument();
+    second.unmount();
+
+    // No adjudicator could run: the fail-closed inconclusive default.
+    queryState = {
+      data: {
+        debate: arena({
+          state: 'resolved',
+          verdict: 'inconclusive',
+          winner: 'none',
+          decided_by: 'ai',
+          adjudicator: 'unavailable',
+          resolved_at: '2026-07-06T00:00:00.000Z',
+          edit_deadline_at: PAST,
+        }),
+      },
+    };
+    renderArena();
+    expect(screen.getByText(/no adjudicator was available/)).toBeInTheDocument();
   });
 
   it('renders an upheld + a resolved/overridden verdict without an override control', () => {

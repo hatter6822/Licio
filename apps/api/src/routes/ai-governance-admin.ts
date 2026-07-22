@@ -286,6 +286,16 @@ export function createAiGovernanceAdminRoutes() {
         const ai = getAiGovernanceServices();
         return c.json({ alerts: await ai.runtime.listAlerts(100) });
       })
+      // WS-U ADR-9 observability: the boot-resolved governed-LLM status — which
+      // backend/model each role lane runs (moderation / adjudication), whether
+      // the DEV simulated runtime stands in per lane, and which governed
+      // surfaces are ACTIVE with their fail-closed deterministic fallbacks.
+      // The first-class "is the AI actually running?" answer (config only —
+      // never a key; per-call health lives in the breaker metrics).
+      .get('/governance/llm', requireAiTeam(), async (c) => {
+        const ai = getAiGovernanceServices();
+        return c.json({ status: ai.llmStatus ?? null });
+      })
       // WS-U ADR-9: the in-room moderation decision log for a room — for each
       // decision, what the LLM model PROPOSED vs what the deterministic wrapper
       // (escalate-to-review ceiling + capability clamp) actually PERMITTED, plus

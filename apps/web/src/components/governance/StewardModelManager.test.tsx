@@ -142,15 +142,27 @@ describe('StewardModelManager (WS-U §16.6)', () => {
     expect(body.bundle).toMatchObject({ bundleId: 'starter-civility' });
   });
 
-  it('rejects an invalid policy bundle client-side (no network call)', () => {
+  it('rejects an invalid policy bundle client-side, live (inline parser message, submit disabled, no network call)', () => {
     seatHeldBy('steward-1');
     signInAs('steward-1');
     render(<StewardModelManager roomId="r1" />);
     fireEvent.click(screen.getByRole('button', { name: /propose a model/i }));
     fireEvent.change(screen.getByLabelText(/policy bundle/i), { target: { value: 'not json' } });
-    fireEvent.click(screen.getByRole('button', { name: /submit proposal/i }));
-    expect(screen.getByText(/must be valid json/i)).toBeInTheDocument();
+    // The parser's own message surfaces inline AS the member types…
+    expect(screen.getByText(/not valid json/i)).toBeInTheDocument();
+    // …and Submit is disabled while the bundle is not even JSON (the design
+    // system keeps disabled buttons focusable via aria-disabled).
+    const submit = screen.getByRole('button', { name: /submit proposal/i });
+    expect(submit).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(submit);
     expect(proposeMutate).not.toHaveBeenCalled();
+    // Restoring valid JSON clears the inline error and re-enables Submit.
+    fireEvent.change(screen.getByLabelText(/policy bundle/i), { target: { value: '{}' } });
+    expect(screen.queryByText(/not valid json/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit proposal/i })).not.toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
   });
 
   it('lets the steward open a ratification vote on an eligible model', () => {

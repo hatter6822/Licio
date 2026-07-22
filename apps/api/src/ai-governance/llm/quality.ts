@@ -16,6 +16,7 @@
 // model-influenced text), so an accepted draft is a single clean paragraph.
 
 import { contentTokens } from '@licio/ai-governance';
+import { collapseWhitespace, splitWhitespace } from './text.js';
 
 /** Bumped whenever the acceptance constraints below change (pinned via the
  *  identity config into every AIOutputRecord's config hash).
@@ -47,42 +48,6 @@ export interface LawmakingSummaryQualityInput {
 export type LawmakingSummaryQualityResult =
   | { ok: true; headline: string; summary: string }
   | { ok: false; failures: string[] };
-
-/** ReDoS-free whitespace collapse + trim (no regex over model output). */
-function collapseWhitespace(text: string): string {
-  const parts: string[] = [];
-  let cur = '';
-  for (const ch of text) {
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
-      if (cur.length > 0) {
-        parts.push(cur);
-        cur = '';
-      }
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.length > 0) parts.push(cur);
-  return parts.join(' ');
-}
-
-/** ASCII whitespace split without regex (mirrors the forum-agent tokenizers). */
-function splitWhitespace(text: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  for (const ch of text) {
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
-      if (cur.length > 0) {
-        out.push(cur);
-        cur = '';
-      }
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.length > 0) out.push(cur);
-  return out;
-}
 
 /** Trim common trailing prose punctuation off a URL token before matching. */
 function stripTrailingPunctuation(token: string): string {

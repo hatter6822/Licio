@@ -1623,3 +1623,114 @@ describe('WS-T judge-time re-suppression + the judge source cap', () => {
     ).toBe(true);
   });
 });
+
+describe('adjudicator-leg provenance (SPEC §24.1 — the arena states which leg judged)', () => {
+  // Placed LAST in this file: it wires the ai-governance module singleton,
+  // which cannot be unset — earlier tests must keep running without it (their
+  // projections resolve `adjudicator: null`, which none of them assert).
+  it('derives model / deterministic / unavailable from the pinned output record', async () => {
+    const { DEBATE_ADJUDICATOR } = await import('../ai-governance/models.js');
+    const { recordAiOutput } = await import('../ai-governance/output-records.js');
+    const { createInMemoryAiGovernanceServices, setAiGovernanceServices } = await import(
+      '../ai-governance/services.js'
+    );
+    const { freshForumServices } = await import('./forum-test-helpers.js');
+    const graph = freshForumServices();
+    const ai = createInMemoryAiGovernanceServices(graph.events);
+    setAiGovernanceServices(ai);
+
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const debateId = randomUUID();
+    const opened = await maybeEnterDebate(
+      deps,
+      correctionInput(await seedCorrection(targetId), targetId),
+      debateId,
+    );
+    if (opened === null) throw new Error('arena not opened');
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    const judged = await judgeDebateArena(deps, debateId);
+    if (judged === null) throw new Error('arena not judged');
+    const resolveAuthor = async () => null;
+    const content = await readDebateArenaContent(contributions, deps.storyContent, judged);
+    const nowIso = new Date(clock.ms).toISOString();
+
+    // The deterministic MLP's record ⇒ 'deterministic'.
+    const mlpRecord = await recordAiOutput(ai.outputRecords, {
+      modelName: DEBATE_ADJUDICATOR.name,
+      modelVersion: DEBATE_ADJUDICATOR.version,
+      promptTemplateId: DEBATE_ADJUDICATOR.promptTemplateId,
+      config: DEBATE_ADJUDICATOR.config,
+      inputRefs: [debateId],
+      outputRef: 'challenger:corrected:0.9200',
+      useCaseId: 'debate_adjudication',
+      nowIso,
+    });
+    const viaMlp = await toDebateArenaPublic(
+      { ...judged, aiOutputId: mlpRecord.output_id },
+      null,
+      resolveAuthor,
+      false,
+      content,
+    );
+    expect(viaMlp.adjudicator).toBe('deterministic');
+
+    // ANY other identity (a governed LLM lane / hub model) ⇒ 'model'.
+    const llmRecord = await recordAiOutput(ai.outputRecords, {
+      modelName: 'governance-debate-llm-local-9a299ef32c9f',
+      modelVersion: '1.0.0',
+      promptTemplateId: 'governance-debate-llm/v1',
+      config: { provider: 'local' },
+      inputRefs: [debateId],
+      outputRef: 'challenger:corrected:0.9200',
+      useCaseId: 'debate_adjudication',
+      nowIso,
+    });
+    const viaLlm = await toDebateArenaPublic(
+      { ...judged, aiOutputId: llmRecord.output_id },
+      null,
+      resolveAuthor,
+      false,
+      content,
+    );
+    expect(viaLlm.adjudicator).toBe('model');
+
+    // An AI verdict with NO record is the fail-closed inconclusive default.
+    const unavailable = await toDebateArenaPublic(
+      { ...judged, aiOutputId: null },
+      null,
+      resolveAuthor,
+      false,
+      content,
+    );
+    expect(unavailable.adjudicator).toBe('unavailable');
+
+    // A record that cannot be resolved right now ⇒ null (honest unknown).
+    const unresolvable = await toDebateArenaPublic(
+      { ...judged, aiOutputId: 'out:not-a-real-record' },
+      null,
+      resolveAuthor,
+      false,
+      content,
+    );
+    expect(unresolvable.adjudicator).toBeNull();
+
+    // A steward-overridden arena carries no AI-leg claim.
+    clock.ms += 1000;
+    const overridden = await overrideDebateVerdict(
+      deps,
+      debateId,
+      STEWARD,
+      'none',
+      'Sources are inconclusive either way.',
+    );
+    if (!overridden.ok) throw new Error('override failed');
+    const viaSteward = await toDebateArenaPublic(
+      overridden.arena,
+      null,
+      resolveAuthor,
+      false,
+      content,
+    );
+    expect(viaSteward.adjudicator).toBeNull();
+  });
+});

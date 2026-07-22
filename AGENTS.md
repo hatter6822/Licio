@@ -41,8 +41,10 @@ corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install
 
 # Daily commands.
-pnpm dev                            # web (5173) + api (3001); in-memory + seeded demo data; the DEV-ONLY
-                                    #   simulated governance-LLM runtime auto-starts (LICIO_LLM_SIM=off disables)
+pnpm dev                            # web (5173) + api (3001); in-memory + seeded demo data. The governance
+                                    #   LLM defaults to the local vLLM lanes in dev AND prod; the dev boot
+                                    #   probes each lane and the DEV-ONLY simulated runtime stands in per
+                                    #   absent lane (LICIO_LLM_SIM=off disables the stand-in)
 pnpm setup:llm                      # provision + verify the REAL local governance-LLM lanes (moderation
                                     #   Qwen3Guard-Gen-4B @ :8001, adjudication Qwen3.6-27B @ :8002; vLLM
                                     #   default; --docker = Compose `llm` profile; --runtime ollama = single-URL alt)
@@ -290,6 +292,7 @@ in `package.json`, so an override placed there is silently ignored.
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
 | `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
+| `fast-uri ^3.1.4` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); patches the 3.1.3 host-confusion advisory | ajv/workbox resolve `fast-uri >= 3.1.4` |
 | `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |
 | `esbuild ^0.28.1` | dev-only toolchain; dedupes onto one audited line | bump with the Vite major |
 | `@noble/curves 2.0.1` + `@noble/ciphers 2.1.1` (EXACT) | `ts-mls@1.6.2` declares them as exact peers (KAT cross-checks guard the pin) | `ts-mls` widens its `@noble/*` peer range |

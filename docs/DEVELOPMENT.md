@@ -67,8 +67,11 @@ corpus (rooms, stories, threads with nested comments) so the PWA renders real
 end-to-end data immediately. The in-memory data is ephemeral — each restart
 re-seeds a fresh corpus. The three governed AI surfaces (lawmaking summaries,
 in-room moderation, debate adjudication) also work out of the box: dev
-auto-starts a deterministic **simulated local LLM runtime** behind the real
-governed pipeline (Section 16), and the **traffic simulator** (Section 10)
+resolves the SAME local vLLM lane defaults as production, probes them at boot,
+prefers any **real provisioned runtime** (`pnpm setup:llm`), and auto-starts a
+deterministic **simulated local LLM runtime** behind the real governed
+pipeline for each lane whose runtime is absent (Section 16), and the
+**traffic simulator** (Section 10)
 starts generating live synthetic activity — including corrections that the
 governed adjudicator resolves and contributions the in-room moderation model
 classifies — so every automated surface has something to act on immediately.
@@ -346,8 +349,13 @@ Opt-in services sit behind the LLM Compose profiles (a plain
 `llm-ollama` profile runs the single-URL **ollama** alternative
 (`127.0.0.1:11434`, persistent `ollama-data` volume). All loopback-published
 only. Start + provision either in one step with `pnpm setup:llm --docker`
-(vLLM) or `pnpm setup:llm --runtime ollama --docker` (Section 16); dev
-doesn't need them (the simulated runtime serves `pnpm dev`).
+(vLLM, NVIDIA) or `pnpm setup:llm --runtime ollama --docker` (Section 16);
+**AMD-GPU hosts** use the `llm-rocm` profile instead
+(`pnpm setup:llm --docker --rocm` — AMD's official `rocm/vllm` build of the
+SAME two vLLM lanes on the same loopback ports; gfx110X image tag by default
+(Radeon RX 7900 class), `VLLM_ROCM_IMAGE` overrides for other AMD classes). Dev
+doesn't strictly need them — `pnpm dev` probes the lanes at boot, uses any
+real runtime that is up, and the simulated runtime stands in for the rest.
 
 > **Why the `pgvector` image and not stock `postgres:16`?** The WS-F
 > migration chain installs the `vector` extension (for embedding search).
@@ -489,7 +497,7 @@ covered in detail in Section 16.
 | `S3_*` group | DSAR export archives use an **in-memory** store (fine for dev; production warns). Upload/story-media bytes fall back to the durable Postgres `upload_blobs` table (durable + instance-shared with or without S3) |
 | `SES_*` group | A **dev mailer** surfaces the one-time code + recipient to the API log (no email is sent) so the passwordless email flows — sign-in, email-factor verification, deletion-cancel — are testable end-to-end; this is the only way to become a verified account on a `pnpm dev` box. CI / `NODE_ENV=test` use the silent logging mailer (never the code/recipient) |
 | `EMBEDDING_*` group | A deterministic **lexical** embedding provider is used (fine for dedup; not a real semantic model) |
-| `GOVERNANCE_LLM_*` group | **Development:** the DEV-ONLY simulated loopback LLM runtime auto-starts and serves the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) — disable it with `LICIO_LLM_SIM=off`, or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend with TWO role lanes served by vLLM — moderation `Qwen/Qwen3Guard-Gen-4B` @ `:8001` (guard-native dialect), adjudication `Qwen/Qwen3.6-27B` @ `:8002` (debate + summaries); each governed surface fails closed per call to its deterministic path until its lane responds. Per-lane keys (`GOVERNANCE_LLM_MODERATION_*` / `GOVERNANCE_LLM_ADJUDICATION_*`) override lane-by-lane; the legacy `GOVERNANCE_LLM_MODEL`/`GOVERNANCE_LLM_LOCAL_URL` pair runs BOTH lanes on one runtime (the Ollama posture). `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify real runtimes with `pnpm setup:llm [--docker] [--runtime ollama]`. Details: Section 16 |
+| `GOVERNANCE_LLM_*` group | **Development:** resolves the SAME local vLLM lane defaults as production, probes each lane at boot, prefers any real runtime serving its model, and auto-starts the DEV-ONLY simulated loopback LLM runtime per absent lane so the three governed AI surfaces (lawmaking summary, in-room moderation, debate adjudication) are always live — disable the stand-in with `LICIO_LLM_SIM=off` (prod-identical fail-closed posture), or pick its port with `LICIO_LLM_SIM_PORT`. **Production:** defaults to the loopback-`local` backend with TWO role lanes served by vLLM — moderation `Qwen/Qwen3Guard-Gen-4B` @ `:8001` (guard-native dialect), adjudication `Qwen/Qwen3.6-27B` @ `:8002` (debate + summaries); each governed surface fails closed per call to its deterministic path until its lane responds. Per-lane keys (`GOVERNANCE_LLM_MODERATION_*` / `GOVERNANCE_LLM_ADJUDICATION_*`) override lane-by-lane; the legacy `GOVERNANCE_LLM_MODEL`/`GOVERNANCE_LLM_LOCAL_URL` pair runs BOTH lanes on one runtime (the Ollama posture). `GOVERNANCE_LLM_PROVIDER=deterministic` opts out anywhere; `anthropic` (+ `ANTHROPIC_API_KEY`) is an explicit hosted opt-in. Provision + verify real runtimes with `pnpm setup:llm [--docker] [--runtime ollama]`. Details: Section 16 |
 | `GOVERNANCE_MODEL_HUB` / `HF_TOKEN` | The WS-U model-hub candidacy surface (member model search + revision-pinned verification via server-side huggingface.co METADATA reads) is ON by default; `GOVERNANCE_MODEL_HUB=off` disables `/v1/model-hub` AND rejects hub-referencing bundles at propose time (fail-closed — for air-gapped deployments). `HF_TOKEN` adds hub rate-limit headroom only; gated models are never selectable candidates. Details: Section 16 |
 | `KNOMOSIS_GATEWAY_URL` + `KNOMOSIS_GATEWAY_TOKEN_FILE` group | The WS-L Knomosis gateway uses the deterministic in-memory `FakeKnomosisGateway` (fine for dev; no real substrate). Both must be set together to bind the real `HttpKnomosisGateway` (bearer token read from the file); if the pin declares more than one **active** deployment the server refuses to boot, since one gateway URL cannot route multiple deployments. The `knomosis.cryptoEnabled` / `knomosis.governanceEnabled` runtime-config keys gate every WS-L endpoint and both default `false` + fail closed in **production**. For developer convenience a non-production (`pnpm dev`) boot DEFAULTS both keys **`true`** (so the wallet + governance-simulation surface is reachable out of the box) — but only when the key is not already explicitly set, so a durable (Redis-backed) dev config or an admin write still wins and can force fail-closed testing. Production is untouched: the flags stay `false` unless an operator flips them through the admin surface. The dev deployment is scoped to the **Knomosis L2 (chain `8357`)**, settling to its **Sepolia L1 (`11155111`)** — the SIWE wallet-link allowlist is both. The web client binds the link message to the Knomosis chain (`8357`) regardless of the extension's active network — override with `VITE_WALLET_CHAIN_ID` — so a dev wallet never signs a mainnet-scoped message. A non-production box also scopes the WS-D wallet **sign-in** allowlist to `[8357, 11155111]` (never mainnet); production keeps the multi-chain default |
 | `SIGNUP_POW_MAX_NUMBER` | The sign-up proof-of-work CAPTCHA (bot-prevention layer 1) runs at the built-in work factor (40 000 — the browser auto-solves in a Web Worker while you fill the create-account form; no interaction, sub-second on a desktop). Set a smaller number to speed up repeated manual sign-up testing, or `0` to disable the gate entirely (the API warns loudly at boot, like `ALLOW_INSECURE_NULL_MAILER`). Tests pin a tiny factor and run the real flow |
@@ -902,8 +910,9 @@ LICIO_SIM_SEED=my-seed pnpm dev # pin the deterministic seed (same seed ⇒ same
 ```
 
 A second, independent dev simulator — the **simulated governance-LLM
-runtime** (`LICIO_LLM_SIM=off` disables it) — backs the three governed AI
-surfaces; see Section 16.
+runtime** (`LICIO_LLM_SIM=off` disables it) — stands in for any governed-LLM
+lane whose real runtime is absent, so the three governed AI surfaces are
+always backed; see Section 16.
 
 **Drive it from the UI.** Sign in, then open **Profile → Developer tools →
 Traffic simulator** (or go to `/dev/simulator`). The panel shows the run state,
@@ -996,16 +1005,17 @@ curl -s localhost:3001/v1/dev/simulator/status \
   | jq '{counters: .counters, debate: .debate_pulse, moderation: .moderation_pulse}'
 ```
 
-By default the adjudications run against the DEV **simulated** runtime
+On a bare dev box the adjudications run against the DEV **simulated** runtime
 (deterministic, milliseconds per verdict — measures the pipeline overhead).
 To measure a **real local model**:
 
 ```sh
-pnpm setup:llm                                   # both lane runtimes + models ready
-GOVERNANCE_LLM_PROVIDER=local pnpm dev           # the real Qwen3.6 adjudication lane judges
-# Raise the ADR-6 debate budget for a sustained run (default 60/hour;
-# the simulated runtime raises it automatically):
-GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000 GOVERNANCE_LLM_PROVIDER=local pnpm dev
+pnpm setup:llm             # both lane runtimes + models ready
+pnpm dev                   # the boot probes the lanes and prefers the real
+                           #   Qwen3.6 adjudication runtime automatically
+# Raise the ADR-6 debate budget for a sustained run (default 60/hour; a
+# SIMULATED adjudication lane raises it automatically, a real one does not):
+GOVERNANCE_LLM_DEBATE_BUDGET_PER_HOUR=5000 pnpm dev
 ```
 
 Adjudications fan out **4-wide** within a lifecycle pass (matching the Compose
@@ -1438,15 +1448,20 @@ The environment defaults implement the *production-complete* posture —
 production always runs the full feature; development may fake it, never the
 reverse:
 
-- **Production, provider unset** → defaults to the **`local`** backend with
-  the two lanes above served by **vLLM** (one instance per lane — the reviewed
-  default runtime; the compose `llm` profile provisions exactly them). Until a
-  lane responds, its governed surfaces fail **closed per call** to their
-  deterministic paths (deterministic summary; WS-J baseline moderation +
-  deferred re-moderation; the pinned-weights MLP adjudicator) and recover
-  automatically — the boot log states exactly what runtime is expected where.
-- **Development, provider unset** → the DEV-ONLY *simulated* local runtime
-  auto-starts and serves all three surfaces from one URL (see below).
+- **Production AND development, provider unset** → default to the **`local`**
+  backend with the two lanes above served by **vLLM** (one instance per lane —
+  the reviewed default runtime; the compose `llm` profile provisions exactly
+  them). In production, until a lane responds its governed surfaces fail
+  **closed per call** to their deterministic paths (deterministic summary;
+  WS-J baseline moderation + deferred re-moderation; the pinned-weights MLP
+  adjudicator) and recover automatically — the boot log states exactly what
+  runtime is expected where.
+- **Development additionally probes each lane at boot** (the standard
+  `GET /v1/models` listing): a lane whose runtime serves its model runs REAL;
+  the DEV-ONLY *simulated* local runtime stands in per lane that is down or
+  not serving its model, so AI moderation and adjudication are live on every
+  `pnpm dev` boot (see below; `LICIO_LLM_SIM=off` disables the stand-in —
+  dev then behaves exactly like production).
 - **`GOVERNANCE_LLM_PROVIDER=deterministic`** → the explicit opt-out anywhere.
 - **`anthropic`** → always an explicit opt-in: governed-room content is sent
   to the hosted API (an operator-chosen data processor, boot-logged loudly).
@@ -1458,6 +1473,18 @@ reverse:
 #      pnpm setup:llm --docker  # ALSO starts the Compose `llm` profile first
 #                               # (two loopback vLLM instances; weights pull
 #                               #  from huggingface.co into the hf-cache volume)
+#      pnpm setup:llm --docker --rocm
+#                               # AMD-GPU hosts: the `llm-rocm` profile — AMD's
+#                               # official rocm/vllm build of the SAME two vLLM
+#                               # lanes (RDNA tag default; VLLM_ROCM_IMAGE
+#                               # overrides for CDNA). On a 24 GB consumer card
+#                               # (24 GB cards: the 27B default doesn't fit —
+#                               # set GOVERNANCE_LLM_ADJUDICATION_MODEL to the
+#                               # bench-selected Qwen/Qwen3-4B-Instruct-2507;
+#                               # the compose lane FOLLOWS that same key, so
+#                               # served + requested models stay in lockstep —
+#                               # and re-balance VLLM_*_GPU_FRACTION, 0.42/0.50
+#                               # measured on an RX 7900 XTX; §17.7)
 #      pnpm setup:llm --runtime ollama --docker
 #                               # the single-URL ALTERNATIVE: one Ollama serves
 #                               # GGUF builds of both lane models from :11434
@@ -1627,10 +1654,12 @@ resolution queue.  Try it in dev: post a sourced `correction` contribution
 against a comment/story, watch the live arena modal, and use its dev
 fast-forward row to jump it to the verdict.
 
-#### The dev-simulated local runtime (the `pnpm dev` default)
+#### The dev-simulated local runtime (the `pnpm dev` stand-in)
 
 On a **development** boot where `GOVERNANCE_LLM_PROVIDER` is unset, the API
-starts a DEV-ONLY **simulated local LLM runtime**
+probes each resolved lane's `(URL, model)` pair and — for every lane whose
+real runtime is not actually serving its model — starts (once) a DEV-ONLY
+**simulated local LLM runtime**
 (`apps/api/src/simulator/governance-llm.ts`): a deterministic, zero-dependency
 loopback HTTP server speaking the same OpenAI-compatible protocol as the real
 local runtimes — POST `/chat/completions` for all three governed surfaces
@@ -1652,11 +1681,17 @@ sampling passes deterministically. It is never constructed in production (a
 `127.0.0.1` only.
 
 ```sh
-pnpm dev                                # simulated runtime on http://127.0.0.1:3117/v1
-LICIO_LLM_SIM=off pnpm dev              # boot dev without it (deterministic stand-ins)
-LICIO_LLM_SIM_PORT=4200 pnpm dev        # pick the port (falls back to ephemeral if taken)
-GOVERNANCE_LLM_PROVIDER=deterministic pnpm dev  # explicit deterministic (also disables it)
-# Any real backend (anthropic/local, above) always wins over the simulator.
+pnpm dev                                # probes :8001/:8002; real lanes preferred,
+                                        #   sim stands in per absent lane (:3117/v1)
+LICIO_LLM_SIM=off pnpm dev              # no stand-in: prod-identical posture (real
+                                        #   lanes, fail-closed per call until up)
+LICIO_LLM_SIM_PORT=4200 pnpm dev        # pick the sim port (ephemeral if taken)
+GOVERNANCE_LLM_PROVIDER=deterministic pnpm dev  # explicit deterministic (no probe, no sim)
+# Any EXPLICIT backend choice (anthropic/local, above) always wins over the
+# probe-and-substitute flow. After `pnpm setup:llm` finishes, just restart
+# `pnpm dev` — the boot picks the real lanes up automatically. The dev
+# simulator panel's "Governance AI runtime" card (and the AI-team endpoint
+# GET /v1/ai/admin/governance/llm) states per lane which runtime is serving.
 ```
 
 Deterministic **failure-injection markers** anywhere in the governed text (a
@@ -2015,6 +2050,25 @@ Operational rules — Section 16 has the full tuning detail:
   (or override `VLLM_ADJUDICATION_MODEL` / add a quantization flag for your
   hardware). The compose services set `--max-model-len 8192` (the governed
   prompts are ≤ ~2.5k tokens) and share an `hf-cache` weights volume.
+  **AMD GPUs are first-class**: the `llm-rocm` profile runs AMD's official
+  `rocm/vllm` build of the same two lanes (identical protocol, ports,
+  verification) — gfx110X image tag by default (Radeon RX 7900 class),
+  `VLLM_ROCM_IMAGE` selects the broader rdna tag or the cdna datacenter tags.
+  **24 GB single-card sizing (measured, RX 7900 XTX, `pnpm bench:llm`):** the
+  co-resident pair that fits alongside the guard (fractions 0.42/0.50) is
+  `GOVERNANCE_LLM_ADJUDICATION_MODEL=Qwen/Qwen3-4B-Instruct-2507` — set the
+  ONE governance key: the API boot, `pnpm setup:llm`, and the compose lane
+  (whose model resolves `VLLM_*_MODEL → GOVERNANCE_LLM_*_MODEL → default`)
+  all follow it, so the served and requested models cannot drift apart.
+  Bench-selected over
+  the alternatives: 0.93 s warm debate verdicts / 0.36 s effective in the
+  4-wide burst / 0.52 s §24.5-clean summaries, correct canonical-fixture
+  direction, non-thinking (no `reasoning_effort` negotiation edge). The
+  official `Qwen/Qwen3-8B-AWQ` also verifies end-to-end (AWQ works on ROCm;
+  3.35 s warm debate — generic int4 kernels) as a raw-capacity alternative;
+  `Qwen3-14B-AWQ` and the 27B default cannot serve the required 8192 context
+  co-resident on 24 GB (measured KV shortfall), and the 27B runs here only as
+  the documented Q4_K_M GGUF via the `llm-ollama` profile (4.84 s warm).
 - **On the Ollama alternative, match the runtime to the platform's fan-out:**
   `OLLAMA_NUM_PARALLEL=4` (debate adjudications fan out 4-wide),
   `OLLAMA_KEEP_ALIVE=-1`, and `OLLAMA_CONTEXT_LENGTH=8192` — the Compose

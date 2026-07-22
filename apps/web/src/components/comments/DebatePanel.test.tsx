@@ -43,6 +43,16 @@ describe('DebatePanel', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('renders nothing while the debates query is still loading (undefined)', () => {
+    const { container } = render(<DebatePanel debates={undefined} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders an explicit notice when the debates query failed — live debates never silently vanish', () => {
+    render(<DebatePanel debates={undefined} error />);
+    expect(screen.getByRole('status')).toHaveTextContent(/could not be loaded/i);
+  });
+
   it('lists an open debate with its subject, a countdown, and opens the arena modal', () => {
     render(<DebatePanel debates={[summary()]} />);
     expect(screen.getByText('1 active debate')).toBeInTheDocument();

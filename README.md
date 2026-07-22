@@ -247,10 +247,13 @@ immediately:
   and real computed invariant/reading signals.
 - A **community-governed room** (*Elections & Governance*) with an active,
   member-ratified AI moderation model, so the WS-U surfaces render real data.
-- The **simulated local LLM runtime** auto-starts, so all three governed AI
-  surfaces (lawmaking summaries, in-room moderation, debate adjudication) run
-  the full production path — admission gate, guards, budgets, output records —
-  with zero setup and zero egress. `LICIO_LLM_SIM=off` disables it.
+- The governance LLM resolves the **same local vLLM lane defaults as
+  production**; the boot probes them and prefers any real runtime you have
+  provisioned (`pnpm setup:llm`), while the **simulated local LLM runtime**
+  stands in per absent lane — so all three governed AI surfaces (lawmaking
+  summaries, in-room moderation, debate adjudication) always run the full
+  production path — admission gate, guards, budgets, output records — with
+  zero setup and zero egress. `LICIO_LLM_SIM=off` disables the stand-in.
 - The **development traffic simulator** auto-starts, driving the real
   pipelines with deterministic synthetic activity: stories, discussion,
   reading signals, reports, sourced corrections the AI adjudicates, and
