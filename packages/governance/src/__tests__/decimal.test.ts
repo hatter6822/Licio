@@ -10,11 +10,14 @@ import {
   decAdd,
   decCompare,
   decIsNegative,
+  decMul,
   decNegate,
   decSub,
   decSum,
   isDecimalString,
   isValidDecimal,
+  MAX_DECIMAL_SCALE,
+  MAX_DECIMAL_SIGNIFICANT_DIGITS,
 } from '../decimal.js';
 import { evaluateTreasuryAction } from '../kernel.js';
 import type { TreasuryBounds } from '../schemas/law-pack.js';
@@ -33,6 +36,64 @@ describe('isDecimalString / isValidDecimal', () => {
     expect(isValidDecimal(Number.NaN)).toBe(false);
     expect(isValidDecimal(Number.POSITIVE_INFINITY)).toBe(false);
     expect(isValidDecimal(Number.NEGATIVE_INFINITY)).toBe(false);
+  });
+
+  // The two predicates are one implementation: a syntactically well-formed
+  // literal whose exponent explodes the scale is REJECTED by both, so
+  // `isDecimalString` can never advertise a value the arithmetic then chokes on.
+  it('agrees with isValidDecimal on out-of-domain exponent forms', () => {
+    for (const v of [
+      '1e2000000000',
+      '1e-2000000000',
+      '1e-10000000',
+      `1e${MAX_DECIMAL_SCALE + 1}`,
+    ]) {
+      expect(isDecimalString(v), v).toBe(false);
+      expect(isValidDecimal(v), v).toBe(false);
+    }
+  });
+
+  it('bounds significant digits and scale at the documented ceilings', () => {
+    expect(isValidDecimal('9'.repeat(MAX_DECIMAL_SIGNIFICANT_DIGITS))).toBe(true);
+    expect(isValidDecimal('9'.repeat(MAX_DECIMAL_SIGNIFICANT_DIGITS + 1))).toBe(false);
+    expect(isValidDecimal(`1e-${MAX_DECIMAL_SCALE}`)).toBe(true);
+    expect(isValidDecimal(`1e-${MAX_DECIMAL_SCALE + 1}`)).toBe(false);
+  });
+
+  // The guard's WHOLE job: `isValidDecimal(x)` is the kernel's precondition for
+  // the cap comparison that follows (kernel.ts), so acceptance must imply the
+  // arithmetic succeeds — never a RangeError escaping a plain compare.
+  it('acceptance implies the arithmetic is total (no throw, no CPU blow-up)', () => {
+    const accepted = [
+      '0',
+      '-3.25',
+      '1e21',
+      String(Number.MAX_VALUE),
+      String(Number.MIN_VALUE),
+      '115792089237316195423570985008687907853269984665640564039457584007913129639935',
+      `1e-${MAX_DECIMAL_SCALE}`,
+      '9'.repeat(MAX_DECIMAL_SIGNIFICANT_DIGITS),
+    ];
+    for (const v of accepted) {
+      expect(isValidDecimal(v), v).toBe(true);
+      expect(() => decCompare(v, '1'), v).not.toThrow();
+      expect(() => decAdd(v, '1'), v).not.toThrow();
+      expect(() => decMul(v, '2'), v).not.toThrow();
+    }
+  });
+
+  // The widest product the platform can form (MAX_VALUE × MIN_VALUE: 309 integer
+  // digits by scale 324) must stay inside the domain, so a `decMul` result fed
+  // straight back into `decCompare` — exactly what proposal-tally.ts does — round
+  // trips instead of tripping the bound.
+  it('keeps decMul results re-parseable (arithmetic closed over real inputs)', () => {
+    const product = decMul(String(Number.MAX_VALUE), String(Number.MIN_VALUE));
+    expect(isValidDecimal(product)).toBe(true);
+    expect(decCompare(product, '0')).toBe(1);
+  });
+
+  it('rejects an out-of-domain literal with a domain error, not a RangeError', () => {
+    expect(() => decCompare('1e-2000000000', '1')).toThrowError(/scale is outside/);
   });
 });
 

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
+import { createHash } from 'node:crypto';
 import {
   attentionAggregateSchema,
   DEFAULT_USER_SETTINGS,
@@ -15,6 +17,7 @@ import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetPushState } from '../lib/push-service.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
+import { getUserSettingsStore, InMemoryUserSettingsStore } from '../lib/user-settings.js';
 import { createV1Routes, resetSettingsState } from '../routes/v1.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from '../telemetry/service.js';
 import { freshEventServices, legacyAggregate, seedUserWithSession } from './event-test-helpers.js';
@@ -35,6 +38,14 @@ function jsonRequest(path: string, method: string, body: unknown): Request {
 }
 
 const VALID_UUID = '11111111-1111-4111-8111-111111111111';
+
+/** The in-memory settings store's live state keys (the default binding in tests). */
+function settingsStateKeys(): string[] {
+  const store = getUserSettingsStore();
+  if (!(store instanceof InMemoryUserSettingsStore))
+    throw new Error('expected the in-memory store');
+  return store.keysForTests();
+}
 
 beforeEach(() => {
   resetPushState();
@@ -125,6 +136,41 @@ describe('v1 auth + settings + flags', () => {
     // compat: stale bundles keep parsing; normalizeFeedMode maps it back).
     expect(body.feed_mode).toBe('chronological');
     expect(body.personalization_enabled).toBe(true);
+  });
+
+  // The settings/notification stores are DURABLE (Drizzle in production), so the
+  // session-scoped fallback key must never be the raw cookie value: that value is
+  // a live BEARER credential, and the session store itself only ever persists
+  // sha256(token). `middleware/csrf.ts` hashes the same value for the same
+  // reason; this pins that the settings path does too.
+  it('never persists the RAW session token as a settings key', async () => {
+    const a = app();
+    const token = 'a'.repeat(64);
+    const cookie = `__Host-sid=${token}`;
+    const res = await a.request(
+      new Request('http://local/v1/settings', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ feed_mode: 'new' }),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const keys = settingsStateKeys();
+    expect(keys.length).toBe(1);
+    expect(keys).not.toContain(token);
+    expect(keys[0]).toBe(createHash('sha256').update(token).digest('hex'));
+
+    // Same session ⇒ same key: hashing must not break settings sync.
+    const read = await a.request(new Request('http://local/v1/settings', { headers: { cookie } }));
+    expect(userSettingsSchema.parse(await read.json()).feed_mode).toBe('chronological');
+    expect(settingsStateKeys().length).toBe(1);
+  });
+
+  it('persists nothing server-side for a cookieless visitor', async () => {
+    const a = app();
+    await a.request(jsonRequest('/v1/settings', 'PATCH', { feed_mode: 'new' }));
+    expect(settingsStateKeys()).toEqual([]);
   });
 
   it('serves fail-closed crypto/governance + the WS-Q content surface', async () => {

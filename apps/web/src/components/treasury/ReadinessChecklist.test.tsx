@@ -10,9 +10,14 @@ import { checkA11y } from '../../test/axe.js';
 
 const mockReadiness = vi.fn();
 const mockMutateAsync = vi.fn();
+const mockQuiz = vi.fn(() => ({ isLoading: false, isError: false, data: undefined }));
 vi.mock('../../lib/queries.js', () => ({
   useRoomReadinessQuery: () => mockReadiness(),
   useModeTransitionMutation: () => ({ mutateAsync: mockMutateAsync, isPending: false }),
+  // The checklist mounts the comprehension quiz in place for the one requirement
+  // a member can satisfy from here (WS-L.4.1e).
+  useComprehensionQuizQuery: () => mockQuiz(),
+  useSubmitComprehensionMutation: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 import { ReadinessChecklist } from './ReadinessChecklist.js';
@@ -143,6 +148,44 @@ describe('ReadinessChecklist (WS-M.1.2e)', () => {
         reason: 'Ready to escalate.',
       }),
     );
+  });
+
+  // `comprehension_passed` is the ONLY checklist item a member can act on from
+  // here; listing it as "not met" with no way to take the check was a dead end
+  // that made `simulated → testnet` unreachable through the UI.
+  it('opens the comprehension check in place when that requirement is unmet', () => {
+    mockQuiz.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: {
+        quiz_version: 'v1',
+        already_passed: false,
+        questions: [
+          {
+            question_id: 'q1',
+            prompt: 'What does simulation mode move?',
+            choices: ['Real funds', 'No real funds'],
+            explanation: 'Simulation never moves real assets.',
+          },
+        ],
+      },
+    } as unknown as ReturnType<typeof mockQuiz>);
+    mockReadiness.mockReturnValue(
+      readinessData({
+        items: ITEMS.map((item) =>
+          item.requirement === 'comprehension_passed' ? { ...item, status: 'fail' as const } : item,
+        ),
+      }),
+    );
+    render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);
+    expect(screen.getByText(/What does simulation mode move\?/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit answers/i })).toBeInTheDocument();
+  });
+
+  it('does not re-ask the comprehension check once it is met', () => {
+    mockReadiness.mockReturnValue(readinessData());
+    render(<ReadinessChecklist roomId="r1" isRoomSteward={false} />);
+    expect(screen.queryByRole('button', { name: /submit answers/i })).not.toBeInTheDocument();
   });
 
   it('surfaces the live unmet list when the gate blocks the transition', async () => {

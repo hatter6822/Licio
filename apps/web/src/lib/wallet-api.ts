@@ -12,8 +12,6 @@ import {
   type ComprehensionSubmitResponse,
   comprehensionQuizResponseSchema,
   comprehensionSubmitResponseSchema,
-  type GovernanceTabWithProduction,
-  governanceTabWithProductionSchema,
   type KnomosisDeploymentListResponse,
   type KnomosisManifestResponse,
   type KnomosisPreflightRequest,
@@ -125,11 +123,6 @@ export async function submitKnomosisAction(
 }
 
 // --- Governance simulation (WS-L.4) ----------------------------------------
-
-export async function fetchGovernanceTab(roomId: string): Promise<GovernanceTabWithProduction> {
-  const response = await client.v1.rooms[':roomId'].governance.$get({ param: { roomId } });
-  return parseResponse(response, governanceTabWithProductionSchema);
-}
 
 export async function fetchComprehensionQuiz(roomId: string): Promise<ComprehensionQuizResponse> {
   const response = await client.v1.rooms[':roomId'].governance.comprehension.$get({

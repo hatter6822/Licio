@@ -282,6 +282,16 @@ scanners at the route level, so the seam swap needs no route changes.
 `scan_state` rides the wire (`uploadPublicSchema`) so clients can show a
 pending hold.
 
+**Page-batched media resolution.**  `resolveMedia` (`forum/comments.ts`) collects
+the distinct `attachment_ids` across the WHOLE rendered page and reads them in ONE
+`UploadStore.getRecords` call.  Resolving them a row at a time was an N+1 whose
+latency scaled `rows × attachments × round-trip` on the most-read surface in the
+product.  Both adapters implement the same contract — duplicates collapse, a
+missing id is absent rather than an error (an upload can be purged while a
+contribution still references it), and an empty ask does no work — and both are
+pinned to it by test (in-memory in `forum-organic.test.ts`, the real `IN (...)`
+adapter in the gated `forum-integration.test.ts`).
+
 **Restricted-media serving gate** (WS-Q.5.2c).  Authorization for media bytes
 is enforced at the serving route, not the object ACL.  An upload linked to a
 story carries that story's id in `owner_story_id`: set at submission for story

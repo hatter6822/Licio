@@ -273,15 +273,22 @@ This task fills the canonical WS-J.1.2 (block and mute) scope referenced by the 
 **Request/response shape:**
 
     POST /v1/blocks
-    Request { blocked_user_id: string }
-    201 Response { block_id: string, blocked_user_id: string, created_at: string }
+    Request { blocked_user_id: string } | { blocked_user_handle: string }   // exactly one
+    201 Response { block_id, blocked_user_id, blocked_user_handle, created_at }
     DELETE /v1/blocks/{block_id}    // unblock
     200 Response { ok: true }
     GET /v1/blocks                  // list the caller's blocks (paginated)
-    200 Response { blocks: [{ block_id, blocked_user_id, created_at }], next_cursor? }
+    200 Response { blocks: [{ block_id, blocked_user_id, blocked_user_handle, created_at }], next_cursor? }
     Errors:
-      400 { error: { code: "cannot_block_self" } }
+      400 { error: { code: "cannot_block_self" } }   // also 400 on both/neither target form
       404 { error: { code: "user_not_found" } }
+
+The HANDLE form is what the client uses: the public contribution projection
+withholds `author_user_id` (Section 19.5), so a reader looking at a comment holds
+the author's handle and nothing else — an id-only request shape would leave the
+Section B "two-tap report/block/mute" affordance with no identifier to act on.
+The list carries the handle for the same reason: a management list keyed on
+truncated opaque ids cannot tell the owner who they blocked.
 
 **Acceptance criteria:**
 - Block takes effect immediately and is persisted.
@@ -316,12 +323,16 @@ Implement account muting. A mute hides the muted user's content from the muting 
 **Request/response shape:**
 
     POST /v1/mutes
-    Request { muted_user_id: string, duration?: "1d" | "7d" | "30d" | "forever" }
-    201 Response { mute_id: string, muted_user_id: string, expires_at?: string, created_at: string }
+    Request { muted_user_id | muted_user_handle, duration?: "1d"|"7d"|"30d"|"forever" }
+    201 Response { mute_id, muted_user_id, muted_user_handle, expires_at?, created_at }
     DELETE /v1/mutes/{mute_id}      // unmute
     200 Response { ok: true }
     GET /v1/mutes                   // list the caller's mutes (paginated)
-    200 Response { mutes: [{ mute_id, muted_user_id, expires_at?, created_at }], next_cursor? }
+    200 Response { mutes: [{ mute_id, muted_user_id, muted_user_handle, expires_at?, created_at }], next_cursor? }
+
+Same id-or-handle union and the same handle-on-the-list rationale as
+`/v1/blocks` above; `duration` is offered on the client control rather than
+defaulted silently to `forever`.
 
 **Acceptance criteria:**
 - Mute hides the muted user's content from the muting user only.

@@ -1,6 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { MiddlewareHandler } from 'hono';
 
+/**
+ * The operator-configured canonical app origin (`CORS_ORIGIN`), normalized to a
+ * bare `scheme://host[:port]`, or null when unset/unparseable.  This is the SAME
+ * trusted binding the WebAuthn RP-ID, the SIWE domain, and the mailer's link
+ * origin derive from — deployment identity comes from configuration, never from
+ * a request header (`Host` / `X-Forwarded-*` are attacker-controllable).
+ */
+export function getCanonicalAppOrigin(): string | null {
+  const corsOrigin = process.env['CORS_ORIGIN'];
+  if (!corsOrigin) return null;
+  try {
+    return new URL(corsOrigin).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function getAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
@@ -11,11 +28,7 @@ export function getAllowedOrigins(): Set<string> {
     // (which never carries a path) — otherwise every cross-origin mutation is
     // silently blocked. Falls back to the trimmed raw value if it is not a valid
     // absolute URL.
-    try {
-      origins.add(new URL(corsOrigin).origin);
-    } catch {
-      origins.add(corsOrigin.trim());
-    }
+    origins.add(getCanonicalAppOrigin() ?? corsOrigin.trim());
   }
 
   if (process.env['NODE_ENV'] === 'development') {

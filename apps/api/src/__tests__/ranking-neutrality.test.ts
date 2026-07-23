@@ -323,14 +323,16 @@ describe('Test 2 — payment amount absent from organic feature schemas (WS-I.3.
       rankingProfileConfigSchema,
       rankingDecisionLogSchema,
     ]) {
-      const fields = collectZodFieldNames(schema).filter(
-        // The penalty-term field names ARE the control vocabulary
-        // (coordination/holonomy/…), not financial fields; everything is
-        // still scanned — none of them matches the denylist.
-        (name) => true && name.length > 0,
-      );
-      const violations = fields.filter((name) => isFinancialFieldName(name));
-      expect(violations).toEqual([]);
+      // EVERY reachable field name is scanned — nothing is filtered out. (The
+      // penalty-term names ARE the control vocabulary — coordination/holonomy/… —
+      // and none of them matches the denylist, so no exemption is needed.)
+      const fields = collectZodFieldNames(schema);
+      // Non-vacuity: an empty walk would make the assertion below pass without
+      // having inspected anything. `collectZodFieldNames` throws on a node kind
+      // it cannot descend, so this pins the other failure mode — a schema that
+      // legitimately walks to nothing.
+      expect(fields.length).toBeGreaterThan(0);
+      expect(fields.filter((name) => isFinancialFieldName(name))).toEqual([]);
     }
   });
 });

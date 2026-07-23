@@ -19,6 +19,13 @@ export interface UserSettingsStore {
 export class InMemoryUserSettingsStore implements UserSettingsStore {
   readonly #rows = new Map<string, UserSettings>();
 
+  /** Test seam: the state keys currently persisted.  Exists so a test can assert
+   *  WHAT is used as a key — the session-scoped fallback must be a hash, never
+   *  the raw bearer cookie value (see `settingsKey` in `routes/v1.ts`). */
+  keysForTests(): string[] {
+    return [...this.#rows.keys()];
+  }
+
   async get(stateKey: string): Promise<UserSettings | null> {
     return this.#rows.get(stateKey) ?? null;
   }

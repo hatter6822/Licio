@@ -840,16 +840,6 @@ export function useUnlinkWalletMutation() {
   });
 }
 
-/** WS-L.4.1a — the room governance tab bundle (simulation-aware). */
-export function useGovernanceTabQuery(roomId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.governanceTab(roomId),
-    queryFn: () => wallet.fetchGovernanceTab(roomId),
-    ...cachePolicy.room,
-    enabled,
-  });
-}
-
 /** WS-L.4.1e — the comprehension quiz for a governance room. */
 export function useComprehensionQuizQuery(roomId: string, enabled: boolean) {
   return useQuery({
@@ -867,7 +857,11 @@ export function useSubmitComprehensionMutation(roomId: string) {
       wallet.submitComprehensionQuiz(roomId, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.comprehensionQuiz(roomId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceTab(roomId) });
+      // Passing the quiz flips the `comprehension_passed` READINESS requirement
+      // (`knomosis/readiness.ts`), and the checklist is where the member sees it.
+      // Every target-mode variant of the key is invalidated by prefix, since the
+      // checklist can be viewed for any target.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomReadinessAll(roomId) });
     },
   });
 }

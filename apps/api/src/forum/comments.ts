@@ -106,11 +106,9 @@ async function resolveMedia(
   for (const row of rows) {
     for (const id of row.metadata.attachment_ids ?? []) ids.add(id);
   }
-  const uploads = new Map<string, UploadRecord>();
-  for (const id of ids) {
-    const upload = await bundle.forum.uploads.getRecord(id);
-    if (upload) uploads.set(id, upload);
-  }
+  // ONE batched read for the whole page: resolving media a row at a time made
+  // every comment page cost `rows × attachments` sequential round trips.
+  const uploads = await bundle.forum.uploads.getRecords([...ids]);
   const byContribution = new Map<string, NonNullable<ContributionPublic['media']>>();
   for (const row of rows) {
     const media: NonNullable<ContributionPublic['media']> = [];

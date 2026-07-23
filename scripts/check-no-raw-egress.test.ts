@@ -38,12 +38,42 @@ describe('findEgressIssues', () => {
 });
 
 describe('findGuardIssues', () => {
-  it('passes when the runtime guard is present', () => {
+  it('passes when the runtime guard is invoked', () => {
     expect(findGuardIssues('this.add = (a) => assertNoRawEgress(a);')).toEqual([]);
   });
 
   it('flags removal of the runtime guard', () => {
     expect(findGuardIssues('this.add = (a) => this.pending.push(a);')).toHaveLength(1);
+  });
+
+  // The guard is the ONLY check that inspects the value about to egress; the
+  // other three are structural. A bare identifier test is satisfied by the
+  // import line alone, so deleting the CALL while keeping the import used to
+  // pass while the runtime guard no longer ran.
+  it('flags a kept import whose CALL was deleted', () => {
+    const content = [
+      "import { assertNoRawEgress } from './privacy.js';",
+      'this.add = (a) => { void assertNoRawEgress; this.pending.push(a); };',
+    ].join('\n');
+    expect(findGuardIssues(content)).toEqual([expect.stringContaining('no longer invoked')]);
+  });
+
+  it('does not count a multi-line import as an invocation', () => {
+    const content = [
+      'import {',
+      '  assertNoRawEgress,',
+      "} from './privacy.js';",
+      'this.add = (a) => this.pending.push(a);',
+    ].join('\n');
+    expect(findGuardIssues(content)).toHaveLength(1);
+  });
+
+  it('still passes a real invocation that sits alongside its import', () => {
+    const content = [
+      "import { assertNoRawEgress } from './privacy.js';",
+      'this.add = (a) => { assertNoRawEgress(a); this.pending.push(a); };',
+    ].join('\n');
+    expect(findGuardIssues(content)).toEqual([]);
   });
 });
 

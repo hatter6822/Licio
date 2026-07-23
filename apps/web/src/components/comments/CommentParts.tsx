@@ -314,8 +314,12 @@ const badgeBase =
  */
 export function CommentReportButton({
   contributionId,
+  authorHandle,
 }: {
   contributionId: string;
+  /** Enables the sheet's block/mute half; null when the author is unknown or is
+   *  the reader themselves. */
+  authorHandle?: string | null;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   const label = 'Report this comment';
@@ -338,6 +342,7 @@ export function CommentReportButton({
           targetType="content"
           targetId={contributionId}
           contentKind="contribution"
+          {...(authorHandle ? { authorHandle } : {})}
         />
       ) : null}
     </>

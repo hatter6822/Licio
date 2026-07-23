@@ -180,7 +180,13 @@ double-submit token).
   `ip_hash`/`country` field can be stored.
 - **Tokens/PII never plaintext** — session tokens stored as `sha256`; wallet
   addresses as domain-separated HMACs; the auth-wallet and financial-wallet hashes
-  of the same address are non-correlatable.
+  of the same address are non-correlatable.  This holds for every store that keys
+  on a session, not just the session store: `middleware/csrf.ts` hashes the
+  session id for its Redis key, and the settings / notification-preference
+  fallback key (`settingsKey` in `routes/v1.ts`, used when a valid cookie cannot
+  be resolved to a user) hashes it too — those stores are durable, so a raw key
+  would put a live bearer credential in a table reachable through backups,
+  replicas, and log exports.  Pinned by `v1.test.ts`.
 - **Phishing resistance** — WebAuthn RP-ID/origin binding and SIWE domain/URI
   binding both reject look-alike origins.
 - **Cloned-authenticator detection** — WebAuthn counter regression is surfaced and

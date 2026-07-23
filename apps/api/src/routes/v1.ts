@@ -63,7 +63,7 @@ import {
 } from '../forum/card-signals.js';
 import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
-import { accountRef } from '../identity/crypto.js';
+import { accountRef, sha256Hex } from '../identity/crypto.js';
 import { getIdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { loadContentFlags } from '../ingestion/content-flags.js';
@@ -130,14 +130,26 @@ async function resolveOptionalUserId(cookieHeader: string | undefined): Promise<
 
 /**
  * The settings-sync key (SPEC §23.2): the USER id when signed in — so settings
- * survive re-login and sync across devices — else the raw session token (the
- * degraded path when a valid `__Host-sid` session cannot be resolved to a user,
- * e.g. a transient store outage).  A cookieless visitor gets `undefined` and is
- * never persisted server-side (the client's local persistence owns that state;
- * the old shared 'anonymous' fallback was a cross-user state bleed).
+ * survive re-login and sync across devices — else the session token's SHA-256
+ * (the degraded path when a valid `__Host-sid` session cannot be resolved to a
+ * user, e.g. a transient store outage).  A cookieless visitor gets `undefined`
+ * and is never persisted server-side (the client's local persistence owns that
+ * state; the old shared 'anonymous' fallback was a cross-user state bleed).
+ *
+ * The fallback key is HASHED, never the raw cookie value.  The cookie carries a
+ * BEARER session token, and these stores are durable (the production boot swaps
+ * in the Drizzle adapter), so a raw key would put a live credential in plaintext
+ * in a table — reachable through backups, replicas, log exports, and keyspace
+ * scans.  Hashing keeps the key exactly as stable and as distinct per session
+ * while making a leaked row useless: the session store itself only ever persists
+ * `sha256(token)`, and `middleware/csrf.ts` hashes the same value for the same
+ * reason.  This is that invariant, applied here too.
  */
 async function settingsKey(cookieHeader: string | undefined): Promise<string | undefined> {
-  return (await resolveOptionalUserId(cookieHeader)) ?? readSessionToken(cookieHeader);
+  const userId = await resolveOptionalUserId(cookieHeader);
+  if (userId !== null) return userId;
+  const token = readSessionToken(cookieHeader);
+  return token === undefined ? undefined : sha256Hex(token);
 }
 
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } } as const;

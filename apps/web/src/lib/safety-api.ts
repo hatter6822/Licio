@@ -89,6 +89,16 @@ export async function fetchBlocks(cursor?: string): Promise<BlockListResponse> {
   return parseResponse(response, blockListResponseSchema);
 }
 
+/**
+ * Block an account by its PUBLIC HANDLE — the only identifier a reader on a
+ * content surface has (§19.5 keeps `author_user_id` off the public projection),
+ * so this is the form every UI affordance uses.
+ */
+export async function createBlockByHandle(handle: string): Promise<BlockRecordView> {
+  const response = await client.v1.blocks.$post({ json: { blocked_user_handle: handle } });
+  return parseResponse(response, blockRecordSchema);
+}
+
 export async function createBlock(blockedUserId: string): Promise<BlockRecordView> {
   const response = await client.v1.blocks.$post({ json: { blocked_user_id: blockedUserId } });
   return parseResponse(response, blockRecordSchema);
@@ -102,6 +112,17 @@ export async function removeBlock(blockId: string): Promise<OkResponse> {
 export async function fetchMutes(cursor?: string): Promise<MuteListResponse> {
   const response = await client.v1.mutes.$get({ query: cursor ? { cursor } : {} });
   return parseResponse(response, muteListResponseSchema);
+}
+
+/** Mute an account by its PUBLIC HANDLE — see {@link createBlockByHandle}. */
+export async function createMuteByHandle(
+  handle: string,
+  duration?: MuteDuration,
+): Promise<MuteRecordView> {
+  const response = await client.v1.mutes.$post({
+    json: { muted_user_handle: handle, ...(duration ? { duration } : {}) },
+  });
+  return parseResponse(response, muteRecordSchema);
 }
 
 export async function createMute(

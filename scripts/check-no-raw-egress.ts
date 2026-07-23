@@ -155,11 +155,23 @@ export function findEgressIssues(filename: string, content: string): string[] {
   return issues;
 }
 
-/** Confirm the aggregate builder still invokes the runtime no-raw-egress guard. */
+/**
+ * Confirm the aggregate builder still INVOKES the runtime no-raw-egress guard.
+ *
+ * Import lines are stripped first, and an actual call expression is required:
+ * a bare "does the identifier appear" test is satisfied by the `import
+ * { assertNoRawEgress }` line alone, so deleting the call while leaving the
+ * import passed the check while the runtime guard no longer ran.  The guard is
+ * the one defense that inspects the actual VALUE about to egress — the other
+ * three checks are structural — so its invocation is what must be pinned.
+ */
 export function findGuardIssues(content: string): string[] {
-  return stripComments(content).includes('assertNoRawEgress')
+  const code = stripComments(content)
+    // Drop import statements (single- and multi-line) so only real code remains.
+    .replace(/^\s*import\s[\s\S]*?from\s*['"][^'"]*['"];?\s*$/gm, '');
+  return /\bassertNoRawEgress\s*\(/.test(code)
     ? []
-    : ['aggregate.ts: the assertNoRawEgress runtime guard has been removed'];
+    : ['aggregate.ts: the assertNoRawEgress runtime guard is no longer invoked'];
 }
 
 /** Confirm the §22.1 aggregate schema names no raw-trace field. */

@@ -74,11 +74,14 @@ export const queryKeys = {
   // WS-L wallets + knomosis.
   wallets: () => ['wallets'] as const,
   walletRiskState: (walletId: string) => ['wallet-risk-state', walletId] as const,
-  governanceTab: (roomId: string) => ['room', roomId, 'governance-tab'] as const,
   governanceProposals: (roomId: string) => ['room', roomId, 'governance-proposals'] as const,
   comprehensionQuiz: (roomId: string) => ['room', roomId, 'comprehension-quiz'] as const,
   roomReadiness: (roomId: string, target = 'next') =>
     ['room', roomId, 'readiness', target] as const,
+  /** Prefix of every target-mode variant of {@link roomReadiness} — invalidate
+   *  through this so a change that flips ONE requirement refreshes the checklist
+   *  whichever target the member is currently viewing. */
+  roomReadinessAll: (roomId: string) => ['room', roomId, 'readiness'] as const,
   // WS-M treasury + production governance.
   governanceProfile: (roomId: string) => ['room', roomId, 'governance-profile'] as const,
   treasuryTab: (roomId: string) => ['room', roomId, 'treasury-tab'] as const,
