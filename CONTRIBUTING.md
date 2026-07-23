@@ -110,16 +110,22 @@ gate, and that the history it lands with is the history that was reviewed.
 
 ## CI Gates (Required for Merge)
 
-No PR merges with a failing CI gate. The following jobs must all pass:
+No PR merges with a failing CI gate.  These are the SAME ten checks the
+`main-core` ruleset requires above — the two lists are one inventory described
+twice (job name here, check name there) and must not drift apart:
 
-- **lint**: Biome formatting and lint rules (security rules at `error` severity)
-- **typecheck**: TypeScript strict mode across all workspaces
-- **lockfile-lint**: Lockfile integrity (registry and integrity hash validation)
-- **dep-budget**: Dependency budget enforcement (`apps/web` < 15, `apps/api` < 20)
-- **test**: Unit tests with 80% coverage threshold (lines, functions, branches, statements)
-- **build-and-size**: Build validation (zero inline scripts/styles) and bundle-size budget
-- **e2e**: Playwright E2E tests across Chromium, Firefox, WebKit with axe-core WCAG 2.2 AA checks
-- **security**: Dependency audit, secret scan, SBOM generation
+| Job (`ci.yml`) | Required check name | What it enforces |
+|---|---|---|
+| `lint` | `Lint & Format` | Biome formatting and lint rules (security rules at `error` severity) |
+| `typecheck` | `Type Check` | TypeScript strict mode across all workspaces |
+| `lockfile-lint` | `Lockfile Integrity` | Lockfile integrity (registry and integrity hash validation) |
+| `dep-budget` | `Dependency Budget` | Dependency budgets (`apps/web` < 15, `apps/api` < 20) |
+| `test` | `Test & Coverage` | Unit tests with the 80% coverage threshold (lines, functions, branches, statements) |
+| `build-and-size` | `Build & Size Check` | Build validation (zero inline scripts/styles), SRI, bundle-size budget |
+| `e2e` | `E2E Tests` | Playwright across Chromium, Firefox, WebKit with axe-core WCAG 2.2 AA checks |
+| `security` | `Security Audit` | Dependency audit, secret scan, SBOM generation |
+| `courier-apk` | `Native Courier APK (WS-R.15.4a)` | The Capacitor shell builds from the web bundle (byte-identity no-fork gate) |
+| (`codeql.yml`) | `CodeQL Analysis` | `security-extended` static analysis |
 
 ## Adding Dependencies
 

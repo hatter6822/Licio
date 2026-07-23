@@ -1888,19 +1888,40 @@ Add a CI job dedicated to security checks. This job runs in parallel with other 
 Configure GitHub branch protection on `main` so the CI security gates are mandatory, not advisory. A pipeline that can be merged around provides no guarantee. Codify the required status checks, required review, and merge constraints. Because branch-protection settings live in repository configuration rather than the codebase, document the exact required settings in `CONTRIBUTING.md`/an ADR so they are reproducible and auditable, and apply them via repository settings (or `gh api`/Terraform if infrastructure-as-code is adopted).
 
 **Required settings on `main`:**
-- Require all CI jobs to pass (lint, typecheck, lockfile-lint, dep-budget, test, build-and-size, e2e, security) before merge.
+- Require all CI jobs to pass (lint, typecheck, lockfile-lint, dep-budget, test, build-and-size, e2e, security, courier-apk, codeql) before merge.
 - Require at least one approving review; dismiss stale approvals on new commits.
 - Require branches to be up to date before merging.
-- Require linear history (no merge commits) or squash-merge only, to keep provenance clean.
+- **Merge commits only; squash and rebase merging DISABLED.**  (Superseded 2026-07-23:
+  this task originally asked for linear history or squash-only "to keep provenance
+  clean".  That is backwards for this repository — `CLAUDE.md` keeps per-audit and
+  per-workstream completion detail in COMMIT MESSAGES rather than in the doctrine
+  files, so squashing destroys the provenance the requirement was trying to protect,
+  along with the boundaries `git bisect` and a reviewer need between original work,
+  follow-up findings, and review fixes.  A merge commit keeps every commit AND
+  records which commits formed which PR.  `CONTRIBUTING.md` "Merge constraints" is
+  the authority.)
 - Restrict force-pushes and deletion of `main`.
 - Require signed commits (optional but recommended) to strengthen provenance.
+
+**Implementation note (2026-07-23).**  Expressed as TWO rulesets rather than classic
+branch protection, because a bypass applies to a whole ruleset and only the review
+COUNT should be waivable: `main-core` (no bypass — PR required with 0 approvals,
+`merge` only, all required checks, no force-push, no deletion) and `main-review`
+(repository-admin bypass — 1 approving review).  Classic protection cannot express
+this: its `enforce_admins` flag is all-or-nothing, so waiving the review for a
+single maintainer also waives the direct-push block — verified by trying it, where
+an admin push to `main` succeeded.
 
 **Acceptance criteria:**
 - `main` cannot be pushed to directly; changes require a PR.
 - A PR with any failing required check cannot be merged.
-- A PR without an approving review cannot be merged.
+- A PR without an approving review cannot be merged (repository admins bypass the
+  review COUNT only — GitHub forbids approving one's own PR, so an unwaivable count
+  would block every merge on a single-maintainer repo; every other rule still applies
+  to them).
 - Force-push and branch deletion on `main` are blocked.
 - The required-checks list is documented and matches the CI job names.
+- A squash or rebase merge is refused (both disabled at the repository level).
 
 **Testing:**
 - Open a PR with a failing lint job; verify the merge button is blocked.
