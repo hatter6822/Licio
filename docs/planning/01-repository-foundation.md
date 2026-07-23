@@ -1934,13 +1934,26 @@ making the documented control a fiction.
 
 **Testing:**
 - Open a PR with a failing lint job; verify the merge button is blocked.
-- Attempt a direct push to `main`; verify it is rejected.
-- Attempt to merge without a review; verify it is blocked.
+- Attempt a direct push to `main` AS AN ADMIN; verify it is rejected (`GH013`).
+  Doing this as a non-admin proves nothing — the failure mode this guards against
+  is a bypass that exempts the owner.
+- Attempt a force-push and a branch deletion on `main`; verify both are rejected.
+- Verify the ruleset carries ZERO bypass actors:
+  `gh api repos/OWNER/REPO/rulesets --jq '[.[].bypass_actors[]?] | length'` → `0`.
+  This is the test that keeps the acceptance criteria honest: every other rule is
+  only as strong as the absence of an exemption from it.
+- Attempt a squash merge; verify it is refused.
 - Verify the documented required-check names exactly match the workflow job names.
+- NOT tested: "merge without an approving review is blocked."  An approval COUNT
+  is deliberately not enforced (see the required-settings note above); a test
+  asserting it would fail against the intended configuration and would invite a
+  future maintainer to re-add the gate this task deliberately removed.  Reinstate
+  this test together with `required_approving_review_count: 1` when a second
+  contributor exists.
 
 **Dependencies:** WS-0.6.1b, WS-0.6.1c, WS-0.6.1d, WS-0.6.1e, WS-0.1.5 (CONTRIBUTING documents the policy).
 
-**Security (Section 30.8, 25.1):** Branch protection is what makes every preceding gate enforceable rather than optional -- without it, a contributor (or a compromised credential) could merge code that bypasses lint, tests, and the security job. Required review and restricted force-push protect the integrity and provenance of `main`, the branch from which production bundles are built.
+**Security (Section 30.8, 25.1):** Branch protection is what makes every preceding gate enforceable rather than optional -- without it, a contributor (or a compromised credential) could merge code that bypasses lint, tests, and the security job. The PR requirement, the restricted force-push, and the absence of any bypass actor protect the integrity and provenance of `main`, the branch from which production bundles are built: a compromised maintainer credential still cannot push to `main` directly, rewrite its history, or land code past a red gate. Human review is policy rather than a machine-enforced count while the repository has one maintainer -- so it is the one control here that a compromised credential could skip, which is why the mechanical gates are drawn to not depend on it.
 
 ---
 
