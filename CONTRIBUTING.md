@@ -41,7 +41,11 @@ REDIS_URL=redis://localhost:6379 pnpm dev
    - `pnpm check:workspace-deps` — workspace boundary enforcement
 4. Push and open a PR against `main`
 5. All CI checks must pass before merge
-6. At least one approving review is required
+6. Review the PR.  No approval COUNT is enforced — see **Merge constraints**
+   below for why — so the review is a real reading, not a button press
+7. Merge with a **merge commit**: `gh pr merge <n> --merge`.  Squash and rebase
+   merging are disabled on the repository, so this is the only option the API
+   will accept
 
 ## Branch Protection (`main`)
 
@@ -57,30 +61,109 @@ security gates are mandatory, not advisory:
 - `Build & Size Check` — zero inline scripts/styles, SRI, bundle-size budgets
 - `E2E Tests` — Playwright across Chromium/Firefox/WebKit with axe-core a11y
 - `Security Audit` — dependency audit, secret scan, SBOM generation
+- `Native Courier APK (WS-R.15.4a)` — the Capacitor shell builds from the web bundle
+- `CodeQL Analysis` — `security-extended` static analysis
 
 **Merge constraints:**
-- Require at least one approving review; stale approvals are dismissed on new pushes
-- Require branches to be up to date with `main` before merging
-- Require linear history (squash-merge or rebase-merge only)
-- Force-pushes to `main` are blocked
-- Deletion of `main` is blocked
-- Direct pushes to `main` are blocked — all changes require a PR
+- Every change reaches `main` through a pull request — direct pushes are blocked
+- Branches must be up to date with `main` before merging
+- Every review conversation must be resolved before merging
+- Force-pushes to `main` are blocked; deletion of `main` is blocked
+- No approving-review COUNT is enforced (single-maintainer repo — see below)
+- **Merge commits only — never squash.**  A PR's commits are the durable
+  engineering record: `CLAUDE.md` deliberately keeps per-audit and per-workstream
+  completion detail in commit messages rather than in the doctrine files, and
+  squashing collapses that record into a single blob.  It also destroys the
+  boundaries a reviewer and `git bisect` depend on — original work, follow-up
+  findings, and review-response fixes stop being separable.  A merge commit keeps
+  every commit AND records which commits formed which PR, so
+  `git log --first-parent` reads as one entry per PR while `git log` still shows
+  the full history.
+
+**How this is enforced.**  ONE ruleset on `refs/heads/main` — `main-core`, with
+**no bypass actors at all** — plus the repository merge-method settings:
+
+| Rule | Effect |
+|---|---|
+| `pull_request` | Every change arrives by PR; `merge` is the only permitted method; every review conversation must be resolved.  Required approvals: **0** |
+| `required_status_checks` (strict) | All ten checks below must pass, and the branch must be up to date with `main` |
+| `non_fast_forward` | Force-pushes to `main` are refused |
+| `deletion` | `main` cannot be deleted |
+
+Because nothing bypasses it, **no one — the repository owner included — can push
+directly to `main`, force-push it, delete it, merge past a red CI gate, or merge
+by squash.**
+
+**Verify it rather than trust this page.**  Branch protection lives in repository
+configuration, not in the tree, so the two can drift — and a settings page that
+merely *claims* a control is exactly the failure this section was written to fix
+(`main` had no protection at all until 2026-07-23, while this file described six
+constraints).  These commands print the live configuration:
+
+```sh
+# Exactly one ruleset, and it must have NO bypass actors.
+gh api repos/OWNER/REPO/rulesets \
+  --jq '.[] | "\(.name) bypass=\([.bypass_actors[]?.actor_type] | length)"'
+#   → main-core bypass=0
+
+# The rules actually in force on main.
+gh api repos/OWNER/REPO/rules/branches/main --jq '[.[].type] | unique'
+#   → ["deletion","non_fast_forward","pull_request","required_status_checks"]
+
+# Merge method: merge only.
+gh api repos/OWNER/REPO \
+  --jq '{merge:.allow_merge_commit, squash:.allow_squash_merge, rebase:.allow_rebase_merge}'
+#   → {"merge":true,"squash":false,"rebase":false}
+```
+
+If any of those disagree with the table above, the configuration drifted — fix
+the configuration, not this page.
+
+**Why no approval count.**  GitHub will not let an author approve their own pull
+request (`422 Review Can not approve your own pull request`).  On a
+single-maintainer repository an enforced count therefore has exactly two possible
+outcomes: it blocks every merge, or it is waived on every merge.  A rule waived
+every time is worse than no rule — it trains the maintainer to click through the
+bypass prompt, and it makes the documented control a fiction, which is the class
+of defect this section exists to prevent.  So the count is not enforced, the
+review is a real reading rather than a button press, and CI is the mechanical
+gate.  Re-enable it (`required_approving_review_count: 1`) the day a second
+contributor exists — at that point an approval is something a *different* person
+can actually give.
+
+Do NOT express this with classic branch protection: its `enforce_admins` flag is
+all-or-nothing, so waiving anything for the maintainer would also waive
+
+Do NOT express this with classic branch protection: its `enforce_admins` flag is
+the direct-push and force-push blocks.  That was verified by trying it — an admin
+push to `main` succeeded under classic protection and is refused (`GH013`) under
+the ruleset.
+
+Squash and rebase merging are additionally disabled at the repository level
+(`allow_squash_merge: false`, `allow_rebase_merge: false`), so the wrong merge
+method fails at the API rather than silently rewriting history.
 
 These settings ensure that no code reaches `main` without passing every security
-gate and receiving human review.
+gate, and that the history it lands with is the history that was reviewed.
 
 ## CI Gates (Required for Merge)
 
-No PR merges with a failing CI gate. The following jobs must all pass:
+No PR merges with a failing CI gate.  These are the SAME ten checks the
+`main-core` ruleset requires above — the two lists are one inventory described
+twice (job name here, check name there) and must not drift apart:
 
-- **lint**: Biome formatting and lint rules (security rules at `error` severity)
-- **typecheck**: TypeScript strict mode across all workspaces
-- **lockfile-lint**: Lockfile integrity (registry and integrity hash validation)
-- **dep-budget**: Dependency budget enforcement (`apps/web` < 15, `apps/api` < 20)
-- **test**: Unit tests with 80% coverage threshold (lines, functions, branches, statements)
-- **build-and-size**: Build validation (zero inline scripts/styles) and bundle-size budget
-- **e2e**: Playwright E2E tests across Chromium, Firefox, WebKit with axe-core WCAG 2.2 AA checks
-- **security**: Dependency audit, secret scan, SBOM generation
+| Job (`ci.yml`) | Required check name | What it enforces |
+|---|---|---|
+| `lint` | `Lint & Format` | Biome formatting and lint rules (security rules at `error` severity) |
+| `typecheck` | `Type Check` | TypeScript strict mode across all workspaces |
+| `lockfile-lint` | `Lockfile Integrity` | Lockfile integrity (registry and integrity hash validation) |
+| `dep-budget` | `Dependency Budget` | Dependency budgets (`apps/web` < 15, `apps/api` < 20) |
+| `test` | `Test & Coverage` | Unit tests with the 80% coverage threshold (lines, functions, branches, statements) |
+| `build-and-size` | `Build & Size Check` | Build validation (zero inline scripts/styles), SRI, bundle-size budget |
+| `e2e` | `E2E Tests` | Playwright across Chromium, Firefox, WebKit with axe-core WCAG 2.2 AA checks |
+| `security` | `Security Audit` | Dependency audit, secret scan, SBOM generation |
+| `courier-apk` | `Native Courier APK (WS-R.15.4a)` | The Capacitor shell builds from the web bundle (byte-identity no-fork gate) |
+| (`codeql.yml`) | `CodeQL Analysis` | `security-extended` static analysis |
 
 ## Adding Dependencies
 

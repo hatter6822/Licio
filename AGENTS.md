@@ -231,7 +231,8 @@ licio/
 ├── scripts/                -- build validation + CI static gates (check-*, validate-build)
 ├── docs/                   -- SPEC.md, OFFLINE_SPEC.md, PRIVATE_SPEC.md, planning/
 │                               (00-index.md), per-workstream + policy references
-└── .github/workflows/      -- ci.yml (9 jobs), codeql.yml, dependabot
+└── .github/workflows/      -- ci.yml (9 jobs), codeql.yml (dependabot RAISES
+                            update PRs but never auto-merges them)
 ```
 
 ## Workspace dependency graph
@@ -406,6 +407,18 @@ write for a file the foreground agent may also touch.
 
 - **Git practices:**  One commit per completed work unit.  All
   commits must pass `pnpm typecheck`, `pnpm lint`, and `pnpm test`.
+
+- **Merging (ABSOLUTE): MERGE COMMITS ONLY — never squash.**  `gh pr merge <n>
+  --merge`.  The PR's individual commits ARE the engineering record: this file
+  deliberately keeps per-audit and per-workstream detail in commit messages
+  rather than here, so squashing destroys that record and the boundaries
+  `git bisect` and a reviewer need between original work, follow-up findings,
+  and review-response fixes.  Squash and rebase merging are disabled on the
+  repository, so the wrong method fails at the API — but do not reach for a
+  workaround: the failure is the policy working.  Do NOT infer the merge style
+  from recent history; `CONTRIBUTING.md` is the authority (recent history can be
+  a previous agent session's drift, which is exactly how #148–#162 became
+  squashed against policy).
 
 - **Versioning:**  The root `package.json` version is the project
   version (workspace packages stay private at `0.0.0`).  EVERY pull

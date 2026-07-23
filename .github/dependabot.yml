@@ -12,11 +12,14 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
-    # Patch updates are auto-merge candidates when all CI checks pass.
-    # Auto-merge is enforced by the branch protection required-check set
-    # (WS-0.6.1f), so a malicious patch cannot merge without green security jobs.
-    # To enable: gh api repos/OWNER/REPO/pulls/{id}/merge or configure
-    # a GitHub Actions auto-merge workflow gated on the security job.
+    # NO AUTO-MERGE.  Dependency updates land through the same human review as
+    # every other change (2026-07-23 maintainer decision).  A dependency bump is
+    # a supply-chain change — the one class of PR where an unreviewed merge is
+    # most costly — so the convenience is not worth the bypass, and the
+    # `main-review` ruleset would block it anyway: Dependabot cannot approve its
+    # own pull request, and the only bypass is a repository admin.  The
+    # `dependabot-auto-merge.yml` workflow that used to do this was removed
+    # rather than left to fail silently on every bump.
 
   - package-ecosystem: "github-actions"
     directory: "/"

@@ -1888,29 +1888,79 @@ Add a CI job dedicated to security checks. This job runs in parallel with other 
 Configure GitHub branch protection on `main` so the CI security gates are mandatory, not advisory. A pipeline that can be merged around provides no guarantee. Codify the required status checks, required review, and merge constraints. Because branch-protection settings live in repository configuration rather than the codebase, document the exact required settings in `CONTRIBUTING.md`/an ADR so they are reproducible and auditable, and apply them via repository settings (or `gh api`/Terraform if infrastructure-as-code is adopted).
 
 **Required settings on `main`:**
-- Require all CI jobs to pass (lint, typecheck, lockfile-lint, dep-budget, test, build-and-size, e2e, security) before merge.
-- Require at least one approving review; dismiss stale approvals on new commits.
+- Require all CI jobs to pass (lint, typecheck, lockfile-lint, dep-budget, test, build-and-size, e2e, security, courier-apk, codeql) before merge.
+- Human review of every PR.  An approving-review COUNT is NOT enforced while the
+  repository has a single maintainer: GitHub refuses self-approval, so a required
+  count either blocks every merge or is waived on every merge, and a rule waived
+  every time is a fiction.  Re-enable `required_approving_review_count: 1` when a
+  second contributor exists (superseded 2026-07-23).
 - Require branches to be up to date before merging.
-- Require linear history (no merge commits) or squash-merge only, to keep provenance clean.
+- **Merge commits only; squash and rebase merging DISABLED.**  (Superseded 2026-07-23:
+  this task originally asked for linear history or squash-only "to keep provenance
+  clean".  That is backwards for this repository — `CLAUDE.md` keeps per-audit and
+  per-workstream completion detail in COMMIT MESSAGES rather than in the doctrine
+  files, so squashing destroys the provenance the requirement was trying to protect,
+  along with the boundaries `git bisect` and a reviewer need between original work,
+  follow-up findings, and review fixes.  A merge commit keeps every commit AND
+  records which commits formed which PR.  `CONTRIBUTING.md` "Merge constraints" is
+  the authority.)
 - Restrict force-pushes and deletion of `main`.
 - Require signed commits (optional but recommended) to strengthen provenance.
+
+**Implementation note (2026-07-23).**  Expressed as ONE ruleset — `main-core`, with
+**no bypass actors** — rather than classic branch protection: `pull_request` (PR
+required, `merge` the only method, conversation resolution, 0 approvals),
+`required_status_checks` (all ten, strict), `non_fast_forward`, `deletion`.  Nothing
+bypasses it, so the repository owner is bound by it too.
+
+*Rejected alternatives — NEITHER of the following is configured; both are recorded
+so they are not re-attempted:*
+
+1. **Classic branch protection.**  Its `enforce_admins` flag is all-or-nothing, so
+   waiving anything for a single maintainer also waives the direct-push block —
+   verified empirically, where an admin push to `main` succeeded under classic
+   protection and is refused (`GH013`) under the ruleset.
+2. **A second `main-review` ruleset** carrying a bypassable 1-approval rule.
+   Created 2026-07-23 and **DELETED the same day**; `GET .../rulesets/19622644`
+   now returns 404.  On a single-maintainer repository the count can only ever be
+   waived, and a rule waived on every merge trains the maintainer to click through
+   the prompt while making the documented control a fiction.
+
+The live configuration is ONE ruleset with ZERO bypass actors, and
+`CONTRIBUTING.md` carries the commands to confirm that.
 
 **Acceptance criteria:**
 - `main` cannot be pushed to directly; changes require a PR.
 - A PR with any failing required check cannot be merged.
-- A PR without an approving review cannot be merged.
+- No PR merges without human review.  Not machine-enforced as a COUNT while the
+  repository is single-maintainer (GitHub forbids self-approval); the mechanical
+  gates are CI, the PR requirement, and conversation resolution.
 - Force-push and branch deletion on `main` are blocked.
 - The required-checks list is documented and matches the CI job names.
+- A squash or rebase merge is refused (both disabled at the repository level).
 
 **Testing:**
 - Open a PR with a failing lint job; verify the merge button is blocked.
-- Attempt a direct push to `main`; verify it is rejected.
-- Attempt to merge without a review; verify it is blocked.
+- Attempt a direct push to `main` AS AN ADMIN; verify it is rejected (`GH013`).
+  Doing this as a non-admin proves nothing — the failure mode this guards against
+  is a bypass that exempts the owner.
+- Attempt a force-push and a branch deletion on `main`; verify both are rejected.
+- Verify the ruleset carries ZERO bypass actors:
+  `gh api repos/OWNER/REPO/rulesets --jq '[.[].bypass_actors[]?] | length'` → `0`.
+  This is the test that keeps the acceptance criteria honest: every other rule is
+  only as strong as the absence of an exemption from it.
+- Attempt a squash merge; verify it is refused.
 - Verify the documented required-check names exactly match the workflow job names.
+- NOT tested: "merge without an approving review is blocked."  An approval COUNT
+  is deliberately not enforced (see the required-settings note above); a test
+  asserting it would fail against the intended configuration and would invite a
+  future maintainer to re-add the gate this task deliberately removed.  Reinstate
+  this test together with `required_approving_review_count: 1` when a second
+  contributor exists.
 
 **Dependencies:** WS-0.6.1b, WS-0.6.1c, WS-0.6.1d, WS-0.6.1e, WS-0.1.5 (CONTRIBUTING documents the policy).
 
-**Security (Section 30.8, 25.1):** Branch protection is what makes every preceding gate enforceable rather than optional -- without it, a contributor (or a compromised credential) could merge code that bypasses lint, tests, and the security job. Required review and restricted force-push protect the integrity and provenance of `main`, the branch from which production bundles are built.
+**Security (Section 30.8, 25.1):** Branch protection is what makes every preceding gate enforceable rather than optional -- without it, a contributor (or a compromised credential) could merge code that bypasses lint, tests, and the security job. The PR requirement, the restricted force-push, and the absence of any bypass actor protect the integrity and provenance of `main`, the branch from which production bundles are built: a compromised maintainer credential still cannot push to `main` directly, rewrite its history, or land code past a red gate. Human review is policy rather than a machine-enforced count while the repository has one maintainer -- so it is the one control here that a compromised credential could skip, which is why the mechanical gates are drawn to not depend on it.
 
 ---
 
@@ -1923,13 +1973,26 @@ Configure GitHub branch protection on `main` so the CI security gates are mandat
 Configure automated dependency updates and vulnerability scanning. This ensures the project stays current with security patches and that newly discovered vulnerabilities are flagged promptly.
 
 **Configuration options (choose one):**
-- **Dependabot** (`.github/dependabot.yml`): weekly update checks, grouped by ecosystem, auto-merge for patch updates with passing CI
+- **Dependabot** (`.github/dependabot.yml`): weekly update checks, grouped by ecosystem (NO auto-merge — see below)
 - **Renovate** (`renovate.json`): similar functionality with more granular control
 
 **Configuration requirements:**
 - Check for updates weekly
 - Group minor and patch updates to reduce PR noise
-- Auto-merge patch updates that pass all CI checks (auto-merge is gated by the full required-check set from WS-0.6.1f, so a malicious patch still cannot merge without green security jobs)
+- **No auto-merge** (superseded 2026-07-23).  This task originally asked for
+  auto-merged patch updates gated on the required-check set.  The maintainer's
+  decision is that dependency updates take the same human review as every other
+  change: a dependency bump is a supply-chain change — the class of PR where an
+  unreviewed merge is most costly — so passing CI is a necessary condition for
+  landing one, never a sufficient one.  The `dependabot-auto-merge.yml` workflow
+  was REMOVED rather than left to fail silently on every bump.
+
+  This is a POLICY choice, not a mechanical impossibility.  It briefly was one:
+  for a few hours on 2026-07-23 a `main-review` ruleset enforced an approving
+  review, which an auto-merge workflow could never have satisfied (Dependabot
+  cannot approve its own PR).  **That ruleset no longer exists**, so auto-merge
+  would work again if the workflow were restored — and it should not be.  The
+  reason is the supply-chain argument above, which depends on no ruleset.
 - Flag packages with install scripts for manual review
 - Alert on known CVEs immediately (not just on schedule), via the security advisory integration
 - Respect the dependency budget (Section 6.12.12): new direct dependencies require human review and re-run the dep-budget check
@@ -1937,18 +2000,18 @@ Configure automated dependency updates and vulnerability scanning. This ensures 
 **Acceptance criteria:**
 - Dependency update PRs are created automatically on a weekly schedule.
 - Vulnerable packages are flagged with CVE details.
-- Patch updates with passing CI (including the security job) can be auto-merged.
+- Patch updates with passing CI are ready for a human to review and merge; nothing merges without review.
 - Packages with install scripts are flagged for manual review in the PR.
 - The configuration file is committed to the repository.
 
 **Testing:**
 - Verify the dependency scanning configuration file is valid (schema check).
 - Manually trigger a dependency check; verify PRs are created for outdated packages.
-- Verify an auto-merge candidate still requires the security and dep-budget checks to pass.
+- Verify a dependency PR still requires the security and dep-budget checks to pass, and that no workflow merges it automatically.
 
 **Dependencies:** WS-0.6.1f.
 
-**Security (Section 25.4, 6.12.12):** Automated scanning closes the window between a CVE disclosure and a patched deployment, implementing the Section 25.4 vulnerability-management control. Gating auto-merge on the full required-check set ensures the convenience of automation never bypasses the security gate.
+**Security (Section 25.4, 6.12.12):** Automated scanning closes the window between a CVE disclosure and a patched deployment, implementing the Section 25.4 vulnerability-management control. Automation raises the PR and proves the gates are green; a human still decides what enters the supply chain, so convenience never bypasses review.
 
 ---
 
