@@ -41,7 +41,11 @@ REDIS_URL=redis://localhost:6379 pnpm dev
    - `pnpm check:workspace-deps` — workspace boundary enforcement
 4. Push and open a PR against `main`
 5. All CI checks must pass before merge
-6. At least one approving review is required
+6. At least one approving review is required (repository admins are exempt from
+   the review COUNT only — see **Merge constraints** below)
+7. Merge with a **merge commit**: `gh pr merge <n> --merge`.  Squash and rebase
+   merging are disabled on the repository, so this is the only option the API
+   will accept
 
 ## Branch Protection (`main`)
 
@@ -57,17 +61,52 @@ security gates are mandatory, not advisory:
 - `Build & Size Check` — zero inline scripts/styles, SRI, bundle-size budgets
 - `E2E Tests` — Playwright across Chromium/Firefox/WebKit with axe-core a11y
 - `Security Audit` — dependency audit, secret scan, SBOM generation
+- `Native Courier APK (WS-R.15.4a)` — the Capacitor shell builds from the web bundle
+- `CodeQL Analysis` — `security-extended` static analysis
 
 **Merge constraints:**
-- Require at least one approving review; stale approvals are dismissed on new pushes
-- Require branches to be up to date with `main` before merging
-- Require linear history (squash-merge or rebase-merge only)
-- Force-pushes to `main` are blocked
-- Deletion of `main` is blocked
-- Direct pushes to `main` are blocked — all changes require a PR
+- Every change reaches `main` through a pull request — direct pushes are blocked
+- Branches must be up to date with `main` before merging
+- Every review conversation must be resolved before merging
+- Force-pushes to `main` are blocked; deletion of `main` is blocked
+- At least one approving review; stale approvals are dismissed on new pushes
+- **Merge commits only — never squash.**  A PR's commits are the durable
+  engineering record: `CLAUDE.md` deliberately keeps per-audit and per-workstream
+  completion detail in commit messages rather than in the doctrine files, and
+  squashing collapses that record into a single blob.  It also destroys the
+  boundaries a reviewer and `git bisect` depend on — original work, follow-up
+  findings, and review-response fixes stop being separable.  A merge commit keeps
+  every commit AND records which commits formed which PR, so
+  `git log --first-parent` reads as one entry per PR while `git log` still shows
+  the full history.
+
+**How this is enforced.**  Two rulesets on `refs/heads/main`, plus the repository
+merge-method settings.  The split exists because a bypass applies to a whole
+ruleset, and only the review COUNT should be waivable:
+
+| Ruleset | Bypass | Rules |
+|---|---|---|
+| `main-core` | **none** — applies to admins too | `pull_request` (0 approvals, `merge` only, conversation resolution), `required_status_checks` (all ten, strict), `non_fast_forward`, `deletion` |
+| `main-review` | repository admin | `pull_request` (1 approval) |
+
+GitHub does not let an author approve their own pull request, so on a
+single-maintainer repository an unwaivable review requirement would block every
+merge.  Putting the count in its own bypassable ruleset means the maintainer can
+land their own work today, a second contributor gets a real review gate the
+moment they exist, and **no one — admin included — can push directly to `main`,
+force-push it, delete it, or merge past a red CI gate.**
+
+Do NOT express this with classic branch protection: its `enforce_admins` flag is
+all-or-nothing, so waiving the review count for the maintainer would also waive
+the direct-push and force-push blocks.  That was verified by trying it — an admin
+push to `main` succeeded until the rulesets replaced it.
+
+Squash and rebase merging are additionally disabled at the repository level
+(`allow_squash_merge: false`, `allow_rebase_merge: false`), so the wrong merge
+method fails at the API rather than silently rewriting history.
 
 These settings ensure that no code reaches `main` without passing every security
-gate and receiving human review.
+gate, and that the history it lands with is the history that was reviewed.
 
 ## CI Gates (Required for Merge)
 
