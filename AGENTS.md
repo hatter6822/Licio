@@ -231,7 +231,8 @@ licio/
 ├── scripts/                -- build validation + CI static gates (check-*, validate-build)
 ├── docs/                   -- SPEC.md, OFFLINE_SPEC.md, PRIVATE_SPEC.md, planning/
 │                               (00-index.md), per-workstream + policy references
-└── .github/workflows/      -- ci.yml (9 jobs), codeql.yml, dependabot
+└── .github/workflows/      -- ci.yml (9 jobs), codeql.yml (dependabot RAISES
+                            update PRs but never auto-merges them)
 ```
 
 ## Workspace dependency graph

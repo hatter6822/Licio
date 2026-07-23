@@ -1944,13 +1944,22 @@ an admin push to `main` succeeded.
 Configure automated dependency updates and vulnerability scanning. This ensures the project stays current with security patches and that newly discovered vulnerabilities are flagged promptly.
 
 **Configuration options (choose one):**
-- **Dependabot** (`.github/dependabot.yml`): weekly update checks, grouped by ecosystem, auto-merge for patch updates with passing CI
+- **Dependabot** (`.github/dependabot.yml`): weekly update checks, grouped by ecosystem (NO auto-merge — see below)
 - **Renovate** (`renovate.json`): similar functionality with more granular control
 
 **Configuration requirements:**
 - Check for updates weekly
 - Group minor and patch updates to reduce PR noise
-- Auto-merge patch updates that pass all CI checks (auto-merge is gated by the full required-check set from WS-0.6.1f, so a malicious patch still cannot merge without green security jobs)
+- **No auto-merge** (superseded 2026-07-23).  This task originally asked for
+  auto-merged patch updates gated on the required-check set.  The maintainer's
+  decision is that dependency updates take the same human review as every other
+  change: a dependency bump is a supply-chain change — the class of PR where an
+  unreviewed merge is most costly — so passing CI is a necessary condition, not a
+  sufficient one.  It is also unachievable as written: the `main-review` ruleset
+  requires one approving review and Dependabot cannot approve its own PR, so an
+  auto-merge workflow would sit pending forever.  The
+  `dependabot-auto-merge.yml` workflow was REMOVED rather than left to fail
+  silently on every bump.
 - Flag packages with install scripts for manual review
 - Alert on known CVEs immediately (not just on schedule), via the security advisory integration
 - Respect the dependency budget (Section 6.12.12): new direct dependencies require human review and re-run the dep-budget check
@@ -1958,18 +1967,18 @@ Configure automated dependency updates and vulnerability scanning. This ensures 
 **Acceptance criteria:**
 - Dependency update PRs are created automatically on a weekly schedule.
 - Vulnerable packages are flagged with CVE details.
-- Patch updates with passing CI (including the security job) can be auto-merged.
+- Patch updates with passing CI are ready for a human to review and merge; nothing merges without review.
 - Packages with install scripts are flagged for manual review in the PR.
 - The configuration file is committed to the repository.
 
 **Testing:**
 - Verify the dependency scanning configuration file is valid (schema check).
 - Manually trigger a dependency check; verify PRs are created for outdated packages.
-- Verify an auto-merge candidate still requires the security and dep-budget checks to pass.
+- Verify a dependency PR still requires the security and dep-budget checks to pass, and that no workflow merges it automatically.
 
 **Dependencies:** WS-0.6.1f.
 
-**Security (Section 25.4, 6.12.12):** Automated scanning closes the window between a CVE disclosure and a patched deployment, implementing the Section 25.4 vulnerability-management control. Gating auto-merge on the full required-check set ensures the convenience of automation never bypasses the security gate.
+**Security (Section 25.4, 6.12.12):** Automated scanning closes the window between a CVE disclosure and a patched deployment, implementing the Section 25.4 vulnerability-management control. Automation raises the PR and proves the gates are green; a human still decides what enters the supply chain, so convenience never bypasses review.
 
 ---
 
