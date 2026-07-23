@@ -47,6 +47,7 @@ import {
   useStoryDebatesQuery,
   useStoryQuery,
 } from '../../lib/queries.js';
+import { storySearchScopes } from '../../lib/search-api.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -234,6 +235,12 @@ function StoryCommentsContent({
           name: lensDisplayName(room.data?.my_lens_id ?? null, roomLenses),
         }
       : null;
+  // The banner's search menu — identical to the story page's, from the shared
+  // constructor, so the same story never offers two different menus.
+  const searchScopes = storySearchScopes(
+    { id: storyId, title: storyTitle ?? t('story.title', 'Story') },
+    room.data === undefined ? null : { id: room.data.room_id, name: room.data.name },
+  );
 
   // This level's comments + the load-more control, rendered EITHER nested inside
   // the focused anchor's article (rooted view) or as the page's top-level list
@@ -288,14 +295,9 @@ function StoryCommentsContent({
         actions={
           <>
             {/* Story-scoped search (WS-T.7.3): this page IS the story's
-                conversation, so the scoped corpus is exactly what it shows. */}
-            <SearchButton
-              scope={{
-                kind: 'story',
-                storyId,
-                label: storyTitle ?? t('story.title', 'Story'),
-              }}
-            />
+                conversation, so that is the default corpus — with the home room
+                and the whole site one press away inside the dialog. */}
+            <SearchButton scopes={searchScopes} />
             {/* WS-U §24.6 — the same governance surface the story page offers;
                 the conversation is governed by the story's home room. */}
             {roomId ? (

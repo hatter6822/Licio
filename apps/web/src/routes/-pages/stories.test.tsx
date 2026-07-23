@@ -111,7 +111,9 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     expect(heading.className.split(/\s+/)).not.toContain('sr-only');
 
     fireEvent.click(screen.getByRole('button', { name: 'Search this conversation' }));
-    expect(useUIStore.getState().searchScope).toEqual({
+    // The conversation leads (the default); the home room follows once its
+    // read resolves, and the dialog appends "All of Licio".
+    expect(useUIStore.getState().searchScopes[0]).toEqual({
       kind: 'story',
       storyId: STORY.story_id,
       label: STORY.title,

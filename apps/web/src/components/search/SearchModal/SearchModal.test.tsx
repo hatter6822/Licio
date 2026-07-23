@@ -5,7 +5,7 @@
 // (aria-activedescendant), result activation → route navigation, dismissal,
 // and axe cleanliness with the dialog open.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -63,7 +63,7 @@ function fixtureItems() {
   ];
 }
 
-function renderModal(onClose = vi.fn(), scope: SearchModalProps['scope'] = null) {
+function renderModal(onClose = vi.fn(), scopes: SearchModalProps['scopes'] = []) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <I18nProvider locale="en">
@@ -74,7 +74,7 @@ function renderModal(onClose = vi.fn(), scope: SearchModalProps['scope'] = null)
     <SearchModal
       onClose={onClose}
       navigate={navigate as unknown as SearchModalProps['navigate']}
-      scope={scope}
+      scopes={scopes}
     />,
     { wrapper },
   );
@@ -214,8 +214,9 @@ describe('SearchModal (WS-F.3.1b)', () => {
 });
 
 // WS-Q.2.5b / WS-T.7.3 — the same modal against a narrower corpus. The scope is
-// carried to the server (which enforces the read bar) AND named in the UI, and
-// the type filters shrink to what the scope can actually return.
+// carried to the server (which enforces the read bar) AND named in the UI, the
+// type filters shrink to what the scope can return, and — because a scope is a
+// DEFAULT, not a cage — the reader can widen or step sideways without leaving.
 describe('SearchModal scopes', () => {
   const roomScope = { kind: 'room', roomId: ROOM_ID, label: 'Hydrology' } as const;
   const storyScope = {
@@ -225,7 +226,7 @@ describe('SearchModal scopes', () => {
   } as const;
 
   it('room scope: sends `room`, names the room, and drops the Rooms filter', async () => {
-    renderModal(vi.fn(), roomScope);
+    renderModal(vi.fn(), [roomScope]);
     const user = userEvent.setup();
     await user.type(screen.getByRole('combobox', { name: 'Search this room' }), 'reservoir');
     await waitFor(() => {
@@ -236,16 +237,19 @@ describe('SearchModal scopes', () => {
         expect.anything(),
       );
     });
-    // The reader is told WHICH corpus is being searched.
-    expect(screen.getByText('Searching within')).toBeInTheDocument();
-    expect(screen.getByText('Hydrology')).toBeInTheDocument();
+    // The reader is told WHICH corpus is being searched — by the pressed chip.
+    const scopeRow = screen.getByRole('group', { name: 'Choose where to search' });
+    expect(within(scopeRow).getByRole('button', { name: 'Hydrology' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     // A room-scoped search cannot return the room record, so that filter is gone.
     expect(screen.getByRole('button', { name: 'Stories' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Rooms' })).not.toBeInTheDocument();
   });
 
   it('story scope: sends `story`, searches comments only, and offers no filters', async () => {
-    renderModal(vi.fn(), storyScope);
+    renderModal(vi.fn(), [storyScope]);
     const user = userEvent.setup();
     await user.type(
       screen.getByRole('combobox', { name: 'Search this conversation' }),
@@ -263,10 +267,113 @@ describe('SearchModal scopes', () => {
     expect(screen.queryByRole('group', { name: 'Filter results by type' })).not.toBeInTheDocument();
   });
 
-  it('has no axe violations when scoped', async () => {
-    renderModal(vi.fn(), roomScope);
+  it('widening to "All of Licio" KEEPS the query and re-runs it globally', async () => {
+    renderModal(vi.fn(), [roomScope]);
     const user = userEvent.setup();
-    await user.type(screen.getByRole('combobox', { name: 'Search this room' }), 'reservoir');
+    const input = screen.getByRole('combobox', { name: 'Search this room' });
+    await user.type(input, 'reservoir');
+    await waitFor(() => expect(searchContent).toHaveBeenCalled());
+    searchContent.mockClear();
+
+    await user.click(screen.getByRole('button', { name: 'All of Licio' }));
+
+    // The query the reader typed survives — widening must not cost them a retype.
+    expect(screen.getByRole('combobox', { name: 'Search public content' })).toHaveValue(
+      'reservoir',
+    );
+    await waitFor(() => {
+      expect(searchContent).toHaveBeenCalledWith(
+        'reservoir',
+        ['story', 'comment', 'room'],
+        null,
+        expect.anything(),
+      );
+    });
+    // The global corpus restores the filter the room scope could not serve.
+    expect(screen.getByRole('button', { name: 'Rooms' })).toBeInTheDocument();
+  });
+
+  it('a story banner steps outward: conversation → its room → all of Licio', async () => {
+    renderModal(vi.fn(), [storyScope, roomScope]);
+    const user = userEvent.setup();
+    const scopeRow = screen.getByRole('group', { name: 'Choose where to search' });
+    // All three, in widening order, with the story's own conversation default.
+    expect(
+      within(scopeRow)
+        .getAllByRole('button')
+        .map((b) => b.textContent),
+    ).toEqual(['This conversation', 'Hydrology', 'All of Licio']);
+    expect(within(scopeRow).getByRole('button', { name: 'This conversation' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // The chip shortens the headline; the full title stays reachable as a tooltip.
+    expect(within(scopeRow).getByRole('button', { name: 'This conversation' })).toHaveAttribute(
+      'title',
+      storyScope.label,
+    );
+
+    await user.type(
+      screen.getByRole('combobox', { name: 'Search this conversation' }),
+      'reservoir',
+    );
+    await waitFor(() => expect(searchContent).toHaveBeenCalled());
+    searchContent.mockClear();
+
+    await user.click(within(scopeRow).getByRole('button', { name: 'Hydrology' }));
+    await waitFor(() => {
+      expect(searchContent).toHaveBeenCalledWith(
+        'reservoir',
+        ['story', 'comment'],
+        roomScope,
+        expect.anything(),
+      );
+    });
+  });
+
+  it('drops a type filter the new scope cannot serve, and keeps one it can', async () => {
+    renderModal(vi.fn(), [storyScope, roomScope]);
+    const user = userEvent.setup();
+    const scopeRow = screen.getByRole('group', { name: 'Choose where to search' });
+
+    // In the room scope, narrow to Stories…
+    await user.click(within(scopeRow).getByRole('button', { name: 'Hydrology' }));
+    await user.click(screen.getByRole('button', { name: 'Stories' }));
+    expect(screen.getByRole('button', { name: 'Stories' })).toHaveAttribute('aria-pressed', 'true');
+
+    // …then narrow to the conversation, which has no stories at all. Keeping
+    // `story` would ask the server for a corpus this scope does not have.
+    await user.click(within(scopeRow).getByRole('button', { name: 'This conversation' }));
+    await user.type(
+      screen.getByRole('combobox', { name: 'Search this conversation' }),
+      'reservoir',
+    );
+    await waitFor(() => {
+      expect(searchContent).toHaveBeenCalledWith(
+        'reservoir',
+        ['comment'],
+        storyScope,
+        expect.anything(),
+      );
+    });
+
+    // Widening back to the room restores the full filter row at its default.
+    await user.click(within(scopeRow).getByRole('button', { name: 'Hydrology' }));
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('the front page shows no scope control — there is nothing to choose', () => {
+    renderModal();
+    expect(screen.queryByRole('group', { name: 'Choose where to search' })).not.toBeInTheDocument();
+  });
+
+  it('has no axe violations when scoped', async () => {
+    renderModal(vi.fn(), [storyScope, roomScope]);
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole('combobox', { name: 'Search this conversation' }),
+      'reservoir',
+    );
     await screen.findByRole('option', { name: /Reservoir level fell in May/ });
     expect(await checkA11y(document.body)).toHaveNoViolations();
   });

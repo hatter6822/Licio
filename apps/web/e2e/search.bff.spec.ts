@@ -65,8 +65,12 @@ test.describe('search over the seeded corpus (anonymous, BFF-in-the-loop)', () =
     await page.getByRole('button', { name: 'Search this conversation' }).click();
     const scoped = page.getByRole('combobox', { name: 'Search this conversation' });
     await expect(scoped).toBeFocused();
-    // The dialog NAMES the corpus it is searching…
-    await expect(page.getByText('Searching within')).toBeVisible();
+    // The dialog NAMES the corpus it is searching — the pressed scope chip…
+    const scopeRow = page.getByRole('group', { name: 'Choose where to search' });
+    await expect(scopeRow.getByRole('button', { name: 'This conversation' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     // …and offers no type filters: a story's conversation is comments only.
     await expect(page.getByRole('group', { name: 'Filter results by type' })).toHaveCount(0);
 
@@ -80,6 +84,13 @@ test.describe('search over the seeded corpus (anonymous, BFF-in-the-loop)', () =
     // is never a result inside a story's conversation.
     await scoped.fill('harbor district');
     await expect(page.getByText(/No results for/)).toBeVisible();
+
+    // The scope is a DEFAULT, not a cage: widening finds it without retyping.
+    await scopeRow.getByRole('button', { name: 'All of Licio' }).click();
+    await expect(page.getByRole('combobox', { name: 'Search public content' })).toHaveValue(
+      'harbor district',
+    );
+    await expect(page.getByRole('option', { name: /Harbor District/ }).first()).toBeVisible();
   });
 
   test('WS-Q containment: a private room_only story never surfaces globally', async ({ page }) => {

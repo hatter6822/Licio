@@ -330,9 +330,10 @@ describe('RoomDetailPage banner', () => {
   it('scopes the search modal to this room', async () => {
     renderPage(baseRoom({ visibility: 'public', joined: true, name: 'Hydrology' }));
     fireEvent.click(screen.getByRole('button', { name: 'Search this room' }));
-    const { searchOpen, searchScope } = useUIStore.getState();
+    const { searchOpen, searchScopes } = useUIStore.getState();
     expect(searchOpen).toBe(true);
-    expect(searchScope).toEqual({ kind: 'room', roomId: ROOM_ID, label: 'Hydrology' });
+    // The room is the DEFAULT (first) scope; the dialog adds "All of Licio".
+    expect(searchScopes).toEqual([{ kind: 'room', roomId: ROOM_ID, label: 'Hydrology' }]);
     useUIStore.getState().closeSearch();
   });
 

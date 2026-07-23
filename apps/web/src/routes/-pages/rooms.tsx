@@ -202,7 +202,7 @@ export function RoomDetailPage(): React.ReactElement {
                 affordance for a signed-out reader (bar or no bar), and nothing
                 for a signed-in reader who cannot yet read the room. */}
             {contentVisible ? (
-              <SearchButton scope={{ kind: 'room', roomId, label: roomName }} />
+              <SearchButton scopes={[{ kind: 'room', roomId, label: roomName }]} />
             ) : null}
             <GovernanceButton
               onOpen={() => setGovernanceOpen(true)}

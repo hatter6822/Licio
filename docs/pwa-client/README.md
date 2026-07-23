@@ -156,18 +156,26 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   `/rooms/$roomId`. Global search serves only public content from public
   rooms — the WS-Q boundary is server-side; the modal adds no ranking input.
 - **Scoped search (WS-Q.2.5b / WS-T.7.3):** the same button and the same modal
-  serve three **scopes**, selected by the banner that opened them and carried
-  in the transient `searchScope` UI-store slice (`null` = global): a **room**
-  banner searches that room's pool (`?room=`, stories + comments), a **story**
-  or comments banner searches that story's conversation (`?story=`, comments
-  only). Both scoped forms are gated server-side by the corresponding read bar
-  (`roomContentVisibleToUser` / `storyReadableByUser`), so an unreadable target
-  is a **404, never an empty page** (no existence oracle); the two scope
-  parameters are mutually exclusive at the wire schema. The modal names the
-  scope (heading, placeholder, and a persistent "Searching within" pill) and
-  offers only the type filters that scope can return — a story scope has one
-  corpus, so it shows no filter row. Closing clears the scope, and Ctrl/Cmd+K
-  is always the GLOBAL surface (an app-wide hotkey carries no page context).
+  serve three **scopes**: a **room** banner searches that room's pool
+  (`?room=`, stories + comments), a **story** or comments banner searches that
+  story's conversation (`?story=`, comments only), and the global surface
+  searches everything public. Both scoped forms are gated server-side by the
+  corresponding read bar (`roomContentVisibleToUser` / `storyReadableByUser`),
+  so an unreadable target is a **404, never an empty page** (no existence
+  oracle); the two scope parameters are mutually exclusive at the wire schema.
+- **A scope is a DEFAULT, not a cage.** The opening banner declares the scopes
+  it can name — a story offers its conversation *then its home room*
+  (`storySearchScopes`, shared by both story surfaces so they cannot drift) —
+  and the transient `searchScopes` UI-store slice carries that list, first =
+  initial selection. The modal appends "All of Licio" and renders the set as a
+  chip row (`Search in: …`), so a reader who comes up empty widens or steps
+  sideways **without closing the dialog or retyping**: switching keeps the
+  query, re-runs it against the new corpus, and carries the type filter across
+  only when the new scope can still serve it. The pressed chip is also how the
+  dialog *names* what it is searching; the heading, placeholder and combobox
+  label follow the selection. The row is hidden when there is nothing to choose
+  (the front page). Closing resets the list, and Ctrl/Cmd+K always opens the
+  GLOBAL surface (an app-wide hotkey carries no page context).
 - **Banner actions (WS-B.1.5):** on the story and room routes the banner
   carries **navigation only** — the back button at the inline-start and, at the
   inline-end symmetrically opposite it, circular 48px `CircleIconButton`
