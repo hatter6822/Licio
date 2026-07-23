@@ -41,8 +41,8 @@ REDIS_URL=redis://localhost:6379 pnpm dev
    - `pnpm check:workspace-deps` — workspace boundary enforcement
 4. Push and open a PR against `main`
 5. All CI checks must pass before merge
-6. At least one approving review is required (repository admins are exempt from
-   the review COUNT only — see **Merge constraints** below)
+6. Review the PR.  No approval COUNT is enforced — see **Merge constraints**
+   below for why — so the review is a real reading, not a button press
 7. Merge with a **merge commit**: `gh pr merge <n> --merge`.  Squash and rebase
    merging are disabled on the repository, so this is the only option the API
    will accept
@@ -69,7 +69,7 @@ security gates are mandatory, not advisory:
 - Branches must be up to date with `main` before merging
 - Every review conversation must be resolved before merging
 - Force-pushes to `main` are blocked; deletion of `main` is blocked
-- At least one approving review; stale approvals are dismissed on new pushes
+- No approving-review COUNT is enforced (single-maintainer repo — see below)
 - **Merge commits only — never squash.**  A PR's commits are the durable
   engineering record: `CLAUDE.md` deliberately keeps per-audit and per-workstream
   completion detail in commit messages rather than in the doctrine files, and
@@ -80,26 +80,39 @@ security gates are mandatory, not advisory:
   `git log --first-parent` reads as one entry per PR while `git log` still shows
   the full history.
 
-**How this is enforced.**  Two rulesets on `refs/heads/main`, plus the repository
-merge-method settings.  The split exists because a bypass applies to a whole
-ruleset, and only the review COUNT should be waivable:
+**How this is enforced.**  ONE ruleset on `refs/heads/main` — `main-core`, with
+**no bypass actors at all** — plus the repository merge-method settings:
 
-| Ruleset | Bypass | Rules |
-|---|---|---|
-| `main-core` | **none** — applies to admins too | `pull_request` (0 approvals, `merge` only, conversation resolution), `required_status_checks` (all ten, strict), `non_fast_forward`, `deletion` |
-| `main-review` | repository admin | `pull_request` (1 approval) |
+| Rule | Effect |
+|---|---|
+| `pull_request` | Every change arrives by PR; `merge` is the only permitted method; every review conversation must be resolved.  Required approvals: **0** |
+| `required_status_checks` (strict) | All ten checks below must pass, and the branch must be up to date with `main` |
+| `non_fast_forward` | Force-pushes to `main` are refused |
+| `deletion` | `main` cannot be deleted |
 
-GitHub does not let an author approve their own pull request, so on a
-single-maintainer repository an unwaivable review requirement would block every
-merge.  Putting the count in its own bypassable ruleset means the maintainer can
-land their own work today, a second contributor gets a real review gate the
-moment they exist, and **no one — admin included — can push directly to `main`,
-force-push it, delete it, or merge past a red CI gate.**
+Because nothing bypasses it, **no one — the repository owner included — can push
+directly to `main`, force-push it, delete it, merge past a red CI gate, or merge
+by squash.**
+
+**Why no approval count.**  GitHub will not let an author approve their own pull
+request (`422 Review Can not approve your own pull request`).  On a
+single-maintainer repository an enforced count therefore has exactly two possible
+outcomes: it blocks every merge, or it is waived on every merge.  A rule waived
+every time is worse than no rule — it trains the maintainer to click through the
+bypass prompt, and it makes the documented control a fiction, which is the class
+of defect this section exists to prevent.  So the count is not enforced, the
+review is a real reading rather than a button press, and CI is the mechanical
+gate.  Re-enable it (`required_approving_review_count: 1`) the day a second
+contributor exists — at that point an approval is something a *different* person
+can actually give.
 
 Do NOT express this with classic branch protection: its `enforce_admins` flag is
-all-or-nothing, so waiving the review count for the maintainer would also waive
+all-or-nothing, so waiving anything for the maintainer would also waive
+
+Do NOT express this with classic branch protection: its `enforce_admins` flag is
 the direct-push and force-push blocks.  That was verified by trying it — an admin
-push to `main` succeeded until the rulesets replaced it.
+push to `main` succeeded under classic protection and is refused (`GH013`) under
+the ruleset.
 
 Squash and rebase merging are additionally disabled at the repository level
 (`allow_squash_merge: false`, `allow_rebase_merge: false`), so the wrong merge

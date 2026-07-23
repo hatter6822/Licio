@@ -1889,7 +1889,11 @@ Configure GitHub branch protection on `main` so the CI security gates are mandat
 
 **Required settings on `main`:**
 - Require all CI jobs to pass (lint, typecheck, lockfile-lint, dep-budget, test, build-and-size, e2e, security, courier-apk, codeql) before merge.
-- Require at least one approving review; dismiss stale approvals on new commits.
+- Human review of every PR.  An approving-review COUNT is NOT enforced while the
+  repository has a single maintainer: GitHub refuses self-approval, so a required
+  count either blocks every merge or is waived on every merge, and a rule waived
+  every time is a fiction.  Re-enable `required_approving_review_count: 1` when a
+  second contributor exists (superseded 2026-07-23).
 - Require branches to be up to date before merging.
 - **Merge commits only; squash and rebase merging DISABLED.**  (Superseded 2026-07-23:
   this task originally asked for linear history or squash-only "to keep provenance
@@ -1903,22 +1907,27 @@ Configure GitHub branch protection on `main` so the CI security gates are mandat
 - Restrict force-pushes and deletion of `main`.
 - Require signed commits (optional but recommended) to strengthen provenance.
 
-**Implementation note (2026-07-23).**  Expressed as TWO rulesets rather than classic
-branch protection, because a bypass applies to a whole ruleset and only the review
-COUNT should be waivable: `main-core` (no bypass — PR required with 0 approvals,
-`merge` only, all required checks, no force-push, no deletion) and `main-review`
-(repository-admin bypass — 1 approving review).  Classic protection cannot express
-this: its `enforce_admins` flag is all-or-nothing, so waiving the review for a
-single maintainer also waives the direct-push block — verified by trying it, where
-an admin push to `main` succeeded.
+**Implementation note (2026-07-23).**  Expressed as ONE ruleset — `main-core`, with
+**no bypass actors** — rather than classic branch protection: `pull_request` (PR
+required, `merge` the only method, conversation resolution, 0 approvals),
+`required_status_checks` (all ten, strict), `non_fast_forward`, `deletion`.  Nothing
+bypasses it, so the repository owner is bound by it too.
+
+Classic protection was tried first and rejected: its `enforce_admins` flag is
+all-or-nothing, so waiving anything for a single maintainer also waives the
+direct-push block — verified empirically, where an admin push to `main` succeeded
+under classic protection and is refused (`GH013`) under the ruleset.  A second
+`main-review` ruleset carrying a bypassable 1-approval rule was also tried and then
+removed: on a single-maintainer repository the count can only ever be waived, and a
+rule waived on every merge trains the maintainer to click through the prompt while
+making the documented control a fiction.
 
 **Acceptance criteria:**
 - `main` cannot be pushed to directly; changes require a PR.
 - A PR with any failing required check cannot be merged.
-- A PR without an approving review cannot be merged (repository admins bypass the
-  review COUNT only — GitHub forbids approving one's own PR, so an unwaivable count
-  would block every merge on a single-maintainer repo; every other rule still applies
-  to them).
+- No PR merges without human review.  Not machine-enforced as a COUNT while the
+  repository is single-maintainer (GitHub forbids self-approval); the mechanical
+  gates are CI, the PR requirement, and conversation resolution.
 - Force-push and branch deletion on `main` are blocked.
 - The required-checks list is documented and matches the CI job names.
 - A squash or rebase merge is refused (both disabled at the repository level).
@@ -1954,12 +1963,16 @@ Configure automated dependency updates and vulnerability scanning. This ensures 
   auto-merged patch updates gated on the required-check set.  The maintainer's
   decision is that dependency updates take the same human review as every other
   change: a dependency bump is a supply-chain change — the class of PR where an
-  unreviewed merge is most costly — so passing CI is a necessary condition, not a
-  sufficient one.  It is also unachievable as written: the `main-review` ruleset
-  requires one approving review and Dependabot cannot approve its own PR, so an
-  auto-merge workflow would sit pending forever.  The
-  `dependabot-auto-merge.yml` workflow was REMOVED rather than left to fail
-  silently on every bump.
+  unreviewed merge is most costly — so passing CI is a necessary condition for
+  landing one, never a sufficient one.  The `dependabot-auto-merge.yml` workflow
+  was REMOVED rather than left to fail silently on every bump.
+
+  This is a POLICY choice, not a mechanical impossibility.  It briefly was one:
+  while the `main-review` ruleset enforced an approving review, an auto-merge
+  workflow could never have landed a bump (Dependabot cannot approve its own PR).
+  That ruleset has since been dropped, so auto-merge would work again if it were
+  restored — and it should not be.  The reason is the supply-chain argument
+  above, which does not depend on any ruleset.
 - Flag packages with install scripts for manual review
 - Alert on known CVEs immediately (not just on schedule), via the security advisory integration
 - Respect the dependency budget (Section 6.12.12): new direct dependencies require human review and re-run the dep-budget check
