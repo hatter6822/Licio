@@ -1913,14 +1913,21 @@ required, `merge` the only method, conversation resolution, 0 approvals),
 `required_status_checks` (all ten, strict), `non_fast_forward`, `deletion`.  Nothing
 bypasses it, so the repository owner is bound by it too.
 
-Classic protection was tried first and rejected: its `enforce_admins` flag is
-all-or-nothing, so waiving anything for a single maintainer also waives the
-direct-push block — verified empirically, where an admin push to `main` succeeded
-under classic protection and is refused (`GH013`) under the ruleset.  A second
-`main-review` ruleset carrying a bypassable 1-approval rule was also tried and then
-removed: on a single-maintainer repository the count can only ever be waived, and a
-rule waived on every merge trains the maintainer to click through the prompt while
-making the documented control a fiction.
+*Rejected alternatives — NEITHER of the following is configured; both are recorded
+so they are not re-attempted:*
+
+1. **Classic branch protection.**  Its `enforce_admins` flag is all-or-nothing, so
+   waiving anything for a single maintainer also waives the direct-push block —
+   verified empirically, where an admin push to `main` succeeded under classic
+   protection and is refused (`GH013`) under the ruleset.
+2. **A second `main-review` ruleset** carrying a bypassable 1-approval rule.
+   Created 2026-07-23 and **DELETED the same day**; `GET .../rulesets/19622644`
+   now returns 404.  On a single-maintainer repository the count can only ever be
+   waived, and a rule waived on every merge trains the maintainer to click through
+   the prompt while making the documented control a fiction.
+
+The live configuration is ONE ruleset with ZERO bypass actors, and
+`CONTRIBUTING.md` carries the commands to confirm that.
 
 **Acceptance criteria:**
 - `main` cannot be pushed to directly; changes require a PR.
@@ -1981,11 +1988,11 @@ Configure automated dependency updates and vulnerability scanning. This ensures 
   was REMOVED rather than left to fail silently on every bump.
 
   This is a POLICY choice, not a mechanical impossibility.  It briefly was one:
-  while the `main-review` ruleset enforced an approving review, an auto-merge
-  workflow could never have landed a bump (Dependabot cannot approve its own PR).
-  That ruleset has since been dropped, so auto-merge would work again if it were
-  restored — and it should not be.  The reason is the supply-chain argument
-  above, which does not depend on any ruleset.
+  for a few hours on 2026-07-23 a `main-review` ruleset enforced an approving
+  review, which an auto-merge workflow could never have satisfied (Dependabot
+  cannot approve its own PR).  **That ruleset no longer exists**, so auto-merge
+  would work again if the workflow were restored — and it should not be.  The
+  reason is the supply-chain argument above, which depends on no ruleset.
 - Flag packages with install scripts for manual review
 - Alert on known CVEs immediately (not just on schedule), via the security advisory integration
 - Respect the dependency budget (Section 6.12.12): new direct dependencies require human review and re-run the dep-budget check
