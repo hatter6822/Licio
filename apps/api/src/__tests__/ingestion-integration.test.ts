@@ -659,6 +659,72 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
       expect(scoped.items.some((i) => i.id === validated)).toBe(true);
       expect(scoped.items.some((i) => i.result_type === 'room')).toBe(false);
 
+      // WS-T.7.3 story scope AGAINST THE REAL SQL: only this story's
+      // CONVERSATION. The story record is the page the reader is already on and
+      // a room is not story content, so those corpora are skipped entirely —
+      // and the exclusions (hidden, adjudicated-incorrect) still hold, because
+      // the scope narrows the corpus without loosening a single predicate.
+      const storyScoped = await search.search({
+        q: 'brackishline',
+        story: host.story.storyId,
+        limit: 20,
+        prefix: false,
+      });
+      expect(storyScoped.items.every((i) => i.result_type === 'comment')).toBe(true);
+      expect(storyScoped.items.every((i) => i.story_id === host.story.storyId)).toBe(true);
+      expect(storyScoped.items.some((i) => i.id === validated)).toBe(true);
+      expect(storyScoped.items.map((i) => i.id)).not.toContain(hidden);
+      expect(storyScoped.items.map((i) => i.id)).not.toContain(incorrect);
+      // The WS-T ordering the two adapters must agree on survives the scope.
+      const scopedIds = storyScoped.items.map((i) => i.id);
+      expect(scopedIds.indexOf(validated)).toBeLessThan(scopedIds.indexOf(newer));
+      // A term that matches only the STORY (title) or the ROOM (description)
+      // returns nothing here — proof both corpora are skipped, not merely
+      // filtered after the fact.
+      const scopedTitle = await search.search({
+        q: 'estuary',
+        story: host.story.storyId,
+        limit: 20,
+        prefix: false,
+      });
+      expect(scopedTitle.items).toHaveLength(0);
+
+      // A DIFFERENT story's conversation never leaks into this scope.
+      const other = await stories.createWithThread(
+        storyInput({ title: 'Unrelated brackishline host' }),
+        randomUUID(),
+      );
+      if (!other.ok) throw new Error('setup failed');
+      const otherComment = await contributions.insert({
+        contributionId: randomUUID(),
+        threadId: other.thread.threadId,
+        userId: null,
+        type: 'comment',
+        body: 'A brackishline note on another story.',
+        citations: [],
+        metadata: {},
+        targetClaimId: null,
+        parentContributionId: null,
+        clientDraftId: `it-${randomUUID()}`,
+        path: [],
+        moderationState: 'published',
+      });
+      if (!otherComment.ok) throw new Error('comment setup failed');
+      const stillScoped = await search.search({
+        q: 'brackishline',
+        story: host.story.storyId,
+        limit: 20,
+        prefix: false,
+      });
+      expect(stillScoped.items.map((i) => i.id)).not.toContain(
+        otherComment.contribution.contributionId,
+      );
+      // …while the global surface still finds it (the scope narrows, never hides).
+      const globalAgain = await search.search({ q: 'brackishline', limit: 20, prefix: false });
+      expect(globalAgain.items.map((i) => i.id)).toContain(
+        otherComment.contribution.contributionId,
+      );
+
       // WS-J.1.2 against the REAL SQL: a viewer's hidden (blocked∪muted)
       // author is excluded from the comment corpus; null-author (tombstoned)
       // rows are untouched by the predicate.
