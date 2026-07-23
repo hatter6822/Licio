@@ -255,6 +255,7 @@ import {
 import { DrizzlePushStateStore } from './lib/drizzle-push-store.js';
 import { DrizzleReplyNotificationStore } from './lib/drizzle-reply-notification-store.js';
 import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
+import { describeListenFailure, systemErrorCode } from './lib/listen-diagnostics.js';
 import { createLogger } from './lib/logger.js';
 import { assertProductionParity } from './lib/parity-guard.js';
 import {
@@ -2287,7 +2288,11 @@ function getHttpsOptions(): { key: Buffer; cert: Buffer } | undefined {
 
 const httpsOptions = getHttpsOptions();
 
-serve(
+/** Grace for pino's worker-thread transport to write the fatal line before the
+ *  process exits (see the listen-error handler below). */
+const FATAL_FLUSH_MS = 100;
+
+const server = serve(
   {
     fetch: appFetch,
     port: env.PORT,
@@ -2299,3 +2304,28 @@ serve(
     logger.info({ port: info.port, https: httpsOptions !== undefined }, 'Server started');
   },
 );
+
+/**
+ * Listen failures are DIAGNOSED, not thrown raw.
+ *
+ * Without this handler the server emits an unhandled `'error'` event, which Node
+ * turns into an uncaught exception: the operator gets a `node:net` stack ending
+ * in `EADDRINUSE` / `address: '::'`, which states what the kernel refused but
+ * nothing about what to do — and `pnpm dev` interleaves it with the web server's
+ * output, so it reads as a crash of unknown origin. `describeListenFailure`
+ * turns each known cause into one actionable sentence.
+ *
+ * Every path exits NON-ZERO: a server that cannot listen must never linger as a
+ * half-booted process that a supervisor, a health check, or CI reads as healthy.
+ */
+server.on('error', (error: Error) => {
+  const code = systemErrorCode(error);
+  logger.fatal({ err: error, port: env.PORT, code }, describeListenFailure(code, env.PORT));
+  // pino's development transport (`pino-pretty`) writes on a worker thread, so
+  // an immediate exit can truncate the very message this handler exists to
+  // deliver. Flush, then exit on the next macrotask — and do NOT `unref` the
+  // timer: with the listen failed the event loop may otherwise drain and exit 0,
+  // reporting success for a server that never started.
+  logger.flush();
+  setTimeout(() => process.exit(1), FATAL_FLUSH_MS);
+});

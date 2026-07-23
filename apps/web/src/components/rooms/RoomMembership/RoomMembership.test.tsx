@@ -80,25 +80,29 @@ afterEach(() => {
 });
 
 describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
-  it('prompts an anonymous reader to sign in as a button-styled link (no join button)', () => {
-    render(<RoomMembership roomId="r1" room={baseRoom({})} />);
-    // Rendered as a Button with href → a link styled as a button (role=link), the
-    // href carrying the post-login redirect back to the room.
-    const signIn = screen.getByRole('link', { name: /^sign in$/i });
-    expect(signIn.getAttribute('href')).toContain('/login');
-    expect(signIn.getAttribute('href')).toContain('redirect');
-    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  it('renders NOTHING for an anonymous reader of a public room', () => {
+    const { container } = render(<RoomMembership roomId="r1" room={baseRoom({})} />);
+    // Sign-in is entirely the banner's circular control (GovernanceButton) — no
+    // button and no caption here. A full-width button was the chrome the banner
+    // redesign removed; a paragraph repeating the control's own label was the
+    // same instruction a second time, in the space the button had vacated.
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(/sign in to join this room/i)).not.toBeInTheDocument();
   });
 
-  it('shows the honest-limits notice to an anonymous reader of a private room', () => {
+  it('still shows the honest-limits notice to an anonymous reader of a private room', () => {
     render(
       <RoomMembership
         roomId="r1"
         room={baseRoom({ visibility: 'private', join_model: 'request_approval' })}
       />,
     );
-    expect(screen.getByRole('link', { name: /^sign in$/i })).toBeInTheDocument();
+    // SPEC §6.9 — a DISCLOSURE, not an instruction: a reader deciding whether to
+    // request access must be told what "private" does and does not mean, so this
+    // survives the sign-in copy's removal.
     expect(screen.getByText(/private from the public/i)).toBeInTheDocument();
+    expect(screen.queryByText(/sign in to join this room/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('lets a signed-in non-member join an open public room', async () => {
@@ -153,6 +157,25 @@ describe('RoomMembership (WS-Q.5.3a / WS-U §16.6)', () => {
       <RoomMembership roomId="r1" room={baseRoom({ is_steward: true })} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('an element that renders nothing must not be passed as `trailing`', () => {
+    // The "renders nothing" contract above is only true because callers OMIT a
+    // trailing action that would render null — React cannot tell the component
+    // that its child produced no output, so a present-but-empty element would
+    // open a real (empty) action row and claim a gap slot in the room column.
+    // This pins WHY the room page gates on `roomLensButtonApplies` rather than
+    // relying on RoomLensButton's own null return.
+    const RendersNothing = (): null => null;
+    signIn();
+    const { container } = render(
+      <RoomMembership
+        roomId="r1"
+        room={baseRoom({ is_steward: true })}
+        trailing={<RendersNothing />}
+      />,
+    );
+    expect(container).not.toBeEmptyDOMElement();
   });
 
   it('shows a pending state for an applicant — with the limits notice (no join button)', () => {

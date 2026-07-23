@@ -252,6 +252,81 @@ describe('rooms in the unified corpus (WS-F.3.1a)', () => {
   });
 });
 
+// WS-T.7.3 — `?story=` searches ONE story's conversation: the reader surface is
+// the search button in the story / comments banner, and the corpus is exactly
+// the comments that page renders.
+describe('story-scoped search (WS-T.7.3)', () => {
+  it('returns only THIS story’s comments — never other stories, their comments, or rooms', async () => {
+    const storyId = await submitStory({ title: 'Wraithcurrent survey published' });
+    const mine = await addComment(storyId, 'The wraithcurrent readings are reproducible.');
+    const otherStory = await submitStory({ title: 'Wraithcurrent commentary elsewhere' });
+    const theirs = await addComment(otherStory, 'A separate wraithcurrent remark.');
+    await makeRoom({ name: 'Wraithcurrent watchers' });
+
+    const scoped = await search(`q=wraithcurrent&story=${storyId}`);
+    expect(scoped.status).toBe(200);
+    expect(scoped.items.map((item) => item.id)).toEqual([mine]);
+    // The story record itself is the page the reader is already on…
+    expect(scoped.items.some((item) => item.result_type === 'story')).toBe(false);
+    // …and a room is not story content.
+    expect(scoped.items.some((item) => item.result_type === 'room')).toBe(false);
+    expect(scoped.items.some((item) => item.id === theirs)).toBe(false);
+
+    // The global surface still finds all of it — the scope narrows, never hides.
+    const globally = await search('q=wraithcurrent');
+    expect(globally.items.some((item) => item.id === theirs)).toBe(true);
+  });
+
+  it('keeps every visibility bar: a moderation-removed comment never surfaces', async () => {
+    const storyId = await submitStory({ title: 'Scoped moderation fixture' });
+    const kept = await addComment(storyId, 'stellarcap note one');
+    const removed = await addComment(storyId, 'stellarcap note two');
+    await fixture.forum.contributions.setModerationState(removed, 'removed');
+    const scoped = await search(`q=stellarcap&story=${storyId}`);
+    expect(scoped.items.map((item) => item.id)).toEqual([kept]);
+  });
+
+  it('serves a room_only story’s conversation the global surface withholds', async () => {
+    const storyId = await submitStory({ title: 'Scoped room_only fixture' });
+    await fixture.ingestion.stories.update(storyId, { visibility: 'room_only' });
+    const commentId = await addComment(storyId, 'A cindralwake measurement note.');
+
+    // Off the global surface (room_only never reaches it)…
+    expect((await search('q=cindralwake')).items.some((i) => i.id === commentId)).toBe(false);
+    // …but readable in place: the home room is the PUBLIC Commons, so an
+    // anonymous reader passes the story read bar and the scope serves it.
+    const scoped = await search(`q=cindralwake&story=${storyId}`);
+    expect(scoped.items.map((item) => item.id)).toEqual([commentId]);
+  });
+
+  it('404s (never an empty page) for an unknown, hidden, or unreadable story', async () => {
+    expect((await search(`q=anything&story=${randomUUID()}`)).status).toBe(404);
+
+    const storyId = await submitStory({ title: 'Hidden scope fixture' });
+    await addComment(storyId, 'A drossmere reading.');
+    expect((await search(`q=drossmere&story=${storyId}`)).status).toBe(200);
+    // A takedown-hidden story is 404 for the scope, exactly as its detail read is.
+    await fixture.ingestion.stories.update(storyId, { hiddenState: 'takedown' });
+    expect((await search(`q=drossmere&story=${storyId}`)).status).toBe(404);
+
+    // A story whose home room turns PRIVATE is 404 for a non-member — existence
+    // is tier one, CONTENT search is tier two.
+    const inRoom = await submitStory({ title: 'Private scope fixture' });
+    const story = await fixture.ingestion.stories.getById(inRoom);
+    if (!story) throw new Error('missing story');
+    expect((await search(`q=anything&story=${inRoom}`)).status).toBe(200);
+    await fixture.forum.rooms.update(story.roomId, { visibility: 'private' });
+    expect((await search(`q=anything&story=${inRoom}`)).status).toBe(404);
+  });
+
+  it('rejects a request that names BOTH scopes', async () => {
+    const storyId = await submitStory({ title: 'Dual scope fixture' });
+    const story = await fixture.ingestion.stories.getById(storyId);
+    if (!story) throw new Error('missing story');
+    expect((await search(`q=anything&story=${storyId}&room=${story.roomId}`)).status).toBe(400);
+  });
+});
+
 describe('WS-J.1.2 viewer block/mute filtering (comment corpus)', () => {
   it("excludes a blocked∪muted author's comments for THAT viewer only, never their stories", async () => {
     const viewer = await seedUserWithSession(fixture.identity);

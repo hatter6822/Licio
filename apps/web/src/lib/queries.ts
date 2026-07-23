@@ -52,7 +52,13 @@ import {
 } from './privacy-api.js';
 import { cachePolicy } from './query-client.js';
 import { queryKeys } from './query-keys.js';
-import { MODAL_SEARCH_TYPES, SEARCH_MIN_QUERY_LENGTH, searchContent } from './search-api.js';
+import {
+  SEARCH_MIN_QUERY_LENGTH,
+  type SearchScope,
+  scopeKey,
+  scopeSearchTypes,
+  searchContent,
+} from './search-api.js';
 import * as treasuryApi from './treasury-api.js';
 import * as wallet from './wallet-api.js';
 
@@ -88,11 +94,20 @@ export type SearchTypeFilter = 'all' | 'story' | 'comment' | 'room';
  * in the modal chunk (the schema chain dedupes against zod glue already
  * here), and the initial payload stays well under the §6.10 budget.
  */
-export function useSearchQuery(q: string, filter: SearchTypeFilter = 'all') {
+export function useSearchQuery(
+  q: string,
+  filter: SearchTypeFilter = 'all',
+  scope: SearchScope | null = null,
+) {
+  // `all` means "every type this SCOPE can return" — the room record is not a
+  // result inside a room, and a story's conversation is comments only — so the
+  // unfiltered request mirrors the server's per-scope corpora exactly rather
+  // than asking for types the scope would silently drop.
+  const scopeTypes = scopeSearchTypes(scope);
   return useQuery({
-    queryKey: queryKeys.search(q, filter),
+    queryKey: queryKeys.search(q, filter, scopeKey(scope)),
     queryFn: ({ signal }) =>
-      searchContent(q, filter === 'all' ? MODAL_SEARCH_TYPES : [filter], signal),
+      searchContent(q, filter === 'all' ? scopeTypes : [filter], scope, signal),
     enabled: q.length >= SEARCH_MIN_QUERY_LENGTH,
     placeholderData: keepPreviousData,
     ...cachePolicy.search,

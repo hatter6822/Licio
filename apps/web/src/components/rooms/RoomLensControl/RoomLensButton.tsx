@@ -21,15 +21,28 @@ export interface RoomLensButtonProps {
   room: RoomDetail;
 }
 
+/**
+ * Whether this reader has a posting-lens choice at all: only an ACTIVE MEMBER of
+ * a room WITH lenses does — everyone else (anonymous, non-member, or a room with
+ * no lenses) has nothing to change, so the control does not appear.
+ *
+ * Exported because a caller that lays the button out inside an action ROW needs
+ * to know BEFORE rendering whether that row will have any content: React gives
+ * no way to ask "did this element render nothing?", so an element that returns
+ * null still reads as a present child and would open an empty row. One
+ * predicate, used by the button itself and by every such caller, keeps the two
+ * answers from drifting.
+ */
+export function roomLensButtonApplies(room: RoomDetail): boolean {
+  return room.joined && room.lenses.length > 0;
+}
+
 export function RoomLensButton({ roomId, room }: RoomLensButtonProps): React.ReactElement | null {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const setLens = useSetRoomLensMutation(roomId);
 
-  // Only an active member of a room WITH lenses has a meaningful posting-lens
-  // choice; everyone else (anonymous, non-member, or a room with no lenses) has
-  // nothing to change, so the control does not appear.
-  if (!room.joined || room.lenses.length === 0) return null;
+  if (!roomLensButtonApplies(room)) return null;
 
   const current = room.my_lens_id ?? null;
 

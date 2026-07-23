@@ -1582,17 +1582,21 @@ export class PostgresSearchIndex implements SearchIndex {
     const validatedBoost = (disputeCol: ReturnType<typeof sql>) =>
       sql`(case when ${disputeCol} = 'validated' then ${SEARCH_VALIDATED_BOOST}::float8 else 1.0 end)`;
 
-    // WS-Q.2.5a/b — two-tier visibility. Room-scoped (`?room=`): only this
-    // room's pool (the route enforced the read bar). Global: only PUBLIC
-    // content from PUBLIC rooms — BOTH conjuncts (a mislabeled public story in
-    // a private room is excluded by the room join).
+    // WS-Q.2.5a/b + WS-T.7.3 — the three scopes. Story-scoped (`?story=`): only
+    // that story's conversation (the route enforced the story read bar).
+    // Room-scoped (`?room=`): only this room's pool (the route enforced the room
+    // read bar). Global: only PUBLIC content from PUBLIC rooms — BOTH conjuncts
+    // (a mislabeled public story in a private room is excluded by the room join).
     const roomScoped = request.room !== undefined;
+    const storyScoped = request.story !== undefined;
     // WS-S.1.4 — server search NEVER indexes/serves a Private P2P room (§23.6),
     // so EVERY path additionally requires the home room's `storage_mode='server'`
     // (a p2p room has no server stories, so this also excludes any transient row).
-    const storyVisibilityFilter = roomScoped
-      ? sql`s.room_id = ${request.room}::uuid and exists (select 1 from rooms r where r.room_id = s.room_id and r.storage_mode = 'server')`
-      : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public' and r.storage_mode = 'server')`;
+    const storyVisibilityFilter = storyScoped
+      ? sql`s.story_id = ${request.story}::uuid and exists (select 1 from rooms r where r.room_id = s.room_id and r.storage_mode = 'server')`
+      : roomScoped
+        ? sql`s.room_id = ${request.room}::uuid and exists (select 1 from rooms r where r.room_id = s.room_id and r.storage_mode = 'server')`
+        : sql`s.visibility = 'public' and exists (select 1 from rooms r where r.room_id = s.room_id and r.visibility = 'public' and r.storage_mode = 'server')`;
     // For claim hits, the OWNING story's visibility governs. A null-story
     // (cross-story) row is global-eligible but never room-scoped.
     const ownerVisibilityFilter = (col: ReturnType<typeof sql>) =>
@@ -1623,7 +1627,10 @@ export class PostgresSearchIndex implements SearchIndex {
             or (${rank} = ${cursor.relevance} and ${createdAt} < ${cursor.createdAt}::timestamptz)
             or (${rank} = ${cursor.relevance} and ${createdAt} = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
 
-    if (types.includes('story')) {
+    // A story-scoped query searches the story's CONVERSATION: the story record
+    // itself is the page the reader is already on, so its corpus is skipped
+    // (mirrored in the in-memory index).
+    if (types.includes('story') && !storyScoped) {
       const filters = [
         sql`s.hidden_state is null`,
         // WS-T: an adjudicated-incorrect story stays readable in place but is
@@ -1660,6 +1667,7 @@ export class PostgresSearchIndex implements SearchIndex {
 
     if (
       types.includes('claim') &&
+      !storyScoped &&
       request.topic_id === undefined &&
       request.source_id === undefined &&
       request.language === undefined
@@ -1752,12 +1760,14 @@ export class PostgresSearchIndex implements SearchIndex {
     // `server` rooms only — a private room's shell is reached through the
     // rooms directory (tier-one existence), never global content search, and
     // a p2p room never surfaces from the server at all (§23.6). A room-scoped
-    // query searches the room's CONTENT, so the rooms corpus is skipped there
+    // query searches the room's CONTENT — and a story-scoped one the story's
+    // conversation — so the rooms corpus is skipped under EITHER scope
     // (mirrored in the in-memory index), and like claims it is skipped under
     // story-only filters.
     if (
       types.includes('room') &&
       !roomScoped &&
+      !storyScoped &&
       request.topic_id === undefined &&
       request.source_id === undefined &&
       request.language === undefined

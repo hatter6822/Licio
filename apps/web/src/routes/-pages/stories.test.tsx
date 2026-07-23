@@ -18,8 +18,9 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { useUIStore } from '../../stores/ui.js';
 
 const STORY: StoryDetail = {
   story_id: '33333333-3333-4333-8333-333333333333',
@@ -98,5 +99,25 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     expect(await screen.findByText(STORY.body_summary)).toBeInTheDocument();
     // …but there is no embedded conversation affordance.
     expect(screen.queryByRole('region', { name: 'Conversation' })).not.toBeInTheDocument();
+  });
+
+  // WS-B.1.5 + WS-T.7.3 — the banner carries navigation only: back at the
+  // inline-start, story-scoped search at the inline-end, and the (unbounded)
+  // story TITLE as the page <h1> in the body.
+  it('puts the story title in the body <h1> and scopes the banner search to it', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
+    renderWithThreadRoute();
+    const heading = await screen.findByRole('heading', { level: 1, name: STORY.title });
+    expect(heading.className.split(/\s+/)).not.toContain('sr-only');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search this conversation' }));
+    // The conversation leads (the default); the home room follows once its
+    // read resolves, and the dialog appends "All of Licio".
+    expect(useUIStore.getState().searchScopes[0]).toEqual({
+      kind: 'story',
+      storyId: STORY.story_id,
+      label: STORY.title,
+    });
+    useUIStore.getState().closeSearch();
   });
 });

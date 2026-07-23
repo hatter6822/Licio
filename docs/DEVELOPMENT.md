@@ -58,7 +58,18 @@ Docker, no `.env`:
 corepack enable && corepack prepare pnpm@11.15.1 --activate
 pnpm install --frozen-lockfile
 pnpm dev        # web :5173 + API :3001 — in-memory stores, seeded demo data
+pnpm dev:stop   # stop this checkout's dev servers (also run automatically by `pnpm dev`)
 ```
+
+`pnpm dev` **reclaims its own leftovers** before starting: a previous run whose
+terminal died leaves the api's `tsx watch` supervisor alive, and the supervisor
+respawns the API, so the next `pnpm dev` used to fail on `EADDRINUSE :3001` —
+and killing the process on the port did not help, because the watcher put it
+straight back.  The preflight (`scripts/free-dev-ports.ts`) stops the
+supervisor first, then its descendants, and logs each one.  It matches **only**
+this checkout's own api/web dev servers by absolute path and entry file, so a
+second clone, a container, Postgres, or a running `vitest` is never touched;
+anything else holding :3001 still fails loudly with the API's own diagnosis.
 
 Open <http://localhost:5173>. The API answers on <http://localhost:3001>
 (health check: `curl http://localhost:3001/health`). With no `DATABASE_URL`/
@@ -2242,6 +2253,7 @@ After a deploy, verify in order:
 | Install fails with `MINIMUM_RELEASE_AGE_VIOLATION` naming a package version | The version was published < 24h ago — pnpm 11's supply-chain age gate holds it back | Expected protection, not an error to bypass: wait for the version to age, or resolve to the previous version (Section 5). Do not weaken the policy |
 | `pnpm install` fails on a frozen lockfile | Lockfile and `package.json` diverge | Intentional dep change? install without `--frozen-lockfile` and commit the lockfile. Otherwise check your branch is up to date |
 | Port already in use (5432 / 6379 / 5173 / 3001) | Another process/stack is bound | Stop the other process, or remap: change `PORT` (API) / the Compose port mappings, and keep `CORS_ORIGIN`/`VITE_*` consistent |
+| API logs `FATAL … Port 3001 is already in use` and exits 1 | Something that is **not** this checkout's dev stack holds :3001 (another project, a container, a second clone) | `pnpm dev` already reclaims *its own* leftovers (see below), so this means a foreign process owns the port. Identify it (`lsof -ti :3001`) and stop it, or start on a free port with `PORT=<n>`. Note that killing a `tsx watch`-supervised process on the port is not enough — the watcher **respawns** it, so the supervisor has to go too. |
 | Web loads but `/v1/*` calls 404 (e.g. `:5173/v1/telemetry`, `:5173/v1/security/link-blocklist`) | The API (:3001) isn't running, so the dev proxy has nothing to forward to | The dev server proxies `/v1/*` to :3001 by default — just start the API (`pnpm dev` runs both). The 404 origin being `:5173` means the request reached Vite but the API was down/unreachable |
 | `/v1/*` calls fail with a CORS error | You set a **cross-origin** `VITE_API_URL` and `CORS_ORIGIN` ≠ web origin | For same-origin dev leave `VITE_API_URL` unset (use the proxy). For a cross-origin API, set `VITE_API_URL=http://localhost:3001` and `CORS_ORIGIN=http://localhost:5173`; re-export env; restart `pnpm dev` (Section 7.3) |
 | Vite doesn't see your `VITE_*` values | Vite's env dir is `apps/web`, not the repo root | Export the root `.env` into your shell (Section 7.7) so the `VITE_`-prefixed values are in `process.env` |

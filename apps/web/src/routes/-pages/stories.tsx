@@ -4,14 +4,21 @@
 // error state rather than fetching). Mounting the story marks it the active item
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
+//
+// The banner carries NAVIGATION ONLY — back at the inline-start, and
+// symmetrically opposite it the two circular actions: story-scoped search
+// (WS-T.7.3) and the governing room's governance modal (WS-U §24.6). The story
+// TITLE is unbounded, so it leads the page body as the <h1>.
 import { isSentinelTopicId, type StoryDetail } from '@licio/shared';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection, CorrectionComposer } from '../../components/comments/index.js';
 import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
 import { useCloseDebate, useOpenDebate } from '../../components/debate/open-debate.js';
+import { StoryGovernanceControl } from '../../components/governance/StoryGovernanceControl.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
+import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
@@ -24,10 +31,12 @@ import { PageHeader } from '../../components/ui/PageHeader/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
 import {
+  useRoomQuery,
   useSavedStoriesQuery,
   useStoryQuery,
   useToggleSavedStoryMutation,
 } from '../../lib/queries.js';
+import { storySearchScopes } from '../../lib/search-api.js';
 import { markTopicQuiet } from '../../offline/notification-meter.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -153,10 +162,39 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     setReaderOpen(false);
   };
 
+  // Banner actions (WS-B.1.5): story-scoped search (WS-T.7.3 — the conversation
+  // on THIS story) and the governing room's governance modal (WS-U §24.6), both
+  // right-justified opposite the back button. Governance needs the home room, so
+  // it appears only once the story payload names one (a legacy/orphan row has
+  // none); search is available as soon as the id is valid.
+  const homeRoomId = story.data?.room_id ?? null;
+  // The home room, for the search menu's second step ("this conversation → this
+  // room → all of Licio"). One small GET on a key ALREADY shared with the room
+  // page, this page's governance control, and the comments page, so it is a
+  // cache hit far more often than a request — and it is what lets the room step
+  // carry the room's NAME rather than a generic label.
+  const homeRoom = useRoomQuery(homeRoomId ?? '', homeRoomId !== null);
+  const storyTitle = story.data?.title ?? t('story.title', 'Story');
+  const searchScopes = storySearchScopes(
+    { id: storyId, title: storyTitle },
+    homeRoom.data === undefined ? null : { id: homeRoom.data.room_id, name: homeRoom.data.name },
+  );
+
   return (
     <PageScaffold
-      title={story.data?.title ?? t('story.title', 'Story')}
+      title={storyTitle}
+      // Story titles are unbounded — the <h1> leads the page body and the banner
+      // carries navigation only.
+      titlePlacement="body"
       onBack={goBack}
+      actions={
+        <>
+          <SearchButton scopes={searchScopes} />
+          {homeRoomId !== null ? (
+            <StoryGovernanceControl roomId={homeRoomId} signInRedirect={`/stories/${storyId}`} />
+          ) : null}
+        </>
+      }
       query={story}
     >
       {(data) =>

@@ -3,8 +3,10 @@
 // Public-content search E2E (BFF-in-the-loop): the real React app queries the
 // REAL in-memory search engine over the seeded demo corpus — anonymously, as a
 // signed-out reader. Proves the reader path end to end: stories, comments, and
-// rooms surface; navigation lands on the destination; and the WS-Q containment
-// holds live (a private room's room_only story never appears in global search).
+// rooms surface; navigation lands on the destination; the SCOPED surfaces
+// (a story's conversation, a room's pool) narrow the corpus for real; and the
+// WS-Q containment holds live (a private room's room_only story never appears
+// in global search).
 import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, test } from '@playwright/test';
 
@@ -49,6 +51,46 @@ test.describe('search over the seeded corpus (anonymous, BFF-in-the-loop)', () =
     // The seeded PUBLIC topic room surfaces by name.
     await input.fill('harbor district');
     await expect(page.getByRole('option', { name: /Harbor District/ })).toBeVisible();
+  });
+
+  test('scoped: the story banner searches THAT story’s conversation only', async ({ page }) => {
+    // Reach a seeded story through the global surface, then use its own banner.
+    const input = await openSearch(page);
+    await input.fill('testing dataset');
+    await page
+      .getByRole('option', { name: /Regional water board publishes the full testing dataset/ })
+      .click();
+    await expect(page).toHaveURL(/\/stories\//);
+
+    await page.getByRole('button', { name: 'Search this conversation' }).click();
+    const scoped = page.getByRole('combobox', { name: 'Search this conversation' });
+    await expect(scoped).toBeFocused();
+    // The dialog NAMES the corpus it is searching — the pressed scope chip…
+    const scopeRow = page.getByRole('group', { name: 'Choose where to search' });
+    await expect(scopeRow.getByRole('button', { name: 'This conversation' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // …and offers no type filters: a story's conversation is comments only.
+    await expect(page.getByRole('group', { name: 'Filter results by type' })).toHaveCount(0);
+
+    // A seeded comment on THIS story is found ("The methodology appendix covers
+    // May through October…"), labelled with its parent story.
+    await scoped.fill('methodology appendix');
+    await expect(page.getByRole('option', { name: /^Comment on / }).first()).toBeVisible();
+
+    // …while a term that matches only OTHER content returns nothing here: the
+    // seeded public room "Harbor District" is a global-surface hit, and a room
+    // is never a result inside a story's conversation.
+    await scoped.fill('harbor district');
+    await expect(page.getByText(/No results for/)).toBeVisible();
+
+    // The scope is a DEFAULT, not a cage: widening finds it without retyping.
+    await scopeRow.getByRole('button', { name: 'All of Licio' }).click();
+    await expect(page.getByRole('combobox', { name: 'Search public content' })).toHaveValue(
+      'harbor district',
+    );
+    await expect(page.getByRole('option', { name: /Harbor District/ }).first()).toBeVisible();
   });
 
   test('WS-Q containment: a private room_only story never surfaces globally', async ({ page }) => {

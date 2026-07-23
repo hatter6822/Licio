@@ -68,10 +68,14 @@ Tailwind utility names map to tokens via `tailwindColorMap` in `css.ts`
 (`canvas`, `surface`, `surface-strong`, `surface-sunken`, `ink`, `ink-muted`,
 `line`, `line-strong`, `focus`,
 `primary`/`success`/`warning`/`error`/`info` with `-fg`/`-soft`/`-on-soft`
-variants). The story-signal chips reuse the status palette (solid vs `-soft`
+variants; `primary` and `success` additionally carry `-hover`/`-active` and
+`error` a `-hover`, the interaction ramp their filled controls need — each step
+darker, so the white `-fg` contrast only ever rises above the verified base).
+The story-signal chips reuse the status palette (solid vs `-soft`
 chips for ≥3:1 distinctness) rather than dedicated shade tokens. The named
 z-index utilities (`z-dropdown`…`z-toast`) are the only source of stacking
-values; touch targets are exposed as `min-h-touch` / `min-w-touch` (48px).
+values; touch targets are exposed as `min-h-touch` / `min-w-touch` and, for the
+circular banner actions, `h-touch` / `w-touch` (48px).
 
 ### Contrast is verified mathematically
 

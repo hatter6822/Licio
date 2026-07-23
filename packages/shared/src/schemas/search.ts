@@ -3,7 +3,12 @@
 // Search wire contracts (WS-F.3.1b, SPEC §21.2/§23.2). Keyword search over ALL
 // public content — stories, claims, comments (forum contributions), and public
 // rooms — with filters (date, source, content type, topic, language), keyset
-// pagination, and a stable sort (relevance, then recency, then id). Ranking is
+// pagination, and a stable sort (relevance, then recency, then id).  The same
+// engine serves three SCOPES, selected by the mutually-exclusive `room` /
+// `story` parameters: global public content (neither), one room's pool
+// (`?room=`, WS-Q.2.5b), or one story's conversation (`?story=`, WS-T.7.3).
+// Both scoped forms are gated by the corresponding read bar at the route.
+// Ranking is
 // TEXTUAL relevance + recency, weighted by the WS-T adjudication outcome only:
 // a `validated` story/comment ranks higher at equal textual relevance and an
 // `incorrect` one (a sourced correction prevailed against it) is filtered out
@@ -63,6 +68,13 @@ export const searchRequestSchema = z
     // the room read bar first (the route 404s otherwise). Absent ⇒ the GLOBAL
     // surface (public content from public rooms only — WS-Q.2.5a).
     room: uuidSchema.optional(),
+    // WS-T.7.3 — story-scoped search: when present, results are restricted to
+    // the CONVERSATION on this story (its comments). The story record itself is
+    // the page the caller is already on and rooms are not story content, so
+    // neither corpus participates. The caller must pass the story read bar
+    // first (the route 404s otherwise — the same tier-two bar the story detail
+    // and comment reads enforce).
+    story: uuidSchema.optional(),
     language: bcp47Schema.optional(),
     date_from: isoTimestampSchema.optional(),
     date_to: isoTimestampSchema.optional(),
@@ -74,7 +86,15 @@ export const searchRequestSchema = z
     cursor: cursorSchema.optional(),
     limit: z.coerce.number().int().min(1).max(50).default(20),
   })
-  .strict();
+  .strict()
+  // The two scopes are alternatives, not a conjunction: a story already sits in
+  // exactly one room, so `?room=&story=` expresses nothing the story scope does
+  // not, and silently letting one win would make the read bar the route
+  // enforces ambiguous. Reject the combination at the boundary instead.
+  .refine((value) => value.room === undefined || value.story === undefined, {
+    message: 'room and story are mutually exclusive scopes',
+    path: ['story'],
+  });
 export type SearchRequest = z.infer<typeof searchRequestSchema>;
 
 /** The WS-T dispute postures a search hit may carry. `incorrect` is absent BY

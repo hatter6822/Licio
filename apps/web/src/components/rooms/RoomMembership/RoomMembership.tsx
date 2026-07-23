@@ -35,14 +35,24 @@ import { RoomLensDialog } from '../RoomLensControl/index.js';
 export interface RoomMembershipProps {
   roomId: string;
   room: RoomDetail;
-  /** Trailing action(s) (e.g. the governance button) rendered inline on the same
-   *  row as the membership button, so the two share one compact action row. */
+  /**
+   * Trailing action(s) rendered inline on the same row as the membership
+   * button, so the two share one compact action row.
+   *
+   * Pass it ONLY when it will actually render something. `ActionBar` keys the
+   * row's existence on its presence, and React offers no way to ask whether an
+   * element rendered nothing — so a component that returns null internally
+   * still counts as a child and would open an empty row (and, inside the room
+   * page's `gap-4` column, claim a gap slot for it). Callers gate on an
+   * explicit predicate instead: see `roomLensButtonApplies`.
+   */
   trailing?: ReactNode;
 }
 
 /** A compact action bar: the primary button + any trailing actions on one row,
  *  with explanatory / honest-limits notes as captions below. Renders nothing when
- *  there is neither an action nor a note (e.g. a steward with no trailing action). */
+ *  there is neither an action nor a note (e.g. a steward with no trailing action —
+ *  which holds because callers omit a `trailing` that would render nothing). */
 function ActionBar({
   button,
   trailing,
@@ -106,35 +116,20 @@ export function RoomMembership({
     );
 
   // Room pages are publicly browsable; an anonymous reader joins by signing in
-  // first (returning here afterwards via the redirect param). Rendered as a
-  // primary Button (a link styled as a button) so it reads as a peer control
-  // beside the governance button rather than bare underlined text.
-  if (!authenticated) {
-    const loginHref = `/login?redirect=${encodeURIComponent(`/rooms/${roomId}`)}`;
-    return (
-      <ActionBar
-        button={
-          <Button variant="primary" href={loginHref}>
-            {t('room.membership.signInLink', 'Sign in')}
-          </Button>
-        }
-        trailing={trailing}
-        notes={
-          <>
-            <p className="text-ink-muted text-xs">
-              {governed
-                ? t(
-                    'room.membership.signInGov',
-                    'Sign in to join this room and take part in its governance.',
-                  )
-                : t('room.membership.signIn', 'Sign in to join this room.')}
-            </p>
-            {privateNotice}
-          </>
-        }
-      />
-    );
-  }
+  // first (returning here afterwards via the redirect param).
+  //
+  // Nothing about sign-in is rendered HERE — neither the button nor a caption.
+  // The banner's circular control IS the affordance (blue sign-in becoming the
+  // green governance button once signed in — see GovernanceButton), and its
+  // accessible name and tooltip already say "Sign in to take part in
+  // governance". A standing paragraph repeating that under the room description
+  // was the same instruction a second time, in the position the removed
+  // full-width button used to occupy — chrome above the room's actual content.
+  //
+  // What DOES survive is the private-room honest-limits notice (SPEC §6.9): it
+  // is a disclosure, not an instruction, and it must reach a reader deciding
+  // whether to request access. A public room shows nothing at all here.
+  if (!authenticated) return privateNotice ? <ActionBar notes={privateNotice} /> : null;
 
   // Stewards are members via their role and manage the room through the steward
   // controls — no separate join affordance, but the trailing governance action

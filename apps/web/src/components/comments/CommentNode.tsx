@@ -22,7 +22,6 @@ import { useRecordReplyDepth } from '../../hooks/useRecordReplyDepth.js';
 import { cn } from '../../lib/cn.js';
 import { formatSourceUrl } from '../../lib/format-source-url.js';
 import { useOpenDebate } from '../debate/open-debate.js';
-import { ReportSheet } from '../safety/ReportSheet.js';
 import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
 import { Dialog } from '../ui/Dialog/index.js';
@@ -31,6 +30,7 @@ import {
   CommentComposer,
   CommentHeader,
   CommentMedia,
+  CommentReportButton,
   CorrectionComposer,
   commentActionClass,
 } from './CommentParts.js';
@@ -155,7 +155,6 @@ export function CommentNode({
 }: CommentNodeProps): React.ReactElement {
   const [replying, setReplying] = useState(false);
   const [correcting, setCorrecting] = useState(false);
-  const [reporting, setReporting] = useState(false);
   const openDebate = useOpenDebate();
   // "Disputed" for dimming + blocking a new correction means an ACTIVE debate or
   // a settled-incorrect outcome. A `validated` comment (challenged and proven
@@ -183,7 +182,13 @@ export function CommentNode({
       ref={recordDepthWhenVisible}
       className={cn('flex flex-col gap-2', depthInView === 0 ? ROOT_TILE : NESTED_RAIL)}
     >
-      <CommentHeader comment={comment} />
+      {/* The report flag is pinned to the header's inline-END, opposite the
+          author name — a safety escalation about the POST, deliberately not a
+          peer of the conversational actions below (see CommentReportButton). */}
+      <CommentHeader
+        comment={comment}
+        action={<CommentReportButton contributionId={comment.contribution_id} />}
+      />
       {/* WS-T — a correction always denotes WHAT it challenges and links to its
           debate arena (live or resolved), so it is never a floating claim:
           • a COMMENT-target correction threads directly UNDER the comment it
@@ -282,19 +287,6 @@ export function CommentNode({
             Correct
           </button>
         ) : null}
-        {/* Report this comment (two-tap sheet). Icon-only flag — mirrors the
-            story card's report control (StoryFeedLink) — to keep the action row
-            compact; the accessible name carries the full intent. */}
-        <button
-          type="button"
-          className={commentActionClass}
-          aria-haspopup="dialog"
-          aria-label="Report this comment"
-          title="Report this comment"
-          onClick={() => setReporting(true)}
-        >
-          <Icon name="flag" className="size-4" aria-hidden />
-        </button>
         {/* An open arena is challenging this comment: anyone — especially the
             incumbent author returning to adjust their content and post their
             rebuttal — opens the arena MODAL here (the `Correct` button is
@@ -318,16 +310,6 @@ export function CommentNode({
           />
         ) : null}
       </div>
-
-      {reporting ? (
-        <ReportSheet
-          open
-          onClose={() => setReporting(false)}
-          targetType="content"
-          targetId={comment.contribution_id}
-          contentKind="contribution"
-        />
-      ) : null}
 
       <Dialog open={correcting} onClose={() => setCorrecting(false)} title="Raise a correction">
         <CorrectionComposer

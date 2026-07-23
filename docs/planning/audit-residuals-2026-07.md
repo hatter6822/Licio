@@ -90,8 +90,12 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   disable takes effect without a reload; it fails closed on error.
 - **Room-governance link** — DONE. The broken standalone `/rooms/:id/governance`
   text link (a member-duplicate of the governance button, a no-op for non-members)
-  was removed; the compact governance button in the membership row is the single
-  entry point, and the legacy route still redirects for bookmarked URLs.
+  was removed; a single governance control is the entry point, and the legacy
+  route still redirects for bookmarked URLs. That control has since moved out of
+  the membership row and into the page BANNER as a circular action (blue sign-in
+  → green shield once signed in), which also retired the full-width "Sign in"
+  button the membership row used to carry — see `docs/pwa-client/README.md`
+  "Banner actions".
 
 ## Component wire-ups (SPEC affordances defined but never mounted)
 

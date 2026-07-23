@@ -14,6 +14,7 @@ import {
   darkHighContrast,
   fontFamilies,
   fontWeights,
+  glowFilters,
   lightColors,
   lightHighContrast,
   motionDurations,
@@ -54,6 +55,8 @@ export const tailwindColorMap: Record<string, ColorToken> = {
   'primary-on-soft': 'primary-on-soft',
   success: 'success',
   'success-fg': 'success-fg',
+  'success-hover': 'success-hover',
+  'success-active': 'success-active',
   'success-soft': 'success-soft',
   'success-on-soft': 'success-on-soft',
   warning: 'warning',
@@ -69,6 +72,7 @@ export const tailwindColorMap: Record<string, ColorToken> = {
   'info-fg': 'info-fg',
   'info-soft': 'info-soft',
   'info-on-soft': 'info-on-soft',
+  governed: 'governed',
 };
 
 const INDENT = '  ';
@@ -123,6 +127,13 @@ function scaleVars(indent: string): string {
   lines.push(`${indent}--licio-neu-shadow: ${neumorphicInk.light.shadow};`);
   for (const [key, value] of Object.entries(neumorphicShadows)) {
     lines.push(`${indent}--licio-shadow-${key}: ${value};`);
+  }
+
+  // State glows (WS-U §24.6). Composed like the neumorphic shadows so the
+  // high-contrast / forced-colours block can flatten them in ONE place.
+  lines.push(`${indent}/* State glows */`);
+  for (const [key, value] of Object.entries(glowFilters)) {
+    lines.push(`${indent}--licio-glow-${key}: ${value};`);
   }
 
   // Derived from the zIndexScale SSOT (never hardcoded) so the stacking scale

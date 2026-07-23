@@ -22,11 +22,14 @@ import {
   CommentHeader,
   CommentMedia,
   CommentNode,
+  CommentReportButton,
   commentActionClass,
 } from '../../components/comments/index.js';
 import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
 import { useCloseDebate } from '../../components/debate/open-debate.js';
+import { StoryGovernanceControl } from '../../components/governance/StoryGovernanceControl.js';
 import { lensDisplayName } from '../../components/rooms/RoomLensControl/RoomLensSelector.js';
+import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { UgcBody } from '../../components/ugc/UgcBody.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -44,6 +47,7 @@ import {
   useStoryDebatesQuery,
   useStoryQuery,
 } from '../../lib/queries.js';
+import { storySearchScopes } from '../../lib/search-api.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { isValidUuidParam } from '../../routing/guards.js';
 import { getSignalProcessor } from '../../signals/runtime.js';
@@ -82,7 +86,13 @@ function AnchorComment({
       aria-label="Focused comment"
     >
       <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">Replying within</p>
-      <CommentHeader comment={anchor} />
+      {/* The focused anchor is a comment like any other, so it carries the same
+          header-end report flag every CommentNode does — drilling into a comment
+          must not be the one way to lose the ability to report it. */}
+      <CommentHeader
+        comment={anchor}
+        action={<CommentReportButton contributionId={anchor.contribution_id} />}
+      />
       {anchor.body.length > 0 ? <UgcBody markdown={anchor.body} compact /> : null}
       <CommentMedia comment={anchor} />
       <div className="-ml-1.5">
@@ -225,6 +235,12 @@ function StoryCommentsContent({
           name: lensDisplayName(room.data?.my_lens_id ?? null, roomLenses),
         }
       : null;
+  // The banner's search menu — identical to the story page's, from the shared
+  // constructor, so the same story never offers two different menus.
+  const searchScopes = storySearchScopes(
+    { id: storyId, title: storyTitle ?? t('story.title', 'Story') },
+    room.data === undefined ? null : { id: room.data.room_id, name: room.data.name },
+  );
 
   // This level's comments + the load-more control, rendered EITHER nested inside
   // the focused anchor's article (rooted view) or as the page's top-level list
@@ -270,7 +286,29 @@ function StoryCommentsContent({
 
   return (
     <>
-      <PageHeader title={t('comments.title', 'Comments')} onBack={goBack} />
+      {/* This page's title is the fixed word "Comments" — short and bounded, so
+          unlike the story/room banners it keeps its title in the bar; the
+          unbounded STORY title is already the linked line below. */}
+      <PageHeader
+        title={t('comments.title', 'Comments')}
+        onBack={goBack}
+        actions={
+          <>
+            {/* Story-scoped search (WS-T.7.3): this page IS the story's
+                conversation, so that is the default corpus — with the home room
+                and the whole site one press away inside the dialog. */}
+            <SearchButton scopes={searchScopes} />
+            {/* WS-U §24.6 — the same governance surface the story page offers;
+                the conversation is governed by the story's home room. */}
+            {roomId ? (
+              <StoryGovernanceControl
+                roomId={roomId}
+                signInRedirect={`/stories/${storyId}/comments`}
+              />
+            ) : null}
+          </>
+        }
+      />
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
         <Breadcrumbs storyId={storyId} anchor={anchor} />
         {storyTitle ? (

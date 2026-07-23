@@ -1,6 +1,6 @@
 {
   "name": "licio",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@11.15.1",
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "prepare": "lefthook install || true",
-    "dev": "pnpm --parallel --filter web --filter api dev",
+    "dev": "tsx scripts/free-dev-ports.ts && pnpm --parallel --filter web --filter api dev",
     "setup:llm": "tsx scripts/setup-local-llm.ts",
     "bench:llm": "tsx scripts/bench-local-llm.ts",
     "build": "pnpm --filter @licio/shared build && pnpm --filter @licio/db --filter @licio/invariants build && pnpm --filter @licio/ranking --filter @licio/governance --filter @licio/lcap build && pnpm --filter web --filter api build",
@@ -52,7 +52,8 @@
     "db:generate": "pnpm --filter @licio/db exec drizzle-kit generate",
     "db:migrate": "pnpm --filter @licio/db exec drizzle-kit migrate",
     "db:push": "pnpm --filter @licio/db exec drizzle-kit push",
-    "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache"
+    "clean": "rm -rf apps/*/dist apps/*/build packages/*/dist coverage test-results playwright-report .tsbuildinfo apps/*/.tsbuildinfo packages/*/.tsbuildinfo node_modules/.cache",
+    "dev:stop": "tsx scripts/free-dev-ports.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.4",
