@@ -94,6 +94,31 @@ Because nothing bypasses it, **no one — the repository owner included — can 
 directly to `main`, force-push it, delete it, merge past a red CI gate, or merge
 by squash.**
 
+**Verify it rather than trust this page.**  Branch protection lives in repository
+configuration, not in the tree, so the two can drift — and a settings page that
+merely *claims* a control is exactly the failure this section was written to fix
+(`main` had no protection at all until 2026-07-23, while this file described six
+constraints).  These commands print the live configuration:
+
+```sh
+# Exactly one ruleset, and it must have NO bypass actors.
+gh api repos/OWNER/REPO/rulesets \
+  --jq '.[] | "\(.name) bypass=\([.bypass_actors[]?.actor_type] | length)"'
+#   → main-core bypass=0
+
+# The rules actually in force on main.
+gh api repos/OWNER/REPO/rules/branches/main --jq '[.[].type] | unique'
+#   → ["deletion","non_fast_forward","pull_request","required_status_checks"]
+
+# Merge method: merge only.
+gh api repos/OWNER/REPO \
+  --jq '{merge:.allow_merge_commit, squash:.allow_squash_merge, rebase:.allow_rebase_merge}'
+#   → {"merge":true,"squash":false,"rebase":false}
+```
+
+If any of those disagree with the table above, the configuration drifted — fix
+the configuration, not this page.
+
 **Why no approval count.**  GitHub will not let an author approve their own pull
 request (`422 Review Can not approve your own pull request`).  On a
 single-maintainer repository an enforced count therefore has exactly two possible
