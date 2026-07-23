@@ -358,7 +358,15 @@ export function CommentHeader({
   const typeTag = comment.type === 'correction' ? 'Correction' : null;
   // A plain comment carrying a source link is "sourced" — greater participation
   // (never applause; the badge marks the presence of sources, not popularity).
-  const sourced = comment.type === 'comment' && comment.citations.length > 0;
+  //
+  // ONE tag per comment: a dispute posture SUPERSEDES "Sourced". A comment that
+  // is Challenged / Incorrect / Validated has been through a sourced correction,
+  // so "Sourced" adds no information beside it — and two chips on a header that
+  // already wraps cost a line of the reading column for a fact the surviving tag
+  // implies. The sources themselves stay visible either way: they render as
+  // inline links in the body (WS-G.4.2c), never as a badge-only affordance.
+  const sourced =
+    comment.type === 'comment' && comment.citations.length > 0 && comment.dispute_status === 'none';
   const meta = (
     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm leading-tight">
       <span className="font-medium text-ink">{authorName(comment)}</span>

@@ -183,8 +183,19 @@ export function SearchModal({
    * survives as the chip's tooltip, so the reader can still confirm which
    * story they are inside.
    */
-  const chipLabel = (choice: SearchScope | null): string => {
-    if (choice === null) return t('search.scope.global', 'All of Licio');
+  const chipLabel = (choice: SearchScope | null): React.ReactNode => {
+    if (choice === null) {
+      // "All of Licio" is a FIXED phrase, so on a phone it gives up its words
+      // first: every pixel it saves goes to the room name beside it, which is
+      // the only label that carries information the reader cannot guess. The
+      // full phrase stays the button's accessible name.
+      return (
+        <>
+          <span className="sm:hidden">{t('search.scope.globalShort', 'All')}</span>
+          <span className="hidden sm:inline">{t('search.scope.global', 'All of Licio')}</span>
+        </>
+      );
+    }
     return choice.kind === 'story' ? t('search.scope.story', 'This conversation') : choice.label;
   };
 
@@ -328,19 +339,31 @@ export function SearchModal({
             <Icon name="x" />
           </Button>
         </div>
-        {/* WHERE the search runs. Rendered only when there is a genuine choice
-            (the front page offers none), and always ending in "All of Licio" so
-            widening is one press away. The pressed chip doubles as the label
-            the scope pill used to be, so naming the corpus costs no extra row. */}
+        {/* WHERE the search runs — a SCOPE BAR under the field (the search-scope
+            convention), rendered only when there is a genuine choice (the front
+            page offers none) and always ending in "All of Licio" so widening is
+            one press away.
+
+            It TILES rather than wraps: the segments share ONE row, each sized
+            in proportion to its own label (`flex-auto` + `min-w-0`), so the
+            space goes where the characters are — an unbounded room name takes
+            the largest share and gives up the fewest characters. The global
+            segment is exempt: it is already at its shortest ("All" on a phone),
+            so it holds that width instead of shrinking to a stub. A wrapping
+            chip strip used to run to two or three ragged lines on a phone, with
+            the room name truncated anyway.
+
+            The scope ICON is a desktop-only flourish: below `sm` every pixel it
+            costs comes straight out of a label, and the row is a set of words,
+            not a set of glyphs. The full name survives as the `title`, and the
+            corpus is named in prose by the input's placeholder, so the row
+            spends none of its width on a "Search in" prefix either. */}
         {choices.length > 1 ? (
           <div
             role="group"
             aria-label={t('search.scopes', 'Choose where to search')}
-            className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2"
+            className="flex items-stretch gap-1.5 border-b border-line px-4 py-2"
           >
-            <span className="shrink-0 text-ink-muted text-xs">
-              {t('search.scope.within', 'Search in')}
-            </span>
             {choices.map((choice) => {
               const selected = scopeKey(choice) === scopeKey(scope);
               return (
@@ -348,18 +371,35 @@ export function SearchModal({
                   key={scopeKey(choice)}
                   type="button"
                   aria-pressed={selected}
-                  // The full story headline / room name, for a chip that had to
-                  // shorten or truncate it.
-                  {...(choice !== null ? { title: choice.label } : {})}
+                  // The name never depends on what fits: CSS truncation is
+                  // visual only, and the global segment's short phone label is
+                  // covered by an explicit `aria-label` below.
+                  {...(choice === null
+                    ? { 'aria-label': t('search.scope.global', 'All of Licio') }
+                    : { title: choice.label })}
                   onClick={() => changeScope(choice)}
                   className={cn(
-                    'inline-flex min-h-8 max-w-[12rem] items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                    'flex min-h-8 items-center justify-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                    // The global segment is already down to its shortest form,
+                    // so it holds that width and the two content-bearing labels
+                    // share everything else in proportion to their length.
+                    choice === null ? 'shrink-0' : 'min-w-0 flex-auto',
+                    // The scope the reader is INSIDE keeps a legible floor: a
+                    // very long room name beside it must not compress the
+                    // current corpus to two characters.
+                    selected && choice !== null && 'min-w-24',
                     selected
                       ? 'border-primary-active bg-surface-strong text-ink neu-pressed-sm'
                       : 'border-line bg-surface text-ink-muted neu-raised-sm hover:text-ink',
                   )}
                 >
-                  <Icon name={scopeIcon(choice)} className="size-3.5 shrink-0" aria-hidden="true" />
+                  {/* The glyph rides a WRAPPER, not the Icon's own className:
+                      `cn` does not resolve Tailwind conflicts, so `hidden` on
+                      the <svg> would lose to the base `inline-block` it already
+                      carries and the icon would show at every width. */}
+                  <span className="hidden shrink-0 sm:inline-flex">
+                    <Icon name={scopeIcon(choice)} className="size-3.5" aria-hidden="true" />
+                  </span>
                   <span className="truncate">{chipLabel(choice)}</span>
                 </button>
               );

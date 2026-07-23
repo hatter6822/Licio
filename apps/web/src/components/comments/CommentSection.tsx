@@ -17,6 +17,7 @@ import {
   useStoryDebatesQuery,
   useStoryInterpretationsQuery,
 } from '../../lib/queries.js';
+import { LiveDebatesButton } from '../debate/LiveDebatesButton.js';
 import { lensDisplayName } from '../rooms/RoomLensControl/RoomLensSelector.js';
 import { WhereInterpretationsDiffer } from '../story/WhereInterpretationsDiffer/index.js';
 import { Button } from '../ui/Button/index.js';
@@ -32,7 +33,6 @@ import {
   viewLabel,
 } from './CommentViewSelector.js';
 import { byParticipationDesc } from './comment-participation.js';
-import { DebatePanel } from './DebatePanel.js';
 
 export interface CommentSectionProps {
   storyId: string;
@@ -127,7 +127,11 @@ export function CommentSection({
 
   return (
     <section id="comments" className="mt-6 flex flex-col gap-4" aria-label="Conversation">
-      <DebatePanel debates={debates.data?.debates} error={debates.isError} />
+      {/* One compact row: how many debates are live, how soon the nearest
+          deadline falls, and a way into the live-debates modal (`?debates`,
+          hosted by the story page) — the list itself never pushes the
+          conversation down the page. */}
+      <LiveDebatesButton debates={debates.data?.debates} error={debates.isError} />
       <CommentComposer
         storyId={storyId}
         threadId={threadId}

@@ -37,6 +37,16 @@ export interface PageScaffoldProps<T> {
    * focus manager looks for it even while the query is still loading.
    */
   titlePlacement?: PageTitlePlacement;
+  /**
+   * With `titlePlacement="body"`: the CONTENT renders the `<h1>` itself (inside
+   * its own card or layout — the story page puts the headline in the article
+   * card it names). The scaffold then renders the body title only on the frames
+   * where the content is NOT on screen (loading, error, empty), so exactly ONE
+   * `<h1>` exists at every moment: the WS-B.1.6 route-change focus manager
+   * always finds a heading, and never a duplicate that would steal focus or be
+   * announced twice.
+   */
+  titleInContent?: boolean;
   query: QueryLike<T>;
   /** Predicate that returns true when `data` should render the empty state. */
   isEmpty?: (data: T) => boolean;
@@ -51,6 +61,7 @@ export function PageScaffold<T>({
   actions,
   titleReplacement,
   titlePlacement = 'header',
+  titleInContent = false,
   query,
   isEmpty,
   emptyTitle,
@@ -58,6 +69,10 @@ export function PageScaffold<T>({
   children,
 }: PageScaffoldProps<T>): React.ReactElement {
   const t = useT();
+  // The content frame is on screen only when the query resolved to non-empty
+  // data; every other frame (loading / error / empty) is a scaffold state.
+  const contentOnScreen =
+    !query.isLoading && !query.isError && query.data !== undefined && !isEmpty?.(query.data);
   return (
     <>
       <PageHeader
@@ -68,7 +83,9 @@ export function PageScaffold<T>({
         {...(titleReplacement !== undefined ? { titleReplacement } : {})}
       />
       <div className="mx-auto w-full max-w-2xl p-4">
-        {titlePlacement === 'body' ? <PageTitle className="mb-4">{title}</PageTitle> : null}
+        {titlePlacement === 'body' && !(titleInContent && contentOnScreen) ? (
+          <PageTitle className="mb-4">{title}</PageTitle>
+        ) : null}
         {query.isLoading ? (
           <LoadingState />
         ) : query.isError || query.data === undefined ? (

@@ -18,7 +18,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useUIStore } from '../../stores/ui.js';
 
@@ -99,6 +99,52 @@ describe('StoryDetailPage conversation link (WS-G.3.3)', () => {
     expect(await screen.findByText(STORY.body_summary)).toBeInTheDocument();
     // …but there is no embedded conversation affordance.
     expect(screen.queryByRole('region', { name: 'Conversation' })).not.toBeInTheDocument();
+  });
+
+  // The story is ONE card — headline, summary, source — and for a link story
+  // the card itself is the control that opens the in-app reader. The old
+  // full-width "Read source" button is gone with it.
+  it('makes the article card the affordance that opens the source', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
+    renderWithThreadRoute();
+    const card = await screen.findByRole('button', {
+      name: `Read the source for ${STORY.title}`,
+    });
+    // The heading and the summary live INSIDE that card, not as loose sections.
+    const article = card.closest('article') as HTMLElement;
+    expect(within(article).getByRole('heading', { level: 1, name: STORY.title })).toBeVisible();
+    expect(within(article).getByText(STORY.body_summary)).toBeVisible();
+    // No wide text button duplicating what the card now does.
+    expect(screen.queryByRole('button', { name: 'Read source' })).not.toBeInTheDocument();
+  });
+
+  it('reduces the action row to named icon-only controls', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: THREAD_ID });
+    renderWithThreadRoute();
+    // Each icon control keeps a real accessible NAME (icon-only is a visual
+    // economy, never an unlabelled control) …
+    for (const name of ['Correct this story', 'Save for offline', 'Share', 'Report this story']) {
+      expect(await screen.findByRole('button', { name })).toBeInTheDocument();
+    }
+    // … and carries no visible text label beside the glyph.
+    expect((await screen.findByRole('button', { name: 'Share' })).textContent).toBe('');
+    // The save control is a toggle, so its state is exposed as pressed-ness.
+    expect(screen.getByRole('button', { name: 'Save for offline' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('keeps EXACTLY one <h1> once the card renders its own headline', async () => {
+    vi.mocked(fetchStory).mockResolvedValueOnce({ ...STORY, thread_id: null });
+    renderWithThreadRoute();
+    await screen.findByText(STORY.body_summary);
+    // The scaffold withdraws its own body title on the content frame rather
+    // than leaving a duplicate that would steal the WS-B.1.6 route-change
+    // focus and announce the page twice. (The scaffold's heading on the
+    // loading/error frames is covered in PageScaffold.test.tsx, where the
+    // query state is driven directly instead of raced against the router.)
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 
   // WS-B.1.5 + WS-T.7.3 — the banner carries navigation only: back at the

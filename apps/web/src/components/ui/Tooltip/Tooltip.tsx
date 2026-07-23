@@ -14,6 +14,18 @@ import {
 } from 'react';
 import { cn } from '../../../lib/cn.js';
 
+/**
+ * Where the bubble sits relative to its trigger, along the inline axis.
+ *
+ * `center` is right for a trigger with room on both sides. A trigger at the
+ * EDGE of a row (the first/last control in an icon strip) has no such room:
+ * a centred bubble hangs off the viewport, where it is clipped or forces a
+ * horizontal scroll. `start`/`end` align the bubble's inline edge with the
+ * trigger's, so it grows INWARD — logical properties, so the mirroring is
+ * automatic under RTL.
+ */
+export type TooltipPlacement = 'center' | 'start' | 'end';
+
 export interface TooltipProps {
   /** The tooltip body. Plain text is typical; any inline node is allowed. */
   content: ReactNode;
@@ -24,11 +36,42 @@ export interface TooltipProps {
    * keyboard users are never made to wait.
    */
   delay?: number;
+  /** Inline alignment against the trigger (default `center`). */
+  placement?: TooltipPlacement;
   /** Extra classes on the tooltip bubble. */
   className?: string;
 }
 
 const DEFAULT_DELAY = 300;
+
+/** Inline alignment classes per placement (logical, so RTL mirrors itself). */
+const PLACEMENT_CLASSES: Record<TooltipPlacement, string> = {
+  center: 'left-1/2 -translate-x-1/2',
+  start: 'start-0',
+  end: 'end-0',
+};
+
+/**
+ * AT MOST ONE tooltip is visible at a time, app-wide.
+ *
+ * A tooltip opened by FOCUS stays up until its trigger blurs, so pressing one
+ * control in a row and then hovering its neighbour used to show two bubbles at
+ * once — overlapping, and unreadable on a strip of 48px icon buttons. The
+ * newest one to open closes the previous, which is what every tooltip a user
+ * has met elsewhere does. The registry is a single module-level closer rather
+ * than context/state: showing a tooltip must not re-render anything but the
+ * two tooltips involved.
+ */
+let closeOpenTooltip: (() => void) | null = null;
+
+function claimSingleton(close: () => void): void {
+  if (closeOpenTooltip !== null && closeOpenTooltip !== close) closeOpenTooltip();
+  closeOpenTooltip = close;
+}
+
+function releaseSingleton(close: () => void): void {
+  if (closeOpenTooltip === close) closeOpenTooltip = null;
+}
 
 /**
  * Accessible tooltip (WCAG 2.1 SC 1.4.13 — Content on Hover or Focus).
@@ -49,6 +92,7 @@ const DEFAULT_DELAY = 300;
 export function Tooltip({
   content,
   children,
+  placement = 'center',
   delay = DEFAULT_DELAY,
   className,
 }: TooltipProps): ReactElement {
@@ -72,20 +116,34 @@ export function Tooltip({
     }
   }, []);
 
-  // Tear down any pending open timer if we unmount mid-delay.
-  useEffect(() => clearShowTimer, [clearShowTimer]);
+  // Close this bubble WITHOUT touching the singleton registry (the registry
+  // calls it when another tooltip takes over). Stable across renders, so it is
+  // a usable identity for the registry.
+  const closeSelf = useCallback(() => setOpen(false), []);
+
+  // Tear down any pending open timer if we unmount mid-delay, and never leave
+  // a gone component as the registered "currently open" tooltip.
+  useEffect(
+    () => () => {
+      clearShowTimer();
+      releaseSingleton(closeSelf);
+    },
+    [clearShowTimer, closeSelf],
+  );
 
   const reveal = useCallback(() => {
     if (dismissedRef.current) {
       return;
     }
+    claimSingleton(closeSelf);
     setOpen(true);
-  }, []);
+  }, [closeSelf]);
 
   const hide = useCallback(() => {
     clearShowTimer();
+    releaseSingleton(closeSelf);
     setOpen(false);
-  }, [clearShowTimer]);
+  }, [clearShowTimer, closeSelf]);
 
   const handlePointerEnter = useCallback(() => {
     hoveredRef.current = true;
@@ -103,9 +161,10 @@ export function Tooltip({
     // can open the tooltip again.
     dismissedRef.current = false;
     if (!focusedRef.current) {
+      releaseSingleton(closeSelf);
       setOpen(false);
     }
-  }, [clearShowTimer]);
+  }, [clearShowTimer, closeSelf]);
 
   const handleFocus = useCallback(() => {
     focusedRef.current = true;
@@ -113,8 +172,9 @@ export function Tooltip({
     // fresh focus is a clear, intentional request to see the description.
     dismissedRef.current = false;
     clearShowTimer();
+    claimSingleton(closeSelf);
     setOpen(true);
-  }, [clearShowTimer]);
+  }, [clearShowTimer, closeSelf]);
 
   const handleBlur = useCallback(() => {
     focusedRef.current = false;
@@ -132,10 +192,11 @@ export function Tooltip({
         event.stopPropagation();
         dismissedRef.current = true;
         clearShowTimer();
+        releaseSingleton(closeSelf);
         setOpen(false);
       }
     },
-    [clearShowTimer, open],
+    [clearShowTimer, closeSelf, open],
   );
 
   if (!isValidElement(children)) {
@@ -181,7 +242,8 @@ export function Tooltip({
             // Positioned above the trigger with a small gap so it never covers
             // it; `z-overlay` keeps it above ordinary content. `pb-1` keeps the
             // hover target contiguous with the trigger across the visual gap.
-            'absolute bottom-full left-1/2 z-overlay mb-1 -translate-x-1/2',
+            'absolute bottom-full z-overlay mb-1',
+            PLACEMENT_CLASSES[placement],
             'w-max max-w-xs rounded-md bg-inverse px-2 py-1 text-sm text-ink-inverse shadow-md',
             className,
           )}

@@ -16,7 +16,6 @@ import type { CommentItem } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { useSpaFocus } from '../../components/a11y/index.js';
-import { DebatePanel } from '../../components/comments/DebatePanel.js';
 import {
   CommentComposer,
   CommentHeader,
@@ -26,7 +25,9 @@ import {
   commentActionClass,
 } from '../../components/comments/index.js';
 import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
-import { useCloseDebate } from '../../components/debate/open-debate.js';
+import { LiveDebatesButton } from '../../components/debate/LiveDebatesButton.js';
+import { LiveDebatesModal } from '../../components/debate/LiveDebatesModal.js';
+import { useCloseDebate, useCloseDebateList } from '../../components/debate/open-debate.js';
 import { StoryGovernanceControl } from '../../components/governance/StoryGovernanceControl.js';
 import { lensDisplayName } from '../../components/rooms/RoomLensControl/RoomLensSelector.js';
 import { SearchButton } from '../../components/search/SearchButton/index.js';
@@ -194,13 +195,18 @@ function StoryCommentsContent({
     storyId,
     isRooted ? { root, depth: FOCUSED_DEPTH } : { depth: ALL_COMMENTS_DEPTH },
   );
-  // WS-T — active-debate discovery + the story's dispute posture render on
-  // this dedicated comments surface too (previously only the story page had
-  // them, so a reader here could not find a live debate).  The arena modal
-  // opens over THIS page via the same `?debate=<id>` param as the story page.
+  // WS-T — live-debate discovery + the story's dispute posture render on this
+  // dedicated comments surface too (previously only the story page had them, so
+  // a reader here could not find a live debate).  Both modals open over THIS
+  // page via the same `?debates` / `?debate=<id>` params as the story page, and
+  // arbitrate the same way: the arena wins while it is open, so the list it was
+  // opened from is waiting when the reader closes it.
   const debates = useStoryDebatesQuery(storyId);
-  const debateParam = useSearch({ from: '/stories/$storyId_/comments' }).debate;
+  const debateSearch = useSearch({ from: '/stories/$storyId_/comments' });
+  const debateParam = debateSearch.debate;
+  const debateListOpen = debateSearch.debates === true && debateParam === undefined;
   const closeDebate = useCloseDebate();
+  const closeDebateList = useCloseDebateList();
 
   // Retrace history so the back button returns the reader to exactly where they
   // came from (the story page, or the previous drill-down level); a cold-loaded
@@ -327,7 +333,8 @@ function StoryCommentsContent({
         ) : null}
 
         {story.data ? <DisputeBanner status={story.data.dispute_status} /> : null}
-        <DebatePanel debates={debates.data?.debates} error={debates.isError} />
+        <LiveDebatesButton debates={debates.data?.debates} error={debates.isError} />
+        <LiveDebatesModal storyId={storyId} open={debateListOpen} onClose={closeDebateList} />
         <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />
 
         {comments.isError ? (

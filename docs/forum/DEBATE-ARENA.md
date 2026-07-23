@@ -190,11 +190,15 @@ renders in the dev panel and at `GET /v1/dev/simulator/status` (see
   — with judge-time re-suppression defusing any withheld text a race got into
   a snapshot.
 - **Web:** source capture + render + a "Sourced" badge on comments
-  (`CommentParts`/`CommentNode`).  Sources render **inline as clickable links in
-  the comment body itself** (the `.ugc-body a` affordance — click-intercepted by
-  `UgcBody`, WS-G.4.2c); legacy "bare" citations with no matching inline link fall
-  back to a compact trailing list of `SafeExternalLink`s — there is **no separate
-  "Sources" modal**.  The report control is an **icon-only flag** (mirrors the
+  (`CommentParts`/`CommentNode`) — **ONE tag per comment header**: a dispute
+  posture SUPERSEDES "Sourced" (a Challenged / Incorrect / Validated comment
+  went through a sourced correction by definition, so the two together spent a
+  wrapped header line on a fact the surviving tag implies).  Sources render
+  **inline as clickable links in the comment body itself** (the `.ugc-body a`
+  affordance — click-intercepted by `UgcBody`, WS-G.4.2c); legacy "bare"
+  citations with no matching inline link fall back to a compact trailing list of
+  `SafeExternalLink`s — there is **no separate "Sources" modal** — so dropping
+  the badge never hides a source.  The report control is an **icon-only flag** (mirrors the
   story card).  The "Correct" action → `CorrectionComposer`; a "View debate"
   control on `under_debate` comments.  The arena itself is a focused **MODAL**
   over the story surface (`components/debate/DebateArenaModal`, a Sheet),
@@ -210,12 +214,29 @@ renders in the dev panel and at `GET /v1/dev/simulator/status` (see
   + the both-sides-idle early-resolution hint; the footer carries the
   withdraw/concede affordances, the verdict banner (including "Decided by the
   incumbent's concession"), the steward override, and a DEV-only fast-forward
-  row.  The active-debates `DebatePanel` + `DisputeBanner` render
-  on the story page AND the dedicated `/stories/:id/comments` surface.  Dispute
+  row.  Discovery is TWO nested surfaces, not a panel: the conversation
+  carries a ONE-ROW `LiveDebatesButton` (how many arenas are live, how many
+  challenge the story, the soonest deadline), and pressing it opens the
+  `LiveDebatesModal` (`?debates`) — a short summary row per arena (state,
+  countdown, subject excerpt, both parties) with **search** over what each row
+  shows and four **sort** orders (ending soonest — the default — recently
+  active, newest, oldest).  **Challenges to the STORY pin first** under every
+  sort and every search: `sortDebates` pins them in the comparator and the
+  modal renders them as its own leading group.  Opening a row REPLACES the list
+  with that arena (`?debate=<id>` — one dialog, one focus trap at a time), and
+  closing the arena drops back into the list it came from; an arena opened from
+  a comment carries no `?debates`, so closing it returns to the page.  The
+  list + `DisputeBanner` render on the story page AND the dedicated
+  `/stories/:id/comments` surface.  Dispute
   tags render through the shared `DisputeBadge`/`DisputeBanner`:
   **"Challenged"** (`under_debate`), **"Incorrect"** (`incorrect`),
   **"Validated"** (`validated`) — on comments (the header), story cards (the
-  rating row), and the story detail page (a banner).
+  signal row), and the story detail page (a banner).  A disputed story CARD
+  also takes the state's hue on its own border (`disputeBorderClass`, the same
+  tone token as the chip), so the posture is legible while scrolling a feed;
+  an undisputed card keeps `border-line`, and exactly one border colour is ever
+  emitted (`cn` resolves no Tailwind conflicts).  Reinforcement only — the chip
+  still states the posture in text.
 
 ## Doctrine
 

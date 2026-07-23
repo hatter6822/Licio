@@ -262,6 +262,59 @@ describe('CommentSection', () => {
     expect(report.className.split(/\s+/)).toContain('size-7');
   });
 
+  it.each([
+    ['under_debate', 'Challenged'],
+    ['incorrect', 'Incorrect'],
+    ['validated', 'Validated'],
+  ] as const)(
+    'WS-T — a %s comment carries that tag ALONE, never beside "Sourced"',
+    (disputeStatus, label) => {
+      queryState = {
+        data: {
+          comments: [
+            comment({
+              contribution_id: '55555555-5555-4555-8555-555555555555',
+              body: 'A sourced claim now [challenged](https://example.org/rebuttal).',
+              citations: [{ url: 'https://example.org/rebuttal', title: 'rebuttal' }],
+              dispute_status: disputeStatus,
+            }),
+          ],
+          next_cursor: null,
+          anchor: null,
+          overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+        },
+      };
+      renderSection();
+      // One tag: the adjudicated posture supersedes the static "Sourced" mark —
+      // a disputed comment went through a sourced correction by definition.
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.queryByText('Sourced')).not.toBeInTheDocument();
+      // The sources themselves are untouched: they stay inline links in the body.
+      expect(screen.getByRole('link', { name: 'challenged' })).toHaveAttribute(
+        'href',
+        'https://example.org/rebuttal',
+      );
+    },
+  );
+
+  it('WS-T — an UNDISPUTED sourced comment still carries the "Sourced" mark', () => {
+    queryState = {
+      data: {
+        comments: [
+          comment({
+            body: 'A [sourced](https://example.org/data) remark.',
+            citations: [{ url: 'https://example.org/data', title: 'sourced' }],
+          }),
+        ],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 1, corrections_count: 0 },
+      },
+    };
+    renderSection();
+    expect(screen.getByText('Sourced')).toBeInTheDocument();
+  });
+
   it('WS-T — surfaces a legacy bare DOI citation with visible link text (no empty link)', () => {
     queryState = {
       data: {
@@ -285,7 +338,7 @@ describe('CommentSection', () => {
     expect(link).toHaveAttribute('href', 'doi:10.1000/182');
   });
 
-  it('WS-T — lists the story’s active debates so a reader can watch one', () => {
+  it('WS-T — a compact row counts the story’s live debates and opens the list modal', () => {
     const debateId = '99999999-9999-4999-8999-999999999999';
     debatesState = {
       debates: [
@@ -310,17 +363,18 @@ describe('CommentSection', () => {
       ],
     };
     renderSection();
-    const panel = screen.getByRole('complementary', { name: 'Active debates' });
-    expect(within(panel).getByText('1 active debate')).toBeInTheDocument();
-    expect(within(panel).getByText(/The vote passed 5-4\./)).toBeInTheDocument();
-    // The row opens the arena MODAL via the `?debate=` param on this route.
-    fireEvent.click(within(panel).getByRole('button', { name: /view debate/i }));
+    // The section itself carries only the COUNT — the per-debate summaries live
+    // in the `?debates` modal, so the conversation is never pushed down the
+    // page by a tile per debate.
+    const trigger = screen.getByRole('button', { name: /1 live debate/i });
+    expect(screen.queryByText(/The vote passed 5-4\./)).not.toBeInTheDocument();
+    fireEvent.click(trigger);
     const call = navigateMock.mock.calls.at(-1)?.[0] as {
       to: string;
       search: (prev: Record<string, unknown>) => Record<string, unknown>;
     };
     expect(call.to).toBe('.');
-    expect(call.search({})).toEqual({ debate: debateId });
+    expect(call.search({})).toEqual({ debates: true });
   });
 
   it('WS-T — an under-debate comment links to its live arena', () => {

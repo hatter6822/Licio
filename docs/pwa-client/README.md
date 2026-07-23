@@ -118,6 +118,21 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   replay their last 200 on a network failure, skipping the server's
   role + step-up-MFA gates for a revoked operator or a later shared-browser
   session.  Operator consoles are online-only by design.
+- **Story surface (`components/story/StoryArticleCard`):** the headline, the
+  dispute notice, the media and the summary are ONE raised card, and for a link
+  story that whole card is the control that opens the in-app reader — a
+  stretched overlay `<button>` named "Read the source for <title>" (the feed
+  card's pattern), with the media raised into its own stacking layer so a
+  `<video controls>` stays operable under it. A story with no `url` renders the
+  same card with nothing pressable. The `<h1>` lives INSIDE that card, so
+  `PageScaffold` takes `titleInContent` and renders its own body title only on
+  the loading/error/empty frames — exactly one `<h1>` on every frame, which is
+  what the WS-B.1.6 focus manager needs. Below the card sits ONE row of
+  icon-only actions (correct · save offline · share — then the report flag at
+  the inline-end): each carries an `aria-label` and a Tooltip showing that same
+  name on hover AND focus (WCAG 1.4.13), the save toggle exposes `aria-pressed`
+  and fills its bookmark, and share confirms a clipboard copy with a transient
+  check plus a live-region announcement.
 - **Conversation surface (WS-T.7/8):** story pages embed their own comment
   section using the served `thread_id`, so the feed → story → discussion path
   stays inline. That inline section shows exactly **one nested reply layer** to
@@ -168,12 +183,19 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   (`storySearchScopes`, shared by both story surfaces so they cannot drift) —
   and the transient `searchScopes` UI-store slice carries that list, first =
   initial selection. The modal appends "All of Licio" and renders the set as a
-  chip row (`Search in: …`), so a reader who comes up empty widens or steps
+  **scope bar** under the field, so a reader who comes up empty widens or steps
   sideways **without closing the dialog or retyping**: switching keeps the
   query, re-runs it against the new corpus, and carries the type filter across
-  only when the new scope can still serve it. The pressed chip is also how the
-  dialog *names* what it is searching; the heading, placeholder and combobox
-  label follow the selection. The row is hidden when there is nothing to choose
+  only when the new scope can still serve it. The pressed segment is also how
+  the dialog *names* what it is searching; the heading, placeholder and combobox
+  label follow the selection. The bar TILES on one line at any width instead of
+  wrapping into ragged chip rows: segments share the row in proportion to their
+  labels (`flex-auto`), so the unbounded ROOM NAME takes the largest share and
+  gives up the fewest characters; the selected scope keeps a legible floor; the
+  fixed "All of Licio" holds its width and shortens to "All" below `sm` (its
+  `aria-label` keeps the full name at every width — WCAG 2.5.3); and the scope
+  glyphs appear only from `sm` up, where they cost no characters. The full room
+  name / story headline stays reachable as the segment's `title`. The row is hidden when there is nothing to choose
   (the front page). Closing resets the list, and Ctrl/Cmd+K always opens the
   GLOBAL surface (an app-wide hotkey carries no page context).
 - **Banner actions (WS-B.1.5):** on the story and room routes the banner
@@ -205,6 +227,10 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   drives the feed switcher; `/submit` accepts only share-target `share_url` /
   `share_title` params for the story composer; the dedicated comment page accepts
   a single `?root=` uuid (the drill-down anchor, invalid ⇒ the unrooted view).
+  The story page and that comment page both accept the WS-T debate pair —
+  `?debates` (the live-debates list modal) and `?debate=<id>` (one arena) —
+  which NEST rather than stack: the arena wins while it is present, so closing
+  it drops the reader back into the list that is still in the URL.
   Thread branch search params are retired with the old branch reader.
 - **Guards (WS-C.1.1d):** `routing/route-guard.ts` exposes `requireAuth` (a route
   `beforeLoad`) that redirects unauthenticated or non-active accounts to `/login`
@@ -586,7 +612,7 @@ server's bars, it does not re-decide them.
   drawer (WS-H) renders right after the composer with a plain-language divergence
   band. A lens is an interpretation context, never a vote (`check:no-applause`).
 - **Native media rendering** (`components/story/StoryMedia`, wired into
-  `StoryCard` and the story page via the shared `feed-card` mapper). Image/video
+  `StoryCard` and the story page's `StoryArticleCard`). Image/video
   load ONLY through the scan-gated upload URL; video is a native
   `<video controls preload="metadata">` with NO autoplay in any state; a load
   failure collapses to an honest message, never a broken element; text captions

@@ -3,7 +3,7 @@ import { type ReactNode, type RefObject, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
 import { useScrollLock } from '../../../hooks/useScrollLock.js';
-import { cn } from '../../../lib/cn.js';
+import { cn, defaultMaxWidth } from '../../../lib/cn.js';
 import { Button } from '../Button/index.js';
 import { Icon } from '../Icon/index.js';
 
@@ -59,7 +59,10 @@ export function Dialog({
         aria-labelledby={titleId}
         aria-describedby={describedById}
         className={cn(
-          'relative z-modal flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-auto rounded-lg border border-line bg-canvas p-6 shadow-lg',
+          'relative z-modal flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-auto rounded-lg border border-line bg-canvas p-6 shadow-lg',
+          // `max-w-lg` is the DEFAULT, not a cage: a caller that passes its own
+          // `max-w-*` (the governance dialogs ask for `max-w-2xl`) gets it.
+          defaultMaxWidth('max-w-lg', className),
           className,
         )}
       >

@@ -327,7 +327,7 @@ postures, none of which imply a majority "likes" or "agrees" with the content:
 
 | Signal | Rendering | Meaning |
 |---|---|---|
-| Dispute badge | "Challenged" / "Incorrect" / "Validated" pill | The story's own WS-T posture: a sourced correction's debate is live; a correction prevailed (the story is demoted but kept for the record); or a challenge was adjudicated and the story stood as accurate. Hidden when undisputed. |
+| Dispute badge | "Challenged" / "Incorrect" / "Validated" pill, echoed by the card's border in the same hue | The story's own WS-T posture: a sourced correction's debate is live; a correction prevailed (the story is demoted but kept for the record); or a challenge was adjudicated and the story stood as accurate. Hidden when undisputed (the card keeps its neutral border). The tinted edge is reinforcement so a disputed item is recognisable while scrolling — never the sole carrier: the pill always states the posture in text, and the edge flattens with every other decorative treatment under forced colours. |
 | Under review | Eye icon + "Under review" chip | The Section 22.1 `safety_state` is `under-review`/`restricted`: coordination, safety, or policy signals require review (or access is restricted). Descriptive, never a verdict; the `caution` posture renders nothing (parity with the retired label cascade). |
 | Sources | Link icon + count | Published comments carrying at least one citation — exactly the count the comment section's "Sources" view resolves, so the card number always matches what the reader finds inside. |
 | Corrections tally | Hourglass / check / X icons + counts | The comment section's WS-T adjudication record: corrections currently under debate (hourglass), comments challenged and **validated** (check), and comments a correction prevailed against — **incorrect** (X). The story's own posture is excluded (it rides the dispute badge), so one debate is never double-reported. |
@@ -382,7 +382,7 @@ Requirements:
 3. The default feed uses finite sections and stopping cues, not endless engagement extraction.
 4. Long threads are navigable by semantic structure, not only chronological scrolling.
 5. Context is available through bottom sheets and cards without losing reading position.
-6. Source opening uses an in-app reader (sandboxed `iframe`/reader view) with a clear escape back to the thread.
+6. Source opening uses an in-app reader (sandboxed `iframe`/reader view) with a clear escape back to the thread. On the story surface the affordance IS the article card — headline, notice, media and summary as one pressable surface — so opening the source costs no separate button; the actions beneath it (correct, save offline, share, report) are icon-only, each named for assistive tech and labelled on hover/focus.
 7. Drafting autosaves locally (IndexedDB) and syncs safely when online.
 8. Offline reading is supported for saved stories, permitted source snapshots, and draft contributions.
 9. Push notifications are limited, explainable, and user-controllable (Web Push; on iOS only for installed home-screen web apps, iOS 16.4+).
@@ -408,7 +408,7 @@ Each feed card contains: story title; source; home-room chip (where the conversa
 
 ## 6.4 Thread layout
 
-The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering. Sources attached to a comment are authored inline (a sourced phrase becomes a footnoted link) and read through a per-comment "Sources" footnote modal; active correction debates surface in an active-debates panel above the conversation. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page. (The reader-facing thread **Overview** — the layered thread summary — was **removed**; see Section 24.3.)
+The comment section is embedded directly in the content page. Comments are lightly nested: top-level comments, one collapsible reply preview level, and a "continue thread" link for deeper subthreads. The default read is chronological, with newest/oldest ordering. Sources attached to a comment are authored inline (a sourced phrase becomes a footnoted link) and read through a per-comment "Sources" footnote modal; active correction debates surface above the conversation as a ONE-ROW live-debates control (how many are live, how many challenge the story, the soonest deadline) that opens the live-debates modal — a short summary per arena, searchable and sortable, with challenges to the story itself pinned first, each opening the full arena. Inline controls open the comment composer in place rather than sending the reader to a separate contribution page. (The reader-facing thread **Overview** — the layered thread summary — was **removed**; see Section 24.3.)
 
 ## 6.5 Context cards
 
