@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 
 describe('Security headers', () => {
   const app = createApp();
+  const originalCorsOrigin = process.env['CORS_ORIGIN'];
+
+  beforeEach(() => {
+    process.env['CORS_ORIGIN'] = 'https://licio.example';
+  });
+
+  afterEach(() => {
+    if (originalCorsOrigin === undefined) delete process.env['CORS_ORIGIN'];
+    else process.env['CORS_ORIGIN'] = originalCorsOrigin;
+  });
 
   it('should set Content-Security-Policy with all directives', async () => {
     const res = await app.request('/health');
@@ -25,7 +35,7 @@ describe('Security headers', () => {
     expect(endpoints).toBe('csp-endpoint="/api/security/csp-report"');
   });
 
-  it('should set Report-To header', async () => {
+  it('should set Report-To header at the CONFIGURED canonical origin', async () => {
     const res = await app.request('/health');
     const reportTo = res.headers.get('Report-To');
     expect(reportTo).toBeDefined();
@@ -36,7 +46,37 @@ describe('Security headers', () => {
     };
     expect(parsed.group).toBe('csp-endpoint');
     expect(parsed.max_age).toBe(86400);
-    expect(parsed.endpoints[0]?.url).toMatch(/^https?:\/\/[^/]+\/api\/security\/csp-report$/);
+    expect(parsed.endpoints[0]?.url).toBe('https://licio.example/api/security/csp-report');
+  });
+
+  // The reporting endpoint is deployment identity, and identity comes from
+  // configuration — never from a header the caller controls. A poisoned shared
+  // cache would otherwise point every later visitor's CSP reports (which carry
+  // the document URL) at an attacker's collector for max_age seconds.
+  it('ignores spoofed Host / X-Forwarded-* when building Report-To', async () => {
+    const res = await app.request('/health', {
+      headers: {
+        host: 'evil.example',
+        'x-forwarded-host': 'evil.example',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    const reportTo = res.headers.get('Report-To') ?? '';
+    expect(reportTo).not.toContain('evil.example');
+    expect(reportTo).toContain('https://licio.example/api/security/csp-report');
+  });
+
+  // Unconfigured deployments must not fall back to a header-derived origin: the
+  // legacy v0 header is dropped, and the two RELATIVE reporting channels every
+  // current browser actually uses keep working.
+  it('omits the legacy Report-To when no canonical origin is configured', async () => {
+    delete process.env['CORS_ORIGIN'];
+    const res = await app.request('/health', { headers: { host: 'evil.example' } });
+    expect(res.headers.get('Report-To')).toBeNull();
+    expect(res.headers.get('Reporting-Endpoints')).toBe('csp-endpoint="/api/security/csp-report"');
+    expect(res.headers.get('Content-Security-Policy')).toContain(
+      'report-uri /api/security/csp-report',
+    );
   });
 
   it('should set Strict-Transport-Security', async () => {

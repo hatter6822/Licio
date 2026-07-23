@@ -1259,6 +1259,24 @@ export class DrizzleUploadStore implements UploadStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  /** ONE `IN (...)` round trip for a whole page's media (see the interface note).
+   *  An empty id list short-circuits: `inArray(col, [])` is a degenerate SQL
+   *  predicate, and there is nothing to ask for. */
+  async getRecords(uploadIds: readonly string[]): Promise<Map<string, UploadRecord>> {
+    const out = new Map<string, UploadRecord>();
+    const ids = [...new Set(uploadIds)];
+    if (ids.length === 0) return out;
+    const rows = await this.#db
+      .select()
+      .from(uploadsTable)
+      .where(inArray(uploadsTable.uploadId, ids));
+    for (const row of rows) {
+      const record = this.#toRecord(row);
+      out.set(record.uploadId, record);
+    }
+    return out;
+  }
+
   async getBytes(uploadId: string): Promise<Uint8Array | null> {
     const record = await this.getRecord(uploadId);
     if (!record) return null;

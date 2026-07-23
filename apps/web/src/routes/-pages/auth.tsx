@@ -8,7 +8,7 @@
 // allowlisted via sanitizeRedirect (open-redirect defense).  Anti-enumeration
 // copy is deliberate: email registration shows the SAME neutral guidance
 // whether or not the address already had an account.
-import type { DeletionStatus, UserContext } from '@licio/shared';
+import type { UserContext } from '@licio/shared';
 import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../../components/ui/Button/index.js';
@@ -27,7 +27,8 @@ import {
   verifyEmailLogin,
 } from '../../lib/auth-api.js';
 import { primeSignupCaptcha } from '../../lib/pow-captcha.js';
-import { cancelAccountDeletion, fetchDeletionStatus } from '../../lib/privacy-api.js';
+import { cancelAccountDeletion } from '../../lib/privacy-api.js';
+import { useDeletionStatusQuery } from '../../lib/queries.js';
 import { isWebAuthnAvailable } from '../../lib/webauthn.js';
 import { sanitizeRedirect } from '../../routing/guards.js';
 import { useAuthStore } from '../../stores/auth.js';
@@ -359,13 +360,13 @@ function DeletionPendingPanel({
 }): React.ReactElement {
   const t = useT();
   const { locale } = useI18n();
-  const [status, setStatus] = useState<DeletionStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchDeletionStatus().then(setStatus, () => setStatus(null));
-  }, []);
+  // Read through the query layer like every other server read: a bespoke
+  // useEffect + useState copy of the same fetch gets no caching, no retry
+  // policy, and no shared invalidation, and it drifts from the hook the rest of
+  // the app would use.
+  const status = useDeletionStatusQuery().data ?? null;
 
   return (
     <div className="flex flex-col gap-4 pt-4">

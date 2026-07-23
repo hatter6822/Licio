@@ -752,11 +752,23 @@ export function useExportStatusQuery(jobId: string | null) {
   });
 }
 
+/**
+ * The signed-in account's deletion schedule.  ALWAYS FRESH and never retained:
+ * this is read on the PRE-AUTH sign-in page (the grace-period cancel panel), and
+ * the key is not account-scoped, so a cached answer would be the previous
+ * sign-in attempt's.  Two deletion-pending accounts used on one device in one
+ * SPA session would otherwise show the second account the FIRST one's purge date
+ * — no `logout()` fires between them (the first attempt never completed a
+ * session), so the sign-out cache purge does not cover this path.  `gcTime: 0`
+ * drops the entry the moment the panel unmounts, so nothing survives to be
+ * mis-served.
+ */
 export function useDeletionStatusQuery() {
   return useQuery({
     queryKey: queryKeys.deletionStatus(),
     queryFn: () => fetchDeletionStatus(),
-    ...cachePolicy.profile,
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 
@@ -840,16 +852,6 @@ export function useUnlinkWalletMutation() {
   });
 }
 
-/** WS-L.4.1a — the room governance tab bundle (simulation-aware). */
-export function useGovernanceTabQuery(roomId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.governanceTab(roomId),
-    queryFn: () => wallet.fetchGovernanceTab(roomId),
-    ...cachePolicy.room,
-    enabled,
-  });
-}
-
 /** WS-L.4.1e — the comprehension quiz for a governance room. */
 export function useComprehensionQuizQuery(roomId: string, enabled: boolean) {
   return useQuery({
@@ -867,7 +869,11 @@ export function useSubmitComprehensionMutation(roomId: string) {
       wallet.submitComprehensionQuiz(roomId, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.comprehensionQuiz(roomId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.governanceTab(roomId) });
+      // Passing the quiz flips the `comprehension_passed` READINESS requirement
+      // (`knomosis/readiness.ts`), and the checklist is where the member sees it.
+      // Every target-mode variant of the key is invalidated by prefix, since the
+      // checklist can be viewed for any target.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.roomReadinessAll(roomId) });
     },
   });
 }

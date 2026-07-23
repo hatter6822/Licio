@@ -22,11 +22,39 @@ interface ParsedDecimal {
   scale: number;
 }
 
+/**
+ * The accepted domain is BOUNDED, and that bound is what makes every operation
+ * below total.  Alignment and exponent normalization both evaluate `10n ** k`
+ * where `k` is derived from the literal's exponent — an UNBOUNDED exponent makes
+ * that term unbounded too, so `"1e-2000000000"` would either burn seconds of CPU
+ * (`1e-10000000` alone measured ~530ms) or exceed V8's BigInt ceiling and throw a
+ * RangeError out of a plain comparison.  Bounding the significant digits and the
+ * scale caps every `10n ** k` at a few thousand digits (microseconds), so an
+ * input this module ACCEPTS can always be compared, added, and multiplied.
+ *
+ * The bounds sit far above every value the platform can construct: uint256 minor
+ * units are 78 digits (`minorUnitAmountSchema`), law-pack money strings are
+ * capped at 100 characters, and the widest `number` round-trips are
+ * `String(Number.MAX_VALUE)` (309 integer digits) and `String(Number.MIN_VALUE)`
+ * (scale 324).  The widest product those can form — `decMul` adds scales and
+ * sums digit counts — is ~648 scale / ~618 digits, so results stay comfortably
+ * re-parseable and the arithmetic is closed over real inputs.
+ */
+export const MAX_DECIMAL_SIGNIFICANT_DIGITS = 4096;
+/** Companion bound on the decimal scale (fractional digits after normalization). */
+export const MAX_DECIMAL_SCALE = 4096;
+
 const DECIMAL_RE = /^[+-]?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
 
-/** Whether a string is a valid plain/exponent decimal literal. */
+/**
+ * Whether a string is a decimal literal this module ACCEPTS — syntactically well
+ * formed AND inside the {@link MAX_DECIMAL_SIGNIFICANT_DIGITS} /
+ * {@link MAX_DECIMAL_SCALE} bounds.  Implemented by the same parse the arithmetic
+ * uses, so it can never disagree with {@link isValidDecimal}: a `true` here is a
+ * promise that every operation below succeeds on the value.
+ */
 export function isDecimalString(value: string): boolean {
-  return DECIMAL_RE.test(value);
+  return isValidDecimal(value);
 }
 
 function parseDecimalString(value: string): ParsedDecimal {
@@ -37,8 +65,17 @@ function parseDecimalString(value: string): ParsedDecimal {
   const frac = match[2] ?? '';
   const exp = match[3] !== undefined ? Number.parseInt(match[3], 10) : 0;
 
-  let units = BigInt(whole + frac);
+  // Bound BEFORE any bigint work: the checks below are what keep `10n ** k`
+  // (here and in `aligned`) small enough to evaluate in microseconds.
+  if (whole.length + frac.length > MAX_DECIMAL_SIGNIFICANT_DIGITS) {
+    throw new Error(`decimal has more than ${MAX_DECIMAL_SIGNIFICANT_DIGITS} significant digits`);
+  }
   let scale = frac.length - exp;
+  if (scale > MAX_DECIMAL_SCALE || scale < -MAX_DECIMAL_SCALE) {
+    throw new Error(`decimal scale is outside ±${MAX_DECIMAL_SCALE}`);
+  }
+
+  let units = BigInt(whole + frac);
   if (scale < 0) {
     units *= 10n ** BigInt(-scale);
     scale = 0;
@@ -46,7 +83,9 @@ function parseDecimalString(value: string): ParsedDecimal {
   return { neg: neg && units !== 0n, units, scale };
 }
 
-/** Parse a `number | string` amount exactly (throws on NaN/±Infinity/garbage). */
+/** Parse a `number | string` amount exactly.  Throws on NaN/±Infinity/garbage and
+ *  on anything outside the bounded domain documented above — so every value that
+ *  parses is safe to align, compare, add, and multiply. */
 function parseDecimal(input: DecimalInput): ParsedDecimal {
   if (typeof input === 'number') {
     if (!Number.isFinite(input)) throw new Error('amount must be finite');
@@ -55,7 +94,12 @@ function parseDecimal(input: DecimalInput): ParsedDecimal {
   return parseDecimalString(input);
 }
 
-/** True when the input parses as a valid finite decimal. */
+/**
+ * True when the input is a finite decimal INSIDE this module's bounded domain.
+ * This is the module's guard predicate: callers (the WS-U kernel's treasury-cap
+ * check) rely on `isValidDecimal(x) === true` implying that the subsequent
+ * `decCompare`/`decSum` on `x` cannot throw.
+ */
 export function isValidDecimal(input: DecimalInput): boolean {
   try {
     parseDecimal(input);

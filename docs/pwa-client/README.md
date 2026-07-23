@@ -468,7 +468,12 @@ uploaded (to `attention.aggregate`).
   aggregate is checked for raw-trace keys before it is queued or uploaded — and
   `scripts/check-no-raw-egress.ts` is the **build-failing static** half (the signal
   layer may use no network-egress primitive and no BFF import but the bucketed
-  uploader).
+  uploader).  The static half pins the runtime half's **invocation**, not merely
+  its name: it strips import statements and requires an `assertNoRawEgress(` call
+  expression, because the guard is the only check that inspects the VALUE about to
+  egress (the other three are structural), and a bare identifier test was
+  satisfied by the `import { assertNoRawEgress }` line alone — deleting the call
+  while keeping the import passed the gate while the guard no longer ran.
 
 ### The §22.1 bucketing core
 

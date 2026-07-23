@@ -89,10 +89,16 @@ function AnchorComment({
       <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">Replying within</p>
       {/* The focused anchor is a comment like any other, so it carries the same
           header-end report flag every CommentNode does — drilling into a comment
-          must not be the one way to lose the ability to report it. */}
+          must not be the one way to lose the ability to report it, nor (with the
+          sheet's self-serve half) to block or mute its author. */}
       <CommentHeader
         comment={anchor}
-        action={<CommentReportButton contributionId={anchor.contribution_id} />}
+        action={
+          <CommentReportButton
+            contributionId={anchor.contribution_id}
+            authorHandle={anchor.is_author ? null : anchor.author_handle}
+          />
+        }
       />
       {anchor.body.length > 0 ? <UgcBody markdown={anchor.body} compact /> : null}
       <CommentMedia comment={anchor} />

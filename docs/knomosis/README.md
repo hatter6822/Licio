@@ -107,6 +107,33 @@ knomosis-api}.ts` + `packages/shared/src/knomosis/`.  DB:
 (EIP-6963 discovery, SIWE builder, EIP-1193 types), `apps/web/src/lib/
 wallet-api.ts`, `apps/web/src/components/wallet/`.
 
+Two WS-L reads reach the member through WS-M's room surfaces rather than a
+WS-L-specific tab:
+
+- **WS-L.4.1e comprehension check** — `components/treasury/ComprehensionQuiz.tsx`,
+  mounted IN PLACE by `ReadinessChecklist` on the `comprehension_passed` row
+  while that requirement is unmet.  It is the only checklist item a member can
+  act on from the checklist (every other one is a room fact settled elsewhere),
+  and it is a HARD gate on `simulated → testnet` (`readiness.ts`), so listing it
+  without a way to take it would make that transition unreachable.  A wrong
+  answer returns the correct choice + the server's explanation, so the check
+  teaches the simulation boundary rather than only gating on it; the correct
+  answers never appear on the READ (`quizQuestions()` strips `correctChoice`).
+  Passing invalidates `roomReadinessAll` so the checklist reflects it at once.
+- **WS-L.2.5c-1 wallet risk state** — `components/wallet/WalletManager.tsx`
+  fetches the per-wallet detail lazily, ONLY for a wallet whose coarse
+  `risk_state` is not `normal`, and shows the plain-language `explanation` and
+  `next_step`.  The list projection carries the enum alone; showing the label
+  without the reason tells an owner something is wrong and nothing about what to
+  do.  Never raw sanctions/fraud internals — the server decides what is safe to
+  say.
+
+`GET /v1/rooms/:roomId/governance` (the WS-L.4.1a tab bundle) has NO web client:
+every field it carries is served by a live, mode-aware WS-M query — the proposal
+list (`useProposalListQuery`), the treasury tab (`useTreasuryTabQuery`), and the
+charter history — so a second client path would only be a redundant round trip
+that could disagree with them.
+
 ## Tests + gates
 
 - `pnpm --filter api test` — the WS-L suites: signatures (real secp256k1),

@@ -19,6 +19,7 @@ import { TextArea } from '../ui/TextArea/index.js';
 import { useToast } from '../ui/Toast/index.js';
 import { Tooltip, type TooltipPlacement } from '../ui/Tooltip/index.js';
 import { REPORT_REASON_GROUPS } from './report-reasons.js';
+import { BlockMuteButtons } from './SafetyRelations.js';
 
 export interface ReportSheetProps {
   open: boolean;
@@ -26,6 +27,11 @@ export interface ReportSheetProps {
   targetType: ReportTargetType;
   targetId: string;
   contentKind?: ReportContentKind;
+  /** The reported content's author handle.  When present the sheet also offers
+   *  the WS-J.1.2 block/mute controls — the SPEC §B "two-tap report/block/mute"
+   *  affordance.  Omitted when the author is unknown (a deleted-account
+   *  tombstone) or when the reader is looking at their own content. */
+  authorHandle?: string | null;
 }
 
 export function ReportSheet({
@@ -34,6 +40,7 @@ export function ReportSheet({
   targetType,
   targetId,
   contentKind,
+  authorHandle,
 }: ReportSheetProps): React.ReactElement | null {
   const t = useT();
   const { toast } = useToast();
@@ -133,6 +140,26 @@ export function ReportSheet({
           )}
         />
       </div>
+      {/* WS-J.1.2 — the self-serve half of the same sheet. Reporting asks a
+          steward to act; blocking/muting acts immediately and needs no review,
+          so a reader who does not want a review still leaves with a remedy. */}
+      {authorHandle ? (
+        <section
+          aria-label={t('safety.selfServe', 'Or handle it yourself')}
+          className="mt-6 border-t border-line pt-4"
+        >
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+            {t('safety.selfServe', 'Or handle it yourself')}
+          </h3>
+          <p className="mb-3 text-xs text-ink-muted">
+            {t(
+              'safety.selfServe.help',
+              'These take effect immediately and are private — no review needed.',
+            )}
+          </p>
+          <BlockMuteButtons handle={authorHandle} onDone={onClose} />
+        </section>
+      ) : null}
     </Sheet>
   );
 }
@@ -141,6 +168,9 @@ export interface ReportButtonProps {
   targetType: ReportTargetType;
   targetId: string;
   contentKind?: ReportContentKind;
+  /** Passed through to the sheet so it can also offer block/mute — see
+   *  {@link ReportSheetProps.authorHandle}. */
+  authorHandle?: string | null;
   /** Compact presentation: the flag glyph alone, named for assistive tech and
    *  labelled on hover/focus by a tooltip (WCAG 1.4.13). */
   iconOnly?: boolean;
@@ -159,6 +189,7 @@ export function ReportButton({
   targetType,
   targetId,
   contentKind,
+  authorHandle,
   iconOnly = false,
   label,
   tooltipPlacement = 'center',
@@ -195,6 +226,7 @@ export function ReportButton({
           targetType={targetType}
           targetId={targetId}
           {...(contentKind ? { contentKind } : {})}
+          {...(authorHandle ? { authorHandle } : {})}
         />
       ) : null}
     </>

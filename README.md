@@ -420,7 +420,9 @@ pnpm typecheck                   # incremental tsc -b
 pnpm typecheck:ci                # authoritative forced typecheck
 pnpm lint                        # Biome check over the repository
 pnpm test                        # Vitest projects
-pnpm test -- --coverage          # Vitest with coverage gate
+pnpm test --coverage             # Vitest with the 80% coverage gate (NO `--`:
+                                 #   pnpm forwards it verbatim and vitest ignores
+                                 #   everything after a `--`, silently skipping the gate)
 pnpm test:e2e                    # Playwright E2E via the web workspace
 pnpm --filter web test:e2e:bff   # authenticated BFF-in-the-loop E2E
 pnpm build                       # ordered monorepo production build

@@ -1267,8 +1267,26 @@ pnpm --filter web gen:tokens          # regenerate design-token CSS from the SSO
 
 ```sh
 pnpm test                    # all projects, in-memory stores
-pnpm test -- --coverage      # adds the 80% line/function/branch/statement gate
+pnpm test --coverage         # adds the 80% line/function/branch/statement gate
 ```
+
+**The coverage gate needs the gated services up.**  Note the flag form: it is
+`--coverage`, NOT `-- --coverage` — pnpm forwards a bare `--` verbatim and
+vitest parks every following flag in `argv['--']`, so the `--` form runs the
+suite with coverage silently disabled.  And run it with `DATABASE_URL` +
+`REDIS_URL` pointing at the Compose services (§2): the WS-D/E/F/G/H/I/U and
+WS-R integration suites carry a meaningful share of the branch coverage, so a
+bare local run measures **≈79.7% branches and FAILS the gate**, while the same
+tree with the services up measures **≈80.9% and passes** — which is what CI
+does (it provisions `pgvector/pgvector:pg16` + `redis:7` for that job):
+
+```sh
+DATABASE_URL=postgresql://licio:licio_dev@localhost:5432/licio_dev \
+  REDIS_URL=redis://localhost:6379 pnpm test --coverage
+```
+
+Branches clear the bar by under a point, so treat a coverage drop in review as
+a real signal rather than noise.
 
 The twelve Vitest projects (shared, db, invariants, ranking, ai-governance,
 governance, lcap, lcap-p2p, private-p2p, api, web, policy) are composed by the

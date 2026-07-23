@@ -455,6 +455,15 @@ export interface UploadStore {
     bytes: Uint8Array,
   ): Promise<UploadRecord>;
   getRecord(uploadId: string): Promise<UploadRecord | null>;
+  /**
+   * Batch form of {@link UploadStore.getRecord}, keyed by upload id.  Serving a
+   * page of comments resolves the media for EVERY row at once (`resolveMedia`);
+   * doing that one `getRecord` at a time is an N+1 whose latency is
+   * `rows × attachments × round-trip` on a surface that is read constantly.
+   * Missing ids are simply absent from the map (never an error) — an upload can
+   * be purged while a contribution still references it.
+   */
+  getRecords(uploadIds: readonly string[]): Promise<Map<string, UploadRecord>>;
   getBytes(uploadId: string): Promise<Uint8Array | null>;
   setScanState(uploadId: string, state: UploadRecord['scanState']): Promise<void>;
   /** WS-Q.5.2c — link an upload to the story it is media for (idempotent). */
@@ -1319,6 +1328,15 @@ export class InMemoryUploadStore implements UploadStore {
 
   async getRecord(uploadId: string): Promise<UploadRecord | null> {
     return this.#records.get(uploadId) ?? null;
+  }
+
+  async getRecords(uploadIds: readonly string[]): Promise<Map<string, UploadRecord>> {
+    const out = new Map<string, UploadRecord>();
+    for (const id of uploadIds) {
+      const record = this.#records.get(id);
+      if (record) out.set(id, record);
+    }
+    return out;
   }
 
   async getBytes(uploadId: string): Promise<Uint8Array | null> {

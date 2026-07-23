@@ -90,7 +90,7 @@ async function seedUser(opts: {
   platformRoles?: Role[];
   stewardRoles?: StewardRoleId[];
   steward?: boolean;
-}): Promise<{ userId: string; cookie: string }> {
+}): Promise<{ userId: string; handle: string; cookie: string }> {
   const user = await identity.store.createUser({
     handle: opts.handle,
     displayName: opts.handle,
@@ -132,6 +132,7 @@ async function seedUser(opts: {
   });
   return {
     userId: user.userId,
+    handle: user.handle,
     cookie: buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string,
   };
 }
@@ -315,6 +316,90 @@ describe('blocks + mutes', () => {
     );
     expect(created.status).toBe(201);
     expect(((await created.json()) as { expires_at: string | null }).expires_at).not.toBeNull();
+  });
+
+  // The HANDLE form is what every UI affordance uses: the public contribution
+  // projection withholds `author_user_id` (§19.5), so a reader looking at a
+  // comment holds the author's handle and nothing else. Without this the SPEC §B
+  // two-tap block/mute affordance has no identifier to act on.
+  it('blocks by PUBLIC HANDLE and names the target in the list', async () => {
+    const target = await seedUser({ handle: `t${randomUUID().slice(0, 6)}` });
+    const actor = await seedUser({ handle: `a${randomUUID().slice(0, 6)}` });
+
+    const created = await app().request(
+      post('/v1/blocks', { blocked_user_handle: target.handle }, actor.cookie),
+    );
+    expect(created.status).toBe(201);
+    const record = (await created.json()) as {
+      blocked_user_id: string;
+      blocked_user_handle: string;
+    };
+    expect(record.blocked_user_id).toBe(target.userId);
+    expect(record.blocked_user_handle).toBe(target.handle);
+
+    const list = await app().request(get('/v1/blocks', actor.cookie));
+    const { blocks } = (await list.json()) as {
+      blocks: Array<{ blocked_user_handle: string }>;
+    };
+    expect(blocks.map((b) => b.blocked_user_handle)).toEqual([target.handle]);
+  });
+
+  it('mutes by PUBLIC HANDLE, honours the duration, and names the target', async () => {
+    const target = await seedUser({ handle: `t${randomUUID().slice(0, 6)}` });
+    const actor = await seedUser({ handle: `a${randomUUID().slice(0, 6)}` });
+
+    const created = await app().request(
+      post('/v1/mutes', { muted_user_handle: target.handle, duration: '1d' }, actor.cookie),
+    );
+    expect(created.status).toBe(201);
+    const record = (await created.json()) as {
+      muted_user_id: string;
+      muted_user_handle: string;
+      expires_at: string | null;
+    };
+    expect(record.muted_user_id).toBe(target.userId);
+    expect(record.muted_user_handle).toBe(target.handle);
+    expect(record.expires_at).not.toBeNull();
+
+    const list = await app().request(get('/v1/mutes', actor.cookie));
+    const { mutes } = (await list.json()) as { mutes: Array<{ muted_user_handle: string }> };
+    expect(mutes.map((m) => m.muted_user_handle)).toEqual([target.handle]);
+  });
+
+  it('applies the same guards to the handle form (self-target 400, unknown 404)', async () => {
+    const actor = await seedUser({ handle: `a${randomUUID().slice(0, 6)}` });
+
+    const selfBlock = await app().request(
+      post('/v1/blocks', { blocked_user_handle: actor.handle }, actor.cookie),
+    );
+    expect(selfBlock.status).toBe(400);
+    const selfMute = await app().request(
+      post('/v1/mutes', { muted_user_handle: actor.handle }, actor.cookie),
+    );
+    expect(selfMute.status).toBe(400);
+
+    const unknown = await app().request(
+      post('/v1/blocks', { blocked_user_handle: 'nobody_at_all_1' }, actor.cookie),
+    );
+    expect(unknown.status).toBe(404);
+  });
+
+  // Exactly one target form: supplying both (or a handle that is not one) is a
+  // validation error, never a silent precedence rule.
+  it('rejects a request that names the target twice or malformed', async () => {
+    const actor = await seedUser({ handle: `a${randomUUID().slice(0, 6)}` });
+    const both = await app().request(
+      post(
+        '/v1/blocks',
+        { blocked_user_id: AUTHOR, blocked_user_handle: 'someone_here' },
+        actor.cookie,
+      ),
+    );
+    expect(both.status).toBe(400);
+    const bad = await app().request(
+      post('/v1/blocks', { blocked_user_handle: 'no' }, actor.cookie),
+    );
+    expect(bad.status).toBe(400);
   });
 });
 

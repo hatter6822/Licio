@@ -14,6 +14,7 @@ import { type ModerationReasonCode, REPORT_SEVERITIES } from '../constants/moder
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 import { contributionReasonCodeSchema } from './contribution.js';
 import { enforcementActionTypeSchema } from './steward-roles.js';
+import { handleSchema } from './user.js';
 
 /** Severity as it appears on the wire (the taxonomy scale, not the event scale). */
 export const reportSeveritySchema = z.enum(REPORT_SEVERITIES);
@@ -106,13 +107,32 @@ export type ReportCreatedResponse = z.infer<typeof reportCreatedResponseSchema>;
 // Blocks (WS-J.1.2a) — bilateral, API-enforced.
 // ---------------------------------------------------------------------------
 
-export const createBlockRequestSchema = z.object({ blocked_user_id: uuidSchema }).strict();
+/**
+ * Name the block target either by user id or by PUBLIC HANDLE — exactly one.
+ *
+ * The handle form is what the product actually needs: the public contribution
+ * projection deliberately withholds `author_user_id` (§19.5), so a reader looking
+ * at a comment holds the author's HANDLE and nothing else.  Without it the
+ * SPEC §B "two-tap report/block/mute" affordance has no identifier to act on and
+ * blocking is unreachable from every content surface.  The id form is retained
+ * for callers that already hold one (the console, tests, offline replay).
+ *
+ * `.strict()` on each member means supplying BOTH is a validation error rather
+ * than a silent precedence rule.
+ */
+export const createBlockRequestSchema = z.union([
+  z.object({ blocked_user_id: uuidSchema }).strict(),
+  z.object({ blocked_user_handle: handleSchema }).strict(),
+]);
 export type CreateBlockRequest = z.infer<typeof createBlockRequestSchema>;
 
 export const blockRecordSchema = z
   .object({
     block_id: uuidSchema,
     blocked_user_id: uuidSchema,
+    /** The blocked account's public handle, so the management list can name who
+     *  is blocked instead of rendering a truncated opaque id. */
+    blocked_user_handle: handleSchema,
     created_at: isoTimestampSchema,
   })
   .strict();
@@ -134,18 +154,19 @@ export const MUTE_DURATIONS = ['1d', '7d', '30d', 'forever'] as const;
 export const muteDurationSchema = z.enum(MUTE_DURATIONS);
 export type MuteDuration = z.infer<typeof muteDurationSchema>;
 
-export const createMuteRequestSchema = z
-  .object({
-    muted_user_id: uuidSchema,
-    duration: muteDurationSchema.optional(),
-  })
-  .strict();
+/** Id-or-handle target, exactly as {@link createBlockRequestSchema} (same rationale). */
+export const createMuteRequestSchema = z.union([
+  z.object({ muted_user_id: uuidSchema, duration: muteDurationSchema.optional() }).strict(),
+  z.object({ muted_user_handle: handleSchema, duration: muteDurationSchema.optional() }).strict(),
+]);
 export type CreateMuteRequest = z.infer<typeof createMuteRequestSchema>;
 
 export const muteRecordSchema = z
   .object({
     mute_id: uuidSchema,
     muted_user_id: uuidSchema,
+    /** The muted account's public handle — see {@link blockRecordSchema}. */
+    muted_user_handle: handleSchema,
     expires_at: isoTimestampSchema.nullable(),
     created_at: isoTimestampSchema,
   })

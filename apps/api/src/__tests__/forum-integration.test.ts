@@ -635,6 +635,39 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(await uploads.getRecord(randomUUID())).toBeNull();
   });
 
+  // The batch read backs `resolveMedia`, which serves media for a WHOLE page of
+  // comments; the per-row `getRecord` it replaced was an N+1. Pinned against the
+  // REAL adapter so the `IN (...)` path cannot drift from the in-memory one.
+  it('batch-reads upload records by id (the resolveMedia path)', async () => {
+    const ids = [randomUUID(), randomUUID()];
+    uploadIds.push(...ids);
+    for (const id of ids) {
+      await uploads.put(
+        {
+          uploadId: id,
+          ownerUserId: secondUserId,
+          contentType: 'image/png',
+          byteSize: 3,
+          altText: 'batch',
+          storageRef: `uploads/${id}`,
+          metadataStripped: true,
+          scanState: 'clear',
+        },
+        new Uint8Array([1, 2, 3]),
+      );
+    }
+    const missing = randomUUID();
+    // Duplicates collapse; a missing id is simply absent, never an error (an
+    // upload can be purged while a contribution still references it).
+    const batch = await uploads.getRecords([...ids, ids[0] as string, missing]);
+    expect([...batch.keys()].sort()).toEqual([...ids].sort());
+    expect(batch.get(ids[0] as string)?.altText).toBe('batch');
+    expect(batch.has(missing)).toBe(false);
+    // Matches the single-record read exactly.
+    expect(batch.get(ids[1] as string)).toEqual(await uploads.getRecord(ids[1] as string));
+    expect(await uploads.getRecords([])).toEqual(new Map());
+  });
+
   it('the S3 byte path signs requests (SigV4) and round-trips through the fake bucket', async () => {
     const objects = new Map<string, Uint8Array>();
     const seenHeaders: Array<Record<string, string>> = [];

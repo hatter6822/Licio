@@ -360,6 +360,16 @@ describe('upload scanner seam (WS-J.2.6b) + DSAR upload listing', () => {
     const listed = await fixture.forum.uploads.listByOwner(userId);
     expect(listed.map((row) => row.uploadId)).toEqual([mine.uploadId]);
     expect(await fixture.forum.uploads.listByOwner(randomUUID())).toEqual([]);
+
+    // The batch read behind `resolveMedia` — the SAME contract the Drizzle
+    // adapter is pinned to in forum-integration.test.ts: duplicates collapse, a
+    // missing id is absent rather than an error, and an empty ask does no work.
+    const missing = randomUUID();
+    const batch = await fixture.forum.uploads.getRecords([mine.uploadId, mine.uploadId, missing]);
+    expect([...batch.keys()]).toEqual([mine.uploadId]);
+    expect(batch.get(mine.uploadId)).toEqual(await fixture.forum.uploads.getRecord(mine.uploadId));
+    expect(batch.has(missing)).toBe(false);
+    expect(await fixture.forum.uploads.getRecords([])).toEqual(new Map());
   });
 
   it('a pending scan verdict holds attachment; flagged rejects at the seam', async () => {

@@ -51,7 +51,9 @@ pnpm setup:llm                      # provision + verify the REAL local governan
 pnpm bench:llm                      # race local models through the REAL governed surfaces, per role
                                     #   (--role moderation|adjudication|all; guard models use their native dialect)
 pnpm build                          # shared → db/invariants → web/api
-pnpm test                           # Vitest across all workspaces (80% coverage gate); -- --coverage for the report
+pnpm test                           # Vitest across all workspaces; `--coverage` adds the 80% gate
+                                    #   (NOT `-- --coverage`: pnpm passes the `--` through and vitest
+                                    #   drops every flag after it, so the gate would never run)
 pnpm test:e2e                       # Playwright E2E (Chromium/Firefox/WebKit); web test:e2e:bff = authenticated BFF harness
 pnpm lint / lint:fix                # Biome check / auto-fix
 pnpm typecheck                      # TypeScript strict-mode (tsc -b; see the cache warning below)
@@ -692,13 +694,21 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈8400 pass without
-the gated integration env; more with live Postgres/Redis).  Only monotonic
+**Test counts.**  `pnpm test` is the canonical query (≈8700 pass without
+the gated integration env; ≈8950 with live Postgres/Redis).  Only monotonic
 growth is enforced — exact numbers drift, so the per-suite breakdown lives
 in each `docs/*/README.md`, not here.  WS-D/E/F/G/H/I/U and WS-R add
 **gated** Postgres+Redis integration suites that run only with
 `DATABASE_URL`/`REDIS_URL` set (CI provisions `pgvector/pgvector:pg16` +
 `redis:7`, so they run in CI and skip on a bare local run).
+
+**Coverage.**  The 80% gate is only ENFORCED when coverage is actually
+enabled — `pnpm test --coverage`, never `pnpm test -- --coverage` (pnpm
+forwards the `--` verbatim and vitest drops every flag after it, so the run
+looks normal while computing no coverage at all).  Measure it with the gated
+services up: the WS-D/E/F/G/H/I/U + WS-R integration suites carry a large
+share of the branch coverage, and branches clear the bar by a thin margin
+(≈81%) WITH them.
 
 **E2E.**  Playwright over Chromium/Firefox/WebKit with axe-core assertions.
 `playwright.config.ts` is the frontend-only suite against the static

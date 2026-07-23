@@ -4,9 +4,11 @@
 // focused (rooted) anchor whose replies nest INSIDE its article, drill-down
 // breadcrumbs, and the page-header upper-left back button to the story.
 import type { CommentItem, LensPublic } from '@licio/shared';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ToastProvider } from '../../components/ui/Toast/index.js';
 
 const navigate = vi.fn();
 const recordReplyDepth = vi.fn();
@@ -237,10 +239,28 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
     search = { root: anchor.contribution_id };
     commentsState = { data: { comments: [child], anchor, next_cursor: null } };
 
-    render(<StoryCommentsPage />);
+    // The sheet's block/mute half raises toasts and owns mutations, so this one
+    // case mounts the providers the real app root always supplies.
+    render(<StoryCommentsPage />, {
+      wrapper: ({ children }) => (
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <ToastProvider>{children}</ToastProvider>
+        </QueryClientProvider>
+      ),
+    });
 
     expect(screen.getByText('Replying within')).toBeInTheDocument();
     expect(screen.getByText('The focused comment.')).toBeInTheDocument();
+    // Drilling into a comment must not be the one way to lose a safety action:
+    // the anchor's report control carries its author handle, so its sheet keeps
+    // the self-serve block/mute half (WS-J.1.2) that a CommentNode's does. The
+    // anchor renders first, so its flag is the first report control on the page.
+    const flags = screen.getAllByRole('button', { name: 'Report this comment' });
+    expect(flags.length).toBeGreaterThan(1);
+    fireEvent.click(flags[0] as HTMLElement);
+    expect(screen.getByRole('button', { name: /Block @alice/ })).toBeInTheDocument();
     expect(screen.getByText('A reply to the focused comment.')).toBeInTheDocument();
     // Breadcrumbs: "All comments" (unrooted) and "Up one level" (the parent).
     expect(screen.getByRole('link', { name: 'All comments' })).toHaveAttribute(

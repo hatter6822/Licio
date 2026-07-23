@@ -187,7 +187,15 @@ export function CommentNode({
           peer of the conversational actions below (see CommentReportButton). */}
       <CommentHeader
         comment={comment}
-        action={<CommentReportButton contributionId={comment.contribution_id} />}
+        action={
+          <CommentReportButton
+            contributionId={comment.contribution_id}
+            // The sheet's block/mute half needs the author's handle. It is null
+            // on a deleted-account tombstone, and self-blocking is refused, so
+            // neither case offers the control.
+            authorHandle={comment.is_author ? null : comment.author_handle}
+          />
+        }
       />
       {/* WS-T — a correction always denotes WHAT it challenges and links to its
           debate arena (live or resolved), so it is never a floating claim:

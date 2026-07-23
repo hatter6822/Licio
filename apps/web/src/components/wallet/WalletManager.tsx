@@ -16,6 +16,7 @@ import { StepUpRequiredError } from '../../lib/auth-api.js';
 import {
   useLinkWalletMutation,
   useUnlinkWalletMutation,
+  useWalletRiskStateQuery,
   useWalletsQuery,
 } from '../../lib/queries.js';
 import { requestWalletNonce } from '../../lib/wallet-api.js';
@@ -25,6 +26,26 @@ import { buildSiweMessage, LICIO_WALLET_CHAIN_ID, normalizeAddress } from '../..
 import { StepUpDialog, useStepUpGate } from '../security/StepUpDialog/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
+
+/**
+ * The plain-language reason a wallet is flagged, plus the next step when one
+ * exists (WS-L.2.5c-1).  The list projection carries only the coarse
+ * `risk_state` enum, so this fetches the per-wallet detail — lazily, and ONLY
+ * for a non-normal wallet, so an ordinary wallet list still makes one request.
+ * Never raw sanctions/fraud internals: the server decides what is safe to say.
+ */
+function WalletRiskExplanation({ walletId }: { walletId: string }): React.ReactElement | null {
+  const risk = useWalletRiskStateQuery(walletId);
+  if (!risk.data) return null;
+  return (
+    <div className="mt-1 text-xs">
+      <p className="text-ink">{risk.data.explanation}</p>
+      {risk.data.next_step !== null ? (
+        <p className="text-ink-muted">{risk.data.next_step}</p>
+      ) : null}
+    </div>
+  );
+}
 
 /** The provider `icon` is attacker-controllable announcement data.  Only a
  *  `data:image/...` URI is safe to put in `<img src>`; an `https://…` icon would
@@ -290,6 +311,14 @@ export function WalletManager({ enabled }: WalletManagerProps): React.ReactEleme
                   <p className="text-xs text-ink-muted">
                     {w.address_truncated} · {t(`wallet.risk.${w.risk_state}`, w.risk_state)}
                   </p>
+                  {/* A non-normal risk state is a bare enum word on this row.
+                      The server already computes a plain-language explanation and
+                      a user-actionable next step for exactly this case
+                      (WS-L.2.5c-1); showing the label without them tells the owner
+                      something is wrong and nothing about what to do. */}
+                  {w.risk_state !== 'normal' ? (
+                    <WalletRiskExplanation walletId={w.wallet_account_id} />
+                  ) : null}
                 </div>
                 {w.unlink_state === 'active' ? (
                   <Button

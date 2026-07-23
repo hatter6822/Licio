@@ -97,8 +97,14 @@ apps/web/src/
                                           the comment HEADER's inline end, opposite
                                           the author, matching the feed card's
                                           top-right flag rather than sitting among
-                                          the Reply/Correct actions), support
-                                          contact, block/mute, notice inbox + appeal
+                                          the Reply/Correct actions).  The SHEET
+                                          also carries BlockMuteButtons whenever it
+                                          knows the author's handle — the SPEC §B
+                                          "two-tap report/block/mute" affordance:
+                                          reporting asks a steward to act, block/
+                                          mute acts immediately.  Plus support
+                                          contact, the block/mute management list,
+                                          notice inbox + appeal
   components/moderation/ModerationConsole steward console (queue/review/palette/
                                           appeals/integrity/audit)
   routes/support.tsx, profile_.notices.tsx, profile_.safety.tsx, moderation.tsx
@@ -126,6 +132,16 @@ apps/web/src/
   blocked user is never notified.
 - **Mutes (`/v1/mutes`, WS-J.1.2b).** One-directional viewing filter with an
   optional duration that auto-lifts (the scheduler sweeps expired mutes).
+- **Naming the target (both).** Each create accepts EITHER `*_user_id` OR the
+  target's public `*_user_handle` — exactly one (a strict zod union; supplying
+  both is a 400, never a silent precedence rule).  The handle form is the one the
+  UI uses, and it is what makes the affordance mountable at all: the public
+  contribution projection deliberately withholds `author_user_id` (§19.5), so a
+  reader looking at a comment holds the author's HANDLE and nothing else.  Both
+  forms resolve through `resolveTargetUser` before the shared self-target (400) /
+  unknown-account (404) guards, so the two entry points cannot diverge.  The LIST
+  responses carry the target handle too — an unblock list keyed on truncated
+  opaque ids is not a management surface.
 - **Appeals (`/v1/appeals`, WS-J.1.3).** Eligibility mirrors the WS-A.1.2c matrix
   (`appealEligibility`): warn/hide/restrict immediate; remove except CSAM/
   imminent-threat (lawful basis); ban after a cooldown; emergency deferred;
@@ -342,9 +358,14 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
 
 - **BFF E2E** for the safety flows (report → console review → action → appeal),
   driven through the WS-P BFF-in-the-loop harness.
-- **Block/mute + report affordances** are mounted on the safety page, the feed
-  card, and the story page; mounting them on every contribution row + profile
-  header is remaining client polish.
+- **Report affordances** are mounted on the feed card, the story page, and every
+  comment header.  **Block/mute** rides the same sheet wherever the author's
+  handle is known — which today is every comment — plus the management list on
+  the safety page.  It is deliberately NOT on the feed card or story header: the
+  story projection carries no submitter handle, and adding one would publish an
+  identity those surfaces do not otherwise show.  Reaching block/mute from a
+  story therefore waits on a decision about surfacing the submitter, not on
+  client polish.
 - **SPEC enhancements beyond the §-DoD** (not claimed complete): the two-person
   co-approval rule for the highest-severity actions; escalation AUTO-routing to a
   senior queue (today `escalate` sets the case status and seniors pull it);

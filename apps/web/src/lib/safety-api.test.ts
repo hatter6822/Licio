@@ -43,12 +43,12 @@ describe('safety-api client flows', () => {
     });
     await safety.fetchBlocks();
     await safety.fetchBlocks('cursor-1');
-    await safety.createBlock(ID);
+    await safety.createBlockByHandle('noisy_reader');
     await safety.removeBlock(ID);
     await safety.fetchMutes();
     await safety.fetchMutes('cursor-1');
-    await safety.createMute(ID);
-    await safety.createMute(ID, '7d');
+    await safety.createMuteByHandle('noisy_reader');
+    await safety.createMuteByHandle('noisy_reader', '7d');
     await safety.removeMute(ID);
     await safety.fetchAppealEligibility(ID);
     await safety.createAppeal({ action_id: ID, user_statement: 'please reconsider' });

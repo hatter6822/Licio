@@ -1758,7 +1758,7 @@ Add CI jobs for running tests with coverage enforcement and tracking bundle size
 **Jobs:**
 
 **Job: test**
-- Run `pnpm test -- --coverage` across all workspaces
+- Run `pnpm test --coverage` across all workspaces
 - Coverage threshold: 80% (lines, functions, branches, statements)
 - Fail the build if coverage drops below threshold
 - Upload coverage report as a CI artifact

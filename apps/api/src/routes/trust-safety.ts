@@ -48,6 +48,52 @@ const deny = (code: string, message: string) => ({ error: { code, message } });
 const uuidParam = <K extends string>(name: K) =>
   z.object({ [name]: uuidSchema } as Record<K, typeof uuidSchema>);
 
+/**
+ * Resolve a block/mute target given EITHER form of the request (WS-J.1.2).  A
+ * reader on a content surface holds the author's public handle and never a user
+ * id (§19.5 keeps `author_user_id` off the public projection), so the handle form
+ * is the one the UI uses; both collapse to the same `{ userId, handle }` here so
+ * the self-target guard and the create path stay single-implementation.
+ * Returns null when no such account exists (the caller answers 404).
+ */
+async function resolveTargetUser(
+  ref: { userId: string } | { handle: string },
+): Promise<{ userId: string; handle: string } | null> {
+  const store = getIdentityServices().store;
+  const user =
+    'userId' in ref ? await store.getUser(ref.userId) : await store.getUserByHandle(ref.handle);
+  return user ? { userId: user.userId, handle: user.handle } : null;
+}
+
+/**
+ * Decorate a block/mute page with each target's public handle so the management
+ * list can NAME who is blocked or muted rather than printing a truncated opaque
+ * id.  Handles are looked up once per DISTINCT target — a page holds at most 50
+ * rows of indexed point lookups, and the dedupe keeps it O(distinct) by
+ * construction.  A deleted account still resolves: `tombstoneUser` REPLACES the
+ * handle with a `deleted_<hash>` form rather than dropping the row, so the list
+ * never loses a block that is still in force.  The placeholder is reachable only
+ * if a relation row outlives its user row (an FK violation), and a named row is
+ * still better there than a dropped one.
+ */
+async function withHandles<K extends string, H extends string, T extends Record<K, string>>(
+  rows: readonly T[],
+  idKey: K,
+  handleKey: H,
+): Promise<Array<T & Record<H, string>>> {
+  const handles = new Map<string, string>();
+  await Promise.all(
+    [...new Set(rows.map((row) => row[idKey]))].map(async (userId) => {
+      const user = await getIdentityServices().store.getUser(userId);
+      if (user) handles.set(userId, user.handle);
+    }),
+  );
+  return rows.map(
+    (row) =>
+      ({ ...row, [handleKey]: handles.get(row[idKey]) ?? 'unknown' }) as T & Record<H, string>,
+  );
+}
+
 export function createTrustSafetyRoutes() {
   return (
     new Hono<AuthEnv>()
@@ -165,8 +211,12 @@ export function createTrustSafetyRoutes() {
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const { cursor } = c.req.valid('query');
           const mod = getModerationServices();
+          const page = await listBlocks(mod, auth.userId, cursor ?? null, 50);
           return c.json(
-            blockListResponseSchema.parse(await listBlocks(mod, auth.userId, cursor ?? null, 50)),
+            blockListResponseSchema.parse({
+              ...page,
+              blocks: await withHandles(page.blocks, 'blocked_user_id', 'blocked_user_handle'),
+            }),
           );
         },
       )
@@ -177,14 +227,21 @@ export function createTrustSafetyRoutes() {
         async (c) => {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-          const { blocked_user_id } = c.req.valid('json');
-          if (blocked_user_id === auth.userId) {
+          const body = c.req.valid('json');
+          const target = await resolveTargetUser(
+            'blocked_user_id' in body
+              ? { userId: body.blocked_user_id }
+              : { handle: body.blocked_user_handle },
+          );
+          if (!target) return c.json(deny('user_not_found', 'User not found'), 404);
+          if (target.userId === auth.userId) {
             return c.json(deny('cannot_block_self', 'You cannot block yourself'), 400);
           }
-          const target = await getIdentityServices().store.getUser(blocked_user_id);
-          if (!target) return c.json(deny('user_not_found', 'User not found'), 404);
-          const block = await createBlock(getModerationServices(), auth.userId, blocked_user_id);
-          return c.json(blockRecordSchema.parse(block), 201);
+          const block = await createBlock(getModerationServices(), auth.userId, target.userId);
+          return c.json(
+            blockRecordSchema.parse({ ...block, blocked_user_handle: target.handle }),
+            201,
+          );
         },
       )
       .delete(
@@ -210,29 +267,35 @@ export function createTrustSafetyRoutes() {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const { cursor } = c.req.valid('query');
+          const page = await listMutes(getModerationServices(), auth.userId, cursor ?? null, 50);
           return c.json(
-            muteListResponseSchema.parse(
-              await listMutes(getModerationServices(), auth.userId, cursor ?? null, 50),
-            ),
+            muteListResponseSchema.parse({
+              ...page,
+              mutes: await withHandles(page.mutes, 'muted_user_id', 'muted_user_handle'),
+            }),
           );
         },
       )
       .post('/mutes', authMiddleware(), zValidator('json', createMuteRequestSchema), async (c) => {
         const auth = getAuth(c);
         if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-        const { muted_user_id, duration } = c.req.valid('json');
-        if (muted_user_id === auth.userId) {
+        const body = c.req.valid('json');
+        const target = await resolveTargetUser(
+          'muted_user_id' in body
+            ? { userId: body.muted_user_id }
+            : { handle: body.muted_user_handle },
+        );
+        if (!target) return c.json(deny('user_not_found', 'User not found'), 404);
+        if (target.userId === auth.userId) {
           return c.json(deny('cannot_mute_self', 'You cannot mute yourself'), 400);
         }
-        const target = await getIdentityServices().store.getUser(muted_user_id);
-        if (!target) return c.json(deny('user_not_found', 'User not found'), 404);
         const mute = await createMute(
           getModerationServices(),
           auth.userId,
-          muted_user_id,
-          duration,
+          target.userId,
+          body.duration,
         );
-        return c.json(muteRecordSchema.parse(mute), 201);
+        return c.json(muteRecordSchema.parse({ ...mute, muted_user_handle: target.handle }), 201);
       })
       .delete(
         '/mutes/:muteId',

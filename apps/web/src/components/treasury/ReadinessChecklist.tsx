@@ -19,6 +19,7 @@ import { ErrorState } from '../ui/ErrorState/index.js';
 import { LoadingState } from '../ui/LoadingState/index.js';
 import { Select } from '../ui/Select/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
+import { ComprehensionQuiz } from './ComprehensionQuiz.js';
 import { governanceModeMeta } from './mode-meta.js';
 
 const STATUS_TONE = { pass: 'success', fail: 'warning', not_applicable: 'neutral' } as const;
@@ -137,6 +138,18 @@ export function ReadinessChecklist({
                     )
                     .join(', ')}
                 </p>
+              ) : null}
+              {/* The one requirement the reader can satisfy from HERE. Every other
+                  item is a room fact (charter, stewards, treasury policy, track
+                  record) settled elsewhere, but the comprehension check is a
+                  personal action — listing it as "not met" with no way to take it
+                  is a dead end, so the quiz opens in place (WS-L.4.1e).  Rendered
+                  only while the requirement is UNMET: once it passes the badge
+                  already says so, and mounting the quiz would just re-fetch it. */}
+              {item.requirement === 'comprehension_passed' && item.status === 'fail' ? (
+                <div className="mt-3 border-t border-line pt-3">
+                  <ComprehensionQuiz roomId={roomId} enabled={enabled} />
+                </div>
               ) : null}
             </li>
           ))}

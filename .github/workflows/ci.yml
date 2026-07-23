@@ -139,7 +139,12 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test -- --coverage --reporter=default --reporter=junit --outputFile=test-results/junit.xml
+      # NO `--` before the flags: pnpm forwards a bare `--` verbatim, and vitest's
+      # CLI parks everything after it in `argv['--']` — so `pnpm test -- --coverage`
+      # ran the suite with coverage DISABLED, never computed the 80% thresholds,
+      # and silently dropped the JUnit reporter too (no test-results/junit.xml was
+      # ever produced). The gate this job is named for only exists without the `--`.
+      - run: pnpm test --coverage --reporter=default --reporter=junit --outputFile=test-results/junit.xml
       # WS-I.3: the ten ranking-neutrality tests as an EXPLICIT, named gate
       # (they also run inside the full suite above; this step makes the
       # pay-to-rank guarantee a visible required check on every PR and

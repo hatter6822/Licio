@@ -149,9 +149,26 @@ export function applyBalancing(
       if (candidate === undefined) break;
       // Replace the lowest-scoring page item whose lens is over-represented
       // (appears more than once) or is null; never drop the only item of a lens.
-      const replaceable = [...page]
-        .reverse()
-        .find((p) => p.lensId === null || page.filter((q) => q.lensId === p.lensId).length > 1);
+      //
+      // Selected by SCORE, not by position: the graceful-degradation fill above
+      // appends over-cap items to the end of `page`, so page order is not score
+      // order on a degraded page — taking the last eligible entry could evict a
+      // high-scoring item and keep a much weaker one (a score-8 item dropped
+      // while a score-2 item stayed).  Ties break on the greater item id, which
+      // is exactly the entry the final `score desc, id asc` sort would place
+      // last, so the choice stays deterministic.
+      const eligible = page.filter(
+        (p) => p.lensId === null || page.filter((q) => q.lensId === p.lensId).length > 1,
+      );
+      const replaceable = eligible.reduce<BalancingInput | undefined>(
+        (lowest, p) =>
+          lowest === undefined ||
+          p.score < lowest.score ||
+          (p.score === lowest.score && p.itemId > lowest.itemId)
+            ? p
+            : lowest,
+        undefined,
+      );
       if (replaceable === undefined) break;
       page.splice(page.indexOf(replaceable), 1);
       demoted.push(replaceable);

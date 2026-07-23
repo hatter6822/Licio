@@ -32,13 +32,27 @@ export function muteExpiry(duration: MuteDuration | undefined, nowMs: number): s
   }
 }
 
-const toBlockView = (r: AccountBlockRecord): BlockRecordView => ({
+/**
+ * The relation records this module produces carry NO target handle: the public
+ * handle is an identity-store fact, and `relations.ts` owns the moderation store
+ * alone.  The ROUTE joins the two planes (`withHandles` in `routes/trust-safety.ts`)
+ * before egress validation, which keeps this module free of an identity
+ * dependency and keeps the join in one place.
+ */
+export type BlockRecordCore = Omit<BlockRecordView, 'blocked_user_handle'>;
+export type MuteRecordCore = Omit<MuteRecordView, 'muted_user_handle'>;
+/** A page of un-decorated records, shaped exactly like the wire response minus
+ *  the handle each row gains at the route. */
+export type BlockListPage = Omit<BlockListResponse, 'blocks'> & { blocks: BlockRecordCore[] };
+export type MuteListPage = Omit<MuteListResponse, 'mutes'> & { mutes: MuteRecordCore[] };
+
+const toBlockView = (r: AccountBlockRecord): BlockRecordCore => ({
   block_id: r.blockId,
   blocked_user_id: r.blockedUserId,
   created_at: r.createdAt,
 });
 
-const toMuteView = (r: AccountMuteRecord): MuteRecordView => ({
+const toMuteView = (r: AccountMuteRecord): MuteRecordCore => ({
   mute_id: r.muteId,
   muted_user_id: r.mutedUserId,
   expires_at: r.expiresAt,
@@ -50,7 +64,7 @@ export async function listBlocks(
   blockerUserId: string,
   cursor: string | null,
   limit: number,
-): Promise<BlockListResponse> {
+): Promise<BlockListPage> {
   const rows = await services.blocks.listByBlocker(blockerUserId, cursor, limit + 1);
   const page = rows.slice(0, limit);
   return {
@@ -63,7 +77,7 @@ export async function createBlock(
   services: ModerationServices,
   blockerUserId: string,
   blockedUserId: string,
-): Promise<BlockRecordView> {
+): Promise<BlockRecordCore> {
   const record = await services.blocks.insert(blockerUserId, blockedUserId);
   services.metrics.increment('blocks.created');
   return toBlockView(record);
@@ -84,7 +98,7 @@ export async function listMutes(
   muterUserId: string,
   cursor: string | null,
   limit: number,
-): Promise<MuteListResponse> {
+): Promise<MuteListPage> {
   const rows = await services.mutes.listByMuter(muterUserId, cursor, limit + 1);
   const page = rows.slice(0, limit);
   return {
@@ -98,7 +112,7 @@ export async function createMute(
   muterUserId: string,
   mutedUserId: string,
   duration: MuteDuration | undefined,
-): Promise<MuteRecordView> {
+): Promise<MuteRecordCore> {
   const record = await services.mutes.insert(
     muterUserId,
     mutedUserId,
