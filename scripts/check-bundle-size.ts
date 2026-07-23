@@ -14,16 +14,21 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // unbounded app growth has a brake too.  The total is a RATCHET: it moves
 // only by an explicit, reviewed adjustment when an audited feature ships,
 // and always stays within ~3 KiB of the measured build so silent growth
-// keeps failing fast.  (Last adjusted for the WS-F.3.1b unified-search
-// modal — a lazy ~4 KiB chunk; initial payload unaffected at ~164 KiB.)
+// keeps failing fast.  (Last adjusted for scoped search + the banner
+// governance/sign-in action: +2.3 KiB measured — the room/story scope plumbing,
+// the shared circular-action primitive, and the governance modal now reachable
+// from the story surfaces.  Splitting that modal into its own chunk was
+// measured and REJECTED: its tree is shared with the room page, so the split
+// moved bytes between chunks and added boundary cost rather than removing any.
+// Initial payload unaffected at ~164 KiB.)
 const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
-const TOTAL_JS_BUDGET_BYTES = 324 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 327 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 // WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily
 // code-split, reached ONLY through dynamic imports (check:private-p2p-split /
 // check:lcap-p2p-split), so they carry no weight for a user who never opts into
-// E2EE rooms or P2P/courier sync.  They would blow the core 320 KiB TOTAL-JS
+// E2EE rooms or P2P/courier sync.  They would blow the core TOTAL-JS
 // budget even though they never enter the initial load (PRIVATE_SPEC §9.8), so
 // each gets its OWN measured budget and is EXCLUDED from the core total — never
 // silently exempt.  Two chunks qualify: the `private-p2p` plane (the E2EE rooms

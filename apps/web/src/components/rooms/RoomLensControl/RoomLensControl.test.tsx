@@ -7,7 +7,7 @@ import type { LensPublic, RoomDetail } from '@licio/shared';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { RoomLensButton } from './RoomLensButton.js';
+import { RoomLensButton, roomLensButtonApplies } from './RoomLensButton.js';
 import { RoomLensDialog } from './RoomLensDialog.js';
 import { lensDisplayName, RoomLensSelector } from './RoomLensSelector.js';
 
@@ -134,6 +134,24 @@ describe('RoomLensButton (WS-G.2.2)', () => {
       <RoomLensButton roomId="r1" room={baseRoom({ joined: true, lenses: [] })} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('`roomLensButtonApplies` answers exactly what the button renders', () => {
+    // A caller laying this out in an action row must know BEFORE rendering
+    // whether the row will have content (React cannot report "rendered
+    // nothing"), so the predicate and the component must never disagree.
+    const cases = [
+      { joined: false, lenses: LENSES },
+      { joined: true, lenses: [] },
+      { joined: true, lenses: LENSES },
+      { joined: false, lenses: [] },
+    ];
+    for (const over of cases) {
+      const room = baseRoom(over);
+      const { container, unmount } = render(<RoomLensButton roomId="r1" room={room} />);
+      expect(roomLensButtonApplies(room)).toBe(container.innerHTML !== '');
+      unmount();
+    }
   });
 
   it('labels the button with the current lens (Undecided by default)', () => {

@@ -155,6 +155,39 @@ the SW-update / eviction toasts, and emits a navigation breadcrumb (route PATTER
   `/stories/$storyId/comments?root=<id>` (comment permalinks), or
   `/rooms/$roomId`. Global search serves only public content from public
   rooms — the WS-Q boundary is server-side; the modal adds no ranking input.
+- **Scoped search (WS-Q.2.5b / WS-T.7.3):** the same button and the same modal
+  serve three **scopes**, selected by the banner that opened them and carried
+  in the transient `searchScope` UI-store slice (`null` = global): a **room**
+  banner searches that room's pool (`?room=`, stories + comments), a **story**
+  or comments banner searches that story's conversation (`?story=`, comments
+  only). Both scoped forms are gated server-side by the corresponding read bar
+  (`roomContentVisibleToUser` / `storyReadableByUser`), so an unreadable target
+  is a **404, never an empty page** (no existence oracle); the two scope
+  parameters are mutually exclusive at the wire schema. The modal names the
+  scope (heading, placeholder, and a persistent "Searching within" pill) and
+  offers only the type filters that scope can return — a story scope has one
+  corpus, so it shows no filter row. Closing clears the scope, and Ctrl/Cmd+K
+  is always the GLOBAL surface (an app-wide hotkey carries no page context).
+- **Banner actions (WS-B.1.5):** on the story and room routes the banner
+  carries **navigation only** — the back button at the inline-start and, at the
+  inline-end symmetrically opposite it, circular 48px `CircleIconButton`
+  actions: scoped search and the governance control. The (unbounded) story
+  title / room name moves out of the bar and leads the page body as the `<h1>`
+  (`PageHeader titlePlacement="body"` + `PageTitle`, which renders outside the
+  query-state switch so the WS-B.1.6 focus target exists on the frame after a
+  route change). The governance slot is **one affordance in two states**
+  (`GovernanceButton`): a **blue** sign-in link to `/login?redirect=<here>`
+  while signed out (governance participation is account-gated, WS-U §16.6),
+  becoming the **green** shield-with-check modal trigger once signed in — with
+  the glyph and accessible name changing too, so colour is never the only cue.
+  A signed-out reader keeps that control even below a room's tier-two bar
+  (signing in is how they get past it); the full-width "Sign in" and
+  "Governance" buttons that used to stack in the room's membership row are
+  gone, leaving only the explanation an icon cannot carry. While a ratified AI
+  model **actively governs** the room, that shield GLOWS gold (`glow-governed`
+  over the `governed` token, verified against the `success` fill and flattened
+  under `prefers-contrast: more` / forced colours) — reinforcing, never
+  replacing, the "AI agent active" already in the accessible name.
 - **Code splitting (WS-C.1.1c):** `autoCodeSplitting` makes every route's
   component its own on-demand chunk behind a Skeleton fallback. The initial JS
   payload stays within the Section 6.10 budget (CI gate:
@@ -194,8 +227,9 @@ version mismatch is discarded and the store falls back to its defaults.
 - **`useUIStore` (1.3b):** theme, reduced-motion, feed mode (the §11.6 sort
   orders `best`/`rising`/`sources`/`debates`/`new`; a legacy persisted value
   normalizes forward on rehydration instead of discarding the slice), focus
-  mode, sheet, and the transient `searchOpen` flag behind the search modal
-  (never persisted — a reload never reopens it).
+  mode, sheet, and the transient `searchOpen` + `searchScope` pair behind the
+  search modal (never persisted — a reload never reopens it, and closing clears
+  the scope so a later global open cannot inherit it).
   The accessibility-adapter surface — applies `data-theme` / `data-motion` to
   `<html>` for the WS-B token layer.
 - **`useFeatureFlagStore` (1.3c):** `cryptoEnabled` / `governanceEnabled` /

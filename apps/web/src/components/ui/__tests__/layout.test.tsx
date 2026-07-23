@@ -6,7 +6,7 @@ import { useT } from '../../../i18n/index.js';
 import { checkA11y } from '../../../test/axe.js';
 import { AppShell } from '../AppShell/index.js';
 import { BottomNav, defaultNavItems } from '../BottomNav/index.js';
-import { PageHeader } from '../PageHeader/index.js';
+import { PageHeader, PageTitle } from '../PageHeader/index.js';
 import { SafeArea } from '../SafeArea/index.js';
 import { ScrollArea } from '../ScrollArea/index.js';
 
@@ -99,6 +99,39 @@ describe('PageHeader (WS-B.1.5)', () => {
     expect(heading.className.split(/\s+/)).toContain('sr-only');
     // …and the replacement control renders in its visual slot.
     expect(screen.getByRole('button', { name: 'Open search' })).toBeInTheDocument();
+  });
+
+  it('titlePlacement="body" renders NO heading — the page body owns the <h1>', () => {
+    // A long story title or room name would squeeze the banner's controls, so
+    // those pages move the <h1> below the bar. PageHeader must then emit no
+    // heading at all: a second <h1> inside <main> would steal the WS-B.1.6
+    // route-change focus and announce a duplicate.
+    render(
+      <PageHeader
+        title="An unusually long story headline that would crowd the banner"
+        titlePlacement="body"
+        onBack={vi.fn()}
+        actions={<button type="button">Search</button>}
+      />,
+    );
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument();
+    // Navigation stays at the two ends: back at the start, actions at the end.
+    expect(screen.getByRole('button', { name: 'Go back' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Search' })).toBeInTheDocument();
+  });
+});
+
+describe('PageTitle (WS-B.1.5)', () => {
+  it('is the page <h1> and wraps rather than truncating', () => {
+    render(<PageTitle>A room name long enough to wrap onto a second line</PageTitle>);
+    const heading = screen.getByRole('heading', {
+      level: 1,
+      name: 'A room name long enough to wrap onto a second line',
+    });
+    const classes = heading.className.split(/\s+/);
+    expect(classes).toContain('break-words');
+    expect(classes).not.toContain('truncate');
+    expect(classes).not.toContain('sr-only');
   });
 });
 

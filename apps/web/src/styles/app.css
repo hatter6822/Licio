@@ -152,6 +152,27 @@
 }
 
 /* ===================================================================== *
+ * Governed-room glow (WS-U §24.6). The governance action's shield-with-check
+ * GLOWS gold while a ratified AI model actively governs the room — a property
+ * of the mark itself rather than a badge stuck beside it, so the banner's
+ * circle stays one clean 48px control.
+ *
+ * `drop-shadow` (not `box-shadow`) so the halo follows the glyph's STROKED
+ * outline instead of its bounding box; two stops give a tight core plus a soft
+ * bloom. It is static — a pulse would be motion in the periphery, exactly what
+ * `prefers-reduced-motion` readers ask us not to do.
+ *
+ * Accessibility: decorative reinforcement only. The state is always carried by
+ * the button's accessible NAME ("Governance — AI agent active"), so the glow is
+ * never the sole indicator; it reads through the `--licio-glow-governed` token
+ * so the flattening block at the foot of this file can neutralise it under
+ * `prefers-contrast: more` / forced colours alongside the neumorphic shadows.
+ * ===================================================================== */
+@utility glow-governed {
+  filter: var(--licio-glow-governed);
+}
+
+/* ===================================================================== *
  * Brand-logo theme swap (BrandLogo component). Mirrors the token layer's
  * EXACT colour-mode resolution so the visible mark always matches the active
  * theme — both the system `prefers-color-scheme` and the manual
@@ -223,6 +244,9 @@
     --licio-shadow-pressed: none;
     --licio-shadow-pressed-sm: none;
     --licio-shadow-inset: none;
+    /* State glows are decorative reinforcement of something the accessible
+     * name already states (WS-U §24.6), so they flatten here too. */
+    --licio-glow-governed: none;
   }
 }
 

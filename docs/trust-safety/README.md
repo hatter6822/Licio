@@ -92,7 +92,12 @@ apps/api/src/routes/
 apps/web/src/
   lib/safety-api.ts                       typed client (zod on every response)
   components/safety/                      report sheet + ReportButton (mounted on
-                                          the feed card + story page), support
+                                          the feed card + story page; comments use
+                                          CommentReportButton — the same sheet from
+                                          the comment HEADER's inline end, opposite
+                                          the author, matching the feed card's
+                                          top-right flag rather than sitting among
+                                          the Reply/Correct actions), support
                                           contact, block/mute, notice inbox + appeal
   components/moderation/ModerationConsole steward console (queue/review/palette/
                                           appeals/integrity/audit)

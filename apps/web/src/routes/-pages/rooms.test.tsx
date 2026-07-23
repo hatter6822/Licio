@@ -10,10 +10,14 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '../../stores/auth.js';
+import { useUIStore } from '../../stores/ui.js';
 import { checkA11y } from '../../test/axe.js';
-import { RoomDetailBody } from './rooms.js';
+import { RoomDetailBody, RoomDetailPage } from './rooms.js';
+
+const ROOM_ID = '77777777-7777-4777-8777-777777777777';
 
 const searchMock = vi.hoisted(() => vi.fn((): Record<string, unknown> => ({})));
+const historyBack = vi.hoisted(() => vi.fn());
 vi.mock('@tanstack/react-router', () => ({
   // Forward className + aria-label so StoryFeedLink's stretched overlay link
   // keeps an accessible name in the test DOM (axe link-name).
@@ -30,15 +34,26 @@ vi.mock('@tanstack/react-router', () => ({
       {children}
     </a>
   ),
-  useParams: () => ({ roomId: 'r1' }),
+  useParams: () => ({ roomId: ROOM_ID }),
   useSearch: () => searchMock(),
+  useNavigate: () => vi.fn(),
+  // useGoBack (the banner's back button) retraces history.
+  useCanGoBack: () => true,
+  useRouter: () => ({ history: { back: historyBack } }),
 }));
+// The route-change focus/announcement hook reaches the router transition
+// lifecycle; the banner's own behaviour is what these cases exercise.
+vi.mock('./usePageFocus.js', () => ({ usePageFocus: vi.fn() }));
 
 const roomFeed = vi.hoisted(() => vi.fn());
 const joinRoom = vi.hoisted(() => vi.fn());
 const leaveRoom = vi.hoisted(() => vi.fn());
+const roomQuery = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/queries.js', () => ({
   useRoomFeedQuery: (_roomId: string, enabled: boolean) => roomFeed(enabled),
+  // RoomDetailPage's own read (the banner + the governance modal both need the
+  // loaded room); the body-only cases never reach it.
+  useRoomQuery: () => roomQuery(),
   useJoinRoomMutation: () => ({ mutate: joinRoom, isPending: false }),
   useLeaveRoomMutation: () => ({ mutate: leaveRoom, isPending: false }),
   // WS-G.2.2: the room action row now renders the posting-lens button (its own
@@ -67,7 +82,7 @@ vi.mock('../../lib/queries.js', () => ({
 
 function baseRoom(over: Partial<RoomDetail>): RoomDetail {
   return {
-    room_id: 'r1',
+    room_id: ROOM_ID,
     name: 'Hydrology',
     slug: 'hydrology',
     room_type: 'global_topic',
@@ -112,7 +127,24 @@ function renderBody(room: RoomDetail) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <RoomDetailBody roomId="r1" room={room} />
+      <RoomDetailBody roomId={ROOM_ID} room={room} />
+    </QueryClientProvider>,
+  );
+}
+
+/** The whole route: banner (back + the two circular actions) + body + the
+ *  governance modal the banner opens. */
+function renderPage(room: RoomDetail) {
+  roomQuery.mockReturnValue({
+    data: room,
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <RoomDetailPage />
     </QueryClientProvider>,
   );
 }
@@ -177,13 +209,13 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     expect(screen.queryByRole('button', { name: /join/i })).not.toBeInTheDocument();
   });
 
-  it('opens the governance surface in a modal from the compact chrome row (WS-U)', () => {
+  it('opens the governance surface in a modal from the banner button (WS-U)', () => {
     roomFeed.mockReturnValue({ isPending: false, data: undefined });
-    // A public room a member can read → the governance chrome row renders.
-    renderBody(baseRoom({ visibility: 'public', joined: true }));
+    // A public room a member can read → both banner actions render.
+    renderPage(baseRoom({ visibility: 'public', joined: true }));
 
-    // The governance surface opens from a single compact button (shares the
-    // membership action row); the modal is closed until the reader opens it.
+    // The governance surface opens from the banner's circular button; the modal
+    // is closed until the reader opens it (the modal subtree is not mounted).
     const trigger = screen.getByRole('button', { name: /^governance$/i });
     expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -209,7 +241,7 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     // The legacy /rooms/:id/governance route redirects here with ?governance=…;
     // the modal opens on render to the deep-linked tab.
     searchMock.mockReturnValue({ governance: 'models' });
-    renderBody(baseRoom({ visibility: 'public', joined: true }));
+    renderPage(baseRoom({ visibility: 'public', joined: true }));
 
     expect(
       screen.getByRole('dialog', { name: /governance, transparency & settings/i }),
@@ -224,11 +256,12 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     roomFeed.mockReturnValue({ isPending: false, data: undefined });
     // Reader is already on the room page with the modal closed…
     searchMock.mockReturnValue({});
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const room = baseRoom({ visibility: 'public', joined: true });
+    roomQuery.mockReturnValue({ data: room, isLoading: false, isError: false, refetch: vi.fn() });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { rerender } = render(
       <QueryClientProvider client={client}>
-        <RoomDetailBody roomId="r1" room={room} />
+        <RoomDetailPage />
       </QueryClientProvider>,
     );
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -238,7 +271,7 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     searchMock.mockReturnValue({ governance: 'overview' });
     rerender(
       <QueryClientProvider client={client}>
-        <RoomDetailBody roomId="r1" room={room} />
+        <RoomDetailPage />
       </QueryClientProvider>,
     );
     expect(
@@ -271,5 +304,67 @@ describe('RoomDetailBody (WS-Q.5.3a/b)', () => {
     });
     const feed = renderBody(baseRoom({ visibility: 'private', joined: true }));
     expect(await checkA11y(feed.container)).toHaveNoViolations();
+  });
+});
+
+// WS-B.1.5 + WS-Q.2.5b + WS-U §24.6 — the room banner carries navigation only:
+// back at the inline-start, room-scoped search and governance at the
+// inline-end, and the (unbounded) room NAME as the page <h1> in the body.
+describe('RoomDetailPage banner', () => {
+  beforeEach(() => {
+    roomFeed.mockReturnValue({ isPending: false, data: undefined });
+  });
+
+  it('puts the room name in the body <h1>, not the bar, and offers both actions', () => {
+    renderPage(baseRoom({ visibility: 'public', joined: true, name: 'Hydrology' }));
+    const heading = screen.getByRole('heading', { level: 1, name: 'Hydrology' });
+    // The <h1> is the WS-B.1.6 focus target and must NOT be hidden the way a
+    // titleReplacement heading is — it is the visible page title now.
+    expect(heading.className.split(/\s+/)).not.toContain('sr-only');
+    // The bar itself no longer carries the name.
+    expect(screen.getByRole('button', { name: 'Go back' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Search this room' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Governance' })).toBeInTheDocument();
+  });
+
+  it('scopes the search modal to this room', async () => {
+    renderPage(baseRoom({ visibility: 'public', joined: true, name: 'Hydrology' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search this room' }));
+    const { searchOpen, searchScope } = useUIStore.getState();
+    expect(searchOpen).toBe(true);
+    expect(searchScope).toEqual({ kind: 'room', roomId: ROOM_ID, label: 'Hydrology' });
+    useUIStore.getState().closeSearch();
+  });
+
+  it('offers neither action below the tier-two bar (signed-in private-room non-member)', () => {
+    renderPage(baseRoom({ visibility: 'private', joined: false }));
+    expect(screen.queryByRole('button', { name: 'Search this room' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /governance/i })).not.toBeInTheDocument();
+  });
+
+  it('gives an ANONYMOUS reader the sign-in circle in the governance slot', () => {
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    renderPage(baseRoom({ visibility: 'public', joined: false }));
+    // One slot, blue while signed out: the governance trigger is not rendered…
+    expect(screen.queryByRole('button', { name: /governance/i })).not.toBeInTheDocument();
+    const signIn = screen.getByRole('link', { name: /sign in/i });
+    expect(signIn.className.split(/\s+/)).toContain('bg-primary');
+    // …and it is the ONLY sign-in affordance: the membership row's full-width
+    // primary button AND its "Sign in to join this room." caption are both gone,
+    // so the instruction is not repeated below the room description.
+    expect(screen.getAllByRole('link', { name: /sign in/i })).toHaveLength(1);
+    expect(screen.queryByText(/sign in to join this room/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the sign-in circle even below the tier-two bar (that is how you get past it)', () => {
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    renderPage(baseRoom({ visibility: 'private', joined: false }));
+    expect(screen.queryByRole('button', { name: 'Search this room' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /sign in/i })).toBeInTheDocument();
+  });
+
+  it('has no accessibility violations with the banner actions rendered', async () => {
+    const page = renderPage(baseRoom({ visibility: 'public', joined: true }));
+    expect(await checkA11y(page.container)).toHaveNoViolations();
   });
 });

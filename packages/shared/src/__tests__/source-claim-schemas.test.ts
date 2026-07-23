@@ -185,6 +185,19 @@ describe('search request schema (WS-F.3.1b)', () => {
     ).toBe(true);
   });
 
+  it('accepts either scope alone (room / story) and rejects the two together', () => {
+    const roomId = '11111111-1111-4111-8111-111111111111';
+    const storyId = '22222222-2222-4222-8222-222222222222';
+    expect(searchRequestSchema.safeParse({ q: 'water', room: roomId }).success).toBe(true);
+    expect(searchRequestSchema.safeParse({ q: 'water', story: storyId }).success).toBe(true);
+    // A story sits in exactly one room, so the conjunction expresses nothing the
+    // story scope does not — and would make the route's read bar ambiguous.
+    expect(
+      searchRequestSchema.safeParse({ q: 'water', room: roomId, story: storyId }).success,
+    ).toBe(false);
+    expect(searchRequestSchema.safeParse({ q: 'water', story: 'not-a-uuid' }).success).toBe(false);
+  });
+
   it('search results carry relevance + recency only — no financial field', () => {
     for (const key of Object.keys(searchResultSchema.shape)) {
       expect(isFinancialFieldName(key)).toBe(false);

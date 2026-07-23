@@ -26,6 +26,8 @@
   --licio-primary-on-soft: #194A9F;
   --licio-success: #1B7A3D;
   --licio-success-fg: #FFFFFF;
+  --licio-success-hover: #166833;
+  --licio-success-active: #125628;
   --licio-success-soft: #E2F2E8;
   --licio-success-on-soft: #15622F;
   --licio-warning: #8A5A00;
@@ -41,6 +43,7 @@
   --licio-info-fg: #FFFFFF;
   --licio-info-soft: #E7EEFB;
   --licio-info-on-soft: #194A9F;
+  --licio-governed: #FFD166;
   /* Typography (WS-B.1.1b) */
   --licio-text-xs: 0.75rem;
   --licio-leading-xs: 1.5;
@@ -94,6 +97,8 @@
   --licio-shadow-pressed: inset 4px 4px 8px var(--licio-neu-shadow), inset -4px -4px 8px var(--licio-neu-highlight);
   --licio-shadow-pressed-sm: inset 2px 2px 4px var(--licio-neu-shadow), inset -2px -2px 4px var(--licio-neu-highlight);
   --licio-shadow-inset: inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight);
+  /* State glows */
+  --licio-glow-governed: drop-shadow(0 0 2px var(--licio-governed)) drop-shadow(0 0 6px var(--licio-governed));
   --licio-z-base: 0;
   --licio-z-dropdown: 100;
   --licio-z-sticky: 200;
@@ -276,6 +281,8 @@
   --color-primary-on-soft: var(--licio-primary-on-soft);
   --color-success: var(--licio-success);
   --color-success-fg: var(--licio-success-fg);
+  --color-success-hover: var(--licio-success-hover);
+  --color-success-active: var(--licio-success-active);
   --color-success-soft: var(--licio-success-soft);
   --color-success-on-soft: var(--licio-success-on-soft);
   --color-warning: var(--licio-warning);
@@ -291,6 +298,7 @@
   --color-info-fg: var(--licio-info-fg);
   --color-info-soft: var(--licio-info-soft);
   --color-info-on-soft: var(--licio-info-on-soft);
+  --color-governed: var(--licio-governed);
   /* Typography */
   --text-xs: var(--licio-text-xs);
   --text-xs--line-height: var(--licio-leading-xs);

@@ -149,6 +149,16 @@ export const iconPaths = {
       <path d="M4 21c0-4 4-6 8-6s8 2 8 6" />
     </>
   ),
+  // An arrow entering a doorway — the sign-in action. Used by the banner's
+  // circular auth affordance, which becomes the governance action once the
+  // reader is signed in.
+  'log-in': (
+    <>
+      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+      <polyline points="10 17 15 12 10 7" />
+      <line x1="15" y1="12" x2="3" y2="12" />
+    </>
+  ),
   pencil: (
     <>
       <path d="M12 20h9" />

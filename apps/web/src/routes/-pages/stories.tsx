@@ -4,14 +4,21 @@
 // error state rather than fetching). Mounting the story marks it the active item
 // for the signal processor; opening the in-app reader records a source-open
 // (WS-C.4.2). Source content is rendered by the sandboxed WS-B.2.7 reader.
+//
+// The banner carries NAVIGATION ONLY — back at the inline-start, and
+// symmetrically opposite it the two circular actions: story-scoped search
+// (WS-T.7.3) and the governing room's governance modal (WS-U §24.6). The story
+// TITLE is unbounded, so it leads the page body as the <h1>.
 import { isSentinelTopicId, type StoryDetail } from '@licio/shared';
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection, CorrectionComposer } from '../../components/comments/index.js';
 import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
 import { useCloseDebate, useOpenDebate } from '../../components/debate/open-debate.js';
+import { StoryGovernanceControl } from '../../components/governance/StoryGovernanceControl.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
+import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
@@ -153,10 +160,34 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     setReaderOpen(false);
   };
 
+  // Banner actions (WS-B.1.5): story-scoped search (WS-T.7.3 — the conversation
+  // on THIS story) and the governing room's governance modal (WS-U §24.6), both
+  // right-justified opposite the back button. Governance needs the home room, so
+  // it appears only once the story payload names one (a legacy/orphan row has
+  // none); search is available as soon as the id is valid.
+  const homeRoomId = story.data?.room_id ?? null;
+
   return (
     <PageScaffold
       title={story.data?.title ?? t('story.title', 'Story')}
+      // Story titles are unbounded — the <h1> leads the page body and the banner
+      // carries navigation only.
+      titlePlacement="body"
       onBack={goBack}
+      actions={
+        <>
+          <SearchButton
+            scope={{
+              kind: 'story',
+              storyId,
+              label: story.data?.title ?? t('story.title', 'Story'),
+            }}
+          />
+          {homeRoomId !== null ? (
+            <StoryGovernanceControl roomId={homeRoomId} signInRedirect={`/stories/${storyId}`} />
+          ) : null}
+        </>
+      }
       query={story}
     >
       {(data) =>

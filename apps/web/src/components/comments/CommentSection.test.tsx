@@ -233,6 +233,35 @@ describe('CommentSection', () => {
     );
   });
 
+  it('WS-J.1.1 — the report flag closes the HEADER row, opposite the author (not an action peer)', () => {
+    queryState = {
+      data: {
+        comments: [comment({ body: 'A plain remark.' })],
+        next_cursor: null,
+        anchor: null,
+        overview: { comment_count: 1, sources_count: 0, corrections_count: 0 },
+      },
+    };
+    renderSection();
+    const report = screen.getByRole('button', { name: 'Report this comment' });
+    const reply = screen.getByRole('button', { name: 'Reply' });
+
+    // Reporting is a safety escalation ABOUT the post, not a conversational
+    // action: it must NOT share the Reply/Correct row.
+    expect(reply.parentElement?.contains(report)).toBe(false);
+
+    // It closes the header row the author name opens — the two ends of one line.
+    const actionSlot = report.parentElement;
+    const headerRow = actionSlot?.parentElement;
+    expect(headerRow?.children).toHaveLength(2);
+    expect(headerRow?.firstElementChild?.textContent).toContain('Alice');
+    expect(headerRow?.lastElementChild).toBe(actionSlot);
+    expect(headerRow?.className.split(/\s+/)).toContain('justify-between');
+
+    // WCAG 2.2 AA target size (2.5.8): the icon-only control clears 24px.
+    expect(report.className.split(/\s+/)).toContain('size-7');
+  });
+
   it('WS-T — surfaces a legacy bare DOI citation with visible link text (no empty link)', () => {
     queryState = {
       data: {

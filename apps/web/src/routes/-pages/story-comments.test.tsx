@@ -88,6 +88,9 @@ vi.mock('../../lib/queries.js', () => ({
   useRoomQuery: () => roomState,
   // WS-T — the page surfaces active-debate discovery; no debates by default.
   useStoryDebatesQuery: () => ({ data: { debates: [] } }),
+  // WS-U §24.6 — the banner's governance control marks an active in-room agent;
+  // no agent by default (the button still renders).
+  useGovernedByQuery: () => ({ isLoading: false, isError: false, data: undefined }),
 }));
 
 const { StoryCommentsPage } = await import('./story-comments.js');
@@ -248,6 +251,11 @@ describe('StoryCommentsPage (dedicated comment page)', () => {
       'href',
       `/stories/${STORY_ID}/comments?root=${anchorParent}`,
     );
+    // WS-J.1.1 — the anchor is a comment like any other: it carries the same
+    // header-end report flag, one per rendered comment (anchor + its reply), so
+    // drilling into a comment is not the one way to lose the ability to report
+    // it.
+    expect(screen.getAllByRole('button', { name: 'Report this comment' })).toHaveLength(2);
   });
 
   it('records the focused anchor depth even with no rendered replies (§5.3)', () => {

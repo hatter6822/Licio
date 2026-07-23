@@ -28,7 +28,7 @@ import {
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
-import { roomContentVisibleToUser } from '../forum/rooms.js';
+import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
 import { getForumServices } from '../forum/services.js';
 import { viewerHideSet } from '../forum/threads.js';
 import { getIdentityServices } from '../identity/services.js';
@@ -247,6 +247,22 @@ export function createStoriesRoutes() {
           if (query.room !== undefined) {
             const room = await forum.rooms.getById(query.room);
             if (room === null || !(await roomContentVisibleToUser(forum, room, userId))) {
+              return c.json(deny('not_found', 'Resource not found'), 404);
+            }
+          }
+          // WS-T.7.3 — a story-scoped query searches that story's conversation,
+          // so it must pass the SAME item read bar every direct story/comment
+          // read enforces (WS-Q.3.2 `storyReadableByUser`): a hidden story, an
+          // unknown id, or a private room the caller is not in is a 404, never
+          // an empty result set (which would leak existence).
+          if (query.story !== undefined) {
+            const story = await ingestion.stories.getById(query.story);
+            const room = story === null ? null : await forum.rooms.getById(story.roomId);
+            if (
+              story === null ||
+              room === null ||
+              !(await storyReadableByUser(forum, story, room, userId))
+            ) {
               return c.json(deny('not_found', 'Resource not found'), 404);
             }
           }

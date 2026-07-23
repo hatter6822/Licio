@@ -39,6 +39,8 @@ export type ColorToken =
   | 'primary-on-soft'
   | 'success'
   | 'success-fg'
+  | 'success-hover'
+  | 'success-active'
   | 'success-soft'
   | 'success-on-soft'
   | 'warning'
@@ -53,7 +55,8 @@ export type ColorToken =
   | 'info'
   | 'info-fg'
   | 'info-soft'
-  | 'info-on-soft';
+  | 'info-on-soft'
+  | 'governed';
 
 export type ColorPalette = Record<ColorToken, string>;
 export type ColorOverrides = Partial<ColorPalette>;
@@ -101,9 +104,14 @@ export const lightColors: ColorPalette = {
   'primary-active': '#16459E',
   'primary-soft': '#E7EEFB',
   'primary-on-soft': '#194A9F',
-  // Success
+  // Success. `hover`/`active` mirror the primary ramp (each step darker, so the
+  // white `success-fg` contrast only ever RISES from the verified 4.9:1 base):
+  // a filled success control — the governance banner action — needs the same
+  // interaction states every other filled variant has.
   success: '#1B7A3D',
   'success-fg': '#FFFFFF',
+  'success-hover': '#166833',
+  'success-active': '#125628',
   'success-soft': '#E2F2E8',
   'success-on-soft': '#15622F',
   // Warning
@@ -122,6 +130,13 @@ export const lightColors: ColorPalette = {
   'info-fg': '#FFFFFF',
   'info-soft': '#E7EEFB',
   'info-on-soft': '#194A9F',
+  // Governed (WS-U §24.6): the gold a room's governance mark takes on while a
+  // ratified AI model actively governs it — the ONE state distinguished from
+  // the severity palette, because it is not a severity. It is only ever drawn
+  // on the `success` fill of the governance action, and `success` is
+  // theme-invariant, so a single hue serves every colour mode (3.74:1 there —
+  // above the 1.4.11 bar for a graphical object; verified in tokens.test.ts).
+  governed: '#FFD166',
 };
 
 /** Dark mode overrides (applied on top of {@link lightColors}). */
@@ -244,6 +259,13 @@ export const documentedPairs: readonly DocumentedPair[] = [
   { fg: 'warning-fg', bg: 'warning', stated: 5.4, wcag: '1.4.3', note: 'Text on warning' },
   { fg: 'error-fg', bg: 'error', stated: 6.1, wcag: '1.4.3', note: 'Text on error' },
   { fg: 'info-fg', bg: 'info', stated: 4.8, wcag: '1.4.3', note: 'Text on info' },
+  {
+    fg: 'governed',
+    bg: 'success',
+    stated: 3.7,
+    wcag: '1.4.11',
+    note: 'Governed-room mark on the governance action',
+  },
   {
     fg: 'border-strong',
     bg: 'bg-default',
@@ -394,6 +416,26 @@ export const neumorphicShadows = {
     'inset 2px 2px 4px var(--licio-neu-shadow), inset -2px -2px 4px var(--licio-neu-highlight)',
   inset:
     'inset 3px 3px 6px var(--licio-neu-shadow), inset -3px -3px 6px var(--licio-neu-highlight)',
+} as const;
+
+/**
+ * Filter-based STATE glows — a halo that follows a glyph's stroked outline
+ * rather than its bounding box, so an icon can carry a state itself instead of
+ * needing a badge stuck beside it.
+ *
+ * Composed here (not inline in a component) for the same reason the neumorphic
+ * shadows are: one place defines the geometry, and the `prefers-contrast: more`
+ * / forced-colours block in `app.css` neutralises every glow by zeroing these
+ * tokens — soft, low-contrast lighting must never survive an explicit
+ * accessibility preference. Two stops give a tight core plus a soft bloom;
+ * nothing here animates.
+ *
+ * `governed` (WS-U §24.6): a room whose ratified AI model is actively
+ * governing. Its colour is the `governed` gold, verified against the `success`
+ * fill it is drawn on (see {@link documentedPairs}).
+ */
+export const glowFilters = {
+  governed: 'drop-shadow(0 0 2px var(--licio-governed)) drop-shadow(0 0 6px var(--licio-governed))',
 } as const;
 
 export const zIndexScale = {

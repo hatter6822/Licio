@@ -14,6 +14,10 @@ import {
 } from '@licio/shared';
 import { z } from 'zod';
 import { create } from 'zustand';
+// TYPE-ONLY: `search-api` reaches the RPC client (which reads the auth store),
+// so a value import here would close a module cycle. The scope is a plain
+// discriminated union, erased at compile time.
+import type { SearchScope } from '../lib/search-api.js';
 import { applyFocusMode, applyMotion, applyTheme } from './dom-sync.js';
 import { loadPersisted, type PersistConfig, savePersisted } from './persist.js';
 
@@ -64,6 +68,12 @@ export interface UIState extends UIPersisted {
   /** Transient: whether the public-content search modal is open (WS-F.3.1b
    *  reader surface). Never persisted — a reload never reopens it. */
   searchOpen: boolean;
+  /** Transient: WHERE the open search runs — `null` is the global public
+   *  surface (the front-page banner + the Ctrl/Cmd+K hotkey); a room/story
+   *  scope is set by that page's banner button (WS-Q.2.5b / WS-T.7.3).
+   *  Cleared on close so the next global open can never inherit a stale
+   *  scope from the page the reader has since left. */
+  searchScope: SearchScope | null;
   setTheme: (theme: ThemePreference) => void;
   setReducedMotion: (motion: MotionPreference) => void;
   setFeedMode: (mode: FeedMode) => void;
@@ -71,8 +81,13 @@ export interface UIState extends UIPersisted {
   toggleFocusMode: () => void;
   openSheet: (id: string) => void;
   closeSheet: () => void;
-  openSearch: () => void;
+  /** Open the search modal. Omit `scope` (or pass null) for the global
+   *  surface. NEVER pass this straight to an `onClick` — the DOM event would
+   *  arrive as the scope. */
+  openSearch: (scope?: SearchScope | null) => void;
   closeSearch: () => void;
+  /** Ctrl/Cmd+K: toggles the GLOBAL surface (the hotkey is app-wide and carries
+   *  no page context); opening a scoped search is a banner-button action. */
   toggleSearch: () => void;
 }
 
@@ -96,6 +111,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   ...(normalizePersisted(loadPersisted(PERSIST)) ?? DEFAULTS),
   sheet: { open: false, id: null },
   searchOpen: false,
+  searchScope: null,
   setTheme: (theme) => {
     applyTheme(theme);
     set({ theme });
@@ -123,9 +139,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   },
   openSheet: (id) => set({ sheet: { open: true, id } }),
   closeSheet: () => set({ sheet: { open: false, id: null } }),
-  openSearch: () => set({ searchOpen: true }),
-  closeSearch: () => set({ searchOpen: false }),
-  toggleSearch: () => set({ searchOpen: !get().searchOpen }),
+  openSearch: (scope = null) => set({ searchOpen: true, searchScope: scope }),
+  closeSearch: () => set({ searchOpen: false, searchScope: null }),
+  toggleSearch: () =>
+    get().searchOpen
+      ? set({ searchOpen: false, searchScope: null })
+      : set({ searchOpen: true, searchScope: null }),
 }));
 
 /**

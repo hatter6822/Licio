@@ -5,7 +5,9 @@
 // (drizzle-ingestion-stores.ts): textual relevance with title-over-body
 // weighting, recency tiebreak, prefix mode for typeahead, filters, keyset
 // pagination, and SERVER-SIDE visibility (hidden stories, retracted content,
-// non-published comments, and non-public rooms never appear). The corpus is
+// non-published comments, and non-public rooms never appear). One engine serves
+// all three scopes — global, room (`?room=`), and story (`?story=`) — so a
+// scoped query inherits every ranking and visibility rule unchanged. The corpus is
 // ALL public content: stories + claims (the ingestion stores) plus comments +
 // rooms (supplied by the forum boot through the late-bound corpus hook).
 // Ranking inputs are textual relevance + recency, weighted ONLY by the WS-T
@@ -196,14 +198,22 @@ export class InMemorySearchIndex implements SearchIndex {
       // WS-S.1.4 — server search NEVER returns Private P2P content (§23.6); a
       // p2p doc should never be indexed, so this is defense in depth at query.
       if (doc.roomStorageMode !== 'server') continue;
-      // WS-Q.2.5a/b — two-tier visibility:
+      // WS-Q.2.5a/b + WS-T.7.3 — the three scopes:
+      //   • story-scoped (`?story=`): only the CONVERSATION on this story (its
+      //     comments); the route has already enforced the story read bar.
       //   • room-scoped (`?room=`): only this room's pool (public + room_only of
       //     THIS room); the route has already enforced the room read bar.
-      //   • global (no `?room=`): only PUBLIC content from PUBLIC rooms — BOTH
+      //   • global (neither): only PUBLIC content from PUBLIC rooms — BOTH
       //     conjuncts (defense-in-depth: a mislabeled public story in a private
       //     room, or a migration-transient row, is excluded even from a reader
       //     who could pass that room's bar).
-      if (request.room !== undefined) {
+      if (request.story !== undefined) {
+        if (doc.storyId !== request.story) continue;
+        // The story record itself is the page the reader is already on, and a
+        // room is not story content — the conversation is the whole corpus here
+        // (the Drizzle adapter skips the same corpora).
+        if (doc.resultType !== 'comment') continue;
+      } else if (request.room !== undefined) {
         if (doc.roomId !== request.room) continue;
         // A room-scoped query searches the room's CONTENT — the room record
         // itself is not content (the Drizzle adapter skips its rooms corpus

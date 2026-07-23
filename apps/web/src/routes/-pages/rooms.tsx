@@ -4,14 +4,25 @@
 // lenses; the detail route shows a room. The WS-U room-governance surface opens
 // in a modal ON the room page (deep-linkable via `?governance=<tab>`); the legacy
 // `/rooms/:id/governance` route redirects here rather than showing an inert stub.
+//
+// The room banner carries NAVIGATION ONLY — the back button at the
+// inline-start and, symmetrically opposite it, the two circular actions this
+// page owns: room-scoped search (WS-Q.2.5b) and the governance modal
+// (WS-U §24.6). The room NAME is unbounded, so it leads the page body as the
+// <h1> instead of squeezing those controls out of the bar.
 import type { RoomDetail } from '@licio/shared';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { DiminishingReturnsPrompt } from '../../components/feed/DiminishingReturnsPrompt/DiminishingReturnsPrompt.js';
+import { GovernanceButton } from '../../components/governance/GovernanceButton.js';
 import { RoomGovernanceDialog } from '../../components/governance/RoomGovernanceDialog.js';
 import { RoomCreateForm } from '../../components/rooms/RoomCreateForm/index.js';
-import { RoomLensButton } from '../../components/rooms/RoomLensControl/index.js';
+import {
+  RoomLensButton,
+  roomLensButtonApplies,
+} from '../../components/rooms/RoomLensControl/index.js';
 import { RoomMembership } from '../../components/rooms/RoomMembership/index.js';
+import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { StoryFeedLink } from '../../components/story/StoryFeedLink/index.js';
 import { GovernanceModeBadge } from '../../components/treasury/GovernanceModeBadge.js';
 import { Button } from '../../components/ui/Button/index.js';
@@ -112,6 +123,20 @@ export function RoomsPage(): React.ReactElement {
   );
 }
 
+/**
+ * WS-Q.5.3a tier-two bar, client mirror. Public rooms are readable by all;
+ * private rooms need ACTIVE membership OR a steward role — the server bar
+ * (roomContentVisibleToUser) allows stewards, and a freshly-created private
+ * room makes its creator a steward WITHOUT an active subscription, so `joined`
+ * alone would wrongly show that steward the join UI and never load the feed.
+ * ONE function, so the banner (which decides whether to offer scoped search +
+ * governance) and the body (which decides whether to load the feed) can never
+ * disagree about what this reader may see.
+ */
+export function roomContentVisible(room: RoomDetail): boolean {
+  return room.visibility !== 'private' || room.joined || room.is_steward === true;
+}
+
 export function RoomDetailPage(): React.ReactElement {
   const t = useT();
   const { roomId } = useParams({ from: '/rooms_/$roomId' });
@@ -121,6 +146,32 @@ export function RoomDetailPage(): React.ReactElement {
   // Return to wherever the room was opened from (the rooms list, a link, a
   // profile); a cold-loaded deep link falls back (replacing) to the rooms list.
   const goBack = useGoBack(() => void navigate({ to: '/rooms', replace: true }));
+  // WS-Q.6.2 — the steward-only settings tab is part of the flag-gated controls.
+  const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
+  // WS-U §24.6 — the governance surface opens in a focused modal whose trigger
+  // is the banner's circular button (right-justified beside scoped search,
+  // symmetrically opposite the back button). The full-width "Governance" button
+  // that used to sit in the membership action row is gone: governance is a
+  // room-wide context, not an action on the content below it. A
+  // `?governance=<tab>` deep link (the legacy /rooms/:id/governance route
+  // redirects here) opens the modal to that tab.
+  const governanceParam = useSearch({ from: '/rooms_/$roomId' }).governance;
+  const [governanceOpen, setGovernanceOpen] = useState(() => governanceParam != null);
+  // Open the modal when the deep-link param appears — INCLUDING a param change
+  // while this component is already mounted (the legacy /governance route redirects
+  // to `?governance=…`; a reader already on the room page keeps this component, so
+  // the mount-time initializer above would otherwise miss it and the modal would
+  // stay closed despite the advertised deep link).
+  useEffect(() => {
+    if (governanceParam != null) setGovernanceOpen(true);
+  }, [governanceParam]);
+  const data = room.data;
+  const contentVisible = data !== undefined && roomContentVisible(data);
+  // WS-U §24.6 — shares GovernedByPanel's cached query (same key) purely so the
+  // banner button can mark an active in-room AI agent at a glance, without
+  // opening the modal.
+  const governedBy = useGovernedByQuery(roomId, contentVisible);
+  const roomName = data?.name ?? t('room.title', 'Room');
 
   if (!isValidUuidParam(roomId)) {
     return (
@@ -137,9 +188,51 @@ export function RoomDetailPage(): React.ReactElement {
   }
 
   return (
-    <PageScaffold title={room.data?.name ?? t('room.title', 'Room')} onBack={goBack} query={room}>
-      {(data) => <RoomDetailBody roomId={roomId} room={data} />}
-    </PageScaffold>
+    <>
+      <PageScaffold
+        title={roomName}
+        // Room names are unbounded — the <h1> leads the page body and the
+        // banner carries navigation only (WS-B.1.5).
+        titlePlacement="body"
+        onBack={goBack}
+        actions={
+          <>
+            {/* Search is gated on the tier-two bar: outside it there is no room
+                content to search. Governance gates itself — it is the SIGN-IN
+                affordance for a signed-out reader (bar or no bar), and nothing
+                for a signed-in reader who cannot yet read the room. */}
+            {contentVisible ? (
+              <SearchButton scope={{ kind: 'room', roomId, label: roomName }} />
+            ) : null}
+            <GovernanceButton
+              onOpen={() => setGovernanceOpen(true)}
+              agentActive={governedBy.data?.active === true}
+              signInRedirect={`/rooms/${roomId}`}
+              reachable={contentVisible}
+            />
+          </>
+        }
+        query={room}
+      >
+        {(loaded) => <RoomDetailBody roomId={roomId} room={loaded} />}
+      </PageScaffold>
+      {/* WS-U §24.6/§16.6 — the governance modal (opened by the banner button
+          above). Tabs separate the "governed by" transparency view, the member
+          model candidacy + vote (with the steward's validation powers), and the
+          steward-only settings. Rendered here, beside the scaffold, because its
+          trigger now lives in the banner rather than in the page body — and
+          only while OPEN, so its subtree costs nothing while a reader browses. */}
+      {contentVisible && data !== undefined && governanceOpen ? (
+        <RoomGovernanceDialog
+          open
+          onClose={() => setGovernanceOpen(false)}
+          roomId={roomId}
+          room={data}
+          showSettings={data.is_steward === true && binaryVisibilityUi}
+          {...(governanceParam ? { defaultTab: governanceParam } : {})}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -154,52 +247,14 @@ export function RoomDetailBody({
 }): React.ReactElement {
   const t = useT();
   const isPrivate = room.visibility === 'private';
-  // Tier two: public rooms are readable by all; private rooms need ACTIVE
-  // membership OR a steward role — the server bar (roomContentVisibleToUser)
-  // allows stewards, and a freshly-created private room makes its creator a
-  // steward WITHOUT an active subscription, so `joined` alone would wrongly
-  // show that steward the join UI and never load the feed.
-  const contentVisible = !isPrivate || room.joined || room.is_steward === true;
+  const contentVisible = roomContentVisible(room);
   const feed = useRoomFeedQuery(roomId, contentVisible);
   const roomFeedItems = feed.data?.pages.flatMap((page) => page.items) ?? [];
-  // WS-Q.6.2 — the steward settings UI is part of the flag-gated room controls.
-  const binaryVisibilityUi = useFeatureFlagStore(selectContentSurface).binary_visibility_ui;
-  // WS-U §24.6 — shares GovernedByPanel's cached query (same key) purely to keep
-  // at-a-glance transparency in the collapsed disclosure's summary: when an AI
-  // agent governs the room, the summary says so even before it is expanded.
-  const governedBy = useGovernedByQuery(roomId, contentVisible);
-  const agentActive = governedBy.data?.active === true;
-  // WS-U §24.6 — the governance surface opens in a focused modal. Its trigger is a
-  // COMPACT button that shares the membership action row (passed to RoomMembership
-  // as `trailing`), so the room's CONTENT leads and the two controls no longer
-  // stack as two full-width blocks. The "AI agent active" badge keeps at-a-glance
-  // transparency without opening the modal. A `?governance=<tab>` deep link (the
-  // legacy /governance route redirects here) opens the modal to that tab.
-  const governanceParam = useSearch({ from: '/rooms_/$roomId' }).governance;
-  const [governanceOpen, setGovernanceOpen] = useState(() => governanceParam != null);
-  // Open the modal when the deep-link param appears — INCLUDING a param change
-  // while this component is already mounted (the legacy /governance route redirects
-  // to `?governance=…`; a reader already on the room page keeps this component, so
-  // the mount-time initializer above would otherwise miss it and the modal would
-  // stay closed despite the advertised deep link).
-  useEffect(() => {
-    if (governanceParam != null) setGovernanceOpen(true);
-  }, [governanceParam]);
-  const governanceButton = contentVisible ? (
-    <Button variant="secondary" onClick={() => setGovernanceOpen(true)} aria-haspopup="dialog">
-      <Icon name="check-badge" className="size-4 text-ink-muted" />
-      {t('room.governance.button', 'Governance')}
-      {agentActive ? (
-        <span className="inline-flex items-center rounded-full bg-info-soft px-2 py-0.5 font-medium text-info-on-soft text-xs">
-          {t('room.governance.agentActive', 'AI agent active')}
-        </span>
-      ) : null}
-    </Button>
-  ) : null;
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Tier-one shell: name (in the header), visibility badge, description. */}
+      {/* Tier-one shell: name (the page <h1>, above), visibility badge,
+          description. */}
       <div className="flex flex-wrap items-center gap-2">
         <span
           className={cn(
@@ -224,45 +279,28 @@ export function RoomDetailBody({
           the gate room governance voting enforces. Public rooms join immediately;
           private rooms by request/invite. Handles every state (incl. leave) and
           is independent of content visibility (a public room reads without it). */}
-      {/* WS-Q.5.3a + WS-U §24.6 + WS-G.2.2 — the compact room action bar: the
-          membership button (Sign in / Join / Leave), then the POSTING-lens button
-          (WS-G.2.2 — a member's sole control for the interpretation they post
-          through), then the governance-modal button all share ONE row (both are
-          passed as `trailing`, lens BEFORE governance), placed ABOVE the feed so
-          no control is buried under a long list of story cards. The lens button
-          renders nothing unless the reader is a member of a room with lenses. */}
+      {/* WS-Q.5.3a + WS-G.2.2 — the compact room action bar: the membership
+          button (Sign in / Join / Leave) and the POSTING-lens button (WS-G.2.2 —
+          a member's sole control for the interpretation they post through) share
+          ONE row, placed ABOVE the feed so neither is buried under a long list of
+          story cards. The lens button renders nothing unless the reader is a
+          member of a room with lenses. Governance is NOT here: it is a room-wide
+          context, so it lives in the banner (WS-U §24.6) beside scoped search. */}
       <RoomMembership
         roomId={roomId}
         room={room}
-        trailing={
-          <>
-            <RoomLensButton roomId={roomId} room={room} />
-            {governanceButton}
-          </>
-        }
+        {...(roomLensButtonApplies(room)
+          ? { trailing: <RoomLensButton roomId={roomId} room={room} /> }
+          : {})}
       />
 
-      {/* The governance surface is reached through the compact `governanceButton`
-          in the membership action row above (it opens the modal directly).  A
-          separate `/rooms/:id/governance` text link was removed: it duplicated
-          that button for members and was a silent no-op for non-members (the modal
-          is content-visibility-gated, so the legacy-redirect only changed the URL).
-          The legacy route itself still 301s to `?governance=` for bookmarked URLs. */}
-
-      {/* WS-U §24.6/§16.6 — the governance modal (opened by the compact button
-          above). Tabs separate the "governed by" transparency view, the member
-          model candidacy + vote (with the steward's validation powers), and the
-          steward-only settings. */}
-      {contentVisible ? (
-        <RoomGovernanceDialog
-          open={governanceOpen}
-          onClose={() => setGovernanceOpen(false)}
-          roomId={roomId}
-          room={room}
-          showSettings={room.is_steward === true && binaryVisibilityUi}
-          {...(governanceParam ? { defaultTab: governanceParam } : {})}
-        />
-      ) : null}
+      {/* The governance surface is reached through the banner's circular button
+          (RoomDetailPage owns both it and the modal). A separate
+          `/rooms/:id/governance` text link was removed: it duplicated that
+          control for members and was a silent no-op for non-members (the modal
+          is content-visibility-gated, so the legacy redirect only changed the
+          URL). The legacy route itself still 301s to `?governance=` for
+          bookmarked URLs. */}
 
       {/* Tier two: the room feed is the PRIMARY content, so it leads (in-room chip
           on every room_only item). */}

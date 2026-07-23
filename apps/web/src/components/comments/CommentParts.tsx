@@ -25,8 +25,10 @@ import {
   saveDraft,
 } from '../../offline/index.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
+import { ReportSheet } from '../safety/ReportSheet.js';
 import { DisputeBadge } from '../story/DisputeBadge/index.js';
 import { Button } from '../ui/Button/index.js';
+import { Icon } from '../ui/Icon/index.js';
 
 /** Trailing autosave debounce: one encrypt+write per pause (mirrors StoryComposer). */
 const DRAFT_DEBOUNCE_MS = 800;
@@ -294,14 +296,70 @@ export const commentActionClass =
 const badgeBase =
   'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide leading-tight';
 
+/**
+ * Report this comment (WS-J.1.1, the two-tap sheet).
+ *
+ * Placed at the comment header's inline-END — symmetrically opposite the author
+ * name — rather than inline among Reply / Correct / View debate. Those are
+ * CONVERSATIONAL actions the reader takes on the discussion; reporting is a
+ * safety escalation ABOUT the post and its author, and sitting in the same row
+ * made it read as a peer of "Reply". This is exactly where the story card puts
+ * its own report control (StoryFeedLink, top-right), so the affordance is now
+ * literally in the same place on both content surfaces instead of only claiming
+ * to be.
+ *
+ * Muted circular icon button, self-contained (it owns its sheet), and sized to
+ * 28px so it clears the WCAG 2.2 AA 24px target-size minimum while staying
+ * proportionate to the meta line it sits on.
+ */
+export function CommentReportButton({
+  contributionId,
+}: {
+  contributionId: string;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const label = 'Report this comment';
+  return (
+    <>
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-label={label}
+        title={label}
+        onClick={() => setOpen(true)}
+        className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-surface hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+      >
+        <Icon name="flag" className="size-4" aria-hidden />
+      </button>
+      {open ? (
+        <ReportSheet
+          open
+          onClose={() => setOpen(false)}
+          targetType="content"
+          targetId={contributionId}
+          contentKind="contribution"
+        />
+      ) : null}
+    </>
+  );
+}
+
 /** A single-line meta row: `Author · 3h` with typed-card / sourced / dispute
- *  tags.  The full localized timestamp is on the `<time>`'s `title`/`dateTime`. */
-export function CommentHeader({ comment }: { comment: CommentItemType }): React.ReactElement {
+ *  tags.  The full localized timestamp is on the `<time>`'s `title`/`dateTime`.
+ *  `action` is an optional control pinned to the inline-END of the row — the
+ *  report flag, opposite the author name. */
+export function CommentHeader({
+  comment,
+  action,
+}: {
+  comment: CommentItemType;
+  action?: ReactNode;
+}): React.ReactElement {
   const typeTag = comment.type === 'correction' ? 'Correction' : null;
   // A plain comment carrying a source link is "sourced" — greater participation
   // (never applause; the badge marks the presence of sources, not popularity).
   const sourced = comment.type === 'comment' && comment.citations.length > 0;
-  return (
+  const meta = (
     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm leading-tight">
       <span className="font-medium text-ink">{authorName(comment)}</span>
       <span className="text-ink-muted" aria-hidden>
@@ -323,6 +381,19 @@ export function CommentHeader({ comment }: { comment: CommentItemType }): React.
       {/* WS-T dispute posture: "Challenged" while a correction's debate is live,
           "Incorrect" once a correction prevailed (nothing when undisputed). */}
       <DisputeBadge status={comment.dispute_status} />
+    </div>
+  );
+  if (action === undefined) return meta;
+  return (
+    // `items-start`: the meta block WRAPS (a long name plus badges can run to a
+    // second line), and the action must stay level with the author name on the
+    // FIRST line rather than drifting to the block's centre.  `min-w-0` lets the
+    // meta shrink instead of pushing the action off the inline-end.  The
+    // negative block margin absorbs the 28px control's overshoot of the ~18px
+    // text line, so adding it does not visibly loosen the header.
+    <div className="flex items-start justify-between gap-2">
+      <div className="min-w-0">{meta}</div>
+      <div className="-my-1 shrink-0">{action}</div>
     </div>
   );
 }
@@ -484,6 +555,12 @@ export function CommentComposer({
         // The single top-level composer gets the rich Markdown editor — comments
         // render Markdown-lite through the sanctioned UgcBody sink, so formatting +
         // Preview here are what the reader will actually see.
+        //
+        // No helperText: the "Add source" affordance explains itself from the
+        // toolbar (it labels and enables/disables against the selection), so a
+        // standing paragraph of instructions under every composer was chrome —
+        // and its participation-weight aside read as an incentive pitch on a
+        // platform whose whole point is that weight is not a score to chase.
         <MarkdownEditor
           id={fieldId}
           label="Write a comment"
@@ -493,7 +570,6 @@ export function CommentComposer({
           maxLength={5000}
           placeholder="Add a comment with context…"
           enableSourceLink
-          helperText="Select a phrase and choose “Add source” to link it to its evidence — a sourced comment carries more participation weight."
         />
       )}
       {derivedSources.length > 0 ? (

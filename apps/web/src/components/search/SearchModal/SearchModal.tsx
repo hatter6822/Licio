@@ -8,6 +8,12 @@
 // query-term highlighting, and the standard Dialog a11y contract (focus trap,
 // Escape, scroll lock, backdrop dismiss, focus restore). Rendered lazily by
 // SearchModalHost so none of this enters the initial bundle.
+//
+// ONE modal serves all three SCOPES (see SearchButton): global public content,
+// one room's pool (WS-Q.2.5b), or one story's conversation (WS-T.7.3). The
+// scope is not decoration — it selects a different corpus server-side, so the
+// dialog NAMES it (heading, placeholder, and a persistent scope pill) and
+// offers only the type filters that scope can actually return.
 import type { SearchResult, SearchResultType } from '@licio/shared';
 import type { UseNavigateResult } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -18,7 +24,7 @@ import { useScrollLock } from '../../../hooks/useScrollLock.js';
 import { useT } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { type SearchTypeFilter, useSearchQuery } from '../../../lib/queries.js';
-import { SEARCH_MIN_QUERY_LENGTH } from '../../../lib/search-api.js';
+import { SEARCH_MIN_QUERY_LENGTH, type SearchScope } from '../../../lib/search-api.js';
 import { DisputeBadge } from '../../story/DisputeBadge/DisputeBadge.js';
 import { Button } from '../../ui/Button/index.js';
 import { EmptyState } from '../../ui/EmptyState/index.js';
@@ -33,6 +39,8 @@ export interface SearchModalProps {
    *  ENTRY bundle) so this LAZY chunk carries no @tanstack/react-router
    *  runtime import of its own — a type-only edge, erased at compile time. */
   navigate: UseNavigateResult<string>;
+  /** Which corpus to search; `null` (the default) is the global surface. */
+  scope?: SearchScope | null;
 }
 
 const DEBOUNCE_MS = 250;
@@ -49,12 +57,31 @@ const SECTIONS: ReadonlyArray<{
   { type: 'room', icon: 'grid', labelKey: 'search.section.rooms', labelDefault: 'Rooms' },
 ];
 
-const FILTERS: ReadonlyArray<{ key: SearchTypeFilter; labelKey: string; labelDefault: string }> = [
+interface FilterDescriptor {
+  key: SearchTypeFilter;
+  labelKey: string;
+  labelDefault: string;
+}
+
+const FILTERS: readonly FilterDescriptor[] = [
   { key: 'all', labelKey: 'search.filter.all', labelDefault: 'All' },
   { key: 'story', labelKey: 'search.filter.stories', labelDefault: 'Stories' },
   { key: 'comment', labelKey: 'search.filter.comments', labelDefault: 'Comments' },
   { key: 'room', labelKey: 'search.filter.rooms', labelDefault: 'Rooms' },
 ];
+
+/**
+ * The type filters a scope can offer — the client mirror of the server's
+ * per-scope corpora (`scopeSearchTypes`). A room-scoped search never returns
+ * the room record itself, and a story-scoped one returns comments only, so a
+ * single-type filter row would be a control with nothing to switch between:
+ * a scope with one corpus offers no filters at all.
+ */
+function scopeFilters(scope: SearchScope | null): readonly FilterDescriptor[] {
+  if (scope === null) return FILTERS;
+  if (scope.kind === 'story') return [];
+  return FILTERS.filter((entry) => entry.key !== 'room');
+}
 
 function Kbd({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -64,7 +91,11 @@ function Kbd({ children }: { children: React.ReactNode }): React.ReactElement {
   );
 }
 
-export function SearchModal({ onClose, navigate }: SearchModalProps): React.ReactPortal | null {
+export function SearchModal({
+  onClose,
+  navigate,
+  scope = null,
+}: SearchModalProps): React.ReactPortal | null {
   const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
   const trapRef = useFocusTrap<HTMLDivElement>(true, {
@@ -80,8 +111,28 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
   const [activeIndex, setActiveIndex] = useState(-1);
   const query = useDebouncedValue(input.trim(), DEBOUNCE_MS);
   const longEnough = query.length >= SEARCH_MIN_QUERY_LENGTH;
-  const search = useSearchQuery(query, filter);
+  const search = useSearchQuery(query, filter, scope);
   const tokens = useMemo(() => queryTokens(query), [query]);
+  const filters = scopeFilters(scope);
+
+  // Scope-dependent copy. The dialog must SAY what it searches: an unlabelled
+  // scoped search that silently returns fewer results reads as a broken global
+  // search.
+  const heading =
+    scope === null
+      ? t('search.title', 'Search')
+      : scope.kind === 'room'
+        ? t('search.title.room', 'Search this room')
+        : t('search.title.story', 'Search this conversation');
+  const placeholder =
+    scope === null
+      ? t('search.placeholder', 'Search stories, comments, and rooms…')
+      : scope.kind === 'room'
+        ? t('search.placeholder.room', 'Search stories and comments in this room…')
+        : t('search.placeholder.story', 'Search comments on this story…');
+  // The combobox keeps its own name (the dialog is already named by `heading`);
+  // a scoped search reuses the scope name, which is the more specific of the two.
+  const inputLabel = scope === null ? t('search.inputLabel', 'Search public content') : heading;
 
   // Sectioned + flattened views of the same ordered results: the listbox
   // renders sections, keyboard navigation walks the flat display order.
@@ -183,7 +234,7 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
         className="relative z-modal flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-line bg-canvas shadow-lg"
       >
         <h2 id={titleId} className="sr-only">
-          {t('search.title', 'Search')}
+          {heading}
         </h2>
         <div className="flex items-center gap-3 border-b border-line px-4 py-3">
           <Icon name="search" className="shrink-0 text-ink-muted" />
@@ -195,8 +246,8 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
             aria-controls={listboxId}
             aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
             aria-autocomplete="list"
-            aria-label={t('search.inputLabel', 'Search public content')}
-            placeholder={t('search.placeholder', 'Search stories, comments, and rooms…')}
+            aria-label={inputLabel}
+            placeholder={placeholder}
             value={input}
             onChange={(event) => {
               setInput(event.target.value);
@@ -223,28 +274,48 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
             <Icon name="x" />
           </Button>
         </div>
-        <div
-          role="group"
-          aria-label={t('search.filters', 'Filter results by type')}
-          className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2"
-        >
-          {FILTERS.map((entry) => (
-            <button
-              key={entry.key}
-              type="button"
-              aria-pressed={filter === entry.key}
-              onClick={() => setFilter(entry.key)}
-              className={cn(
-                'min-h-8 rounded-full border px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-                filter === entry.key
-                  ? 'border-primary-active bg-surface-strong text-ink neu-pressed-sm'
-                  : 'border-line bg-surface text-ink-muted neu-raised-sm hover:text-ink',
-              )}
-            >
-              {t(entry.labelKey, entry.labelDefault)}
-            </button>
-          ))}
-        </div>
+        {/* The scope pill: a persistent, non-interactive reminder of WHICH
+            corpus is being searched. Only the page that opened the modal can
+            change the scope (closing and using another banner's button), so it
+            is deliberately not a control — an unlabelled scoped search is the
+            failure mode this prevents. */}
+        {scope !== null ? (
+          <p className="flex items-center gap-2 border-b border-line px-4 py-2 text-ink-muted text-xs">
+            <span className="shrink-0">{t('search.scope.within', 'Searching within')}</span>
+            <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-line bg-surface px-2 py-0.5 font-medium text-ink">
+              <Icon
+                name={scope.kind === 'room' ? 'grid' : 'quote'}
+                className="size-3.5 shrink-0"
+                aria-hidden="true"
+              />
+              <span className="truncate">{scope.label}</span>
+            </span>
+          </p>
+        ) : null}
+        {filters.length > 0 ? (
+          <div
+            role="group"
+            aria-label={t('search.filters', 'Filter results by type')}
+            className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2"
+          >
+            {filters.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                aria-pressed={filter === entry.key}
+                onClick={() => setFilter(entry.key)}
+                className={cn(
+                  'min-h-8 rounded-full border px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                  filter === entry.key
+                    ? 'border-primary-active bg-surface-strong text-ink neu-pressed-sm'
+                    : 'border-line bg-surface text-ink-muted neu-raised-sm hover:text-ink',
+                )}
+              >
+                {t(entry.labelKey, entry.labelDefault)}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <p aria-live="polite" className="sr-only">
           {status}
         </p>
@@ -262,10 +333,20 @@ export function SearchModal({ onClose, navigate }: SearchModalProps): React.Reac
           ) : showEmpty ? (
             <EmptyState
               title={t('search.noResults', 'No results for “{query}”', { query })}
-              description={t(
-                'search.noResultsDescription',
-                'Try different words, or switch the type filter.',
-              )}
+              // Honest next step per scope: a story-scoped search has no type
+              // filter to switch, and a scoped miss may simply be outside the
+              // scope — so it points at the global surface instead.
+              description={
+                filters.length > 0
+                  ? t(
+                      'search.noResultsDescription',
+                      'Try different words, or switch the type filter.',
+                    )
+                  : t(
+                      'search.noResultsDescriptionScoped',
+                      'Try different words, or search all of Licio from the front page.',
+                    )
+              }
             />
           ) : (
             <div
