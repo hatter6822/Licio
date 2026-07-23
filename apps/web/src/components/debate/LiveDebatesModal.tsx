@@ -90,16 +90,20 @@ function DebateSummaryRow({
   debate,
   labels,
   tokens,
+  now,
   onOpen,
 }: {
   debate: DebateArenaSummary;
   labels: RowLabels;
   /** Query tokens to mark in the subject excerpt. */
   tokens: readonly string[];
+  /** The list's clock, sampled ONCE for the whole modal: a `useNow()` per row
+   *  would mount one interval per debate (up to 50) to render countdowns that
+   *  all tick together anyway. */
+  now: number;
   onOpen: (debateId: string) => void;
 }): React.ReactElement {
   const t = useT();
-  const now = useNow();
   const deadline = debateDeadline(debate);
   const time = deadline === null ? null : remainingLabel(deadline.at, now);
   const countdown =
@@ -191,6 +195,8 @@ function DebateGroup({
  */
 export function LiveDebatesList({ storyId }: { storyId: string }): React.ReactElement {
   const t = useT();
+  // ONE clock for every countdown in the list (see DebateSummaryRow's `now`).
+  const now = useNow();
   const query = useStoryDebatesQuery(storyId);
   const openDebate = useOpenDebate();
   const stateLabels = useStateLabels();
@@ -264,6 +270,7 @@ export function LiveDebatesList({ storyId }: { storyId: string }): React.ReactEl
       debate={row.debate}
       labels={row.labels}
       tokens={tokens}
+      now={now}
       onOpen={openDebate}
     />
   );

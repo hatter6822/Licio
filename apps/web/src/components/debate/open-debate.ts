@@ -14,7 +14,35 @@
 // clears only `?debate` — drops the reader back into the list they came from.
 // An arena opened straight from a comment carries no `?debates`, so closing it
 // returns to the page, exactly as before.
-import { useNavigate } from '@tanstack/react-router';
+//
+// HISTORY CONTRACT. Opening PUSHES an entry, so the browser/system back gesture
+// closes the modal — what a reader expects of anything modal on a phone.
+// Closing therefore CONSUMES that entry (`history.back()`) rather than
+// replacing it: replacing left the stack holding two identical URLs, so the
+// next back press appeared to do nothing (and closing an arena back to its list
+// left a second, identical list entry behind it). Popping keeps the stack an
+// exact mirror of the surfaces the reader opened, so the close control and the
+// back gesture do the same thing. A cold-loaded deep link has no pushed entry
+// to consume; there the closer falls back to CLEARING the params in place
+// (`replace: true`), never a push — the same cold-load rule `useGoBack`
+// documents for page-level back buttons.
+import { useCanGoBack, useNavigate, useRouter } from '@tanstack/react-router';
+
+/**
+ * Wrap a param-clearing closer so it pops the history entry the opener pushed
+ * when there is one, and clears the params in place when there is not.
+ */
+function useCloseModal(clearParams: () => void): () => void {
+  const router = useRouter();
+  const canGoBack = useCanGoBack();
+  return () => {
+    if (canGoBack) {
+      router.history.back();
+      return;
+    }
+    clearParams();
+  };
+}
 
 /** Returns an opener that adds `?debate=<id>` to the current location. */
 export function useOpenDebate(): (debateId: string) => void {
@@ -27,17 +55,17 @@ export function useOpenDebate(): (debateId: string) => void {
   };
 }
 
-/** Returns a closer that clears `?debate` from the current location (replace —
- *  closing is not a new history entry; the back button then leaves the page). */
+/** Returns a closer for the arena: pops the entry that opened it, or — on a
+ *  cold-loaded deep link — clears `?debate` in place. */
 export function useCloseDebate(): () => void {
   const navigate = useNavigate();
-  return () => {
+  return useCloseModal(() => {
     void navigate({
       to: '.',
       replace: true,
       search: (prev: Record<string, unknown>) => ({ ...prev, debate: undefined }),
     });
-  };
+  });
 }
 
 /** Returns an opener that adds `?debates` — the live-debates LIST modal. */
@@ -51,11 +79,12 @@ export function useOpenDebateList(): () => void {
   };
 }
 
-/** Returns a closer that clears `?debates` (and any `?debate` under it, so a
+/** Returns a closer for the list: pops the entry that opened it, or — on a
+ *  cold-loaded deep link — clears `?debates` (and any `?debate` under it, so a
  *  closed list can never leave an orphaned arena param behind). */
 export function useCloseDebateList(): () => void {
   const navigate = useNavigate();
-  return () => {
+  return useCloseModal(() => {
     void navigate({
       to: '.',
       replace: true,
@@ -65,5 +94,5 @@ export function useCloseDebateList(): () => void {
         debate: undefined,
       }),
     });
-  };
+  });
 }

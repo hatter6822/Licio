@@ -90,10 +90,14 @@ export function StoryArticleCard({
     >
       <PageTitle>{title}</PageTitle>
       {notice}
-      {/* The media owns a stacking layer ABOVE the overlay below, so a video's
-          native controls stay operable on a story that is ALSO a link. */}
+      {/* A VIDEO owns a stacking layer above the overlay below, so its native
+          controls stay operable on a story that is ALSO a link. An image gets
+          no such layer: it has nothing to operate, and lifting it out would
+          punch a dead hole in the middle of the card — pressing the picture
+          would do nothing where the whole surface advertises "read the
+          source". */}
       {media ? (
-        <div className="relative z-10">
+        <div className={cn(media.kind === 'video' && 'relative z-10')}>
           <StoryMedia
             url={media.url}
             kind={media.kind}
