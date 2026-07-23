@@ -30,3 +30,20 @@ export const raisedSurface = 'rounded-lg border border-line bg-canvas neu-raised
  */
 export const raisedInteractive =
   'transition-shadow active:neu-pressed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';
+
+/**
+ * The COMPACT raised tile: the same treatment at the button/chip bevel
+ * (`neu-raised-sm`) for dense lists — a scannable stack of summary rows where a
+ * 16px-gap grid would waste most of the viewport on air.
+ *
+ * REACH: `neu-raised-sm` extends 8px, so a list of these rows is safe from
+ * `gap-3` (12px) up — the geometry note on `neumorphicShadows['raised-sm']`
+ * owns that number. Do NOT swap this in for {@link raisedSurface} on a
+ * standalone card: a big surface with a small bevel reads flat.
+ */
+export const raisedSurfaceSm = 'rounded-md border border-line bg-canvas neu-raised-sm';
+
+/** Press + focus feedback for a {@link raisedSurfaceSm} row (see
+ *  {@link raisedInteractive} — same contract at the small bevel). */
+export const raisedInteractiveSm =
+  'transition-shadow active:neu-pressed-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus';

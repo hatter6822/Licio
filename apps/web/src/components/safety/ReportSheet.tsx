@@ -13,9 +13,11 @@ import { ApiClientError } from '../../lib/api.js';
 import { submitReport } from '../../lib/safety-api.js';
 import { enqueue } from '../../offline/queue.js';
 import { Button } from '../ui/Button/index.js';
+import { Icon } from '../ui/Icon/index.js';
 import { Sheet } from '../ui/Sheet/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
 import { useToast } from '../ui/Toast/index.js';
+import { Tooltip, type TooltipPlacement } from '../ui/Tooltip/index.js';
 import { REPORT_REASON_GROUPS } from './report-reasons.js';
 
 export interface ReportSheetProps {
@@ -139,6 +141,16 @@ export interface ReportButtonProps {
   targetType: ReportTargetType;
   targetId: string;
   contentKind?: ReportContentKind;
+  /** Compact presentation: the flag glyph alone, named for assistive tech and
+   *  labelled on hover/focus by a tooltip (WCAG 1.4.13). */
+  iconOnly?: boolean;
+  /** Override the control's name, so a compact row can say WHAT is reported
+   *  ("Report this story") where the text button just says "Report". */
+  label?: string;
+  /** Inline alignment of the icon-only tooltip. Pass `end` when the control
+   *  sits at the inline-end of a row, where a centred bubble would overhang
+   *  the viewport edge. */
+  tooltipPlacement?: TooltipPlacement;
   className?: string;
 }
 
@@ -147,15 +159,33 @@ export function ReportButton({
   targetType,
   targetId,
   contentKind,
+  iconOnly = false,
+  label,
+  tooltipPlacement = 'center',
   className,
 }: ReportButtonProps): React.ReactElement {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const name = label ?? t('report.action', 'Report');
   return (
     <>
-      <Button variant="ghost" {...(className ? { className } : {})} onClick={() => setOpen(true)}>
-        {t('report.action', 'Report')}
-      </Button>
+      {iconOnly ? (
+        <Tooltip content={name} placement={tooltipPlacement}>
+          <Button
+            iconOnly
+            variant="ghost"
+            aria-label={name}
+            {...(className ? { className } : {})}
+            onClick={() => setOpen(true)}
+          >
+            <Icon name="flag" className="size-5" />
+          </Button>
+        </Tooltip>
+      ) : (
+        <Button variant="ghost" {...(className ? { className } : {})} onClick={() => setOpen(true)}>
+          {name}
+        </Button>
+      )}
       {/* Mount the sheet lazily so the closed affordance needs no ToastProvider
           (the sheet's hooks run only once it is actually opened). */}
       {open ? (

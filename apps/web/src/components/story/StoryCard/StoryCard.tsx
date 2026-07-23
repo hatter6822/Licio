@@ -4,7 +4,7 @@ import { formatReadingEstimate, useI18n } from '../../../i18n/index.js';
 import { cn } from '../../../lib/cn.js';
 import { Button } from '../../ui/Button/index.js';
 import { Icon } from '../../ui/Icon/index.js';
-import { DisputeBadge } from '../DisputeBadge/index.js';
+import { DisputeBadge, disputeBorderClass } from '../DisputeBadge/index.js';
 import { StoryMedia } from '../StoryMedia/index.js';
 import { StorySignals } from '../StorySignals/index.js';
 import type { StoryCardData } from '../types.js';
@@ -61,13 +61,23 @@ export function StoryCard({
     t('reading.estimate', '{minutes} min read', { minutes: m }),
   );
 
+  // WS-T — a disputed story wears its posture on the card EDGE, in the same hue
+  // as the state's chip below, so a challenged / corrected / validated item is
+  // recognisable while scrolling before any chip is read. Reinforcement only:
+  // the DisputeBadge still states it in text (colour is never the sole carrier,
+  // WS-B.1.1f), and only ONE border colour is ever emitted — `cn` does not
+  // resolve Tailwind conflicts, so `border-line` and a dispute hue must not both
+  // be in the list.
+  const disputeBorder = disputeBorderClass(disputeStatus);
+
   return (
     // DOM order == visual order (WS-B.2.1c / WCAG 1.3.2): title, source, signal
     // row, chips, estimate, branch preview, then interactive actions last.
     <article
       aria-labelledby={titleId}
       className={cn(
-        'group flex flex-col gap-3 rounded-lg border border-line bg-canvas p-4',
+        'group flex flex-col gap-3 rounded-lg border bg-canvas p-4',
+        disputeBorder ?? 'border-line',
         className,
       )}
     >

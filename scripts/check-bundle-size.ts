@@ -14,15 +14,20 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // unbounded app growth has a brake too.  The total is a RATCHET: it moves
 // only by an explicit, reviewed adjustment when an audited feature ships,
 // and always stays within ~3 KiB of the measured build so silent growth
-// keeps failing fast.  (Last adjusted for scoped search + the banner
-// governance/sign-in action: +2.3 KiB measured — the room/story scope plumbing,
-// the shared circular-action primitive, and the governance modal now reachable
-// from the story surfaces.  Splitting that modal into its own chunk was
-// measured and REJECTED: its tree is shared with the room page, so the split
-// moved bytes between chunks and added boundary cost rather than removing any.
-// Initial payload unaffected at ~164 KiB.)
+// keeps failing fast.  (Last adjusted for the WS-T story-surface pass:
+// +3.0 KiB measured, 324.2 → 327.2 KiB — the live-debates modal, its pure
+// sort/search/pin model and the compact discovery row; the dispute-tinted
+// story-card edge; and the story article card with its icon-only action row
+// (a new `share` glyph + tooltipped controls).  All of it lands in LAZY route
+// chunks: the initial payload moved 164.3 → 164.5 KiB.  A previous adjustment
+// covered scoped search + the banner governance/sign-in action: +2.3 KiB
+// measured.  Splitting the governance modal into its own chunk was measured
+// and REJECTED: its tree is shared with the room page, so the split moved
+// bytes between chunks and added boundary cost rather than removing any — the
+// same reasoning applies to the debate modal, which shares its tree with both
+// story surfaces.)
 const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
-const TOTAL_JS_BUDGET_BYTES = 327 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 330 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 // WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily

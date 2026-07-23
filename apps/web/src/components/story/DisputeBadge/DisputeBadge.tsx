@@ -30,6 +30,9 @@ interface DisputeMeta {
   chip: string;
   /** Banner tone (soft-filled panel). */
   banner: string;
+  /** Card EDGE tone — the same hue as this state's chip, at the weight a
+   *  full-card outline needs (see {@link disputeBorderClass}). */
+  edge: string;
   icon: IconName;
   /** One-line, plain explanation for the banner. */
   explanation: string;
@@ -40,6 +43,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
     label: 'Challenged',
     chip: 'border-warning/50 text-warning',
     banner: 'bg-warning-soft text-warning-on-soft',
+    edge: 'border-warning/60',
     icon: 'flag',
     explanation:
       'A sourced correction has opened an open debate — both sides are making their case.',
@@ -48,6 +52,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
     label: 'Incorrect',
     chip: 'border-error/60 text-error',
     banner: 'bg-error-soft text-error-on-soft',
+    edge: 'border-error/60',
     icon: 'flag',
     explanation:
       'A sourced correction prevailed in an open debate. It is demoted and kept for the record.',
@@ -56,6 +61,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
     label: 'Validated',
     chip: 'border-success/60 text-success',
     banner: 'bg-success-soft text-success-on-soft',
+    edge: 'border-success/60',
     icon: 'check-circle',
     explanation:
       'A sourced correction was reviewed and did not hold — this was challenged and stands as accurate.',
@@ -64,6 +70,24 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
 
 const CHIP_BASE =
   'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide leading-tight';
+
+/**
+ * The border colour a WHOLE CARD takes on while it carries a dispute posture —
+ * the same hue as the state's chip, so the card's edge and its label read as
+ * one signal and a challenged/corrected/validated story is recognisable while
+ * scrolling a feed, before the chip row is read.
+ *
+ * Null for `none`, so a caller keeps its neutral `border-line`: `cn` does not
+ * resolve Tailwind conflicts, so the two border colours must never both be
+ * emitted (`cn(..., disputeBorderClass(s) ?? 'border-line')`).
+ *
+ * Never the SOLE carrier of meaning (WS-B.1.1f): the card always renders the
+ * DisputeBadge with the same state in text, and the tinted edge flattens with
+ * every other decorative treatment under forced colours.
+ */
+export function disputeBorderClass(status: DisputeStatus): string | null {
+  return status === 'none' ? null : DISPUTE_META[status].edge;
+}
 
 /**
  * Compact pill for the comment header and the story-card rating row. Renders

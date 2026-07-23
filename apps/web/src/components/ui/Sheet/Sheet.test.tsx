@@ -139,4 +139,26 @@ describe('Sheet', () => {
     await user.click(screen.getByRole('button', { name: 'Open sheet' }));
     expect(await checkA11y(baseElement)).toHaveNoViolations();
   });
+
+  // `cn` does not resolve Tailwind conflicts, so a hard-coded default width in
+  // the base list would silently beat the caller's — the wide sheets (the
+  // debate arena's side-by-side columns, the live-debates list) would render at
+  // the narrow default with no error anywhere.
+  it('defaults to max-w-xl but yields that width to a caller that sets its own', () => {
+    const { rerender } = render(
+      <Sheet open onClose={() => undefined} title="Context">
+        <p>Body</p>
+      </Sheet>,
+    );
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-xl');
+
+    rerender(
+      <Sheet open onClose={() => undefined} title="Context" className="max-w-3xl">
+        <p>Body</p>
+      </Sheet>,
+    );
+    const sheet = screen.getByRole('dialog');
+    expect(sheet).toHaveClass('max-w-3xl');
+    expect(sheet).not.toHaveClass('max-w-xl');
+  });
 });

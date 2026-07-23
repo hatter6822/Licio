@@ -24,7 +24,7 @@ apps/web/src/
   components/
     ui/              Primitives: Icon, Button, Input, …, Tabs, AppShell     (WS-B.1.x)
     a11y/            SkipToContent, RouteAnnouncer, useSpaFocus             (WS-B.1.6)
-    story/           StoryCard, StorySignals, DisputeBadge, ContextCard, swipes (WS-B.2.1–4)
+    story/           StoryCard, StoryArticleCard, StorySignals, DisputeBadge, ContextCard, swipes (WS-B.2.1–4)
     feed/            SectionEndpoint, DiminishingReturnsPrompt, FeedMode     (WS-B.2.8–9)
     wellbeing/       FocusModeToggle, QuietHoursSetting, NotificationBudget  (WS-B.2.8c)
     profile/         SignalLedger                                           (WS-B.2.6)
@@ -231,7 +231,7 @@ and in the e2e suite, which is the stronger guarantee.
 | 1.1a–e | design tokens | colour, type, spacing, motion, touch target |
 | 1.1f | `Icon`, `status.ts` | inline SVG, `currentColor`, status vocabulary |
 | 1.2a–d | `Button`, `Input`, `TextArea`, `Select`, `Checkbox`, `RadioGroup` | `TextArea` auto-grows via CSS `field-sizing` with a `scrollHeight` JS fallback |
-| 1.3a–c | `Dialog`, `Sheet`, `Toast`, `Tooltip` + `useFocusTrap`/`useScrollLock`/`useReducedMotion` | `Sheet` animates in **and** out (reduced-motion-aware; immediate unmount when reduced) |
+| 1.3a–c | `Dialog`, `Sheet`, `Toast`, `Tooltip` + `useFocusTrap`/`useScrollLock`/`useReducedMotion` | `Sheet` animates in **and** out (reduced-motion-aware; immediate unmount when reduced); both overlays treat their width (`max-w-lg`/`max-w-xl`) as a DEFAULT a caller's own `max-w-*` replaces (`defaultMaxWidth` — `cn` resolves no Tailwind conflicts, so a hard-coded base width would silently outrank the call site's).  `Tooltip` shows AT MOST ONE bubble app-wide (a module-level singleton: the newest to open closes the previous, so a focus-open tooltip and a hovered neighbour on an icon row cannot overlap) and takes a `placement` (`center` \| `start` \| `end`, logical so RTL mirrors) for triggers at the edge of a row, where a centred bubble would overhang the viewport |
 | 1.1a | `ThemeToggle` + `applyColorScheme` | manual System/Light/Dark (sets `data-theme`) |
 | 1.1e | `tap-target` utility | 48×48 hit-slop from the hit-pad/target-min tokens (e2e-measured) |
 | 1.4 | `Skeleton`, `Badge`, `Card`, `Tabs`, `Avatar`, `Separator`, `Switch`, `ReadingEstimate` | `ReadingEstimate`: localized "N min read", descriptive — never a score |

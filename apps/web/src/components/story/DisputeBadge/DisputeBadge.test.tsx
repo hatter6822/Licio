@@ -5,7 +5,12 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { checkA11y } from '../../../test/axe.js';
-import { DisputeBadge, DisputeBanner } from './DisputeBadge.js';
+import {
+  DisputeBadge,
+  DisputeBanner,
+  type DisputeStatus,
+  disputeBorderClass,
+} from './DisputeBadge.js';
 
 describe('DisputeBadge', () => {
   it('renders "Challenged" while a correction debate is live', () => {
@@ -26,6 +31,29 @@ describe('DisputeBadge', () => {
   it('renders nothing when undisputed', () => {
     const { container } = render(<DisputeBadge status="none" />);
     expect(container.firstChild).toBeNull();
+  });
+});
+
+describe('disputeBorderClass', () => {
+  it('has no edge colour for an undisputed item (the caller keeps border-line)', () => {
+    expect(disputeBorderClass('none')).toBeNull();
+  });
+
+  // The card edge and the chip must read as ONE signal: same tone token, so a
+  // future change to either colour cannot silently split them apart.
+  it.each<[Exclude<DisputeStatus, 'none'>, string, string]>([
+    ['under_debate', 'Challenged', 'warning'],
+    ['incorrect', 'Incorrect', 'error'],
+    ['validated', 'Validated', 'success'],
+  ])('shares the %s chip’s tone on the card edge', (status, label, tone) => {
+    expect(disputeBorderClass(status)).toContain(`border-${tone}`);
+    render(<DisputeBadge status={status} />);
+    expect(screen.getByText(label).className).toContain(`border-${tone}`);
+  });
+
+  it('gives the three states three distinct edges', () => {
+    const edges = (['under_debate', 'incorrect', 'validated'] as const).map(disputeBorderClass);
+    expect(new Set(edges).size).toBe(3);
   });
 });
 

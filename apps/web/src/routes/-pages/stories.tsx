@@ -14,7 +14,12 @@ import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { CommentSection, CorrectionComposer } from '../../components/comments/index.js';
 import { DebateArenaModal } from '../../components/debate/DebateArenaModal.js';
-import { useCloseDebate, useOpenDebate } from '../../components/debate/open-debate.js';
+import { LiveDebatesModal } from '../../components/debate/LiveDebatesModal.js';
+import {
+  useCloseDebate,
+  useCloseDebateList,
+  useOpenDebate,
+} from '../../components/debate/open-debate.js';
 import { StoryGovernanceControl } from '../../components/governance/StoryGovernanceControl.js';
 import { SourceReader } from '../../components/reader/SourceReader/index.js';
 import { ReportButton } from '../../components/safety/ReportSheet.js';
@@ -22,14 +27,16 @@ import { SearchButton } from '../../components/search/SearchButton/index.js';
 import { AuthorVisibilityControl } from '../../components/story/AuthorVisibilityControl/index.js';
 import { DisputeBanner } from '../../components/story/DisputeBadge/index.js';
 import { ShareStoryButton } from '../../components/story/ShareStoryButton/index.js';
-import { StoryMedia } from '../../components/story/StoryMedia/index.js';
+import { StoryArticleCard } from '../../components/story/StoryArticleCard/index.js';
 import { Button } from '../../components/ui/Button/index.js';
 import { Dialog } from '../../components/ui/Dialog/index.js';
 import { ErrorState } from '../../components/ui/ErrorState/index.js';
 import { Icon } from '../../components/ui/Icon/index.js';
 import { PageHeader } from '../../components/ui/PageHeader/index.js';
+import { Tooltip } from '../../components/ui/Tooltip/index.js';
 import { useGoBack } from '../../hooks/useGoBack.js';
 import { useT } from '../../i18n/index.js';
+import { cn } from '../../lib/cn.js';
 import {
   useRoomQuery,
   useSavedStoriesQuery,
@@ -44,25 +51,43 @@ import { getTopicLoopTracker } from '../../signals/topic-loops.js';
 import { PageScaffold } from './PageScaffold.js';
 import { usePageFocus } from './usePageFocus.js';
 
-/** Toggle whether a story is saved for offline reading (WS-C.2.2a). */
+/**
+ * Toggle whether a story is saved for offline reading (WS-C.2.2a).
+ *
+ * Icon-only, like every control in the story's action row: the state rides
+ * `aria-pressed` (the truth for assistive tech), the accessible NAME flips
+ * between "Save for offline" and "Saved for offline", the tooltip shows that
+ * name on hover/focus, and the glyph FILLS when saved — so the state is never
+ * carried by colour alone, and never by the icon alone either.
+ */
 function SaveStoryButton({ story }: { story: StoryDetail }): React.ReactElement {
   const t = useT();
   const saved = useSavedStoriesQuery();
   const toggle = useToggleSavedStoryMutation();
   const isSaved = saved.data?.some((record) => record.storyId === story.story_id) ?? false;
+  const label = isSaved
+    ? t('story.saved', 'Saved for offline')
+    : t('story.save', 'Save for offline');
   return (
-    <Button
-      variant="secondary"
-      aria-pressed={isSaved}
-      disabled={toggle.isPending}
-      onClick={() =>
-        toggle.mutate(
-          isSaved ? { action: 'unsave', storyId: story.story_id } : { action: 'save', story },
-        )
-      }
-    >
-      {isSaved ? t('story.saved', 'Saved for offline') : t('story.save', 'Save for offline')}
-    </Button>
+    <Tooltip content={label}>
+      <Button
+        iconOnly
+        variant="ghost"
+        aria-label={label}
+        aria-pressed={isSaved}
+        disabled={toggle.isPending}
+        onClick={() =>
+          toggle.mutate(
+            isSaved ? { action: 'unsave', storyId: story.story_id } : { action: 'save', story },
+          )
+        }
+      >
+        <Icon
+          name="bookmark"
+          className={cn('size-5', isSaved && 'fill-current text-primary-on-soft')}
+        />
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -78,12 +103,25 @@ function StoryCorrectionButton({
   const t = useT();
   const [open, setOpen] = useState(false);
   const openDebate = useOpenDebate();
+  const label = t('story.correct', 'Correct this story');
   return (
     <>
-      <Button variant="secondary" aria-haspopup="dialog" onClick={() => setOpen(true)}>
-        <Icon name="pencil" className="size-4" aria-hidden />
-        {t('story.correct', 'Correct')}
-      </Button>
+      {/* The bubble carries the VERB alone and hangs off the trigger's inline
+          START: this is the first control in the row, so a centred bubble with
+          the full label ran off the edge of a phone screen. The fuller name
+          stays the accessible one — the visible word is contained in it, which
+          is what WCAG 2.5.3 (Label in Name) asks for. */}
+      <Tooltip content={t('story.correct.short', 'Correct')} placement="start">
+        <Button
+          iconOnly
+          variant="ghost"
+          aria-label={label}
+          aria-haspopup="dialog"
+          onClick={() => setOpen(true)}
+        >
+          <Icon name="pencil" className="size-5" />
+        </Button>
+      </Tooltip>
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
@@ -110,11 +148,16 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
   const [readerOpen, setReaderOpen] = useState(false);
   const openId = useRef(`source-${storyId}`);
   const navigate = useNavigate();
-  // WS-T — the debate-arena modal opens over this page exactly while the
-  // `?debate=<id>` deep link is present (the legacy arena route redirects
-  // here); closing clears the param, so back/refresh behave honestly.
-  const debateParam = useSearch({ from: '/stories/$storyId' }).debate;
+  // WS-T — two nested debate surfaces open over this page from search params:
+  // `?debates` lists the story's live debates, `?debate=<id>` opens one arena
+  // (the legacy arena route redirects here).  The arena WINS when both are
+  // present, so the list is never a second dialog under it — and since closing
+  // the arena clears only `?debate`, the reader lands back in the list.
+  const debateSearch = useSearch({ from: '/stories/$storyId' });
+  const debateParam = debateSearch.debate;
+  const debateListOpen = debateSearch.debates === true && debateParam === undefined;
   const closeDebate = useCloseDebate();
+  const closeDebateList = useCloseDebateList();
   // Return to wherever the story was opened from (front page, topic, room); a
   // cold-loaded deep link falls back (replacing) to the front page.
   const goBack = useGoBack(() => void navigate({ to: '/', replace: true }));
@@ -184,8 +227,11 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
     <PageScaffold
       title={storyTitle}
       // Story titles are unbounded — the <h1> leads the page body and the banner
-      // carries navigation only.
+      // carries navigation only. The loaded page renders that <h1> INSIDE the
+      // article card (the headline belongs to the thing it names), so the
+      // scaffold keeps its own copy for the loading/error frames alone.
       titlePlacement="body"
+      titleInContent
       onBack={goBack}
       actions={
         <>
@@ -201,38 +247,65 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
         readerOpen && data.url ? (
           <SourceReader url={data.url} title={data.title} onClose={closeReader} />
         ) : (
-          <article className="flex flex-col gap-4">
-            {/* WS-T — a prominent banner when a sourced correction has challenged
-                this story ("Challenged") or prevailed against it ("Incorrect"). */}
-            <DisputeBanner status={data.dispute_status} />
-            {data.media ? (
-              <StoryMedia
-                url={data.media.url}
-                kind={data.media.kind}
-                altText={data.media.alt_text}
-                captionsText={data.media.captions_text}
-                captionsUrl={data.media.captions_url}
-                posterUrl={data.media.poster_url}
-              />
-            ) : null}
-            <p className="text-base text-ink">{data.body_summary}</p>
-            <div className="flex flex-wrap gap-2">
-              {data.url ? (
-                <Button variant="primary" onClick={openReader}>
-                  {t('story.readSource', 'Read source')}
-                </Button>
-              ) : null}
-              <SaveStoryButton story={data} />
-              <ShareStoryButton
-                title={data.title}
-                url={typeof window !== 'undefined' ? window.location.href : ''}
-              />
+          <div className="flex flex-col gap-4">
+            {/* The story itself is ONE card: headline, posture notice, media,
+                summary — and, when it is a link, the whole card opens the
+                in-app reader (so no wide "Read source" button is needed). */}
+            <StoryArticleCard
+              title={data.title}
+              bodySummary={data.body_summary}
+              source={data.source}
+              {...(data.url ? { url: data.url, onOpenSource: openReader } : {})}
+              {...(data.media
+                ? {
+                    media: {
+                      url: data.media.url,
+                      kind: data.media.kind,
+                      altText: data.media.alt_text,
+                      captionsText: data.media.captions_text,
+                      captionsUrl: data.media.captions_url,
+                      posterUrl: data.media.poster_url,
+                    },
+                  }
+                : {})}
+              // WS-T — a prominent notice when a sourced correction has
+              // challenged this story ("Challenged") or prevailed against it
+              // ("Incorrect"); it belongs to the content, so it rides the card.
+              notice={<DisputeBanner status={data.dispute_status} />}
+            />
+            {/* One row of ICON-ONLY actions under the card (each named for
+                assistive tech and tooltipped on hover/focus): correct, save
+                offline, share — then, pushed to the inline-end, the safety
+                escalation, which is about the story rather than part of
+                working with it (the comment header's report flag sits apart
+                for the same reason). */}
+            <div className="flex flex-wrap items-center gap-1">
               {/* WS-T — raise a sourced correction against the story (opens a debate). */}
               {data.thread_id ? (
                 <StoryCorrectionButton storyId={data.story_id} threadId={data.thread_id} />
               ) : null}
-              {/* WS-J.1.1 — report this story (the two-tap sheet). */}
-              <ReportButton targetType="content" targetId={data.story_id} contentKind="story" />
+              <SaveStoryButton story={data} />
+              <ShareStoryButton
+                iconOnly
+                title={data.title}
+                url={typeof window !== 'undefined' ? window.location.href : ''}
+              />
+              {/* WS-J.1.1 — report this story (the two-tap sheet). The margin
+                  rides a wrapper, not the button: the icon-only control is
+                  nested inside its tooltip's positioning span, so a class on
+                  the button itself would never reach the row's flex line. */}
+              <div className="ms-auto">
+                <ReportButton
+                  iconOnly
+                  // Last control in the row: the bubble hangs off the trigger's
+                  // inline END so it grows inward instead of past the edge.
+                  tooltipPlacement="end"
+                  label={t('report.story', 'Report this story')}
+                  targetType="content"
+                  targetId={data.story_id}
+                  contentKind="story"
+                />
+              </div>
             </div>
             {/* WS-T.7 — the conversation now lives inline on the story page as a
                 lightly nested comment section; /threads deep links remain only
@@ -260,9 +333,15 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
             ) : null}
             {/* WS-H "Where interpretations differ" renders inside CommentSection,
                 right after the composer (not here at the page bottom). */}
-            {/* WS-T — the debate-arena modal (deep-linked via ?debate=<id>). */}
+            {/* WS-T — the live-debates list (?debates) and, drilled into from
+                it or straight from a comment, the arena (?debate=<id>). */}
+            <LiveDebatesModal
+              storyId={data.story_id}
+              open={debateListOpen}
+              onClose={closeDebateList}
+            />
             <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />
-          </article>
+          </div>
         )
       }
     </PageScaffold>

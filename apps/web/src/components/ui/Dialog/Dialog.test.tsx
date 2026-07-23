@@ -103,4 +103,24 @@ describe('Dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Open' }));
     expect(await checkA11y(baseElement)).toHaveNoViolations();
   });
+
+  // The governance dialogs pass `max-w-2xl`; `cn` does not resolve Tailwind
+  // conflicts, so the base list must not hard-code a width that outranks it.
+  it('defaults to max-w-lg but yields that width to a caller that sets its own', () => {
+    const { rerender } = render(
+      <Dialog open onClose={() => undefined} title="Confirm action">
+        <p>Body</p>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-lg');
+
+    rerender(
+      <Dialog open onClose={() => undefined} title="Confirm action" className="max-w-2xl">
+        <p>Body</p>
+      </Dialog>,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveClass('max-w-2xl');
+    expect(dialog).not.toHaveClass('max-w-lg');
+  });
 });

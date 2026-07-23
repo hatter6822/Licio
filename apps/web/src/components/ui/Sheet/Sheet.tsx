@@ -13,7 +13,7 @@ import { createPortal } from 'react-dom';
 import { useFocusTrap } from '../../../hooks/useFocusTrap.js';
 import { useReducedMotion } from '../../../hooks/useReducedMotion.js';
 import { useScrollLock } from '../../../hooks/useScrollLock.js';
-import { cn } from '../../../lib/cn.js';
+import { cn, defaultMaxWidth } from '../../../lib/cn.js';
 import { Button } from '../Button/index.js';
 import { Icon } from '../Icon/index.js';
 
@@ -175,7 +175,11 @@ export function Sheet({
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          'relative z-modal flex max-h-[90dvh] w-full max-w-xl translate-y-[var(--licio-sheet-y,100vh)] flex-col overflow-auto rounded-t-lg border border-line bg-canvas pb-[env(safe-area-inset-bottom)] shadow-lg transition-transform duration-normal ease-out',
+          'relative z-modal flex max-h-[90dvh] w-full translate-y-[var(--licio-sheet-y,100vh)] flex-col overflow-auto rounded-t-lg border border-line bg-canvas pb-[env(safe-area-inset-bottom)] shadow-lg transition-transform duration-normal ease-out',
+          // `max-w-xl` is the DEFAULT, not a cage: a sheet whose content needs
+          // the room (the debate arena's side-by-side columns, the live-debates
+          // list) passes its own `max-w-*` and gets it.
+          defaultMaxWidth('max-w-xl', className),
           className,
         )}
       >

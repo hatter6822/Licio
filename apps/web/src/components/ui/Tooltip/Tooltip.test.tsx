@@ -186,3 +186,87 @@ describe('Tooltip', () => {
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });
+
+describe('Tooltip singleton (only one bubble at a time)', () => {
+  function Row(): ReactElement {
+    return (
+      <div>
+        <Tooltip content="Correct">
+          <button type="button">A</button>
+        </Tooltip>
+        <Tooltip content="Save for offline">
+          <button type="button">B</button>
+        </Tooltip>
+      </div>
+    );
+  }
+
+  it('a second tooltip opening closes the first — even while the first is focus-open', async () => {
+    const user = userEvent.setup();
+    render(<Row />);
+    const a = screen.getByRole('button', { name: 'A' });
+    const b = screen.getByRole('button', { name: 'B' });
+
+    // Press A: focus holds its tooltip open…
+    a.focus();
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Correct');
+
+    // …and moving to the neighbour must not leave TWO overlapping bubbles on a
+    // 48px icon row: focusing B takes over.
+    act(() => b.focus());
+    const tips = screen.getAllByRole('tooltip');
+    expect(tips).toHaveLength(1);
+    expect(tips[0]).toHaveTextContent('Save for offline');
+    await user.keyboard('{Escape}');
+  });
+
+  it('hover on a neighbour also takes over from a focus-open tooltip', () => {
+    vi.useFakeTimers();
+    try {
+      render(<Row />);
+      const a = screen.getByRole('button', { name: 'A' });
+      const b = screen.getByRole('button', { name: 'B' });
+      act(() => a.focus());
+      expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+
+      fireEvent.mouseEnter(wrapperOf(b));
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+      const tips = screen.getAllByRole('tooltip');
+      expect(tips).toHaveLength(1);
+      expect(tips[0]).toHaveTextContent('Save for offline');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Tooltip placement', () => {
+  it('centres by default and aligns to an inline edge on request', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <Tooltip content="Correct">
+        <button type="button">Edge</button>
+      </Tooltip>,
+    );
+    await user.tab();
+    expect(screen.getByRole('tooltip').className).toContain('-translate-x-1/2');
+
+    // A control at the START of a row grows inward instead of off-screen.
+    rerender(
+      <Tooltip content="Correct" placement="start">
+        <button type="button">Edge</button>
+      </Tooltip>,
+    );
+    expect(screen.getByRole('tooltip').className).toContain('start-0');
+    expect(screen.getByRole('tooltip').className).not.toContain('-translate-x-1/2');
+
+    rerender(
+      <Tooltip content="Correct" placement="end">
+        <button type="button">Edge</button>
+      </Tooltip>,
+    );
+    expect(screen.getByRole('tooltip').className).toContain('end-0');
+  });
+});

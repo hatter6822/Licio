@@ -164,3 +164,28 @@ describe('lens-count chip removal', () => {
     expect(screen.getByText('2 primary sources')).toBeInTheDocument();
   });
 });
+
+describe('dispute posture on the card edge (WS-T)', () => {
+  it('keeps the neutral edge while the story is undisputed', () => {
+    const { container } = render(<StoryCard {...sample} />);
+    const article = container.querySelector('article') as HTMLElement;
+    expect(article.className).toContain('border-line');
+    expect(article.className).not.toMatch(/border-(warning|error|success)/);
+  });
+
+  it.each([
+    ['under_debate', 'Challenged', 'border-warning'],
+    ['incorrect', 'Incorrect', 'border-error'],
+    ['validated', 'Validated', 'border-success'],
+  ] as const)('tints the edge to match the %s label', (status, label, edge) => {
+    const { container } = render(<StoryCard {...sample} disputeStatus={status} />);
+    const article = container.querySelector('article') as HTMLElement;
+    expect(article.className).toContain(edge);
+    // Exactly ONE border colour reaches the DOM: `cn` does not resolve Tailwind
+    // conflicts, so keeping `border-line` alongside would leave the winner to
+    // stylesheet order rather than to intent.
+    expect(article.className).not.toContain('border-line');
+    // Colour is never the sole carrier: the state is still stated in text.
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+});

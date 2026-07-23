@@ -298,10 +298,13 @@ describe('SearchModal scopes', () => {
     const user = userEvent.setup();
     const scopeRow = screen.getByRole('group', { name: 'Choose where to search' });
     // All three, in widening order, with the story's own conversation default.
+    // Read the ACCESSIBLE name, not raw text: the global segment carries both a
+    // phone-short and a full label (one hidden per breakpoint), and its
+    // `aria-label` is what a reader is actually told either way.
     expect(
       within(scopeRow)
         .getAllByRole('button')
-        .map((b) => b.textContent),
+        .map((b) => b.getAttribute('aria-label') ?? b.textContent),
     ).toEqual(['This conversation', 'Hydrology', 'All of Licio']);
     expect(within(scopeRow).getByRole('button', { name: 'This conversation' })).toHaveAttribute(
       'aria-pressed',
@@ -329,6 +332,19 @@ describe('SearchModal scopes', () => {
         expect.anything(),
       );
     });
+  });
+
+  it('the fixed global label shortens on a phone WITHOUT changing what it is called', () => {
+    renderModal(vi.fn(), [storyScope, roomScope]);
+    const scopeRow = screen.getByRole('group', { name: 'Choose where to search' });
+    // The unbounded room name is the only label worth the width on a narrow
+    // screen, so the fixed phrase gives its words up first…
+    const global = within(scopeRow).getByRole('button', { name: 'All of Licio' });
+    expect(within(global).getByText('All')).toHaveClass('sm:hidden');
+    expect(within(global).getByText('All of Licio')).toHaveClass('hidden');
+    // …while the control is still named in full for assistive tech at EVERY
+    // width (WCAG 2.5.3: the visible "All" is contained in the name).
+    expect(global).toHaveAttribute('aria-label', 'All of Licio');
   });
 
   it('drops a type filter the new scope cannot serve, and keeps one it can', async () => {

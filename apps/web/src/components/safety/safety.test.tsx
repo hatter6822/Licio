@@ -15,7 +15,7 @@ vi.mock('../../lib/safety-api.js', () => ({
 vi.mock('../../offline/queue.js', () => ({ enqueue: vi.fn() }));
 
 const api = await import('../../lib/safety-api.js');
-const { ReportSheet } = await import('./ReportSheet.js');
+const { ReportButton, ReportSheet } = await import('./ReportSheet.js');
 const { SupportContact } = await import('./SupportContact.js');
 
 function Providers({ children }: { children: ReactNode }): React.ReactElement {
@@ -86,5 +86,39 @@ describe('ReportSheet (two-tap)', () => {
       content_kind: 'contribution',
     });
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe('ReportButton', () => {
+  it('opens the sheet from a labelled text button', async () => {
+    render(<ReportButton targetType="content" targetId="00000000-0000-4000-8000-0000000000aa" />, {
+      wrapper: Providers,
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Report' }));
+    expect(screen.getByRole('dialog', { name: 'Report' })).toBeInTheDocument();
+  });
+
+  it("icon-only keeps a real name (and takes the caller's), and still opens the sheet", async () => {
+    const { container } = render(
+      <ReportButton
+        iconOnly
+        label="Report this story"
+        targetType="content"
+        targetId="00000000-0000-4000-8000-0000000000aa"
+        contentKind="story"
+      />,
+      { wrapper: Providers },
+    );
+    const button = screen.getByRole('button', { name: 'Report this story' });
+    // Icon-only is a VISUAL economy: no text label, but never an unnamed control.
+    expect(button.textContent).toBe('');
+    expect(await checkA11y(container)).toHaveNoViolations();
+
+    // The name is also shown sighted, on hover/focus (WCAG 1.4.13).
+    button.focus();
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Report this story');
+
+    await userEvent.click(button);
+    expect(screen.getByRole('dialog', { name: 'Report' })).toBeInTheDocument();
   });
 });
