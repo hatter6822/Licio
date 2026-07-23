@@ -92,15 +92,13 @@ export async function fetchBlocks(cursor?: string): Promise<BlockListResponse> {
 /**
  * Block an account by its PUBLIC HANDLE — the only identifier a reader on a
  * content surface has (§19.5 keeps `author_user_id` off the public projection),
- * so this is the form every UI affordance uses.
+ * so this is the form every UI affordance uses, and the only form this client
+ * ships.  The endpoint still accepts a user id for callers that hold one (the
+ * console, offline replay); the browser never does, so a wrapper for it here
+ * would be unreachable code.
  */
 export async function createBlockByHandle(handle: string): Promise<BlockRecordView> {
   const response = await client.v1.blocks.$post({ json: { blocked_user_handle: handle } });
-  return parseResponse(response, blockRecordSchema);
-}
-
-export async function createBlock(blockedUserId: string): Promise<BlockRecordView> {
-  const response = await client.v1.blocks.$post({ json: { blocked_user_id: blockedUserId } });
   return parseResponse(response, blockRecordSchema);
 }
 
@@ -121,16 +119,6 @@ export async function createMuteByHandle(
 ): Promise<MuteRecordView> {
   const response = await client.v1.mutes.$post({
     json: { muted_user_handle: handle, ...(duration ? { duration } : {}) },
-  });
-  return parseResponse(response, muteRecordSchema);
-}
-
-export async function createMute(
-  mutedUserId: string,
-  duration?: MuteDuration,
-): Promise<MuteRecordView> {
-  const response = await client.v1.mutes.$post({
-    json: { muted_user_id: mutedUserId, ...(duration ? { duration } : {}) },
   });
   return parseResponse(response, muteRecordSchema);
 }

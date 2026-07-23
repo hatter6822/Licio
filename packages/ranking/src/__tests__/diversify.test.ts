@@ -147,6 +147,34 @@ describe('WS-I.2.4b balancing', () => {
     expect(result.applications.some((a) => a.constraint === 'lens_representation')).toBe(true);
   });
 
+  // The graceful-degradation fill APPENDS over-cap items, so a degraded page is
+  // not in score order. Choosing the eviction by POSITION therefore dropped the
+  // strongest eligible item and kept a much weaker one; it must choose by SCORE.
+  it('lens promotion evicts the lowest-SCORING eligible item on a degraded page', () => {
+    const pool = [
+      balanceItem(1, 0.9, uuidOf(900), ['a'], 'lens-1'),
+      balanceItem(2, 0.8, uuidOf(900), ['b'], 'lens-1'), // deferred by the source cap
+      balanceItem(3, 0.2, uuidOf(901), ['c'], 'lens-1'),
+      balanceItem(4, 0.1, uuidOf(900), ['d'], 'lens-2'), // deferred; lens-promoted
+    ];
+    const result = applyBalancing(pool, {
+      ...CONFIG,
+      pageSize: 3,
+      maxSourceSharePct: 34, // 1 of 3 → items 2 and 4 defer, then 2 back-fills
+    });
+    expect(result.degraded).toBe(true);
+    const served = result.page.map((p) => p.itemId);
+    // The 0.8 item stays; the 0.2 item is the one that makes way for the lens.
+    expect(served).toContain(uuidOf(2));
+    expect(served).not.toContain(uuidOf(3));
+    expect(result.demoted.map((d) => d.itemId)).toContain(uuidOf(3));
+    // Lens representation is still achieved, and the page stays score-ordered.
+    expect(new Set(result.page.map((p) => p.lensId))).toEqual(new Set(['lens-1', 'lens-2']));
+    expect(result.page.map((p) => p.score)).toEqual(
+      [...result.page.map((p) => p.score)].sort((a, b) => b - a),
+    ); // prettier-ignore
+  });
+
   it('never lists a served item as demoted, even when a cap-demoted item is lens-promoted', () => {
     // Source 900 fills the 2-slot page (cap 1/source), pushing the low-score
     // lens-2 item (same source) out via the source cap.  The lens loop then
