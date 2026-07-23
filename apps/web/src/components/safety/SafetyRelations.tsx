@@ -65,6 +65,19 @@ export function BlockMuteButtons({
     });
   };
 
+  /**
+   * The relationship is enforced SERVER-side on the next fetch, so the caches
+   * holding already-rendered content must be dropped too — otherwise the toast
+   * says the block took effect immediately while the blocked author's comment is
+   * still on screen.  Invalidating the owner's own blocks/mutes list alone was
+   * exactly that gap.
+   */
+  const refreshVisibleContent = (): void => {
+    for (const queryKey of queryKeys.relationshipFiltered()) {
+      void queryClient.invalidateQueries({ queryKey });
+    }
+  };
+
   const block = useMutation({
     mutationFn: () => createBlockByHandle(handle),
     onSuccess: () => {
@@ -73,6 +86,7 @@ export function BlockMuteButtons({
         tone: 'success',
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.blocks() });
+      refreshVisibleContent();
       onDone?.();
     },
     onError: failed(t('block.failed', 'We could not block that account.')),
@@ -86,6 +100,7 @@ export function BlockMuteButtons({
         tone: 'success',
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.mutes() });
+      refreshVisibleContent();
       onDone?.();
     },
     onError: failed(t('mute.failed', 'We could not mute that account.')),

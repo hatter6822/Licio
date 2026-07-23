@@ -82,6 +82,22 @@ export const queryKeys = {
    *  through this so a change that flips ONE requirement refreshes the checklist
    *  whichever target the member is currently viewing. */
   roomReadinessAll: (roomId: string) => ['room', roomId, 'readiness'] as const,
+  /**
+   * Every cache whose contents the server filters by the viewer's block/mute
+   * relationships (`RelationshipReader`).  Those filters apply on the NEXT fetch,
+   * so a block that does not invalidate these leaves the blocked author's already
+   * rendered content on screen while the UI says the block took effect
+   * immediately.  Room-scoped reads are covered by the `room` prefix.
+   */
+  relationshipFiltered: (): ReadonlyArray<readonly [string]> => [
+    ['feed'],
+    ['story'],
+    ['thread'],
+    ['room'],
+    ['rooms'],
+    ['search'],
+    ['debate'],
+  ],
   // WS-M treasury + production governance.
   governanceProfile: (roomId: string) => ['room', roomId, 'governance-profile'] as const,
   treasuryTab: (roomId: string) => ['room', roomId, 'treasury-tab'] as const,

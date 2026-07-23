@@ -173,6 +173,31 @@ describe('BlockMuteButtons (WS-J.1.2)', () => {
     await waitFor(() => expect(api.createMuteByHandle).toHaveBeenCalledWith('noisy', '30d'));
   });
 
+  // The server applies the relationship filter on the NEXT fetch, so the caches
+  // holding already-rendered content must be dropped or the toast's "you will no
+  // longer see each other" is false until an unrelated refetch.
+  it('invalidates the relationship-filtered content caches on success', async () => {
+    vi.mocked(api.createBlockByHandle).mockResolvedValue(block);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    render(
+      <I18nProvider locale="en">
+        <QueryClientProvider client={client}>
+          <ToastProvider>
+            <BlockMuteButtons handle="noisy" />
+          </ToastProvider>
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Block @noisy/ }));
+    await waitFor(() => expect(api.createBlockByHandle).toHaveBeenCalled());
+    const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+    expect(keys).toContain(JSON.stringify(['blocks']));
+    for (const prefix of [['feed'], ['story'], ['thread'], ['room'], ['search']]) {
+      expect(keys, `missing ${prefix[0]}`).toContain(JSON.stringify(prefix));
+    }
+  });
+
   // A silent failure would leave the reader believing they had blocked someone.
   it('surfaces a failure instead of reporting success', async () => {
     vi.mocked(api.createBlockByHandle).mockRejectedValue(new Error('nope'));
