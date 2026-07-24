@@ -74,7 +74,9 @@ import {
   buildComplianceExport,
   buildCompliancePort,
   buildCompliancePurge,
+  complianceServicesConfigured,
   createInMemoryComplianceServices,
+  getComplianceServices,
   resolveRegionForUser,
   setComplianceServices,
 } from './compliance/services.js';
@@ -591,6 +593,18 @@ if (db) {
   // WS-T — the debate arena store over migration 0056.
   forumServices.debates = new DrizzleDebateStore(db);
 }
+// WS-T challenge policy — the KYC capacity-boost reader (a BOOSTER only; the
+// floor of 1 is never KYC-gated — content participation never is).  Resolved
+// LAZILY: the WS-N compliance container installs later in this boot; a
+// missing container or any read failure is `false`, never an error.
+forumServices.kycReader = async (userId) => {
+  if (!complianceServicesConfigured()) return false;
+  try {
+    return (await getComplianceServices().kycLevel(userId)) === 'kyc_partner';
+  } catch {
+    return false;
+  }
+};
 await forumServices.reloadConfig();
 setForumServices(forumServices);
 // Thread-posture consumer (durable; handlers first run at recovery replay,

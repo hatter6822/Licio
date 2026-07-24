@@ -139,6 +139,7 @@ export class DrizzleStoryStore implements StoryStore {
       extractionState: row.extractionState,
       hiddenState: row.hiddenState,
       disputeStatus: row.disputeStatus,
+      settledAt: isoOrNull(row.settledAt),
       lastMaterialUpdateAt: iso(row.lastMaterialUpdateAt),
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
@@ -469,6 +470,9 @@ export class DrizzleStoryStore implements StoryStore {
     if (patch.lifecycleState !== undefined) values['lifecycleState'] = patch.lifecycleState;
     if (patch.lastMaterialUpdateAt !== undefined) {
       values['lastMaterialUpdateAt'] = new Date(patch.lastMaterialUpdateAt);
+    }
+    if (patch.settledAt !== undefined) {
+      values['settledAt'] = patch.settledAt === null ? null : new Date(patch.settledAt);
     }
     if (patch.topicIds !== undefined) values['topicIds'] = patch.topicIds;
     // WS-K §24.1 — an authoritative body-override classification CONSUMES the

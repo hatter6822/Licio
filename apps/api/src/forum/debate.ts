@@ -41,6 +41,12 @@ import {
 import { DEBATE_ADJUDICATOR } from '../ai-governance/models.js';
 import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { mapBounded } from '../lib/concurrency.js';
+import {
+  type ChallengePolicy,
+  challengePolicyFromConfig,
+  isGraceWithdrawal,
+} from './challenge-policy.js';
+import { DEFAULT_FORUM_CONFIG } from './config.js';
 import type {
   DebateArenaRecord,
   DebateConcessionPatch,
@@ -94,10 +100,14 @@ export type StoryAuthorReader = (storyId: string) => Promise<string | null>;
 export type StewardReader = (roomId: string, userId: string) => Promise<boolean>;
 
 /** Set a STORY's dispute posture (story-target debates); the ranking feed reads
- *  it to penalize a corrected story to the bottom of the feed. */
+ *  it to penalize a corrected story to the bottom of the feed.  `settledAt`
+ *  (when passed) lands in the SAME write: a string marks the story SETTLED
+ *  (the challenge-policy threshold crossed — no longer challengeable), null
+ *  clears the mark, undefined leaves it untouched. */
 export type StoryDisputeSetter = (
   storyId: string,
   status: 'none' | 'under_debate' | 'incorrect' | 'validated',
+  settledAt?: string | null,
 ) => Promise<void>;
 
 /** A story's debatable material (the incumbent side of a story-target arena). */
@@ -203,8 +213,22 @@ export interface DebateDeps {
   /** Window-length override (dev simulator / tests ONLY; absent ⇒ the §15.4
    *  spec constants). */
   windows?: DebateWindowsOverride | undefined;
+  /** The WS-T challenge policy in force (settled threshold + withdrawal grace;
+   *  challenge-policy.ts).  Absent ⇒ the config defaults. */
+  challengePolicy?: (() => ChallengePolicy) | undefined;
+  /** A story's creation instant — the settle anchor for story targets (stories
+   *  have no author edit path; `lastMaterialUpdateAt` is the conversation-
+   *  freshness clock and must never anchor settling).  Absent/null ⇒ story
+   *  settling is skipped (partial test wirings). */
+  storyCreatedAt?: ((storyId: string) => Promise<string | null>) | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
+}
+
+/** The effective challenge policy for a deps bundle (config defaults when the
+ *  wiring predates the seam). */
+function effectiveChallengePolicy(deps: Pick<DebateDeps, 'challengePolicy'>): ChallengePolicy {
+  return deps.challengePolicy?.() ?? challengePolicyFromConfig(DEFAULT_FORUM_CONFIG);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,10 +685,26 @@ export type WithdrawOutcome =
   | { ok: false; reason: 'not_found' | 'not_challenger' | 'window_closed' };
 
 /** The post-close effects of a withdrawal: the target's `under_debate` tag
- *  clears back to `none` (still re-challengeable), audit log, live frame. */
+ *  clears back to `none` (still re-challengeable), audit log, live frame.
+ *  The log carries the challenge-policy GRACE classification (a misclick
+ *  retracted inside the grace window with a never-engaged incumbent costs
+ *  nothing; every other withdrawal cools the challenger down and counts
+ *  toward their capacity penalties) — the penalties themselves are DERIVED
+ *  from the arena rows at the next create, never written here. */
 async function applyWithdrawalEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
   await clearDisputeTag(deps, closed);
-  deps.log('forum.debate_withdrawn', { debate_id: closed.debateId, story_id: closed.storyId });
+  deps.log('forum.debate_withdrawn', {
+    debate_id: closed.debateId,
+    story_id: closed.storyId,
+    grace: isGraceWithdrawal(
+      {
+        createdAt: closed.createdAt,
+        resolvedAt: closed.resolvedAt ?? closed.createdAt,
+        incumbentEngaged: closed.incumbentLastActiveAt > closed.createdAt,
+      },
+      effectiveChallengePolicy(deps).withdrawGraceMs,
+    ),
+  });
   await broadcastArena(deps, closed);
 }
 
@@ -713,9 +753,9 @@ export function concessionPatch(nowIso: string): DebateConcessionPatch {
  *  (visible-but-sunk, never hidden), audit log, live frame. */
 async function applyConcessionEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
   if (closed.targetType === 'comment' && closed.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect');
+    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect', null);
   } else if (closed.targetType === 'story') {
-    await deps.setStoryDispute(closed.storyId, 'incorrect');
+    await deps.setStoryDispute(closed.storyId, 'incorrect', null);
   }
   deps.log('forum.debate_conceded', { debate_id: closed.debateId, story_id: closed.storyId });
   await broadcastArena(deps, closed);
@@ -801,12 +841,14 @@ export async function closeDebatesForRemoval(
   return { ok: true, closedIds: closed.map((arena) => arena.debateId) };
 }
 
-/** Clear the challenged target's `under_debate` tag back to `none`. */
+/** Clear the challenged target's `under_debate` tag back to `none` (the
+ *  settled mark clears with it — a target reachable here was never settled,
+ *  so this is stale-mark hygiene, not a state change). */
 async function clearDisputeTag(deps: DebateDeps, arena: DebateArenaRecord): Promise<void> {
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none');
+    await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none', null);
   } else if (arena.targetType === 'story') {
-    await deps.setStoryDispute(arena.storyId, 'none');
+    await deps.setStoryDispute(arena.storyId, 'none', null);
   }
 }
 
@@ -840,10 +882,42 @@ export async function finalizeDebate(
       : arena.verdict === 'upheld' && !selfTargeted
         ? 'validated'
         : 'none';
+  // WS-T challenge policy — an upheld defense may cross the SETTLED threshold:
+  // count the target's PRIOR adjudicated upheld defenses since its material-
+  // edit anchor (this arena is the +1; its own resolvedAt lands below).  A
+  // settled target refuses further challenges at create until a room steward
+  // unsettles it or (for a comment) the author materially edits.  Any other
+  // outcome passes null — self-healing hygiene for a stale settled mark.
+  let settledAt: string | null = null;
+  if (resolvedStatus === 'validated') {
+    const threshold = effectiveChallengePolicy(deps).settleThreshold;
+    if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+      const target = await deps.contributions.getById(arena.targetContributionId);
+      if (target !== null) {
+        const anchor =
+          (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
+        const prior = await deps.debates.countUpheldDefensesForComment(
+          target.contributionId,
+          anchor,
+        );
+        if (prior + 1 >= threshold) settledAt = resolvedAt;
+      }
+    } else if (arena.targetType === 'story') {
+      const anchor = (await deps.storyCreatedAt?.(arena.storyId)) ?? null;
+      if (anchor !== null) {
+        const prior = await deps.debates.countUpheldDefensesForStory(arena.storyId, anchor);
+        if (prior + 1 >= threshold) settledAt = resolvedAt;
+      }
+    }
+  }
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(arena.targetContributionId, resolvedStatus);
+    await deps.contributions.setDisputeStatus(
+      arena.targetContributionId,
+      resolvedStatus,
+      settledAt,
+    );
   } else if (arena.targetType === 'story') {
-    await deps.setStoryDispute(arena.storyId, resolvedStatus);
+    await deps.setStoryDispute(arena.storyId, resolvedStatus, settledAt);
   }
   // A challenge the adjudicator RULED AGAINST (`upheld` — the incumbent
   // prevailed) is a false correction: tag the CHALLENGER `incorrect` so it takes
@@ -860,6 +934,7 @@ export async function finalizeDebate(
     debate_id: debateId,
     verdict: arena.verdict,
     target_dispute_status: resolvedStatus,
+    target_settled: settledAt !== null,
   });
   await broadcastArena(deps, updated);
   return updated;

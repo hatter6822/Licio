@@ -19,14 +19,17 @@ import { debateArenas as debateArenasTable } from '@licio/db';
 import type { Citation, DebateState } from '@licio/shared';
 import { and, asc, count, eq, gt, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
-import type {
-  DebateArenaRecord,
-  DebateConcessionPatch,
-  DebateLockedContent,
-  DebateRemovalClosure,
-  DebateSidePosition,
-  DebateStore,
-  DebateVerdictPatch,
+import { type ChallengerHistory, isGraceWithdrawal } from './challenge-policy.js';
+import {
+  type DebateArenaRecord,
+  type DebateConcessionPatch,
+  type DebateLockedContent,
+  type DebateRemovalClosure,
+  type DebateSidePosition,
+  type DebateStore,
+  type DebateVerdictPatch,
+  PRE_VERDICT_STATES,
+  TOMBSTONED_OPPONENT_KEY,
 } from './debate-store.js';
 
 type Db = DbExecutor;
@@ -702,6 +705,171 @@ export class DrizzleDebateStore implements DebateStore {
       .orderBy(asc(debateArenasTable.createdAt), asc(debateArenasTable.debateId))
       .limit(Math.max(0, limit));
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async challengerHistory(
+    userId: string,
+    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+  ): Promise<ChallengerHistory> {
+    const nowMs = Date.parse(opts.nowIso);
+    const opensCutoff = new Date(nowMs - opts.opensWindowMs);
+    const withdrawCutoff = new Date(nowMs - opts.withdrawWindowMs);
+    const asChallenger = eq(debateArenasTable.challengerUserId, userId);
+    // Adjudicated resolutions only, self-targeted legacy arenas excluded.
+    const adjudicated = and(
+      asChallenger,
+      eq(debateArenasTable.state, 'resolved'),
+      inArray(debateArenasTable.decidedBy, ['ai', 'steward']),
+      or(isNull(debateArenasTable.incumbentUserId), ne(debateArenasTable.incumbentUserId, userId)),
+    );
+    const [winRows, lossRows, liveRows, openRows, withdrawnRows] = await Promise.all([
+      this.#db
+        .select({ opponent: debateArenasTable.incumbentUserId, wins: count() })
+        .from(debateArenasTable)
+        .where(and(adjudicated, eq(debateArenasTable.winner, 'challenger')))
+        .groupBy(debateArenasTable.incumbentUserId),
+      this.#db
+        .select({ losses: count() })
+        .from(debateArenasTable)
+        .where(and(adjudicated, eq(debateArenasTable.winner, 'incumbent'))),
+      this.#db
+        .select({ live: count() })
+        .from(debateArenasTable)
+        .where(and(asChallenger, inArray(debateArenasTable.state, [...PRE_VERDICT_STATES]))),
+      this.#db
+        .select({ createdAt: debateArenasTable.createdAt })
+        .from(debateArenasTable)
+        .where(and(asChallenger, gt(debateArenasTable.createdAt, opensCutoff))),
+      this.#db
+        .select({
+          createdAt: debateArenasTable.createdAt,
+          resolvedAt: debateArenasTable.resolvedAt,
+          incumbentLastActiveAt: debateArenasTable.incumbentLastActiveAt,
+        })
+        .from(debateArenasTable)
+        .where(
+          and(
+            asChallenger,
+            eq(debateArenasTable.state, 'withdrawn'),
+            gt(debateArenasTable.resolvedAt, withdrawCutoff),
+          ),
+        ),
+    ]);
+    return {
+      winsByOpponent: winRows.map((row) => ({
+        opponentKey: row.opponent ?? TOMBSTONED_OPPONENT_KEY,
+        wins: row.wins,
+      })),
+      adjudicatedLosses: lossRows[0]?.losses ?? 0,
+      liveCount: liveRows[0]?.live ?? 0,
+      openTimesLast24h: openRows.map((row) => iso(row.createdAt)),
+      withdrawals: withdrawnRows.flatMap((row) =>
+        row.resolvedAt === null
+          ? []
+          : [
+              {
+                createdAt: iso(row.createdAt),
+                resolvedAt: iso(row.resolvedAt),
+                incumbentEngaged: row.incumbentLastActiveAt.getTime() > row.createdAt.getTime(),
+              },
+            ],
+      ),
+    };
+  }
+
+  async countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number> {
+    return this.#countUpheldDefenses(
+      and(
+        eq(debateArenasTable.targetType, 'comment'),
+        eq(debateArenasTable.targetContributionId, contributionId),
+      ),
+      sinceIso,
+    );
+  }
+
+  async countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number> {
+    return this.#countUpheldDefenses(
+      and(eq(debateArenasTable.targetType, 'story'), eq(debateArenasTable.storyId, storyId)),
+      sinceIso,
+    );
+  }
+
+  async #countUpheldDefenses(
+    targetWhere: ReturnType<typeof and>,
+    sinceIso: string,
+  ): Promise<number> {
+    const rows = await this.#db
+      .select({ defenses: count() })
+      .from(debateArenasTable)
+      .where(
+        and(
+          targetWhere,
+          eq(debateArenasTable.state, 'resolved'),
+          eq(debateArenasTable.verdict, 'upheld'),
+          gt(debateArenasTable.resolvedAt, new Date(sinceIso)),
+          // Self-targeted legacy arenas never count toward settling.
+          or(
+            isNull(debateArenasTable.incumbentUserId),
+            isNull(debateArenasTable.challengerUserId),
+            ne(debateArenasTable.incumbentUserId, debateArenasTable.challengerUserId),
+          ),
+        ),
+      );
+    return rows[0]?.defenses ?? 0;
+  }
+
+  async latestConcludedChallengeAt(
+    target: { contributionId: string } | { storyId: string },
+    challengerUserId: string,
+    graceMs: number,
+  ): Promise<string | null> {
+    const targetWhere =
+      'contributionId' in target
+        ? and(
+            eq(debateArenasTable.targetType, 'comment'),
+            eq(debateArenasTable.targetContributionId, target.contributionId),
+          )
+        : and(
+            eq(debateArenasTable.targetType, 'story'),
+            eq(debateArenasTable.storyId, target.storyId),
+          );
+    // The per-(target, challenger) terminal set is tiny; grace classification
+    // stays in the shared pure predicate rather than a SQL re-encoding.
+    const rows = await this.#db
+      .select({
+        state: debateArenasTable.state,
+        createdAt: debateArenasTable.createdAt,
+        resolvedAt: debateArenasTable.resolvedAt,
+        incumbentLastActiveAt: debateArenasTable.incumbentLastActiveAt,
+      })
+      .from(debateArenasTable)
+      .where(
+        and(
+          targetWhere,
+          eq(debateArenasTable.challengerUserId, challengerUserId),
+          inArray(debateArenasTable.state, ['resolved', 'withdrawn']),
+        ),
+      );
+    let latest: string | null = null;
+    for (const row of rows) {
+      if (row.resolvedAt === null) continue;
+      if (
+        row.state === 'withdrawn' &&
+        isGraceWithdrawal(
+          {
+            createdAt: iso(row.createdAt),
+            resolvedAt: iso(row.resolvedAt),
+            incumbentEngaged: row.incumbentLastActiveAt.getTime() > row.createdAt.getTime(),
+          },
+          graceMs,
+        )
+      ) {
+        continue;
+      }
+      const concludedAt = iso(row.resolvedAt);
+      if (latest === null || concludedAt > latest) latest = concludedAt;
+    }
+    return latest;
   }
 
   async anonymizeParty(userId: string): Promise<number> {

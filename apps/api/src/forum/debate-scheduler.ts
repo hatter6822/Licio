@@ -16,6 +16,7 @@ import { adjudicateDebate } from '../ai-governance/debate.js';
 import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
+import { challengePolicyFromConfig } from './challenge-policy.js';
 import {
   type DebateDeps,
   type DebateJudgeRunner,
@@ -145,6 +146,12 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     contributions: forum.contributions,
     storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
     storyContent: buildStoryContentReader(ingestion.stories),
+    // WS-T challenge policy: the settled threshold + withdrawal grace come
+    // from the runtime forum config; the story settle anchor is the story's
+    // CREATION instant (no author edit path — `lastMaterialUpdateAt` is the
+    // conversation-freshness clock and must never anchor settling).
+    challengePolicy: () => challengePolicyFromConfig(forum.config()),
+    storyCreatedAt: async (sid) => (await ingestion.stories.getById(sid))?.createdAt ?? null,
     // Room stewards, plus the platform ADMIN (2026-07 final-line-of-defense
     // decision): the verdict-overrule power follows the same platform-admin
     // arm as the rest of the room-steward gate family (`isRoomSteward`), while

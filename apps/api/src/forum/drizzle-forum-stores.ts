@@ -156,6 +156,7 @@ export class DrizzleContributionStore implements ContributionStore {
       editHistoryRef: row.editHistoryRef,
       moderationState: row.moderationState,
       disputeStatus: row.disputeStatus,
+      settledAt: isoOrNull(row.settledAt),
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
     };
@@ -164,7 +165,7 @@ export class DrizzleContributionStore implements ContributionStore {
   async insert(
     record: Omit<
       ContributionRecord,
-      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus' | 'settledAt'
     >,
   ): Promise<ContributionInsertOutcome> {
     try {
@@ -537,13 +538,31 @@ export class DrizzleContributionStore implements ContributionStore {
   async setDisputeStatus(
     contributionId: string,
     status: ContributionDisputeStatus,
+    settledAt?: string | null,
   ): Promise<ContributionRecord | null> {
     const rows = await this.#db
       .update(contributionsTable)
-      .set({ disputeStatus: status, updatedAt: new Date() })
+      .set({
+        disputeStatus: status,
+        updatedAt: new Date(),
+        ...(settledAt !== undefined
+          ? { settledAt: settledAt === null ? null : new Date(settledAt) }
+          : {}),
+      })
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async latestEditAt(contributionId: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ editedAt: contributionEditHistory.editedAt })
+      .from(contributionEditHistory)
+      .where(eq(contributionEditHistory.contributionId, contributionId))
+      .orderBy(desc(contributionEditHistory.editedAt))
+      .limit(1);
+    const latest = rows[0]?.editedAt;
+    return latest === undefined ? null : iso(latest);
   }
 
   async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {

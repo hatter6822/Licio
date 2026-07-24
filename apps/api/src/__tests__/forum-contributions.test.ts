@@ -36,6 +36,8 @@ function app() {
 let fixture: ForumServicesFixture;
 let cookie: string;
 let userId: string;
+let challengerCookie: string;
+let challengerId: string;
 let threadId: string;
 let claimId: string;
 let nowMs: number;
@@ -45,10 +47,26 @@ beforeEach(async () => {
   // The default fixture raises the per-minute cap (the clock is frozen, so
   // the sliding window never advances); the rate-limit test below builds its
   // own fixture at the REAL default of 10/minute.
-  fixture = freshForumServices({ now: () => nowMs, forumConfig: { contributionsPerMinute: 100 } });
+  // Challenge-policy quota raised too: these suites exercise arena MECHANICS
+  // (several corrections per account under a frozen clock, where every arena
+  // stays live); the policy quotas themselves are covered by their own suite.
+  fixture = freshForumServices({
+    now: () => nowMs,
+    forumConfig: {
+      contributionsPerMinute: 100,
+      challengeBaseCapacity: 10,
+      challengeMaxCapacity: 20,
+      challengeOpensPerDay: 100,
+    },
+  });
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   userId = session.userId;
+  // Corrections come from a SECOND account: challenging your own content is
+  // refused (`cannot_challenge_own_content`).
+  const challenger = await seedUserWithSession(fixture.identity);
+  challengerCookie = challenger.cookie;
+  challengerId = challenger.userId;
   ({ threadId } = await seedThread(fixture));
   claimId = await seedClaim(fixture);
 });
@@ -64,12 +82,24 @@ async function createOk(body: Record<string, unknown>): Promise<ContributionPubl
   return contributionPublicSchema.parse(json.contribution);
 }
 
+/** File a challenge from the CHALLENGER session (see the beforeEach note). */
+async function challenge(body: Record<string, unknown>): Promise<Response> {
+  return app().request(jsonRequest('/v1/contributions', 'POST', body, challengerCookie));
+}
+
+async function challengeOk(body: Record<string, unknown>): Promise<ContributionPublic> {
+  const res = await challenge(body);
+  expect(res.status).toBe(201);
+  const json = (await res.json()) as { contribution: unknown };
+  return contributionPublicSchema.parse(json.contribution);
+}
+
 describe('WS-T.3.2 — comment-first write surface', () => {
   it('creates comment, sourced-comment, and correction writes and projects the public shape', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
     const sourced = await createOk(contributionBody('comment', threadId, { sourced: true }));
     // WS-T — a correction now challenges a comment (or the story), not a claim.
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     expect(sourced.citations).toHaveLength(1);
@@ -79,10 +109,17 @@ describe('WS-T.3.2 — comment-first write surface', () => {
       expect(created.moderation_state).toBe('published');
     }
     await fixture.settleAll();
+    // The two comments are the author's events; the correction is the
+    // challenger account's (a challenge is never filed against your own
+    // content, so its event lands on the second owner).
     const events = await fixture.events.eventStore.listByOwner(userId);
     const createdEvents = events.filter((e) => e.eventType === 'contribution.created');
-    expect(createdEvents).toHaveLength(3);
-    for (const event of createdEvents) {
+    expect(createdEvents).toHaveLength(2);
+    const challengerEvents = (await fixture.events.eventStore.listByOwner(challengerId)).filter(
+      (e) => e.eventType === 'contribution.created',
+    );
+    expect(challengerEvents).toHaveLength(1);
+    for (const event of [...createdEvents, ...challengerEvents]) {
       expect(JSON.stringify(event.payload)).not.toContain('This is a comment in the thread.');
     }
   });
@@ -115,7 +152,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
 
   it('opens the arena SYNCHRONOUSLY and back-references a resolvable id', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     // #2 — the id is on the response and the arena EXISTS before it returned
@@ -136,7 +173,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     );
     // The correction targets a NESTED reply (depth 1); it must thread one level
     // deeper, directly under the comment it corrects — never at the thread root.
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: reply.contribution_id }),
     );
     expect(correction.parent_contribution_id).toBe(reply.contribution_id);
@@ -181,8 +218,10 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
 
   it('refuses a second correction against a comment already under debate (422)', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
-    await createOk(contributionBody('correction', threadId, { targetId: comment.contribution_id }));
-    const res = await create(
+    await challengeOk(
+      contributionBody('correction', threadId, { targetId: comment.contribution_id }),
+    );
+    const res = await challenge(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     expect(res.status).toBe(422);
@@ -192,7 +231,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
   it('refuses a correction against a comment already found incorrect (422)', async () => {
     const comment = await createOk(contributionBody('comment', threadId));
     await fixture.forum.contributions.setDisputeStatus(comment.contribution_id, 'incorrect');
-    const res = await create(
+    const res = await challenge(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     expect(res.status).toBe(422);
@@ -246,7 +285,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     const storyId = thread?.storyId ?? '';
     const comment = await createOk(contributionBody('comment', threadId));
     // A correction targeting the COMMENT (nests under it) and one targeting the STORY (root).
-    const commentCorrection = await createOk(
+    const commentCorrection = await challengeOk(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     const storyCorrection = await createOk(contributionBody('correction', threadId, { storyId }));
@@ -269,7 +308,7 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';
     const comment = await createOk(contributionBody('comment', threadId));
-    const c1 = await createOk(
+    const c1 = await challengeOk(
       contributionBody('correction', threadId, { targetId: comment.contribution_id }),
     );
     // A correction that targets ANOTHER correction — it nests under c1.
@@ -295,11 +334,11 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     const storyId = thread?.storyId ?? '';
     const commentA = await createOk(contributionBody('comment', threadId));
     const commentB = await createOk(contributionBody('comment', threadId));
-    const older = await createOk(
+    const older = await challengeOk(
       contributionBody('correction', threadId, { targetId: commentA.contribution_id }),
     );
     nowMs += 60_000; // the second correction is strictly newer
-    const newer = await createOk(
+    const newer = await challengeOk(
       contributionBody('correction', threadId, { targetId: commentB.contribution_id }),
     );
     const res = await app().request(
@@ -712,7 +751,7 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
 
   it('WS-T — a debated edit is refused from the DUE instant, before any sweep flips the state', async () => {
     const target = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
     const debateId = correction.metadata.debate_arena_id ?? '';
@@ -739,7 +778,7 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
       throw err;
     };
     const target = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
     const debateId = correction.metadata.debate_arena_id ?? '';
@@ -779,16 +818,15 @@ describe('WS-G §15.5 — edits and tombstone removal', () => {
 
   it('edits cannot drop the correction citation floor (422)', async () => {
     const target = await createOk(contributionBody('comment', threadId));
-    const res = await create(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
-    const json = (await res.json()) as { contribution: { contribution_id: string } };
     const patch = await app().request(
       jsonRequest(
-        `/v1/contributions/${json.contribution.contribution_id}`,
+        `/v1/contributions/${correction.contribution_id}`,
         'PATCH',
-        { contribution_id: json.contribution.contribution_id, citations: [] },
-        cookie,
+        { contribution_id: correction.contribution_id, citations: [] },
+        challengerCookie,
       ),
     );
     expect(patch.status).toBe(422);
@@ -823,7 +861,7 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
 
   async function openArena(): Promise<{ targetId: string; debateId: string }> {
     const target = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
     return {
@@ -834,7 +872,7 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
 
   it('a NO-OP edit (identical body) does not reset the debate activity clocks', async () => {
     const target = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
     const debateId = correction.metadata.debate_arena_id ?? '';
@@ -875,17 +913,17 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
       forumConfig: { contributionsPerMinute: 100 },
     });
     const session = await seedUserWithSession(flagged.identity);
+    const flaggedChallenger = await seedUserWithSession(flagged.identity);
     const seeded = await seedThread(flagged);
-    const mk = async (body: Record<string, unknown>) => {
-      const res = await app().request(
-        jsonRequest('/v1/contributions', 'POST', body, session.cookie),
-      );
+    const mk = async (body: Record<string, unknown>, asCookie = session.cookie) => {
+      const res = await app().request(jsonRequest('/v1/contributions', 'POST', body, asCookie));
       expect(res.status).toBe(201);
       return ((await res.json()) as { contribution: ContributionPublic }).contribution;
     };
     const target = await mk(contributionBody('comment', seeded.threadId));
     const correction = await mk(
       contributionBody('correction', seeded.threadId, { targetId: target.contribution_id }),
+      flaggedChallenger.cookie,
     );
     const debateId = correction.metadata.debate_arena_id ?? '';
     // The lock lands BETWEEN the edit's touch-CAS and its applyEdit — simulated
@@ -1014,7 +1052,7 @@ describe('WS-T — lock/removal races, activity gaming, and debate-write access 
 
   it('an edit racing a verdict that lands BEFORE the touch-CAS still succeeds (judged frees it)', async () => {
     const target = await createOk(contributionBody('comment', threadId));
-    const correction = await createOk(
+    const correction = await challengeOk(
       contributionBody('correction', threadId, { targetId: target.contribution_id }),
     );
     const debateId = correction.metadata.debate_arena_id ?? '';

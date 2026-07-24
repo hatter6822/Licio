@@ -85,6 +85,11 @@ export interface StoryRecord {
    *  ORTHOGONAL to `hiddenState`: an `incorrect` story stays VISIBLE but is
    *  penalized to the bottom of the feed by ranking. */
   disputeStatus?: ContributionDisputeStatus;
+  /** WS-T settled threshold (challenge-policy.ts): set once the story has
+   *  accumulated the configured adjudicated `upheld` defenses — no longer
+   *  challengeable until a steward unsettles.  Absent/null ⇒ not settled; the
+   *  story still reads `validated` on every existing wire surface. */
+  settledAt?: string | null;
   lastMaterialUpdateAt: string;
   createdAt: string;
   updatedAt: string;
@@ -345,6 +350,7 @@ export interface StoryStore {
         | 'canonicalPublicStoryId'
         | 'mediaUploadRef'
         | 'disputeStatus'
+        | 'settledAt'
       >
     >,
   ): Promise<StoryRecord | null>;

@@ -591,6 +591,30 @@ export function usePostDebatePositionMutation(debateId: string) {
   });
 }
 
+/**
+ * The caller's OWN challenge standing (WS-T challenge policy), optionally
+ * probing one prospective target — the correction composer's pre-flight
+ * quota/cooldown/target line, and the withdraw dialog's consequence source.
+ * Short-lived by design: standing changes with every open/verdict/withdrawal.
+ */
+export function useChallengeStandingQuery(
+  target: { contributionId: string } | { storyId: string } | null,
+  enabled = true,
+) {
+  const targetKey =
+    target === null
+      ? null
+      : 'contributionId' in target
+        ? `comment:${target.contributionId}`
+        : `story:${target.storyId}`;
+  return useQuery({
+    queryKey: queryKeys.challengeStanding(targetKey),
+    enabled,
+    queryFn: () => api.fetchChallengeStanding(target ?? undefined),
+    staleTime: 15_000,
+  });
+}
+
 export function useOverrideDebateMutation(debateId: string) {
   const queryClient = useQueryClient();
   return useMutation({

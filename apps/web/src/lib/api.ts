@@ -17,9 +17,11 @@ import {
   attentionAggregateSchema,
   attentionIngestAckSchema,
   authStatusResponseSchema,
+  type ChallengeStandingResponse,
   type ContributionCreateResponse,
   type ContributionWriteCreate,
   type CreateReportRequest,
+  challengeStandingResponseSchema,
   contentSavedAggregateEventSchema,
   contributionCreateResponseSchema,
   type DebateArenaResponse,
@@ -426,6 +428,22 @@ export async function closeDebate(
       ? await target.withdraw.$post({ param: { debateId } })
       : await target.concede.$post({ param: { debateId } });
   return parseResponse(response, debateArenaResponseSchema);
+}
+
+/** The caller's OWN challenge standing (+ an optional target probe): quota,
+ *  cooldown, and per-target block reasons for the correction composer — the
+ *  WS-T challenge policy, rendered BEFORE a challenge is filed. */
+export async function fetchChallengeStanding(
+  target?: { contributionId: string } | { storyId: string },
+): Promise<ChallengeStandingResponse> {
+  const params = new URLSearchParams();
+  if (target !== undefined) {
+    if ('contributionId' in target) params.set('target_contribution_id', target.contributionId);
+    else params.set('target_story_id', target.storyId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  const response = await apiFetch(`${API_BASE}/v1/challenge-standing${query}`);
+  return parseResponse(response, challengeStandingResponseSchema);
 }
 
 export async function createReport(request: CreateReportRequest): Promise<ReportCreatedResponse> {

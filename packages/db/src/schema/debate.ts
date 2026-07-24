@@ -160,6 +160,9 @@ export const debateArenas = pgTable(
     index('debate_arenas_thread_idx').on(t.threadId),
     index('debate_arenas_target_contribution_idx').on(t.targetContributionId),
     index('debate_arenas_challenger_idx').on(t.challengerContributionId),
+    /** WS-T challenge policy: the per-challenger standing derivations (live
+     *  slot counts, adjudicated win/loss aggregates, withdrawal windows). */
+    index('debate_arenas_challenger_user_idx').on(t.challengerUserId, t.state),
     /** The scheduler sweeps: open arenas past their edit deadline (→ lock),
      *  due arenas past their resolve-due instant (→ the AI resolution
      *  queue), then judged arenas past their override deadline (→ finalize). */

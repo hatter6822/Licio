@@ -15,6 +15,7 @@ import type {
   DebateVerdict,
   DebateWinner,
 } from '@licio/shared';
+import { type ChallengerHistory, isGraceWithdrawal } from './challenge-policy.js';
 
 /** One side's live, editable draft. */
 export interface DebateSidePosition {
@@ -270,6 +271,38 @@ export interface DebateStore {
     after: { createdAt: string; debateId: string } | null,
     limit: number,
   ): Promise<DebateArenaRecord[]>;
+  /** WS-T challenge policy (challenge-policy.ts) — the caller's arena-derived
+   *  standing rows in ONE read: adjudicated win/loss aggregates as challenger
+   *  (decidedBy ∈ {ai, steward} only — concessions credit nothing; legacy
+   *  self-targeted arenas excluded; tombstoned opponents share one bucket so
+   *  account deletion cannot launder the per-opponent dedup), the live
+   *  PRE-VERDICT slot count (open/locked/awaiting_verdict — the slot frees at
+   *  the verdict), opens inside the trailing `opensWindowMs`, and the trailing
+   *  `withdrawWindowMs`'s withdrawn arenas (grace classification + cooldowns
+   *  happen in the pure policy layer).  All standing state derives from arena
+   *  rows — never a counter table that can drift. */
+  challengerHistory(
+    userId: string,
+    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+  ): Promise<ChallengerHistory>;
+  /** Adjudicated `upheld` defenses of a COMMENT target with `resolvedAt`
+   *  strictly after `sinceIso` (the target's material-edit anchor) — the
+   *  settled-threshold input.  Self-targeted arenas never count (legacy rows;
+   *  the create guard refuses new ones). */
+  countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number>;
+  /** Story-target variant of `countUpheldDefensesForComment`. */
+  countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number>;
+  /** The once-per-target-per-version guard input: the latest `resolvedAt` of a
+   *  TERMINAL arena (resolved, or non-grace withdrawn) this challenger opened
+   *  against the target — null when none.  Grace withdrawals (retracted within
+   *  `graceMs` while the incumbent never engaged) are excluded: they consumed
+   *  nothing.  Live arenas are omitted by design — the one-live-per-target
+   *  invariant already refuses every concurrent open. */
+  latestConcludedChallengeAt(
+    target: { contributionId: string } | { storyId: string },
+    challengerUserId: string,
+    graceMs: number,
+  ): Promise<string | null>;
   /** DSAR account-purge: detach `userId` from every arena they touch — NULLing
    *  the identity link on the incumbent / challenger / steward-override columns
    *  — while the rebuttal text persists per §22.4 (mirrors contribution
@@ -292,6 +325,53 @@ const NON_RESOLVED: ReadonlySet<DebateState> = new Set<DebateState>([
   'awaiting_verdict',
   'judged',
 ]);
+
+/** The capacity-slot states: pre-verdict only — a `judged` arena (inside the
+ *  steward-override window) no longer holds the challenger's slot. */
+export const PRE_VERDICT_STATES: readonly DebateState[] = ['open', 'locked', 'awaiting_verdict'];
+const PRE_VERDICT: ReadonlySet<DebateState> = new Set<DebateState>(PRE_VERDICT_STATES);
+
+/** One shared bucket for wins over since-deleted incumbents: account deletion
+ *  must not launder the per-opponent win dedup into distinct opponents. */
+export const TOMBSTONED_OPPONENT_KEY = 'tombstoned';
+
+/** An adjudicated `upheld` defense of the target, resolved strictly after the
+ *  material-edit anchor; self-targeted legacy arenas never count. */
+function upheldDefenseAfter(row: DebateArenaRecord, sinceIso: string): boolean {
+  if (row.state !== 'resolved' || row.verdict !== 'upheld') return false;
+  if (row.resolvedAt === null || row.resolvedAt <= sinceIso) return false;
+  return !(
+    row.incumbentUserId !== null &&
+    row.challengerUserId !== null &&
+    row.incumbentUserId === row.challengerUserId
+  );
+}
+
+function matchesTarget(
+  row: DebateArenaRecord,
+  target: { contributionId: string } | { storyId: string },
+): boolean {
+  return 'contributionId' in target
+    ? row.targetType === 'comment' && row.targetContributionId === target.contributionId
+    : row.targetType === 'story' && row.storyId === target.storyId;
+}
+
+/** A terminal arena's once-per-target consumption instant: its `resolvedAt`,
+ *  unless it was a GRACE withdrawal (which consumed nothing). */
+function concludedChallengeAt(row: DebateArenaRecord, graceMs: number): string | null {
+  if (row.resolvedAt === null) return null;
+  if (row.state === 'resolved') return row.resolvedAt;
+  if (row.state !== 'withdrawn') return null;
+  const grace = isGraceWithdrawal(
+    {
+      createdAt: row.createdAt,
+      resolvedAt: row.resolvedAt,
+      incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+    },
+    graceMs,
+  );
+  return grace ? null : row.resolvedAt;
+}
 
 type Clock = () => number;
 
@@ -733,6 +813,90 @@ export class InMemoryDebateStore implements DebateStore {
           );
     if (start < 0) return [];
     return rows.slice(start, start + Math.max(0, limit));
+  }
+
+  async challengerHistory(
+    userId: string,
+    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+  ): Promise<ChallengerHistory> {
+    const nowMs = Date.parse(opts.nowIso);
+    const opensCutoffMs = nowMs - opts.opensWindowMs;
+    const withdrawCutoffMs = nowMs - opts.withdrawWindowMs;
+    const winsByOpponent = new Map<string, number>();
+    let adjudicatedLosses = 0;
+    let liveCount = 0;
+    const openTimesLast24h: string[] = [];
+    const withdrawals: ChallengerHistory['withdrawals'][number][] = [];
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== userId) continue;
+      if (PRE_VERDICT.has(row.state)) liveCount += 1;
+      if (Date.parse(row.createdAt) > opensCutoffMs) openTimesLast24h.push(row.createdAt);
+      if (
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        Date.parse(row.resolvedAt) > withdrawCutoffMs
+      ) {
+        withdrawals.push({
+          createdAt: row.createdAt,
+          resolvedAt: row.resolvedAt,
+          incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+        });
+      }
+      // Win/loss aggregates: adjudicated resolutions only, self-targeted
+      // legacy arenas excluded (a self-challenge can never build standing).
+      if (row.state !== 'resolved') continue;
+      if (row.incumbentUserId !== null && row.incumbentUserId === userId) continue;
+      if (row.decidedBy !== 'ai' && row.decidedBy !== 'steward') continue;
+      if (row.winner === 'challenger') {
+        const key = row.incumbentUserId ?? TOMBSTONED_OPPONENT_KEY;
+        winsByOpponent.set(key, (winsByOpponent.get(key) ?? 0) + 1);
+      } else if (row.winner === 'incumbent') {
+        adjudicatedLosses += 1;
+      }
+    }
+    return {
+      winsByOpponent: [...winsByOpponent.entries()].map(([opponentKey, wins]) => ({
+        opponentKey,
+        wins,
+      })),
+      adjudicatedLosses,
+      liveCount,
+      openTimesLast24h,
+      withdrawals,
+    };
+  }
+
+  async countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'comment' || row.targetContributionId !== contributionId) continue;
+      if (upheldDefenseAfter(row, sinceIso)) count += 1;
+    }
+    return count;
+  }
+
+  async countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'story' || row.storyId !== storyId) continue;
+      if (upheldDefenseAfter(row, sinceIso)) count += 1;
+    }
+    return count;
+  }
+
+  async latestConcludedChallengeAt(
+    target: { contributionId: string } | { storyId: string },
+    challengerUserId: string,
+    graceMs: number,
+  ): Promise<string | null> {
+    let latest: string | null = null;
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== challengerUserId) continue;
+      if (!matchesTarget(row, target)) continue;
+      const concludedAt = concludedChallengeAt(row, graceMs);
+      if (concludedAt !== null && (latest === null || concludedAt > latest)) latest = concludedAt;
+    }
+    return latest;
   }
 
   async anonymizeParty(userId: string): Promise<number> {

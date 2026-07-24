@@ -182,6 +182,12 @@ export const stories = pgTable(
     hiddenState: storyHiddenStateEnum('hidden_state'),
     /** WS-T dispute posture (default `none`); `incorrect` sinks in the feed. */
     disputeStatus: storyDisputeStatusEnum('dispute_status').notNull().default('none'),
+    /** WS-T settled threshold: set when the story has accumulated the
+     *  configured number of adjudicated `upheld` defenses — it can no longer
+     *  be challenged (a steward unsettle clears it; stories have no author
+     *  edit path, so no edit reset applies).  A separate column, NEVER a
+     *  dispute-status value (the story still reads `validated` everywhere). */
+    settledAt: timestamp('settled_at', { withTimezone: true }),
     /** Last material update (new contribution/evidence/claim) — freshness input. */
     lastMaterialUpdateAt: timestamp('last_material_update_at', { withTimezone: true })
       .notNull()
