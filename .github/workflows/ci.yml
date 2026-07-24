@@ -29,6 +29,10 @@ jobs:
       - run: pnpm biome check .
       - run: pnpm lint:security
       - run: pnpm check:policy
+      # Postgres TRUNCATES an identifier over 63 bytes with only a NOTICE, so two
+      # names sharing a 63-byte prefix collapse into one.  Migrations are
+      # hand-authored here, so the SQL is where a name first reaches the server.
+      - run: pnpm check:sql-identifiers
       # The dev↔prod parity gate: every in-memory adapter needs a boot-wired
       # production counterpart; every env key must be schema-validated or a
       # documented dev flag; production adapters hold no in-memory state.

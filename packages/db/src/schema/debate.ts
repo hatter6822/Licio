@@ -15,6 +15,7 @@ import { sql } from 'drizzle-orm';
 import {
   check,
   doublePrecision,
+  foreignKey,
   index,
   jsonb,
   pgEnum,
@@ -97,15 +98,14 @@ export const debateArenas = pgTable(
     /** The home room (drives which governed AI model judges); null for the Commons. */
     roomId: uuid('room_id').references(() => rooms.roomId),
     targetType: debateTargetTypeEnum('target_type').notNull(),
-    /** The challenged comment; null for a story target. */
-    targetContributionId: uuid('target_contribution_id').references(
-      () => contributions.contributionId,
-      { onDelete: 'cascade' },
-    ),
-    /** The correction contribution that opened this arena. */
-    challengerContributionId: uuid('challenger_contribution_id')
-      .notNull()
-      .references(() => contributions.contributionId, { onDelete: 'cascade' }),
+    /** The challenged comment; null for a story target.  The FK is declared
+     *  table-level below with an EXPLICIT short name — Drizzle's inline
+     *  `.references()` would derive
+     *  `debate_arenas_target_contribution_id_contributions_contribution_id_fk`
+     *  (69 bytes), which Postgres silently truncates at 63. */
+    targetContributionId: uuid('target_contribution_id'),
+    /** The correction contribution that opened this arena (FK below). */
+    challengerContributionId: uuid('challenger_contribution_id').notNull(),
     /** The incumbent (target author); null when the target's account was deleted. */
     incumbentUserId: uuid('incumbent_user_id').references(() => users.userId, {
       onDelete: 'set null',
@@ -156,6 +156,20 @@ export const debateArenas = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    // EXPLICITLY NAMED foreign keys (see the columns above): the derived names
+    // would be 69 and 73 bytes, past Postgres's 63-byte identifier limit, so the
+    // server would truncate them — and two truncated names that share a 63-byte
+    // prefix collide silently.  `check:sql-identifiers` enforces the bound.
+    foreignKey({
+      columns: [t.targetContributionId],
+      foreignColumns: [contributions.contributionId],
+      name: 'debate_arenas_target_contribution_fk',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [t.challengerContributionId],
+      foreignColumns: [contributions.contributionId],
+      name: 'debate_arenas_challenger_contribution_fk',
+    }).onDelete('cascade'),
     index('debate_arenas_story_idx').on(t.storyId),
     index('debate_arenas_thread_idx').on(t.threadId),
     index('debate_arenas_target_contribution_idx').on(t.targetContributionId),

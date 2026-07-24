@@ -68,6 +68,8 @@ pnpm lint:lockfile                  # lockfile integrity
 pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
+pnpm check:sql-identifiers          # no migration identifier over Postgres's 63-byte limit
+                                    #   (over-long names TRUNCATE silently and can collide)
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation
