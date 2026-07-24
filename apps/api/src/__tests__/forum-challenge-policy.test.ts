@@ -352,6 +352,54 @@ describe('WS-T challenge policy — withdrawal pricing', () => {
   });
 });
 
+describe('WS-T challenge policy — the post-open target-state recheck', () => {
+  it('a prior arena finalizing between the guards and the open never bypasses once-per-target', async () => {
+    const challenger = await seedUserWithSession(fixture.identity);
+    const targetId = await seedTarget();
+    const filed = await postOk(challengeBody(targetId), challenger.cookie);
+    const debateId = filed.metadata.debate_arena_id ?? '';
+    nowMs += HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    nowMs += 24 * HOUR_MS + 1000;
+    // The vulnerable interleave: finalize's STATUS write lands before the
+    // second create's guards read (simulated by the direct store poke — the
+    // arena itself is still `judged`, so `latestConcludedChallengeAt` sees
+    // nothing concluded), and the RESOLVE lands before the arena open (the
+    // classify hook runs the finalize tick), so the one-live-per-target
+    // constraint no longer blocks either.  Only the post-open target-state
+    // recheck stands between this and a second arena on the same version.
+    await fixture.forum.contributions.setDisputeStatus(targetId, 'none', null);
+    const safety = fixture.forum.safety;
+    const realClassify = safety.classify.bind(safety);
+    safety.classify = async (...args: Parameters<typeof realClassify>) => {
+      safety.classify = realClassify;
+      await runDebateSchedulerTick(rethrow);
+      expect((await fixture.forum.debates.getById(debateId))?.state).toBe('resolved');
+      return realClassify(...args);
+    };
+    const refiled = await post(challengeBody(targetId), challenger.cookie);
+    expect(refiled.status).toBe(201);
+    const body = (await refiled.json()) as {
+      contribution: { contribution_id: string; metadata: { debate_arena_id?: string } };
+    };
+    // The correction posted but its arena self-voided: no arena id handed
+    // out, the raced arena is a terminal (grace) withdrawal, and the target
+    // was never re-tagged.
+    expect(body.contribution.metadata.debate_arena_id).toBeUndefined();
+    expect(await fixture.forum.debates.getActiveForComment(targetId)).toBeNull();
+    expect((await fixture.forum.contributions.getById(targetId))?.disputeStatus).toBe('none');
+    // The once-per-target right stays consumed for this version.
+    expect(
+      await fixture.forum.debates.latestConcludedChallengeAt(
+        { contributionId: targetId },
+        challenger.userId,
+        5 * 60_000,
+      ),
+    ).not.toBeNull();
+  });
+});
+
 describe('WS-T challenge policy — grace and the daily budget', () => {
   it('a grace withdrawal burns no daily budget (immediate re-file allowed)', async () => {
     const tight = freshForumServices({

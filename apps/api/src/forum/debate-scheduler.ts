@@ -147,11 +147,20 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
     storyContent: buildStoryContentReader(ingestion.stories),
     // WS-T challenge policy: the settled threshold + withdrawal grace come
-    // from the runtime forum config; the story settle anchor is the story's
-    // CREATION instant (no author edit path — `lastMaterialUpdateAt` is the
-    // conversation-freshness clock and must never anchor settling).
+    // from the runtime forum config; the story policy state anchors settling
+    // and the post-open recheck at the story's CREATION instant (no author
+    // edit path — `lastMaterialUpdateAt` is the conversation-freshness clock
+    // and must never anchor these).
     challengePolicy: () => challengePolicyFromConfig(forum.config()),
-    storyCreatedAt: async (sid) => (await ingestion.stories.getById(sid))?.createdAt ?? null,
+    storyPolicyState: async (sid) => {
+      const story = await ingestion.stories.getById(sid);
+      if (!story) return null;
+      return {
+        createdAt: story.createdAt,
+        disputeStatus: story.disputeStatus ?? 'none',
+        settledAt: story.settledAt ?? null,
+      };
+    },
     // Room stewards, plus the platform ADMIN (2026-07 final-line-of-defense
     // decision): the verdict-overrule power follows the same platform-admin
     // arm as the rest of the room-steward gate family (`isRoomSteward`), while

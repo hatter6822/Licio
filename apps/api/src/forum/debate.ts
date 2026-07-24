@@ -217,11 +217,19 @@ export interface DebateDeps {
   /** The WS-T challenge policy in force (settled threshold + withdrawal grace;
    *  challenge-policy.ts).  Absent ⇒ the config defaults. */
   challengePolicy?: (() => ChallengePolicy) | undefined;
-  /** A story's creation instant — the settle anchor for story targets (stories
-   *  have no author edit path; `lastMaterialUpdateAt` is the conversation-
-   *  freshness clock and must never anchor settling).  Absent/null ⇒ story
-   *  settling is skipped (partial test wirings). */
-  storyCreatedAt?: ((storyId: string) => Promise<string | null>) | undefined;
+  /** A story's CHALLENGE-POLICY state: `createdAt` is the settle/once anchor
+   *  (stories have no author edit path; `lastMaterialUpdateAt` is the
+   *  conversation-freshness clock and must never anchor these), and the
+   *  dispute/settled fields feed the post-open target-state recheck.
+   *  Absent/null ⇒ story settling and the story recheck are skipped (partial
+   *  test wirings). */
+  storyPolicyState?:
+    | ((storyId: string) => Promise<{
+        createdAt: string;
+        disputeStatus: 'none' | 'under_debate' | 'incorrect' | 'validated';
+        settledAt: string | null;
+      } | null>)
+    | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
 }
@@ -380,6 +388,63 @@ export async function maybeEnterDebate(
         debate_id: debateId,
         target_type: targetType,
         story_id: correction.storyId,
+      });
+      return null;
+    }
+  }
+  // WS-T challenge policy — the post-open TARGET-STATE recheck (the same
+  // write-before-read fence as the quota recheck above): the create guard's
+  // target reads can predate a finalize landing in the same window — the
+  // caller's own prior arena concluding (once-per-target), the target being
+  // tagged `incorrect`, or the settled threshold being crossed — while the
+  // one-live-per-target constraint stops blocking the instant that arena
+  // resolves.  Re-read the target's policy state AFTER the open and void
+  // (grace) when it changed.  Skipped without the quota param (legacy call
+  // sites / the demo seed open outside the policy system).
+  if (quota !== undefined && correction.userId !== null) {
+    let staleReason: string | null = null;
+    if (targetType === 'comment' && targetContributionId !== null) {
+      const freshTarget = await deps.contributions.getById(targetContributionId);
+      if (freshTarget !== null) {
+        const anchor =
+          (await deps.contributions.latestEditAt(targetContributionId)) ?? freshTarget.createdAt;
+        if (freshTarget.disputeStatus === 'incorrect') {
+          staleReason = 'target_incorrect';
+        } else if (freshTarget.settledAt !== null && freshTarget.settledAt >= anchor) {
+          staleReason = 'target_settled';
+        } else {
+          const prior = await deps.debates.latestConcludedChallengeAt(
+            { contributionId: targetContributionId },
+            correction.userId,
+            quota.graceMs,
+          );
+          if (prior !== null && prior > anchor) staleReason = 'already_challenged';
+        }
+      }
+    } else if (targetStoryId !== null) {
+      const freshStory = await deps.storyPolicyState?.(targetStoryId);
+      if (freshStory != null) {
+        if (freshStory.disputeStatus === 'incorrect') {
+          staleReason = 'target_incorrect';
+        } else if (freshStory.settledAt !== null && freshStory.settledAt >= freshStory.createdAt) {
+          staleReason = 'target_settled';
+        } else {
+          const prior = await deps.debates.latestConcludedChallengeAt(
+            { storyId: targetStoryId },
+            correction.userId,
+            quota.graceMs,
+          );
+          if (prior !== null && prior > freshStory.createdAt) staleReason = 'already_challenged';
+        }
+      }
+    }
+    if (staleReason !== null) {
+      await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
+      deps.log('forum.debate_voided_stale_target', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
+        reason: staleReason,
       });
       return null;
     }
@@ -1022,7 +1087,7 @@ async function applyFinalizeOutcome(
         anchor = (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
       }
     } else if (arena.targetType === 'story') {
-      anchor = (await deps.storyCreatedAt?.(arena.storyId)) ?? null;
+      anchor = (await deps.storyPolicyState?.(arena.storyId))?.createdAt ?? null;
     }
     if (anchor !== null && arena.lockedAt !== null && arena.lockedAt <= anchor) {
       resolvedStatus = 'none'; // the judged snapshot predates the served version

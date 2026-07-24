@@ -382,6 +382,12 @@ The rationing layer over challenge creation — every number steward-tunable
   and consumes NOTHING, opens included.  Racing still cannot convert into
   throughput — the survivor set is bounded by capacity, voided arenas never
   reach the adjudicator, and the contribution limiter bounds request churn.
+  The same fence re-reads the TARGET's policy state after the open (a
+  finalize can land between the create guards and the open, concluding the
+  caller's prior arena, tagging the target `incorrect`, or crossing the
+  settled threshold exactly while the one-live-per-target constraint stops
+  blocking): a stale target voids the open the same way
+  (`forum.debate_voided_stale_target`).
 - **Standing** (`GET /v1/challenge-standing` + optional target probe,
   `evaluateChallengeTarget` kept in lockstep with the create guard): the
   correction composer's pre-flight line, target-block copy, and the withdraw
