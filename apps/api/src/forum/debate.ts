@@ -969,6 +969,20 @@ async function applyFinalizeOutcome(
   // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
   // (challenged and proven accurate — no penalty, still re-challengeable);
   // `inconclusive`/absent ⇒ cleared back to `none`.
+  //
+  // The version fences are DELIBERATELY asymmetric.  `validated` is a
+  // certificate about the SERVED text, so it is edit-lineage-fenced below
+  // (certifying unjudged text would be a false endorsement).  `incorrect` is
+  // the RECORD of a lost adjudication — §15.4: visible, never hidden, kept
+  // for the record; "the adjudicated demotion is not an edit's to clear" —
+  // and it lands regardless of a post-verdict edit ON PURPOSE: post-judged
+  // edits are unrestricted, so an edit-fenced (or none-on-edit) `corrected`
+  // outcome would let every losing incumbent dodge the demotion by editing
+  // one character inside the override window, gutting the deterrent and the
+  // transparency remedy.  The author's in-design remedies are the open
+  // window's co-visible editing and concession; a post-verdict fix improves
+  // the text but does not erase the adjudicated record — exactly as the
+  // losing challenger's own `incorrect` tag stands.
   // A `validated` outcome earns a ranking / participation BOOST, so it must reflect
   // INDEPENDENT scrutiny: a self-targeted arena (the challenger IS the target's own
   // author) can never earn `validated` — an upheld self-challenge clears to `none`,
