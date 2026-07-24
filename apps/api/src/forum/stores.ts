@@ -304,6 +304,18 @@ export interface ContributionStore {
    *  concurrent material edit and re-certify text the edit just reset.
    *  Idempotent; returns null for an unknown id. */
   clearSettled(contributionId: string): Promise<ContributionRecord | null>;
+  /** WS-T — finalize's `validated` certification, CAS-guarded on the row's
+   *  material-edit lineage: applies `validated` (+ the settled mark) ONLY
+   *  while `editHistoryRef` still equals what finalize read alongside its
+   *  anchor — a material edit landing between that read and this write bumps
+   *  the ref, the CAS misses (null), and finalize resolves `none` instead, so
+   *  a verdict can never certify text that was not in its locked snapshot.
+   *  Returns the certified row, or null on a missed CAS / unknown id. */
+  certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null>;
   /** WS-T — the material-edit dispute reset, CONDITIONAL at the storage layer:
    *  clears `validated` → `none` (+ the settled mark) only while the row still
    *  reads `validated`/settled.  A challenge racing the edit may have tagged
@@ -943,6 +955,19 @@ export class InMemoryContributionStore implements ContributionStore {
     const row = this.#rows.get(contributionId);
     if (!row) return null;
     row.settledAt = null;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row || row.editHistoryRef !== expectedEditHistoryRef) return null;
+    row.disputeStatus = 'validated';
+    row.settledAt = settledAt;
     row.updatedAt = iso(this.#now);
     return row;
   }

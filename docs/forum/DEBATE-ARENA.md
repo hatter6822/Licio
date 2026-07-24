@@ -345,7 +345,12 @@ The rationing layer over challenge creation — every number steward-tunable
   edit path's own dispute reset is CONDITIONAL at the storage layer
   (`resetDisputeAfterEdit`: `WHERE dispute_status = 'validated' OR settled_at
   IS NOT NULL`), so a challenge racing the edit can never have its fresh
-  `under_debate` tag stomped by the edit's stale pre-read.
+  `under_debate` tag stomped by the edit's stale pre-read — and the inverse
+  interleave is closed on the finalize side: the `validated` write is
+  CAS-guarded on the target's edit lineage (`certifyValidatedIfUnedited`,
+  keyed on `edit_history_ref` read with the anchor), falling back to `none`
+  on a miss, so a verdict can never certify text outside its locked snapshot
+  from either direction.
   `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
   (migration 0096) — never a dispute-status enum value — so every existing
   wire schema, ranking feature, search filter, and badge keeps its exact

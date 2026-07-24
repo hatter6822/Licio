@@ -929,12 +929,16 @@ export async function finalizeDebate(
   // never settles — conservative in the settle direction only.  Any other
   // outcome passes null — self-healing hygiene for a stale settled mark.
   let settledAt: string | null = null;
+  /** The comment target's material-edit lineage AT the anchor read — the CAS
+   *  token for the `validated` write below. */
+  let targetEditRef: string | null | undefined;
   if (resolvedStatus === 'validated') {
     const threshold = effectiveChallengePolicy(deps).settleThreshold;
     let anchor: string | null = null;
     if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
       const target = await deps.contributions.getById(arena.targetContributionId);
       if (target !== null) {
+        targetEditRef = target.editHistoryRef;
         anchor = (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
       }
     } else if (arena.targetType === 'story') {
@@ -951,12 +955,33 @@ export async function finalizeDebate(
     }
   }
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(
-      arena.targetContributionId,
-      resolvedStatus,
-      settledAt,
-    );
+    if (resolvedStatus === 'validated' && targetEditRef !== undefined) {
+      // CAS on the material-edit lineage read WITH the anchor: an edit landing
+      // between that read and this write bumps `editHistoryRef`, the certify
+      // misses, and the target resolves `none` instead — a verdict can never
+      // certify text that was not in its locked snapshot, and the fallback
+      // also clears the (now stale) `under_debate` tag the racing edit's own
+      // conditional reset deliberately left alone.
+      const certified = await deps.contributions.certifyValidatedIfUnedited(
+        arena.targetContributionId,
+        targetEditRef,
+        settledAt,
+      );
+      if (certified === null) {
+        resolvedStatus = 'none';
+        settledAt = null;
+        await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none', null);
+      }
+    } else {
+      await deps.contributions.setDisputeStatus(
+        arena.targetContributionId,
+        resolvedStatus,
+        settledAt,
+      );
+    }
   } else if (arena.targetType === 'story') {
+    // Stories have no author edit path — no lineage to race (the setter note
+    // in debate-scheduler.ts); the plain write stands.
     await deps.setStoryDispute(arena.storyId, resolvedStatus, settledAt);
   }
   // A challenge the adjudicator RULED AGAINST (`upheld` — the incumbent

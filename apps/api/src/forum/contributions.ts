@@ -1244,10 +1244,12 @@ export async function editContribution(
     // gate would have skipped the reset and left the new text certified by a
     // verdict on the old version.  The WHERE keeps a concurrently tagged
     // `under_debate` row untouched, and `incorrect` survives a rewrite (the
-    // adjudicated demotion is not an edit's to clear).  Residual sliver: a
-    // finalize whose anchor read predates this edit but whose status write
-    // lands after the reset can still stamp `validated` briefly — settle-safe
-    // (counting is lockedAt-keyed) and cleared by the next material edit.
+    // adjudicated demotion is not an edit's to clear).  The inverse
+    // interleave — a finalize whose anchor read predates this edit but whose
+    // status write lands after this reset — is closed on the FINALIZE side:
+    // its `validated` write is CAS-guarded on the edit lineage
+    // (`certifyValidatedIfUnedited`), so this edit bumps the ref and the
+    // certify misses.
     edited = (await forum.contributions.resetDisputeAfterEdit(contributionId)) ?? edited;
   }
   if (!edited) {

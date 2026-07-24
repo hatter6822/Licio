@@ -575,6 +575,32 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null> {
+    // CAS on the material-edit lineage: an edit landing after finalize's
+    // anchor read bumps `edit_history_ref` and this write matches nothing.
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({
+        disputeStatus: 'validated',
+        settledAt: settledAt === null ? null : new Date(settledAt),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(contributionsTable.contributionId, contributionId),
+          expectedEditHistoryRef === null
+            ? isNull(contributionsTable.editHistoryRef)
+            : eq(contributionsTable.editHistoryRef, expectedEditHistoryRef),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null> {
     // The condition lives in the WHERE (atomic): a row a racing challenge has
     // already re-tagged `under_debate` matches nothing and stays untouched.

@@ -583,6 +583,52 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     expect(row?.body).toBe('Edited while the verdict finalized.');
   });
 
+  it('an edit landing between finalize’s anchor read and its write is never certified', async () => {
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const targetId = await seedTarget();
+    const challenger = await seedUserWithSession(fixture.identity);
+    const filed = await postOk(challengeBody(targetId), challenger.cookie);
+    const debateId = filed.metadata.debate_arena_id ?? '';
+    nowMs += HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    // The material edit lands AFTER finalize read the target/anchor but
+    // BEFORE its status write: the edit's own conditional reset no-ops (the
+    // row still reads `under_debate`), so only the finalize-side CAS on the
+    // edit lineage can stop the stale `validated` — the settle-count hook
+    // sits exactly between the two.
+    const debates = fixture.forum.debates;
+    const realCount = debates.countUpheldDefensesForComment.bind(debates);
+    let raced = false;
+    debates.countUpheldDefensesForComment = async (
+      ...args: Parameters<typeof realCount>
+    ): Promise<number> => {
+      if (!raced) {
+        raced = true;
+        const edit = await app().request(
+          jsonRequest(
+            `/v1/contributions/${targetId}`,
+            'PATCH',
+            { contribution_id: targetId, body: 'Edited inside the finalize window.' },
+            author.cookie,
+          ),
+        );
+        expect(edit.status).toBe(200);
+        expect((await fixture.forum.contributions.getById(targetId))?.disputeStatus).toBe(
+          'under_debate',
+        );
+      }
+      return realCount(...args);
+    };
+    nowMs += 24 * HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('resolved');
+    const row = await fixture.forum.contributions.getById(targetId);
+    expect(row?.disputeStatus).toBe('none');
+    expect(row?.settledAt).toBeNull();
+    expect(row?.body).toBe('Edited inside the finalize window.');
+  });
+
   it('a verdict on a SUPERSEDED version resolves none — never validated, never settled', async () => {
     fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
     const targetId = await seedTarget();
