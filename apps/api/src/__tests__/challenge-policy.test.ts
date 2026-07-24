@@ -69,6 +69,26 @@ describe('challengePolicyFromConfig', () => {
       settle_threshold: 3,
     });
   });
+
+  it('raises an inverted KYC ceiling up to the non-KYC ceiling (booster invariant)', () => {
+    // A legacy/bad stored pair with the KYC ceiling BELOW the non-KYC ceiling
+    // must not let KYC reduce standing: the builder normalizes it structurally.
+    const inverted = challengePolicyFromConfig({
+      ...DEFAULT_FORUM_CONFIG,
+      challengeMaxCapacity: 4,
+      challengeMaxCapacityKyc: 1,
+    });
+    expect(inverted.maxCapacityKyc).toBe(4);
+    expect(inverted.maxCapacity).toBe(4);
+    // A KYC ceiling at or above the non-KYC ceiling is left untouched.
+    expect(
+      challengePolicyFromConfig({
+        ...DEFAULT_FORUM_CONFIG,
+        challengeMaxCapacity: 4,
+        challengeMaxCapacityKyc: 8,
+      }).maxCapacityKyc,
+    ).toBe(8);
+  });
 });
 
 describe('resolveChallengePolicy', () => {
@@ -85,6 +105,18 @@ describe('resolveChallengePolicy', () => {
     expect(resolveChallengePolicy(DEFAULT_FORUM_CONFIG, override, 'real').maxCapacity).toBe(
       POLICY.maxCapacity,
     );
+  });
+
+  it('re-asserts the booster invariant over a partial override', () => {
+    // An override that raises only the non-KYC ceiling must not leave it above
+    // the (unchanged) KYC ceiling — the merge is re-normalized.
+    const resolved = resolveChallengePolicy(
+      DEFAULT_FORUM_CONFIG,
+      { policy: { maxCapacity: 12 } },
+      'u1',
+    );
+    expect(resolved.maxCapacity).toBe(12);
+    expect(resolved.maxCapacityKyc).toBe(12);
   });
 });
 

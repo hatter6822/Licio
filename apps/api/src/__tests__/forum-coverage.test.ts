@@ -433,6 +433,19 @@ describe('WS-G steward admin surface', () => {
     expect(good.status).toBe(200);
     expect(fixture.forum.config().contributionsPerMinute).toBe(20);
 
+    // Cross-key invariant: the KYC capacity ceiling may not drop below the
+    // non-KYC ceiling (default 4) — a per-key validator would accept 3.
+    const invertKyc = await app().request(
+      jsonRequest(
+        '/v1/forum/admin/config',
+        'PATCH',
+        { key: 'challengeMaxCapacityKyc', value: 3 },
+        steward.cookie,
+      ),
+    );
+    expect(invertKyc.status).toBe(422);
+    expect(fixture.forum.config().challengeMaxCapacityKyc).toBe(8); // unchanged
+
     const metrics = await app().request(
       new Request('http://local/v1/forum/admin/metrics', { headers: { cookie: steward.cookie } }),
     );

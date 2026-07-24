@@ -64,7 +64,7 @@ import { commentMediaOf, commentPage } from '../forum/comments.js';
 import {
   FORUM_CONFIG_KEYS,
   storeForumConfigValue,
-  validateForumConfigValue,
+  validateForumConfigChange,
 } from '../forum/config.js';
 import {
   createContribution,
@@ -1233,7 +1233,10 @@ export function createForumRoutes() {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const { key, value } = c.req.valid('json');
-          const problem = validateForumConfigValue(key, value);
+          // Validate against the effective config the write would produce, not
+          // the key in isolation: the KYC capacity ceiling must never be set
+          // below the non-KYC ceiling (codex on PR #168).
+          const problem = validateForumConfigChange(getForumServices().config(), key, value);
           if (problem !== null) return c.json(deny('invalid_config', problem), 422);
           const events = getEventPipelineServices();
           await storeForumConfigValue(events.configStore, key, value);

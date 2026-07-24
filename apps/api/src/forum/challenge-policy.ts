@@ -64,8 +64,28 @@ export interface ChallengePolicy {
   settleThreshold: number;
 }
 
+/**
+ * The KYC ceiling is a BOOSTER (SPEC §15.4): it must never fall below the
+ * non-KYC ceiling.  Were `maxCapacityKyc < maxCapacity`, a verified user's
+ * capacity clamp could bind LOWER than the same history's would without KYC —
+ * `clamp(base + bonus + tier − pen, 1, maxCapacityKyc)` capped below the
+ * unverified `clamp(base + tier − pen, 1, maxCapacity)` — so KYC would REDUCE
+ * standing, inverting its meaning (codex on PR #168).  A steward write that
+ * would invert the pair is rejected at the config boundary
+ * (`validateForumConfigChange`); this is the structural backstop so the runtime
+ * policy stays sane even if an inverted pair reaches it another way (a legacy
+ * value stored before that guard, a dev override).  Raising the KYC ceiling to
+ * the non-KYC ceiling (never lowering the non-KYC ceiling) preserves the
+ * booster's non-negative floor.
+ */
+function enforceCapacityCeilingOrder(policy: ChallengePolicy): ChallengePolicy {
+  return policy.maxCapacityKyc >= policy.maxCapacity
+    ? policy
+    : { ...policy, maxCapacityKyc: policy.maxCapacity };
+}
+
 export function challengePolicyFromConfig(config: ForumRuntimeConfig): ChallengePolicy {
-  return {
+  return enforceCapacityCeilingOrder({
     baseCapacity: config.challengeBaseCapacity,
     kycCapacityBonus: config.challengeKycCapacityBonus,
     winsPerTier: config.challengeWinsPerTier,
@@ -84,7 +104,7 @@ export function challengePolicyFromConfig(config: ForumRuntimeConfig): Challenge
     freeWithdrawalsPerWindow: config.challengeFreeWithdrawalsPerWindow,
     perOpponentWinCap: config.challengePerOpponentWinCap,
     settleThreshold: config.challengeSettleThreshold,
-  };
+  });
 }
 
 /**
@@ -110,7 +130,10 @@ export function resolveChallengePolicy(
   const base = challengePolicyFromConfig(config);
   if (override == null) return base;
   if (override.appliesToUser !== undefined && !override.appliesToUser(userId)) return base;
-  return { ...base, ...override.policy };
+  // The override may set either ceiling; re-assert the booster invariant over
+  // the merged pair so a partial override cannot invert it (base is already
+  // normalized; only the merge can reintroduce a violation).
+  return enforceCapacityCeilingOrder({ ...base, ...override.policy });
 }
 
 /** One withdrawn arena of the caller's, as the store hands it over. */

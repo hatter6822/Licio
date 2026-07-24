@@ -161,6 +161,39 @@ export function validateForumConfigValue(key: string, value: unknown): string | 
   return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid value');
 }
 
+/**
+ * Validate a candidate single-key write against the EFFECTIVE config it would
+ * produce — the cross-key invariants the per-key {@link validateForumConfigValue}
+ * cannot see (it validates one key in isolation, and a steward sets keys one at
+ * a time through the config endpoint).  Returns null ⇒ OK, string ⇒ the problem.
+ *
+ * `challengeMaxCapacityKyc >= challengeMaxCapacity`: the KYC capacity ceiling is
+ * a BOOSTER (SPEC §15.4).  If a steward could set it below the non-KYC ceiling,
+ * a verified user's capacity clamp could bind lower than the same history's
+ * would without KYC, so KYC would REDUCE standing (codex on PR #168).  The
+ * runtime policy also normalizes this structurally
+ * (`enforceCapacityCeilingOrder`); rejecting it here gives the steward the 422
+ * feedback instead of a silently-corrected value.
+ */
+export function validateForumConfigChange(
+  current: ForumRuntimeConfig,
+  key: string,
+  value: unknown,
+): string | null {
+  const perKey = validateForumConfigValue(key, value);
+  if (perKey !== null) return perKey;
+  const candidate: ForumRuntimeConfig = { ...current };
+  (candidate as unknown as Record<string, unknown>)[key] = value;
+  if (candidate.challengeMaxCapacityKyc < candidate.challengeMaxCapacity) {
+    return (
+      `challengeMaxCapacityKyc (${candidate.challengeMaxCapacityKyc}) must be >= ` +
+      `challengeMaxCapacity (${candidate.challengeMaxCapacity}): the KYC capacity ` +
+      `ceiling is a booster, never a reduction`
+    );
+  }
+  return null;
+}
+
 /** Fail-closed loader: invalid stored values are reported and defaults kept. */
 export async function loadForumConfig(
   configStore: PwattConfigStore,
