@@ -806,7 +806,9 @@ export class DrizzleDebateStore implements DebateStore {
           targetWhere,
           eq(debateArenasTable.state, 'resolved'),
           eq(debateArenasTable.verdict, 'upheld'),
-          gt(debateArenasTable.resolvedAt, new Date(sinceIso)),
+          // Keyed on the LOCK instant — which VERSION the verdict judged
+          // (a null-lockedAt legacy row proves nothing and never matches).
+          gt(debateArenasTable.lockedAt, new Date(sinceIso)),
           // Self-targeted legacy arenas never count toward settling.
           or(
             isNull(debateArenasTable.incumbentUserId),
@@ -839,6 +841,7 @@ export class DrizzleDebateStore implements DebateStore {
       .select({
         state: debateArenasTable.state,
         createdAt: debateArenasTable.createdAt,
+        lockedAt: debateArenasTable.lockedAt,
         resolvedAt: debateArenasTable.resolvedAt,
         incumbentLastActiveAt: debateArenasTable.incumbentLastActiveAt,
       })
@@ -866,7 +869,11 @@ export class DrizzleDebateStore implements DebateStore {
       ) {
         continue;
       }
-      const concludedAt = iso(row.resolvedAt);
+      // A resolved arena consumes the VERSION its verdict judged — the lock
+      // instant (legacy null-lockedAt rows fall back to the resolve instant);
+      // a withdrawal consumes by its retraction instant (no snapshot exists).
+      const concludedAt =
+        row.state === 'resolved' ? iso(row.lockedAt ?? row.resolvedAt) : iso(row.resolvedAt);
       if (latest === null || concludedAt > latest) latest = concludedAt;
     }
     return latest;

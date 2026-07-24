@@ -39,7 +39,19 @@ import type {
   ContributionModerationState,
   ContributionType,
 } from '@licio/shared';
-import { and, asc, count, desc, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
@@ -561,6 +573,25 @@ export class DrizzleContributionStore implements ContributionStore {
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null> {
+    // The condition lives in the WHERE (atomic): a row a racing challenge has
+    // already re-tagged `under_debate` matches nothing and stays untouched.
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ disputeStatus: 'none', settledAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(contributionsTable.contributionId, contributionId),
+          or(
+            eq(contributionsTable.disputeStatus, 'validated'),
+            isNotNull(contributionsTable.settledAt),
+          ),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : this.getById(contributionId);
   }
 
   async latestEditAt(contributionId: string): Promise<string | null> {

@@ -334,7 +334,18 @@ The rationing layer over challenge creation — every number steward-tunable
   clears `validated` + `settled_at` in the edit path itself.
 - **Settling** happens in `finalizeDebate`: an upheld outcome counts the
   target's prior adjudicated upheld defenses since its anchor (self-targeted
-  legacy arenas excluded) and stamps `settled_at` at the threshold.
+  legacy arenas excluded) and stamps `settled_at` at the threshold.  The count
+  — and the once-per-target consumption of a resolved arena — is keyed on
+  each arena's **lock instant** (`lockedAt`, the version its verdict actually
+  judged), never its resolve instant: a material edit is allowed once an
+  arena is judged, and SNAPSHOT CURRENCY then guards the outcome — a verdict
+  whose `lockedAt` predates the anchor resolves the target `none` (nothing is
+  claimed about the served text) instead of stamping `validated`, and a
+  null-`lockedAt` legacy row keeps `validated` but can never settle.  The
+  edit path's own dispute reset is CONDITIONAL at the storage layer
+  (`resetDisputeAfterEdit`: `WHERE dispute_status = 'validated' OR settled_at
+  IS NOT NULL`), so a challenge racing the edit can never have its fresh
+  `under_debate` tag stomped by the edit's stale pre-read.
   `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
   (migration 0096) — never a dispute-status enum value — so every existing
   wire schema, ranking feature, search filter, and badge keeps its exact

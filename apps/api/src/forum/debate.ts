@@ -910,7 +910,7 @@ export async function finalizeDebate(
   // (self-marking incorrect is self-inflicted, never a reward).
   const selfTargeted =
     arena.incumbentUserId !== null && arena.incumbentUserId === arena.challengerUserId;
-  const resolvedStatus: 'incorrect' | 'validated' | 'none' =
+  let resolvedStatus: 'incorrect' | 'validated' | 'none' =
     arena.verdict === 'corrected'
       ? 'incorrect'
       : arena.verdict === 'upheld' && !selfTargeted
@@ -918,30 +918,36 @@ export async function finalizeDebate(
         : 'none';
   // WS-T challenge policy — an upheld defense may cross the SETTLED threshold:
   // count the target's PRIOR adjudicated upheld defenses since its material-
-  // edit anchor (this arena is the +1; its own resolvedAt lands below).  A
-  // settled target refuses further challenges at create until a room steward
-  // unsettles it or (for a comment) the author materially edits.  Any other
+  // edit anchor, keyed on each arena's LOCK instant (which version its verdict
+  // judged); this arena is the +1.  SNAPSHOT CURRENCY guards the whole branch:
+  // a material edit is allowed once the arena is judged, and it advances the
+  // anchor past this arena's own lockedAt — the verdict then certifies a
+  // SUPERSEDED version, so the target resolves `none` (nothing is claimed
+  // about the served text) instead of stamping `validated` (let alone
+  // settling) onto content the adjudicator never saw.  An unprovable case
+  // (null lockedAt legacy row / missing anchor reader) keeps `validated` but
+  // never settles — conservative in the settle direction only.  Any other
   // outcome passes null — self-healing hygiene for a stale settled mark.
   let settledAt: string | null = null;
   if (resolvedStatus === 'validated') {
     const threshold = effectiveChallengePolicy(deps).settleThreshold;
+    let anchor: string | null = null;
     if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
       const target = await deps.contributions.getById(arena.targetContributionId);
       if (target !== null) {
-        const anchor =
-          (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
-        const prior = await deps.debates.countUpheldDefensesForComment(
-          target.contributionId,
-          anchor,
-        );
-        if (prior + 1 >= threshold) settledAt = resolvedAt;
+        anchor = (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
       }
     } else if (arena.targetType === 'story') {
-      const anchor = (await deps.storyCreatedAt?.(arena.storyId)) ?? null;
-      if (anchor !== null) {
-        const prior = await deps.debates.countUpheldDefensesForStory(arena.storyId, anchor);
-        if (prior + 1 >= threshold) settledAt = resolvedAt;
-      }
+      anchor = (await deps.storyCreatedAt?.(arena.storyId)) ?? null;
+    }
+    if (anchor !== null && arena.lockedAt !== null && arena.lockedAt <= anchor) {
+      resolvedStatus = 'none'; // the judged snapshot predates the served version
+    } else if (anchor !== null && arena.lockedAt !== null) {
+      const prior =
+        arena.targetType === 'comment' && arena.targetContributionId !== null
+          ? await deps.debates.countUpheldDefensesForComment(arena.targetContributionId, anchor)
+          : await deps.debates.countUpheldDefensesForStory(arena.storyId, anchor);
+      if (prior + 1 >= threshold) settledAt = resolvedAt;
     }
   }
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {

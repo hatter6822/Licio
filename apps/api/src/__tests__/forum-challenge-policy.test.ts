@@ -250,6 +250,10 @@ describe('WS-T challenge policy — the post-open quota recheck (TOCTOU)', () =>
       moderationState: 'published',
     });
     expect(inserted.ok).toBe(true);
+    // Strictly newer than the first arena: under the frozen test clock both
+    // opens would otherwise share a createdAt and the oldest-survives order
+    // would fall to the random debate-id tie-break.
+    nowMs += 1000;
     const racedArenaId = randomUUID();
     const opened = await maybeEnterDebate(
       buildDebateDeps(fixture.forum, fixture.ingestion),
@@ -500,6 +504,87 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     const resettled = await fixture.forum.contributions.getById(targetId);
     expect(resettled?.disputeStatus).toBe('validated');
     expect(resettled?.settledAt).not.toBeNull();
+  });
+
+  it('a verdict on a SUPERSEDED version resolves none — never validated, never settled', async () => {
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const targetId = await seedTarget();
+    const challenger = await seedUserWithSession(fixture.identity);
+    const filed = await postOk(challengeBody(targetId), challenger.cookie);
+    const debateId = filed.metadata.debate_arena_id ?? '';
+    // Judge the arena (both-sides-idle expedite), then materially edit the
+    // target INSIDE the override window — allowed (only locked/awaiting
+    // freeze edits), and it advances the version anchor past the snapshot.
+    nowMs += HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    nowMs += 60_000;
+    const edit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Rewritten after the verdict.' },
+        author.cookie,
+      ),
+    );
+    expect(edit.status).toBe(200);
+    nowMs += 24 * HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('resolved');
+    // The verdict certified text that is no longer served: nothing is claimed
+    // about the current version, and no settle progress accrues from it.
+    const row = await fixture.forum.contributions.getById(targetId);
+    expect(row?.disputeStatus).toBe('none');
+    expect(row?.settledAt).toBeNull();
+    // The challenger's loss stands — their correction was judged against the
+    // material as it was locked.
+    expect((await fixture.forum.contributions.getById(filed.contribution_id))?.disputeStatus).toBe(
+      'incorrect',
+    );
+    // And the once-per-target right re-opened with the version (the judged
+    // snapshot predates the edit anchor).
+    expect((await post(challengeBody(targetId), challenger.cookie)).status).toBe(201);
+  });
+
+  it('an edit racing a fresh challenge never stomps under_debate', async () => {
+    // A validated (unsettled) target: one adjudicated upheld defense.
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const targetId = await seedTarget();
+    const first = await seedUserWithSession(fixture.identity);
+    const filed = await postOk(challengeBody(targetId), first.cookie);
+    await resolveArena(filed.metadata.debate_arena_id ?? '');
+    expect((await fixture.forum.contributions.getById(targetId))?.disputeStatus).toBe('validated');
+    // The author's material edit interleaves with a SECOND challenger's create:
+    // the challenge lands (and tags `under_debate`) between the edit's write
+    // and the edit path's dispute reset — the reset must not stomp it.
+    const second = await seedUserWithSession(fixture.identity);
+    const store = fixture.forum.contributions;
+    const realApplyEdit = store.applyEdit.bind(store);
+    let raced = false;
+    store.applyEdit = async (...args: Parameters<typeof realApplyEdit>) => {
+      const row = await realApplyEdit(...args);
+      if (!raced) {
+        raced = true;
+        const challenge = await post(challengeBody(targetId), second.cookie);
+        expect(challenge.status).toBe(201);
+        expect((await store.getById(targetId))?.disputeStatus).toBe('under_debate');
+      }
+      return row;
+    };
+    nowMs += 60_000;
+    const edit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Edited while a challenge raced in.' },
+        author.cookie,
+      ),
+    );
+    expect(edit.status).toBe(200);
+    const row = await fixture.forum.contributions.getById(targetId);
+    expect(row?.disputeStatus).toBe('under_debate');
+    expect(row?.body).toBe('Edited while a challenge raced in.');
+    expect(await fixture.forum.debates.getActiveForComment(targetId)).not.toBeNull();
   });
 
   it('unsettle never re-certifies a materially edited row (settled mark only)', async () => {

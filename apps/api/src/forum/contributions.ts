@@ -1237,9 +1237,11 @@ export async function editContribution(
     // `validated` posture clears to `none` and any settled threshold resets
     // (the settle count is anchored at the edit-history instant this edit just
     // wrote, so both re-open together).  `incorrect` is untouched — the
-    // adjudicated demotion survives a rewrite; `under_debate` is live-arena
-    // state and is managed by the arena lifecycle alone.
-    edited = (await forum.contributions.setDisputeStatus(contributionId, 'none', null)) ?? edited;
+    // adjudicated demotion survives a rewrite.  The reset is CONDITIONAL at
+    // the store layer (`resetDisputeAfterEdit`): a challenge racing this edit
+    // may have just tagged the row `under_debate`, and that live-arena state
+    // must never be stomped by this pre-read's stale `validated`.
+    edited = (await forum.contributions.resetDisputeAfterEdit(contributionId)) ?? edited;
   }
   if (!edited) {
     return {

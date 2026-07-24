@@ -285,10 +285,15 @@ export interface DebateStore {
     userId: string,
     opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
   ): Promise<ChallengerHistory>;
-  /** Adjudicated `upheld` defenses of a COMMENT target with `resolvedAt`
-   *  strictly after `sinceIso` (the target's material-edit anchor) — the
-   *  settled-threshold input.  Self-targeted arenas never count (legacy rows;
-   *  the create guard refuses new ones). */
+  /** Adjudicated `upheld` defenses of a COMMENT target whose LOCKED snapshot
+   *  postdates `sinceIso` (the target's material-edit anchor) — the
+   *  settled-threshold input.  Keyed on `lockedAt`, never `resolvedAt`: the
+   *  snapshot instant is what fixes WHICH VERSION the verdict judged, and a
+   *  post-verdict edit inside the override window makes the two diverge (a
+   *  resolve-keyed count would let an old-version verdict certify new text).
+   *  A null-`lockedAt` legacy row proves nothing and never counts.
+   *  Self-targeted arenas never count (legacy rows; the create guard refuses
+   *  new ones). */
   countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number>;
   /** Story-target variant of `countUpheldDefensesForComment`. */
   countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number>;
@@ -345,11 +350,12 @@ const PRE_VERDICT: ReadonlySet<DebateState> = new Set<DebateState>(PRE_VERDICT_S
  *  must not launder the per-opponent win dedup into distinct opponents. */
 export const TOMBSTONED_OPPONENT_KEY = 'tombstoned';
 
-/** An adjudicated `upheld` defense of the target, resolved strictly after the
- *  material-edit anchor; self-targeted legacy arenas never count. */
+/** An adjudicated `upheld` defense of the target whose LOCKED snapshot
+ *  postdates the material-edit anchor (`lockedAt` fixes which version was
+ *  judged — see the interface note); self-targeted legacy arenas never count. */
 function upheldDefenseAfter(row: DebateArenaRecord, sinceIso: string): boolean {
   if (row.state !== 'resolved' || row.verdict !== 'upheld') return false;
-  if (row.resolvedAt === null || row.resolvedAt <= sinceIso) return false;
+  if (row.lockedAt === null || row.lockedAt <= sinceIso) return false;
   return !(
     row.incumbentUserId !== null &&
     row.challengerUserId !== null &&
@@ -366,11 +372,16 @@ function matchesTarget(
     : row.targetType === 'story' && row.storyId === target.storyId;
 }
 
-/** A terminal arena's once-per-target consumption instant: its `resolvedAt`,
- *  unless it was a GRACE withdrawal (which consumed nothing). */
+/** A terminal arena's once-per-target consumption instant.  A RESOLVED arena
+ *  consumes the VERSION its verdict judged — the lock instant (`lockedAt`,
+ *  falling back to `resolvedAt` for null-lockedAt legacy rows), so a
+ *  post-verdict material edit re-opens the challenger's right exactly as it
+ *  re-opens settling.  A WITHDRAWN arena consumes by its retraction instant
+ *  (no snapshot exists; the consumption is the parked slot-time itself) —
+ *  unless it was a GRACE withdrawal, which consumed nothing. */
 function concludedChallengeAt(row: DebateArenaRecord, graceMs: number): string | null {
   if (row.resolvedAt === null) return null;
-  if (row.state === 'resolved') return row.resolvedAt;
+  if (row.state === 'resolved') return row.lockedAt ?? row.resolvedAt;
   if (row.state !== 'withdrawn') return null;
   const grace = isGraceWithdrawal(
     {

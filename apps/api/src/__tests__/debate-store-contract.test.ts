@@ -743,24 +743,31 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     const ctx = await freshCtx();
     const challenger = ctx.challengerUser;
     if (challenger === null) return;
+    // The count keys on the LOCK instant (which version the verdict judged);
+    // resolvedAt trails it by the override window here, as in the real flow.
     const upheld = (over: Partial<DebateArenaRecord>): Partial<DebateArenaRecord> => ({
       state: 'resolved',
       verdict: 'upheld',
       winner: 'incumbent',
       decidedBy: 'ai',
       incumbentUserId: ctx.opponentUser,
-      resolvedAt: '2026-07-05T06:00:00.000Z',
+      lockedAt: '2026-07-05T06:00:00.000Z',
+      resolvedAt: '2026-07-06T06:00:00.000Z',
       ...over,
     });
     for (const over of [
       upheld({}),
-      upheld({ resolvedAt: '2026-07-05T07:00:00.000Z' }),
+      upheld({ lockedAt: '2026-07-05T07:00:00.000Z' }),
       // Self-targeted (legacy) upheld arenas never count toward settling.
       upheld({ incumbentUserId: challenger }),
       // A successful correction is not a defense.
       upheld({ verdict: 'corrected', winner: 'challenger' }),
-      // Before the anchor ⇒ a different content version defended.
-      upheld({ resolvedAt: '2026-07-05T04:00:00.000Z' }),
+      // Locked before the anchor ⇒ a different content version was defended
+      // (its resolvedAt lands after the anchor — exactly the post-verdict-edit
+      // shape a resolve-keyed count would mis-attribute).
+      upheld({ lockedAt: '2026-07-05T04:00:00.000Z' }),
+      // A null-lockedAt legacy row proves nothing and never counts.
+      upheld({ lockedAt: null }),
     ]) {
       const opened = await store.open(
         makeArena(ctx, { ...over, challengerContributionId: await ctx.newCorrection() }),

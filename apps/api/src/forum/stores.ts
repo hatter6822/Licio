@@ -304,6 +304,14 @@ export interface ContributionStore {
    *  concurrent material edit and re-certify text the edit just reset.
    *  Idempotent; returns null for an unknown id. */
   clearSettled(contributionId: string): Promise<ContributionRecord | null>;
+  /** WS-T — the material-edit dispute reset, CONDITIONAL at the storage layer:
+   *  clears `validated` → `none` (+ the settled mark) only while the row still
+   *  reads `validated`/settled.  A challenge racing the edit may have tagged
+   *  the row `under_debate` between the edit's write and this reset — that tag
+   *  must never be stomped by the edit path's stale pre-read (the guard lives
+   *  in the WHERE, not the caller).  Returns the current row (changed or not);
+   *  null for an unknown id. */
+  resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null>;
   /** WS-T challenge policy — the row's material-edit anchor: the latest edit-
    *  history instant, or null when never edited (callers fall back to
    *  `createdAt`).  Settle counts and the once-per-target guard compare arena
@@ -936,6 +944,17 @@ export class InMemoryContributionStore implements ContributionStore {
     if (!row) return null;
     row.settledAt = null;
     row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    if (row.disputeStatus === 'validated' || row.settledAt !== null) {
+      row.disputeStatus = 'none';
+      row.settledAt = null;
+      row.updatedAt = iso(this.#now);
+    }
     return row;
   }
 
