@@ -188,4 +188,15 @@ describe('dispute posture on the card edge (WS-T)', () => {
     // Colour is never the sole carrier: the state is still stated in text.
     expect(screen.getByText(label)).toBeInTheDocument();
   });
+
+  it('shows the terminal "Settled" label and a success edge when settled', () => {
+    const { container } = render(
+      <StoryCard {...sample} disputeStatus="validated" disputeSettled />,
+    );
+    const article = container.querySelector('article') as HTMLElement;
+    expect(article.className).toContain('border-success');
+    expect(article.className).not.toContain('border-line');
+    expect(screen.getByText('Settled')).toBeInTheDocument();
+    expect(screen.queryByText('Validated')).not.toBeInTheDocument();
+  });
 });

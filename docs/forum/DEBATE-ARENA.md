@@ -299,6 +299,123 @@ platform legal floor).
   including the lock CAS, withdrawal/concession, the activity clocks, and the
   both-sides-idle sweep over the partial `greatest(...)` index.
 
+## The challenge policy (SPEC §15.4 "The challenge policy")
+
+The rationing layer over challenge creation — every number steward-tunable
+(`ForumRuntimeConfig` `challenge*` keys), every derivation event-sourced from
+`debate_arenas` rows (the moderation-reports quota pattern: no counter tables).
+
+- **The pure math** lives in `apps/api/src/forum/challenge-policy.ts`
+  (`computeChallengeStanding`, `isGraceWithdrawal`, `resolveChallengePolicy`):
+  capacity = clamp(base 1 + KYC bonus + earned tier − active withdrawal
+  penalties, 1, ceiling). Tiers count ADJUDICATED challenger wins only
+  (`decided_by ∈ {ai, steward}` — concessions credit nothing), deduped per
+  opponent (tombstoned incumbents share one bucket so account deletion cannot
+  launder the dedup), gated on the adjudicated win rate. Slots are PRE-VERDICT
+  arenas (open/locked/awaiting_verdict); the verdict frees the slot.
+- **The store derivations** (`DebateStore.challengerHistory`,
+  `countUpheldDefensesFor{Comment,Story}`, `latestConcludedChallengeAt`) run in
+  both adapters over the `debate_arenas (challenger_user_id, state)` index
+  (migration 0096) and are pinned by the parameterized contract test.
+- **Enforcement** is the correction branch of `createContribution`
+  (target-order first: self-challenge → dispute status → settled →
+  once-per-target, then account-order: cooldown → daily budget → capacity,
+  with typed rejections `cannot_challenge_own_content`, `target_settled`,
+  `target_already_challenged`, `challenge_cooldown`, `challenge_daily_limit`,
+  `challenge_capacity_reached`). The KYC read is a seam
+  (`ForumServices.kycReader`, boot-wired to compliance `kycLevel ===
+  'kyc_partner'`, fail-closed false — a booster only, never a gate).
+- **Material-edit anchors.** Comments anchor at their latest edit-history
+  instant (`ContributionStore.latestEditAt` — immaterial no-op PATCHes no
+  longer write history, so the anchor cannot be moved by contentless pings);
+  stories anchor at `created_at` (no author edit path exists;
+  `last_material_update_at` is the conversation-freshness clock — every new
+  comment bumps it — and must NEVER anchor these guards). A material edit
+  clears `validated` + `settled_at` in the edit path itself.
+- **Settling** happens in `finalizeDebate`: an upheld outcome counts the
+  target's prior adjudicated upheld defenses since its anchor (self-targeted
+  legacy arenas excluded) and stamps `settled_at` at the threshold.  The count
+  — and the once-per-target consumption of a resolved arena — is keyed on
+  each arena's **lock instant** (`lockedAt`, the version its verdict actually
+  judged), never its resolve instant: a material edit is allowed once an
+  arena is judged, and SNAPSHOT CURRENCY then guards the outcome — a verdict
+  whose `lockedAt` predates the anchor resolves the target `none` (nothing is
+  claimed about the served text) instead of stamping `validated`, and a
+  null-`lockedAt` legacy row keeps `validated` but can never settle.  The
+  edit path's own dispute reset is CONDITIONAL at the storage layer
+  (`resetDisputeAfterEdit`: `WHERE dispute_status = 'validated' OR settled_at
+  IS NOT NULL`), so a challenge racing the edit can never have its fresh
+  `under_debate` tag stomped by the edit's stale pre-read — and the inverse
+  interleave is closed on the finalize side: the `validated` write is
+  CAS-guarded on the target's edit lineage (`certifyValidatedIfUnedited`,
+  keyed on `edit_history_ref` read with the anchor), falling back to `none`
+  on a miss, so a verdict can never certify text outside its locked snapshot
+  from either direction.  Finalization itself is fenced against a
+  last-moment steward override the same way: the `judged → resolved` flip is
+  `resolveIfUnchanged`, a CAS on the row's `updatedAt` token (the only
+  judged-row writers are `recordOverride` — which bumps the token STRICTLY
+  MONOTONICALLY, `greatest(now, updated_at + 1ms)` in both adapters, so a
+  same-millisecond override still moves it — and finalize).  An override
+  landing mid-effects makes the resolve miss and finalize re-applies its
+  outcome for the FINAL verdict (idempotent overwrites, plus a revert of the
+  stale upheld challenger tag that RESTORES the status read before the tag —
+  a separate arena may legitimately hold that correction `incorrect` as ITS
+  target, and that adjudication is not this arena's to erase) before
+  retrying, keeping the resolved arena and its dispute statuses consistent
+  while preserving the effects-first / state-flip-last crash-healing order.
+  Withdrawal standing reads fetch `withdrawalFetchWindowMs` (the policy
+  window + the longest cooldown rung), so steward-tuned configs whose rungs
+  outlive the window still rank and enforce their cooldowns.
+  `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
+  (migration 0096) — never a dispute-status enum value — so every existing
+  ranking feature and search filter keeps its exact vocabulary (a settled row
+  still reads `validated`; ranking/search are untouched by construction). The
+  settled distinction reaches the CARD as a separate optional `dispute_settled`
+  wire marker (contribution + feed-item schemas), emitted only when TRUE — a
+  new optional key, never a new enum value, so a pre-settle cached bundle keeps
+  parsing every not-yet-settled response; the `DisputeBadge`/`DisputeBanner`
+  render the terminal "Settled" state in place of "Validated" when it is set.
+- **Unsettle** (`POST /v1/{contributions,stories}/:id/unsettle`): the
+  target's home-room stewards (the Commons included — the same arm that
+  already holds the stronger verdict override), or the platform ADMIN under
+  the per-session MFA bar; clears `settled_at` ONLY (`clearSettled` — writing
+  a pre-read dispute status back would race a concurrent material edit and
+  re-certify text the edit just reset), so the adjudicated `validated` record
+  stands and the next upheld defense re-settles immediately.
+- **The quota TOCTOU close**: the account-level create gates are
+  read-then-act, so N parallel corrections could all pass before any arena
+  exists.  `maybeEnterDebate` therefore re-reads the raced set AFTER its own
+  open lands (`listChallengeOpens` + `challengeOpenSurvivesQuota`, the
+  open-vs-removal write-before-read discipline) and the overflow self-voids
+  by the deterministic oldest-survives order — as a same-instant GRACE
+  withdrawal, so a racer is never cooled down, keeps their once-per-target
+  right, and (like every grace retraction) burns no daily budget: grace costs
+  and consumes NOTHING, opens included.  Beyond self-voiding, every observer
+  also EVICTS the displaced overflow it can see (`challengeQuotaOverflow` +
+  the full withdrawal effects): a later-landing open can rank ahead of an
+  already-evaluated keeper (equal createdAt with the id tie-break, or
+  cross-instance clock skew) that never re-evaluates, so observer-side
+  eviction is what converges the survivor set to exactly the quota — and a
+  racer re-checks its own arena is still `open` before tagging, so an evicted
+  arena never leaves a stale `under_debate` mark.  Racing still cannot convert into
+  throughput — the survivor set is bounded by capacity, voided arenas never
+  reach the adjudicator, and the contribution limiter bounds request churn.
+  The same fence re-reads the TARGET's policy state after the open (a
+  finalize can land between the create guards and the open, concluding the
+  caller's prior arena, tagging the target `incorrect`, or crossing the
+  settled threshold exactly while the one-live-per-target constraint stops
+  blocking): a stale target voids the open the same way
+  (`forum.debate_voided_stale_target`).
+- **Standing** (`GET /v1/challenge-standing` + optional target probe,
+  `evaluateChallengeTarget` kept in lockstep with the create guard): the
+  correction composer's pre-flight line, target-block copy, and the withdraw
+  dialog's grace/penalized consequence (`challenge-standing.ts` on the web —
+  pure copy model, `debate-summary.ts` pattern).
+- **Sim/test seams**: `ForumServices.challengePolicyOverride` (the
+  `DebateWindowsOverride` pattern — the DEV simulator raises caps and zeroes
+  cooldowns for synthetic personas only; a real dev account keeps production
+  policy).
+
 ## Residuals
 
 - Field confirmation of the live stream on physical browsers at scale (the
@@ -309,3 +426,21 @@ platform legal floor).
   snapshot (`locked_content`) that quotes an anonymized contribution — the
   arena is the transparency artifact of a judged dispute, but the DSAR sweep
   should redact snapshot bodies for erased authors (tracked here).
+- Card-level SETTLED presentation — **implemented.** A settled story/comment
+  now renders a terminal "Settled" badge (and card edge / detail banner) in
+  place of "Validated", carried by the optional `dispute_settled` marker on the
+  contribution + feed-item schemas. It is a presence field emitted only when
+  TRUE — a new *optional key*, not a new enum value — so a stale cached PWA
+  bundle validating against the pre-marker strict schema keeps parsing every
+  not-yet-settled response (and settles are rare by construction: three
+  adjudicated upheld defenses). The distinction still ALSO surfaces in the
+  composer probe, the create rejection, and the standing endpoint.
+- If a story author-edit path ever ships, it must introduce a story
+  content-edit anchor and thread it through the settle/once-per-target guards
+  (`created_at` is correct only while stories are immutable) — and clear
+  `validated`/`settled_at` exactly as the comment edit path does.
+- A withdrawal (or inconclusive verdict) on a previously-`validated` target
+  clears the badge to `none` even though its adjudicated defenses persist in
+  the arena record (documented §15.4 behavior, kept). If that reads as an
+  erasure in practice, the restoration is one derivation away: re-derive
+  `validated` from `countUpheldDefenses > 0` at tag-clear time.

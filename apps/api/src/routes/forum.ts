@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
   type ContributionPublic,
+  challengeStandingResponseSchema,
   contributionAnchorSchema,
   contributionCreateResponseSchema,
   contributionPublicSchema,
@@ -43,6 +44,7 @@ import {
   UPLOAD_CAPTION_TYPES,
   UPLOAD_IMAGE_TYPES,
   UPLOAD_VIDEO_TYPES,
+  unsettleResponseSchema,
   uploadPublicSchema,
   uuidSchema,
 } from '@licio/shared';
@@ -50,16 +52,24 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
+import {
+  CHALLENGE_OPENS_WINDOW_MS,
+  challengePolicyWire,
+  computeChallengeStanding,
+  resolveChallengePolicy,
+  withdrawalFetchWindowMs,
+} from '../forum/challenge-policy.js';
 import type { CommentFrame } from '../forum/comment-broadcaster.js';
 import { commentMediaOf, commentPage } from '../forum/comments.js';
 import {
   FORUM_CONFIG_KEYS,
   storeForumConfigValue,
-  validateForumConfigValue,
+  validateForumConfigChange,
 } from '../forum/config.js';
 import {
   createContribution,
   editContribution,
+  evaluateChallengeTarget,
   removeContribution,
   threadOnGlobalDirectory,
   threadReadableToUser,
@@ -1223,7 +1233,10 @@ export function createForumRoutes() {
           const auth = getAuth(c);
           if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
           const { key, value } = c.req.valid('json');
-          const problem = validateForumConfigValue(key, value);
+          // Validate against the effective config the write would produce, not
+          // the key in isolation: the KYC capacity ceiling must never be set
+          // below the non-KYC ceiling (codex on PR #168).
+          const problem = validateForumConfigChange(getForumServices().config(), key, value);
           if (problem !== null) return c.json(deny('invalid_config', problem), 422);
           const events = getEventPipelineServices();
           await storeForumConfigValue(events.configStore, key, value);
@@ -1242,6 +1255,206 @@ export function createForumRoutes() {
       .get('/forum/admin/metrics', authMiddleware(), requireSteward(), (c) => {
         return c.json({ counters: getForumServices().metrics.snapshot() });
       })
+      // --- WS-T challenge policy ---------------------------------------------
+      // The caller's OWN challenge standing (+ an optional target probe): the
+      // correction composer renders quota, cooldown, and per-target block
+      // reasons from this BEFORE a challenge is filed.  Self-only by
+      // construction — no other account's record is ever served (no-applause:
+      // this is private plumbing, never a leaderboard).
+      .get(
+        '/challenge-standing',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        zValidator(
+          'query',
+          z
+            .object({
+              target_contribution_id: uuidSchema.optional(),
+              target_story_id: uuidSchema.optional(),
+            })
+            .refine(
+              (q) => q.target_contribution_id === undefined || q.target_story_id === undefined,
+              { message: 'Probe one target at a time.' },
+            ),
+        ),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const forum = bundle.forum;
+          const nowMs = forum.now();
+          const policy = resolveChallengePolicy(
+            forum.config(),
+            forum.challengePolicyOverride,
+            auth.userId,
+          );
+          // The KYC boost reads fail-closed to false (the floor of 1 is never
+          // KYC-gated) — identical to the create guard.
+          let kycVerified = false;
+          if (forum.kycReader !== null) {
+            try {
+              kycVerified = await forum.kycReader(auth.userId);
+            } catch {
+              kycVerified = false;
+            }
+          }
+          const standing = computeChallengeStanding(
+            await forum.debates.challengerHistory(auth.userId, {
+              nowIso: new Date(nowMs).toISOString(),
+              opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
+              withdrawFetchWindowMs: withdrawalFetchWindowMs(policy),
+              graceMs: policy.withdrawGraceMs,
+            }),
+            kycVerified,
+            nowMs,
+            policy,
+          );
+          const query = c.req.valid('query');
+          const probe =
+            query.target_contribution_id !== undefined
+              ? { contributionId: query.target_contribution_id }
+              : query.target_story_id !== undefined
+                ? { storyId: query.target_story_id }
+                : null;
+          const target =
+            probe === null
+              ? null
+              : await (async () => {
+                  const reason = await evaluateChallengeTarget(bundle, auth.userId, policy, probe);
+                  return { challengeable: reason === null, reason };
+                })();
+          return c.json(
+            challengeStandingResponseSchema.parse({
+              standing: {
+                capacity: standing.capacity,
+                live_count: standing.liveCount,
+                available: standing.available,
+                cooldown_until:
+                  standing.cooldownUntilMs === null
+                    ? null
+                    : new Date(standing.cooldownUntilMs).toISOString(),
+                opens_last_24h: standing.opensLast24h,
+                daily_limit_resets_at:
+                  standing.dailyLimitResetsAtMs === null
+                    ? null
+                    : new Date(standing.dailyLimitResetsAtMs).toISOString(),
+                kyc_verified: standing.kycVerified,
+                earned_tier: standing.earnedTier,
+                qualified_wins: standing.qualifiedWins,
+                adjudicated_wins: standing.adjudicatedWins,
+                adjudicated_losses: standing.adjudicatedLosses,
+                win_rate_gate_passed: standing.winRateGatePassed,
+                active_withdrawal_penalties: standing.activeWithdrawalPenalties,
+                can_open_now: standing.canOpenNow,
+                blocked_by: standing.blockedBy,
+                policy: challengePolicyWire(policy),
+                target,
+              },
+            }),
+          );
+        },
+      )
+      // Steward/admin unsettle — the settled-content escape hatch: reopens a
+      // SETTLED target for challenges when genuinely new evidence emerges.
+      // The gate is the SAME arm family as the debate override (WS-D.1.5b):
+      // the target's home-room stewards, or the platform ADMIN under the
+      // per-session MFA bar.  The Commons is a room like any other here — its
+      // (platform-controlled) steward grants already hold the strictly
+      // STRONGER verdict-override power over Commons arenas, so carving it
+      // out of the weaker unsettle would guard nothing; a thread with NO home
+      // room (impossible today — threads.room_id is NOT NULL) falls back to
+      // the admin arm alone.  The settled mark alone clears; the `validated`
+      // badge (and its ranking treatment) stands — unsettling reopens the
+      // debate lane, it does not un-adjudicate the record.
+      .post(
+        '/contributions/:contributionId/unsettle',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ contributionId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { contributionId } = c.req.valid('param');
+          const row = await bundle.forum.contributions.getById(contributionId);
+          if (!row) return c.json(notFound, 404);
+          const thread = await bundle.ingestion.stories.getThreadById(row.threadId);
+          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
+            return c.json(notFound, 404);
+          }
+          const isAdminStepped = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
+          const isRoomSteward =
+            thread.roomId !== null &&
+            (await bundle.forum.rooms.stewardRolesFor(thread.roomId, auth.userId)).length > 0;
+          if (!isAdminStepped && !isRoomSteward) {
+            return c.json(
+              deny(
+                'not_steward',
+                'Only a room steward (or a platform admin with active MFA) may unsettle.',
+              ),
+              403,
+            );
+          }
+          if (row.settledAt === null) {
+            return c.json(deny('not_settled', 'This content is not settled.'), 409);
+          }
+          // Clears ONLY the settled mark: writing the pre-authorization
+          // `disputeStatus` read back would race a concurrent material edit
+          // and re-certify text the edit just reset (codex on PR #168).
+          await bundle.forum.contributions.clearSettled(contributionId);
+          bundle.forum.metrics.increment('contributions.unsettled');
+          bundle.forum.log('forum.dispute_unsettled', {
+            target_type: 'comment',
+            contribution_id: contributionId,
+            by: `steward:${auth.userId}`,
+          });
+          return c.json(unsettleResponseSchema.parse({ unsettled: true }));
+        },
+      )
+      .post(
+        '/stories/:storyId/unsettle',
+        authMiddleware(),
+        requireVerifiedAccount(),
+        requireUnrestricted(),
+        zValidator('param', z.object({ storyId: uuidSchema })),
+        async (c) => {
+          const auth = getAuth(c);
+          if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+          const bundle = bundles();
+          const { storyId } = c.req.valid('param');
+          const story = await bundle.ingestion.stories.getById(storyId);
+          if (!story) return c.json(notFound, 404);
+          const thread = await bundle.ingestion.stories.getThreadByStoryId(storyId);
+          if (!thread || !(await threadReadableToUser(bundle, thread, auth.userId))) {
+            return c.json(notFound, 404);
+          }
+          const isAdminStepped = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
+          const isRoomSteward =
+            thread.roomId !== null &&
+            (await bundle.forum.rooms.stewardRolesFor(thread.roomId, auth.userId)).length > 0;
+          if (!isAdminStepped && !isRoomSteward) {
+            return c.json(
+              deny(
+                'not_steward',
+                'Only a room steward (or a platform admin with active MFA) may unsettle.',
+              ),
+              403,
+            );
+          }
+          if (story.settledAt == null) {
+            return c.json(deny('not_settled', 'This story is not settled.'), 409);
+          }
+          await bundle.ingestion.stories.update(storyId, { settledAt: null });
+          bundle.forum.metrics.increment('stories.unsettled');
+          bundle.forum.log('forum.dispute_unsettled', {
+            target_type: 'story',
+            story_id: storyId,
+            by: `steward:${auth.userId}`,
+          });
+          return c.json(unsettleResponseSchema.parse({ unsettled: true }));
+        },
+      )
       // --- WS-T debate arena (sourced-correction adjudication) ----------------
       // Read the arena (role-scoped: the caller sees whether they are the
       // incumbent, challenger, steward, or an observer).

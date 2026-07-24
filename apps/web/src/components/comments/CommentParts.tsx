@@ -15,7 +15,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ZodError } from 'zod';
 import { ApiClientError } from '../../lib/api.js';
 import { cn } from '../../lib/cn.js';
-import { useCreateCommentMutation } from '../../lib/queries.js';
+import { useChallengeStandingQuery, useCreateCommentMutation } from '../../lib/queries.js';
 import { relativeTimeShort } from '../../lib/time.js';
 import {
   type DraftContributionRecord,
@@ -29,6 +29,12 @@ import { ReportSheet } from '../safety/ReportSheet.js';
 import { DisputeBadge } from '../story/DisputeBadge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
+import {
+  challengeRejectionCopy,
+  challengeStandingRefetchMs,
+  standingSummary,
+  targetBlockCopy,
+} from './challenge-standing.js';
 
 /** Trailing autosave debounce: one encrypt+write per pause (mirrors StoryComposer). */
 const DRAFT_DEBOUNCE_MS = 800;
@@ -393,7 +399,7 @@ export function CommentHeader({
       ) : null}
       {/* WS-T dispute posture: "Challenged" while a correction's debate is live,
           "Incorrect" once a correction prevailed (nothing when undisputed). */}
-      <DisputeBadge status={comment.dispute_status} />
+      <DisputeBadge status={comment.dispute_status} settled={comment.dispute_settled ?? false} />
     </div>
   );
   if (action === undefined) return meta;
@@ -669,6 +675,19 @@ export function CorrectionComposer({
   const [error, setError] = useState<string | null>(null);
   const [queued, setQueued] = useState(false);
   const mutation = useCreateCommentMutation(storyId);
+  // WS-T challenge policy — the caller's own quota + the target probe, BEFORE
+  // anything is typed: the composer says up front when the challenge cannot be
+  // filed (settled target, capacity, cooldown…) instead of failing the submit.
+  const standingQuery = useChallengeStandingQuery(
+    'commentId' in target ? { contributionId: target.commentId } : { storyId },
+    true,
+    challengeStandingRefetchMs,
+  );
+  const standing = standingQuery.data?.standing;
+  const account = standing === undefined ? null : standingSummary(standing, Date.now());
+  const targetBlock =
+    standing?.target != null && !standing.target.challengeable ? standing.target.reason : null;
+  const policyBlocked = targetBlock !== null || account?.blocked === true;
   const trimmed = body.trim();
   // A correction MUST carry ≥1 source — the sources are the inline links in the
   // correction text (a correction takes at most five).
@@ -706,6 +725,7 @@ export function CorrectionComposer({
     };
     mutation.mutate(payload, {
       onSuccess: (response) => {
+        void standingQuery.refetch();
         draft.clearDraft();
         const debateId = response.contribution.metadata.debate_arena_id;
         if (debateId) {
@@ -720,6 +740,16 @@ export function CorrectionComposer({
         );
       },
       onError: (mutationError) => {
+        // A challenge-policy refusal is terminal and specific — say exactly
+        // why (cooldown, capacity, settled target…), never the generic text.
+        if (mutationError instanceof ApiClientError) {
+          const copy = challengeRejectionCopy(mutationError.code);
+          if (copy !== null) {
+            setError(copy);
+            void standingQuery.refetch();
+            return;
+          }
+        }
         // Offline / transient failure — queue the correction to replay when
         // connectivity returns; a terminal 4xx keeps the plain error text.
         void draft.queueIfTransient(payload, mutationError).then((queued: boolean) => {
@@ -755,6 +785,18 @@ export function CorrectionComposer({
         debate the room's AI resolves — you and the author can each adjust your case for up to 24
         hours, and the debate queues for resolution an hour after you both stop editing.
       </p>
+      {targetBlock !== null ? (
+        <p role="alert" className="text-sm text-error">
+          {targetBlockCopy(targetBlock)}
+        </p>
+      ) : account !== null ? (
+        <p
+          role={account.blocked ? 'alert' : undefined}
+          className={cn('text-sm', account.blocked ? 'text-error' : 'text-ink-muted')}
+        >
+          {account.text}
+        </p>
+      ) : null}
       <MarkdownEditor
         id="correction-body"
         label="Your correction"
@@ -786,7 +828,7 @@ export function CorrectionComposer({
           type="submit"
           variant="primary"
           loading={mutation.isPending}
-          disabled={trimmed.length === 0 || !hasSource}
+          disabled={trimmed.length === 0 || !hasSource || policyBlocked}
         >
           Open debate
         </Button>

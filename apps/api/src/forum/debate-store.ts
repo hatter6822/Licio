@@ -15,6 +15,7 @@ import type {
   DebateVerdict,
   DebateWinner,
 } from '@licio/shared';
+import { type ChallengerHistory, isGraceWithdrawal } from './challenge-policy.js';
 
 /** One side's live, editable draft. */
 export interface DebateSidePosition {
@@ -219,6 +220,18 @@ export interface DebateStore {
     state: DebateState,
     resolvedAt?: string,
   ): Promise<DebateArenaRecord | null>;
+  /** ATOMICALLY resolve a `judged` arena (→ `resolved`) — CAS on the row's
+   *  `updatedAt` token, the finalize-vs-override fence: the ONLY writers of a
+   *  judged row are `recordOverride` (which bumps the token) and this resolve,
+   *  so a steward override landing after finalize read its verdict makes the
+   *  CAS miss (null) and finalize re-applies its outcome effects against the
+   *  FINAL verdict before retrying.  State stays `judged` on a miss — the
+   *  crash-healing property (effects first, state flip last) is preserved. */
+  resolveIfUnchanged(
+    debateId: string,
+    resolvedAt: string,
+    expectedUpdatedAt: string,
+  ): Promise<DebateArenaRecord | null>;
   /** Arenas due for the scheduled hour-23 lock: still `open` past their edit
    *  deadline. */
   listDueForLock(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
@@ -270,6 +283,70 @@ export interface DebateStore {
     after: { createdAt: string; debateId: string } | null,
     limit: number,
   ): Promise<DebateArenaRecord[]>;
+  /** WS-T challenge policy (challenge-policy.ts) — the caller's arena-derived
+   *  standing rows in ONE read: adjudicated win/loss aggregates as challenger
+   *  (decidedBy ∈ {ai, steward} only — concessions credit nothing; tombstoned
+   *  opponents share one bucket so account deletion cannot launder the
+   *  per-opponent dedup), the live PRE-VERDICT slot count
+   *  (open/locked/awaiting_verdict — the slot frees at the verdict), opens
+   *  inside the trailing `opensWindowMs` (GRACE withdrawals excluded — a
+   *  grace retraction costs and consumes NOTHING, the daily budget included;
+   *  the anti-race property never depended on budget burn: the survivor-set
+   *  capacity bounds concurrency and voided arenas never adjudicate), and the
+   *  trailing `withdrawFetchWindowMs`'s withdrawn arenas (the policy window +
+   *  the longest cooldown rung — `withdrawalFetchWindowMs` — so ranks and
+   *  still-active rungs stay computable; grace classification + cooldowns
+   *  happen in the pure policy layer).  Self-targeted LEGACY arenas are
+   *  outside the standing system in EVERY derivation (the create guard
+   *  refuses new ones): they build no wins, cost no slots, burn no budget,
+   *  and trigger no withdrawal consequences.  All standing state derives from
+   *  arena rows — never a counter table that can drift. */
+  challengerHistory(
+    userId: string,
+    opts: {
+      nowIso: string;
+      opensWindowMs: number;
+      withdrawFetchWindowMs: number;
+      /** The grace window (policy) — opens counting excludes grace rows. */
+      graceMs: number;
+    },
+  ): Promise<ChallengerHistory>;
+  /** Adjudicated `upheld` defenses of a COMMENT target whose LOCKED snapshot
+   *  postdates `sinceIso` (the target's material-edit anchor) — the
+   *  settled-threshold input.  Keyed on `lockedAt`, never `resolvedAt`: the
+   *  snapshot instant is what fixes WHICH VERSION the verdict judged, and a
+   *  post-verdict edit inside the override window makes the two diverge (a
+   *  resolve-keyed count would let an old-version verdict certify new text).
+   *  A null-`lockedAt` legacy row proves nothing and never counts.
+   *  Self-targeted arenas never count (legacy rows; the create guard refuses
+   *  new ones). */
+  countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number>;
+  /** Story-target variant of `countUpheldDefensesForComment`. */
+  countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number>;
+  /** The once-per-target-per-version guard input: the latest `resolvedAt` of a
+   *  TERMINAL arena (resolved, or non-grace withdrawn) this challenger opened
+   *  against the target — null when none.  Grace withdrawals (retracted within
+   *  `graceMs` while the incumbent never engaged) are excluded: they consumed
+   *  nothing.  Live arenas are omitted by design — the one-live-per-target
+   *  invariant already refuses every concurrent open. */
+  latestConcludedChallengeAt(
+    target: { contributionId: string } | { storyId: string },
+    challengerUserId: string,
+    graceMs: number,
+  ): Promise<string | null>;
+  /** The post-open quota RECHECK input (challenge-policy.ts
+   *  `challengeOpenSurvivesQuota`): every arena this challenger opened after
+   *  `sinceIso` PLUS every pre-verdict arena regardless of age (a live slot
+   *  can outlast the opens window); self-targeted legacy arenas AND
+   *  grace-withdrawn rows excluded — the recheck counts the SAME set the
+   *  account gates count.  Read AFTER an
+   *  open lands so concurrent writers each observe the full raced set — the
+   *  same write-before-read discipline as the open-vs-removal close. */
+  listChallengeOpens(
+    challengerUserId: string,
+    sinceIso: string,
+    graceMs: number,
+  ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]>;
   /** DSAR account-purge: detach `userId` from every arena they touch — NULLing
    *  the identity link on the incumbent / challenger / steward-override columns
    *  — while the rebuttal text persists per §22.4 (mirrors contribution
@@ -292,6 +369,69 @@ const NON_RESOLVED: ReadonlySet<DebateState> = new Set<DebateState>([
   'awaiting_verdict',
   'judged',
 ]);
+
+/** The capacity-slot states: pre-verdict only — a `judged` arena (inside the
+ *  steward-override window) no longer holds the challenger's slot. */
+export const PRE_VERDICT_STATES: readonly DebateState[] = ['open', 'locked', 'awaiting_verdict'];
+const PRE_VERDICT: ReadonlySet<DebateState> = new Set<DebateState>(PRE_VERDICT_STATES);
+
+/** One shared bucket for wins over since-deleted incumbents: account deletion
+ *  must not launder the per-opponent win dedup into distinct opponents. */
+export const TOMBSTONED_OPPONENT_KEY = 'tombstoned';
+
+/** An adjudicated `upheld` defense of the target whose LOCKED snapshot
+ *  postdates the material-edit anchor (`lockedAt` fixes which version was
+ *  judged — see the interface note); self-targeted legacy arenas never count. */
+function upheldDefenseAfter(row: DebateArenaRecord, sinceIso: string): boolean {
+  if (row.state !== 'resolved' || row.verdict !== 'upheld') return false;
+  if (row.lockedAt === null || row.lockedAt <= sinceIso) return false;
+  return !(
+    row.incumbentUserId !== null &&
+    row.challengerUserId !== null &&
+    row.incumbentUserId === row.challengerUserId
+  );
+}
+
+function matchesTarget(
+  row: DebateArenaRecord,
+  target: { contributionId: string } | { storyId: string },
+): boolean {
+  return 'contributionId' in target
+    ? row.targetType === 'comment' && row.targetContributionId === target.contributionId
+    : row.targetType === 'story' && row.storyId === target.storyId;
+}
+
+/** A terminal arena's once-per-target consumption instant.  A RESOLVED arena
+ *  consumes the VERSION its verdict judged — the lock instant (`lockedAt`,
+ *  falling back to `resolvedAt` for null-lockedAt legacy rows), so a
+ *  post-verdict material edit re-opens the challenger's right exactly as it
+ *  re-opens settling.  A WITHDRAWN arena consumes by its retraction instant
+ *  (no snapshot exists; the consumption is the parked slot-time itself) —
+ *  unless it was a GRACE withdrawal, which consumed nothing. */
+function concludedChallengeAt(row: DebateArenaRecord, graceMs: number): string | null {
+  if (row.resolvedAt === null) return null;
+  if (row.state === 'resolved') return row.lockedAt ?? row.resolvedAt;
+  if (row.state !== 'withdrawn') return null;
+  const grace = isGraceWithdrawal(
+    {
+      createdAt: row.createdAt,
+      resolvedAt: row.resolvedAt,
+      incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+    },
+    graceMs,
+  );
+  return grace ? null : row.resolvedAt;
+}
+
+/** The later of two ISO instants (the monotonic-token helper). */
+function maxIso(a: string, b: string): string {
+  return a > b ? a : b;
+}
+
+/** One millisecond after an ISO instant. */
+function plusOneMs(iso: string): string {
+  return new Date(Date.parse(iso) + 1).toISOString();
+}
 
 type Clock = () => number;
 
@@ -588,7 +728,11 @@ export class InMemoryDebateStore implements DebateStore {
     row.decidedBy = 'steward';
     row.overriddenByUserId = override.overriddenByUserId;
     row.overrideReason = override.overrideReason;
-    row.updatedAt = this.#iso();
+    // STRICTLY MONOTONIC token bump: the finalize fence (`resolveIfUnchanged`)
+    // compares millisecond timestamps, and an override landing in the same
+    // millisecond as the row's previous write would otherwise leave the token
+    // unchanged — letting a stale finalizer resolve with pre-override effects.
+    row.updatedAt = maxIso(this.#iso(), plusOneMs(row.updatedAt));
     return row;
   }
 
@@ -601,6 +745,19 @@ export class InMemoryDebateStore implements DebateStore {
     if (!row) return null;
     row.state = state;
     if (resolvedAt !== undefined) row.resolvedAt = resolvedAt;
+    row.updatedAt = this.#iso();
+    return row;
+  }
+
+  async resolveIfUnchanged(
+    debateId: string,
+    resolvedAt: string,
+    expectedUpdatedAt: string,
+  ): Promise<DebateArenaRecord | null> {
+    const row = this.#rows.get(debateId);
+    if (row?.state !== 'judged' || row.updatedAt !== expectedUpdatedAt) return null;
+    row.state = 'resolved';
+    row.resolvedAt = resolvedAt;
     row.updatedAt = this.#iso();
     return row;
   }
@@ -733,6 +890,146 @@ export class InMemoryDebateStore implements DebateStore {
           );
     if (start < 0) return [];
     return rows.slice(start, start + Math.max(0, limit));
+  }
+
+  async challengerHistory(
+    userId: string,
+    opts: {
+      nowIso: string;
+      opensWindowMs: number;
+      withdrawFetchWindowMs: number;
+      graceMs: number;
+    },
+  ): Promise<ChallengerHistory> {
+    const nowMs = Date.parse(opts.nowIso);
+    const opensCutoffMs = nowMs - opts.opensWindowMs;
+    const withdrawCutoffMs = nowMs - opts.withdrawFetchWindowMs;
+    const winsByOpponent = new Map<string, number>();
+    let adjudicatedLosses = 0;
+    let liveCount = 0;
+    const openTimesLast24h: string[] = [];
+    const withdrawals: ChallengerHistory['withdrawals'][number][] = [];
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== userId) continue;
+      // Self-targeted legacy arenas are outside the standing system entirely
+      // (the create guard refuses new ones): they build no wins, but they
+      // also must not cost slots, burn the daily budget, or trigger
+      // withdrawal cooldowns/penalties.
+      if (row.incumbentUserId !== null && row.incumbentUserId === userId) continue;
+      if (PRE_VERDICT.has(row.state)) liveCount += 1;
+      // A GRACE withdrawal consumed nothing — the daily budget included.
+      const graceWithdrawn =
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        isGraceWithdrawal(
+          {
+            createdAt: row.createdAt,
+            resolvedAt: row.resolvedAt,
+            incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+          },
+          opts.graceMs,
+        );
+      if (!graceWithdrawn && Date.parse(row.createdAt) > opensCutoffMs) {
+        openTimesLast24h.push(row.createdAt);
+      }
+      if (
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        Date.parse(row.resolvedAt) > withdrawCutoffMs
+      ) {
+        withdrawals.push({
+          createdAt: row.createdAt,
+          resolvedAt: row.resolvedAt,
+          incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+        });
+      }
+      // Win/loss aggregates: adjudicated resolutions only.
+      if (row.state !== 'resolved') continue;
+      if (row.decidedBy !== 'ai' && row.decidedBy !== 'steward') continue;
+      if (row.winner === 'challenger') {
+        const key = row.incumbentUserId ?? TOMBSTONED_OPPONENT_KEY;
+        winsByOpponent.set(key, (winsByOpponent.get(key) ?? 0) + 1);
+      } else if (row.winner === 'incumbent') {
+        adjudicatedLosses += 1;
+      }
+    }
+    return {
+      winsByOpponent: [...winsByOpponent.entries()].map(([opponentKey, wins]) => ({
+        opponentKey,
+        wins,
+      })),
+      adjudicatedLosses,
+      liveCount,
+      openTimesLast24h,
+      withdrawals,
+    };
+  }
+
+  async countUpheldDefensesForComment(contributionId: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'comment' || row.targetContributionId !== contributionId) continue;
+      if (upheldDefenseAfter(row, sinceIso)) count += 1;
+    }
+    return count;
+  }
+
+  async countUpheldDefensesForStory(storyId: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.targetType !== 'story' || row.storyId !== storyId) continue;
+      if (upheldDefenseAfter(row, sinceIso)) count += 1;
+    }
+    return count;
+  }
+
+  async latestConcludedChallengeAt(
+    target: { contributionId: string } | { storyId: string },
+    challengerUserId: string,
+    graceMs: number,
+  ): Promise<string | null> {
+    let latest: string | null = null;
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== challengerUserId) continue;
+      if (!matchesTarget(row, target)) continue;
+      const concludedAt = concludedChallengeAt(row, graceMs);
+      if (concludedAt !== null && (latest === null || concludedAt > latest)) latest = concludedAt;
+    }
+    return latest;
+  }
+
+  async listChallengeOpens(
+    challengerUserId: string,
+    sinceIso: string,
+    graceMs: number,
+  ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]> {
+    const out: { debateId: string; createdAt: string; preVerdict: boolean }[] = [];
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== challengerUserId) continue;
+      // Self-targeted legacy arenas sit outside the standing system — the
+      // recheck must count the SAME set the account gates count.
+      if (row.incumbentUserId !== null && row.incumbentUserId === challengerUserId) continue;
+      const preVerdict = PRE_VERDICT.has(row.state);
+      if (!preVerdict && row.createdAt <= sinceIso) continue;
+      // Grace withdrawals consumed nothing (the gates exempt them too).
+      if (
+        !preVerdict &&
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        isGraceWithdrawal(
+          {
+            createdAt: row.createdAt,
+            resolvedAt: row.resolvedAt,
+            incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+          },
+          graceMs,
+        )
+      ) {
+        continue;
+      }
+      out.push({ debateId: row.debateId, createdAt: row.createdAt, preVerdict });
+    }
+    return out;
   }
 
   async anonymizeParty(userId: string): Promise<number> {

@@ -5,6 +5,7 @@
 // rollback pattern for mutations. Every queryFn returns zod-validated data
 // (validated inside the RPC client), so nothing unvalidated reaches the cache.
 import type {
+  ChallengeStanding,
   ContributionWriteCreate,
   DebateOverrideRequest,
   DebatePositionUpdate,
@@ -588,6 +589,40 @@ export function usePostDebatePositionMutation(debateId: string) {
   return useMutation({
     mutationFn: (body: DebatePositionUpdate) => api.postDebatePosition(debateId, body),
     onSuccess: (data) => queryClient.setQueryData(queryKeys.debate(debateId), data),
+  });
+}
+
+/**
+ * The caller's OWN challenge standing (WS-T challenge policy), optionally
+ * probing one prospective target — the correction composer's pre-flight
+ * quota/cooldown/target line, and the withdraw dialog's consequence source.
+ * Short-lived by design: standing changes with every open/verdict/withdrawal.
+ */
+export function useChallengeStandingQuery(
+  target: { contributionId: string } | { storyId: string } | null,
+  enabled = true,
+  /** Data-driven polling strategy (the composer passes the pure
+   *  `challengeStandingRefetchMs` so a mounted, BLOCKED composer heals itself
+   *  the moment its cooldown/daily deadline expires — `staleTime` alone never
+   *  re-enables a cached gate).  Absent ⇒ no polling. */
+  refetchMsOf?: (standing: ChallengeStanding, nowMs: number) => number | false,
+) {
+  const targetKey =
+    target === null
+      ? null
+      : 'contributionId' in target
+        ? `comment:${target.contributionId}`
+        : `story:${target.storyId}`;
+  return useQuery({
+    queryKey: queryKeys.challengeStanding(targetKey),
+    enabled,
+    queryFn: () => api.fetchChallengeStanding(target ?? undefined),
+    staleTime: 15_000,
+    refetchInterval: (query) => {
+      const standing = query.state.data?.standing;
+      if (standing === undefined || refetchMsOf === undefined) return false;
+      return refetchMsOf(standing, Date.now());
+    },
   });
 }
 

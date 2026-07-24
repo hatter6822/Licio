@@ -20,6 +20,7 @@
 import type { DebateJudgeVerdict } from '@licio/ai-governance';
 import {
   type Citation,
+  type ContributionDisputeStatus,
   type ContributionMetadata,
   DEBATE_EDIT_WINDOW_MS,
   DEBATE_INACTIVITY_WINDOW_MS,
@@ -41,6 +42,13 @@ import {
 import { DEBATE_ADJUDICATOR } from '../ai-governance/models.js';
 import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { mapBounded } from '../lib/concurrency.js';
+import {
+  type ChallengePolicy,
+  challengePolicyFromConfig,
+  challengeQuotaOverflow,
+  isGraceWithdrawal,
+} from './challenge-policy.js';
+import { DEFAULT_FORUM_CONFIG } from './config.js';
 import type {
   DebateArenaRecord,
   DebateConcessionPatch,
@@ -94,10 +102,14 @@ export type StoryAuthorReader = (storyId: string) => Promise<string | null>;
 export type StewardReader = (roomId: string, userId: string) => Promise<boolean>;
 
 /** Set a STORY's dispute posture (story-target debates); the ranking feed reads
- *  it to penalize a corrected story to the bottom of the feed. */
+ *  it to penalize a corrected story to the bottom of the feed.  `settledAt`
+ *  (when passed) lands in the SAME write: a string marks the story SETTLED
+ *  (the challenge-policy threshold crossed — no longer challengeable), null
+ *  clears the mark, undefined leaves it untouched. */
 export type StoryDisputeSetter = (
   storyId: string,
   status: 'none' | 'under_debate' | 'incorrect' | 'validated',
+  settledAt?: string | null,
 ) => Promise<void>;
 
 /** A story's debatable material (the incumbent side of a story-target arena). */
@@ -203,8 +215,30 @@ export interface DebateDeps {
   /** Window-length override (dev simulator / tests ONLY; absent ⇒ the §15.4
    *  spec constants). */
   windows?: DebateWindowsOverride | undefined;
+  /** The WS-T challenge policy in force (settled threshold + withdrawal grace;
+   *  challenge-policy.ts).  Absent ⇒ the config defaults. */
+  challengePolicy?: (() => ChallengePolicy) | undefined;
+  /** A story's CHALLENGE-POLICY state: `createdAt` is the settle/once anchor
+   *  (stories have no author edit path; `lastMaterialUpdateAt` is the
+   *  conversation-freshness clock and must never anchor these), and the
+   *  dispute/settled fields feed the post-open target-state recheck.
+   *  Absent/null ⇒ story settling and the story recheck are skipped (partial
+   *  test wirings). */
+  storyPolicyState?:
+    | ((storyId: string) => Promise<{
+        createdAt: string;
+        disputeStatus: 'none' | 'under_debate' | 'incorrect' | 'validated';
+        settledAt: string | null;
+      } | null>)
+    | undefined;
   now: () => number;
   log: (event: string, meta: Record<string, unknown>) => void;
+}
+
+/** The effective challenge policy for a deps bundle (config defaults when the
+ *  wiring predates the seam). */
+function effectiveChallengePolicy(deps: Pick<DebateDeps, 'challengePolicy'>): ChallengePolicy {
+  return deps.challengePolicy?.() ?? challengePolicyFromConfig(DEFAULT_FORUM_CONFIG);
 }
 
 // ---------------------------------------------------------------------------
@@ -222,15 +256,32 @@ export interface CorrectionForDebate {
   metadata: ContributionMetadata;
 }
 
+/** The per-user quota the post-open recheck enforces (resolved by the CREATE
+ *  path with the caller's policy override applied; absent ⇒ no recheck —
+ *  legacy call sites and the demo seed open outside the quota system). */
+export interface ChallengeQuotaRecheck {
+  capacity: number;
+  opensPerDay: number;
+  /** now − the trailing opens window, ISO. */
+  opensCutoffIso: string;
+  /** The grace window (policy) — grace-withdrawn rows are budget-exempt. */
+  graceMs: number;
+}
+
 /**
  * Open a debate arena for a sourced correction, if one is not already open for
  * the same target.  Marks the target `under_debate`.  Returns the arena, or null
- * when the target is unknown / an arena is already open.
+ * when the target is unknown / an arena is already open — or when the post-open
+ * QUOTA recheck voids it (`challengeOpenSurvivesQuota`: the account-level
+ * capacity/velocity gates are read-then-act, so parallel corrections could
+ * otherwise all pass before any arena exists; each writer re-reads the raced
+ * set after its own open and the overflow self-voids as a grace withdrawal).
  */
 export async function maybeEnterDebate(
   deps: DebateDeps,
   correction: CorrectionForDebate,
   debateId: string,
+  quota?: ChallengeQuotaRecheck,
 ): Promise<DebateArenaRecord | null> {
   const targetContributionId = correction.metadata.target_contribution_id ?? null;
   const targetStoryId = correction.metadata.target_story_id ?? null;
@@ -319,6 +370,121 @@ export async function maybeEnterDebate(
       story_id: correction.storyId,
     });
     return null;
+  }
+  // WS-T challenge policy — the post-open quota recheck (see the function
+  // doc): runs BEFORE the target is tagged, so a voided open leaves no
+  // `under_debate` mark to clear.  The void is a same-instant withdrawal —
+  // GRACE by construction (the incumbent's clock still reads the open
+  // instant), so a racer is never cooled down, keeps their once-per-target
+  // right, and — like every grace retraction — burns no daily budget.
+  if (quota !== undefined && correction.userId !== null) {
+    const raced = await deps.debates.listChallengeOpens(
+      correction.userId,
+      quota.opensCutoffIso,
+      quota.graceMs,
+    );
+    // Beyond self-voiding, EVICT every displaced overflow row in the observed
+    // set (`challengeQuotaOverflow`): a later-landing open can rank ahead of
+    // an already-evaluated keeper (equal createdAt + the id tie-break, or
+    // cross-instance clock skew), and that keeper never re-evaluates — so the
+    // observer converges the survivor set to exactly the quota.  The eviction
+    // is the same open-CAS grace withdrawal, with the full withdrawal effects
+    // (tag clear, log, live frame) since the evicted racer may have tagged
+    // its target already; a CAS miss means the row progressed and is left to
+    // its own lifecycle.
+    const overflow = challengeQuotaOverflow(raced, quota, quota.opensCutoffIso);
+    for (const displacedId of overflow) {
+      if (displacedId === debateId) continue;
+      const evicted = await deps.debates.withdraw(displacedId, new Date(deps.now()).toISOString());
+      if (evicted !== null) {
+        deps.log('forum.debate_voided_quota_displaced', {
+          debate_id: displacedId,
+          by_debate_id: debateId,
+        });
+        await applyWithdrawalEffects(deps, evicted);
+      }
+    }
+    if (overflow.includes(debateId)) {
+      // Tolerant self-void: a peer observer may have evicted this arena first.
+      await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
+      deps.log('forum.debate_voided_quota', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
+      });
+      return null;
+    }
+  }
+  // WS-T challenge policy — the post-open TARGET-STATE recheck (the same
+  // write-before-read fence as the quota recheck above): the create guard's
+  // target reads can predate a finalize landing in the same window — the
+  // caller's own prior arena concluding (once-per-target), the target being
+  // tagged `incorrect`, or the settled threshold being crossed — while the
+  // one-live-per-target constraint stops blocking the instant that arena
+  // resolves.  Re-read the target's policy state AFTER the open and void
+  // (grace) when it changed.  Skipped without the quota param (legacy call
+  // sites / the demo seed open outside the policy system).
+  if (quota !== undefined && correction.userId !== null) {
+    let staleReason: string | null = null;
+    if (targetType === 'comment' && targetContributionId !== null) {
+      const freshTarget = await deps.contributions.getById(targetContributionId);
+      if (freshTarget !== null) {
+        const anchor =
+          (await deps.contributions.latestEditAt(targetContributionId)) ?? freshTarget.createdAt;
+        if (freshTarget.disputeStatus === 'incorrect') {
+          staleReason = 'target_incorrect';
+        } else if (freshTarget.settledAt !== null && freshTarget.settledAt >= anchor) {
+          staleReason = 'target_settled';
+        } else {
+          const prior = await deps.debates.latestConcludedChallengeAt(
+            { contributionId: targetContributionId },
+            correction.userId,
+            quota.graceMs,
+          );
+          if (prior !== null && prior > anchor) staleReason = 'already_challenged';
+        }
+      }
+    } else if (targetStoryId !== null) {
+      const freshStory = await deps.storyPolicyState?.(targetStoryId);
+      if (freshStory != null) {
+        if (freshStory.disputeStatus === 'incorrect') {
+          staleReason = 'target_incorrect';
+        } else if (freshStory.settledAt !== null && freshStory.settledAt >= freshStory.createdAt) {
+          staleReason = 'target_settled';
+        } else {
+          const prior = await deps.debates.latestConcludedChallengeAt(
+            { storyId: targetStoryId },
+            correction.userId,
+            quota.graceMs,
+          );
+          if (prior !== null && prior > freshStory.createdAt) staleReason = 'already_challenged';
+        }
+      }
+    }
+    if (staleReason !== null) {
+      await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
+      deps.log('forum.debate_voided_stale_target', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
+        reason: staleReason,
+      });
+      return null;
+    }
+  }
+  // A peer observer may have EVICTED this arena between the rechecks above
+  // and the tagging below (the displaced-overflow reconciliation): re-read
+  // and bail arena-less rather than tagging a withdrawn arena's target.
+  if (quota !== undefined) {
+    const still = await deps.debates.getById(debateId);
+    if (still === null || still.state !== 'open') {
+      deps.log('forum.debate_voided_by_peer', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
+      });
+      return null;
+    }
   }
   // Mark the challenged target `under_debate` (visible; not hidden).
   if (targetType === 'comment' && targetContributionId !== null) {
@@ -661,10 +827,26 @@ export type WithdrawOutcome =
   | { ok: false; reason: 'not_found' | 'not_challenger' | 'window_closed' };
 
 /** The post-close effects of a withdrawal: the target's `under_debate` tag
- *  clears back to `none` (still re-challengeable), audit log, live frame. */
+ *  clears back to `none` (still re-challengeable), audit log, live frame.
+ *  The log carries the challenge-policy GRACE classification (a misclick
+ *  retracted inside the grace window with a never-engaged incumbent costs
+ *  nothing; every other withdrawal cools the challenger down and counts
+ *  toward their capacity penalties) — the penalties themselves are DERIVED
+ *  from the arena rows at the next create, never written here. */
 async function applyWithdrawalEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
   await clearDisputeTag(deps, closed);
-  deps.log('forum.debate_withdrawn', { debate_id: closed.debateId, story_id: closed.storyId });
+  deps.log('forum.debate_withdrawn', {
+    debate_id: closed.debateId,
+    story_id: closed.storyId,
+    grace: isGraceWithdrawal(
+      {
+        createdAt: closed.createdAt,
+        resolvedAt: closed.resolvedAt ?? closed.createdAt,
+        incumbentEngaged: closed.incumbentLastActiveAt > closed.createdAt,
+      },
+      effectiveChallengePolicy(deps).withdrawGraceMs,
+    ),
+  });
   await broadcastArena(deps, closed);
 }
 
@@ -713,9 +895,9 @@ export function concessionPatch(nowIso: string): DebateConcessionPatch {
  *  (visible-but-sunk, never hidden), audit log, live frame. */
 async function applyConcessionEffects(deps: DebateDeps, closed: DebateArenaRecord): Promise<void> {
   if (closed.targetType === 'comment' && closed.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect');
+    await deps.contributions.setDisputeStatus(closed.targetContributionId, 'incorrect', null);
   } else if (closed.targetType === 'story') {
-    await deps.setStoryDispute(closed.storyId, 'incorrect');
+    await deps.setStoryDispute(closed.storyId, 'incorrect', null);
   }
   deps.log('forum.debate_conceded', { debate_id: closed.debateId, story_id: closed.storyId });
   await broadcastArena(deps, closed);
@@ -801,12 +983,14 @@ export async function closeDebatesForRemoval(
   return { ok: true, closedIds: closed.map((arena) => arena.debateId) };
 }
 
-/** Clear the challenged target's `under_debate` tag back to `none`. */
+/** Clear the challenged target's `under_debate` tag back to `none` (the
+ *  settled mark clears with it — a target reachable here was never settled,
+ *  so this is stale-mark hygiene, not a state change). */
 async function clearDisputeTag(deps: DebateDeps, arena: DebateArenaRecord): Promise<void> {
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none');
+    await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none', null);
   } else if (arena.targetType === 'story') {
-    await deps.setStoryDispute(arena.storyId, 'none');
+    await deps.setStoryDispute(arena.storyId, 'none', null);
   }
 }
 
@@ -818,15 +1002,100 @@ export async function finalizeDebate(
   deps: DebateDeps,
   debateId: string,
 ): Promise<DebateArenaRecord | null> {
-  const arena = await deps.debates.getById(debateId);
+  let arena = await deps.debates.getById(debateId);
   if (arena === null) return null;
   if (arena.state !== 'judged') return arena;
-  const resolvedAt = new Date(deps.now()).toISOString();
+  // The finalize-vs-override fence: the outcome effects below are computed
+  // from the verdict READ here, so the resolve is a CAS on the row's
+  // `updatedAt` token (`resolveIfUnchanged`) — a steward override landing
+  // while the effects are in flight makes the CAS miss, and the loop
+  // re-applies the effects against the FINAL verdict (the writes are
+  // idempotent overwrites) before retrying.  Bounded: the override window
+  // admits finitely many overrides, and a still-`judged` arena is simply
+  // re-listed on the next tick (effects-first, state-flip-last keeps the
+  // crash-healing property).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    // SNAPSHOT the row before the effects run: the in-memory adapter returns
+    // live row references, so a concurrent override mutates `arena` in place
+    // — a late `updatedAt` read would spuriously match the override's own
+    // bump and a late `verdict` read would describe the wrong attempt.  The
+    // override touches top-level scalars only, so a shallow copy fences them.
+    const attemptArena: DebateArenaRecord = { ...arena };
+    const resolvedAt = new Date(deps.now()).toISOString();
+    const outcome = await applyFinalizeOutcome(deps, attemptArena, resolvedAt);
+    const resolved = await deps.debates.resolveIfUnchanged(
+      debateId,
+      resolvedAt,
+      attemptArena.updatedAt,
+    );
+    if (resolved !== null) {
+      deps.log('forum.debate_resolved', {
+        debate_id: debateId,
+        verdict: attemptArena.verdict,
+        target_dispute_status: outcome.resolvedStatus,
+        target_settled: outcome.settledAt !== null,
+      });
+      await broadcastArena(deps, resolved);
+      return resolved;
+    }
+    const fresh = await deps.debates.getById(debateId);
+    // Resolved by a concurrent finalizer (or gone): nothing more to apply.
+    if (fresh === null || fresh.state !== 'judged') return fresh;
+    // An override re-decided the outcome mid-effects.  Revert the upheld
+    // challenger tag THIS attempt applied for a verdict that no longer
+    // stands — by restoring the status read BEFORE the tag (a separate arena
+    // may have legitimately marked this correction `incorrect` as ITS target;
+    // that adjudication is not this arena's to erase).  The re-applied
+    // effects cover everything else by overwrite.
+    if (outcome.challengerPrior !== null && fresh.verdict !== 'upheld') {
+      await deps.contributions.setDisputeStatus(
+        attemptArena.challengerContributionId,
+        outcome.challengerPrior,
+      );
+    }
+    arena = fresh;
+  }
+  // Exhausted (a pathological override storm): leave `judged` for the next
+  // sweep — never a resolve whose effects describe a superseded verdict.
+  return deps.debates.getById(debateId);
+}
+
+/** The dispute-outcome effects of one finalize attempt, computed and applied
+ *  for the verdict on `arena` AS READ (the caller CAS-fences the resolve on
+ *  that same read).  Returns what was applied, for the resolution log. */
+async function applyFinalizeOutcome(
+  deps: DebateDeps,
+  arena: DebateArenaRecord,
+  resolvedAt: string,
+): Promise<{
+  resolvedStatus: 'incorrect' | 'validated' | 'none';
+  settledAt: string | null;
+  /** The challenger row's dispute status BEFORE this attempt tagged it
+   *  `incorrect` (upheld only; null when nothing was tagged) — the retry
+   *  loop's revert restores THIS, never a hardcoded `none`: the correction
+   *  can be the target of a SEPARATE arena whose own adjudicated `incorrect`
+   *  must survive an override-driven re-apply here. */
+  challengerPrior: ContributionDisputeStatus | null;
+}> {
   // Apply the dispute outcome to the CHALLENGED target. `corrected` ⇒ tagged
   // `incorrect` (and, for a story, demoted to the bottom of the feed by the
   // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
   // (challenged and proven accurate — no penalty, still re-challengeable);
   // `inconclusive`/absent ⇒ cleared back to `none`.
+  //
+  // The version fences are DELIBERATELY asymmetric.  `validated` is a
+  // certificate about the SERVED text, so it is edit-lineage-fenced below
+  // (certifying unjudged text would be a false endorsement).  `incorrect` is
+  // the RECORD of a lost adjudication — §15.4: visible, never hidden, kept
+  // for the record; "the adjudicated demotion is not an edit's to clear" —
+  // and it lands regardless of a post-verdict edit ON PURPOSE: post-judged
+  // edits are unrestricted, so an edit-fenced (or none-on-edit) `corrected`
+  // outcome would let every losing incumbent dodge the demotion by editing
+  // one character inside the override window, gutting the deterrent and the
+  // transparency remedy.  The author's in-design remedies are the open
+  // window's co-visible editing and concession; a post-verdict fix improves
+  // the text but does not erase the adjudicated record — exactly as the
+  // losing challenger's own `incorrect` tag stands.
   // A `validated` outcome earns a ranking / participation BOOST, so it must reflect
   // INDEPENDENT scrutiny: a self-targeted arena (the challenger IS the target's own
   // author) can never earn `validated` — an upheld self-challenge clears to `none`,
@@ -834,16 +1103,79 @@ export async function finalizeDebate(
   // (self-marking incorrect is self-inflicted, never a reward).
   const selfTargeted =
     arena.incumbentUserId !== null && arena.incumbentUserId === arena.challengerUserId;
-  const resolvedStatus: 'incorrect' | 'validated' | 'none' =
+  let resolvedStatus: 'incorrect' | 'validated' | 'none' =
     arena.verdict === 'corrected'
       ? 'incorrect'
       : arena.verdict === 'upheld' && !selfTargeted
         ? 'validated'
         : 'none';
+  // WS-T challenge policy — an upheld defense may cross the SETTLED threshold:
+  // count the target's PRIOR adjudicated upheld defenses since its material-
+  // edit anchor, keyed on each arena's LOCK instant (which version its verdict
+  // judged); this arena is the +1.  SNAPSHOT CURRENCY guards the whole branch:
+  // a material edit is allowed once the arena is judged, and it advances the
+  // anchor past this arena's own lockedAt — the verdict then certifies a
+  // SUPERSEDED version, so the target resolves `none` (nothing is claimed
+  // about the served text) instead of stamping `validated` (let alone
+  // settling) onto content the adjudicator never saw.  An unprovable case
+  // (null lockedAt legacy row / missing anchor reader) keeps `validated` but
+  // never settles — conservative in the settle direction only.  Any other
+  // outcome passes null — self-healing hygiene for a stale settled mark.
+  let settledAt: string | null = null;
+  /** The comment target's material-edit lineage AT the anchor read — the CAS
+   *  token for the `validated` write below. */
+  let targetEditRef: string | null | undefined;
+  if (resolvedStatus === 'validated') {
+    const threshold = effectiveChallengePolicy(deps).settleThreshold;
+    let anchor: string | null = null;
+    if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
+      const target = await deps.contributions.getById(arena.targetContributionId);
+      if (target !== null) {
+        targetEditRef = target.editHistoryRef;
+        anchor = (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
+      }
+    } else if (arena.targetType === 'story') {
+      anchor = (await deps.storyPolicyState?.(arena.storyId))?.createdAt ?? null;
+    }
+    if (anchor !== null && arena.lockedAt !== null && arena.lockedAt <= anchor) {
+      resolvedStatus = 'none'; // the judged snapshot predates the served version
+    } else if (anchor !== null && arena.lockedAt !== null) {
+      const prior =
+        arena.targetType === 'comment' && arena.targetContributionId !== null
+          ? await deps.debates.countUpheldDefensesForComment(arena.targetContributionId, anchor)
+          : await deps.debates.countUpheldDefensesForStory(arena.storyId, anchor);
+      if (prior + 1 >= threshold) settledAt = resolvedAt;
+    }
+  }
   if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
-    await deps.contributions.setDisputeStatus(arena.targetContributionId, resolvedStatus);
+    if (resolvedStatus === 'validated' && targetEditRef !== undefined) {
+      // CAS on the material-edit lineage read WITH the anchor: an edit landing
+      // between that read and this write bumps `editHistoryRef`, the certify
+      // misses, and the target resolves `none` instead — a verdict can never
+      // certify text that was not in its locked snapshot, and the fallback
+      // also clears the (now stale) `under_debate` tag the racing edit's own
+      // conditional reset deliberately left alone.
+      const certified = await deps.contributions.certifyValidatedIfUnedited(
+        arena.targetContributionId,
+        targetEditRef,
+        settledAt,
+      );
+      if (certified === null) {
+        resolvedStatus = 'none';
+        settledAt = null;
+        await deps.contributions.setDisputeStatus(arena.targetContributionId, 'none', null);
+      }
+    } else {
+      await deps.contributions.setDisputeStatus(
+        arena.targetContributionId,
+        resolvedStatus,
+        settledAt,
+      );
+    }
   } else if (arena.targetType === 'story') {
-    await deps.setStoryDispute(arena.storyId, resolvedStatus);
+    // Stories have no author edit path — no lineage to race (the setter note
+    // in debate-scheduler.ts); the plain write stands.
+    await deps.setStoryDispute(arena.storyId, resolvedStatus, settledAt);
   }
   // A challenge the adjudicator RULED AGAINST (`upheld` — the incumbent
   // prevailed) is a false correction: tag the CHALLENGER `incorrect` so it takes
@@ -851,18 +1183,13 @@ export async function finalizeDebate(
   // section sinks it to the bottom). Applies to BOTH story- and comment-target
   // challenges. `corrected`/`inconclusive` — and the concession/withdrawal
   // paths, which never reach finalize — leave the challenger untouched.
+  let challengerPrior: ContributionDisputeStatus | null = null;
   if (arena.verdict === 'upheld') {
+    challengerPrior =
+      (await deps.contributions.getById(arena.challengerContributionId))?.disputeStatus ?? null;
     await deps.contributions.setDisputeStatus(arena.challengerContributionId, 'incorrect');
   }
-  const updated = await deps.debates.setState(debateId, 'resolved', resolvedAt);
-  if (updated === null) return null;
-  deps.log('forum.debate_resolved', {
-    debate_id: debateId,
-    verdict: arena.verdict,
-    target_dispute_status: resolvedStatus,
-  });
-  await broadcastArena(deps, updated);
-  return updated;
+  return { resolvedStatus, settledAt, challengerPrior };
 }
 
 // ---------------------------------------------------------------------------

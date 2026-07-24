@@ -62,6 +62,10 @@ export interface StoryCardData {
   /** WS-T dispute posture (SPEC §15.4): drives the "Challenged"/"Incorrect"
    *  badge. Absent ⇒ undisputed. A content-integrity signal, never applause. */
   disputeStatus?: ContributionDisputeStatus;
+  /** WS-T settle marker (SPEC §15.4): the story prevailed in enough debates that
+   *  it can no longer be challenged. Supersedes `disputeStatus` in the badge
+   *  ("Settled"). Absent ⇒ not settled. Always co-occurs with `validated`. */
+  disputeSettled?: boolean;
   contextChips?: ContextChip[];
   branchPreview?: BranchPreviewItem[];
   /** WS-Q.5.3b — in-room chip on non-public items (room feeds). */

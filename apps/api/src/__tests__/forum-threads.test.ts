@@ -591,6 +591,7 @@ describe('orderDepthFirst (pure)', () => {
       editHistoryRef: null,
       moderationState: 'published',
       disputeStatus: 'none',
+      settledAt: null,
       createdAt,
       updatedAt: createdAt,
     });

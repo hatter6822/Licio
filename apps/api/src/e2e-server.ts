@@ -25,7 +25,9 @@ import {
   buildComplianceExport,
   buildCompliancePort,
   buildCompliancePurge,
+  complianceServicesConfigured,
   createInMemoryComplianceServices,
+  getComplianceServices,
   resolveRegionForUser,
   setComplianceServices,
 } from './compliance/services.js';
@@ -142,6 +144,16 @@ await forumServices.reloadConfig();
 forumServices.platformRolesReader = async (id) => {
   const user = await identityServices.store.getUser(id);
   return user?.accountState === 'active' ? user.roles : [];
+};
+// WS-T challenge policy — the KYC capacity-boost reader (mirrors the
+// production boot: lazy compliance resolution, fail-closed to false).
+forumServices.kycReader = async (userId) => {
+  if (!complianceServicesConfigured()) return false;
+  try {
+    return (await getComplianceServices().kycLevel(userId)) === 'kyc_partner';
+  } catch {
+    return false;
+  }
 };
 // WS-U: the contribution path consults the in-room agent (uses the lazy
 // in-memory GovernanceService singleton in the harness), with real author-history

@@ -13,6 +13,7 @@ import {
   DEFAULT_FORUM_CONFIG,
   loadForumConfig,
   storeForumConfigValue,
+  validateForumConfigChange,
   validateForumConfigValue,
 } from '../forum/config.js';
 import { FORUM_TO_EVENT_TYPE } from '../forum/contributions.js';
@@ -741,6 +742,33 @@ describe('WS-G forum runtime config (fail-closed)', () => {
     expect(config.contributionsPerMinute).toBe(20);
     expect(config.branchPageSize).toBe(DEFAULT_FORUM_CONFIG.branchPageSize); // default kept
     expect(problems).toEqual(['branchPageSize']);
+  });
+
+  it('rejects a cross-key write that would set the KYC ceiling below the non-KYC one', () => {
+    // Per-key validation still runs first (a bad value short-circuits).
+    expect(
+      validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'challengeMaxCapacityKyc', 0),
+    ).not.toBeNull();
+
+    // Lowering the KYC ceiling below the non-KYC ceiling (default 4) is refused:
+    // the KYC ceiling is a booster, never a reduction.
+    const lowerKyc = validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'challengeMaxCapacityKyc', 3);
+    expect(lowerKyc).not.toBeNull();
+    expect(lowerKyc).toContain('booster');
+
+    // Raising the non-KYC ceiling ABOVE the KYC ceiling (default 8) trips the
+    // same invariant from the other side.
+    expect(
+      validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'challengeMaxCapacity', 9),
+    ).not.toBeNull();
+
+    // Equal ceilings, and a KYC ceiling above the non-KYC ceiling, are fine.
+    expect(
+      validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'challengeMaxCapacityKyc', 4),
+    ).toBeNull();
+    expect(validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'challengeMaxCapacity', 4)).toBeNull();
+    // An unrelated key is unaffected by the challenge-ceiling invariant.
+    expect(validateForumConfigChange(DEFAULT_FORUM_CONFIG, 'roomPageSize', 20)).toBeNull();
   });
 
   it('merges the drainer blocklist into a cache-busted endpoint payload', async () => {

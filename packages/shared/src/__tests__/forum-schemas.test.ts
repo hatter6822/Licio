@@ -176,7 +176,38 @@ describe('WS-T.1.2 contribution create union — comment-first writes', () => {
     if (parsed.success) {
       expect(parsed.data.dispute_status).toBe('none');
       expect(parsed.data.active_debate_id).toBeNull();
+      // The settle marker is a PRESENCE field: absent on a not-settled row.
+      expect(parsed.data.dispute_settled).toBeUndefined();
     }
+  });
+
+  it('carries the optional dispute_settled presence marker when a row has settled', () => {
+    const base = {
+      contribution_id: uuidOf(21),
+      thread_id: THREAD,
+      type: 'comment',
+      body: 'A comment that prevailed enough times to settle.',
+      citations: [citation],
+      metadata: {},
+      target_claim_id: null,
+      parent_contribution_id: null,
+      author_handle: 'mara',
+      author_display_name: 'Mara',
+      is_author: false,
+      depth: 0,
+      child_count: 0,
+      moderation_state: 'published',
+      dispute_status: 'validated',
+      edited: false,
+      created_at: '2026-06-11T00:00:00.000Z',
+      updated_at: '2026-06-11T00:00:00.000Z',
+    } as const;
+    // Emitted only when true — the server never sends `false`.
+    const settled = contributionPublicSchema.safeParse({ ...base, dispute_settled: true });
+    expect(settled.success).toBe(true);
+    if (settled.success) expect(settled.data.dispute_settled).toBe(true);
+    // Absent parses fine (every not-yet-settled row, and every legacy producer).
+    expect(contributionPublicSchema.safeParse(base).success).toBe(true);
   });
 
   it('projects exactly the two-type union publicly (legacy types are fully retired)', () => {

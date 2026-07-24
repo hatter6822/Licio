@@ -25,6 +25,7 @@
 import { randomUUID } from 'node:crypto';
 import { classifyAccusationV0, classifyLowInfoReplyV0 } from '@licio/invariants';
 import {
+  type ChallengeTargetBlockReason,
   type Citation,
   CONTRIBUTION_BODY_LIMITS,
   type ContributionCreate,
@@ -42,6 +43,14 @@ import type { NewStoredEvent } from '../events/stores.js';
 import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import {
+  CHALLENGE_OPENS_WINDOW_MS,
+  type ChallengePolicy,
+  computeChallengeStanding,
+  resolveChallengePolicy,
+  withdrawalFetchWindowMs,
+} from './challenge-policy.js';
+import {
+  type ChallengeQuotaRecheck,
   closeDebatesForRemoval,
   debateDueToLock,
   liveArenasForContribution,
@@ -51,7 +60,7 @@ import {
 } from './debate.js';
 import { buildDebateDeps } from './debate-scheduler.js';
 import type { DebateArenaRecord } from './debate-store.js';
-import { roomContentVisibleToUser } from './rooms.js';
+import { roomContentVisibleToUser, storyReadableByUser } from './rooms.js';
 import type { ForumServices } from './services.js';
 import type { ContributionRecord } from './stores.js';
 import { maybeDeepenConversation } from './transitions.js';
@@ -120,7 +129,15 @@ export type ContributionRejection =
   | { status: 409; code: 'thread_archived'; message: string }
   | { status: 409; code: 'debate_locked'; message: string }
   | { status: 422; code: string; message: string }
-  | { status: 429; code: 'rate_limited'; message: string; retryAfterSec: number };
+  | {
+      status: 429;
+      /** `challenge_cooldown` / `challenge_daily_limit` are the WS-T challenge-
+       *  policy refusals (post-withdrawal cooldown, trailing-24h open budget);
+       *  `rate_limited` is the generic per-account contribution limiter. */
+      code: 'rate_limited' | 'challenge_cooldown' | 'challenge_daily_limit';
+      message: string;
+      retryAfterSec: number;
+    };
 
 export type ContributionCreateOutcome =
   | {
@@ -239,6 +256,57 @@ export async function threadOnGlobalDirectory(
   if (thread.roomId === null) return false;
   const room = await bundle.forum.rooms.getById(thread.roomId);
   return room !== null && room.visibility === 'public';
+}
+
+/**
+ * The WS-T challenge-standing TARGET probe (`GET /v1/challenge-standing`):
+ * whether `userId` could file a correction against the target right now, as
+ * the create guard would judge it — kept in LOCKSTEP with the correction
+ * branch of `createContribution` below (same predicates, same order; the
+ * probe answers with the reason vocabulary, the create with its rejection
+ * codes).  `not_found` doubles as the visibility answer (404-over-403: the
+ * probe is exactly as informative as the create itself).
+ */
+export async function evaluateChallengeTarget(
+  bundle: Pick<ServiceBundle, 'forum' | 'ingestion' | 'events'>,
+  userId: string,
+  policy: ChallengePolicy,
+  target: { contributionId: string } | { storyId: string },
+): Promise<ChallengeTargetBlockReason | null> {
+  const { forum, ingestion } = bundle;
+  if ('contributionId' in target) {
+    const row = await forum.contributions.getById(target.contributionId);
+    if (!row) return 'not_found';
+    const thread = await ingestion.stories.getThreadById(row.threadId);
+    if (!thread || !(await threadReadableToUser(bundle, thread, userId))) return 'not_found';
+    if (row.moderationState !== 'published') return 'not_found';
+    if (row.userId !== null && row.userId === userId) return 'own_content';
+    if (row.disputeStatus === 'under_debate') return 'under_debate';
+    if (row.disputeStatus === 'incorrect') return 'already_incorrect';
+    const anchor = (await forum.contributions.latestEditAt(row.contributionId)) ?? row.createdAt;
+    if (row.settledAt !== null && row.settledAt >= anchor) return 'settled';
+    const prior = await forum.debates.latestConcludedChallengeAt(
+      { contributionId: row.contributionId },
+      userId,
+      policy.withdrawGraceMs,
+    );
+    return prior !== null && prior > anchor ? 'already_challenged' : null;
+  }
+  const story = await ingestion.stories.getById(target.storyId);
+  if (!story) return 'not_found';
+  const room = await forum.rooms.getById(story.roomId);
+  if (!room || !(await storyReadableByUser(forum, story, room, userId))) return 'not_found';
+  if (story.submittedBy === userId) return 'own_content';
+  const dispute = story.disputeStatus ?? 'none';
+  if (dispute === 'under_debate') return 'under_debate';
+  if (dispute === 'incorrect') return 'already_incorrect';
+  if (story.settledAt != null && story.settledAt >= story.createdAt) return 'settled';
+  const prior = await forum.debates.latestConcludedChallengeAt(
+    { storyId: story.storyId },
+    userId,
+    policy.withdrawGraceMs,
+  );
+  return prior !== null && prior > story.createdAt ? 'already_challenged' : null;
 }
 
 /** The WS-G.3.1 create flow (see module header for the guard chain). */
@@ -389,7 +457,12 @@ export async function createContribution(
   // story-challenge pin finds it. `undefined` ⇒ not a correction (use the
   // generic reply parent/path); `{ id: null }` ⇒ a correction forced to root.
   let correctionParent: { id: string | null; path: string[] } | undefined;
-  if (request.type === 'correction') {
+  const challengePolicy: ChallengePolicy | null =
+    request.type === 'correction'
+      ? resolveChallengePolicy(config, forum.challengePolicyOverride, userId)
+      : null;
+  let challengeQuota: ChallengeQuotaRecheck | null = null;
+  if (request.type === 'correction' && challengePolicy !== null) {
     if (request.target_contribution_id !== undefined) {
       const target = await forum.contributions.getById(request.target_contribution_id);
       if (!target || target.threadId !== request.thread_id) {
@@ -402,6 +475,17 @@ export async function createContribution(
       if (target.moderationState !== 'published') {
         return invalid('invalid_target', 'The targeted comment is not currently available.');
       }
+      // WS-T challenge policy — a self-challenge can never be a genuine
+      // adversarial adjudication (the finalize path already refused it the
+      // `validated` boost as a farming vector); refusing it at CREATE also
+      // closes self-parking: without this, an author could occupy their own
+      // content's single live-arena slot to keep real challengers out.
+      if (target.userId !== null && target.userId === userId) {
+        return invalid(
+          'cannot_challenge_own_content',
+          'You cannot challenge your own comment — edit it instead.',
+        );
+      }
       // WS-T — refuse a challenge against a comment already under debate or already
       // adjudicated `incorrect` (the UI disables this, but a direct API caller must
       // not open a second arena / re-litigate a settled outcome).
@@ -410,6 +494,29 @@ export async function createContribution(
       }
       if (target.disputeStatus === 'incorrect') {
         return invalid('target_already_incorrect', 'This comment was already found incorrect.');
+      }
+      // WS-T challenge policy — the settled threshold and the once-per-target
+      // right, both anchored to the row's last MATERIAL edit (the append-only
+      // edit history): an edit re-opens both, because the defended text is no
+      // longer the served text.
+      const targetAnchor =
+        (await forum.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
+      if (target.settledAt !== null && target.settledAt >= targetAnchor) {
+        return invalid(
+          'target_settled',
+          'This comment is settled — it has withstood repeated adjudicated challenges. A room steward can reopen it if genuinely new evidence emerges.',
+        );
+      }
+      const priorChallenge = await forum.debates.latestConcludedChallengeAt(
+        { contributionId: target.contributionId },
+        userId,
+        challengePolicy.withdrawGraceMs,
+      );
+      if (priorChallenge !== null && priorChallenge > targetAnchor) {
+        return invalid(
+          'target_already_challenged',
+          'You have already challenged this comment; it has not materially changed since.',
+        );
       }
       // Thread the correction UNDER its target (it is a child of the comment it
       // corrects).  The depth cap still applies; the block gate is the
@@ -434,6 +541,14 @@ export async function createContribution(
       if (!targetStory) {
         return invalid('invalid_target', 'The targeted story no longer exists.');
       }
+      // WS-T challenge policy — self-challenge refusal (see the comment-target
+      // branch: no genuine adjudication, and it closes self-parking).
+      if (targetStory.submittedBy === userId) {
+        return invalid(
+          'cannot_challenge_own_content',
+          'You cannot challenge your own story — edit or retract it instead.',
+        );
+      }
       const storyDispute = targetStory.disputeStatus ?? 'none';
       if (storyDispute === 'under_debate') {
         return invalid('target_under_debate', 'This story is already under debate.');
@@ -441,10 +556,90 @@ export async function createContribution(
       if (storyDispute === 'incorrect') {
         return invalid('target_already_incorrect', 'This story was already found incorrect.');
       }
+      // WS-T challenge policy — settled threshold + once-per-target, anchored
+      // at the story's CREATION: stories have no author edit path today, so
+      // story content is version-stable for its lifetime (a future story-edit
+      // path must introduce a content-edit anchor here; `lastMaterialUpdateAt`
+      // is the conversation-freshness clock — every new comment bumps it — and
+      // must NEVER anchor these guards).
+      if (targetStory.settledAt != null && targetStory.settledAt >= targetStory.createdAt) {
+        return invalid(
+          'target_settled',
+          'This story is settled — it has withstood repeated adjudicated challenges. A room steward can reopen it if genuinely new evidence emerges.',
+        );
+      }
+      const priorStoryChallenge = await forum.debates.latestConcludedChallengeAt(
+        { storyId: targetStory.storyId },
+        userId,
+        challengePolicy.withdrawGraceMs,
+      );
+      if (priorStoryChallenge !== null && priorStoryChallenge > targetStory.createdAt) {
+        return invalid('target_already_challenged', 'You have already challenged this story.');
+      }
       // A story correction is ALWAYS a root — never nested under a client-supplied
       // parent — so it appears in the top-level section and the pin can find it.
       correctionParent = { id: null, path: [] };
     }
+
+    // WS-T challenge policy — the ACCOUNT-level gates, after the target gates
+    // (a bad target reads as a target error, never a quota error): the
+    // post-withdrawal cooldown, the trailing-24h open budget, and the
+    // standing-derived concurrent-slot capacity (challenge-policy.ts).  KYC is
+    // a capacity BOOSTER read fail-closed to `false` — the floor of 1 is never
+    // KYC-gated (content participation never is, governance/eligibility.ts).
+    let kycVerified = false;
+    if (forum.kycReader !== null) {
+      try {
+        kycVerified = await forum.kycReader(userId);
+      } catch {
+        kycVerified = false;
+      }
+    }
+    const standing = computeChallengeStanding(
+      await forum.debates.challengerHistory(userId, {
+        nowIso: new Date(nowMs).toISOString(),
+        opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
+        withdrawFetchWindowMs: withdrawalFetchWindowMs(challengePolicy),
+        graceMs: challengePolicy.withdrawGraceMs,
+      }),
+      kycVerified,
+      nowMs,
+      challengePolicy,
+    );
+    if (standing.blockedBy === 'cooldown' && standing.cooldownUntilMs !== null) {
+      forum.metrics.increment('contributions.challenge_cooldown_rejected');
+      return reject({
+        status: 429,
+        code: 'challenge_cooldown',
+        message: 'Withdrawing a challenge starts a cooldown; you can challenge again soon.',
+        retryAfterSec: Math.max(1, Math.ceil((standing.cooldownUntilMs - nowMs) / 1000)),
+      });
+    }
+    if (standing.blockedBy === 'daily_limit' && standing.dailyLimitResetsAtMs !== null) {
+      forum.metrics.increment('contributions.challenge_daily_limit_rejected');
+      return reject({
+        status: 429,
+        code: 'challenge_daily_limit',
+        message: `Challenge budget reached (${challengePolicy.opensPerDay} per day).`,
+        retryAfterSec: Math.max(1, Math.ceil((standing.dailyLimitResetsAtMs - nowMs) / 1000)),
+      });
+    }
+    if (standing.blockedBy === 'capacity') {
+      forum.metrics.increment('contributions.challenge_capacity_rejected');
+      return invalid(
+        'challenge_capacity_reached',
+        `You have ${standing.liveCount} of ${standing.capacity} challenges in flight — a slot frees when a debate reaches its verdict or you withdraw. Winning adjudicated debates${kycVerified ? '' : ' and verifying your identity'} raises your capacity.`,
+      );
+    }
+    // The gates above are read-then-act; the arena open below re-checks the
+    // raced set against THIS resolved quota and self-voids on overflow
+    // (maybeEnterDebate + challengeOpenSurvivesQuota — the TOCTOU close).
+    challengeQuota = {
+      capacity: standing.capacity,
+      opensPerDay: challengePolicy.opensPerDay,
+      opensCutoffIso: new Date(nowMs - CHALLENGE_OPENS_WINDOW_MS).toISOString(),
+      graceMs: challengePolicy.withdrawGraceMs,
+    };
   }
 
   if (request.lens_id !== undefined) {
@@ -792,6 +987,7 @@ export async function createContribution(
           metadata: contribution.metadata,
         },
         debateArenaId,
+        challengeQuota ?? undefined,
       );
       if (openedArena !== null) {
         // PERSIST the back-reference onto the stored record so EVERY projection
@@ -954,6 +1150,12 @@ export async function editContribution(
     (patch.citations !== undefined &&
       JSON.stringify(patch.citations) !== JSON.stringify(existing.citations));
 
+  // §15.5 — the edit history records MATERIAL changes.  A no-op PATCH (empty,
+  // or values identical to what is stored) writes NOTHING: no history row (so
+  // the challenge-policy material-edit anchor cannot be moved by contentless
+  // pings), no safety re-screen, no agent pass, no debate-activity touch.
+  if (!materialChange) return { ok: true, contribution: existing };
+
   // Safety re-screen (WS-G.3.1 parity): an edit can introduce exactly the
   // content the create-time classifier would have held — a denylisted URL
   // in the body or citations.  Classify the contribution AS IT WILL READ
@@ -993,47 +1195,66 @@ export async function editContribution(
   // post-edit reconcile below must police (an arena already judged/terminal
   // BEFORE the edit legitimately allows it and needs no reconciliation).
   const racedArenaIds: string[] = [];
-  // An IMMATERIAL patch skips the touch entirely (no activity to record, no
-  // snapshot content to change — see `materialChange` above).
-  if (materialChange) {
-    const dueDeps = { windows: forum.debateWindowsOverride ?? undefined, now: forum.now };
-    for (const { arena, side } of debateParties) {
-      if (arena.state !== 'open') continue;
-      // The early gate saw the arena BEFORE the safety/agent passes; those
-      // can take real time (an LLM call), and the 23h deadline or the
-      // both-sides-idle instant may have elapsed meanwhile with no sweep run
-      // yet — the state-only CAS below would still succeed against the
-      // stored `open`, reset the activity clock, and persist post-due
-      // material.  Re-read and re-apply the due predicate AT the boundary:
-      // due ⇒ frozen, exactly like the fast gate (and like every other
-      // party action, the freeze binds from the due instant, not the sweep).
-      const fresh = await forum.debates.getById(arena.debateId);
-      if (fresh !== null && fresh.state === 'open' && debateDueToLock(dueDeps, fresh)) {
+  // Every patch reaching this point is MATERIAL (the no-op early-return
+  // above), so the touch always applies.
+  const dueDeps = { windows: forum.debateWindowsOverride ?? undefined, now: forum.now };
+  for (const { arena, side } of debateParties) {
+    if (arena.state !== 'open') continue;
+    // The early gate saw the arena BEFORE the safety/agent passes; those
+    // can take real time (an LLM call), and the 23h deadline or the
+    // both-sides-idle instant may have elapsed meanwhile with no sweep run
+    // yet — the state-only CAS below would still succeed against the
+    // stored `open`, reset the activity clock, and persist post-due
+    // material.  Re-read and re-apply the due predicate AT the boundary:
+    // due ⇒ frozen, exactly like the fast gate (and like every other
+    // party action, the freeze binds from the due instant, not the sweep).
+    const fresh = await forum.debates.getById(arena.debateId);
+    if (fresh !== null && fresh.state === 'open' && debateDueToLock(dueDeps, fresh)) {
+      return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
+    }
+    if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
+      // The CAS lost: the arena left `open` during the passes above.  Only a
+      // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
+      // conceded, judged) frees the author to edit — and is deliberately
+      // NOT added to the raced set, or the reconcile below would treat the
+      // landed verdict as a mid-race claim and revert a legitimate
+      // post-verdict edit.
+      const current = await forum.debates.getById(arena.debateId);
+      if (
+        current !== null &&
+        (current.state === 'locked' || current.state === 'awaiting_verdict')
+      ) {
         return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
       }
-      if ((await forum.debates.touchActivity(arena.debateId, side, touchAt)) === null) {
-        // The CAS lost: the arena left `open` during the passes above.  Only a
-        // pre-verdict freeze rejects; a debate that ENDED meanwhile (withdrawn,
-        // conceded, judged) frees the author to edit — and is deliberately
-        // NOT added to the raced set, or the reconcile below would treat the
-        // landed verdict as a mid-race claim and revert a legitimate
-        // post-verdict edit.
-        const current = await forum.debates.getById(arena.debateId);
-        if (
-          current !== null &&
-          (current.state === 'locked' || current.state === 'awaiting_verdict')
-        ) {
-          return { ok: false, rejection: DEBATE_LOCKED_REJECTION };
-        }
-        continue;
-      }
-      // Only a WON touch (the arena was verifiably `open` at this write
-      // boundary) joins the reconcile set.
-      racedArenaIds.push(arena.debateId);
+      continue;
     }
+    // Only a WON touch (the arena was verifiably `open` at this write
+    // boundary) joins the reconcile set.
+    racedArenaIds.push(arena.debateId);
   }
 
-  const edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
+  let edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
+  if (edited) {
+    // WS-T challenge policy — a MATERIAL edit invalidates the adjudication the
+    // badge certifies: the defended text is no longer the served text.  The
+    // `validated` posture clears to `none` and any settled threshold resets
+    // (the settle count is anchored at the edit-history instant this edit just
+    // wrote, so both re-open together).  The reset runs after EVERY material
+    // edit and is CONDITIONAL at the store layer (`resetDisputeAfterEdit`:
+    // only a `validated`/settled row matches) — never gated on the stale
+    // initial read: an arena FINALIZING during the slow safety/agent passes
+    // above can flip `under_debate` → `validated` mid-edit, and the pre-read
+    // gate would have skipped the reset and left the new text certified by a
+    // verdict on the old version.  The WHERE keeps a concurrently tagged
+    // `under_debate` row untouched, and `incorrect` survives a rewrite (the
+    // adjudicated demotion is not an edit's to clear).  The inverse
+    // interleave — a finalize whose anchor read predates this edit but whose
+    // status write lands after this reset — is closed on the FINALIZE side:
+    // its `validated` write is CAS-guarded on the edit lineage
+    // (`certifyValidatedIfUnedited`), so this edit bumps the ref and the
+    // certify misses.
+    edited = (await forum.contributions.resetDisputeAfterEdit(contributionId)) ?? edited;
+  }
   if (!edited) {
     return {
       ok: false,

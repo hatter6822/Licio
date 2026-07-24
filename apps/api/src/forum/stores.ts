@@ -50,6 +50,12 @@ export interface ContributionRecord {
   /** WS-T dispute posture (default `none`); `incorrect` stays visible-but-sunk,
    *  ORTHOGONAL to `moderationState`. */
   disputeStatus: ContributionDisputeStatus;
+  /** WS-T settled threshold (challenge-policy.ts): set once the row has
+   *  accumulated the configured adjudicated `upheld` defenses since its last
+   *  material edit — no longer challengeable until a steward unsettles or a
+   *  material edit clears it.  The row still reads `validated` on every
+   *  existing wire surface (never a dispute-status value). */
+  settledAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -185,7 +191,7 @@ export interface ContributionStore {
   insert(
     record: Omit<
       ContributionRecord,
-      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus' | 'settledAt'
     >,
   ): Promise<ContributionInsertOutcome>;
   getById(contributionId: string): Promise<ContributionRecord | null>;
@@ -284,11 +290,45 @@ export interface ContributionStore {
     state: ContributionModerationState,
   ): Promise<ContributionRecord | null>;
   /** WS-T — set the dispute posture (a debate outcome).  ORTHOGONAL to
-   *  moderation: never hides the row.  Returns null for an unknown id. */
+   *  moderation: never hides the row.  `settledAt` (when passed) lands in the
+   *  SAME write: a string sets the settled instant (the finalize threshold
+   *  crossing), null clears it (a material edit / steward unsettle), undefined
+   *  leaves it untouched.  Returns null for an unknown id. */
   setDisputeStatus(
     contributionId: string,
     status: ContributionDisputeStatus,
+    settledAt?: string | null,
   ): Promise<ContributionRecord | null>;
+  /** WS-T — clear ONLY the settled mark (the steward/admin unsettle), leaving
+   *  `disputeStatus` untouched: writing a pre-read status back would race a
+   *  concurrent material edit and re-certify text the edit just reset.
+   *  Idempotent; returns null for an unknown id. */
+  clearSettled(contributionId: string): Promise<ContributionRecord | null>;
+  /** WS-T — finalize's `validated` certification, CAS-guarded on the row's
+   *  material-edit lineage: applies `validated` (+ the settled mark) ONLY
+   *  while `editHistoryRef` still equals what finalize read alongside its
+   *  anchor — a material edit landing between that read and this write bumps
+   *  the ref, the CAS misses (null), and finalize resolves `none` instead, so
+   *  a verdict can never certify text that was not in its locked snapshot.
+   *  Returns the certified row, or null on a missed CAS / unknown id. */
+  certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null>;
+  /** WS-T — the material-edit dispute reset, CONDITIONAL at the storage layer:
+   *  clears `validated` → `none` (+ the settled mark) only while the row still
+   *  reads `validated`/settled.  A challenge racing the edit may have tagged
+   *  the row `under_debate` between the edit's write and this reset — that tag
+   *  must never be stomped by the edit path's stale pre-read (the guard lives
+   *  in the WHERE, not the caller).  Returns the current row (changed or not);
+   *  null for an unknown id. */
+  resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null>;
+  /** WS-T challenge policy — the row's material-edit anchor: the latest edit-
+   *  history instant, or null when never edited (callers fall back to
+   *  `createdAt`).  Settle counts and the once-per-target guard compare arena
+   *  resolutions against this anchor, so an edit re-opens both. */
+  latestEditAt(contributionId: string): Promise<string | null>;
   /** WS-T — persist the `debate_arena_id` back-reference onto a correction's
    *  stored metadata once its arena opens, so EVERY projection path (comment
    *  page, live SSE replay) serves the "View debate" link, not just the create
@@ -603,7 +643,7 @@ export class InMemoryContributionStore implements ContributionStore {
   async insert(
     record: Omit<
       ContributionRecord,
-      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus' | 'settledAt'
     >,
   ): Promise<ContributionInsertOutcome> {
     if (record.userId !== null) {
@@ -621,6 +661,7 @@ export class InMemoryContributionStore implements ContributionStore {
       path: [...record.path],
       editHistoryRef: null,
       disputeStatus: 'none',
+      settledAt: null,
       createdAt: at,
       updatedAt: at,
     };
@@ -877,6 +918,15 @@ export class InMemoryContributionStore implements ContributionStore {
     return [...(this.#edits.get(contributionId) ?? [])];
   }
 
+  async latestEditAt(contributionId: string): Promise<string | null> {
+    const history = this.#edits.get(contributionId);
+    if (!history || history.length === 0) return null;
+    return history.reduce(
+      (latest, edit) => (edit.editedAt > latest ? edit.editedAt : latest),
+      history[0]?.editedAt ?? '',
+    );
+  }
+
   async setModerationState(
     contributionId: string,
     state: ContributionModerationState,
@@ -891,11 +941,45 @@ export class InMemoryContributionStore implements ContributionStore {
   async setDisputeStatus(
     contributionId: string,
     status: ContributionDisputeStatus,
+    settledAt?: string | null,
   ): Promise<ContributionRecord | null> {
     const row = this.#rows.get(contributionId);
     if (!row) return null;
     row.disputeStatus = status;
+    if (settledAt !== undefined) row.settledAt = settledAt;
     row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async clearSettled(contributionId: string): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    row.settledAt = null;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row || row.editHistoryRef !== expectedEditHistoryRef) return null;
+    row.disputeStatus = 'validated';
+    row.settledAt = settledAt;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    if (row.disputeStatus === 'validated' || row.settledAt !== null) {
+      row.disputeStatus = 'none';
+      row.settledAt = null;
+      row.updatedAt = iso(this.#now);
+    }
     return row;
   }
 

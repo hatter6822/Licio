@@ -511,6 +511,21 @@ export class DevTrafficSimulator {
       windows: SIM_DEBATE_WINDOWS,
       appliesToUser: (userId) => this.#isSimPersona(userId),
     };
+    // WS-T challenge policy: lift the quota for SYNTHETIC personas only (the
+    // debate-surge scenario files corrections far faster than the production
+    // capacity/cooldown budget), same scoping as the windows override — a
+    // real dev-account user keeps the production policy end to end.
+    this.#graph.forum.challengePolicyOverride = {
+      policy: {
+        baseCapacity: 10,
+        maxCapacity: 20,
+        maxCapacityKyc: 50,
+        opensPerDay: 100,
+        withdrawCooldownsMs: [0, 0, 0],
+        freeWithdrawalsPerWindow: 10,
+      },
+      appliesToUser: (userId) => this.#isSimPersona(userId),
+    };
     // Provision the organic roster up front so the first tick has actors. A
     // provisioning failure (e.g. a durable-store handle collision) must not
     // leave the instance stuck "running" with no timer and no way to restart —
@@ -562,6 +577,7 @@ export class DevTrafficSimulator {
     // at the real spec cadence; open synthetic arenas keep their short
     // stamped deadlines and the 5-min debate scheduler resolves them).
     this.#graph.forum.debateWindowsOverride = null;
+    this.#graph.forum.challengePolicyOverride = null;
     this.#log('dev-sim: stopped');
   }
 

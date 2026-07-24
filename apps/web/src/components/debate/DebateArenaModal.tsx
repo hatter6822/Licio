@@ -26,6 +26,7 @@ import { useT } from '../../i18n/index.js';
 import { cn } from '../../lib/cn.js';
 import { useDebateStream } from '../../lib/debate-stream.js';
 import {
+  useChallengeStandingQuery,
   useCloseDebateMutation,
   useDebateQuery,
   useOverrideDebateMutation,
@@ -33,6 +34,7 @@ import {
 } from '../../lib/queries.js';
 import { raisedSurface } from '../../lib/surfaces.js';
 import { AiLabel } from '../ai/index.js';
+import { withdrawConsequence, withdrawConsequenceCopy } from '../comments/challenge-standing.js';
 import { MarkdownEditor } from '../composer/MarkdownEditor/index.js';
 import { SafeExternalLink } from '../ugc/SafeExternalLink.js';
 import { UgcBody } from '../ugc/UgcBody.js';
@@ -503,6 +505,12 @@ function PartyExitControl({
   const mutation = useCloseDebateMutation(debateId, isChallenger ? 'withdraw' : 'concede');
   const t = useT();
   const [confirming, setConfirming] = useState(false);
+  // WS-T challenge policy — the withdraw consequence (a 5-minute pre-engagement
+  // grace is free; anything later cools the challenger down and can cost
+  // capacity). The policy constants ride the caller's own standing; fetched
+  // only once the confirm step opens, and only for the challenger.
+  const standingQuery = useChallengeStandingQuery(null, confirming && isChallenger);
+  const graceMs = standingQuery.data?.standing.policy.withdraw_grace_ms;
   if (arena.state !== 'open' || (role !== 'challenger' && role !== 'incumbent')) return null;
   return (
     <div
@@ -518,10 +526,12 @@ function PartyExitControl({
         <>
           <span className="text-sm text-ink">
             {isChallenger
-              ? t(
-                  'debate.withdrawConfirm',
-                  'Withdraw the correction? The debate closes with no verdict.',
-                )
+              ? graceMs === undefined
+                ? t(
+                    'debate.withdrawConfirm',
+                    'Withdraw the correction? The debate closes with no verdict.',
+                  )
+                : withdrawConsequenceCopy(withdrawConsequence(arena, graceMs, Date.now()), graceMs)
               : t(
                   'debate.concedeConfirm',
                   'Concede? The correction prevails and your content is tagged Incorrect.',

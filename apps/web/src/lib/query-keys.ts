@@ -28,6 +28,8 @@ export const queryKeys = {
   debate: (debateId: string) => ['debate', debateId] as const,
   /** WS-T story-level active-debate discovery list. */
   storyDebates: (storyId: string) => ['story', storyId, 'debates'] as const,
+  /** WS-T challenge policy — the caller's own standing (+ target probe). */
+  challengeStanding: (targetKey: string | null) => ['challenge-standing', targetKey] as const,
   rooms: () => ['rooms'] as const,
   room: (roomId: string) => ['room', roomId] as const,
   roomFeed: (roomId: string) => ['room', roomId, 'feed'] as const,

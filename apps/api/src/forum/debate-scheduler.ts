@@ -16,6 +16,7 @@ import { adjudicateDebate } from '../ai-governance/debate.js';
 import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
+import { challengePolicyFromConfig } from './challenge-policy.js';
 import {
   type DebateDeps,
   type DebateJudgeRunner,
@@ -145,6 +146,21 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     contributions: forum.contributions,
     storyAuthor: async (sid) => (await ingestion.stories.getById(sid))?.submittedBy ?? null,
     storyContent: buildStoryContentReader(ingestion.stories),
+    // WS-T challenge policy: the settled threshold + withdrawal grace come
+    // from the runtime forum config; the story policy state anchors settling
+    // and the post-open recheck at the story's CREATION instant (no author
+    // edit path — `lastMaterialUpdateAt` is the conversation-freshness clock
+    // and must never anchor these).
+    challengePolicy: () => challengePolicyFromConfig(forum.config()),
+    storyPolicyState: async (sid) => {
+      const story = await ingestion.stories.getById(sid);
+      if (!story) return null;
+      return {
+        createdAt: story.createdAt,
+        disputeStatus: story.disputeStatus ?? 'none',
+        settledAt: story.settledAt ?? null,
+      };
+    },
     // Room stewards, plus the platform ADMIN (2026-07 final-line-of-defense
     // decision): the verdict-overrule power follows the same platform-admin
     // arm as the rest of the room-steward gate family (`isRoomSteward`), while
@@ -157,8 +173,14 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     isSteward: async (roomId, uid) =>
       (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0 ||
       ((await forum.platformRolesReader?.(uid)) ?? []).includes('admin'),
-    setStoryDispute: async (sid, status) => {
-      await ingestion.stories.update(sid, { disputeStatus: status });
+    setStoryDispute: async (sid, status, settledAt) => {
+      // `settledAt` lands in the SAME write (undefined ⇒ untouched): dropping
+      // it here silently disabled story settling — the create guard reads
+      // `story.settledAt`, which never got set (codex on PR #168).
+      await ingestion.stories.update(sid, {
+        disputeStatus: status,
+        ...(settledAt !== undefined ? { settledAt } : {}),
+      });
       // WS-T — when a debate outcome tags a story `incorrect` (or clears it), the
       // feed's `dispute_penalty` reads the STORED ranking feature vector, which is
       // otherwise only refreshed on an invariant/integrity event or the hourly

@@ -30,9 +30,19 @@ interface Ctx {
   threadId: string;
   incumbentUser: string | null;
   challengerUser: string | null;
+  /** A user DISTINCT from both parties (the challenge-policy opponent-dedup
+   *  cases need a real non-null, non-self incumbent). */
+  opponentUser: string;
   targetId: string;
   challengerId: string;
   challenger2Id: string;
+  /** Mint one more correction-contribution id in this ctx's thread (the
+   *  standing/settle cases need >2 terminal arenas per target). */
+  newCorrection: () => Promise<string>;
+  /** Mint a fresh user id: the USER-keyed standing aggregation must be
+   *  isolated per case (the Drizzle leg shares one database, so a shared
+   *  challenger id would pick up every prior case's arenas). */
+  newUser: () => Promise<string>;
 }
 
 function makeArena(
@@ -625,6 +635,347 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(arenaCounts.size).toBe(1);
     expect(await store.countActiveCommentArenas([])).toEqual(new Map());
   });
+
+  it('recordOverride bumps the updatedAt token STRICTLY, even in the same millisecond', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const judged = await store.open(
+      makeArena(ctx, {
+        state: 'judged',
+        verdict: 'upheld',
+        winner: 'incumbent',
+        decidedBy: 'ai',
+        overrideDeadlineAt: '2026-07-06T00:00:00.000Z',
+      }),
+    );
+    expect(judged).not.toBeNull();
+    const before = judged?.updatedAt ?? '';
+    const overridden = await store.recordOverride(judged?.debateId ?? '', {
+      verdict: 'corrected',
+      winner: 'challenger',
+      overriddenByUserId: ctx.opponentUser,
+      overrideReason: 'monotonic token contract',
+    });
+    // Strictly greater — the finalize fence (`resolveIfUnchanged`) compares
+    // millisecond timestamps, so an override in the SAME millisecond as the
+    // previous write must still change the token (the in-memory leg's frozen
+    // clock is exactly that case).
+    expect(overridden?.updatedAt ?? '').not.toBe('');
+    expect((overridden?.updatedAt ?? '') > before).toBe(true);
+    // And the moved token makes a stale-token resolve MISS.
+    expect(
+      await store.resolveIfUnchanged(judged?.debateId ?? '', '2026-07-06T01:00:00.000Z', before),
+    ).toBeNull();
+  });
+
+  it('challengerHistory aggregates standing from arena rows (challenge policy)', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    // A FRESH challenger for every arena in this case: the aggregation is
+    // user-keyed, and the Drizzle leg's database persists across cases.
+    const challenger = await ctx.newUser();
+    const resolvedWin = (over: Partial<DebateArenaRecord>): Partial<DebateArenaRecord> => ({
+      challengerUserId: challenger,
+      state: 'resolved',
+      verdict: 'corrected',
+      winner: 'challenger',
+      decidedBy: 'ai',
+      resolvedAt: '2026-07-05T06:00:00.000Z',
+      ...over,
+    });
+    // Two adjudicated wins against the SAME opponent (one 'ai', one 'steward')
+    // group into one bucket; a tombstoned-incumbent win lands in the shared
+    // tombstone bucket; a concession win and a self-targeted win credit nothing.
+    for (const over of [
+      resolvedWin({ incumbentUserId: ctx.opponentUser }),
+      resolvedWin({ incumbentUserId: ctx.opponentUser, decidedBy: 'steward' }),
+      resolvedWin({ incumbentUserId: null }),
+      resolvedWin({ incumbentUserId: ctx.opponentUser, decidedBy: 'concession' }),
+      resolvedWin({ incumbentUserId: challenger }),
+      // An adjudicated loss (the incumbent prevailed).
+      resolvedWin({ incumbentUserId: ctx.opponentUser, verdict: 'upheld', winner: 'incumbent' }),
+    ]) {
+      const opened = await store.open(
+        makeArena(ctx, { ...over, challengerContributionId: await ctx.newCorrection() }),
+      );
+      expect(opened).not.toBeNull();
+    }
+    // One LIVE (pre-verdict) arena holds a slot; a JUDGED one does not.
+    const live = await store.open(makeArena(ctx, { challengerUserId: challenger }));
+    expect(live).not.toBeNull();
+    const judged = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'judged',
+        verdict: 'corrected',
+        winner: 'challenger',
+        decidedBy: 'ai',
+      }),
+    );
+    expect(judged).not.toBeNull();
+    // Two REAL withdrawal flows: one engaged (non-grace), one untouched (grace).
+    const engagedTarget = await ctx.newCorrection();
+    const engaged = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        targetContributionId: engagedTarget,
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(engaged).not.toBeNull();
+    const engagedBase = Date.parse(engaged?.createdAt ?? '');
+    await store.touchActivity(
+      engaged?.debateId ?? '',
+      'incumbent',
+      new Date(engagedBase + 30_000).toISOString(),
+    );
+    expect(
+      await store.withdraw(engaged?.debateId ?? '', new Date(engagedBase + 600_000).toISOString()),
+    ).not.toBeNull();
+    const untouchedTarget = await ctx.newCorrection();
+    const untouched = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        targetContributionId: untouchedTarget,
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(untouched).not.toBeNull();
+    const untouchedBase = Date.parse(untouched?.createdAt ?? '');
+    expect(
+      await store.withdraw(
+        untouched?.debateId ?? '',
+        new Date(untouchedBase + 60_000).toISOString(),
+      ),
+    ).not.toBeNull();
+
+    // Self-targeted LEGACY rows (incumbent === challenger) sit outside the
+    // standing system in EVERY derivation: a live one costs no slot and no
+    // open; a withdrawn one triggers no cooldown row.  The unchanged
+    // assertions below prove the exclusion.
+    const selfLive = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(selfLive).not.toBeNull();
+    const selfWithdrawn = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'withdrawn',
+        resolvedAt: '2026-07-05T08:00:00.000Z',
+      }),
+    );
+    expect(selfWithdrawn).not.toBeNull();
+
+    const nowIso = new Date(Math.max(engagedBase, untouchedBase) + 3_600_000).toISOString();
+    const history = await store.challengerHistory(challenger, {
+      nowIso,
+      opensWindowMs: 86_400_000,
+      withdrawFetchWindowMs: 30 * 86_400_000,
+      graceMs: 5 * 60_000,
+    });
+    const buckets = new Map(history.winsByOpponent.map((row) => [row.opponentKey, row.wins]));
+    expect(buckets.get(ctx.opponentUser)).toBe(2);
+    expect(buckets.get('tombstoned')).toBe(1);
+    expect(buckets.size).toBe(2);
+    expect(history.adjudicatedLosses).toBe(1);
+    expect(history.liveCount).toBe(1);
+    // Eight, not ten: the self-targeted win row is outside the standing
+    // system in EVERY derivation, and the GRACE (untouched) withdrawal is
+    // budget-exempt — opens included for both.
+    expect(history.openTimesLast24h).toHaveLength(8);
+    expect(history.withdrawals).toHaveLength(2);
+    const engagement = history.withdrawals.map((row) => row.incumbentEngaged).sort();
+    expect(engagement).toEqual([false, true]);
+  });
+
+  it('countUpheldDefenses counts adjudicated upheld outcomes after the anchor, never self-defenses', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const challenger = ctx.challengerUser;
+    if (challenger === null) return;
+    // The count keys on the LOCK instant (which version the verdict judged);
+    // resolvedAt trails it by the override window here, as in the real flow.
+    const upheld = (over: Partial<DebateArenaRecord>): Partial<DebateArenaRecord> => ({
+      state: 'resolved',
+      verdict: 'upheld',
+      winner: 'incumbent',
+      decidedBy: 'ai',
+      incumbentUserId: ctx.opponentUser,
+      lockedAt: '2026-07-05T06:00:00.000Z',
+      resolvedAt: '2026-07-06T06:00:00.000Z',
+      ...over,
+    });
+    for (const over of [
+      upheld({}),
+      upheld({ lockedAt: '2026-07-05T07:00:00.000Z' }),
+      // Self-targeted (legacy) upheld arenas never count toward settling.
+      upheld({ incumbentUserId: challenger }),
+      // A successful correction is not a defense.
+      upheld({ verdict: 'corrected', winner: 'challenger' }),
+      // Locked before the anchor ⇒ a different content version was defended
+      // (its resolvedAt lands after the anchor — exactly the post-verdict-edit
+      // shape a resolve-keyed count would mis-attribute).
+      upheld({ lockedAt: '2026-07-05T04:00:00.000Z' }),
+      // A null-lockedAt legacy row proves nothing and never counts.
+      upheld({ lockedAt: null }),
+    ]) {
+      const opened = await store.open(
+        makeArena(ctx, { ...over, challengerContributionId: await ctx.newCorrection() }),
+      );
+      expect(opened).not.toBeNull();
+    }
+    const anchor = '2026-07-05T05:00:00.000Z';
+    expect(await store.countUpheldDefensesForComment(ctx.targetId, anchor)).toBe(2);
+    expect(
+      await store.countUpheldDefensesForComment(ctx.targetId, '2026-07-05T06:30:00.000Z'),
+    ).toBe(1);
+    // The story variant keys on the story id.
+    const storyDefense = await store.open(
+      makeArena(ctx, {
+        targetType: 'story',
+        targetContributionId: null,
+        challengerContributionId: await ctx.newCorrection(),
+        ...upheld({}),
+      }),
+    );
+    expect(storyDefense).not.toBeNull();
+    expect(await store.countUpheldDefensesForStory(ctx.storyId, anchor)).toBe(1);
+  });
+
+  it('listChallengeOpens unions pre-verdict arenas with window-scoped opens', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const challenger = await ctx.newUser();
+    // Terminal first: the one-live-per-target guard refuses ANY insert on a
+    // target that already carries a live arena.
+    const terminal = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'resolved',
+        verdict: 'inconclusive',
+        winner: 'none',
+        decidedBy: 'ai',
+        resolvedAt: '2026-07-05T06:00:00.000Z',
+      }),
+    );
+    expect(terminal).not.toBeNull();
+    const live = await store.open(makeArena(ctx, { challengerUserId: challenger }));
+    expect(live).not.toBeNull();
+    const bothCreated = [live?.createdAt ?? '', terminal?.createdAt ?? ''].sort();
+    // A cutoff BEFORE both opens returns the union with honest flags.
+    const before = new Date(Date.parse(bothCreated[0] ?? '') - 1000).toISOString();
+    const all = await store.listChallengeOpens(challenger, before, 5 * 60_000);
+    expect(new Map(all.map((r) => [r.debateId, r.preVerdict]))).toEqual(
+      new Map([
+        [live?.debateId ?? '', true],
+        [terminal?.debateId ?? '', false],
+      ]),
+    );
+    // A cutoff AFTER both drops the terminal open but keeps the live slot —
+    // a pre-verdict arena can outlast the opens window.
+    const after = new Date(Date.parse(bothCreated[1] ?? '') + 1000).toISOString();
+    const slots = await store.listChallengeOpens(challenger, after, 5 * 60_000);
+    expect(slots.map((r) => r.debateId)).toEqual([live?.debateId ?? '']);
+    // A self-targeted LEGACY live arena never enters the recheck set — the
+    // recheck counts the same rows the account gates count.
+    const selfRow = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(selfRow).not.toBeNull();
+    expect(
+      (await store.listChallengeOpens(challenger, before, 5 * 60_000)).map((r) => r.debateId),
+    ).not.toContain(selfRow?.debateId ?? '');
+    // A GRACE withdrawal (fast unengaged retraction) is budget-exempt and
+    // never enters the recheck set either.
+    const graceArena = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(graceArena).not.toBeNull();
+    const graceBase = Date.parse(graceArena?.createdAt ?? '');
+    await store.withdraw(graceArena?.debateId ?? '', new Date(graceBase + 60_000).toISOString());
+    expect(
+      (await store.listChallengeOpens(challenger, before, 5 * 60_000)).map((r) => r.debateId),
+    ).not.toContain(graceArena?.debateId ?? '');
+  });
+
+  it('latestConcludedChallengeAt skips grace withdrawals and other challengers', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const challenger = ctx.challengerUser;
+    if (challenger === null) return;
+    const graceMs = 5 * 60_000;
+    // A grace withdrawal (retracted in 1 minute, incumbent never engaged)
+    // consumed nothing.
+    const grace = await store.open(makeArena(ctx));
+    expect(grace).not.toBeNull();
+    const graceBase = Date.parse(grace?.createdAt ?? '');
+    await store.withdraw(grace?.debateId ?? '', new Date(graceBase + 60_000).toISOString());
+    expect(
+      await store.latestConcludedChallengeAt({ contributionId: ctx.targetId }, challenger, graceMs),
+    ).toBeNull();
+    // A non-grace withdrawal (the incumbent engaged) consumes the once-per-
+    // target right.
+    const engaged = await store.open(
+      makeArena(ctx, { challengerContributionId: ctx.challenger2Id }),
+    );
+    expect(engaged).not.toBeNull();
+    const engagedBase = Date.parse(engaged?.createdAt ?? '');
+    await store.touchActivity(
+      engaged?.debateId ?? '',
+      'incumbent',
+      new Date(engagedBase + 30_000).toISOString(),
+    );
+    const withdrawnAt = new Date(engagedBase + 600_000).toISOString();
+    await store.withdraw(engaged?.debateId ?? '', withdrawnAt);
+    expect(
+      await store.latestConcludedChallengeAt({ contributionId: ctx.targetId }, challenger, graceMs),
+    ).toBe(withdrawnAt);
+    // A later RESOLVED arena advances the latest instant; another challenger's
+    // arena never surfaces for this one.
+    const resolvedAt = new Date(engagedBase + 7_200_000).toISOString();
+    const resolved = await store.open(
+      makeArena(ctx, {
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'resolved',
+        verdict: 'inconclusive',
+        winner: 'none',
+        decidedBy: 'ai',
+        resolvedAt,
+      }),
+    );
+    expect(resolved).not.toBeNull();
+    expect(
+      await store.latestConcludedChallengeAt({ contributionId: ctx.targetId }, challenger, graceMs),
+    ).toBe(resolvedAt);
+    expect(
+      await store.latestConcludedChallengeAt(
+        { contributionId: ctx.targetId },
+        ctx.opponentUser,
+        graceMs,
+      ),
+    ).toBeNull();
+  });
 }
 
 describe('InMemoryDebateStore (contract)', () => {
@@ -635,9 +986,12 @@ describe('InMemoryDebateStore (contract)', () => {
       threadId: randomUUID(),
       incumbentUser: randomUUID(),
       challengerUser: randomUUID(),
+      opponentUser: randomUUID(),
       targetId: randomUUID(),
       challengerId: randomUUID(),
       challenger2Id: randomUUID(),
+      newCorrection: async () => randomUUID(),
+      newUser: async () => randomUUID(),
     }),
   );
 });
@@ -648,6 +1002,7 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
   let contributions: DrizzleContributionStore;
   let rooms: DrizzleRoomStore;
   let user: string;
+  let opponent: string;
   let roomId: string;
 
   beforeAll(async () => {
@@ -659,16 +1014,27 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
     const { users } = await import('@licio/db');
     const inserted = await db
       .insert(users)
-      .values({
-        handle: `wst_${randomUUID().slice(0, 8)}`,
-        displayName: 'WS-T debate',
-        email: null,
-        ageBandIfKnown: 'adult',
-        privacySettings: defaultPrivacySettings(),
-        personalizationSettings: defaultPersonalizationSettings(),
-      })
+      .values([
+        {
+          handle: `wst_${randomUUID().slice(0, 8)}`,
+          displayName: 'WS-T debate',
+          email: null,
+          ageBandIfKnown: 'adult',
+          privacySettings: defaultPrivacySettings(),
+          personalizationSettings: defaultPersonalizationSettings(),
+        },
+        {
+          handle: `wsto_${randomUUID().slice(0, 8)}`,
+          displayName: 'WS-T opponent',
+          email: null,
+          ageBandIfKnown: 'adult',
+          privacySettings: defaultPrivacySettings(),
+          personalizationSettings: defaultPersonalizationSettings(),
+        },
+      ])
       .returning();
     user = (inserted[0] as { userId: string }).userId;
+    opponent = (inserted[1] as { userId: string }).userId;
     const suffix = randomUUID().slice(0, 8);
     const room = await rooms.insert({
       roomId: randomUUID(),
@@ -757,9 +1123,26 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
       threadId,
       incumbentUser: user,
       challengerUser: user,
+      opponentUser: opponent,
       targetId: await seedContribution(threadId),
       challengerId: await seedContribution(threadId),
       challenger2Id: await seedContribution(threadId),
+      newCorrection: () => seedContribution(threadId),
+      newUser: async () => {
+        const { users } = await import('@licio/db');
+        const rows = await db
+          .insert(users)
+          .values({
+            handle: `wstu_${randomUUID().slice(0, 8)}`,
+            displayName: 'WS-T standing',
+            email: null,
+            ageBandIfKnown: 'adult',
+            privacySettings: defaultPrivacySettings(),
+            personalizationSettings: defaultPersonalizationSettings(),
+          })
+          .returning();
+        return (rows[0] as { userId: string }).userId;
+      },
     };
   };
 

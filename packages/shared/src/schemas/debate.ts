@@ -389,3 +389,86 @@ export const debateJudgeInputSchema = z
   })
   .strict();
 export type DebateJudgeInput = z.infer<typeof debateJudgeInputSchema>;
+
+// ---------------------------------------------------------------------------
+// Challenge standing (GET /v1/challenge-standing) — the caller's OWN quota
+// state, served only to the authenticated account (never anyone else's): how
+// many debate arenas they may have in flight, why the next open would be
+// refused, and the policy constants the composer needs to explain itself.
+// Derived entirely from the caller's arena history + their KYC standing (a
+// capacity BOOSTER only — the floor of 1 is never KYC-gated; content
+// participation never is).  Not applause: no other user's record is ever
+// served, and nothing here enters ranking.
+// ---------------------------------------------------------------------------
+
+/** Why a prospective target cannot be challenged right now (mirrors the
+ *  create-guard rejections; `not_found` doubles as the visibility answer —
+ *  the standing probe is exactly as informative as the create itself). */
+export const challengeTargetBlockReasonSchema = z.enum([
+  'not_found',
+  'own_content',
+  'under_debate',
+  'already_incorrect',
+  'settled',
+  'already_challenged',
+]);
+export type ChallengeTargetBlockReason = z.infer<typeof challengeTargetBlockReasonSchema>;
+
+/** The policy constants the composer actually RENDERS (steward-tunable
+ *  runtime config).  Deliberately the consumed subset, not the whole policy:
+ *  the client bundle pays for every field it parses (the total-JS ratchet),
+ *  so a constant joins the echo when a surface uses it. */
+export const challengeStandingPolicySchema = z
+  .object({
+    opens_per_day: z.number().int().min(1),
+    withdraw_grace_ms: z.number().int().min(0),
+    settle_threshold: z.number().int().min(1),
+  })
+  .strict();
+export type ChallengeStandingPolicy = z.infer<typeof challengeStandingPolicySchema>;
+
+export const challengeStandingSchema = z
+  .object({
+    /** Concurrent open-challenge slots (arenas pre-verdict: open / locked /
+     *  awaiting_verdict).  The slot frees at the verdict. */
+    capacity: z.number().int().min(1),
+    live_count: z.number().int().min(0),
+    available: z.number().int().min(0),
+    /** Post-withdrawal cooldown end; null when none is active. */
+    cooldown_until: isoTimestampSchema.nullable(),
+    opens_last_24h: z.number().int().min(0),
+    /** When the trailing-24h open budget frees a slot; null unless exhausted. */
+    daily_limit_resets_at: isoTimestampSchema.nullable(),
+    kyc_verified: z.boolean(),
+    earned_tier: z.number().int().min(0),
+    /** Adjudicated challenger wins counted toward tiers (per-opponent capped). */
+    qualified_wins: z.number().int().min(0),
+    adjudicated_wins: z.number().int().min(0),
+    adjudicated_losses: z.number().int().min(0),
+    win_rate_gate_passed: z.boolean(),
+    active_withdrawal_penalties: z.number().int().min(0),
+    can_open_now: z.boolean(),
+    /** The binding account-level refusal, priority-ordered; null = none. */
+    blocked_by: z.enum(['cooldown', 'daily_limit', 'capacity']).nullable(),
+    policy: challengeStandingPolicySchema,
+    /** Present only when the request named a prospective target. */
+    target: z
+      .object({
+        challengeable: z.boolean(),
+        reason: challengeTargetBlockReasonSchema.nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ChallengeStanding = z.infer<typeof challengeStandingSchema>;
+
+export const challengeStandingResponseSchema = z
+  .object({ standing: challengeStandingSchema })
+  .strict();
+export type ChallengeStandingResponse = z.infer<typeof challengeStandingResponseSchema>;
+
+/** POST /v1/contributions/:id/unsettle · /v1/stories/:id/unsettle — the
+ *  steward/admin escape hatch reopening a SETTLED target for challenges. */
+export const unsettleResponseSchema = z.object({ unsettled: z.literal(true) }).strict();
+export type UnsettleResponse = z.infer<typeof unsettleResponseSchema>;

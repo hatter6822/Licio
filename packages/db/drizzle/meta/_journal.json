@@ -666,6 +666,13 @@
       "when": 1783728000019,
       "tag": "0095_search_public_content",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1783728000020,
+      "tag": "0096_challenge_policy",
+      "breakpoints": true
     }
   ]
 }

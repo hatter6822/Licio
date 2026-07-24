@@ -19,6 +19,10 @@ vi.mock('../../lib/queries.js', () => ({
     isPending: false,
     isError: false,
   }),
+  // WS-T challenge policy — undefined data keeps the withdraw confirm on its
+  // generic copy; the consequence variants are covered in
+  // challenge-standing.test.ts.
+  useChallengeStandingQuery: () => ({ data: undefined, refetch: () => {} }),
 }));
 
 import { DebateArenaContent, DebateArenaModal } from './DebateArenaModal.js';

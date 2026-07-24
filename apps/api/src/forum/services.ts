@@ -14,6 +14,7 @@ import { getIdentityServices } from '../identity/services.js';
 import { SEARCH_COMMENT_SNIPPET_LENGTH, type SearchDocument } from '../ingestion/search.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { StoryRecord, ThreadShellRecord } from '../ingestion/stores.js';
+import type { ChallengePolicyOverride } from './challenge-policy.js';
 import { type CommentBroadcaster, InMemoryCommentBroadcaster } from './comment-broadcaster.js';
 import { DEFAULT_FORUM_CONFIG, type ForumRuntimeConfig, loadForumConfig } from './config.js';
 import { ContributionRateLimiter } from './contributions.js';
@@ -160,6 +161,19 @@ export interface ForumServices {
    *  debate a real dev-account user is party to runs the REAL spec windows.
    *  Every DebateDeps construction site threads it through. */
   debateWindowsOverride: DebateWindowsOverride | null;
+  /** WS-T challenge-policy override (the windows-override pattern: DEV traffic
+   *  simulator / tests ONLY — the simulator raises caps + zeroes cooldowns for
+   *  its synthetic personas via `appliesToUser`, so scenario load is never
+   *  quota-throttled while a real dev-account user keeps the production
+   *  policy; null ⇒ the runtime forum config governs everyone). */
+  challengePolicyOverride: ChallengePolicyOverride | null;
+  /** WS-T challenge policy — reads whether the account holds the reviewer-
+   *  verified KYC standing (compliance kycLevel === 'kyc_partner').  A
+   *  capacity BOOSTER only: fail-closed `false` (and a null seam) still leave
+   *  the floor of 1 — content participation is never KYC-gated
+   *  (governance/eligibility.ts doctrine).  Assigned at boot over the WS-N
+   *  compliance container; null in partial wirings. */
+  kycReader: ((userId: string) => Promise<boolean>) | null;
   metrics: ForumMetrics;
   config: () => ForumRuntimeConfig;
   reloadConfig: () => Promise<ForumRuntimeConfig>;
@@ -186,6 +200,7 @@ export interface InMemoryForumOptions {
   debates?: DebateStore;
   debateJudge?: DebateJudgeRunner;
   limiterStore?: SlidingWindowStore;
+  kycReader?: (userId: string) => Promise<boolean>;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
 }
@@ -221,6 +236,8 @@ export function createInMemoryForumServices(options: InMemoryForumOptions = {}):
     debateBroadcaster: new InMemoryDebateBroadcaster(),
     debateJudge: options.debateJudge ?? (async () => null),
     debateWindowsOverride: null,
+    challengePolicyOverride: null,
+    kycReader: options.kycReader ?? null,
     metrics,
     config: () => config,
     reloadConfig: async () => config,

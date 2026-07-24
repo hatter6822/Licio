@@ -10,6 +10,14 @@
 //       the content: challenged and PROVEN ACCURATE. No penalty (a positive
 //       content-integrity signal, never applause), still re-challengeable.
 //
+// A fourth, TERMINAL presentation rides orthogonally to the status:
+//   • "Settled"   (`dispute_settled`) — the content prevailed in ENOUGH sourced
+//       debates (the challenge-policy settle threshold, SPEC §15.4) that it can
+//       no longer be challenged. It always co-occurs with `validated` (only an
+//       upheld defense settles), and it SUPERSEDES the plain "Validated" chip:
+//       "Settled" is the stronger, no-longer-challengeable form of the same
+//       positive integrity outcome. Still no penalty, still never applause.
+//
 // Strictly no-applause: these are content-INTEGRITY signals (outcomes of a
 // sourced, adjudicated debate), never popularity counts. They are distinct from
 // the lens divergence in "Where interpretations differ": no reading there is ever
@@ -68,6 +76,25 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
   },
 };
 
+/**
+ * The TERMINAL "Settled" presentation (SPEC §15.4). It is not a `dispute_status`
+ * value — settling is carried by the separate `dispute_settled` wire marker so a
+ * pre-settle cached bundle's strict enum never has to parse a new status — so it
+ * lives outside {@link DISPUTE_META}, keyed by the boolean rather than the enum.
+ * Success-family tone (settled is a stronger `validated`) with its own label,
+ * seal icon, and explanation carrying the load-bearing distinction: challenged,
+ * upheld, and now beyond challenge.
+ */
+const SETTLED_META: DisputeMeta = {
+  label: 'Settled',
+  chip: 'border-success/60 text-success',
+  banner: 'bg-success-soft text-success-on-soft',
+  edge: 'border-success/60',
+  icon: 'check-badge',
+  explanation:
+    'Sourced corrections were reviewed and did not hold enough times that this is now established — it can no longer be challenged.',
+};
+
 const CHIP_BASE =
   'rounded border px-1.5 py-px text-xs font-medium uppercase tracking-wide leading-tight';
 
@@ -81,25 +108,38 @@ const CHIP_BASE =
  * resolve Tailwind conflicts, so the two border colours must never both be
  * emitted (`cn(..., disputeBorderClass(s) ?? 'border-line')`).
  *
+ * `settled` supersedes the status hue (a settled item is always `validated`, so
+ * this only ever swaps one success edge for the settled success edge).
+ *
  * Never the SOLE carrier of meaning (WS-B.1.1f): the card always renders the
  * DisputeBadge with the same state in text, and the tinted edge flattens with
  * every other decorative treatment under forced colours.
  */
-export function disputeBorderClass(status: DisputeStatus): string | null {
+export function disputeBorderClass(status: DisputeStatus, settled = false): string | null {
+  if (settled) return SETTLED_META.edge;
   return status === 'none' ? null : DISPUTE_META[status].edge;
 }
 
 /**
  * Compact pill for the comment header and the story-card rating row. Renders
- * nothing for `none`, so callers can mount it unconditionally.
+ * nothing for `none` (unless `settled`), so callers can mount it
+ * unconditionally. `settled` supersedes the status — a settled item shows the
+ * terminal "Settled" chip in place of "Validated".
  */
 export function DisputeBadge({
   status,
+  settled = false,
   className,
 }: {
   status: DisputeStatus;
+  settled?: boolean;
   className?: string;
 }): React.ReactElement | null {
+  if (settled) {
+    return (
+      <span className={cn(CHIP_BASE, SETTLED_META.chip, className)}>{SETTLED_META.label}</span>
+    );
+  }
   if (status === 'none') return null;
   const meta = DISPUTE_META[status];
   return <span className={cn(CHIP_BASE, meta.chip, className)}>{meta.label}</span>;
@@ -112,13 +152,15 @@ export function DisputeBadge({
  */
 export function DisputeBanner({
   status,
+  settled = false,
   className,
 }: {
   status: DisputeStatus;
+  settled?: boolean;
   className?: string;
 }): React.ReactElement | null {
-  if (status === 'none') return null;
-  const meta = DISPUTE_META[status];
+  if (!settled && status === 'none') return null;
+  const meta = settled ? SETTLED_META : DISPUTE_META[status as ActiveDisputeStatus];
   return (
     <div
       role="note"

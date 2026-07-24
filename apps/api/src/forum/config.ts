@@ -42,6 +42,42 @@ export interface ForumRuntimeConfig {
   deepeningMinContributions: number;
   deepeningMinDepth: number;
   deepeningMinEvidence: number;
+  /** WS-T challenge policy (§15.4): the per-account open-challenge capacity —
+   *  floor for every account; KYC and adjudicated challenger wins raise it
+   *  (challenge-policy.ts owns the math).  A slot is an arena pre-verdict
+   *  (open/locked/awaiting_verdict); it frees when the verdict lands. */
+  challengeBaseCapacity: number;
+  challengeKycCapacityBonus: number;
+  /** Adjudicated challenger wins per earned capacity tier, and the tier cap. */
+  challengeWinsPerTier: number;
+  challengeMaxEarnedTiers: number;
+  /** Absolute capacity ceilings (non-KYC / KYC-verified). */
+  challengeMaxCapacity: number;
+  challengeMaxCapacityKyc: number;
+  /** Earned tiers require at least this adjudicated win rate (wins over
+   *  wins+losses as challenger; concessions and inconclusives count neither). */
+  challengeMinWinRate: number;
+  /** Velocity backstop: arenas opened per trailing 24h, regardless of slots. */
+  challengeOpensPerDay: number;
+  /** Withdrawal inside this window with a never-engaged incumbent is FREE
+   *  (misclick/instant-regret) — it consumes nothing and cools nothing down. */
+  challengeWithdrawGraceMinutes: number;
+  /** Escalating cooldowns after the 1st / 2nd / 3rd+ non-grace withdrawal in
+   *  the trailing window — priced BELOW losing, so the compute-saving exit
+   *  stays rational for a challenger who realizes they are wrong. */
+  challengeWithdrawCooldownFirstHours: number;
+  challengeWithdrawCooldownSecondHours: number;
+  challengeWithdrawCooldownThirdHours: number;
+  /** The trailing window for withdrawal counting and capacity penalties. */
+  challengeWithdrawWindowDays: number;
+  /** Non-grace withdrawals in the window beyond this each cost −1 capacity. */
+  challengeFreeWithdrawalsPerWindow: number;
+  /** Tier-counted wins are deduped per opponent account at this cap (the
+   *  sibling-subdomain rule of standing: a ring cannot mint tiers). */
+  challengePerOpponentWinCap: number;
+  /** Adjudicated `upheld` defenses (since the target's last material edit)
+   *  after which the target is SETTLED — no longer challengeable. */
+  challengeSettleThreshold: number;
 }
 
 export const DEFAULT_FORUM_CONFIG: ForumRuntimeConfig = {
@@ -58,6 +94,22 @@ export const DEFAULT_FORUM_CONFIG: ForumRuntimeConfig = {
   deepeningMinContributions: 12,
   deepeningMinDepth: 2,
   deepeningMinEvidence: 2,
+  challengeBaseCapacity: 1,
+  challengeKycCapacityBonus: 2,
+  challengeWinsPerTier: 3,
+  challengeMaxEarnedTiers: 5,
+  challengeMaxCapacity: 4,
+  challengeMaxCapacityKyc: 8,
+  challengeMinWinRate: 0.5,
+  challengeOpensPerDay: 5,
+  challengeWithdrawGraceMinutes: 5,
+  challengeWithdrawCooldownFirstHours: 2,
+  challengeWithdrawCooldownSecondHours: 24,
+  challengeWithdrawCooldownThirdHours: 72,
+  challengeWithdrawWindowDays: 30,
+  challengeFreeWithdrawalsPerWindow: 1,
+  challengePerOpponentWinCap: 2,
+  challengeSettleThreshold: 3,
 };
 
 const CONFIG_PREFIX = 'forum.';
@@ -81,6 +133,22 @@ const VALIDATORS: Readonly<Record<keyof ForumRuntimeConfig, z.ZodType>> = {
   deepeningMinContributions: z.number().int().min(3).max(500),
   deepeningMinDepth: z.number().int().min(1).max(10),
   deepeningMinEvidence: z.number().int().min(0).max(100),
+  challengeBaseCapacity: z.number().int().min(1).max(10),
+  challengeKycCapacityBonus: z.number().int().min(0).max(10),
+  challengeWinsPerTier: z.number().int().min(1).max(50),
+  challengeMaxEarnedTiers: z.number().int().min(0).max(20),
+  challengeMaxCapacity: z.number().int().min(1).max(20),
+  challengeMaxCapacityKyc: z.number().int().min(1).max(50),
+  challengeMinWinRate: z.number().min(0).max(1),
+  challengeOpensPerDay: z.number().int().min(1).max(100),
+  challengeWithdrawGraceMinutes: z.number().int().min(0).max(60),
+  challengeWithdrawCooldownFirstHours: z.number().int().min(0).max(168),
+  challengeWithdrawCooldownSecondHours: z.number().int().min(0).max(720),
+  challengeWithdrawCooldownThirdHours: z.number().int().min(0).max(720),
+  challengeWithdrawWindowDays: z.number().int().min(1).max(365),
+  challengeFreeWithdrawalsPerWindow: z.number().int().min(0).max(10),
+  challengePerOpponentWinCap: z.number().int().min(1).max(50),
+  challengeSettleThreshold: z.number().int().min(1).max(20),
 };
 
 export const FORUM_CONFIG_KEYS = Object.keys(VALIDATORS) as Array<keyof ForumRuntimeConfig>;
@@ -91,6 +159,39 @@ export function validateForumConfigValue(key: string, value: unknown): string | 
   if (!validator) return `unknown forum config key: ${key}`;
   const parsed = validator.safeParse(value);
   return parsed.success ? null : (parsed.error.issues[0]?.message ?? 'invalid value');
+}
+
+/**
+ * Validate a candidate single-key write against the EFFECTIVE config it would
+ * produce — the cross-key invariants the per-key {@link validateForumConfigValue}
+ * cannot see (it validates one key in isolation, and a steward sets keys one at
+ * a time through the config endpoint).  Returns null ⇒ OK, string ⇒ the problem.
+ *
+ * `challengeMaxCapacityKyc >= challengeMaxCapacity`: the KYC capacity ceiling is
+ * a BOOSTER (SPEC §15.4).  If a steward could set it below the non-KYC ceiling,
+ * a verified user's capacity clamp could bind lower than the same history's
+ * would without KYC, so KYC would REDUCE standing (codex on PR #168).  The
+ * runtime policy also normalizes this structurally
+ * (`enforceCapacityCeilingOrder`); rejecting it here gives the steward the 422
+ * feedback instead of a silently-corrected value.
+ */
+export function validateForumConfigChange(
+  current: ForumRuntimeConfig,
+  key: string,
+  value: unknown,
+): string | null {
+  const perKey = validateForumConfigValue(key, value);
+  if (perKey !== null) return perKey;
+  const candidate: ForumRuntimeConfig = { ...current };
+  (candidate as unknown as Record<string, unknown>)[key] = value;
+  if (candidate.challengeMaxCapacityKyc < candidate.challengeMaxCapacity) {
+    return (
+      `challengeMaxCapacityKyc (${candidate.challengeMaxCapacityKyc}) must be >= ` +
+      `challengeMaxCapacity (${candidate.challengeMaxCapacity}): the KYC capacity ` +
+      `ceiling is a booster, never a reduction`
+    );
+  }
+  return null;
 }
 
 /** Fail-closed loader: invalid stored values are reported and defaults kept. */

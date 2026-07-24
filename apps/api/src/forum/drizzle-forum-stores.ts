@@ -39,7 +39,19 @@ import type {
   ContributionModerationState,
   ContributionType,
 } from '@licio/shared';
-import { and, asc, count, desc, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import { sha256Hex } from '../identity/crypto.js';
 import type { S3ObjectStoreConfig } from '../identity/object-store-s3.js';
 import { type SigV4Credentials, signRequest, uriEncode } from '../identity/sigv4.js';
@@ -156,6 +168,7 @@ export class DrizzleContributionStore implements ContributionStore {
       editHistoryRef: row.editHistoryRef,
       moderationState: row.moderationState,
       disputeStatus: row.disputeStatus,
+      settledAt: isoOrNull(row.settledAt),
       createdAt: iso(row.createdAt),
       updatedAt: iso(row.updatedAt),
     };
@@ -164,7 +177,7 @@ export class DrizzleContributionStore implements ContributionStore {
   async insert(
     record: Omit<
       ContributionRecord,
-      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus'
+      'createdAt' | 'updatedAt' | 'editHistoryRef' | 'disputeStatus' | 'settledAt'
     >,
   ): Promise<ContributionInsertOutcome> {
     try {
@@ -537,13 +550,85 @@ export class DrizzleContributionStore implements ContributionStore {
   async setDisputeStatus(
     contributionId: string,
     status: ContributionDisputeStatus,
+    settledAt?: string | null,
   ): Promise<ContributionRecord | null> {
     const rows = await this.#db
       .update(contributionsTable)
-      .set({ disputeStatus: status, updatedAt: new Date() })
+      .set({
+        disputeStatus: status,
+        updatedAt: new Date(),
+        ...(settledAt !== undefined
+          ? { settledAt: settledAt === null ? null : new Date(settledAt) }
+          : {}),
+      })
       .where(eq(contributionsTable.contributionId, contributionId))
       .returning();
     return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async clearSettled(contributionId: string): Promise<ContributionRecord | null> {
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ settledAt: null, updatedAt: new Date() })
+      .where(eq(contributionsTable.contributionId, contributionId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async certifyValidatedIfUnedited(
+    contributionId: string,
+    expectedEditHistoryRef: string | null,
+    settledAt: string | null,
+  ): Promise<ContributionRecord | null> {
+    // CAS on the material-edit lineage: an edit landing after finalize's
+    // anchor read bumps `edit_history_ref` and this write matches nothing.
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({
+        disputeStatus: 'validated',
+        settledAt: settledAt === null ? null : new Date(settledAt),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(contributionsTable.contributionId, contributionId),
+          expectedEditHistoryRef === null
+            ? isNull(contributionsTable.editHistoryRef)
+            : eq(contributionsTable.editHistoryRef, expectedEditHistoryRef),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
+  async resetDisputeAfterEdit(contributionId: string): Promise<ContributionRecord | null> {
+    // The condition lives in the WHERE (atomic): a row a racing challenge has
+    // already re-tagged `under_debate` matches nothing and stays untouched.
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ disputeStatus: 'none', settledAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(contributionsTable.contributionId, contributionId),
+          or(
+            eq(contributionsTable.disputeStatus, 'validated'),
+            isNotNull(contributionsTable.settledAt),
+          ),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : this.getById(contributionId);
+  }
+
+  async latestEditAt(contributionId: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ editedAt: contributionEditHistory.editedAt })
+      .from(contributionEditHistory)
+      .where(eq(contributionEditHistory.contributionId, contributionId))
+      .orderBy(desc(contributionEditHistory.editedAt))
+      .limit(1);
+    const latest = rows[0]?.editedAt;
+    return latest === undefined ? null : iso(latest);
   }
 
   async setDebateArena(contributionId: string, debateArenaId: string): Promise<void> {

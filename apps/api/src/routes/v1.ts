@@ -231,6 +231,10 @@ function realStoryToDetail(
     // WS-T dispute posture — powers the "Challenged"/"Incorrect" badge on the
     // story detail page (parity with the feed card projection).
     dispute_status: story.disputeStatus ?? 'none',
+    // WS-T settle marker (SPEC §15.4): emitted only when TRUE (parity with the
+    // feed projection). A settled story is always `validated`; the detail banner
+    // renders the terminal "Settled" state.
+    ...(story.settledAt != null ? { dispute_settled: true } : {}),
     body_summary: story.excerpt ?? '',
     thread_id: thread?.threadId ?? null,
     // The home room (WS-G.2.2): powers the client's lens composer + conversation

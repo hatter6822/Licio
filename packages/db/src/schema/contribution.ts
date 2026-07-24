@@ -96,6 +96,12 @@ export const contributions = pgTable(
     /** Dispute posture (WS-T sourced-correction debate); default `none`.  An
      *  `incorrect` row stays visible but sinks to the bottom of its section. */
     disputeStatus: contributionDisputeStatusEnum('dispute_status').notNull().default('none'),
+    /** WS-T settled threshold: set when the row has accumulated the configured
+     *  number of adjudicated `upheld` defenses since its last material edit —
+     *  it can no longer be challenged (steward unsettle / a material edit
+     *  clears it).  A separate column, NEVER a dispute-status value: the row
+     *  still reads `validated` on every existing wire/ranking/search surface. */
+    settledAt: timestamp('settled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     /**

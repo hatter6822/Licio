@@ -25,6 +25,7 @@ function app() {
 
 let fixture: ForumServicesFixture;
 let cookie: string;
+let challengerCookie: string;
 let threadId: string;
 let storyId: string;
 let userId: string;
@@ -43,6 +44,10 @@ beforeEach(async () => {
   const session = await seedUserWithSession(fixture.identity);
   cookie = session.cookie;
   userId = session.userId;
+  // Challenges come from a second account (challenging your own content is
+  // refused — `cannot_challenge_own_content`).
+  const challengerSession = await seedUserWithSession(fixture.identity);
+  challengerCookie = challengerSession.cookie;
   ({ threadId, storyId } = await seedThread(fixture));
 });
 
@@ -286,7 +291,7 @@ describe('WS-T — story active-debate discovery route', () => {
           citations: [{ url: 'https://example.gov/record' }],
           target_contribution_id: targetId,
         },
-        cookie,
+        challengerCookie,
       ),
     );
     expect(correctionRes.status).toBe(201);
