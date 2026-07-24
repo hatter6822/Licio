@@ -271,22 +271,13 @@ export function computeChallengeStanding(
   };
 }
 
-/** The policy echo the standing endpoint serves (wire snake_case). */
+/** The policy echo the standing endpoint serves (wire snake_case) — the
+ *  CONSUMED subset only, per the shared schema's note: the client bundle pays
+ *  for every field it parses, so a constant joins the echo with its surface. */
 export function challengePolicyWire(policy: ChallengePolicy): ChallengeStandingPolicy {
   return {
-    base_capacity: policy.baseCapacity,
-    kyc_capacity_bonus: policy.kycCapacityBonus,
-    wins_per_tier: policy.winsPerTier,
-    max_earned_tiers: policy.maxEarnedTiers,
-    max_capacity: policy.maxCapacity,
-    max_capacity_kyc: policy.maxCapacityKyc,
-    min_win_rate: policy.minWinRate,
     opens_per_day: policy.opensPerDay,
     withdraw_grace_ms: policy.withdrawGraceMs,
-    withdraw_cooldowns_ms: [...policy.withdrawCooldownsMs],
-    withdraw_window_ms: policy.withdrawWindowMs,
-    free_withdrawals_per_window: policy.freeWithdrawalsPerWindow,
-    per_opponent_win_cap: policy.perOpponentWinCap,
     settle_threshold: policy.settleThreshold,
   };
 }

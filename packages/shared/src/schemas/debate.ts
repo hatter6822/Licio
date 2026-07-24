@@ -414,23 +414,14 @@ export const challengeTargetBlockReasonSchema = z.enum([
 ]);
 export type ChallengeTargetBlockReason = z.infer<typeof challengeTargetBlockReasonSchema>;
 
-/** The policy constants in force (steward-tunable runtime config). */
+/** The policy constants the composer actually RENDERS (steward-tunable
+ *  runtime config).  Deliberately the consumed subset, not the whole policy:
+ *  the client bundle pays for every field it parses (the total-JS ratchet),
+ *  so a constant joins the echo when a surface uses it. */
 export const challengeStandingPolicySchema = z
   .object({
-    base_capacity: z.number().int().min(1),
-    kyc_capacity_bonus: z.number().int().min(0),
-    wins_per_tier: z.number().int().min(1),
-    max_earned_tiers: z.number().int().min(0),
-    max_capacity: z.number().int().min(1),
-    max_capacity_kyc: z.number().int().min(1),
-    min_win_rate: z.number().min(0).max(1),
     opens_per_day: z.number().int().min(1),
     withdraw_grace_ms: z.number().int().min(0),
-    /** Escalating post-withdrawal cooldowns (1st/2nd/3rd+ in the window). */
-    withdraw_cooldowns_ms: z.array(z.number().int().min(0)).length(3),
-    withdraw_window_ms: z.number().int().min(0),
-    free_withdrawals_per_window: z.number().int().min(0),
-    per_opponent_win_cap: z.number().int().min(1),
     settle_threshold: z.number().int().min(1),
   })
   .strict();

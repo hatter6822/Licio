@@ -58,12 +58,13 @@ describe('challengePolicyFromConfig', () => {
     expect(POLICY.withdrawWindowMs).toBe(30 * DAY_MS);
   });
 
-  it('round-trips into the wire echo', () => {
+  it('round-trips the CONSUMED subset into the wire echo', () => {
     const wire = challengePolicyWire(POLICY);
-    expect(wire.base_capacity).toBe(1);
-    expect(wire.kyc_capacity_bonus).toBe(2);
-    expect(wire.settle_threshold).toBe(3);
-    expect(wire.withdraw_cooldowns_ms).toEqual([2 * HOUR_MS, 24 * HOUR_MS, 72 * HOUR_MS]);
+    expect(wire).toEqual({
+      opens_per_day: 5,
+      withdraw_grace_ms: 5 * 60_000,
+      settle_threshold: 3,
+    });
   });
 });
 
