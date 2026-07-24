@@ -29,14 +29,85 @@ import { fileURLToPath } from 'node:url';
 export const PG_MAX_IDENTIFIER_BYTES = 63;
 
 /**
- * Quoted SQL identifiers. Restricted to the unquoted-identifier charset
- * (`[A-Za-z_][A-Za-z0-9_$]*`) on purpose: a permissive `"[^"]+"` also matches
- * multi-line spans between two unrelated quotes — comment prose, `->>'…'`
- * JSON paths, `format()` templates — and reported them as enormous
- * "identifiers". Every real identifier in this schema is snake_case, so the
- * narrow form matches all of them and nothing else.
+ * Split SQL into the spans that can hold an identifier, discarding the spans
+ * that cannot: `--` line comments, `/* … *\/` block comments (nesting, which
+ * Postgres allows), `'…'` string literals (with the `''` escape), and
+ * `$tag$ … $tag$` dollar-quoted bodies' delimiters.
+ *
+ * Scanning rather than regex-replacing because the constructs interleave: a
+ * string can contain `--`, a comment can contain an apostrophe, and a
+ * sequential set of replaces gets both wrong. Dollar-quoted BODIES are kept
+ * (migration 0097's `DO $$ … $$` block contains real DDL), while the string
+ * literals inside them are still dropped.
+ *
+ * Yields `{ text, quoted }` runs: `quoted` marks a `"…"` delimited identifier,
+ * which may legally contain characters a bare identifier may not.
  */
-const QUOTED_IDENTIFIER = /"([A-Za-z_][A-Za-z0-9_$]*)"/g;
+export function* identifierCandidates(sql: string): Generator<{ text: string; quoted: boolean }> {
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const two = sql.slice(i, i + 2);
+    // -- line comment
+    if (two === '--') {
+      const nl = sql.indexOf('\n', i);
+      i = nl === -1 ? n : nl;
+      continue;
+    }
+    // /* block comment */ (Postgres nests these)
+    if (two === '/*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        const t = sql.slice(i, i + 2);
+        if (t === '/*') {
+          depth += 1;
+          i += 2;
+        } else if (t === '*/') {
+          depth -= 1;
+          i += 2;
+        } else i += 1;
+      }
+      continue;
+    }
+    // 'string literal' — '' is an escaped quote, not a terminator
+    if (sql[i] === "'") {
+      i += 1;
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") i += 2;
+          else {
+            i += 1;
+            break;
+          }
+        } else i += 1;
+      }
+      continue;
+    }
+    // $tag$ … $tag$ — skip only the DELIMITERS so the body is still scanned
+    const dollar = /^\$[A-Za-z_]*\$/.exec(sql.slice(i));
+    if (dollar) {
+      i += dollar[0].length;
+      continue;
+    }
+    // "quoted identifier"
+    if (sql[i] === '"') {
+      const end = sql.indexOf('"', i + 1);
+      if (end === -1) return;
+      yield { text: sql.slice(i + 1, end), quoted: true };
+      i = end + 1;
+      continue;
+    }
+    // bare identifier / keyword token
+    const bare = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(i));
+    if (bare) {
+      yield { text: bare[0], quoted: false };
+      i += bare[0].length;
+      continue;
+    }
+    i += 1;
+  }
+}
 
 /**
  * Over-long identifiers in migrations that are ALREADY APPLIED and therefore
@@ -64,6 +135,20 @@ export interface IdentifierViolation {
 /**
  * Find identifiers Postgres would truncate in one migration's SQL. Pure.
  *
+ * Scans BOTH `"quoted"` and bare identifiers. The bare case matters because
+ * migrations here are hand-authored: `CREATE INDEX a…64_bytes ON t (c)` is
+ * valid SQL that Postgres truncates just as silently, and — unlike the quoted
+ * case — the catalog backstop can never recover it after the fact, because the
+ * server stores only the 63-byte result. The static scan is the ONLY general
+ * protection against it, so it has to see unquoted names.
+ *
+ * Scanning every bare token (not just DDL name positions) is safe precisely
+ * because the only thing reported is a token OVER the limit: no SQL keyword is
+ * anywhere near 63 bytes, so a bare token that long is an identifier by
+ * construction. That avoids enumerating every DDL form — `CREATE INDEX`,
+ * `ADD CONSTRAINT`, `CREATE TRIGGER`, `RENAME CONSTRAINT … TO …` — and the
+ * inevitable gap in that list.
+ *
  * Length is measured in BYTES, not characters: `NAMEDATALEN` bounds the byte
  * length, so a multi-byte identifier truncates sooner than its character count
  * suggests (and truncation can even split a UTF-8 sequence).
@@ -71,13 +156,12 @@ export interface IdentifierViolation {
 export function findOverlongIdentifiers(filename: string, sql: string): IdentifierViolation[] {
   const violations: IdentifierViolation[] = [];
   const seen = new Set<string>();
-  for (const match of sql.matchAll(QUOTED_IDENTIFIER)) {
-    const identifier = match[1];
-    if (identifier === undefined || seen.has(identifier)) continue;
-    seen.add(identifier);
-    const bytes = Buffer.byteLength(identifier, 'utf8');
-    if (bytes > PG_MAX_IDENTIFIER_BYTES && !HISTORICAL_EXEMPTIONS.has(identifier)) {
-      violations.push({ file: filename, identifier, bytes });
+  for (const { text } of identifierCandidates(sql)) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (bytes > PG_MAX_IDENTIFIER_BYTES && !HISTORICAL_EXEMPTIONS.has(text)) {
+      violations.push({ file: filename, identifier: text, bytes });
     }
   }
   return violations;

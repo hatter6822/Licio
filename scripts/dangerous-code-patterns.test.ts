@@ -11,6 +11,7 @@ import {
   EVAL_PATTERN,
   EVAL_PATTERN_STRICT,
   FUNCTION_CONSTRUCTOR_PATTERNS,
+  INDIRECT_EVAL_PATTERNS,
   SOURCE_CODE_SINKS,
   STRING_TIMER_PATTERN,
   stripComments,
@@ -31,6 +32,19 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     ['self.Function()', 'const f = self.Function("x")();'],
     ['spaced call', 'const f = Function ("x");'],
   ])('catches %s', (_label, code) => {
+    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
+  });
+
+  // The indirect forms Codex found on PR #169: the constructor reference can be
+  // parenthesized or reached by computed member access, and each still executes
+  // arbitrary source.
+  it.each([
+    ['parenthesized', "const f = (Function)('return 1');"],
+    ['new + parenthesized', "const f = new (Function)('return 1');"],
+    ['computed on globalThis', "const f = globalThis['Function']('return 1');"],
+    ['computed on window', 'const f = window["Function"]("x");'],
+    ['computed on self', "const f = self['Function']('x');"],
+  ])('catches the INDIRECT form: %s', (_label, code) => {
     expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
 
@@ -113,7 +127,36 @@ describe('the assembled sink sets', () => {
   });
 });
 
+describe('INDIRECT_EVAL_PATTERNS', () => {
+  it.each(["(eval)('x')", "globalThis['eval']('x')", 'window["eval"]("x")'])(
+    'catches indirect eval: %s',
+    (code) => {
+      expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
+    },
+  );
+
+  it('does not flag a direct or member eval call (those have their own patterns)', () => {
+    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test('await redis.eval(script, 0);'))).toBe(false);
+  });
+});
+
 describe('stripComments', () => {
+  // A comment placed INSIDE a call — `Function/*gap*/('…')` — split the token
+  // stream so no pattern matched; stripping first closes that route.
+  it('closes the comment-gap route into the Function constructor', () => {
+    const code = stripComments("const f = Function/*gap*/('return 1');");
+    expect(hits(SOURCE_CODE_SINKS, code)).toBe(true);
+  });
+
+  it('PRESERVES line numbers across a multi-line block comment', () => {
+    // Gates report `file:line`. Collapsing a 4-line comment to one space would
+    // point every later violation at the wrong line.
+    const source = ['const a = 1;', '/* one', '   two', '   three */', "eval('x');"].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped.split('\n')).toHaveLength(source.split('\n').length);
+    expect(stripped.split('\n').findIndex((l) => /eval/.test(l))).toBe(4);
+  });
+
   it('lets doctrine be discussed in prose without tripping a scan', () => {
     const code = stripComments('// never call eval() here\n/* nor new Function() */\nrun();');
     expect(hits(SOURCE_CODE_SINKS, code)).toBe(false);

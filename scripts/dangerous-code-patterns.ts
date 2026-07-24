@@ -21,20 +21,47 @@
 
 /**
  * Every textual form that reaches the **Function constructor**, an
- * eval-equivalent sink: `Function(src)` and `new Function(src)` are the same
- * operation (the `new` is optional per ECMA-262), and `globalThis.Function(src)`
- * / `window.Function(src)` / `self.Function(src)` reach it through the global
- * object.
+ * eval-equivalent sink. `Function(src)` and `new Function(src)` are the same
+ * operation (the `new` is optional per ECMA-262), and the reference itself can
+ * be reached indirectly — parenthesized, through the global object by dot OR
+ * by computed member access:
  *
- * The first pattern's lookbehind excludes a member/private access (`.Function(`,
- * `#Function(`) and word-suffix false positives (`getFunction(`,
- * `AsyncFunction(`) so only a real constructor call is flagged; the qualified
- * global forms are matched explicitly by the second pattern precisely because
- * that lookbehind would otherwise skip them.
+ *     Function('…')            new Function('…')
+ *     (Function)('…')          new (Function)('…')
+ *     globalThis.Function('…')  window.Function('…')  self.Function('…')
+ *     globalThis['Function']('…')                     self["Function"]('…')
+ *
+ * The direct pattern's lookbehind excludes a member/private access
+ * (`.Function(`, `#Function(`) and word-suffix false positives (`getFunction(`,
+ * `AsyncFunction(`), so the qualified and computed forms need their own
+ * patterns — that lookbehind would otherwise skip them.
+ *
+ * SCOPE, stated honestly: this is a text scan, so it recognises the syntactic
+ * forms an author or a minifier actually emits, not every semantically
+ * equivalent route to the constructor (`Reflect.construct(Function, …)`,
+ * `[]['constructor']['constructor']`, a name assembled at runtime). Those are
+ * unreachable by ANY regex; the runtime enforcement is the CSP, which ships
+ * without `'unsafe-eval'` so the constructor throws in the browser however it
+ * is spelled. This gate is the build-time half that keeps the obvious routes
+ * from landing in the first place.
  */
 export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   /(?<![.\w$#])Function\s*\(/,
   /\b(?:globalThis|window|self)\s*\.\s*Function\s*\(/,
+  // Parenthesized reference: `(Function)('…')` and `new (Function)('…')`.
+  /\(\s*Function\s*\)\s*\(/,
+  // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
+  /\[\s*(['"`])Function\1\s*\]\s*\(/,
+];
+
+/**
+ * The same indirection applied to `eval`: a parenthesized or computed reference
+ * reaches the same sink. (Indirect eval runs in global scope rather than the
+ * caller's, which is if anything the more dangerous of the two.)
+ */
+export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
+  /\(\s*eval\s*\)\s*\(/,
+  /\[\s*(['"`])eval\1\s*\]\s*\(/,
 ];
 
 /**
@@ -73,6 +100,7 @@ export interface CodeSinkPattern {
  */
 export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
   { pattern: EVAL_PATTERN, label: 'eval()' },
+  ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
   ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
     pattern,
     label: 'Function() constructor (equivalent to eval)',
@@ -89,6 +117,7 @@ export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
  */
 export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
   { pattern: EVAL_PATTERN_STRICT, label: 'eval()' },
+  ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
   ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
     pattern,
     label: 'Function() constructor',
@@ -105,10 +134,19 @@ export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
  *
  * The line-comment rule ignores a `//` preceded by `:` or by a quote, so both
  * an absolute `https://…` URL and a protocol-relative `"//host/x.js"` string
- * literal survive for the importScripts checks that need to see them. Block
- * comments collapse to a SPACE rather than nothing, so `a/**\/b` cannot fuse
- * two identifiers into one.
+ * literal survive for the importScripts checks that need to see them.
+ *
+ * A block comment is replaced by a SPACE when it sits on one line, so
+ * `a/**\/b` cannot fuse into a single token — and by its own NEWLINES when it
+ * spans several, so every later line keeps its original number. Gates report
+ * `file:line`, and collapsing a 20-line licence header to one space would have
+ * pointed every subsequent violation at the wrong line.
  */
 export function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (match) => {
+      const newlines = match.match(/\n/g)?.length ?? 0;
+      return newlines === 0 ? ' ' : '\n'.repeat(newlines);
+    })
+    .replace(/(^|[^:'"])\/\/.*$/gm, '$1');
 }

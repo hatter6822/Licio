@@ -303,6 +303,8 @@ in `package.json`, so an override placed there is silently ignored.
 
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
+| `brace-expansion ^5.0.8` | GHSA-mh99-v99m-4gvg (unbounded-expansion OOM) lists EVERY prior release vulnerable (`<=5.0.7`) — there is no backported 1.x/2.x fix, so 5.0.8 is the only patched version | the advisory gains a backported fix, or nothing resolves brace-expansion below 5.0.8 |
+| `filelist ^2.0.2` | pairs with the pin above: the workbox dev chain (`…off-main-thread`→ejs→jake→filelist) pulled `minimatch@5`, whose CJS `require('brace-expansion')` expects the pre-5.x DEFAULT export and throws `expand is not a function` under 5.0.8.  filelist 2.x moves to `minimatch@^10.2.1`, which uses the patched line | jake ships a release depending on `filelist >= 2` |
 | `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
 | `fast-uri ^3.1.4` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); patches the 3.1.3 host-confusion advisory | ajv/workbox resolve `fast-uri >= 3.1.4` |
 | `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |

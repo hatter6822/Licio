@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { SOURCE_CODE_SINKS } from './dangerous-code-patterns.js';
+import { SOURCE_CODE_SINKS, stripComments } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -66,7 +66,12 @@ function lint(): void {
     for (const filePath of files) {
       if (ALLOWLIST_PATHS.some((p) => p.test(filePath))) continue;
 
-      const content = readFileSync(filePath, 'utf-8');
+      // Strip comments BEFORE scanning. Two reasons, both real: a doctrine
+      // comment naming a forbidden sink in prose is not a violation, and a
+      // comment placed INSIDE a call — `Function/*gap*/('…')` — otherwise split
+      // the token stream so the pattern never matched. `stripComments`
+      // preserves the line count, so the reported line numbers stay exact.
+      const content = stripComments(readFileSync(filePath, 'utf-8'));
       const lines = content.split('\n');
 
       for (let i = 0; i < lines.length; i++) {

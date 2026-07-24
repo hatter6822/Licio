@@ -53,7 +53,14 @@ pnpm install --frozen-lockfile
 # --------------------------------------------------------------------------
 # 2. PostgreSQL 16 + pgvector (the WS-F embedding suites need the extension)
 # --------------------------------------------------------------------------
-if ! command -v pg_ctlcluster >/dev/null 2>&1; then
+# Probe for THIS major's server binary, not for `pg_ctlcluster`. The wrapper is
+# shipped by the version-agnostic `postgresql-common` package, so a base image
+# carrying any other major (or the client tools alone) already has it — testing
+# for it would skip this install and then die at `pg_ctlcluster 16 main start`
+# below, under `set -e`, before either service URL is exported. The whole point
+# of this hook is that the gated suites RUN, and that failure mode returns them
+# to silently self-skipping.
+if [ ! -x "/usr/lib/postgresql/${PG_VERSION}/bin/postgres" ]; then
   log "Installing PostgreSQL ${PG_VERSION}"
   export DEBIAN_FRONTEND=noninteractive
   apt-get install -y --no-install-recommends "postgresql-${PG_VERSION}" >/dev/null
@@ -68,9 +75,25 @@ if [ ! -f "/usr/share/postgresql/${PG_VERSION}/extension/vector.control" ]; then
   apt-get install -y --no-install-recommends "postgresql-${PG_VERSION}-pgvector" >/dev/null
 fi
 
+# The server package's postinst normally creates `<major>/main`, but an image
+# that ships the binaries with cluster creation suppressed (or where a previous
+# run removed it) has none — and `pg_ctlcluster … start` on a missing cluster
+# fails, taking the whole hook down with it under `set -e`.  Create it first
+# when it is absent.
+if ! pg_lsclusters -h 2>/dev/null | awk -v v="${PG_VERSION}" '$1 == v && $2 == "main"' | grep -q .; then
+  log "Creating PostgreSQL cluster ${PG_VERSION}/main"
+  pg_createcluster "${PG_VERSION}" main
+fi
+
+# `pg_ctlcluster … status` exits non-zero both when the cluster is DOWN and for
+# other faults, so a failed start is reported explicitly rather than inherited
+# from `set -e` with no explanation.
 if ! pg_ctlcluster "${PG_VERSION}" main status >/dev/null 2>&1; then
   log "Starting PostgreSQL cluster ${PG_VERSION}/main"
-  pg_ctlcluster "${PG_VERSION}" main start
+  if ! pg_ctlcluster "${PG_VERSION}" main start; then
+    log "ERROR: could not start PostgreSQL ${PG_VERSION}/main — the DATABASE_URL-gated suites will self-skip"
+    exit 1
+  fi
 fi
 
 # Wait for the socket before issuing DDL (the cluster reports "online" slightly

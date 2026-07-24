@@ -25,15 +25,60 @@ describe('findOverlongIdentifiers', () => {
 
   it('measures BYTES, not characters — a multi-byte name truncates sooner', () => {
     // 32 two-byte characters = 64 bytes but only 32 characters: a
-    // character-length check would wave this through.
+    // character-length check would wave this through, and Postgres would
+    // truncate mid-sequence.
     const name = 'é'.repeat(32);
     expect(Buffer.byteLength(name, 'utf8')).toBe(64);
     expect(name.length).toBe(32);
-    const found = findOverlongIdentifiers('0099_x.sql', `CREATE TABLE "${name}" ()`);
-    // The narrow identifier charset does not match non-ASCII, so this documents
-    // the known scope of the static scan: ASCII snake_case, which is every
-    // identifier this schema uses. The gated DB assertion is the backstop.
-    expect(found).toEqual([]);
+    expect(findOverlongIdentifiers('0099_x.sql', `CREATE TABLE "${name}" ()`)).toEqual([
+      { file: '0099_x.sql', identifier: name, bytes: 64 },
+    ]);
+  });
+
+  // The gap Codex found on PR #169: hand-authored migrations may leave a name
+  // unquoted, and unlike the quoted case the catalog can never reveal it after
+  // the fact — Postgres stores only the truncated 63-byte result — so the
+  // static scan is the ONLY protection against it.
+  it('flags an UNQUOTED over-long name (regression)', () => {
+    const name = `debate_arenas_${'x'.repeat(50)}_idx`;
+    expect(Buffer.byteLength(name, 'utf8')).toBe(68);
+    expect(findOverlongIdentifiers('0099_x.sql', `CREATE INDEX ${name} ON t (c);`)).toEqual([
+      { file: '0099_x.sql', identifier: name, bytes: 68 },
+    ]);
+  });
+
+  it('flags unquoted names in every DDL position, without enumerating them', () => {
+    // Scanning every bare token is safe because only tokens OVER the limit are
+    // reported and no SQL keyword comes close — so no DDL form can be missed
+    // by omission from a context list.
+    const name = `c_${'y'.repeat(70)}`;
+    for (const stmt of [
+      `ALTER TABLE t ADD CONSTRAINT ${name} CHECK (x > 0);`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${name} ON t (c);`,
+      `CREATE TRIGGER ${name} BEFORE INSERT ON t EXECUTE FUNCTION f();`,
+      `ALTER TABLE t RENAME CONSTRAINT old_name TO ${name};`,
+      `CREATE TYPE ${name} AS ENUM ('a');`,
+    ]) {
+      expect(findOverlongIdentifiers('0099_x.sql', stmt)).toHaveLength(1);
+    }
+  });
+
+  it('does not flag long text inside string literals or comments', () => {
+    // Prose and URLs legitimately run past 63 bytes; only identifiers matter.
+    const long = 'z'.repeat(80);
+    const sql = [
+      `-- a very long note ${long}`,
+      `/* block comment ${long} */`,
+      `INSERT INTO t (url) VALUES ('https://example.org/${long}');`,
+      `COMMENT ON TABLE t IS 'it''s a quoted apostrophe plus ${long}';`,
+    ].join('\n');
+    expect(findOverlongIdentifiers('0099_x.sql', sql)).toEqual([]);
+  });
+
+  it('still scans DDL inside a dollar-quoted DO block (migration 0097 shape)', () => {
+    const name = `d_${'w'.repeat(70)}`;
+    const sql = `DO $$ BEGIN CREATE INDEX ${name} ON t (c); END $$;`;
+    expect(findOverlongIdentifiers('0097_x.sql', sql)).toHaveLength(1);
   });
 
   it('reports each distinct over-long identifier once, however often it repeats', () => {
@@ -59,10 +104,10 @@ describe('findOverlongIdentifiers', () => {
     }
   });
 
-  it('does not mistake multi-line prose or JSON paths between quotes for identifiers', () => {
-    // A permissive `"[^"]+"` matches the span between two unrelated quotes and
-    // reports it as an enormous identifier — the exact false positive the
-    // narrow charset exists to avoid.
+  it('does not mistake prose or JSON paths between quotes for identifiers', () => {
+    // Comments and string literals are skipped by the scanner, so a `"` inside
+    // either cannot pair with a later one and report the span between them as
+    // one enormous identifier.
     const sql = [
       '-- A comment mentioning "one thing" and then, lines later,',
       '-- another quoted "phrase" in the same file.',
