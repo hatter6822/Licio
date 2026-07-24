@@ -108,6 +108,27 @@ export function withdrawConsequence(
   return nowMs - Date.parse(arena.created_at) <= graceMs ? 'grace' : 'penalized';
 }
 
+/**
+ * How soon a mounted standing consumer should REFETCH so a block heals itself
+ * the moment it expires (a composer left open through a cooldown or daily
+ * reset must re-enable without a remount): for a time-based block, poll to the
+ * reported deadline (clamped 1s–60s, so the instant after expiry re-reads);
+ * for a capacity block (no deadline — a slot frees on a verdict elsewhere), a
+ * slow 30s poll; unblocked ⇒ no polling.
+ */
+export function challengeStandingRefetchMs(
+  standing: ChallengeStanding,
+  nowMs: number,
+): number | false {
+  if (standing.blocked_by === null) return false;
+  const deadlines = [standing.cooldown_until, standing.daily_limit_resets_at]
+    .filter((value): value is string => value !== null)
+    .map((value) => Date.parse(value) - nowMs)
+    .filter((ms) => Number.isFinite(ms));
+  if (deadlines.length === 0) return 30_000;
+  return Math.min(Math.max(Math.min(...deadlines) + 1000, 1000), 60_000);
+}
+
 /** The withdraw confirm copy for the classification above. */
 export function withdrawConsequenceCopy(
   consequence: 'grace' | 'penalized',

@@ -290,11 +290,15 @@ export interface ChallengeOpenRow {
  *
  *   • capacity — mine must be among the first `capacity` PRE-VERDICT arenas;
  *   • velocity — mine must be among the first `opensPerDay` arenas opened in
- *     the trailing window (a voided open still counts as an open, so a burst
- *     burns its own budget and cannot convert racing into throughput).
+ *     the trailing window.
  *
  * The void is a same-instant GRACE withdrawal: racers are never cooled down
- * or penalized, and the once-per-target right is not consumed.
+ * or penalized, the once-per-target right is not consumed, and — like every
+ * grace retraction — the voided open is budget-exempt (grace costs and
+ * consumes NOTHING).  Racing still cannot convert into throughput: the
+ * survivor set is bounded by `capacity`, voided arenas never reach the
+ * adjudicator, and the per-account contribution limiter bounds the raw
+ * request churn.
  */
 export function challengeOpenSurvivesQuota(
   rows: readonly ChallengeOpenRow[],

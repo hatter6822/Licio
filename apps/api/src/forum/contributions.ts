@@ -599,6 +599,7 @@ export async function createContribution(
         nowIso: new Date(nowMs).toISOString(),
         opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
         withdrawWindowMs: challengePolicy.withdrawWindowMs,
+        graceMs: challengePolicy.withdrawGraceMs,
       }),
       kycVerified,
       nowMs,
@@ -636,6 +637,7 @@ export async function createContribution(
       capacity: standing.capacity,
       opensPerDay: challengePolicy.opensPerDay,
       opensCutoffIso: new Date(nowMs - CHALLENGE_OPENS_WINDOW_MS).toISOString(),
+      graceMs: challengePolicy.withdrawGraceMs,
     };
   }
 

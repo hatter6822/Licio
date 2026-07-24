@@ -255,6 +255,8 @@ export interface ChallengeQuotaRecheck {
   opensPerDay: number;
   /** now − the trailing opens window, ISO. */
   opensCutoffIso: string;
+  /** The grace window (policy) — grace-withdrawn rows are budget-exempt. */
+  graceMs: number;
 }
 
 /**
@@ -364,10 +366,14 @@ export async function maybeEnterDebate(
   // doc): runs BEFORE the target is tagged, so a voided open leaves no
   // `under_debate` mark to clear.  The void is a same-instant withdrawal —
   // GRACE by construction (the incumbent's clock still reads the open
-  // instant), so a racer is never cooled down and keeps their
-  // once-per-target right.
+  // instant), so a racer is never cooled down, keeps their once-per-target
+  // right, and — like every grace retraction — burns no daily budget.
   if (quota !== undefined && correction.userId !== null) {
-    const raced = await deps.debates.listChallengeOpens(correction.userId, quota.opensCutoffIso);
+    const raced = await deps.debates.listChallengeOpens(
+      correction.userId,
+      quota.opensCutoffIso,
+      quota.graceMs,
+    );
     if (!challengeOpenSurvivesQuota(raced, debateId, quota, quota.opensCutoffIso)) {
       await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
       deps.log('forum.debate_voided_quota', {

@@ -750,6 +750,7 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
       nowIso,
       opensWindowMs: 86_400_000,
       withdrawWindowMs: 30 * 86_400_000,
+      graceMs: 5 * 60_000,
     });
     const buckets = new Map(history.winsByOpponent.map((row) => [row.opponentKey, row.wins]));
     expect(buckets.get(ctx.opponentUser)).toBe(2);
@@ -757,9 +758,10 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(buckets.size).toBe(2);
     expect(history.adjudicatedLosses).toBe(1);
     expect(history.liveCount).toBe(1);
-    // Nine, not ten: the self-targeted win row above is outside the standing
-    // system in EVERY derivation — opens included.
-    expect(history.openTimesLast24h).toHaveLength(9);
+    // Eight, not ten: the self-targeted win row is outside the standing
+    // system in EVERY derivation, and the GRACE (untouched) withdrawal is
+    // budget-exempt — opens included for both.
+    expect(history.openTimesLast24h).toHaveLength(8);
     expect(history.withdrawals).toHaveLength(2);
     const engagement = history.withdrawals.map((row) => row.incumbentEngaged).sort();
     expect(engagement).toEqual([false, true]);
@@ -842,7 +844,7 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     const bothCreated = [live?.createdAt ?? '', terminal?.createdAt ?? ''].sort();
     // A cutoff BEFORE both opens returns the union with honest flags.
     const before = new Date(Date.parse(bothCreated[0] ?? '') - 1000).toISOString();
-    const all = await store.listChallengeOpens(challenger, before);
+    const all = await store.listChallengeOpens(challenger, before, 5 * 60_000);
     expect(new Map(all.map((r) => [r.debateId, r.preVerdict]))).toEqual(
       new Map([
         [live?.debateId ?? '', true],
@@ -852,7 +854,7 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     // A cutoff AFTER both drops the terminal open but keeps the live slot —
     // a pre-verdict arena can outlast the opens window.
     const after = new Date(Date.parse(bothCreated[1] ?? '') + 1000).toISOString();
-    const slots = await store.listChallengeOpens(challenger, after);
+    const slots = await store.listChallengeOpens(challenger, after, 5 * 60_000);
     expect(slots.map((r) => r.debateId)).toEqual([live?.debateId ?? '']);
     // A self-targeted LEGACY live arena never enters the recheck set — the
     // recheck counts the same rows the account gates count.
@@ -866,8 +868,23 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     );
     expect(selfRow).not.toBeNull();
     expect(
-      (await store.listChallengeOpens(challenger, before)).map((r) => r.debateId),
+      (await store.listChallengeOpens(challenger, before, 5 * 60_000)).map((r) => r.debateId),
     ).not.toContain(selfRow?.debateId ?? '');
+    // A GRACE withdrawal (fast unengaged retraction) is budget-exempt and
+    // never enters the recheck set either.
+    const graceArena = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(graceArena).not.toBeNull();
+    const graceBase = Date.parse(graceArena?.createdAt ?? '');
+    await store.withdraw(graceArena?.debateId ?? '', new Date(graceBase + 60_000).toISOString());
+    expect(
+      (await store.listChallengeOpens(challenger, before, 5 * 60_000)).map((r) => r.debateId),
+    ).not.toContain(graceArena?.debateId ?? '');
   });
 
   it('latestConcludedChallengeAt skips grace withdrawals and other challengers', async () => {

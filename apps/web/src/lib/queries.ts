@@ -5,6 +5,7 @@
 // rollback pattern for mutations. Every queryFn returns zod-validated data
 // (validated inside the RPC client), so nothing unvalidated reaches the cache.
 import type {
+  ChallengeStanding,
   ContributionWriteCreate,
   DebateOverrideRequest,
   DebatePositionUpdate,
@@ -600,6 +601,11 @@ export function usePostDebatePositionMutation(debateId: string) {
 export function useChallengeStandingQuery(
   target: { contributionId: string } | { storyId: string } | null,
   enabled = true,
+  /** Data-driven polling strategy (the composer passes the pure
+   *  `challengeStandingRefetchMs` so a mounted, BLOCKED composer heals itself
+   *  the moment its cooldown/daily deadline expires — `staleTime` alone never
+   *  re-enables a cached gate).  Absent ⇒ no polling. */
+  refetchMsOf?: (standing: ChallengeStanding, nowMs: number) => number | false,
 ) {
   const targetKey =
     target === null
@@ -612,6 +618,11 @@ export function useChallengeStandingQuery(
     enabled,
     queryFn: () => api.fetchChallengeStanding(target ?? undefined),
     staleTime: 15_000,
+    refetchInterval: (query) => {
+      const standing = query.state.data?.standing;
+      if (standing === undefined || refetchMsOf === undefined) return false;
+      return refetchMsOf(standing, Date.now());
+    },
   });
 }
 

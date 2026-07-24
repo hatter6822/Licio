@@ -369,9 +369,11 @@ The rationing layer over challenge creation — every number steward-tunable
   open lands (`listChallengeOpens` + `challengeOpenSurvivesQuota`, the
   open-vs-removal write-before-read discipline) and the overflow self-voids
   by the deterministic oldest-survives order — as a same-instant GRACE
-  withdrawal, so a racer is never cooled down and keeps their once-per-target
-  right, while the voided open still burns the velocity window (racing cannot
-  convert into throughput).
+  withdrawal, so a racer is never cooled down, keeps their once-per-target
+  right, and (like every grace retraction) burns no daily budget: grace costs
+  and consumes NOTHING, opens included.  Racing still cannot convert into
+  throughput — the survivor set is bounded by capacity, voided arenas never
+  reach the adjudicator, and the contribution limiter bounds request churn.
 - **Standing** (`GET /v1/challenge-standing` + optional target probe,
   `evaluateChallengeTarget` kept in lockstep with the create guard): the
   correction composer's pre-flight line, target-block copy, and the withdraw

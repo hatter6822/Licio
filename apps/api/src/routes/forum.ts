@@ -1299,6 +1299,7 @@ export function createForumRoutes() {
               nowIso: new Date(nowMs).toISOString(),
               opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
               withdrawWindowMs: policy.withdrawWindowMs,
+              graceMs: policy.withdrawGraceMs,
             }),
             kycVerified,
             nowMs,

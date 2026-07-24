@@ -272,6 +272,7 @@ describe('WS-T challenge policy — the post-open quota recheck (TOCTOU)', () =>
         capacity: 1,
         opensPerDay: 5,
         opensCutoffIso: new Date(nowMs - DAY_MS).toISOString(),
+        graceMs: 5 * 60_000,
       },
     );
     // The overflow open self-voided: no arena handed out, the row is a
@@ -285,6 +286,7 @@ describe('WS-T challenge policy — the post-open quota recheck (TOCTOU)', () =>
       nowIso: new Date(nowMs).toISOString(),
       opensWindowMs: DAY_MS,
       withdrawWindowMs: 30 * DAY_MS,
+      graceMs: 5 * 60_000,
     });
     expect(history.liveCount).toBe(1);
     expect(
@@ -346,6 +348,46 @@ describe('WS-T challenge policy — withdrawal pricing', () => {
     // No cooldown — and the once-per-target right was NOT consumed: the SAME
     // account may re-file against the SAME target immediately.
     const refiled = await post(challengeBody(targetId), challenger.cookie);
+    expect(refiled.status).toBe(201);
+  });
+});
+
+describe('WS-T challenge policy — grace and the daily budget', () => {
+  it('a grace withdrawal burns no daily budget (immediate re-file allowed)', async () => {
+    const tight = freshForumServices({
+      now: () => nowMs,
+      forumConfig: {
+        contributionsPerMinute: 100,
+        challengeOpensPerDay: 1,
+        challengeBaseCapacity: 10,
+      },
+    });
+    const tightAuthor = await seedUserWithSession(tight.identity);
+    const challenger = await seedUserWithSession(tight.identity);
+    const seeded = await seedThread(tight);
+    const target = (await postOk(contributionBody('comment', seeded.threadId), tightAuthor.cookie))
+      .contribution_id;
+    const filed = await postOk(
+      contributionBody('correction', seeded.threadId, { targetId: target }),
+      challenger.cookie,
+    );
+    nowMs += 2 * 60_000; // inside the grace window, incumbent silent
+    const withdrawn = await app().request(
+      jsonRequest(
+        `/v1/debates/${filed.metadata.debate_arena_id ?? ''}/withdraw`,
+        'POST',
+        {},
+        challenger.cookie,
+      ),
+    );
+    expect(withdrawn.status).toBe(200);
+    // opensPerDay is 1 and the grace-withdrawn open is budget-EXEMPT: the
+    // immediate re-file (same target — once-per-target also unconsumed)
+    // succeeds instead of a 24h challenge_daily_limit.
+    const refiled = await post(
+      contributionBody('correction', seeded.threadId, { targetId: target }),
+      challenger.cookie,
+    );
     expect(refiled.status).toBe(201);
   });
 });

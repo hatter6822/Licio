@@ -277,16 +277,25 @@ export interface DebateStore {
    *  opponents share one bucket so account deletion cannot launder the
    *  per-opponent dedup), the live PRE-VERDICT slot count
    *  (open/locked/awaiting_verdict — the slot frees at the verdict), opens
-   *  inside the trailing `opensWindowMs`, and the trailing
-   *  `withdrawWindowMs`'s withdrawn arenas (grace classification + cooldowns
-   *  happen in the pure policy layer).  Self-targeted LEGACY arenas are
+   *  inside the trailing `opensWindowMs` (GRACE withdrawals excluded — a
+   *  grace retraction costs and consumes NOTHING, the daily budget included;
+   *  the anti-race property never depended on budget burn: the survivor-set
+   *  capacity bounds concurrency and voided arenas never adjudicate), and the
+   *  trailing `withdrawWindowMs`'s withdrawn arenas (grace classification +
+   *  cooldowns happen in the pure policy layer).  Self-targeted LEGACY arenas are
    *  outside the standing system in EVERY derivation (the create guard
    *  refuses new ones): they build no wins, cost no slots, burn no budget,
    *  and trigger no withdrawal consequences.  All standing state derives from
    *  arena rows — never a counter table that can drift. */
   challengerHistory(
     userId: string,
-    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+    opts: {
+      nowIso: string;
+      opensWindowMs: number;
+      withdrawWindowMs: number;
+      /** The grace window (policy) — opens counting excludes grace rows. */
+      graceMs: number;
+    },
   ): Promise<ChallengerHistory>;
   /** Adjudicated `upheld` defenses of a COMMENT target whose LOCKED snapshot
    *  postdates `sinceIso` (the target's material-edit anchor) — the
@@ -314,13 +323,15 @@ export interface DebateStore {
   /** The post-open quota RECHECK input (challenge-policy.ts
    *  `challengeOpenSurvivesQuota`): every arena this challenger opened after
    *  `sinceIso` PLUS every pre-verdict arena regardless of age (a live slot
-   *  can outlast the opens window); self-targeted legacy arenas excluded —
-   *  the recheck counts the SAME set the account gates count.  Read AFTER an
+   *  can outlast the opens window); self-targeted legacy arenas AND
+   *  grace-withdrawn rows excluded — the recheck counts the SAME set the
+   *  account gates count.  Read AFTER an
    *  open lands so concurrent writers each observe the full raced set — the
    *  same write-before-read discipline as the open-vs-removal close. */
   listChallengeOpens(
     challengerUserId: string,
     sinceIso: string,
+    graceMs: number,
   ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]>;
   /** DSAR account-purge: detach `userId` from every arena they touch — NULLing
    *  the identity link on the incumbent / challenger / steward-override columns
@@ -842,7 +853,12 @@ export class InMemoryDebateStore implements DebateStore {
 
   async challengerHistory(
     userId: string,
-    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+    opts: {
+      nowIso: string;
+      opensWindowMs: number;
+      withdrawWindowMs: number;
+      graceMs: number;
+    },
   ): Promise<ChallengerHistory> {
     const nowMs = Date.parse(opts.nowIso);
     const opensCutoffMs = nowMs - opts.opensWindowMs;
@@ -860,7 +876,21 @@ export class InMemoryDebateStore implements DebateStore {
       // withdrawal cooldowns/penalties.
       if (row.incumbentUserId !== null && row.incumbentUserId === userId) continue;
       if (PRE_VERDICT.has(row.state)) liveCount += 1;
-      if (Date.parse(row.createdAt) > opensCutoffMs) openTimesLast24h.push(row.createdAt);
+      // A GRACE withdrawal consumed nothing — the daily budget included.
+      const graceWithdrawn =
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        isGraceWithdrawal(
+          {
+            createdAt: row.createdAt,
+            resolvedAt: row.resolvedAt,
+            incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+          },
+          opts.graceMs,
+        );
+      if (!graceWithdrawn && Date.parse(row.createdAt) > opensCutoffMs) {
+        openTimesLast24h.push(row.createdAt);
+      }
       if (
         row.state === 'withdrawn' &&
         row.resolvedAt !== null &&
@@ -930,6 +960,7 @@ export class InMemoryDebateStore implements DebateStore {
   async listChallengeOpens(
     challengerUserId: string,
     sinceIso: string,
+    graceMs: number,
   ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]> {
     const out: { debateId: string; createdAt: string; preVerdict: boolean }[] = [];
     for (const row of this.#rows.values()) {
@@ -939,6 +970,22 @@ export class InMemoryDebateStore implements DebateStore {
       if (row.incumbentUserId !== null && row.incumbentUserId === challengerUserId) continue;
       const preVerdict = PRE_VERDICT.has(row.state);
       if (!preVerdict && row.createdAt <= sinceIso) continue;
+      // Grace withdrawals consumed nothing (the gates exempt them too).
+      if (
+        !preVerdict &&
+        row.state === 'withdrawn' &&
+        row.resolvedAt !== null &&
+        isGraceWithdrawal(
+          {
+            createdAt: row.createdAt,
+            resolvedAt: row.resolvedAt,
+            incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
+          },
+          graceMs,
+        )
+      ) {
+        continue;
+      }
       out.push({ debateId: row.debateId, createdAt: row.createdAt, preVerdict });
     }
     return out;

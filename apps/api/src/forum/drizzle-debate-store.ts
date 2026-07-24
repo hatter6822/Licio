@@ -709,7 +709,12 @@ export class DrizzleDebateStore implements DebateStore {
 
   async challengerHistory(
     userId: string,
-    opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
+    opts: {
+      nowIso: string;
+      opensWindowMs: number;
+      withdrawWindowMs: number;
+      graceMs: number;
+    },
   ): Promise<ChallengerHistory> {
     const nowMs = Date.parse(opts.nowIso);
     const opensCutoff = new Date(nowMs - opts.opensWindowMs);
@@ -741,7 +746,12 @@ export class DrizzleDebateStore implements DebateStore {
         .from(debateArenasTable)
         .where(and(asChallenger, inArray(debateArenasTable.state, [...PRE_VERDICT_STATES]))),
       this.#db
-        .select({ createdAt: debateArenasTable.createdAt })
+        .select({
+          createdAt: debateArenasTable.createdAt,
+          state: debateArenasTable.state,
+          resolvedAt: debateArenasTable.resolvedAt,
+          incumbentLastActiveAt: debateArenasTable.incumbentLastActiveAt,
+        })
         .from(debateArenasTable)
         .where(and(asChallenger, gt(debateArenasTable.createdAt, opensCutoff))),
       this.#db
@@ -766,7 +776,24 @@ export class DrizzleDebateStore implements DebateStore {
       })),
       adjudicatedLosses: lossRows[0]?.losses ?? 0,
       liveCount: liveRows[0]?.live ?? 0,
-      openTimesLast24h: openRows.map((row) => iso(row.createdAt)),
+      // A GRACE withdrawal consumed nothing — the daily budget included.
+      openTimesLast24h: openRows
+        .filter(
+          (row) =>
+            !(
+              row.state === 'withdrawn' &&
+              row.resolvedAt !== null &&
+              isGraceWithdrawal(
+                {
+                  createdAt: iso(row.createdAt),
+                  resolvedAt: iso(row.resolvedAt),
+                  incumbentEngaged: row.incumbentLastActiveAt.getTime() > row.createdAt.getTime(),
+                },
+                opts.graceMs,
+              )
+            ),
+        )
+        .map((row) => iso(row.createdAt)),
       withdrawals: withdrawnRows.flatMap((row) =>
         row.resolvedAt === null
           ? []
@@ -886,12 +913,15 @@ export class DrizzleDebateStore implements DebateStore {
   async listChallengeOpens(
     challengerUserId: string,
     sinceIso: string,
+    graceMs: number,
   ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]> {
     const rows = await this.#db
       .select({
         debateId: debateArenasTable.debateId,
         createdAt: debateArenasTable.createdAt,
         state: debateArenasTable.state,
+        resolvedAt: debateArenasTable.resolvedAt,
+        incumbentLastActiveAt: debateArenasTable.incumbentLastActiveAt,
       })
       .from(debateArenasTable)
       .where(
@@ -909,11 +939,28 @@ export class DrizzleDebateStore implements DebateStore {
           ),
         ),
       );
-    return rows.map((row) => ({
-      debateId: row.debateId,
-      createdAt: iso(row.createdAt),
-      preVerdict: (PRE_VERDICT_STATES as readonly string[]).includes(row.state),
-    }));
+    return rows
+      .filter(
+        (row) =>
+          // Grace withdrawals consumed nothing (the gates exempt them too).
+          !(
+            row.state === 'withdrawn' &&
+            row.resolvedAt !== null &&
+            isGraceWithdrawal(
+              {
+                createdAt: iso(row.createdAt),
+                resolvedAt: iso(row.resolvedAt),
+                incumbentEngaged: row.incumbentLastActiveAt.getTime() > row.createdAt.getTime(),
+              },
+              graceMs,
+            )
+          ),
+      )
+      .map((row) => ({
+        debateId: row.debateId,
+        createdAt: iso(row.createdAt),
+        preVerdict: (PRE_VERDICT_STATES as readonly string[]).includes(row.state),
+      }));
   }
 
   async anonymizeParty(userId: string): Promise<number> {

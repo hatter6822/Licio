@@ -7,6 +7,7 @@ import type { ChallengeStanding } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import {
   challengeRejectionCopy,
+  challengeStandingRefetchMs,
   standingSummary,
   targetBlockCopy,
   withdrawConsequence,
@@ -103,6 +104,36 @@ describe('challengeRejectionCopy', () => {
   it('speaks about settling in the settled copies', () => {
     expect(targetBlockCopy('settled')).toContain('settled');
     expect(challengeRejectionCopy('target_settled')).toContain('steward');
+  });
+});
+
+describe('challengeStandingRefetchMs', () => {
+  it('never polls while unblocked', () => {
+    expect(challengeStandingRefetchMs(standing(), NOW)).toBe(false);
+  });
+
+  it('polls to a time-based deadline, clamped to [1s, 60s]', () => {
+    const far = standing({
+      blocked_by: 'cooldown',
+      cooldown_until: new Date(NOW + 90 * 60_000).toISOString(),
+    });
+    expect(challengeStandingRefetchMs(far, NOW)).toBe(60_000);
+    const near = standing({
+      blocked_by: 'daily_limit',
+      daily_limit_resets_at: new Date(NOW + 10_000).toISOString(),
+    });
+    expect(challengeStandingRefetchMs(near, NOW)).toBe(11_000);
+    const past = standing({
+      blocked_by: 'cooldown',
+      cooldown_until: new Date(NOW - 5_000).toISOString(),
+    });
+    expect(challengeStandingRefetchMs(past, NOW)).toBe(1_000);
+  });
+
+  it('slow-polls a capacity block (no deadline to wait for)', () => {
+    expect(
+      challengeStandingRefetchMs(standing({ blocked_by: 'capacity', available: 0 }), NOW),
+    ).toBe(30_000);
   });
 });
 

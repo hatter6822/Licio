@@ -29,7 +29,12 @@ import { ReportSheet } from '../safety/ReportSheet.js';
 import { DisputeBadge } from '../story/DisputeBadge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Icon } from '../ui/Icon/index.js';
-import { challengeRejectionCopy, standingSummary, targetBlockCopy } from './challenge-standing.js';
+import {
+  challengeRejectionCopy,
+  challengeStandingRefetchMs,
+  standingSummary,
+  targetBlockCopy,
+} from './challenge-standing.js';
 
 /** Trailing autosave debounce: one encrypt+write per pause (mirrors StoryComposer). */
 const DRAFT_DEBOUNCE_MS = 800;
@@ -675,6 +680,8 @@ export function CorrectionComposer({
   // filed (settled target, capacity, cooldown…) instead of failing the submit.
   const standingQuery = useChallengeStandingQuery(
     'commentId' in target ? { contributionId: target.commentId } : { storyId },
+    true,
+    challengeStandingRefetchMs,
   );
   const standing = standingQuery.data?.standing;
   const account = standing === undefined ? null : standingSummary(standing, Date.now());
