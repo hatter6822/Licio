@@ -1351,12 +1351,16 @@ export function createForumRoutes() {
       )
       // Steward/admin unsettle — the settled-content escape hatch: reopens a
       // SETTLED target for challenges when genuinely new evidence emerges.
-      // Room content: the room's stewards, or the platform ADMIN under the
-      // per-session MFA bar (the override route's arm, WS-D.1.5b); Commons
-      // content (no room) is admin-only — no steward exists to hold the power.
-      // The settled mark alone clears; the `validated` badge (and its ranking
-      // treatment) stands — unsettling reopens the debate lane, it does not
-      // un-adjudicate the record.
+      // The gate is the SAME arm family as the debate override (WS-D.1.5b):
+      // the target's home-room stewards, or the platform ADMIN under the
+      // per-session MFA bar.  The Commons is a room like any other here — its
+      // (platform-controlled) steward grants already hold the strictly
+      // STRONGER verdict-override power over Commons arenas, so carving it
+      // out of the weaker unsettle would guard nothing; a thread with NO home
+      // room (impossible today — threads.room_id is NOT NULL) falls back to
+      // the admin arm alone.  The settled mark alone clears; the `validated`
+      // badge (and its ranking treatment) stands — unsettling reopens the
+      // debate lane, it does not un-adjudicate the record.
       .post(
         '/contributions/:contributionId/unsettle',
         authMiddleware(),
@@ -1390,11 +1394,10 @@ export function createForumRoutes() {
           if (row.settledAt === null) {
             return c.json(deny('not_settled', 'This content is not settled.'), 409);
           }
-          await bundle.forum.contributions.setDisputeStatus(
-            contributionId,
-            row.disputeStatus,
-            null,
-          );
+          // Clears ONLY the settled mark: writing the pre-authorization
+          // `disputeStatus` read back would race a concurrent material edit
+          // and re-certify text the edit just reset (codex on PR #168).
+          await bundle.forum.contributions.clearSettled(contributionId);
           bundle.forum.metrics.increment('contributions.unsettled');
           bundle.forum.log('forum.dispute_unsettled', {
             target_type: 'comment',

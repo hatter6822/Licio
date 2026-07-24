@@ -299,6 +299,11 @@ export interface ContributionStore {
     status: ContributionDisputeStatus,
     settledAt?: string | null,
   ): Promise<ContributionRecord | null>;
+  /** WS-T — clear ONLY the settled mark (the steward/admin unsettle), leaving
+   *  `disputeStatus` untouched: writing a pre-read status back would race a
+   *  concurrent material edit and re-certify text the edit just reset.
+   *  Idempotent; returns null for an unknown id. */
+  clearSettled(contributionId: string): Promise<ContributionRecord | null>;
   /** WS-T challenge policy — the row's material-edit anchor: the latest edit-
    *  history instant, or null when never edited (callers fall back to
    *  `createdAt`).  Settle counts and the once-per-target guard compare arena
@@ -922,6 +927,14 @@ export class InMemoryContributionStore implements ContributionStore {
     if (!row) return null;
     row.disputeStatus = status;
     if (settledAt !== undefined) row.settledAt = settledAt;
+    row.updatedAt = iso(this.#now);
+    return row;
+  }
+
+  async clearSettled(contributionId: string): Promise<ContributionRecord | null> {
+    const row = this.#rows.get(contributionId);
+    if (!row) return null;
+    row.settledAt = null;
     row.updatedAt = iso(this.#now);
     return row;
   }

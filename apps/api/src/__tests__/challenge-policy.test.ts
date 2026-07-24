@@ -10,6 +10,7 @@ import {
   CHALLENGE_OPENS_WINDOW_MS,
   type ChallengePolicy,
   type ChallengerHistory,
+  challengeOpenSurvivesQuota,
   challengePolicyFromConfig,
   challengePolicyWire,
   computeChallengeStanding,
@@ -294,6 +295,56 @@ describe('computeChallengeStanding — velocity and slots', () => {
       POLICY,
     );
     expect(standing.blockedBy).toBe('cooldown');
+  });
+});
+
+describe('challengeOpenSurvivesQuota — the post-open TOCTOU recheck', () => {
+  const cutoff = iso(NOW - DAY_MS);
+  const quota = { capacity: 1, opensPerDay: 5 };
+  const row = (id: string, atMs: number, preVerdict = true) => ({
+    debateId: id,
+    createdAt: iso(atMs),
+    preVerdict,
+  });
+
+  it('keeps a lone open inside the quota', () => {
+    expect(challengeOpenSurvivesQuota([row('a', NOW)], 'a', quota, cutoff)).toBe(true);
+  });
+
+  it('voids exactly the overflow: oldest survives, newer racer self-voids', () => {
+    const raced = [row('a', NOW - 1000), row('b', NOW)];
+    expect(challengeOpenSurvivesQuota(raced, 'a', quota, cutoff)).toBe(true);
+    expect(challengeOpenSurvivesQuota(raced, 'b', quota, cutoff)).toBe(false);
+  });
+
+  it('breaks same-instant ties deterministically by debate id', () => {
+    const raced = [row('b', NOW), row('a', NOW)];
+    expect(challengeOpenSurvivesQuota(raced, 'a', quota, cutoff)).toBe(true);
+    expect(challengeOpenSurvivesQuota(raced, 'b', quota, cutoff)).toBe(false);
+  });
+
+  it('enforces the velocity window too — terminal opens still count', () => {
+    const raced = [row('old', NOW - HOUR_MS, false), row('mine', NOW)];
+    expect(challengeOpenSurvivesQuota(raced, 'mine', { capacity: 5, opensPerDay: 1 }, cutoff)).toBe(
+      false,
+    );
+    // The older open itself would have survived.
+    expect(challengeOpenSurvivesQuota(raced, 'old', { capacity: 5, opensPerDay: 1 }, cutoff)).toBe(
+      true,
+    );
+  });
+
+  it('counts a pre-verdict arena OLDER than the opens window against capacity only', () => {
+    const raced = [row('stale-live', NOW - 2 * DAY_MS, true), row('mine', NOW)];
+    expect(challengeOpenSurvivesQuota(raced, 'mine', quota, cutoff)).toBe(false);
+    expect(challengeOpenSurvivesQuota(raced, 'mine', { capacity: 2, opensPerDay: 1 }, cutoff)).toBe(
+      true,
+    );
+  });
+
+  it('keeps an open the lifecycle already judged out of the live set', () => {
+    const raced = [row('other', NOW - 1000, true), row('mine', NOW, false)];
+    expect(challengeOpenSurvivesQuota(raced, 'mine', quota, cutoff)).toBe(true);
   });
 });
 

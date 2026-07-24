@@ -43,6 +43,7 @@ import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { mapBounded } from '../lib/concurrency.js';
 import {
   type ChallengePolicy,
+  challengeOpenSurvivesQuota,
   challengePolicyFromConfig,
   isGraceWithdrawal,
 } from './challenge-policy.js';
@@ -246,15 +247,30 @@ export interface CorrectionForDebate {
   metadata: ContributionMetadata;
 }
 
+/** The per-user quota the post-open recheck enforces (resolved by the CREATE
+ *  path with the caller's policy override applied; absent ⇒ no recheck —
+ *  legacy call sites and the demo seed open outside the quota system). */
+export interface ChallengeQuotaRecheck {
+  capacity: number;
+  opensPerDay: number;
+  /** now − the trailing opens window, ISO. */
+  opensCutoffIso: string;
+}
+
 /**
  * Open a debate arena for a sourced correction, if one is not already open for
  * the same target.  Marks the target `under_debate`.  Returns the arena, or null
- * when the target is unknown / an arena is already open.
+ * when the target is unknown / an arena is already open — or when the post-open
+ * QUOTA recheck voids it (`challengeOpenSurvivesQuota`: the account-level
+ * capacity/velocity gates are read-then-act, so parallel corrections could
+ * otherwise all pass before any arena exists; each writer re-reads the raced
+ * set after its own open and the overflow self-voids as a grace withdrawal).
  */
 export async function maybeEnterDebate(
   deps: DebateDeps,
   correction: CorrectionForDebate,
   debateId: string,
+  quota?: ChallengeQuotaRecheck,
 ): Promise<DebateArenaRecord | null> {
   const targetContributionId = correction.metadata.target_contribution_id ?? null;
   const targetStoryId = correction.metadata.target_story_id ?? null;
@@ -343,6 +359,24 @@ export async function maybeEnterDebate(
       story_id: correction.storyId,
     });
     return null;
+  }
+  // WS-T challenge policy — the post-open quota recheck (see the function
+  // doc): runs BEFORE the target is tagged, so a voided open leaves no
+  // `under_debate` mark to clear.  The void is a same-instant withdrawal —
+  // GRACE by construction (the incumbent's clock still reads the open
+  // instant), so a racer is never cooled down and keeps their
+  // once-per-target right.
+  if (quota !== undefined && correction.userId !== null) {
+    const raced = await deps.debates.listChallengeOpens(correction.userId, quota.opensCutoffIso);
+    if (!challengeOpenSurvivesQuota(raced, debateId, quota, quota.opensCutoffIso)) {
+      await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
+      deps.log('forum.debate_voided_quota', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
+      });
+      return null;
+    }
   }
   // Mark the challenged target `under_debate` (visible; not hidden).
   if (targetType === 'comment' && targetContributionId !== null) {

@@ -785,6 +785,43 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(await store.countUpheldDefensesForStory(ctx.storyId, anchor)).toBe(1);
   });
 
+  it('listChallengeOpens unions pre-verdict arenas with window-scoped opens', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const challenger = await ctx.newUser();
+    // Terminal first: the one-live-per-target guard refuses ANY insert on a
+    // target that already carries a live arena.
+    const terminal = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'resolved',
+        verdict: 'inconclusive',
+        winner: 'none',
+        decidedBy: 'ai',
+        resolvedAt: '2026-07-05T06:00:00.000Z',
+      }),
+    );
+    expect(terminal).not.toBeNull();
+    const live = await store.open(makeArena(ctx, { challengerUserId: challenger }));
+    expect(live).not.toBeNull();
+    const bothCreated = [live?.createdAt ?? '', terminal?.createdAt ?? ''].sort();
+    // A cutoff BEFORE both opens returns the union with honest flags.
+    const before = new Date(Date.parse(bothCreated[0] ?? '') - 1000).toISOString();
+    const all = await store.listChallengeOpens(challenger, before);
+    expect(new Map(all.map((r) => [r.debateId, r.preVerdict]))).toEqual(
+      new Map([
+        [live?.debateId ?? '', true],
+        [terminal?.debateId ?? '', false],
+      ]),
+    );
+    // A cutoff AFTER both drops the terminal open but keeps the live slot —
+    // a pre-verdict arena can outlast the opens window.
+    const after = new Date(Date.parse(bothCreated[1] ?? '') + 1000).toISOString();
+    const slots = await store.listChallengeOpens(challenger, after);
+    expect(slots.map((r) => r.debateId)).toEqual([live?.debateId ?? '']);
+  });
+
   it('latestConcludedChallengeAt skips grace withdrawals and other challengers', async () => {
     const store = makeStore();
     const ctx = await freshCtx();

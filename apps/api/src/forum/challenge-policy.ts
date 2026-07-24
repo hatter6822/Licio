@@ -271,6 +271,50 @@ export function computeChallengeStanding(
   };
 }
 
+/** One arena in the post-open quota recheck set
+ *  (`DebateStore.listChallengeOpens`). */
+export interface ChallengeOpenRow {
+  debateId: string;
+  createdAt: string;
+  preVerdict: boolean;
+}
+
+/**
+ * The post-open quota RECHECK (the TOCTOU close): the account-level gates are
+ * read-then-act, so N parallel corrections can all pass them before any arena
+ * exists.  Every writer therefore re-reads the full raced set AFTER its own
+ * open lands (write-before-read, the open-vs-removal discipline) and keeps its
+ * arena only while it sits inside the quota by the OLDEST-SURVIVES order
+ * (createdAt, then debateId — deterministic across racers, so exactly the
+ * overflow self-voids and at least `capacity` survivors always remain):
+ *
+ *   • capacity — mine must be among the first `capacity` PRE-VERDICT arenas;
+ *   • velocity — mine must be among the first `opensPerDay` arenas opened in
+ *     the trailing window (a voided open still counts as an open, so a burst
+ *     burns its own budget and cannot convert racing into throughput).
+ *
+ * The void is a same-instant GRACE withdrawal: racers are never cooled down
+ * or penalized, and the once-per-target right is not consumed.
+ */
+export function challengeOpenSurvivesQuota(
+  rows: readonly ChallengeOpenRow[],
+  mineDebateId: string,
+  quota: { capacity: number; opensPerDay: number },
+  opensCutoffIso: string,
+): boolean {
+  const byAge = [...rows].sort(
+    (a, b) => a.createdAt.localeCompare(b.createdAt) || a.debateId.localeCompare(b.debateId),
+  );
+  const liveRank = byAge
+    .filter((row) => row.preVerdict)
+    .findIndex((row) => row.debateId === mineDebateId);
+  if (liveRank >= quota.capacity) return false;
+  const opensRank = byAge
+    .filter((row) => row.createdAt > opensCutoffIso)
+    .findIndex((row) => row.debateId === mineDebateId);
+  return opensRank < quota.opensPerDay;
+}
+
 /** The policy echo the standing endpoint serves (wire snake_case) — the
  *  CONSUMED subset only, per the shared schema's note: the client bundle pays
  *  for every field it parses, so a constant joins the echo with its surface. */

@@ -554,6 +554,15 @@ export class DrizzleContributionStore implements ContributionStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async clearSettled(contributionId: string): Promise<ContributionRecord | null> {
+    const rows = await this.#db
+      .update(contributionsTable)
+      .set({ settledAt: null, updatedAt: new Date() })
+      .where(eq(contributionsTable.contributionId, contributionId))
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async latestEditAt(contributionId: string): Promise<string | null> {
     const rows = await this.#db
       .select({ editedAt: contributionEditHistory.editedAt })

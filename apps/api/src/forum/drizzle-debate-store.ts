@@ -872,6 +872,33 @@ export class DrizzleDebateStore implements DebateStore {
     return latest;
   }
 
+  async listChallengeOpens(
+    challengerUserId: string,
+    sinceIso: string,
+  ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]> {
+    const rows = await this.#db
+      .select({
+        debateId: debateArenasTable.debateId,
+        createdAt: debateArenasTable.createdAt,
+        state: debateArenasTable.state,
+      })
+      .from(debateArenasTable)
+      .where(
+        and(
+          eq(debateArenasTable.challengerUserId, challengerUserId),
+          or(
+            inArray(debateArenasTable.state, [...PRE_VERDICT_STATES]),
+            gt(debateArenasTable.createdAt, new Date(sinceIso)),
+          ),
+        ),
+      );
+    return rows.map((row) => ({
+      debateId: row.debateId,
+      createdAt: iso(row.createdAt),
+      preVerdict: (PRE_VERDICT_STATES as readonly string[]).includes(row.state),
+    }));
+  }
+
   async anonymizeParty(userId: string): Promise<number> {
     // One statement, CASE per column: an arena where the user is incumbent AND
     // steward-override (or any combination) is NULLed everywhere and counted

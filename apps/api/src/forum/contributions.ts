@@ -49,6 +49,7 @@ import {
   resolveChallengePolicy,
 } from './challenge-policy.js';
 import {
+  type ChallengeQuotaRecheck,
   closeDebatesForRemoval,
   debateDueToLock,
   liveArenasForContribution,
@@ -459,6 +460,7 @@ export async function createContribution(
     request.type === 'correction'
       ? resolveChallengePolicy(config, forum.challengePolicyOverride, userId)
       : null;
+  let challengeQuota: ChallengeQuotaRecheck | null = null;
   if (request.type === 'correction' && challengePolicy !== null) {
     if (request.target_contribution_id !== undefined) {
       const target = await forum.contributions.getById(request.target_contribution_id);
@@ -627,6 +629,14 @@ export async function createContribution(
         `You have ${standing.liveCount} of ${standing.capacity} challenges in flight — a slot frees when a debate reaches its verdict or you withdraw. Winning adjudicated debates${kycVerified ? '' : ' and verifying your identity'} raises your capacity.`,
       );
     }
+    // The gates above are read-then-act; the arena open below re-checks the
+    // raced set against THIS resolved quota and self-voids on overflow
+    // (maybeEnterDebate + challengeOpenSurvivesQuota — the TOCTOU close).
+    challengeQuota = {
+      capacity: standing.capacity,
+      opensPerDay: challengePolicy.opensPerDay,
+      opensCutoffIso: new Date(nowMs - CHALLENGE_OPENS_WINDOW_MS).toISOString(),
+    };
   }
 
   if (request.lens_id !== undefined) {
@@ -974,6 +984,7 @@ export async function createContribution(
           metadata: contribution.metadata,
         },
         debateArenaId,
+        challengeQuota ?? undefined,
       );
       if (openedArena !== null) {
         // PERSIST the back-reference onto the stored record so EVERY projection

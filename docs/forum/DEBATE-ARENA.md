@@ -340,10 +340,22 @@ The rationing layer over challenge creation — every number steward-tunable
   wire schema, ranking feature, search filter, and badge keeps its exact
   vocabulary (a settled row still reads `validated`; ranking/search are
   untouched by construction).
-- **Unsettle** (`POST /v1/{contributions,stories}/:id/unsettle`): room
-  stewards, or the platform ADMIN under the per-session MFA bar (the override
-  route's arm); clears `settled_at` only — the adjudicated `validated` record
-  stands, and the next upheld defense re-settles immediately.
+- **Unsettle** (`POST /v1/{contributions,stories}/:id/unsettle`): the
+  target's home-room stewards (the Commons included — the same arm that
+  already holds the stronger verdict override), or the platform ADMIN under
+  the per-session MFA bar; clears `settled_at` ONLY (`clearSettled` — writing
+  a pre-read dispute status back would race a concurrent material edit and
+  re-certify text the edit just reset), so the adjudicated `validated` record
+  stands and the next upheld defense re-settles immediately.
+- **The quota TOCTOU close**: the account-level create gates are
+  read-then-act, so N parallel corrections could all pass before any arena
+  exists.  `maybeEnterDebate` therefore re-reads the raced set AFTER its own
+  open lands (`listChallengeOpens` + `challengeOpenSurvivesQuota`, the
+  open-vs-removal write-before-read discipline) and the overflow self-voids
+  by the deterministic oldest-survives order — as a same-instant GRACE
+  withdrawal, so a racer is never cooled down and keeps their once-per-target
+  right, while the voided open still burns the velocity window (racing cannot
+  convert into throughput).
 - **Standing** (`GET /v1/challenge-standing` + optional target probe,
   `evaluateChallengeTarget` kept in lockstep with the create guard): the
   correction composer's pre-flight line, target-block copy, and the withdraw

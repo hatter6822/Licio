@@ -7,6 +7,8 @@
 // the settled threshold (three adjudicated upheld defenses), and the
 // material-edit reset.  The pure math is covered in challenge-policy.test.ts;
 // these tests drive the REAL create/withdraw/scheduler paths end to end.
+
+import { randomUUID } from 'node:crypto';
 import type { DebateJudgeVerdict } from '@licio/ai-governance';
 import {
   type ChallengeStandingResponse,
@@ -17,7 +19,8 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { runDebateSchedulerTick } from '../forum/debate-scheduler.js';
+import { maybeEnterDebate } from '../forum/debate.js';
+import { buildDebateDeps, runDebateSchedulerTick } from '../forum/debate-scheduler.js';
 import { createV1Routes } from '../routes/v1.js';
 import type { SeededUser } from './event-test-helpers.js';
 import {
@@ -219,6 +222,74 @@ describe('WS-T challenge policy — capacity and velocity', () => {
     expect((await post(challengeBody(await seedTarget()), challenger.cookie)).status).toBe(201);
     const third = await post(challengeBody(await seedTarget()), challenger.cookie);
     expect(await errorCode(third)).toBe('challenge_capacity_reached');
+  });
+});
+
+describe('WS-T challenge policy — the post-open quota recheck (TOCTOU)', () => {
+  it('self-voids a raced overflow open as a grace withdrawal', async () => {
+    const challenger = await seedUserWithSession(fixture.identity);
+    // One live arena occupies the (floor) capacity of 1.
+    await postOk(challengeBody(await seedTarget()), challenger.cookie);
+    // Simulate the RACED request that already passed the account gates before
+    // the first arena existed: its correction row is inserted directly and
+    // the arena open runs with the same resolved quota the gate computed.
+    const target2 = await seedTarget();
+    const racedCorrectionId = randomUUID();
+    const inserted = await fixture.forum.contributions.insert({
+      contributionId: racedCorrectionId,
+      threadId,
+      userId: challenger.userId,
+      type: 'correction',
+      body: 'Raced challenge.',
+      citations: [{ url: 'https://example.org/raced' }],
+      metadata: { target_contribution_id: target2 },
+      targetClaimId: null,
+      parentContributionId: target2,
+      clientDraftId: `draft-${racedCorrectionId}`,
+      path: [target2],
+      moderationState: 'published',
+    });
+    expect(inserted.ok).toBe(true);
+    const racedArenaId = randomUUID();
+    const opened = await maybeEnterDebate(
+      buildDebateDeps(fixture.forum, fixture.ingestion),
+      {
+        contributionId: racedCorrectionId,
+        threadId,
+        storyId: (await fixture.ingestion.stories.getThreadById(threadId))?.storyId ?? '',
+        roomId: (await fixture.ingestion.stories.getThreadById(threadId))?.roomId ?? null,
+        userId: challenger.userId,
+        body: 'Raced challenge.',
+        citations: [{ url: 'https://example.org/raced' }],
+        metadata: { target_contribution_id: target2 },
+      },
+      racedArenaId,
+      {
+        capacity: 1,
+        opensPerDay: 5,
+        opensCutoffIso: new Date(nowMs - DAY_MS).toISOString(),
+      },
+    );
+    // The overflow open self-voided: no arena handed out, the row is a
+    // terminal withdrawal, and the target was never tagged.
+    expect(opened).toBeNull();
+    expect((await fixture.forum.debates.getById(racedArenaId))?.state).toBe('withdrawn');
+    expect((await fixture.forum.contributions.getById(target2))?.disputeStatus).toBe('none');
+    // GRACE by construction: the racer is not cooled down and keeps the
+    // once-per-target right on that target.
+    const history = await fixture.forum.debates.challengerHistory(challenger.userId, {
+      nowIso: new Date(nowMs).toISOString(),
+      opensWindowMs: DAY_MS,
+      withdrawWindowMs: 30 * DAY_MS,
+    });
+    expect(history.liveCount).toBe(1);
+    expect(
+      await fixture.forum.debates.latestConcludedChallengeAt(
+        { contributionId: target2 },
+        challenger.userId,
+        5 * 60_000,
+      ),
+    ).toBeNull();
   });
 });
 
@@ -429,6 +500,40 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     const resettled = await fixture.forum.contributions.getById(targetId);
     expect(resettled?.disputeStatus).toBe('validated');
     expect(resettled?.settledAt).not.toBeNull();
+  });
+
+  it('unsettle never re-certifies a materially edited row (settled mark only)', async () => {
+    const targetId = await seedTarget();
+    await settleTarget(targetId);
+    const steward = await seedUserWithSession(fixture.identity);
+    await fixture.forum.rooms.addSteward({
+      roomId: COMMONS_ROOM_ID,
+      userId: steward.userId,
+      role: 'community_steward',
+      assignedAt: new Date(nowMs).toISOString(),
+    });
+    // The author materially edits: the version reset clears validated+settled.
+    nowMs += 60_000;
+    const edit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Edited between settle and unsettle.' },
+        author.cookie,
+      ),
+    );
+    expect(edit.status).toBe(200);
+    // The unsettle finds nothing settled (409) — and even the worst-case late
+    // write is harmless: the unsettle path touches ONLY the settled mark, so
+    // the edit's reset can never be overwritten with a stale `validated`.
+    const refused = await app().request(
+      jsonRequest(`/v1/contributions/${targetId}/unsettle`, 'POST', {}, steward.cookie),
+    );
+    expect(refused.status).toBe(409);
+    await fixture.forum.contributions.clearSettled(targetId);
+    const row = await fixture.forum.contributions.getById(targetId);
+    expect(row?.disputeStatus).toBe('none');
+    expect(row?.settledAt).toBeNull();
   });
 });
 

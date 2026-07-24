@@ -303,6 +303,16 @@ export interface DebateStore {
     challengerUserId: string,
     graceMs: number,
   ): Promise<string | null>;
+  /** The post-open quota RECHECK input (challenge-policy.ts
+   *  `challengeOpenSurvivesQuota`): every arena this challenger opened after
+   *  `sinceIso` PLUS every pre-verdict arena regardless of age (a live slot
+   *  can outlast the opens window).  Read AFTER an open lands so concurrent
+   *  writers each observe the full raced set — the same write-before-read
+   *  discipline as the open-vs-removal close. */
+  listChallengeOpens(
+    challengerUserId: string,
+    sinceIso: string,
+  ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]>;
   /** DSAR account-purge: detach `userId` from every arena they touch — NULLing
    *  the identity link on the incumbent / challenger / steward-override columns
    *  — while the rebuttal text persists per §22.4 (mirrors contribution
@@ -897,6 +907,20 @@ export class InMemoryDebateStore implements DebateStore {
       if (concludedAt !== null && (latest === null || concludedAt > latest)) latest = concludedAt;
     }
     return latest;
+  }
+
+  async listChallengeOpens(
+    challengerUserId: string,
+    sinceIso: string,
+  ): Promise<{ debateId: string; createdAt: string; preVerdict: boolean }[]> {
+    const out: { debateId: string; createdAt: string; preVerdict: boolean }[] = [];
+    for (const row of this.#rows.values()) {
+      if (row.challengerUserId !== challengerUserId) continue;
+      const preVerdict = PRE_VERDICT.has(row.state);
+      if (!preVerdict && row.createdAt <= sinceIso) continue;
+      out.push({ debateId: row.debateId, createdAt: row.createdAt, preVerdict });
+    }
+    return out;
   }
 
   async anonymizeParty(userId: string): Promise<number> {
