@@ -299,6 +299,61 @@ platform legal floor).
   including the lock CAS, withdrawal/concession, the activity clocks, and the
   both-sides-idle sweep over the partial `greatest(...)` index.
 
+## The challenge policy (SPEC §15.4 "The challenge policy")
+
+The rationing layer over challenge creation — every number steward-tunable
+(`ForumRuntimeConfig` `challenge*` keys), every derivation event-sourced from
+`debate_arenas` rows (the moderation-reports quota pattern: no counter tables).
+
+- **The pure math** lives in `apps/api/src/forum/challenge-policy.ts`
+  (`computeChallengeStanding`, `isGraceWithdrawal`, `resolveChallengePolicy`):
+  capacity = clamp(base 1 + KYC bonus + earned tier − active withdrawal
+  penalties, 1, ceiling). Tiers count ADJUDICATED challenger wins only
+  (`decided_by ∈ {ai, steward}` — concessions credit nothing), deduped per
+  opponent (tombstoned incumbents share one bucket so account deletion cannot
+  launder the dedup), gated on the adjudicated win rate. Slots are PRE-VERDICT
+  arenas (open/locked/awaiting_verdict); the verdict frees the slot.
+- **The store derivations** (`DebateStore.challengerHistory`,
+  `countUpheldDefensesFor{Comment,Story}`, `latestConcludedChallengeAt`) run in
+  both adapters over the `debate_arenas (challenger_user_id, state)` index
+  (migration 0096) and are pinned by the parameterized contract test.
+- **Enforcement** is the correction branch of `createContribution`
+  (target-order first: self-challenge → dispute status → settled →
+  once-per-target, then account-order: cooldown → daily budget → capacity,
+  with typed rejections `cannot_challenge_own_content`, `target_settled`,
+  `target_already_challenged`, `challenge_cooldown`, `challenge_daily_limit`,
+  `challenge_capacity_reached`). The KYC read is a seam
+  (`ForumServices.kycReader`, boot-wired to compliance `kycLevel ===
+  'kyc_partner'`, fail-closed false — a booster only, never a gate).
+- **Material-edit anchors.** Comments anchor at their latest edit-history
+  instant (`ContributionStore.latestEditAt` — immaterial no-op PATCHes no
+  longer write history, so the anchor cannot be moved by contentless pings);
+  stories anchor at `created_at` (no author edit path exists;
+  `last_material_update_at` is the conversation-freshness clock — every new
+  comment bumps it — and must NEVER anchor these guards). A material edit
+  clears `validated` + `settled_at` in the edit path itself.
+- **Settling** happens in `finalizeDebate`: an upheld outcome counts the
+  target's prior adjudicated upheld defenses since its anchor (self-targeted
+  legacy arenas excluded) and stamps `settled_at` at the threshold.
+  `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
+  (migration 0096) — never a dispute-status enum value — so every existing
+  wire schema, ranking feature, search filter, and badge keeps its exact
+  vocabulary (a settled row still reads `validated`; ranking/search are
+  untouched by construction).
+- **Unsettle** (`POST /v1/{contributions,stories}/:id/unsettle`): room
+  stewards, or the platform ADMIN under the per-session MFA bar (the override
+  route's arm); clears `settled_at` only — the adjudicated `validated` record
+  stands, and the next upheld defense re-settles immediately.
+- **Standing** (`GET /v1/challenge-standing` + optional target probe,
+  `evaluateChallengeTarget` kept in lockstep with the create guard): the
+  correction composer's pre-flight line, target-block copy, and the withdraw
+  dialog's grace/penalized consequence (`challenge-standing.ts` on the web —
+  pure copy model, `debate-summary.ts` pattern).
+- **Sim/test seams**: `ForumServices.challengePolicyOverride` (the
+  `DebateWindowsOverride` pattern — the DEV simulator raises caps and zeroes
+  cooldowns for synthetic personas only; a real dev account keeps production
+  policy).
+
 ## Residuals
 
 - Field confirmation of the live stream on physical browsers at scale (the
@@ -309,3 +364,18 @@ platform legal floor).
   snapshot (`locked_content`) that quotes an anonymized contribution — the
   arena is the transparency artifact of a judged dispute, but the DSAR sweep
   should redact snapshot bodies for erased authors (tracked here).
+- Card-level SETTLED presentation: the story/comment cards still badge a
+  settled row as "Validated" — `settled_at` is deliberately not on the card
+  wire yet (the strict projection schemas would hard-fail stale cached PWA
+  bundles on an unknown key). The settled distinction currently surfaces in
+  the composer probe, the create rejection, and the standing endpoint; add
+  the badge variant on the next coordinated wire-schema rev.
+- If a story author-edit path ever ships, it must introduce a story
+  content-edit anchor and thread it through the settle/once-per-target guards
+  (`created_at` is correct only while stories are immutable) — and clear
+  `validated`/`settled_at` exactly as the comment edit path does.
+- A withdrawal (or inconclusive verdict) on a previously-`validated` target
+  clears the badge to `none` even though its adjudicated defenses persist in
+  the arena record (documented §15.4 behavior, kept). If that reads as an
+  erasure in practice, the restoration is one derivation away: re-derive
+  `validated` from `countUpheldDefenses > 0` at tag-clear time.
