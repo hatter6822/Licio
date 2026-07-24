@@ -1231,16 +1231,23 @@ export async function editContribution(
   }
 
   let edited = await forum.contributions.applyEdit(contributionId, patch, userId, randomUUID());
-  if (edited && (existing.disputeStatus === 'validated' || existing.settledAt !== null)) {
+  if (edited) {
     // WS-T challenge policy — a MATERIAL edit invalidates the adjudication the
     // badge certifies: the defended text is no longer the served text.  The
     // `validated` posture clears to `none` and any settled threshold resets
     // (the settle count is anchored at the edit-history instant this edit just
-    // wrote, so both re-open together).  `incorrect` is untouched — the
-    // adjudicated demotion survives a rewrite.  The reset is CONDITIONAL at
-    // the store layer (`resetDisputeAfterEdit`): a challenge racing this edit
-    // may have just tagged the row `under_debate`, and that live-arena state
-    // must never be stomped by this pre-read's stale `validated`.
+    // wrote, so both re-open together).  The reset runs after EVERY material
+    // edit and is CONDITIONAL at the store layer (`resetDisputeAfterEdit`:
+    // only a `validated`/settled row matches) — never gated on the stale
+    // initial read: an arena FINALIZING during the slow safety/agent passes
+    // above can flip `under_debate` → `validated` mid-edit, and the pre-read
+    // gate would have skipped the reset and left the new text certified by a
+    // verdict on the old version.  The WHERE keeps a concurrently tagged
+    // `under_debate` row untouched, and `incorrect` survives a rewrite (the
+    // adjudicated demotion is not an edit's to clear).  Residual sliver: a
+    // finalize whose anchor read predates this edit but whose status write
+    // lands after the reset can still stamp `validated` briefly — settle-safe
+    // (counting is lockedAt-keyed) and cleared by the next material edit.
     edited = (await forum.contributions.resetDisputeAfterEdit(contributionId)) ?? edited;
   }
   if (!edited) {

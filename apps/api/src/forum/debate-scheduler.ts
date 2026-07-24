@@ -164,8 +164,14 @@ export function buildDebateDeps(forum: ForumServices, ingestion: IngestionServic
     isSteward: async (roomId, uid) =>
       (await forum.rooms.stewardRolesFor(roomId, uid)).length > 0 ||
       ((await forum.platformRolesReader?.(uid)) ?? []).includes('admin'),
-    setStoryDispute: async (sid, status) => {
-      await ingestion.stories.update(sid, { disputeStatus: status });
+    setStoryDispute: async (sid, status, settledAt) => {
+      // `settledAt` lands in the SAME write (undefined ⇒ untouched): dropping
+      // it here silently disabled story settling — the create guard reads
+      // `story.settledAt`, which never got set (codex on PR #168).
+      await ingestion.stories.update(sid, {
+        disputeStatus: status,
+        ...(settledAt !== undefined ? { settledAt } : {}),
+      });
       // WS-T — when a debate outcome tags a story `incorrect` (or clears it), the
       // feed's `dispute_penalty` reads the STORED ranking feature vector, which is
       // otherwise only refreshed on an invariant/integrity event or the hourly

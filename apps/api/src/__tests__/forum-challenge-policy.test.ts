@@ -506,6 +506,83 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     expect(resettled?.settledAt).not.toBeNull();
   });
 
+  it('three upheld defenses settle a STORY too (persisted mark, unsettle, re-settle)', async () => {
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const storyChallenge = () => contributionBody('correction', threadId, { storyId });
+    for (let i = 0; i < 3; i += 1) {
+      const challenger = await seedUserWithSession(fixture.identity);
+      const filed = await postOk(storyChallenge(), challenger.cookie);
+      await resolveArena(filed.metadata.debate_arena_id ?? '');
+      const story = await fixture.ingestion.stories.getById(storyId);
+      expect(story?.disputeStatus).toBe('validated');
+      // The settled mark PERSISTS through the story dispute setter (it was
+      // silently dropped before the setter forwarded the third argument).
+      expect(story?.settledAt == null).toBe(i < 2);
+    }
+    const fourth = await seedUserWithSession(fixture.identity);
+    const refused = await post(storyChallenge(), fourth.cookie);
+    expect(refused.status).toBe(422);
+    expect(await errorCode(refused)).toBe('target_settled');
+    // The story unsettle route clears the mark; the next upheld re-settles.
+    const steward = await seedUserWithSession(fixture.identity);
+    await fixture.forum.rooms.addSteward({
+      roomId: COMMONS_ROOM_ID,
+      userId: steward.userId,
+      role: 'community_steward',
+      assignedAt: new Date(nowMs).toISOString(),
+    });
+    const unsettled = await app().request(
+      jsonRequest(`/v1/stories/${storyId}/unsettle`, 'POST', {}, steward.cookie),
+    );
+    expect(unsettled.status).toBe(200);
+    expect((await fixture.ingestion.stories.getById(storyId))?.settledAt).toBeNull();
+    const refiled = await postOk(storyChallenge(), fourth.cookie);
+    await resolveArena(refiled.metadata.debate_arena_id ?? '');
+    expect((await fixture.ingestion.stories.getById(storyId))?.settledAt).not.toBeNull();
+  });
+
+  it('a verdict FINALIZING during a material edit never certifies the new text', async () => {
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const targetId = await seedTarget();
+    const challenger = await seedUserWithSession(fixture.identity);
+    const filed = await postOk(challengeBody(targetId), challenger.cookie);
+    const debateId = filed.metadata.debate_arena_id ?? '';
+    nowMs += HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    // The finalize lands INSIDE the edit's slow safety pass: at the edit's
+    // initial read the target is still `under_debate`, so a pre-read-gated
+    // reset would be skipped and the fresh `validated` would certify text the
+    // verdict never judged.
+    const safety = fixture.forum.safety;
+    const realClassify = safety.classify.bind(safety);
+    safety.classify = async (...args: Parameters<typeof realClassify>) => {
+      safety.classify = realClassify;
+      nowMs += 24 * HOUR_MS + 1000;
+      await runDebateSchedulerTick(rethrow);
+      expect((await fixture.forum.debates.getById(debateId))?.state).toBe('resolved');
+      expect((await fixture.forum.contributions.getById(targetId))?.disputeStatus).toBe(
+        'validated',
+      );
+      return realClassify(...args);
+    };
+    const edit = await app().request(
+      jsonRequest(
+        `/v1/contributions/${targetId}`,
+        'PATCH',
+        { contribution_id: targetId, body: 'Edited while the verdict finalized.' },
+        author.cookie,
+      ),
+    );
+    expect(edit.status).toBe(200);
+    const row = await fixture.forum.contributions.getById(targetId);
+    expect(row?.disputeStatus).toBe('none');
+    expect(row?.settledAt).toBeNull();
+    expect(row?.body).toBe('Edited while the verdict finalized.');
+  });
+
   it('a verdict on a SUPERSEDED version resolves none — never validated, never settled', async () => {
     fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
     const targetId = await seedTarget();

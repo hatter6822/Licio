@@ -714,13 +714,17 @@ export class DrizzleDebateStore implements DebateStore {
     const nowMs = Date.parse(opts.nowIso);
     const opensCutoff = new Date(nowMs - opts.opensWindowMs);
     const withdrawCutoff = new Date(nowMs - opts.withdrawWindowMs);
-    const asChallenger = eq(debateArenasTable.challengerUserId, userId);
-    // Adjudicated resolutions only, self-targeted legacy arenas excluded.
+    // Self-targeted legacy arenas sit outside the standing system in EVERY
+    // derivation (no wins, no slots, no budget, no withdrawal consequences).
+    const asChallenger = and(
+      eq(debateArenasTable.challengerUserId, userId),
+      or(isNull(debateArenasTable.incumbentUserId), ne(debateArenasTable.incumbentUserId, userId)),
+    );
+    // Adjudicated resolutions only.
     const adjudicated = and(
       asChallenger,
       eq(debateArenasTable.state, 'resolved'),
       inArray(debateArenasTable.decidedBy, ['ai', 'steward']),
-      or(isNull(debateArenasTable.incumbentUserId), ne(debateArenasTable.incumbentUserId, userId)),
     );
     const [winRows, lossRows, liveRows, openRows, withdrawnRows] = await Promise.all([
       this.#db
@@ -893,6 +897,12 @@ export class DrizzleDebateStore implements DebateStore {
       .where(
         and(
           eq(debateArenasTable.challengerUserId, challengerUserId),
+          // The recheck counts the SAME set the account gates count: self-
+          // targeted legacy arenas are outside the standing system.
+          or(
+            isNull(debateArenasTable.incumbentUserId),
+            ne(debateArenasTable.incumbentUserId, challengerUserId),
+          ),
           or(
             inArray(debateArenasTable.state, [...PRE_VERDICT_STATES]),
             gt(debateArenasTable.createdAt, new Date(sinceIso)),

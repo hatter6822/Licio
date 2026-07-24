@@ -720,6 +720,31 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
       ),
     ).not.toBeNull();
 
+    // Self-targeted LEGACY rows (incumbent === challenger) sit outside the
+    // standing system in EVERY derivation: a live one costs no slot and no
+    // open; a withdrawn one triggers no cooldown row.  The unchanged
+    // assertions below prove the exclusion.
+    const selfLive = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(selfLive).not.toBeNull();
+    const selfWithdrawn = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+        state: 'withdrawn',
+        resolvedAt: '2026-07-05T08:00:00.000Z',
+      }),
+    );
+    expect(selfWithdrawn).not.toBeNull();
+
     const nowIso = new Date(Math.max(engagedBase, untouchedBase) + 3_600_000).toISOString();
     const history = await store.challengerHistory(challenger, {
       nowIso,
@@ -732,7 +757,9 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(buckets.size).toBe(2);
     expect(history.adjudicatedLosses).toBe(1);
     expect(history.liveCount).toBe(1);
-    expect(history.openTimesLast24h).toHaveLength(10);
+    // Nine, not ten: the self-targeted win row above is outside the standing
+    // system in EVERY derivation — opens included.
+    expect(history.openTimesLast24h).toHaveLength(9);
     expect(history.withdrawals).toHaveLength(2);
     const engagement = history.withdrawals.map((row) => row.incumbentEngaged).sort();
     expect(engagement).toEqual([false, true]);
@@ -827,6 +854,20 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     const after = new Date(Date.parse(bothCreated[1] ?? '') + 1000).toISOString();
     const slots = await store.listChallengeOpens(challenger, after);
     expect(slots.map((r) => r.debateId)).toEqual([live?.debateId ?? '']);
+    // A self-targeted LEGACY live arena never enters the recheck set — the
+    // recheck counts the same rows the account gates count.
+    const selfRow = await store.open(
+      makeArena(ctx, {
+        challengerUserId: challenger,
+        incumbentUserId: challenger,
+        targetContributionId: await ctx.newCorrection(),
+        challengerContributionId: await ctx.newCorrection(),
+      }),
+    );
+    expect(selfRow).not.toBeNull();
+    expect(
+      (await store.listChallengeOpens(challenger, before)).map((r) => r.debateId),
+    ).not.toContain(selfRow?.debateId ?? '');
   });
 
   it('latestConcludedChallengeAt skips grace withdrawals and other challengers', async () => {

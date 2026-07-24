@@ -273,14 +273,17 @@ export interface DebateStore {
   ): Promise<DebateArenaRecord[]>;
   /** WS-T challenge policy (challenge-policy.ts) — the caller's arena-derived
    *  standing rows in ONE read: adjudicated win/loss aggregates as challenger
-   *  (decidedBy ∈ {ai, steward} only — concessions credit nothing; legacy
-   *  self-targeted arenas excluded; tombstoned opponents share one bucket so
-   *  account deletion cannot launder the per-opponent dedup), the live
-   *  PRE-VERDICT slot count (open/locked/awaiting_verdict — the slot frees at
-   *  the verdict), opens inside the trailing `opensWindowMs`, and the trailing
+   *  (decidedBy ∈ {ai, steward} only — concessions credit nothing; tombstoned
+   *  opponents share one bucket so account deletion cannot launder the
+   *  per-opponent dedup), the live PRE-VERDICT slot count
+   *  (open/locked/awaiting_verdict — the slot frees at the verdict), opens
+   *  inside the trailing `opensWindowMs`, and the trailing
    *  `withdrawWindowMs`'s withdrawn arenas (grace classification + cooldowns
-   *  happen in the pure policy layer).  All standing state derives from arena
-   *  rows — never a counter table that can drift. */
+   *  happen in the pure policy layer).  Self-targeted LEGACY arenas are
+   *  outside the standing system in EVERY derivation (the create guard
+   *  refuses new ones): they build no wins, cost no slots, burn no budget,
+   *  and trigger no withdrawal consequences.  All standing state derives from
+   *  arena rows — never a counter table that can drift. */
   challengerHistory(
     userId: string,
     opts: { nowIso: string; opensWindowMs: number; withdrawWindowMs: number },
@@ -311,9 +314,10 @@ export interface DebateStore {
   /** The post-open quota RECHECK input (challenge-policy.ts
    *  `challengeOpenSurvivesQuota`): every arena this challenger opened after
    *  `sinceIso` PLUS every pre-verdict arena regardless of age (a live slot
-   *  can outlast the opens window).  Read AFTER an open lands so concurrent
-   *  writers each observe the full raced set — the same write-before-read
-   *  discipline as the open-vs-removal close. */
+   *  can outlast the opens window); self-targeted legacy arenas excluded —
+   *  the recheck counts the SAME set the account gates count.  Read AFTER an
+   *  open lands so concurrent writers each observe the full raced set — the
+   *  same write-before-read discipline as the open-vs-removal close. */
   listChallengeOpens(
     challengerUserId: string,
     sinceIso: string,
@@ -850,6 +854,11 @@ export class InMemoryDebateStore implements DebateStore {
     const withdrawals: ChallengerHistory['withdrawals'][number][] = [];
     for (const row of this.#rows.values()) {
       if (row.challengerUserId !== userId) continue;
+      // Self-targeted legacy arenas are outside the standing system entirely
+      // (the create guard refuses new ones): they build no wins, but they
+      // also must not cost slots, burn the daily budget, or trigger
+      // withdrawal cooldowns/penalties.
+      if (row.incumbentUserId !== null && row.incumbentUserId === userId) continue;
       if (PRE_VERDICT.has(row.state)) liveCount += 1;
       if (Date.parse(row.createdAt) > opensCutoffMs) openTimesLast24h.push(row.createdAt);
       if (
@@ -863,10 +872,8 @@ export class InMemoryDebateStore implements DebateStore {
           incumbentEngaged: row.incumbentLastActiveAt > row.createdAt,
         });
       }
-      // Win/loss aggregates: adjudicated resolutions only, self-targeted
-      // legacy arenas excluded (a self-challenge can never build standing).
+      // Win/loss aggregates: adjudicated resolutions only.
       if (row.state !== 'resolved') continue;
-      if (row.incumbentUserId !== null && row.incumbentUserId === userId) continue;
       if (row.decidedBy !== 'ai' && row.decidedBy !== 'steward') continue;
       if (row.winner === 'challenger') {
         const key = row.incumbentUserId ?? TOMBSTONED_OPPONENT_KEY;
@@ -927,6 +934,9 @@ export class InMemoryDebateStore implements DebateStore {
     const out: { debateId: string; createdAt: string; preVerdict: boolean }[] = [];
     for (const row of this.#rows.values()) {
       if (row.challengerUserId !== challengerUserId) continue;
+      // Self-targeted legacy arenas sit outside the standing system — the
+      // recheck must count the SAME set the account gates count.
+      if (row.incumbentUserId !== null && row.incumbentUserId === challengerUserId) continue;
       const preVerdict = PRE_VERDICT.has(row.state);
       if (!preVerdict && row.createdAt <= sinceIso) continue;
       out.push({ debateId: row.debateId, createdAt: row.createdAt, preVerdict });
