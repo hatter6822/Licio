@@ -3,11 +3,14 @@
 // WS-L.3.4c — receipt pairing and public/private receipts (SPEC §29.5, §23.5,
 // §19.5).  After an action reaches a stable state, TWO receipts exist:
 //
-//  - PUBLIC: for the room's audit log.  Payload fields come from an EXPLICIT
-//    allowlist (action type, room, amount where policy makes it public, tx
-//    reference = the typed-data hash, state) — never a civic identity, never
-//    an address, never any §19.5 "never on-chain" field.  Tested by asserting
-//    the payload's key set is a subset of the allowlist.
+//  - PUBLIC: for the room's audit log.  Payload fields are PROJECTED through
+//    an explicit allowlist (action type, room, amount where policy makes it
+//    public, tx reference = the typed-data hash, state) — never a civic
+//    identity, never an address, never any §19.5 "never on-chain" field.  The
+//    projection (`projectPublicReceiptPayload`) is the enforcement, not a
+//    convention: an unlisted key cannot survive it, and a listed key cannot be
+//    dropped without a compile error.  Tested by asserting the payload's key
+//    set equals the allowlist and that an extra field cannot pass through.
 //
 //  - PRIVATE: owner-scoped and exportable (tax/accounting).  It carries the
 //    full signed-field disclosure the owner already saw and signed.
@@ -33,6 +36,32 @@ export const PUBLIC_RECEIPT_FIELDS = [
   'state',
   'created_at',
 ] as const;
+
+export type PublicReceiptField = (typeof PUBLIC_RECEIPT_FIELDS)[number];
+
+/**
+ * Project a candidate payload THROUGH the allowlist — the structural half of
+ * the §19.5 guarantee.
+ *
+ * The allowlist previously existed only as a documented constant: the public
+ * payload was an object literal that happened to agree with it, so nothing
+ * stopped a later edit from adding a civic identity, an address, or any other
+ * "never on-chain" field to the room's PUBLIC audit log. Building the payload
+ * here makes the leak unrepresentable in two directions at once:
+ *
+ *   • only listed keys survive the projection (an unlisted key cannot egress
+ *     even if a caller supplies one), and
+ *   • the `Record<PublicReceiptField, unknown>` parameter makes every listed
+ *     field REQUIRED, so removing one is a compile error rather than a
+ *     silently-thinner receipt.
+ */
+export function projectPublicReceiptPayload(
+  candidate: Readonly<Record<PublicReceiptField, unknown>>,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of PUBLIC_RECEIPT_FIELDS) payload[field] = candidate[field];
+  return payload;
+}
 
 export interface ReceiptDeps {
   receipts: KnomosisReceiptStore;
@@ -62,7 +91,10 @@ export async function writeReceipts(
   const summary = receiptSummary(record, finalState);
   const message = record.signedAction.message;
 
-  const publicPayload: Record<string, unknown> = {
+  // Built THROUGH the allowlist (never as a free object literal): the
+  // projection is what actually enforces "no civic identity, no address, no
+  // §19.5 field" on the room's public audit log.
+  const publicPayload = projectPublicReceiptPayload({
     action_type: record.actionType,
     room_id: record.roomId,
     asset: message['asset'] ?? null,
@@ -70,7 +102,7 @@ export async function writeReceipts(
     tx_ref: record.typedDataHash,
     state: finalState,
     created_at: record.createdAt,
-  };
+  });
 
   const privatePayload: Record<string, unknown> = {
     ...publicPayload,

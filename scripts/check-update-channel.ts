@@ -21,6 +21,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BUILT_CODE_SINKS, stripComments } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'apps', 'web', 'dist');
@@ -141,16 +142,16 @@ export const REQUIRED_FILES: readonly RequiredFile[] = [
   },
 ];
 
-/** A token that MUST NOT appear in the service worker (no remote dynamic code). */
+/** A token that MUST NOT appear in the service worker (no remote dynamic code).
+ *  The eval/Function-constructor/string-timer sinks come from the shared
+ *  definition (`dangerous-code-patterns.ts`) so this gate cannot drift from
+ *  lint:security, check:sw, and check:private-bundle-transparency — all four
+ *  previously pinned only `new Function(`, leaving the equivalent bare
+ *  `Function(` call open in every one of them. */
 const SW_FORBIDDEN: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  { pattern: /\beval\s*\(/, detail: 'sw eval()' },
-  { pattern: /new\s+Function\s*\(/, detail: 'sw new Function()' },
+  ...BUILT_CODE_SINKS.map(({ pattern, label }) => ({ pattern, detail: `sw ${label}` })),
   { pattern: /importScripts\s*\(\s*['"`]?\s*https?:/i, detail: 'sw remote importScripts' },
 ];
-
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
-}
 
 /**
  * Run the gate over an injected file reader (PURE).  Returns the list of

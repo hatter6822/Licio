@@ -16,7 +16,12 @@ import {
   localeRegionSubtag,
 } from '../knomosis/ports.js';
 import { buildHumanSummary, pairSummaryToPayload } from '../knomosis/preflight.js';
-import { verifyReceiptPairing, writeReceipts } from '../knomosis/receipts.js';
+import {
+  PUBLIC_RECEIPT_FIELDS,
+  projectPublicReceiptPayload,
+  verifyReceiptPairing,
+  writeReceipts,
+} from '../knomosis/receipts.js';
 import {
   canExpandTreasury,
   classifyDivergence,
@@ -1730,6 +1735,54 @@ describe('signature verifier factory + receipts', () => {
       chainId: 999, // no endpoint
     });
     expect(result).toBe(false);
+  });
+
+  it('the PUBLIC receipt payload carries exactly the §19.5 allowlist — no more', async () => {
+    const fixture = await freshKnomosisServices();
+    // A signed message deliberately carrying fields that must NEVER reach the
+    // room's public audit log (a civic identity, an address, the raw nonce).
+    const record = baseAction({
+      submissionState: 'finalized',
+      signedAction: {
+        message: {
+          amount: '150',
+          asset: 'SIM-USDC',
+          nonce: '7',
+          civicId: 'civic-abc',
+          walletAddress: '0xdeadbeef',
+        },
+        signature: '0x',
+      },
+    });
+    await fixture.knomosis.actions.insert(record);
+    const { publicReceipt, privateReceipt } = await writeReceipts(fixture.knomosis, record);
+
+    // EQUALITY, not merely "subset": a missing allowlisted field would thin the
+    // receipt silently, and an extra key would be a §19.5 leak.
+    expect(Object.keys(publicReceipt.payload).sort()).toEqual([...PUBLIC_RECEIPT_FIELDS].sort());
+    for (const leaked of ['civicId', 'walletAddress', 'nonce', 'signed_fields']) {
+      expect(Object.hasOwn(publicReceipt.payload, leaked)).toBe(false);
+    }
+    // The owner-scoped PRIVATE receipt is where the full disclosure belongs.
+    expect(privateReceipt.payload['signed_fields']).toMatchObject({ civicId: 'civic-abc' });
+  });
+
+  it('projectPublicReceiptPayload drops an unlisted key instead of forwarding it', () => {
+    // The structural guarantee: even a caller that supplies an extra field
+    // (a future edit, a spread of the signed message) cannot widen the payload.
+    const projected = projectPublicReceiptPayload({
+      action_type: 'treasury_deposit',
+      room_id: 'r1',
+      asset: 'SIM-USDC',
+      amount: '1',
+      tx_ref: '0xabc',
+      state: 'finalized',
+      created_at: '2026-01-01T00:00:00.000Z',
+      // @ts-expect-error — an unlisted field is a TYPE error as well as a runtime no-op.
+      civic_identity: 'must-not-egress',
+    });
+    expect(Object.keys(projected).sort()).toEqual([...PUBLIC_RECEIPT_FIELDS].sort());
+    expect(Object.hasOwn(projected, 'civic_identity')).toBe(false);
   });
 
   it('receipt pairing verifies and detects tampering', async () => {

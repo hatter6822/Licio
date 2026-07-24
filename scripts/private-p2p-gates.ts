@@ -9,6 +9,7 @@
 // effects and stay fast file scanners (the `check:no-applause` pattern).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { BUILT_CODE_SINKS } from './dangerous-code-patterns.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
 
@@ -103,8 +104,12 @@ export function scanPublicGatewayEgress(
 // ---------------------------------------------------------------------------
 
 export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  { pattern: /\beval\s*\(/, detail: 'eval()' },
-  { pattern: /new\s+Function\s*\(/, detail: 'new Function()' },
+  // The eval/Function-constructor/string-timer sinks come from the shared
+  // definition (`dangerous-code-patterns.ts`) so this gate, lint:security,
+  // check:sw, and check:update-channel cannot drift apart on what counts as
+  // runtime code evaluation — they previously all pinned only `new Function(`,
+  // leaving the equivalent bare `Function(` call open in every one of them.
+  ...BUILT_CODE_SINKS.map(({ pattern, label }) => ({ pattern, detail: label })),
   { pattern: /importScripts\s*\(/, detail: 'importScripts()' },
   // A dynamic import() of an http(s) URL string (remote code).
   { pattern: /import\s*\(\s*['"`]https?:/i, detail: 'dynamic import() of a remote URL' },

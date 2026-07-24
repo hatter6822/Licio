@@ -47,10 +47,6 @@ export function orderDepthFirst(rows: readonly ContributionRecord[]): Contributi
   return ordered;
 }
 
-export function ancestorIds(row: ContributionRecord): readonly string[] {
-  return row.path;
-}
-
 export function subtreeRootId(row: ContributionRecord): string {
   return row.path[0] ?? row.contributionId;
 }

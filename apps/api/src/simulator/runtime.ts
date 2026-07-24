@@ -106,7 +106,6 @@ const WORLD_STORY_LIMIT = 80;
 const DEFAULT_STORY_CAP = 400;
 const ACTIVITY_LOG_LIMIT = 60;
 const RECENT_TITLE_LIMIT = 200;
-const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** Shortened WS-T arena windows while the simulator runs (spec: 23h edit /
  *  1h lock / 1h both-sides-idle expedite / 24h override — dev-observable
@@ -2272,6 +2271,3 @@ export class DevTrafficSimulator {
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
-
-/** Backdate constant re-exported for tests. */
-export const SIM_ORGANIC_BACKDATE_MS = NINETY_DAYS_MS;

@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
-import { type PrivacyClassification, type RetentionTier, stewardRolesQueues } from '@licio/shared';
+import type { PrivacyClassification, RetentionTier } from '@licio/shared';
 import {
   parseGovernanceExtraRuntimeUrls,
   parseGovernanceModelHubAliases,
@@ -275,7 +275,7 @@ import {
 } from './lib/reply-notifications.js';
 import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
-import { effectiveStewardRoles } from './moderation/authz.js';
+import { actorQueues } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
   createAutoModerationSink,
@@ -1059,7 +1059,7 @@ identityServices.exportModerationNotices = async (userId) => {
 // resolve each reviewer's queues from their WS-D steward roles.
 moderationServices.reviewerQueues = async (id) => {
   const u = await identityServices.store.getUser(id);
-  return u ? stewardRolesQueues(effectiveStewardRoles(u.roles, u.stewardRoles)) : [];
+  return u ? actorQueues(u.roles, u.stewardRoles) : [];
 };
 await moderationServices.reloadConfig();
 setModerationServices(moderationServices);

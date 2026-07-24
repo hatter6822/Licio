@@ -7,8 +7,31 @@
 // change fails CI. `shadow_status` here is the DOCUMENTED DEFAULT — the live
 // status is resolved from the append-only promotion record (WS-H.1.2e), and
 // all twelve ship in shadow.
+//
+// `version` is taken from the MATH package's per-invariant constant, never a
+// literal here: that version is stamped into every output envelope and read by
+// the promotion gate and the audit trail, so a second hand-maintained copy
+// would let the algorithm change while the envelope kept reporting the old
+// version — a stamp that silently lies about which mathematics produced the
+// result.  One constant per invariant, owned beside the code it versions.
 
-import { type InvariantCard, InvariantType, invariantCardSchema } from '@licio/invariants';
+import {
+  BEHAVIOR_VERSION,
+  BRAID_VERSION,
+  CID_VERSION,
+  GWEI_VERSION,
+  HODGE_VERSION,
+  type InvariantCard,
+  InvariantType,
+  invariantCardSchema,
+  MERI_VERSION,
+  MFCI_VERSION,
+  PATHSIG_VERSION,
+  PHI_VERSION,
+  REEB_VERSION,
+  SCOI_VERSION,
+  TROPICAL_VERSION,
+} from '@licio/invariants';
 
 const OWNER = 'ranking-invariants';
 
@@ -18,7 +41,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.MERI]: card({
     invariant_type: InvariantType.MERI,
     owner: OWNER,
-    version: '1.0.0',
+    version: MERI_VERSION,
     input_schema: 'docs/invariants/README.md#meri-inputs',
     output_schema: 'meriScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.3, typical: 0.85, max: 1 },
@@ -53,7 +76,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.MFCI]: card({
     invariant_type: InvariantType.MFCI,
     owner: OWNER,
-    version: '1.0.0',
+    version: MFCI_VERSION,
     input_schema: 'docs/invariants/README.md#mfci-inputs',
     output_schema: 'mfciScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.8, max: 1 },
@@ -84,7 +107,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.GWEI]: card({
     invariant_type: InvariantType.GWEI,
     owner: OWNER,
-    version: '1.0.0',
+    version: GWEI_VERSION,
     input_schema: 'docs/invariants/README.md#gwei-inputs',
     output_schema: 'gweiScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.7, max: 0.95 },
@@ -119,7 +142,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.SCOI]: card({
     invariant_type: InvariantType.SCOI,
     owner: OWNER,
-    version: '1.0.0',
+    version: SCOI_VERSION,
     input_schema: 'docs/invariants/README.md#scoi-inputs',
     output_schema: 'scoiScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.75, max: 1 },
@@ -148,7 +171,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.PHI]: card({
     invariant_type: InvariantType.PHI,
     owner: OWNER,
-    version: '1.0.0',
+    version: PHI_VERSION,
     input_schema: 'docs/invariants/README.md#phi-inputs',
     output_schema: 'phiScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.7, max: 0.95 },
@@ -187,7 +210,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.HodgeTension]: card({
     invariant_type: InvariantType.HodgeTension,
     owner: OWNER,
-    version: '1.0.0',
+    version: HODGE_VERSION,
     input_schema: 'docs/invariants/README.md#hodge-inputs',
     output_schema: 'hodgeScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.3, typical: 0.8, max: 1 },
@@ -211,7 +234,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.TropicalCascade]: card({
     invariant_type: InvariantType.TropicalCascade,
     owner: OWNER,
-    version: '1.0.0',
+    version: TROPICAL_VERSION,
     input_schema: 'docs/invariants/README.md#tropical-inputs',
     output_schema: 'tropicalScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.6, max: 0.9 },
@@ -234,7 +257,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.BraidDynamics]: card({
     invariant_type: InvariantType.BraidDynamics,
     owner: OWNER,
-    version: '1.0.0',
+    version: BRAID_VERSION,
     input_schema: 'docs/invariants/README.md#braid-inputs',
     output_schema: 'braidScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.3, typical: 0.7, max: 0.95 },
@@ -258,7 +281,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.ReebLandscape]: card({
     invariant_type: InvariantType.ReebLandscape,
     owner: OWNER,
-    version: '1.0.0',
+    version: REEB_VERSION,
     input_schema: 'docs/invariants/README.md#reeb-inputs',
     output_schema: 'reebScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.3, typical: 0.7, max: 0.95 },
@@ -281,7 +304,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.CounterfactualDefect]: card({
     invariant_type: InvariantType.CounterfactualDefect,
     owner: OWNER,
-    version: '1.0.0',
+    version: CID_VERSION,
     input_schema: 'docs/invariants/README.md#cid-inputs',
     output_schema: 'cidScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.5, typical: 0.9, max: 1 },
@@ -308,7 +331,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.PathSignatureWellbeing]: card({
     invariant_type: InvariantType.PathSignatureWellbeing,
     owner: OWNER,
-    version: '1.0.0',
+    version: PATHSIG_VERSION,
     input_schema: 'docs/invariants/README.md#pathsig-inputs',
     output_schema: 'pathSignatureScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.3, typical: 0.75, max: 0.95 },
@@ -331,7 +354,7 @@ export const INVARIANT_CARDS: Readonly<Record<InvariantType, InvariantCard>> = {
   [InvariantType.BehavioralAuthenticity]: card({
     invariant_type: InvariantType.BehavioralAuthenticity,
     owner: OWNER,
-    version: '1.0.0',
+    version: BEHAVIOR_VERSION,
     input_schema: 'docs/invariants/README.md#bai-inputs',
     output_schema: 'behavioralAuthenticityScoreVectorSchema (@licio/invariants)',
     confidence_bounds: { min: 0.2, typical: 0.8, max: 0.95 },

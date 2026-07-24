@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { SOURCE_CODE_SINKS } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -30,13 +31,13 @@ const BLOCKED_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
     pattern: /['"`]javascript\s*:/i,
     message: 'javascript: URL (XSS vector)',
   },
-  { pattern: /new\s+Function\s*\(/, message: 'new Function() (equivalent to eval)' },
-  // Bare global eval(). The lookbehind excludes a member/private access
-  // (`.eval(`, `#eval(` — e.g. a Redis Lua wrapper method), a `$eval(` helper,
-  // and word-suffix false positives (`retrieval(`, `medieval(`); only the
-  // dangerous global call is flagged. (CLAUDE.md documents this gate as the
-  // mechanical check for eval() — Biome 2.x cannot block it at the AST level.)
-  { pattern: /(?<![.\w$#])eval\s*\(/, message: 'eval() call' },
+  // Dynamic-code sinks — eval(), BOTH Function-constructor call forms, and the
+  // string-argument timers — come from the shared definition so this gate,
+  // check:sw, check:update-channel, and check:private-bundle-transparency can
+  // never again drift apart on what counts as runtime code evaluation.
+  // (CLAUDE.md documents this gate as the mechanical check for eval() —
+  // Biome 2.x cannot block it at the AST level.)
+  ...SOURCE_CODE_SINKS.map(({ pattern, label }) => ({ pattern, message: `${label} call` })),
 ];
 
 const ALLOWLIST_PATHS = [/trusted-types\.ts$/, /\.test\.ts$/, /\.test\.tsx$/, /\.spec\.ts$/];

@@ -8,20 +8,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BUILT_CODE_SINKS, stripComments } from './dangerous-code-patterns.js';
 
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const SW_FILES = ['sw.js', 'sw-push.js'];
-
-/**
- * Strip comments so doctrine may be DISCUSSED in prose (e.g. "no eval") while a
- * real call still trips the scan. Removes block + line comments; the line-comment
- * rule ignores `//` preceded by `:` or a quote, so both `https://…` and a
- * protocol-relative `"//…"` URL inside a string literal survive for the
- * importScripts check (a `// comment` still strips).
- */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
-}
 
 /** Find SW security violations in one file's source. Pure (testable). */
 export function findSwSecurityIssues(filename: string, content: string): string[] {
@@ -34,9 +24,10 @@ export function findSwSecurityIssues(filename: string, content: string): string[
       issues.push(`${filename}: external importScripts (remote code): ${call}`);
     }
   }
-  if (/\beval\s*\(/.test(code)) issues.push(`${filename}: eval() is forbidden in the worker`);
-  if (/new\s+Function\s*\(/.test(code)) {
-    issues.push(`${filename}: new Function() is forbidden in the worker`);
+  // Dynamic-code sinks from the shared definition: eval(), BOTH
+  // Function-constructor call forms, and the string-argument timers.
+  for (const { pattern, label } of BUILT_CODE_SINKS) {
+    if (pattern.test(code)) issues.push(`${filename}: ${label} is forbidden in the worker`);
   }
   return issues;
 }

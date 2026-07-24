@@ -335,6 +335,17 @@ pnpm exec lefthook install
 > when you want durable dev data or are running the gated integration tests.
 > Production always requires both.
 
+> **Claude Code on the web sessions provision this automatically.**
+> [`.claude/hooks/session-start.sh`](../.claude/hooks/session-start.sh) is a
+> `SessionStart` hook that installs and starts PostgreSQL 16 **plus the
+> `pgvector` extension** (the WS-F embedding suites need it — CI gets it from
+> the `pgvector/pgvector:pg16` image) and Redis on the same ports and
+> credentials CI uses, then exports `DATABASE_URL`/`REDIS_URL` for the
+> session. It is idempotent and remote-only (`CLAUDE_CODE_REMOTE=true`), so it
+> never starts clusters underneath a developer's own machine. Without it the
+> `DATABASE_URL`/`REDIS_URL`-gated suites self-skip — roughly 260 tests — and a
+> green local run proves strictly less than CI does.
+
 The repository ships a [`docker-compose.yml`](../docker-compose.yml) that
 provisions both services with development credentials:
 

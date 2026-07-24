@@ -90,7 +90,9 @@ export async function loadContentFlags(
   return flags;
 }
 
-/** Persist one validated flag by field (tests/boot write here). */
+/** Persist one validated flag by FIELD — the single write path, so the
+ *  `CONTENT_FLAG_STORE_KEYS` mapping that {@link loadContentFlags} reads is
+ *  also the mapping every writer goes through. */
 export async function storeContentFlagValue(
   configStore: PwattConfigStore,
   field: keyof ContentFeatureFlags,
@@ -100,13 +102,16 @@ export async function storeContentFlagValue(
 }
 
 /** Persist one flag by its steward-facing NAME (the admin surface writes here);
- *  returns false for an unknown name (the caller maps that to a 422). */
+ *  returns false for an unknown name (the caller maps that to a 422).
+ *  Resolves the name to its field and DELEGATES, rather than re-deriving the
+ *  store key, so name-keyed and field-keyed writes cannot diverge. */
 export async function setContentFlagByName(
   configStore: PwattConfigStore,
   name: string,
   value: boolean,
 ): Promise<boolean> {
-  if (!STORE_KEY_TO_FIELD.has(name)) return false;
-  await configStore.set(name, { value });
+  const field = STORE_KEY_TO_FIELD.get(name);
+  if (field === undefined) return false;
+  await storeContentFlagValue(configStore, field, value);
   return true;
 }

@@ -34,6 +34,33 @@ describe('findSwSecurityIssues', () => {
     expect(findSwSecurityIssues('sw.js', 'const f = new Function("return 1");')).toHaveLength(1);
   });
 
+  it('flags the BARE Function() constructor (regression)', () => {
+    // `Function(src)` and `new Function(src)` construct the same function
+    // object — the `new` is optional — so a gate that pins only the `new` form
+    // leaves a fully-equivalent code sink open.
+    expect(findSwSecurityIssues('sw.js', 'const f = Function("return 1");')).toHaveLength(1);
+  });
+
+  it('flags the Function constructor reached through the global object (regression)', () => {
+    expect(findSwSecurityIssues('sw.js', 'const f = globalThis.Function("x")();')).toHaveLength(1);
+    expect(findSwSecurityIssues('sw.js', 'const g = self.Function("x")();')).toHaveLength(1);
+  });
+
+  it('flags a string-bodied setTimeout/setInterval (implicit eval, regression)', () => {
+    expect(findSwSecurityIssues('sw.js', 'setTimeout("doEvil()", 0);')).toHaveLength(1);
+    expect(findSwSecurityIssues('sw.js', 'setInterval("doEvil()", 10);')).toHaveLength(1);
+  });
+
+  it('does NOT flag ordinary function-argument timers or unrelated identifiers', () => {
+    const content = [
+      'setTimeout(() => self.skipWaiting(), 0);',
+      'setInterval(tick, 1000);',
+      'const v = getFunction(name);',
+      'const w = registry.Function;',
+    ].join('\n');
+    expect(findSwSecurityIssues('sw.js', content)).toEqual([]);
+  });
+
   it('accumulates multiple violations', () => {
     const content = 'importScripts("http://x/y.js"); eval("z"); new Function("w");';
     expect(findSwSecurityIssues('sw.js', content)).toHaveLength(3);
