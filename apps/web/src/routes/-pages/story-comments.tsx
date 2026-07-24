@@ -338,7 +338,12 @@ function StoryCommentsContent({
           </p>
         ) : null}
 
-        {story.data ? <DisputeBanner status={story.data.dispute_status} /> : null}
+        {story.data ? (
+          <DisputeBanner
+            status={story.data.dispute_status}
+            settled={story.data.dispute_settled ?? false}
+          />
+        ) : null}
         <LiveDebatesButton debates={debates.data?.debates} error={debates.isError} />
         <LiveDebatesModal storyId={storyId} open={debateListOpen} onClose={closeDebateList} />
         <DebateArenaModal debateId={debateParam ?? null} onClose={closeDebate} />

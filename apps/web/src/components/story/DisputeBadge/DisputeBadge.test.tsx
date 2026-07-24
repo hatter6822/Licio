@@ -32,6 +32,12 @@ describe('DisputeBadge', () => {
     const { container } = render(<DisputeBadge status="none" />);
     expect(container.firstChild).toBeNull();
   });
+
+  it('renders the terminal "Settled" chip in place of "Validated" when settled', () => {
+    render(<DisputeBadge status="validated" settled />);
+    expect(screen.getByText('Settled')).toBeInTheDocument();
+    expect(screen.queryByText('Validated')).not.toBeInTheDocument();
+  });
 });
 
 describe('disputeBorderClass', () => {
@@ -52,8 +58,16 @@ describe('disputeBorderClass', () => {
   });
 
   it('gives the three states three distinct edges', () => {
-    const edges = (['under_debate', 'incorrect', 'validated'] as const).map(disputeBorderClass);
+    const edges = (['under_debate', 'incorrect', 'validated'] as const).map((s) =>
+      disputeBorderClass(s),
+    );
     expect(new Set(edges).size).toBe(3);
+  });
+
+  it('carries a success-family edge when settled (a settled item is always validated)', () => {
+    expect(disputeBorderClass('validated', true)).toContain('border-success');
+    // The settled flag supersedes the status hue even if the two were skewed.
+    expect(disputeBorderClass('none', true)).toContain('border-success');
   });
 });
 
@@ -81,8 +95,25 @@ describe('DisputeBanner', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('explains the terminal "Settled" state as no longer challengeable', () => {
+    render(<DisputeBanner status="validated" settled />);
+    expect(screen.getByText('Settled')).toBeInTheDocument();
+    expect(screen.getByText(/no longer be challenged/i)).toBeInTheDocument();
+    expect(screen.queryByText('Validated')).not.toBeInTheDocument();
+  });
+
+  it('renders the settled banner even when the status skews to none', () => {
+    render(<DisputeBanner status="none" settled />);
+    expect(screen.getByText('Settled')).toBeInTheDocument();
+  });
+
   it('passes the accessibility audit', async () => {
     const { container } = render(<DisputeBanner status="incorrect" />);
+    expect(await checkA11y(container)).toHaveNoViolations();
+  });
+
+  it('passes the accessibility audit when settled', async () => {
+    const { container } = render(<DisputeBanner status="validated" settled />);
     expect(await checkA11y(container)).toHaveNoViolations();
   });
 });

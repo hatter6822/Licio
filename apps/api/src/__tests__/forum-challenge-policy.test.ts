@@ -21,6 +21,7 @@ import { Hono } from 'hono';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { maybeEnterDebate } from '../forum/debate.js';
 import { buildDebateDeps, runDebateSchedulerTick } from '../forum/debate-scheduler.js';
+import { toContributionPublic } from '../forum/threads.js';
 import { createV1Routes } from '../routes/v1.js';
 import type { SeededUser } from './event-test-helpers.js';
 import {
@@ -647,6 +648,25 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     }
     expect((await fixture.forum.contributions.getById(targetId))?.settledAt).not.toBeNull();
   }
+
+  it('projects the settled comment onto the wire as dispute_settled (only when true)', async () => {
+    const targetId = await seedTarget();
+    // Before settling: no marker on the wire (a not-settled row omits the key).
+    const before = await fixture.forum.contributions.getById(targetId);
+    if (!before) throw new Error('seeded target missing');
+    expect(toContributionPublic(before, null, 0, null, false).dispute_settled).toBeUndefined();
+
+    await settleTarget(targetId);
+    const settledRow = await fixture.forum.contributions.getById(targetId);
+    if (!settledRow) throw new Error('settled target missing');
+    const projected = toContributionPublic(settledRow, null, 0, null, false);
+    // A settled row is always `validated`; the marker rides alongside it.
+    expect(projected.dispute_status).toBe('validated');
+    expect(projected.dispute_settled).toBe(true);
+    // Parses on the strict wire schema, and a tombstone never carries it.
+    expect(contributionPublicSchema.safeParse(projected).success).toBe(true);
+    expect(toContributionPublic(settledRow, null, 0, null, true).dispute_settled).toBeUndefined();
+  });
 
   it('serves the caller their own quota, cooldown, and target probe', async () => {
     const challenger = await seedUserWithSession(fixture.identity);

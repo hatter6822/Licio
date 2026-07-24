@@ -368,9 +368,13 @@ The rationing layer over challenge creation — every number steward-tunable
   outlive the window still rank and enforce their cooldowns.
   `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
   (migration 0096) — never a dispute-status enum value — so every existing
-  wire schema, ranking feature, search filter, and badge keeps its exact
-  vocabulary (a settled row still reads `validated`; ranking/search are
-  untouched by construction).
+  ranking feature and search filter keeps its exact vocabulary (a settled row
+  still reads `validated`; ranking/search are untouched by construction). The
+  settled distinction reaches the CARD as a separate optional `dispute_settled`
+  wire marker (contribution + feed-item schemas), emitted only when TRUE — a
+  new optional key, never a new enum value, so a pre-settle cached bundle keeps
+  parsing every not-yet-settled response; the `DisputeBadge`/`DisputeBanner`
+  render the terminal "Settled" state in place of "Validated" when it is set.
 - **Unsettle** (`POST /v1/{contributions,stories}/:id/unsettle`): the
   target's home-room stewards (the Commons included — the same arm that
   already holds the stronger verdict override), or the platform ADMIN under
@@ -422,12 +426,15 @@ The rationing layer over challenge creation — every number steward-tunable
   snapshot (`locked_content`) that quotes an anonymized contribution — the
   arena is the transparency artifact of a judged dispute, but the DSAR sweep
   should redact snapshot bodies for erased authors (tracked here).
-- Card-level SETTLED presentation: the story/comment cards still badge a
-  settled row as "Validated" — `settled_at` is deliberately not on the card
-  wire yet (the strict projection schemas would hard-fail stale cached PWA
-  bundles on an unknown key). The settled distinction currently surfaces in
-  the composer probe, the create rejection, and the standing endpoint; add
-  the badge variant on the next coordinated wire-schema rev.
+- Card-level SETTLED presentation — **implemented.** A settled story/comment
+  now renders a terminal "Settled" badge (and card edge / detail banner) in
+  place of "Validated", carried by the optional `dispute_settled` marker on the
+  contribution + feed-item schemas. It is a presence field emitted only when
+  TRUE — a new *optional key*, not a new enum value — so a stale cached PWA
+  bundle validating against the pre-marker strict schema keeps parsing every
+  not-yet-settled response (and settles are rare by construction: three
+  adjudicated upheld defenses). The distinction still ALSO surfaces in the
+  composer probe, the create rejection, and the standing endpoint.
 - If a story author-edit path ever ships, it must introduce a story
   content-edit anchor and thread it through the settle/once-per-target guards
   (`created_at` is correct only while stories are immutable) — and clear

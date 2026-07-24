@@ -29,6 +29,7 @@ export function feedItemToCard(item: FeedItem): StoryCardData {
     corrections: item.corrections,
     ...(item.safety_state !== 'ok' ? { safetyState: item.safety_state } : {}),
     ...(item.dispute_status !== 'none' ? { disputeStatus: item.dispute_status } : {}),
+    ...(item.dispute_settled ? { disputeSettled: true } : {}),
     contextChips: item.context_chips.map((chip) => {
       const icon = asIconName(chip.icon);
       return { id: chip.id, label: chip.label, ...(icon ? { icon } : {}) };

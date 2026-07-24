@@ -39,6 +39,7 @@ export function StoryCard({
   corrections,
   safetyState,
   disputeStatus = 'none',
+  disputeSettled = false,
   contextChips,
   branchPreview,
   inRoom,
@@ -62,13 +63,13 @@ export function StoryCard({
   );
 
   // WS-T — a disputed story wears its posture on the card EDGE, in the same hue
-  // as the state's chip below, so a challenged / corrected / validated item is
-  // recognisable while scrolling before any chip is read. Reinforcement only:
-  // the DisputeBadge still states it in text (colour is never the sole carrier,
-  // WS-B.1.1f), and only ONE border colour is ever emitted — `cn` does not
-  // resolve Tailwind conflicts, so `border-line` and a dispute hue must not both
-  // be in the list.
-  const disputeBorder = disputeBorderClass(disputeStatus);
+  // as the state's chip below, so a challenged / corrected / validated / settled
+  // item is recognisable while scrolling before any chip is read. Reinforcement
+  // only: the DisputeBadge still states it in text (colour is never the sole
+  // carrier, WS-B.1.1f), and only ONE border colour is ever emitted — `cn` does
+  // not resolve Tailwind conflicts, so `border-line` and a dispute hue must not
+  // both be in the list.
+  const disputeBorder = disputeBorderClass(disputeStatus, disputeSettled);
 
   return (
     // DOM order == visual order (WS-B.2.1c / WCAG 1.3.2): title, source, signal
@@ -129,6 +130,7 @@ export function StoryCard({
           count, corrections tally. Both render nothing when there is nothing
           to say, so a quiet story carries no chip row at all. */}
       {disputeStatus !== 'none' ||
+      disputeSettled ||
       sourcesCount > 0 ||
       corrections.active > 0 ||
       corrections.validated > 0 ||
@@ -137,8 +139,9 @@ export function StoryCard({
       safetyState === 'restricted' ? (
         <div className="flex flex-wrap items-center gap-2">
           {/* WS-T — a sourced correction has challenged (or prevailed against)
-              this story. Renders nothing when undisputed. */}
-          <DisputeBadge status={disputeStatus} />
+              this story. Renders nothing when undisputed. `settled` supersedes
+              the status with the terminal "Settled" chip. */}
+          <DisputeBadge status={disputeStatus} settled={disputeSettled} />
           <StorySignals
             sourcesCount={sourcesCount}
             corrections={corrections}

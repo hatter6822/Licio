@@ -289,6 +289,14 @@ export const contributionPublicSchema = z
     moderation_state: contributionModerationStateSchema,
     /** Dispute posture (default `none`).  `incorrect` stays visible-but-sunk. */
     dispute_status: contributionDisputeStatusSchema.default('none'),
+    /** WS-T — the content prevailed in enough sourced debates (the settle
+     *  threshold, SPEC §15.4) that it can no longer be challenged.  A PRESENCE
+     *  marker: emitted only when TRUE (never `false`), so a pre-settle cached
+     *  bundle validating against a schema without this key keeps parsing every
+     *  response that carries no settled row.  Always co-occurs with
+     *  `dispute_status: 'validated'` — only an upheld defense settles.  A
+     *  content-integrity terminal, never a popularity count. */
+    dispute_settled: z.boolean().optional(),
     /** The open debate arena challenging this contribution, if any. */
     active_debate_id: uuidSchema.nullable().default(null),
     /** WS-T — true only for a STORY-target correction that is the story's

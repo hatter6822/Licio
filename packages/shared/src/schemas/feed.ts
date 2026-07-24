@@ -253,6 +253,12 @@ export const feedItemSchema = z.object({
    *  Defaults to `none` so producers predating disputes stay valid on the wire.
    *  A content-integrity signal, never a popularity count. */
   dispute_status: contributionDisputeStatusSchema.default('none'),
+  /** WS-T — the story prevailed in enough sourced debates (the settle threshold,
+   *  SPEC §15.4) that it can no longer be challenged ("Settled"). A PRESENCE
+   *  marker: emitted only when TRUE, so a pre-settle cached bundle keeps parsing
+   *  every response that carries no settled story. Always co-occurs with
+   *  `dispute_status: 'validated'`. A content-integrity terminal, never a count. */
+  dispute_settled: z.boolean().optional(),
 });
 export type FeedItem = z.infer<typeof feedItemSchema>;
 

@@ -53,6 +53,10 @@ export function toContributionPublic(
     // arena id (active_debate_id) is threaded in by the comment/thread readers
     // that hold the debate store; a bare projection defaults to null.
     dispute_status: tombstone ? 'none' : record.disputeStatus,
+    // WS-T settle marker (SPEC §15.4): emitted only when TRUE so a pre-settle
+    // cached bundle never has to parse an unknown key it hasn't settled a row
+    // for.  A tombstone never settles; a settled row is always `validated`.
+    ...(!tombstone && record.settledAt !== null ? { dispute_settled: true } : {}),
     active_debate_id: null,
     // The comment/thread readers that hold the pin identity override this for a
     // story-target correction that is the story's current challenge.

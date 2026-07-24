@@ -294,6 +294,10 @@ async function buildFeedItems(
         // bottom by the WS-I ordering sink; surfacing the status lets the card
         // label them "Challenged"/"Incorrect".
         dispute_status: story.disputeStatus ?? 'none',
+        // WS-T settle marker (SPEC §15.4): emitted only when TRUE so a pre-settle
+        // cached bundle keeps parsing every not-yet-settled feed. A settled story
+        // is always `validated`; the card renders the terminal "Settled" badge.
+        ...(story.settledAt != null ? { dispute_settled: true } : {}),
       }),
     );
   }

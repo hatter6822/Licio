@@ -399,7 +399,7 @@ export function CommentHeader({
       ) : null}
       {/* WS-T dispute posture: "Challenged" while a correction's debate is live,
           "Incorrect" once a correction prevailed (nothing when undisputed). */}
-      <DisputeBadge status={comment.dispute_status} />
+      <DisputeBadge status={comment.dispute_status} settled={comment.dispute_settled ?? false} />
     </div>
   );
   if (action === undefined) return meta;

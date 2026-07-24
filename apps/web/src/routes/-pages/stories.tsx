@@ -271,7 +271,12 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
               // WS-T — a prominent notice when a sourced correction has
               // challenged this story ("Challenged") or prevailed against it
               // ("Incorrect"); it belongs to the content, so it rides the card.
-              notice={<DisputeBanner status={data.dispute_status} />}
+              notice={
+                <DisputeBanner
+                  status={data.dispute_status}
+                  settled={data.dispute_settled ?? false}
+                />
+              }
             />
             {/* One row of ICON-ONLY actions under the card (each named for
                 assistive tech and tooltipped on hover/focus): correct, save
