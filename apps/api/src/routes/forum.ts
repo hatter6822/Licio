@@ -57,6 +57,7 @@ import {
   challengePolicyWire,
   computeChallengeStanding,
   resolveChallengePolicy,
+  withdrawalFetchWindowMs,
 } from '../forum/challenge-policy.js';
 import type { CommentFrame } from '../forum/comment-broadcaster.js';
 import { commentMediaOf, commentPage } from '../forum/comments.js';
@@ -1298,7 +1299,7 @@ export function createForumRoutes() {
             await forum.debates.challengerHistory(auth.userId, {
               nowIso: new Date(nowMs).toISOString(),
               opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
-              withdrawWindowMs: policy.withdrawWindowMs,
+              withdrawFetchWindowMs: withdrawalFetchWindowMs(policy),
               graceMs: policy.withdrawGraceMs,
             }),
             kycVerified,

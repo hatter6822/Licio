@@ -293,8 +293,10 @@ export interface DebateStore {
    *  grace retraction costs and consumes NOTHING, the daily budget included;
    *  the anti-race property never depended on budget burn: the survivor-set
    *  capacity bounds concurrency and voided arenas never adjudicate), and the
-   *  trailing `withdrawWindowMs`'s withdrawn arenas (grace classification +
-   *  cooldowns happen in the pure policy layer).  Self-targeted LEGACY arenas are
+   *  trailing `withdrawFetchWindowMs`'s withdrawn arenas (the policy window +
+   *  the longest cooldown rung — `withdrawalFetchWindowMs` — so ranks and
+   *  still-active rungs stay computable; grace classification + cooldowns
+   *  happen in the pure policy layer).  Self-targeted LEGACY arenas are
    *  outside the standing system in EVERY derivation (the create guard
    *  refuses new ones): they build no wins, cost no slots, burn no budget,
    *  and trigger no withdrawal consequences.  All standing state derives from
@@ -304,7 +306,7 @@ export interface DebateStore {
     opts: {
       nowIso: string;
       opensWindowMs: number;
-      withdrawWindowMs: number;
+      withdrawFetchWindowMs: number;
       /** The grace window (policy) — opens counting excludes grace rows. */
       graceMs: number;
     },
@@ -419,6 +421,16 @@ function concludedChallengeAt(row: DebateArenaRecord, graceMs: number): string |
     graceMs,
   );
   return grace ? null : row.resolvedAt;
+}
+
+/** The later of two ISO instants (the monotonic-token helper). */
+function maxIso(a: string, b: string): string {
+  return a > b ? a : b;
+}
+
+/** One millisecond after an ISO instant. */
+function plusOneMs(iso: string): string {
+  return new Date(Date.parse(iso) + 1).toISOString();
 }
 
 type Clock = () => number;
@@ -716,7 +728,11 @@ export class InMemoryDebateStore implements DebateStore {
     row.decidedBy = 'steward';
     row.overriddenByUserId = override.overriddenByUserId;
     row.overrideReason = override.overrideReason;
-    row.updatedAt = this.#iso();
+    // STRICTLY MONOTONIC token bump: the finalize fence (`resolveIfUnchanged`)
+    // compares millisecond timestamps, and an override landing in the same
+    // millisecond as the row's previous write would otherwise leave the token
+    // unchanged — letting a stale finalizer resolve with pre-override effects.
+    row.updatedAt = maxIso(this.#iso(), plusOneMs(row.updatedAt));
     return row;
   }
 
@@ -881,13 +897,13 @@ export class InMemoryDebateStore implements DebateStore {
     opts: {
       nowIso: string;
       opensWindowMs: number;
-      withdrawWindowMs: number;
+      withdrawFetchWindowMs: number;
       graceMs: number;
     },
   ): Promise<ChallengerHistory> {
     const nowMs = Date.parse(opts.nowIso);
     const opensCutoffMs = nowMs - opts.opensWindowMs;
-    const withdrawCutoffMs = nowMs - opts.withdrawWindowMs;
+    const withdrawCutoffMs = nowMs - opts.withdrawFetchWindowMs;
     const winsByOpponent = new Map<string, number>();
     let adjudicatedLosses = 0;
     let liveCount = 0;

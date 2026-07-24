@@ -636,6 +636,38 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     expect(await store.countActiveCommentArenas([])).toEqual(new Map());
   });
 
+  it('recordOverride bumps the updatedAt token STRICTLY, even in the same millisecond', async () => {
+    const store = makeStore();
+    const ctx = await freshCtx();
+    const judged = await store.open(
+      makeArena(ctx, {
+        state: 'judged',
+        verdict: 'upheld',
+        winner: 'incumbent',
+        decidedBy: 'ai',
+        overrideDeadlineAt: '2026-07-06T00:00:00.000Z',
+      }),
+    );
+    expect(judged).not.toBeNull();
+    const before = judged?.updatedAt ?? '';
+    const overridden = await store.recordOverride(judged?.debateId ?? '', {
+      verdict: 'corrected',
+      winner: 'challenger',
+      overriddenByUserId: ctx.opponentUser,
+      overrideReason: 'monotonic token contract',
+    });
+    // Strictly greater — the finalize fence (`resolveIfUnchanged`) compares
+    // millisecond timestamps, so an override in the SAME millisecond as the
+    // previous write must still change the token (the in-memory leg's frozen
+    // clock is exactly that case).
+    expect(overridden?.updatedAt ?? '').not.toBe('');
+    expect((overridden?.updatedAt ?? '') > before).toBe(true);
+    // And the moved token makes a stale-token resolve MISS.
+    expect(
+      await store.resolveIfUnchanged(judged?.debateId ?? '', '2026-07-06T01:00:00.000Z', before),
+    ).toBeNull();
+  });
+
   it('challengerHistory aggregates standing from arena rows (challenge policy)', async () => {
     const store = makeStore();
     const ctx = await freshCtx();
@@ -749,7 +781,7 @@ function contract(makeStore: () => DebateStore, freshCtx: () => Promise<Ctx>): v
     const history = await store.challengerHistory(challenger, {
       nowIso,
       opensWindowMs: 86_400_000,
-      withdrawWindowMs: 30 * 86_400_000,
+      withdrawFetchWindowMs: 30 * 86_400_000,
       graceMs: 5 * 60_000,
     });
     const buckets = new Map(history.winsByOpponent.map((row) => [row.opponentKey, row.wins]));

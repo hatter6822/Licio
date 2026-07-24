@@ -285,7 +285,7 @@ describe('WS-T challenge policy — the post-open quota recheck (TOCTOU)', () =>
     const history = await fixture.forum.debates.challengerHistory(challenger.userId, {
       nowIso: new Date(nowMs).toISOString(),
       opensWindowMs: DAY_MS,
-      withdrawWindowMs: 30 * DAY_MS,
+      withdrawFetchWindowMs: 30 * DAY_MS,
       graceMs: 5 * 60_000,
     });
     expect(history.liveCount).toBe(1);
@@ -349,6 +349,148 @@ describe('WS-T challenge policy — withdrawal pricing', () => {
     // account may re-file against the SAME target immediately.
     const refiled = await post(challengeBody(targetId), challenger.cookie);
     expect(refiled.status).toBe(201);
+  });
+});
+
+describe('WS-T challenge policy — cross-arena postures under override retries', () => {
+  it('the mid-finalize revert restores another arena’s incorrect, never a blanket none', async () => {
+    const CORRECTED: DebateJudgeVerdict = {
+      ...UPHELD,
+      winner: 'challenger',
+      verdict: 'corrected',
+      probabilities: { incumbent: 0.05, challenger: 0.9, inconclusive: 0.05 },
+    };
+    // Arena X: userC's correction C challenges the author's comment T1.
+    const userC = await seedUserWithSession(fixture.identity);
+    const t1 = await seedTarget();
+    const filedX = await postOk(challengeBody(t1), userC.cookie);
+    const xId = filedX.metadata.debate_arena_id ?? '';
+    const cId = filedX.contribution_id;
+    // Arena Y: V challenges the correction C itself (a correction is
+    // correctable) — C is simultaneously X's challenger and Y's target.
+    const userV = await seedUserWithSession(fixture.identity);
+    const filedY = await postOk(challengeBody(cId), userV.cookie);
+    const yId = filedY.metadata.debate_arena_id ?? '';
+    // Per-arena verdicts: Y corrects C (V prevails ⇒ C `incorrect`); X
+    // upholds T1.
+    fixture.forum.debateJudge = async (context) => ({
+      verdict: context.debateId === yId ? CORRECTED : UPHELD,
+      outputId: `out-${context.debateId}`,
+    });
+    // Keep X's incumbent active so only Y expedites on the first tick.
+    nowMs += 50 * 60_000;
+    await fixture.forum.debates.touchActivity(xId, 'incumbent', new Date(nowMs).toISOString());
+    nowMs += 11 * 60_000 + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(yId))?.state).toBe('judged');
+    expect((await fixture.forum.debates.getById(xId))?.state).toBe('open');
+    // +25h: Y finalizes (C is now legitimately `incorrect` from arena Y) and
+    // X locks + judges upheld.
+    nowMs += 24 * HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(yId))?.state).toBe('resolved');
+    expect((await fixture.forum.contributions.getById(cId))?.disputeStatus).toBe('incorrect');
+    expect((await fixture.forum.debates.getById(xId))?.state).toBe('judged');
+    // X's finalize: a steward override (upheld → corrected) lands mid-effects;
+    // the retry's revert must RESTORE C's prior `incorrect` (arena Y's
+    // adjudication), never blanket it to `none`.
+    const steward = await seedUserWithSession(fixture.identity);
+    const contributions = fixture.forum.contributions;
+    const realCertify = contributions.certifyValidatedIfUnedited.bind(contributions);
+    let raced = false;
+    contributions.certifyValidatedIfUnedited = async (...args: Parameters<typeof realCertify>) => {
+      const result = await realCertify(...args);
+      if (!raced) {
+        raced = true;
+        const overridden = await fixture.forum.debates.recordOverride(xId, {
+          verdict: 'corrected',
+          winner: 'challenger',
+          overriddenByUserId: steward.userId,
+          overrideReason: 'New primary source vindicates the correction.',
+        });
+        expect(overridden?.verdict).toBe('corrected');
+      }
+      return result;
+    };
+    nowMs += 24 * HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    const arenaX = await fixture.forum.debates.getById(xId);
+    expect(arenaX?.state).toBe('resolved');
+    expect(arenaX?.verdict).toBe('corrected');
+    // C keeps arena Y's `incorrect`; T1 takes X's overridden `corrected`.
+    expect((await fixture.forum.contributions.getById(cId))?.disputeStatus).toBe('incorrect');
+    expect((await fixture.forum.contributions.getById(t1))?.disputeStatus).toBe('incorrect');
+  });
+});
+
+describe('WS-T challenge policy — displaced-winner reconciliation', () => {
+  it('a later-landing tie-winner evicts the displaced keeper (survivors converge to the quota)', async () => {
+    const challenger = await seedUserWithSession(fixture.identity);
+    // Keeper A: opened via the route (kept — nothing else raced yet).  Its
+    // target is tagged `under_debate`.
+    const targetA = await seedTarget();
+    const filedA = await postOk(challengeBody(targetA), challenger.cookie);
+    const arenaA = filedA.metadata.debate_arena_id ?? '';
+    expect((await fixture.forum.contributions.getById(targetA))?.disputeStatus).toBe(
+      'under_debate',
+    );
+    // Racer B lands under the SAME frozen clock (equal createdAt) with a
+    // lexicographically SMALLER debate id — it ranks ahead of A in the
+    // deterministic order, so B keeps its arena AND evicts the displaced A
+    // (A already evaluated and would never revisit).
+    const targetB = await seedTarget();
+    const correctionB = randomUUID();
+    const insertedB = await fixture.forum.contributions.insert({
+      contributionId: correctionB,
+      threadId,
+      userId: challenger.userId,
+      type: 'correction',
+      body: 'Tie-racing challenge.',
+      citations: [{ url: 'https://example.org/tie' }],
+      metadata: { target_contribution_id: targetB },
+      targetClaimId: null,
+      parentContributionId: targetB,
+      clientDraftId: `draft-${correctionB}`,
+      path: [targetB],
+      moderationState: 'published',
+    });
+    expect(insertedB.ok).toBe(true);
+    const arenaB = '00000000-0000-4000-8000-000000000000';
+    const opened = await maybeEnterDebate(
+      buildDebateDeps(fixture.forum, fixture.ingestion),
+      {
+        contributionId: correctionB,
+        threadId,
+        storyId: (await fixture.ingestion.stories.getThreadById(threadId))?.storyId ?? '',
+        roomId: (await fixture.ingestion.stories.getThreadById(threadId))?.roomId ?? null,
+        userId: challenger.userId,
+        body: 'Tie-racing challenge.',
+        citations: [{ url: 'https://example.org/tie' }],
+        metadata: { target_contribution_id: targetB },
+      },
+      arenaB,
+      {
+        capacity: 1,
+        opensPerDay: 5,
+        opensCutoffIso: new Date(nowMs - DAY_MS).toISOString(),
+        graceMs: 5 * 60_000,
+      },
+    );
+    // B survived; A was evicted as a grace withdrawal with the full
+    // withdrawal effects — its target's tag cleared.
+    expect(opened?.debateId).toBe(arenaB);
+    expect((await fixture.forum.debates.getById(arenaA))?.state).toBe('withdrawn');
+    expect((await fixture.forum.contributions.getById(targetA))?.disputeStatus).toBe('none');
+    expect((await fixture.forum.contributions.getById(targetB))?.disputeStatus).toBe(
+      'under_debate',
+    );
+    const history = await fixture.forum.debates.challengerHistory(challenger.userId, {
+      nowIso: new Date(nowMs).toISOString(),
+      opensWindowMs: DAY_MS,
+      withdrawFetchWindowMs: 30 * DAY_MS,
+      graceMs: 5 * 60_000,
+    });
+    expect(history.liveCount).toBe(1);
   });
 });
 

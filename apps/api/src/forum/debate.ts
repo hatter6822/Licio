@@ -20,6 +20,7 @@
 import type { DebateJudgeVerdict } from '@licio/ai-governance';
 import {
   type Citation,
+  type ContributionDisputeStatus,
   type ContributionMetadata,
   DEBATE_EDIT_WINDOW_MS,
   DEBATE_INACTIVITY_WINDOW_MS,
@@ -43,8 +44,8 @@ import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { mapBounded } from '../lib/concurrency.js';
 import {
   type ChallengePolicy,
-  challengeOpenSurvivesQuota,
   challengePolicyFromConfig,
+  challengeQuotaOverflow,
   isGraceWithdrawal,
 } from './challenge-policy.js';
 import { DEFAULT_FORUM_CONFIG } from './config.js';
@@ -382,7 +383,29 @@ export async function maybeEnterDebate(
       quota.opensCutoffIso,
       quota.graceMs,
     );
-    if (!challengeOpenSurvivesQuota(raced, debateId, quota, quota.opensCutoffIso)) {
+    // Beyond self-voiding, EVICT every displaced overflow row in the observed
+    // set (`challengeQuotaOverflow`): a later-landing open can rank ahead of
+    // an already-evaluated keeper (equal createdAt + the id tie-break, or
+    // cross-instance clock skew), and that keeper never re-evaluates — so the
+    // observer converges the survivor set to exactly the quota.  The eviction
+    // is the same open-CAS grace withdrawal, with the full withdrawal effects
+    // (tag clear, log, live frame) since the evicted racer may have tagged
+    // its target already; a CAS miss means the row progressed and is left to
+    // its own lifecycle.
+    const overflow = challengeQuotaOverflow(raced, quota, quota.opensCutoffIso);
+    for (const displacedId of overflow) {
+      if (displacedId === debateId) continue;
+      const evicted = await deps.debates.withdraw(displacedId, new Date(deps.now()).toISOString());
+      if (evicted !== null) {
+        deps.log('forum.debate_voided_quota_displaced', {
+          debate_id: displacedId,
+          by_debate_id: debateId,
+        });
+        await applyWithdrawalEffects(deps, evicted);
+      }
+    }
+    if (overflow.includes(debateId)) {
+      // Tolerant self-void: a peer observer may have evicted this arena first.
       await deps.debates.withdraw(debateId, new Date(deps.now()).toISOString());
       deps.log('forum.debate_voided_quota', {
         debate_id: debateId,
@@ -445,6 +468,20 @@ export async function maybeEnterDebate(
         target_type: targetType,
         story_id: correction.storyId,
         reason: staleReason,
+      });
+      return null;
+    }
+  }
+  // A peer observer may have EVICTED this arena between the rechecks above
+  // and the tagging below (the displaced-overflow reconciliation): re-read
+  // and bail arena-less rather than tagging a withdrawn arena's target.
+  if (quota !== undefined) {
+    const still = await deps.debates.getById(debateId);
+    if (still === null || still.state !== 'open') {
+      deps.log('forum.debate_voided_by_peer', {
+        debate_id: debateId,
+        target_type: targetType,
+        story_id: correction.storyId,
       });
       return null;
     }
@@ -1006,12 +1043,14 @@ export async function finalizeDebate(
     if (fresh === null || fresh.state !== 'judged') return fresh;
     // An override re-decided the outcome mid-effects.  Revert the upheld
     // challenger tag THIS attempt applied for a verdict that no longer
-    // stands (the re-applied effects cover everything else by overwrite).
-    if (attemptArena.verdict === 'upheld' && fresh.verdict !== 'upheld') {
+    // stands — by restoring the status read BEFORE the tag (a separate arena
+    // may have legitimately marked this correction `incorrect` as ITS target;
+    // that adjudication is not this arena's to erase).  The re-applied
+    // effects cover everything else by overwrite.
+    if (outcome.challengerPrior !== null && fresh.verdict !== 'upheld') {
       await deps.contributions.setDisputeStatus(
         attemptArena.challengerContributionId,
-        'none',
-        null,
+        outcome.challengerPrior,
       );
     }
     arena = fresh;
@@ -1028,7 +1067,16 @@ async function applyFinalizeOutcome(
   deps: DebateDeps,
   arena: DebateArenaRecord,
   resolvedAt: string,
-): Promise<{ resolvedStatus: 'incorrect' | 'validated' | 'none'; settledAt: string | null }> {
+): Promise<{
+  resolvedStatus: 'incorrect' | 'validated' | 'none';
+  settledAt: string | null;
+  /** The challenger row's dispute status BEFORE this attempt tagged it
+   *  `incorrect` (upheld only; null when nothing was tagged) — the retry
+   *  loop's revert restores THIS, never a hardcoded `none`: the correction
+   *  can be the target of a SEPARATE arena whose own adjudicated `incorrect`
+   *  must survive an override-driven re-apply here. */
+  challengerPrior: ContributionDisputeStatus | null;
+}> {
   // Apply the dispute outcome to the CHALLENGED target. `corrected` ⇒ tagged
   // `incorrect` (and, for a story, demoted to the bottom of the feed by the
   // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
@@ -1135,10 +1183,13 @@ async function applyFinalizeOutcome(
   // section sinks it to the bottom). Applies to BOTH story- and comment-target
   // challenges. `corrected`/`inconclusive` — and the concession/withdrawal
   // paths, which never reach finalize — leave the challenger untouched.
+  let challengerPrior: ContributionDisputeStatus | null = null;
   if (arena.verdict === 'upheld') {
+    challengerPrior =
+      (await deps.contributions.getById(arena.challengerContributionId))?.disputeStatus ?? null;
     await deps.contributions.setDisputeStatus(arena.challengerContributionId, 'incorrect');
   }
-  return { resolvedStatus, settledAt };
+  return { resolvedStatus, settledAt, challengerPrior };
 }
 
 // ---------------------------------------------------------------------------

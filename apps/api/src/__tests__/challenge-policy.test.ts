@@ -13,10 +13,12 @@ import {
   challengeOpenSurvivesQuota,
   challengePolicyFromConfig,
   challengePolicyWire,
+  challengeQuotaOverflow,
   computeChallengeStanding,
   isGraceWithdrawal,
   resolveChallengePolicy,
   type WithdrawalRow,
+  withdrawalFetchWindowMs,
 } from '../forum/challenge-policy.js';
 import { DEFAULT_FORUM_CONFIG } from '../forum/config.js';
 
@@ -295,6 +297,65 @@ describe('computeChallengeStanding — velocity and slots', () => {
       POLICY,
     );
     expect(standing.blockedBy).toBe('cooldown');
+  });
+});
+
+describe('computeChallengeStanding — cooldown ranks beyond the policy window', () => {
+  it('ranks the oldest in-window withdrawal against out-of-window predecessors', () => {
+    // Steward-tuned config: a ONE-DAY window with 24h/72h rungs — a rung can
+    // outlive the window, so the fetch must reach further back
+    // (withdrawalFetchWindowMs) and ranking must see those predecessors.
+    const tuned: ChallengePolicy = {
+      ...POLICY,
+      withdrawWindowMs: DAY_MS,
+      withdrawCooldownsMs: [2 * HOUR_MS, 24 * HOUR_MS, 72 * HOUR_MS],
+    };
+    expect(withdrawalFetchWindowMs(tuned)).toBe(DAY_MS + 72 * HOUR_MS);
+    const standing = computeChallengeStanding(
+      history({
+        withdrawals: [withdrawal(NOW - 46 * HOUR_MS), withdrawal(NOW - 23 * HOUR_MS)],
+      }),
+      false,
+      NOW,
+      tuned,
+    );
+    // The −23h event is rank TWO in its own trailing day (the −46h predecessor
+    // is outside the POLICY window but inside the fetch window): the 24h rung
+    // is still cooling down.  A window-only computation would call it rank one
+    // (2h — long expired).
+    expect(standing.cooldownUntilMs).toBe(NOW - 23 * HOUR_MS + 24 * HOUR_MS);
+    // Penalties still count ONLY the policy window (one event, one free).
+    expect(standing.activeWithdrawalPenalties).toBe(0);
+  });
+});
+
+describe('challengeQuotaOverflow — displaced-winner reconciliation', () => {
+  const cutoff = iso(NOW - DAY_MS);
+  const quota = { capacity: 1, opensPerDay: 5 };
+  const row = (id: string, atMs: number, preVerdict = true) => ({
+    debateId: id,
+    createdAt: iso(atMs),
+    preVerdict,
+  });
+
+  it('names exactly the live rows beyond capacity, by the deterministic order', () => {
+    const raced = [row('b', NOW), row('a', NOW)];
+    expect(challengeQuotaOverflow(raced, quota, cutoff)).toEqual(['b']);
+  });
+
+  it('a later-landing tie-winner displaces the earlier keeper into the overflow', () => {
+    // 'b' (higher id) evaluated first against {b} alone and kept; 'a' lands
+    // with the same createdAt and ranks ahead — the observer set now names
+    // 'b' as the overflow to evict.
+    const raced = [row('a', NOW), row('b', NOW)];
+    expect(challengeQuotaOverflow(raced, { capacity: 1, opensPerDay: 5 }, cutoff)).toEqual(['b']);
+  });
+
+  it('velocity overflow evicts only LIVE rows (terminal opens cannot be withdrawn)', () => {
+    const raced = [row('t1', NOW - 3000, false), row('t2', NOW - 2000, false), row('mine', NOW)];
+    expect(challengeQuotaOverflow(raced, { capacity: 5, opensPerDay: 2 }, cutoff)).toEqual([
+      'mine',
+    ]);
   });
 });
 

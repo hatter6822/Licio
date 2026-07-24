@@ -353,12 +353,19 @@ The rationing layer over challenge creation — every number steward-tunable
   from either direction.  Finalization itself is fenced against a
   last-moment steward override the same way: the `judged → resolved` flip is
   `resolveIfUnchanged`, a CAS on the row's `updatedAt` token (the only
-  judged-row writers are `recordOverride` and finalize) — an override landing
-  mid-effects makes the resolve miss and finalize re-applies its outcome for
-  the FINAL verdict (idempotent overwrites, plus an explicit revert of a
-  stale upheld challenger tag) before retrying, keeping the resolved arena
-  and its dispute statuses consistent while preserving the effects-first /
-  state-flip-last crash-healing order.
+  judged-row writers are `recordOverride` — which bumps the token STRICTLY
+  MONOTONICALLY, `greatest(now, updated_at + 1ms)` in both adapters, so a
+  same-millisecond override still moves it — and finalize).  An override
+  landing mid-effects makes the resolve miss and finalize re-applies its
+  outcome for the FINAL verdict (idempotent overwrites, plus a revert of the
+  stale upheld challenger tag that RESTORES the status read before the tag —
+  a separate arena may legitimately hold that correction `incorrect` as ITS
+  target, and that adjudication is not this arena's to erase) before
+  retrying, keeping the resolved arena and its dispute statuses consistent
+  while preserving the effects-first / state-flip-last crash-healing order.
+  Withdrawal standing reads fetch `withdrawalFetchWindowMs` (the policy
+  window + the longest cooldown rung), so steward-tuned configs whose rungs
+  outlive the window still rank and enforce their cooldowns.
   `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
   (migration 0096) — never a dispute-status enum value — so every existing
   wire schema, ranking feature, search filter, and badge keeps its exact
@@ -379,7 +386,14 @@ The rationing layer over challenge creation — every number steward-tunable
   by the deterministic oldest-survives order — as a same-instant GRACE
   withdrawal, so a racer is never cooled down, keeps their once-per-target
   right, and (like every grace retraction) burns no daily budget: grace costs
-  and consumes NOTHING, opens included.  Racing still cannot convert into
+  and consumes NOTHING, opens included.  Beyond self-voiding, every observer
+  also EVICTS the displaced overflow it can see (`challengeQuotaOverflow` +
+  the full withdrawal effects): a later-landing open can rank ahead of an
+  already-evaluated keeper (equal createdAt with the id tie-break, or
+  cross-instance clock skew) that never re-evaluates, so observer-side
+  eviction is what converges the survivor set to exactly the quota — and a
+  racer re-checks its own arena is still `open` before tagging, so an evicted
+  arena never leaves a stale `under_debate` mark.  Racing still cannot convert into
   throughput — the survivor set is bounded by capacity, voided arenas never
   reach the adjudicator, and the contribution limiter bounds request churn.
   The same fence re-reads the TARGET's policy state after the open (a

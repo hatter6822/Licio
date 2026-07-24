@@ -484,7 +484,12 @@ export class DrizzleDebateStore implements DebateStore {
         decidedBy: 'steward',
         overriddenByUserId: override.overriddenByUserId,
         overrideReason: override.overrideReason,
-        updatedAt: new Date(),
+        // STRICTLY MONOTONIC token bump: the finalize fence
+        // (`resolveIfUnchanged`) compares millisecond timestamps, and an
+        // override landing in the same millisecond as the row's previous
+        // write would otherwise leave the token unchanged — letting a stale
+        // finalizer resolve with pre-override effects.
+        updatedAt: sql`greatest(${new Date().toISOString()}::timestamptz, ${debateArenasTable.updatedAt} + interval '1 millisecond')`,
       })
       // State CAS (mirrors recordVerdict): only override a still-`judged` arena.
       // Without it, an override racing the finalize sweep (judged→resolved) would
@@ -733,13 +738,13 @@ export class DrizzleDebateStore implements DebateStore {
     opts: {
       nowIso: string;
       opensWindowMs: number;
-      withdrawWindowMs: number;
+      withdrawFetchWindowMs: number;
       graceMs: number;
     },
   ): Promise<ChallengerHistory> {
     const nowMs = Date.parse(opts.nowIso);
     const opensCutoff = new Date(nowMs - opts.opensWindowMs);
-    const withdrawCutoff = new Date(nowMs - opts.withdrawWindowMs);
+    const withdrawCutoff = new Date(nowMs - opts.withdrawFetchWindowMs);
     // Self-targeted legacy arenas sit outside the standing system in EVERY
     // derivation (no wins, no slots, no budget, no withdrawal consequences).
     const asChallenger = and(

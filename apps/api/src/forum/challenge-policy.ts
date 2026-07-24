@@ -198,22 +198,29 @@ export function computeChallengeStanding(
     ? Math.min(policy.maxEarnedTiers, Math.floor(qualifiedWins / policy.winsPerTier))
     : 0;
 
-  // Non-grace withdrawals inside the trailing window, oldest first.
-  const windowStartMs = nowMs - policy.withdrawWindowMs;
-  const penalized = history.withdrawals
+  // ALL fetched non-grace withdrawals, oldest first (the store fetches
+  // `withdrawalFetchWindowMs` — the policy window + the longest rung — so
+  // ranks and still-active cooldowns are computable even when a rung outlives
+  // the policy window under steward-tuned configs).
+  const nonGraceAll = history.withdrawals
     .filter((row) => !isGraceWithdrawal(row, policy.withdrawGraceMs))
     .map((row) => Date.parse(row.resolvedAt))
-    .filter((atMs) => atMs > windowStartMs && atMs <= nowMs)
+    .filter((atMs) => atMs <= nowMs)
     .sort((a, b) => a - b);
-  const activeWithdrawalPenalties = Math.max(0, penalized.length - policy.freeWithdrawalsPerWindow);
+  // Capacity penalties count ONLY the policy window.
+  const windowStartMs = nowMs - policy.withdrawWindowMs;
+  const activeWithdrawalPenalties = Math.max(
+    0,
+    nonGraceAll.filter((atMs) => atMs > windowStartMs).length - policy.freeWithdrawalsPerWindow,
+  );
 
   // Escalating cooldowns: each non-grace withdrawal's rank is its position
-  // among the non-grace withdrawals in ITS OWN trailing window.  Events older
-  // than one window cannot hold an active cooldown (cooldowns ≪ the window),
-  // so the single-window fetch is exact for `cooldownUntilMs`.
+  // among the non-grace withdrawals in ITS OWN trailing window — computed
+  // over the FULL fetched set, so the oldest in-window event still sees the
+  // predecessors that determine its rung.
   let cooldownUntilMs: number | null = null;
-  for (const atMs of penalized) {
-    const rankInWindow = penalized.filter(
+  for (const atMs of nonGraceAll) {
+    const rankInWindow = nonGraceAll.filter(
       (other) => other > atMs - policy.withdrawWindowMs && other <= atMs,
     ).length;
     const ladder = policy.withdrawCooldownsMs[Math.min(rankInWindow, 3) - 1] ?? 0;
@@ -271,6 +278,16 @@ export function computeChallengeStanding(
   };
 }
 
+/** How far back the STORE must fetch withdrawals for standing: the policy
+ *  window PLUS the longest cooldown rung.  Two reasons a single policy window
+ *  is not enough under steward-tuned configs (e.g. a 1-day window with a 72h
+ *  rung): an out-of-window event can still hold an ACTIVE cooldown, and the
+ *  rank of an in-window event depends on predecessors inside ITS OWN trailing
+ *  window, which can start before the policy window does. */
+export function withdrawalFetchWindowMs(policy: ChallengePolicy): number {
+  return policy.withdrawWindowMs + Math.max(...policy.withdrawCooldownsMs, 0);
+}
+
 /** One arena in the post-open quota recheck set
  *  (`DebateStore.listChallengeOpens`). */
 export interface ChallengeOpenRow {
@@ -280,25 +297,9 @@ export interface ChallengeOpenRow {
 }
 
 /**
- * The post-open quota RECHECK (the TOCTOU close): the account-level gates are
- * read-then-act, so N parallel corrections can all pass them before any arena
- * exists.  Every writer therefore re-reads the full raced set AFTER its own
- * open lands (write-before-read, the open-vs-removal discipline) and keeps its
- * arena only while it sits inside the quota by the OLDEST-SURVIVES order
- * (createdAt, then debateId — deterministic across racers, so exactly the
- * overflow self-voids and at least `capacity` survivors always remain):
- *
- *   • capacity — mine must be among the first `capacity` PRE-VERDICT arenas;
- *   • velocity — mine must be among the first `opensPerDay` arenas opened in
- *     the trailing window.
- *
- * The void is a same-instant GRACE withdrawal: racers are never cooled down
- * or penalized, the once-per-target right is not consumed, and — like every
- * grace retraction — the voided open is budget-exempt (grace costs and
- * consumes NOTHING).  Racing still cannot convert into throughput: the
- * survivor set is bounded by `capacity`, voided arenas never reach the
- * adjudicator, and the per-account contribution limiter bounds the raw
- * request churn.
+ * Whether ONE open survives the post-open quota recheck — the negation of
+ * `challengeQuotaOverflow` membership, kept as a named helper for the pure
+ * tests and the docs (one source of truth for the survivor order).
  */
 export function challengeOpenSurvivesQuota(
   rows: readonly ChallengeOpenRow[],
@@ -306,17 +307,35 @@ export function challengeOpenSurvivesQuota(
   quota: { capacity: number; opensPerDay: number },
   opensCutoffIso: string,
 ): boolean {
+  return !challengeQuotaOverflow(rows, quota, opensCutoffIso).includes(mineDebateId);
+}
+
+/**
+ * The DISPLACED overflow of a raced open set: the live (pre-verdict) arenas
+ * that fall outside the quota by the deterministic oldest-survives order.
+ * Every raced writer computes this over ITS observed set and — beyond
+ * self-voiding when it is displaced itself — EVICTS the displaced rows it can
+ * see: a later-landing open can rank ahead of an already-evaluated keeper
+ * (equal createdAt with the id tie-break, or cross-instance clock skew), and
+ * that keeper never re-evaluates, so observer-side eviction is what makes the
+ * survivor set converge to exactly the quota.
+ */
+export function challengeQuotaOverflow(
+  rows: readonly ChallengeOpenRow[],
+  quota: { capacity: number; opensPerDay: number },
+  opensCutoffIso: string,
+): string[] {
   const byAge = [...rows].sort(
     (a, b) => a.createdAt.localeCompare(b.createdAt) || a.debateId.localeCompare(b.debateId),
   );
-  const liveRank = byAge
-    .filter((row) => row.preVerdict)
-    .findIndex((row) => row.debateId === mineDebateId);
-  if (liveRank >= quota.capacity) return false;
-  const opensRank = byAge
+  const live = byAge.filter((row) => row.preVerdict);
+  const overCapacity = live.slice(quota.capacity).map((row) => row.debateId);
+  const overOpens = byAge
     .filter((row) => row.createdAt > opensCutoffIso)
-    .findIndex((row) => row.debateId === mineDebateId);
-  return opensRank < quota.opensPerDay;
+    .slice(quota.opensPerDay)
+    .filter((row) => row.preVerdict)
+    .map((row) => row.debateId);
+  return [...new Set([...overCapacity, ...overOpens])];
 }
 
 /** The policy echo the standing endpoint serves (wire snake_case) — the

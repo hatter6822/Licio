@@ -47,6 +47,7 @@ import {
   type ChallengePolicy,
   computeChallengeStanding,
   resolveChallengePolicy,
+  withdrawalFetchWindowMs,
 } from './challenge-policy.js';
 import {
   type ChallengeQuotaRecheck,
@@ -598,7 +599,7 @@ export async function createContribution(
       await forum.debates.challengerHistory(userId, {
         nowIso: new Date(nowMs).toISOString(),
         opensWindowMs: CHALLENGE_OPENS_WINDOW_MS,
-        withdrawWindowMs: challengePolicy.withdrawWindowMs,
+        withdrawFetchWindowMs: withdrawalFetchWindowMs(challengePolicy),
         graceMs: challengePolicy.withdrawGraceMs,
       }),
       kycVerified,
