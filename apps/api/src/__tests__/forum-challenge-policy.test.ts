@@ -671,6 +671,53 @@ describe('WS-T challenge policy — standing endpoint + unsettle', () => {
     expect(row?.body).toBe('Edited inside the finalize window.');
   });
 
+  it('an override landing mid-finalize resolves with ITS effects, never the stale verdict’s', async () => {
+    fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
+    const targetId = await seedTarget();
+    const challenger = await seedUserWithSession(fixture.identity);
+    const filed = await postOk(challengeBody(targetId), challenger.cookie);
+    const debateId = filed.metadata.debate_arena_id ?? '';
+    nowMs += HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    expect((await fixture.forum.debates.getById(debateId))?.state).toBe('judged');
+    // The steward's overrule lands while finalize is mid-effects for the AI's
+    // `upheld` (the certify hook sits inside that window): the resolve CAS on
+    // the row's updatedAt token must miss and the loop re-apply for the FINAL
+    // `corrected` verdict.
+    const steward = await seedUserWithSession(fixture.identity);
+    const contributions = fixture.forum.contributions;
+    const realCertify = contributions.certifyValidatedIfUnedited.bind(contributions);
+    let raced = false;
+    contributions.certifyValidatedIfUnedited = async (...args: Parameters<typeof realCertify>) => {
+      const result = await realCertify(...args);
+      if (!raced) {
+        raced = true;
+        const overridden = await fixture.forum.debates.recordOverride(debateId, {
+          verdict: 'corrected',
+          winner: 'challenger',
+          overriddenByUserId: steward.userId,
+          overrideReason: 'New primary source contradicts the incumbent.',
+        });
+        expect(overridden?.verdict).toBe('corrected');
+      }
+      return result;
+    };
+    nowMs += 24 * HOUR_MS + 1000;
+    await runDebateSchedulerTick(rethrow);
+    const arena = await fixture.forum.debates.getById(debateId);
+    expect(arena?.state).toBe('resolved');
+    expect(arena?.verdict).toBe('corrected');
+    // The applied effects match the FINAL verdict: the target is incorrect
+    // (never left `validated` by the stale upheld pass), and the challenger's
+    // winning correction carries no `incorrect` tag.
+    const target = await fixture.forum.contributions.getById(targetId);
+    expect(target?.disputeStatus).toBe('incorrect');
+    expect(target?.settledAt).toBeNull();
+    expect((await fixture.forum.contributions.getById(filed.contribution_id))?.disputeStatus).toBe(
+      'none',
+    );
+  });
+
   it('a verdict on a SUPERSEDED version resolves none — never validated, never settled', async () => {
     fixture.forum.debateJudge = async () => ({ verdict: UPHELD, outputId: 'out-upheld' });
     const targetId = await seedTarget();

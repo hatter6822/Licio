@@ -220,6 +220,18 @@ export interface DebateStore {
     state: DebateState,
     resolvedAt?: string,
   ): Promise<DebateArenaRecord | null>;
+  /** ATOMICALLY resolve a `judged` arena (→ `resolved`) — CAS on the row's
+   *  `updatedAt` token, the finalize-vs-override fence: the ONLY writers of a
+   *  judged row are `recordOverride` (which bumps the token) and this resolve,
+   *  so a steward override landing after finalize read its verdict makes the
+   *  CAS miss (null) and finalize re-applies its outcome effects against the
+   *  FINAL verdict before retrying.  State stays `judged` on a miss — the
+   *  crash-healing property (effects first, state flip last) is preserved. */
+  resolveIfUnchanged(
+    debateId: string,
+    resolvedAt: string,
+    expectedUpdatedAt: string,
+  ): Promise<DebateArenaRecord | null>;
   /** Arenas due for the scheduled hour-23 lock: still `open` past their edit
    *  deadline. */
   listDueForLock(nowIso: string, limit: number): Promise<DebateArenaRecord[]>;
@@ -717,6 +729,19 @@ export class InMemoryDebateStore implements DebateStore {
     if (!row) return null;
     row.state = state;
     if (resolvedAt !== undefined) row.resolvedAt = resolvedAt;
+    row.updatedAt = this.#iso();
+    return row;
+  }
+
+  async resolveIfUnchanged(
+    debateId: string,
+    resolvedAt: string,
+    expectedUpdatedAt: string,
+  ): Promise<DebateArenaRecord | null> {
+    const row = this.#rows.get(debateId);
+    if (row?.state !== 'judged' || row.updatedAt !== expectedUpdatedAt) return null;
+    row.state = 'resolved';
+    row.resolvedAt = resolvedAt;
     row.updatedAt = this.#iso();
     return row;
   }

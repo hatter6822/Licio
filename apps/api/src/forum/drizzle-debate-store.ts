@@ -511,6 +511,27 @@ export class DrizzleDebateStore implements DebateStore {
     return rows[0] ? this.#toRecord(rows[0]) : null;
   }
 
+  async resolveIfUnchanged(
+    debateId: string,
+    resolvedAt: string,
+    expectedUpdatedAt: string,
+  ): Promise<DebateArenaRecord | null> {
+    // The updatedAt token is millisecond-precision on both sides (every write
+    // stamps an explicit JS Date), so the equality CAS round-trips exactly.
+    const rows = await this.#db
+      .update(debateArenasTable)
+      .set({ state: 'resolved', resolvedAt: new Date(resolvedAt), updatedAt: new Date() })
+      .where(
+        and(
+          eq(debateArenasTable.debateId, debateId),
+          eq(debateArenasTable.state, 'judged'),
+          eq(debateArenasTable.updatedAt, new Date(expectedUpdatedAt)),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toRecord(rows[0]) : null;
+  }
+
   async listDueForLock(nowIso: string, limit: number): Promise<DebateArenaRecord[]> {
     const rows = await this.#db
       .select()

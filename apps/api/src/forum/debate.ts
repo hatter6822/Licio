@@ -900,10 +900,70 @@ export async function finalizeDebate(
   deps: DebateDeps,
   debateId: string,
 ): Promise<DebateArenaRecord | null> {
-  const arena = await deps.debates.getById(debateId);
+  let arena = await deps.debates.getById(debateId);
   if (arena === null) return null;
   if (arena.state !== 'judged') return arena;
-  const resolvedAt = new Date(deps.now()).toISOString();
+  // The finalize-vs-override fence: the outcome effects below are computed
+  // from the verdict READ here, so the resolve is a CAS on the row's
+  // `updatedAt` token (`resolveIfUnchanged`) — a steward override landing
+  // while the effects are in flight makes the CAS miss, and the loop
+  // re-applies the effects against the FINAL verdict (the writes are
+  // idempotent overwrites) before retrying.  Bounded: the override window
+  // admits finitely many overrides, and a still-`judged` arena is simply
+  // re-listed on the next tick (effects-first, state-flip-last keeps the
+  // crash-healing property).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    // SNAPSHOT the row before the effects run: the in-memory adapter returns
+    // live row references, so a concurrent override mutates `arena` in place
+    // — a late `updatedAt` read would spuriously match the override's own
+    // bump and a late `verdict` read would describe the wrong attempt.  The
+    // override touches top-level scalars only, so a shallow copy fences them.
+    const attemptArena: DebateArenaRecord = { ...arena };
+    const resolvedAt = new Date(deps.now()).toISOString();
+    const outcome = await applyFinalizeOutcome(deps, attemptArena, resolvedAt);
+    const resolved = await deps.debates.resolveIfUnchanged(
+      debateId,
+      resolvedAt,
+      attemptArena.updatedAt,
+    );
+    if (resolved !== null) {
+      deps.log('forum.debate_resolved', {
+        debate_id: debateId,
+        verdict: attemptArena.verdict,
+        target_dispute_status: outcome.resolvedStatus,
+        target_settled: outcome.settledAt !== null,
+      });
+      await broadcastArena(deps, resolved);
+      return resolved;
+    }
+    const fresh = await deps.debates.getById(debateId);
+    // Resolved by a concurrent finalizer (or gone): nothing more to apply.
+    if (fresh === null || fresh.state !== 'judged') return fresh;
+    // An override re-decided the outcome mid-effects.  Revert the upheld
+    // challenger tag THIS attempt applied for a verdict that no longer
+    // stands (the re-applied effects cover everything else by overwrite).
+    if (attemptArena.verdict === 'upheld' && fresh.verdict !== 'upheld') {
+      await deps.contributions.setDisputeStatus(
+        attemptArena.challengerContributionId,
+        'none',
+        null,
+      );
+    }
+    arena = fresh;
+  }
+  // Exhausted (a pathological override storm): leave `judged` for the next
+  // sweep — never a resolve whose effects describe a superseded verdict.
+  return deps.debates.getById(debateId);
+}
+
+/** The dispute-outcome effects of one finalize attempt, computed and applied
+ *  for the verdict on `arena` AS READ (the caller CAS-fences the resolve on
+ *  that same read).  Returns what was applied, for the resolution log. */
+async function applyFinalizeOutcome(
+  deps: DebateDeps,
+  arena: DebateArenaRecord,
+  resolvedAt: string,
+): Promise<{ resolvedStatus: 'incorrect' | 'validated' | 'none'; settledAt: string | null }> {
   // Apply the dispute outcome to the CHALLENGED target. `corrected` ⇒ tagged
   // `incorrect` (and, for a story, demoted to the bottom of the feed by the
   // ranking layer reading dispute_status); `upheld` ⇒ tagged `validated`
@@ -999,16 +1059,7 @@ export async function finalizeDebate(
   if (arena.verdict === 'upheld') {
     await deps.contributions.setDisputeStatus(arena.challengerContributionId, 'incorrect');
   }
-  const updated = await deps.debates.setState(debateId, 'resolved', resolvedAt);
-  if (updated === null) return null;
-  deps.log('forum.debate_resolved', {
-    debate_id: debateId,
-    verdict: arena.verdict,
-    target_dispute_status: resolvedStatus,
-    target_settled: settledAt !== null,
-  });
-  await broadcastArena(deps, updated);
-  return updated;
+  return { resolvedStatus, settledAt };
 }
 
 // ---------------------------------------------------------------------------

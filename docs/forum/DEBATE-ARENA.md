@@ -350,7 +350,15 @@ The rationing layer over challenge creation — every number steward-tunable
   CAS-guarded on the target's edit lineage (`certifyValidatedIfUnedited`,
   keyed on `edit_history_ref` read with the anchor), falling back to `none`
   on a miss, so a verdict can never certify text outside its locked snapshot
-  from either direction.
+  from either direction.  Finalization itself is fenced against a
+  last-moment steward override the same way: the `judged → resolved` flip is
+  `resolveIfUnchanged`, a CAS on the row's `updatedAt` token (the only
+  judged-row writers are `recordOverride` and finalize) — an override landing
+  mid-effects makes the resolve miss and finalize re-applies its outcome for
+  the FINAL verdict (idempotent overwrites, plus an explicit revert of a
+  stale upheld challenger tag) before retrying, keeping the resolved arena
+  and its dispute statuses consistent while preserving the effects-first /
+  state-flip-last crash-healing order.
   `settled_at` is a SEPARATE nullable column on `contributions` + `stories`
   (migration 0096) — never a dispute-status enum value — so every existing
   wire schema, ranking feature, search filter, and badge keeps its exact
