@@ -131,6 +131,81 @@ function decodeUnicodeEscapes(body: string, escapeChar: string): string {
 }
 
 /**
+ * Decode a Postgres ESCAPE STRING (`E'…'`) body. Unlike an ordinary literal,
+ * backslash sequences here are interpreted by the server, so the identifier it
+ * actually creates can be far longer than the text as written — a 64-character
+ * name spelled as 64 `\x61` escapes is 256 bytes of source and 64 bytes of
+ * identifier. Measuring the undecoded text scans short `x61` fragments and
+ * reports nothing.
+ */
+function decodeEscapeString(body: string): string {
+  let out = '';
+  let i = 0;
+  const SIMPLE: Record<string, string> = {
+    n: '\n',
+    t: '\t',
+    r: '\r',
+    b: '\b',
+    f: '\f',
+    v: '\v',
+    '\\': '\\',
+    "'": "'",
+    '"': '"',
+  };
+  while (i < body.length) {
+    if (body[i] !== '\\') {
+      out += body[i];
+      i += 1;
+      continue;
+    }
+    const next = body[i + 1] ?? '';
+    // \xHH — one or two hex digits.
+    const hex = /^x([0-9A-Fa-f]{1,2})/.exec(body.slice(i + 1));
+    if (hex?.[1]) {
+      out += String.fromCharCode(Number.parseInt(hex[1], 16));
+      i += 1 + hex[0].length;
+      continue;
+    }
+    // \uXXXX and \UXXXXXXXX.
+    const uni = /^(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/.exec(body.slice(i + 1));
+    if (uni?.[1]) {
+      out += String.fromCodePoint(Number.parseInt(uni[1].slice(1), 16));
+      i += 1 + uni[0].length;
+      continue;
+    }
+    // \ooo — one to three OCTAL digits.
+    const oct = /^([0-7]{1,3})/.exec(body.slice(i + 1));
+    if (oct?.[1]) {
+      out += String.fromCharCode(Number.parseInt(oct[1], 8));
+      i += 1 + oct[0].length;
+      continue;
+    }
+    if (SIMPLE[next] !== undefined) {
+      out += SIMPLE[next];
+      i += 2;
+      continue;
+    }
+    // Any other escaped character stands for itself.
+    out += next;
+    i += 2;
+  }
+  return out;
+}
+
+/**
+ * Does a string literal plausibly hold SQL rather than data?
+ *
+ * Used only for the `AS '…'` function-body form. `CREATE FUNCTION … AS 'obj',
+ * 'symbol'` names a C object file and link symbol — plain data that would be
+ * reported as an over-long identifier if a path ran past the limit. Requiring
+ * a statement keyword keeps the legacy plpgsql body scanned without turning
+ * every `AS` literal into SQL.
+ */
+function looksLikeSql(text: string): boolean {
+  return /\b(?:begin|create|alter|drop|select|insert|update|delete|execute)\b/i.test(text);
+}
+
+/**
  * Split SQL into the spans that can hold an identifier, discarding the spans
  * that cannot: `--` line comments, `/* … *\/` block comments (nesting, which
  * Postgres allows), `'…'` string literals (with the `''` escape), and
@@ -162,6 +237,9 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
   // is a delimiter to skip, not the start of a new literal (the token before it
   // is `END`, which would otherwise read as data).
   let openProceduralTag: string | null = null;
+  // Set by an `E`/`e` prefix: the NEXT single-quoted literal is an escape
+  // string and its backslash sequences must be decoded before it is measured.
+  let pendingEscapeString = false;
   while (i < n) {
     const two = sql.slice(i, i + 2);
     // -- line comment
@@ -204,13 +282,23 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
           i += 1;
         }
       }
+      // The `''` escapes are already collapsed above; an ESCAPE string needs
+      // its backslash sequences decoded too, since that is what the server
+      // parses.
+      const decoded = pendingEscapeString ? decodeEscapeString(literal) : literal;
+      pendingEscapeString = false;
+      const previous = recent[recent.length - 1];
       // A literal that is the argument of PL/pgSQL's `EXECUTE` is not data —
       // Postgres runs it as SQL, so an over-long name inside it truncates
-      // exactly like one written out. Recurse into the DECODED text (the `''`
-      // escapes are already collapsed above, which is the form the server
-      // sees). Ordinary literals are still discarded.
-      if (recent[recent.length - 1] === 'execute') {
-        yield* identifierCandidates(literal);
+      // exactly like one written out.
+      //
+      // The same is true of the LEGACY function-body form,
+      // `CREATE FUNCTION … AS 'BEGIN … END' LANGUAGE plpgsql`: the body is
+      // procedural code, exactly as in the dollar-quoted spelling that is
+      // already scanned. It carries the `looksLikeSql` guard because `AS` also
+      // introduces the C-language `AS 'objfile', 'symbol'` form, which is data.
+      if (previous === 'execute' || (previous === 'as' && looksLikeSql(decoded))) {
+        yield* identifierCandidates(decoded);
       }
       recent = [];
       continue;
@@ -310,6 +398,9 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // `EXECUTE E'CREATE INDEX …'` would read as an ordinary data literal and
       // the dynamic DDL inside would go unscanned.
       if (/^[EeBbXx]$/.test(text) && sql[i + text.length] === "'") {
+        // `E'…'` additionally makes the NEXT literal an escape string, whose
+        // backslash sequences the server decodes before parsing.
+        pendingEscapeString = /^[Ee]$/.test(text);
         i += text.length;
         continue;
       }

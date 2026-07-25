@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   type CodeSinkPattern,
+  findDynamicCodeSinks,
   SOURCE_CODE_SINKS,
   scanSourceForSinks,
 } from './dangerous-code-patterns.js';
@@ -35,14 +36,15 @@ const BLOCKED_PATTERNS: CodeSinkPattern[] = [
     pattern: /['"`]javascript\s*:/i,
     label: 'javascript: URL (XSS vector)',
   },
-  // Dynamic-code sinks — eval(), every Function-constructor call form, and the
-  // string-argument timers — come from the shared definition so this gate,
-  // check:sw, check:update-channel, and check:private-bundle-transparency can
-  // never again drift apart on what counts as runtime code evaluation.
-  // (CLAUDE.md documents this gate as the mechanical check for eval() —
-  // Biome 2.x cannot block it at the AST level.)
-  ...SOURCE_CODE_SINKS,
 ];
+// The DYNAMIC-CODE sinks are not patterns: `eval`, the `Function` constructor
+// and the string-argument timers are found by tokenising and walking the
+// access chain (`findDynamicCodeSinks`), because the spellings that reach them
+// are unbounded. Same shared definition, so this gate, check:sw,
+// check:update-channel and check:private-bundle-transparency cannot drift on
+// what counts as runtime code evaluation. (CLAUDE.md documents this gate as
+// the mechanical check for eval() — Biome 2.x cannot block it at the AST
+// level.)
 
 const ALLOWLIST_PATHS = [/trusted-types\.ts$/, /\.test\.ts$/, /\.test\.tsx$/, /\.spec\.ts$/];
 
@@ -70,21 +72,19 @@ function lint(): void {
     for (const filePath of files) {
       if (ALLOWLIST_PATHS.some((p) => p.test(filePath))) continue;
 
-      // `scanSourceForSinks` scans the RAW source AND the comment-stripped copy
-      // and unions the results, over the WHOLE text rather than line by line.
-      //   • raw    — no strip bug can ever hide a sink (every regression found
-      //              in review was a strip that deleted the call it should have
-      //              revealed).
-      //   • strip  — adds the one form raw cannot see, a call split by an
-      //              interposed comment: `Function/*gap*/('…')`.
-      //   • whole  — the patterns allow whitespace before `(`, and that
-      //              whitespace may be a NEWLINE, which a per-line scan cannot
-      //              match however permissive the pattern.
       const relative = filePath.replace(ROOT, '');
-      for (const { label, line } of scanSourceForSinks(
-        readFileSync(filePath, 'utf-8'),
-        BLOCKED_PATTERNS,
-      )) {
+      const source = readFileSync(filePath, 'utf-8');
+      // Two scans, because the two sink classes need different machinery.
+      //   • TEXTUAL DOM sinks (`innerHTML =`, `javascript:`) — whole-text
+      //     regex over both lexings of the ambiguous `/`. Whole-text, not per
+      //     line, because a match may span a newline.
+      //   • DYNAMIC-CODE sinks — tokenised and walked, so every spelling of
+      //     "reference, member accesses, call" is covered structurally rather
+      //     than enumerated, and comments cannot produce a finding.
+      for (const { label, line } of [
+        ...scanSourceForSinks(source, BLOCKED_PATTERNS),
+        ...findDynamicCodeSinks(source, SOURCE_CODE_SINKS),
+      ]) {
         errors.push(`${relative}:${line}: ${label}`);
       }
     }

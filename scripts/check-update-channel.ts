@@ -21,7 +21,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BUILT_CODE_SINKS, scanSourceForSinks, stripComments } from './dangerous-code-patterns.js';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  stripComments,
+} from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'apps', 'web', 'dist');
@@ -175,14 +179,13 @@ export function runUpdateChannelGate(read: (relPath: string) => string): UpdateG
       }
     }
     if (file.endsWith('sw-push.js')) {
-      // The dynamic-code sinks are scanned over the RAW ∪ STRIPPED union, not
-      // the stripped copy alone: the strip's regex-vs-division heuristic is a
-      // heuristic, and a mis-lex there can blank a real `Function('…')()` out
-      // of existence and leave this gate green. Scanning the raw text as well
-      // means a lexing mistake can only add a false positive, never hide a
-      // sink. (The marker check above is unaffected — it wants the strip.)
+      // The dynamic-code sinks are found by TOKENISING, so comments are
+      // discarded correctly rather than by a heuristic strip that could blank
+      // a real `Function('…')()` out of existence and leave this gate green.
+      // (The marker check above still uses the strip — it deliberately wants
+      // a marker named in a comment to not count as wiring.)
       const seen = new Set<string>();
-      for (const { label } of scanSourceForSinks(raw, BUILT_CODE_SINKS)) seen.add(label);
+      for (const { label } of findDynamicCodeSinks(raw, BUILT_CODE_SINKS)) seen.add(label);
       for (const label of seen) violations.push({ file, detail: `sw ${label}` });
       for (const { pattern, detail } of SW_FORBIDDEN) {
         if (pattern.test(code)) violations.push({ file, detail });

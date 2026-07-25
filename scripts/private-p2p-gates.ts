@@ -9,7 +9,11 @@
 // effects and stay fast file scanners (the `check:no-applause` pattern).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { BUILT_CODE_SINKS, scanSourceForSinks } from './dangerous-code-patterns.js';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  scanSourceForSinks,
+} from './dangerous-code-patterns.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
 
@@ -109,7 +113,6 @@ export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; labe
   // check:sw, and check:update-channel cannot drift apart on what counts as
   // runtime code evaluation — they previously all pinned only `new Function(`,
   // leaving the equivalent bare `Function(` call open in every one of them.
-  ...BUILT_CODE_SINKS,
   { pattern: /importScripts\s*\(/, label: 'importScripts()' },
   // A dynamic import() of an http(s) URL string (remote code).
   { pattern: /import\s*\(\s*['"`]https?:/i, label: 'dynamic import() of a remote URL' },
@@ -125,7 +128,13 @@ export function scanDynamicRemoteCode(
     // `Function\n('x')` is an ordinary call a per-line scan can never see.
     // The shared, comment-blanking strip preserves offsets, so `findSinkMatches`
     // still reports the true source line.
-    for (const { label, line } of scanSourceForSinks(content, DYNAMIC_REMOTE_CODE_PATTERNS)) {
+    for (const { label, line } of [
+      ...scanSourceForSinks(content, DYNAMIC_REMOTE_CODE_PATTERNS),
+      // The eval/Function/string-timer sinks are TOKENISED and walked rather
+      // than pattern-matched, so this gate covers every invocation spelling
+      // that lint:security and check:sw do, from the same definition.
+      ...findDynamicCodeSinks(content, BUILT_CODE_SINKS),
+    ]) {
       violations.push({ file: path, line, detail: label });
     }
   }

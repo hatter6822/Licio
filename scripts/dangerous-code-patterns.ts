@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// The canonical DYNAMIC-CODE-SINK patterns, shared by every static gate that
+// The canonical DYNAMIC-CODE-SINK definitions, shared by every static gate that
 // must reject runtime code evaluation:
 //
 //   • `lint:security`                  — the repository-wide source scan
@@ -15,339 +15,105 @@
 // payload naturally emits — passed all four gates untouched. A single
 // definition means a sink closed here is closed everywhere at once.
 //
+// HOW THE SINKS ARE DETECTED — not by regex. Review of PR #169 found a new
+// bypass SPELLING on six consecutive rounds (`Function['call'](…)`,
+// `Reflect['apply'](…)`, `globalThis.Function?.call(…)`, computed timer
+// methods, …) because "an expression that evaluates to a sink and is then
+// INVOKED" is a structural property no regex can express. Detection therefore
+// lives in `js-sink-analyzer.ts`, which tokenises and walks the access chain;
+// this module only declares WHICH names are sinks and which argument makes an
+// invocation dangerous.
+//
+// The regex machinery below is retained ONLY for the textual DOM sinks
+// (`innerHTML =`, `javascript:` URLs). Those have no call chain to walk, so
+// they have no equivalent class of spellings and a pattern is the right tool.
+//
 // Deliberately DEPENDENCY-FREE (no zod, no `node:` builtins) so the
 // `scripts`-rooted vitest project — which resolves no external packages —
 // can unit test it directly.
 
-/**
- * Whitespace and/or BLOCK COMMENTS that may legally sit between a callee and
- * its `(` — the separator every sink pattern uses in place of a bare `\s*`.
- *
- * Building the comment into the PATTERN is what makes these robust. A call can
- * be split by an interposed comment (`Function/*gap*\/('…')`), and the previous
- * design handled that by stripping comments first — which made every detection
- * depend on lexing the WHOLE FILE correctly, and review found three separate
- * ways to defeat that lexer (a `/*` inside a string, a `/` after `a++`, an
- * object literal inside a template interpolation). Matching the gap in place
- * needs no lexer at all, so a mis-lex can no longer hide a call.
- *
- * LINEARITY MATTERS HERE, and the first cut of this got it wrong: writing the
- * whitespace branch as `\s+` inside the outer `*` nests two quantifiers over
- * the same characters, so a long run of indentation followed by a non-match can
- * be split exponentially many ways. That took `lint:security` from ~2s to
- * unbounded (killed at 9+ minutes of 100% CPU on this repo).
- *
- * The safe form below consumes exactly ONE whitespace character per iteration,
- * so a whitespace run has a single possible split; the block-comment branch is
- * the standard unrolled (`[^*]*\*+(?:[^/*][^*]*\*+)*`) construction; and the
- * two alternatives are disjoint at their first character (`\s` vs `/`). With no
- * ambiguity at any step the match is linear, which `dangerous-code-patterns`
- * pins with a timing canary.
- */
-const GAP = String.raw`(?:\s|/\*[^*]*\*+(?:[^/*][^*]*\*+)*/)*`;
+import type { SinkSpec } from './js-sink-analyzer.js';
+import { findSinkInvocations, isRemoteUrl, isStringLiteral } from './js-sink-analyzer.js';
 
-/** Build a sink pattern from a template whose `~` placeholders become {@link GAP}. */
-const sink = (source: string): RegExp => new RegExp(source.split('~').join(GAP));
+export type { SinkSpec, Token } from './js-sink-analyzer.js';
+export { findSinkInvocations, isRemoteUrl, isStringLiteral, tokenize } from './js-sink-analyzer.js';
 
 /**
- * Every way a sink's REFERENCE can be spelled where an expression is expected —
- * bare, or reached through a global object by dot or computed access.
+ * The dynamic-code sinks. `eval` and the `Function` constructor evaluate
+ * whatever they are handed, so ANY invocation counts; the timers compile their
+ * argument only when it is a STRING, so `setTimeout(fn, 0)` stays clean.
  *
- * Shared so a reflective call site (`Reflect.apply(<ref>, …)`) accepts the same
- * spellings the direct call sites do. Writing the reference inline at each site
- * is what let `Reflect.apply(globalThis.Function, …)` through while
- * `Reflect.apply(Function, …)` was caught: the file recognised qualified
- * references everywhere else, so the asymmetry was an oversight, not a policy.
- *
- * The computed form is deliberately not backreferenced (`['"\`]…['"\`]` rather
- * than a capture and `\1`) so this fragment can be embedded at any position in
- * a larger pattern without its group number shifting. The only cost is
- * accepting a mismatched quote pair, which no real code contains and which can
- * only ever WIDEN detection.
+ * There is no longer a separate "strict" variant for built artifacts. That
+ * existed to also match `x.eval(`, on the theory a bundler might rewrite the
+ * reference — but a minifier emits `eval(` for a global eval call, so it caught
+ * nothing real while matching prose such as "no remote code, no eval
+ * (WS-C.2.1d)", which is precisely the false positive it produced against the
+ * shipped service worker. The analyzer separates a global sink from somebody
+ * else's property structurally, so the heuristic is no longer needed.
  */
-const reference = (name: string): string =>
-  String.raw`(?:(?:globalThis|window|self)~\??\.~${name}\b` +
-  String.raw`|(?:globalThis|window|self)~(?:\?\.)?~\[~['"\`]${name}['"\`]~\]` +
-  String.raw`|${name}\b)`;
-
-/**
- * Access to one of `names` on a receiver, in every spelling the language
- * allows — plain, optional-chained, computed, or both:
- *
- *     .call     ?.call     ['call']     ?.["apply"]
- *
- * Written once because EVERY dot-only access in this file has turned out to be
- * a bypass: first on the sink reference, then on the inherited method, then on
- * `Reflect` itself. Sharing one fragment is what stops the next member access
- * added here from repeating it.
- */
-const member = (names: string): string =>
-  String.raw`(?:\??\.~(?:${names})|(?:\?\.)?~\[~['"\`](?:${names})['"\`]~\])`;
-
-/** An inherited function method accessed and then CALLED: `.call(`, `['apply'](`, … */
-const INVOKE_METHOD = `${member('call|apply|bind')}~(?:\\?\\.)?~\\(`;
-
-/**
- * `Reflect.apply` / `Reflect.construct` and their computed and optional
- * spellings — `Reflect['apply'](…)`, `Reflect?.construct(…)`.
- *
- * The receiver is `Reflect`, a global that is never a local variable here, so
- * no lookbehind is needed; the accessor gets the same treatment as every other
- * member access rather than being the one place still pinned to a dot.
- */
-const REFLECT_INVOKE = `\\bReflect${member('apply|construct')}~(?:\\?\\.)?~\\(`;
-
-/**
- * Every textual form that reaches the **Function constructor**, an
- * eval-equivalent sink. `Function(src)` and `new Function(src)` are the same
- * operation (the `new` is optional per ECMA-262), and the reference itself can
- * be reached indirectly — parenthesized, through the global object by dot or by
- * computed member access, called optionally, or invoked as a TEMPLATE TAG:
- *
- *     Function('…')             new Function('…')          Function?.('…')
- *     (Function)('…')           new (Function)('…')        (0, Function)('…')
- *     globalThis.Function('…')  window.Function('…')       self.Function('…')
- *     globalThis['Function']('…')                          self["Function"]('…')
- *     Function`…`()             — the tag form: the strings array is coerced
- *                                 with String(), so the template body becomes
- *                                 the function body and the trailing () runs it
- *     Function.call(null, '…')()          Function.apply(null, ['…'])()
- *     Function.bind(null)('…')()          Reflect.apply(Function, null, ['…'])()
- *
- * The direct pattern's lookbehind excludes a member/private access
- * (`.Function(`, `#Function(`) and word-suffix false positives (`getFunction(`,
- * `AsyncFunction(`), so the qualified and computed forms need their own
- * patterns — that lookbehind would otherwise skip them.
- *
- * The FUNCTION-METHOD forms are the reason the reference and the call have to
- * be matched separately. Every pattern above requires the reference to be
- * followed DIRECTLY by a call token, so interposing an inherited method
- * (`.call`/`.apply`/`.bind`, which every function object carries) defeated all
- * of them while still constructing and running the code — verified by
- * execution, all four returning 42. There is no legitimate use of these three
- * methods ON the `Function` constructor itself, so they are matched without
- * requiring an argument shape.
- *
- * SCOPE, stated honestly: this is a text scan, so it recognises the syntactic
- * forms an author or a minifier actually emits, not every semantically
- * equivalent route to the constructor (`[]['constructor']['constructor']`, a
- * name assembled at runtime, a reference stored in a variable first). Those are
- * unreachable by ANY regex; the runtime enforcement is the CSP, which ships
- * without `'unsafe-eval'` so the constructor throws in the browser however it
- * is spelled. This gate is the build-time half that keeps the reachable
- * spellings from landing in the first place — and it matters most in `apps/api`,
- * where there is no CSP behind it.
- */
-export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
-  // Direct call, with or without `new`, and with an optional call `?.()`.
-  sink(String.raw`(?<![.\w$#])Function~(?:\?\.)?~\(`),
-  // Reached through the global object by dot access.
-  sink(String.raw`\b(?:globalThis|window|self)~\??\.~Function~(?:\?\.)?~[(\`]`),
-  // Parenthesized reference: `(Function)('…')`, `new (Function)('…')`, and the
-  // comma/sequence idiom `(0, Function)('…')`.
-  sink(String.raw`\((?:[^()]*,~)?~Function~\)~(?:\?\.)?~[(\`]`),
-  // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
-  sink(String.raw`\[~(['"\`])Function\1~\]~(?:\?\.)?~[(\`]`),
-  // Invoked through an inherited function method, in any spelling of BOTH the
-  // reference and the method: `Function.call(null, '…')()`,
-  // `globalThis.Function?.call(…)`, `Function['apply'](…)`.
-  sink(String.raw`(?<![.\w$#])${reference('Function')}${INVOKE_METHOD}`),
-  // Reflective invocation, accepting any spelling of the reference:
-  // `Reflect.apply(Function, …)`, `Reflect.construct(globalThis.Function, …)`.
-  sink(`${REFLECT_INVOKE}~(?:\\(~)*${reference('Function')}`),
+export const DYNAMIC_CODE_SINKS: readonly SinkSpec[] = [
+  { name: 'eval', label: 'eval()' },
+  { name: 'Function', label: 'Function() constructor (equivalent to eval)' },
+  {
+    name: 'setTimeout',
+    label: 'setTimeout/setInterval with a string body (implicit eval)',
+    codeArgument: isStringLiteral,
+  },
+  {
+    name: 'setInterval',
+    label: 'setTimeout/setInterval with a string body (implicit eval)',
+    codeArgument: isStringLiteral,
+  },
 ];
 
-/**
- * `Function` invoked as a TEMPLATE TAG: `` Function`body`() `` constructs the
- * same function object (the strings array is coerced with String()) and runs it.
- *
- * Held separately because it is COMMENT-SENSITIVE — prose that writes
- * `` `new Function` `` in markdown is textually identical — so it runs only
- * against comment-stripped source. (`eval` needs no equivalent: a tag receives
- * the strings ARRAY, and eval returns a non-string argument unchanged rather
- * than evaluating it — verified, not assumed.)
- */
-export const FUNCTION_TAGGED_TEMPLATE_PATTERN = sink(String.raw`(?<![.\w$#])Function~\``);
+/** `importScripts` loading a REMOTE script — cross-origin CODE, not a string. */
+export const REMOTE_IMPORT_SCRIPTS_SINK: SinkSpec = {
+  name: 'importScripts',
+  label: 'external importScripts (remote code)',
+  codeArgument: isRemoteUrl,
+};
 
 /**
- * `eval` reached other than as a bare call. Each of these evaluates arbitrary
- * source, and several are the CANONICAL way to ask for *indirect* eval — which
- * runs in global scope rather than the caller's, if anything the worse of the
- * two:
- *
- *     (0, eval)('…')        the classic indirect-eval idiom
- *     (eval)('…')           parenthesized reference
- *     globalThis.eval('…')  window.eval('…')  self.eval('…')
- *     globalThis['eval']('…')                 eval?.('…')
- *     eval.call(null, '…')  eval.apply(null, ['…'])  Reflect.apply(eval, …)
- *
- * The bare {@link EVAL_PATTERN} deliberately excludes member access so a Redis
- * Lua wrapper (`redis.eval(script, 0)`) is not flagged; the GLOBAL-object
- * receivers are named explicitly here because those are never a library method.
- * The `.call`/`.apply` forms carry the SAME lookbehind for the same reason —
- * `redis.eval.call(…)` is a library method invocation, not a sink.
+ * The sink set for a SOURCE-tree scan and for a BUILT-artifact scan. They are
+ * now IDENTICAL (see the note on the strict `eval` variant above) and kept as
+ * two names only so each gate reads clearly at its own call site.
  */
-export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
-  // `(eval)('…')` and the sequence form `(0, eval)('…')`.
-  sink(String.raw`\((?:[^()]*,~)?~eval~\)~(?:\?\.)?~\(`),
-  sink(String.raw`\[~(['"\`])eval\1~\]~(?:\?\.)?~\(`),
-  sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~(?:\?\.)?~\(`),
-  // Optional call on the bare binding: `eval?.('…')`.
-  sink(String.raw`(?<![.\w$#])eval~\?\.~\(`),
-  // Invoked through an inherited function method: `eval.call(null, '…')`.
-  sink(String.raw`(?<![.\w$#])${reference('eval')}${INVOKE_METHOD}`),
-  // Reflective invocation, accepting any spelling of the reference:
-  // `Reflect.apply(eval, null, ['…'])`, `Reflect.apply(globalThis.eval, …)`.
-  sink(`${REFLECT_INVOKE}~(?:\\(~)*${reference('eval')}`),
-];
+export const SOURCE_CODE_SINKS: readonly SinkSpec[] = DYNAMIC_CODE_SINKS;
+export const BUILT_CODE_SINKS: readonly SinkSpec[] = DYNAMIC_CODE_SINKS;
 
-/** The two timer names that compile a string argument as source. */
-const TIMER = 'set(?:Timeout|Interval)';
+/** A finding: the sink's human label and the 1-based line it starts on. */
+export interface SinkMatch {
+  readonly label: string;
+  readonly line: number;
+}
 
 /**
- * `setTimeout`/`setInterval` with a STRING first argument — an implicit eval:
- * the host compiles the string exactly as `eval` would. A function argument
- * (the only legitimate use) never matches, because every pattern requires a
- * quote character in the first-argument position.
+ * Find dynamic-code sink INVOCATIONS in `source`.
  *
- * The timer reference is reachable by the SAME indirections as `eval` and
- * `Function`, and the host compiles the string either way:
- *
- *     setTimeout('…')            setTimeout?.('…')
- *     globalThis.setTimeout('…')  window.setTimeout?.('…')
- *     (0, setTimeout)('…')        (setInterval)('…')
- *     globalThis['setTimeout']('…')            self["setInterval"]('…')
- *     setTimeout.call(window, '…', 0)  setTimeout.apply(window, ['…', 0])
- *     setTimeout.bind(window, '…')()   Reflect.apply(setTimeout, window, ['…'])
- *
- * Covering only the bare `name(` form left the others passing every gate, so
- * the set mirrors {@link INDIRECT_EVAL_PATTERNS} rather than standing alone
- * — a sink closed for `eval` must be closed here too, or the shared list is
- * canonical in name only.
- *
- * The `.call`/`.apply` forms move the code to the SECOND argument, so unlike
- * `Function.call` they still have to pin the string's position: a timer really
- * is called with a function through `.call` in ordinary code, and a pattern
- * that flagged the shape alone would fire on `setTimeout.call(window, tick, 0)`.
+ * A thin wrapper over the analyzer so the gates share one entry point.
+ * Comments can never produce a finding — the tokeniser discards them — so
+ * doctrine may be discussed in prose, and no comment-stripping pass is
+ * load-bearing for detection.
  */
-export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
-  // Direct or member call, with an optional call `?.()`:
-  // `setTimeout('…')`, `setTimeout?.('…')`, `globalThis.setTimeout?.('…')`.
-  sink(String.raw`\b${TIMER}~(?:\?\.)?~\(~['"\`]`),
-  // Parenthesized reference and the comma/sequence idiom `(0, setTimeout)('…')`.
-  sink(String.raw`\((?:[^()]*,~)?~${TIMER}~\)~(?:\?\.)?~\(~['"\`]`),
-  // Computed member access: `globalThis['setTimeout']('…')`.
-  sink(String.raw`\[~(['"\`])${TIMER}\1~\]~(?:\?\.)?~\(~['"\`]`),
-  // `setTimeout.call(thisArg, '…')` and `setTimeout.bind(thisArg, '…')()` —
-  // the code is the second argument in both.
-  sink(String.raw`\b${TIMER}~\.~(?:call|bind)~(?:\?\.)?~\(~[^,()]*,~['"\`]`),
-  // `setTimeout.apply(thisArg, ['…', …])` — the code is the array's head.
-  sink(String.raw`\b${TIMER}~\.~apply~(?:\?\.)?~\(~[^,()]*,~\[~['"\`]`),
-  // `Reflect.apply(setTimeout, thisArg, ['…', …])` — reference, thisArg, then
-  // the argument array whose head is the code.
-  sink(`${REFLECT_INVOKE}~${reference(TIMER)}~,~[^,()]*,~\\[~['"\`]`),
-];
+export function findDynamicCodeSinks(
+  source: string,
+  sinks: readonly SinkSpec[] = DYNAMIC_CODE_SINKS,
+): SinkMatch[] {
+  return findSinkInvocations(source, sinks).map(({ label, line }) => ({ label, line }));
+}
 
-/**
- * The bare global `eval(` call. The lookbehind excludes a member/private
- * access (`.eval(`, `#eval(` — e.g. a Redis Lua wrapper method), a `$eval(`
- * helper, and word-suffix false positives (`retrieval(`, `medieval(`).
- * Source-tree gates want this narrow form; a gate scanning BUILT output should
- * prefer {@link EVAL_PATTERN_STRICT}.
- */
-export const EVAL_PATTERN = sink(String.raw`(?<![.\w$#])eval~\(`);
-
-/**
- * The strict `eval(` form used over BUILT artifacts (service worker, bundle),
- * where a member call such as `x.eval(` has no legitimate meaning either and
- * a bundler may have rewritten the reference.
- */
-export const EVAL_PATTERN_STRICT = sink(String.raw`\beval~\(`);
-
-/**
- * `eval` called with a STRING LITERAL — the raw-text-safe half of the eval
- * coverage.
- *
- * The two patterns above are COMMENT-SENSITIVE in a way the other sinks are
- * not: ordinary prose writes "no remote code, no eval (WS-C.2.1d)", and
- * `eval~\(` matches that, so they can only run against comment-stripped text.
- * That would make eval detection depend entirely on the strip lexing correctly
- * — the exact single point of failure the raw ∪ stripped union exists to
- * remove.
- *
- * Requiring a quote in the argument position fixes the asymmetry: prose puts a
- * word after the paren, never a quote, so this form is safe on RAW text and
- * covers `eval('…')` — the dangerous case, and the one an injected payload
- * uses — even if the strip mis-lexes the surrounding file. A dynamic
- * `eval(userInput)` is still caught, on the stripped pass.
- */
-export const EVAL_STRING_ARG_PATTERN = sink(String.raw`\beval~\(~['"\`]`);
+// ---------------------------------------------------------------------------
+// Textual DOM sinks. No call chain to walk, so a pattern is the right tool.
+// ---------------------------------------------------------------------------
 
 export interface CodeSinkPattern {
   readonly pattern: RegExp;
   /** Short human label naming the sink (gates wrap this in their own phrasing). */
   readonly label: string;
-  /**
-   * True when the pattern cannot safely run over RAW text because prose can
-   * spell it. Only the tagged-template form is like this: a doc comment that
-   * writes `` `new Function` `` in markdown puts a backtick straight after the
-   * word, which is textually identical to a template tag. Such patterns are
-   * applied to the COMMENT-STRIPPED copy only.
-   */
-  readonly commentSensitive?: boolean;
 }
 
-/**
- * The complete dynamic-code-sink set for a SOURCE-tree scan: the narrow `eval`
- * form plus every Function-constructor form plus the string-timer implicit eval.
- */
-export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
-  // Prose writes "no eval (…)", which `eval~\(` matches, so the general form
-  // runs on the STRIPPED copy only; the string-argument form is prose-safe and
-  // therefore also covers the raw pass. See EVAL_STRING_ARG_PATTERN.
-  { pattern: EVAL_PATTERN, label: 'eval()', commentSensitive: true },
-  { pattern: EVAL_STRING_ARG_PATTERN, label: 'eval()' },
-  ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
-  ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
-    pattern,
-    label: 'Function() constructor (equivalent to eval)',
-  })),
-  ...STRING_TIMER_PATTERNS.map((pattern) => ({
-    pattern,
-    label: 'setTimeout/setInterval with a string body (implicit eval)',
-  })),
-  {
-    pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
-    label: 'Function() constructor (equivalent to eval) as a template tag',
-    commentSensitive: true,
-  },
-];
-
-/**
- * The same set for a BUILT-artifact scan (service worker / bundle): identical
- * except that `eval` is matched in its strict form.
- */
-export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
-  { pattern: EVAL_PATTERN_STRICT, label: 'eval()', commentSensitive: true },
-  { pattern: EVAL_STRING_ARG_PATTERN, label: 'eval()' },
-  ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
-  ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
-    pattern,
-    label: 'Function() constructor',
-  })),
-  ...STRING_TIMER_PATTERNS.map((pattern) => ({
-    pattern,
-    label: 'setTimeout/setInterval with a string body (implicit eval)',
-  })),
-  {
-    pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
-    label: 'Function() constructor as a template tag',
-    commentSensitive: true,
-  },
-];
-
 /** Keywords after which a `/` begins a REGEX literal rather than a division. */
-const KEYWORDS_BEFORE_REGEX = new Set([
+const KEYWORDS_BEFORE_REGEX: ReadonlySet<string> = new Set([
   'return',
   'typeof',
   'instanceof',
@@ -365,34 +131,19 @@ const KEYWORDS_BEFORE_REGEX = new Set([
 ]);
 
 /**
- * Blank out COMMENTS so gate doctrine may be DISCUSSED in prose ("no eval
- * here") while a real call still trips the scan.
+ * Blank out COMMENTS so doctrine may be DISCUSSED in prose while real code
+ * still trips a scan.
  *
- * STRING-AWARE, and that is the whole point rather than a refinement. A
- * regex-based strip treats comment delimiters that appear INSIDE string
- * literals as real delimiters, so
- *
- *     const start = "/*"; eval("payload"); const end = "*\/";
- *
- * collapses to `const start = " ";` — the strip itself HIDES the `eval` from
- * every gate that consumes it. That is strictly worse than not stripping at
- * all, so this walks the source instead: single/double-quoted strings,
- * template literals (tracking `${…}` nesting, which can hold further strings
- * and comments), and regex literals are skipped intact; only true comment
- * spans are blanked.
+ * NO LONGER LOAD-BEARING FOR SINK DETECTION — the analyzer discards comments
+ * while tokenising, which is correct by construction rather than by heuristic.
+ * This remains for the gates' MARKER checks (`check:update-channel` requires
+ * certain identifiers to be present as real wiring, not merely mentioned in a
+ * comment) and for the textual DOM patterns above.
  *
  * LENGTH- AND NEWLINE-PRESERVING: every blanked character becomes a space and
- * newlines are kept, so the result is the same length as the input and each
- * character keeps its original offset and line. Gates report `file:line` and
- * can therefore map a match index straight back to the source.
- *
- * The one construct not disambiguated perfectly is `/` as division versus a
- * regex literal — that needs a real parser. The heuristic below (a regex may
- * follow an operator, a punctuator, or one of the keywords above, but not an
- * identifier, literal, `)`, `]`, or `}`) is the standard one and is exercised
- * against the whole repository by the gate's own run.
+ * newlines are kept, so a match index still maps back to its original line.
  */
-export function stripComments(source: string): string {
+export function stripComments(source: string, preferRegex = false): string {
   const out = source.split('');
   const n = source.length;
 
@@ -406,25 +157,40 @@ export function stripComments(source: string): string {
     while (k >= 0 && /\s/.test(source[k] as string)) k -= 1;
     if (k < 0) return true;
     const prev = source[k] as string;
-    if (/[)\]}]/.test(prev)) return false;
-    // POSTFIX `++`/`--` yields a value, so the `/` after it divides. Looking at
-    // the previous CHARACTER alone gets this wrong: `+` is an operator (a regex
-    // may follow `a + /re/`), but `++` is not (`a++ / b` is a division).
+    // Ambiguous without a parser (`if (ok) /re/` vs `(a) / b`); `preferRegex`
+    // flips the guess so a caller can scan both readings.
+    if (/[)\]}]/.test(prev)) return preferRegex;
+    // POSTFIX `++`/`--` yields a value, so a `/` after it divides.
     if ((prev === '+' || prev === '-') && source[k - 1] === prev) return false;
     if (/[A-Za-z0-9_$]/.test(prev)) {
       let s = k;
       while (s >= 0 && /[A-Za-z0-9_$]/.test(source[s] as string)) s -= 1;
-      return KEYWORDS_BEFORE_REGEX.has(source.slice(s + 1, k + 1));
+      const word = source.slice(s + 1, k + 1);
+      return KEYWORDS_BEFORE_REGEX.has(word) ? true : preferRegex;
     }
     return true;
   };
 
-  // Template-literal `${…}` spans push a BRACE-DEPTH counter onto this stack.
-  // Tracking depth (not merely presence) is required: an interpolation may hold
-  // an object literal or a block, and treating its first `}` as the end of the
-  // interpolation resumes template scanning early — which swallowed a later
-  // comment and hid the call after it.
+  // Template-literal `${…}` spans push a BRACE-DEPTH counter onto this stack;
+  // tracking depth (not merely presence) keeps an object literal inside an
+  // interpolation from ending the interpolation early.
   const templateStack: number[] = [];
+
+  /** Scan forward from inside a template literal body. */
+  const resumeTemplate = (from: number): number => {
+    let k = from;
+    while (k < n) {
+      const ch = source[k] as string;
+      if (ch === '\\') k += 2;
+      else if (ch === '`') return k + 1;
+      else if (ch === '$' && source[k + 1] === '{') {
+        templateStack.push(1);
+        return k + 2;
+      } else k += 1;
+    }
+    return n;
+  };
+
   let i = 0;
   while (i < n) {
     const c = source[i] as string;
@@ -452,59 +218,28 @@ export function stripComments(source: string): string {
         else if (ch === c) {
           i += 1;
           break;
-        } else if (ch === '\n')
-          break; // unterminated: do not run past the line
+        } else if (ch === '\n') break;
         else i += 1;
       }
       continue;
     }
     if (c === '`') {
-      i += 1;
-      while (i < n) {
-        const ch = source[i] as string;
-        if (ch === '\\') i += 2;
-        else if (ch === '`') {
-          i += 1;
-          break;
-        } else if (ch === '$' && source[i + 1] === '{') {
-          // Enter an interpolation: ordinary scanning resumes inside it, at
-          // brace depth 0.
-          templateStack.push(0);
-          i += 2;
-          break;
-        } else i += 1;
-      }
+      i = resumeTemplate(i + 1);
       continue;
     }
-    // Inside an interpolation, a nested `{` must be balanced before the `}`
-    // that actually closes it.
     if (c === '{' && templateStack.length > 0) {
-      templateStack[templateStack.length - 1] = (templateStack.at(-1) as number) + 1;
+      templateStack.push((templateStack.pop() as number) + 1);
       i += 1;
       continue;
     }
     if (c === '}' && templateStack.length > 0) {
-      const depth = templateStack.at(-1) as number;
+      const depth = (templateStack.pop() as number) - 1;
       if (depth > 0) {
-        templateStack[templateStack.length - 1] = depth - 1;
+        templateStack.push(depth);
         i += 1;
         continue;
       }
-      templateStack.pop();
-      // Resume the enclosing template literal after the interpolation closes.
-      i += 1;
-      while (i < n) {
-        const ch = source[i] as string;
-        if (ch === '\\') i += 2;
-        else if (ch === '`') {
-          i += 1;
-          break;
-        } else if (ch === '$' && source[i + 1] === '{') {
-          templateStack.push(0);
-          i += 2;
-          break;
-        } else i += 1;
-      }
+      i = resumeTemplate(i + 1);
       continue;
     }
     if (c === '/' && opensRegex(i)) {
@@ -513,6 +248,7 @@ export function stripComments(source: string): string {
       while (i < n) {
         const ch = source[i] as string;
         if (ch === '\\') i += 2;
+        else if (ch === '\n') break;
         else if (ch === '[') {
           inClass = true;
           i += 1;
@@ -522,9 +258,7 @@ export function stripComments(source: string): string {
         } else if (ch === '/' && !inClass) {
           i += 1;
           break;
-        } else if (ch === '\n')
-          break; // unterminated: not a regex after all
-        else i += 1;
+        } else i += 1;
       }
       continue;
     }
@@ -533,102 +267,48 @@ export function stripComments(source: string): string {
   return out.join('');
 }
 
-/** One sink match, with the 1-based line it sits on (for `file:line` output). */
-export interface SinkMatch {
-  readonly label: string;
-  readonly line: number;
-}
-
 /**
- * THE entry point every source-tree gate should use: scan a file for sinks in a
- * way no comment-stripping bug can defeat.
+ * Find matches of TEXTUAL patterns across the whole file, reporting the line
+ * each match starts on.
  *
- * The strip is deliberately NOT load-bearing here. It is scanned IN ADDITION to
- * the raw source, and the results are unioned:
- *
- *   • the RAW pass guarantees that however the strip mis-lexes a construct —
- *     a regex-versus-division call, an exotic template nesting, a form nobody
- *     has thought of yet — it can never DELETE a sink from view. Every
- *     regression found on PR #169 was of exactly that shape: a strip that hid
- *     the call it was supposed to reveal.
- *   • the STRIPPED pass adds the one thing the raw pass cannot see: a call
- *     split by an interposed comment, `Function/*gap*\/('…')`.
- *
- * The cost is that a sink call written literally inside a COMMENT is reported.
- * That is the right trade: it is trivially fixed by rewording the comment,
- * whereas the opposite failure silently disarms the gate. (Before the strip
- * existed this gate already scanned raw source and passed, so no such comment
- * exists in the scanned trees today.)
+ * Whole-text rather than per-line: a pattern may span a newline, which a
+ * line-by-line scan can never match. Both lexings of the ambiguous `/` are
+ * scanned and unioned so a lexer guess cannot hide a match.
  */
 export function scanSourceForSinks(
   source: string,
-  sinks: readonly CodeSinkPattern[] = SOURCE_CODE_SINKS,
+  patterns: readonly CodeSinkPattern[],
 ): SinkMatch[] {
-  const seen = new Set<string>();
-  const merged: SinkMatch[] = [];
-  // Comment-sensitive patterns are excluded from the RAW pass: prose can spell
-  // them, and a false positive on a doc comment would be a gate nobody trusts.
-  const rawSafe = sinks.filter((s) => s.commentSensitive !== true);
-  for (const match of [
-    ...findSinkMatches(source, rawSafe),
-    ...findSinkMatches(stripComments(source), sinks),
-  ]) {
-    const key = `${match.line}:${match.label}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(match);
-  }
-  return merged.sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
-}
-
-/**
- * Find every sink match in a WHOLE source text, reporting the line of each.
- *
- * Scanning the whole text — not line by line — is what makes the patterns'
- * `\s*` meaningful: `Function\n('x')` and `(Function)\n('x')` are legal calls,
- * and a per-line scan can never match them however permissive the pattern is.
- * Offsets are converted to line numbers only for reporting.
- *
- * `code` is expected to be {@link stripComments} output, which preserves both
- * length and newlines, so a match index maps to the original file's line.
- */
-export function findSinkMatches(
-  code: string,
-  sinks: readonly CodeSinkPattern[] = SOURCE_CODE_SINKS,
-): SinkMatch[] {
-  const matches: SinkMatch[] = [];
-  // Precompute newline offsets once: line = (count of newlines before index) + 1.
-  const newlines: number[] = [];
-  for (let k = 0; k < code.length; k += 1) if (code[k] === '\n') newlines.push(k);
-  const lineOf = (index: number): number => {
+  const lineStarts: number[] = [0];
+  for (let k = 0; k < source.length; k += 1) if (source[k] === '\n') lineStarts.push(k + 1);
+  const lineOf = (offset: number): number => {
     let lo = 0;
-    let hi = newlines.length;
+    let hi = lineStarts.length - 1;
     while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if ((newlines[mid] as number) < index) lo = mid + 1;
-      else hi = mid;
+      const mid = (lo + hi + 1) >> 1;
+      if ((lineStarts[mid] as number) <= offset) lo = mid;
+      else hi = mid - 1;
     }
     return lo + 1;
   };
-  // One SINK may be described by several patterns — `eval()` by both the
-  // general form and the prose-safe string-argument form — so the same call
-  // can match more than once. Report each (label, line) once: a consumer wants
-  // the distinct findings, not a count of how many patterns happened to cover
-  // the same text.
+
   const seen = new Set<string>();
-  for (const { pattern, label } of sinks) {
-    const global = new RegExp(
-      pattern.source,
-      pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
-    );
-    for (const match of code.matchAll(global)) {
-      if (match.index === undefined) continue;
-      const line = lineOf(match.index);
-      const key = `${line}:${label}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      matches.push({ label, line });
+  const matches: SinkMatch[] = [];
+  for (const text of [stripComments(source), stripComments(source, true)]) {
+    for (const { pattern, label } of patterns) {
+      const global = new RegExp(
+        pattern.source,
+        pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
+      );
+      for (const match of text.matchAll(global)) {
+        if (match.index === undefined) continue;
+        const line = lineOf(match.index);
+        const key = `${line}:${label}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matches.push({ label, line });
+      }
     }
   }
-  return matches.sort((a, b) => a.line - b.line);
+  return matches.sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
 }

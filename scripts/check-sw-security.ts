@@ -8,56 +8,32 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BUILT_CODE_SINKS, scanSourceForSinks, stripComments } from './dangerous-code-patterns.js';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  REMOTE_IMPORT_SCRIPTS_SINK,
+} from './dangerous-code-patterns.js';
 
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const SW_FILES = ['sw.js', 'sw-push.js'];
 
 /** Find SW security violations in one file's source. Pure (testable). */
+/** Find SW security violations in one file's source. Pure (testable). */
 export function findSwSecurityIssues(filename: string, content: string): string[] {
   const issues: string[] = [];
-  // Remote `importScripts` is scanned over the RAW text UNIONED with the
-  // stripped copy, for the same reason the dynamic-code sinks below are: a
-  // mis-lex in the comment strip can blank the call away entirely, and this
-  // sink loads cross-origin CODE — the most severe thing the gate looks for.
-  // Leaving it strip-only would have made the heuristic stripper load-bearing
-  // for precisely the check that can least afford it.
-  //
-  // Scanning raw does mean a comment containing a COMPLETE remote call is
-  // reported. That is deliberate: the pattern needs the call shape *and* a
-  // remote URL, which prose does not have — the real workers say "no remote
-  // code, no importScripts" and "imported … via importScripts", neither of
-  // which matches — and a built worker is generated output where a commented
-  // remote call would itself be worth a look.
-  const remoteImports = new Set<string>();
-  for (const text of [content, stripComments(content)]) {
-    for (const call of text.match(/importScripts\s*\([^)]*\)/g) ?? []) {
-      // Flag absolute (`https://…`) AND protocol-relative (`"//evil/x.js"`)
-      // remote loads — both fetch cross-origin code; only same-origin/relative
-      // is allowed.
-      if (/https?:\/\//i.test(call) || /['"]\s*\/\//.test(call)) remoteImports.add(call);
-    }
-  }
-  for (const call of remoteImports) {
-    issues.push(`${filename}: external importScripts (remote code): ${call}`);
+  // Both checks go through the token analyzer, so every invocation form is
+  // covered structurally: `importScripts('https://…')`,
+  // `self['importScripts'](…)`, `self.importScripts?.(…)` and
+  // `importScripts.call(self, …)` are one walk, not four patterns. Comments
+  // are discarded while tokenising, so prose ("no remote code, no eval") can
+  // never trip the gate and no comment-stripping pass is load-bearing.
+  for (const { label, line } of findDynamicCodeSinks(content, [REMOTE_IMPORT_SCRIPTS_SINK])) {
+    issues.push(`${filename}:${line}: ${label}`);
   }
   // Dynamic-code sinks from the shared definition: eval(), every
   // Function-constructor form, and the string-argument timers.
-  //
-  // Scanned through `scanSourceForSinks`, which unions the RAW text with the
-  // comment-stripped copy, rather than against `code` alone. A strip-only scan
-  // makes every detection depend on lexing the whole file correctly, and the
-  // regex-vs-division heuristic is not a parser: in
-  //
-  //     if (ok) /[/*]/.test(x); Function('return 42')(); const tail = '*/';
-  //
-  // the `/` after `)` is read as division, so the strip treats the `/*` inside
-  // the regex as a comment opener and blanks everything through the trailing
-  // `*/` — deleting the constructor call and leaving the gate green. Matching
-  // the raw text too means a mis-lex can only ever ADD a false positive, never
-  // hide a real sink.
   const seen = new Set<string>();
-  for (const { label } of scanSourceForSinks(content, BUILT_CODE_SINKS)) seen.add(label);
+  for (const { label } of findDynamicCodeSinks(content, BUILT_CODE_SINKS)) seen.add(label);
   for (const label of seen) issues.push(`${filename}: ${label} is forbidden in the worker`);
   return issues;
 }

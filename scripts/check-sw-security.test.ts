@@ -79,14 +79,14 @@ describe('findSwSecurityIssues', () => {
     expect(findSwSecurityIssues('sw.js', content)).toEqual([]);
   });
 
-  // Deliberate consequence of union-scanning the importScripts sink (round 8):
-  // a comment holding a COMPLETE remote call is now reported. The alternative
-  // is leaving the heuristic stripper load-bearing for the one check that
-  // loads cross-origin code, and a commented-out remote import in a BUILT
-  // worker is worth a human look regardless.
-  it('reports a complete remote importScripts call even inside a comment', () => {
+  // Round 8 accepted reporting a commented-out remote call, as the price of
+  // not leaving a heuristic comment-stripper load-bearing for the one check
+  // that loads cross-origin code. That trade is GONE: the analyzer tokenises,
+  // so comments are discarded correctly AND no code can be blanked away with
+  // them. Ignoring prose is simply the better behaviour once it costs nothing.
+  it('does not report a remote importScripts call written inside a comment', () => {
     const content = '/* importScripts("https://x/y.js") */\nself.skipWaiting();';
-    expect(findSwSecurityIssues('sw.js', content)).toHaveLength(1);
+    expect(findSwSecurityIssues('sw.js', content)).toEqual([]);
   });
 
   it('catches a remote importScripts the comment strip would erase (regression)', () => {

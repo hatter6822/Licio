@@ -50,9 +50,66 @@ log() { echo "[session-start] $*"; }
 # --------------------------------------------------------------------------
 # 1. Toolchain + workspace dependencies
 # --------------------------------------------------------------------------
+# Node is pinned in `.nvmrc` and CI runs that exact major. An image whose
+# default Node is a different major runs every install, build and test under a
+# runtime CI never uses — the same silent divergence the service versions below
+# guard against, so it gets the same treatment: try to select the pinned
+# version, then verify.
+NODE_REQUIRED="$(tr -cd '0-9.' < .nvmrc | cut -d. -f1)"
+node_major() { node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1; }
+
+if [ "$(node_major)" != "${NODE_REQUIRED}" ]; then
+  log "Node $(node_major) != pinned ${NODE_REQUIRED}; selecting the pinned major"
+  # nvm is a shell FUNCTION, so it has to be sourced before it can be called;
+  # fnm and n are ordinary binaries. Each attempt is best-effort — the check
+  # below is what decides.
+  # shellcheck disable=SC1090,SC1091
+  for nvm_sh in "${NVM_DIR:-$HOME/.nvm}/nvm.sh" /usr/local/nvm/nvm.sh; do
+    [ -s "$nvm_sh" ] && . "$nvm_sh" && break
+  done
+  if command -v nvm >/dev/null 2>&1; then
+    nvm install "${NODE_REQUIRED}" >/dev/null 2>&1 || true
+    nvm use "${NODE_REQUIRED}" >/dev/null 2>&1 || true
+  elif command -v fnm >/dev/null 2>&1; then
+    fnm install "${NODE_REQUIRED}" >/dev/null 2>&1 || true
+    eval "$(fnm env)" 2>/dev/null || true
+    fnm use "${NODE_REQUIRED}" >/dev/null 2>&1 || true
+  elif command -v n >/dev/null 2>&1; then
+    n install "${NODE_REQUIRED}" >/dev/null 2>&1 || true
+  fi
+fi
+
+if [ "$(node_major)" != "${NODE_REQUIRED}" ]; then
+  log "ERROR: Node major '$(node_major)' does not match the pinned ${NODE_REQUIRED} (.nvmrc),"
+  log "       and no version manager here could select it. Every command below —"
+  log "       install, build, test — would run on a runtime CI never uses."
+  log "       Align the container image with .nvmrc, or install nvm/fnm/n in it."
+  exit 1
+fi
+log "Node $(node -v) matches the pinned major ${NODE_REQUIRED}"
+
+# Corepack activation must FAIL CLOSED. Suppressing both failures left whatever
+# `pnpm` happened to be on PATH in charge — and pnpm 9 silently IGNORES the
+# security overrides in `pnpm-workspace.yaml` (pnpm >= 10 no longer reads the
+# `pnpm` field in package.json), so the install would quietly resolve the
+# unpatched versions those overrides exist to keep out.
 log "Activating pnpm (pinned in package.json packageManager)"
-corepack enable >/dev/null 2>&1 || true
-corepack prepare pnpm@11.15.1 --activate >/dev/null 2>&1 || true
+if ! corepack enable >/dev/null 2>&1; then
+  log "ERROR: 'corepack enable' failed — cannot activate the pinned pnpm"
+  exit 1
+fi
+if ! corepack prepare pnpm@11.15.1 --activate >/dev/null 2>&1; then
+  log "ERROR: could not activate pnpm@11.15.1 (no cached release and no registry access?)"
+  exit 1
+fi
+
+PNPM_VERSION="$(pnpm --version 2>/dev/null || echo none)"
+if [ "${PNPM_VERSION}" != "11.15.1" ]; then
+  log "ERROR: pnpm resolves to '${PNPM_VERSION}', not the pinned 11.15.1."
+  log "       A pnpm below 10 ignores the pnpm-workspace.yaml security overrides."
+  exit 1
+fi
+log "pnpm ${PNPM_VERSION} active"
 
 log "Installing workspace dependencies"
 # `install` (not `ci`/`--frozen-lockfile`) so the post-hook container cache is
