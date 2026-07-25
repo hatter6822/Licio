@@ -79,6 +79,23 @@ describe('the Function constructor', () => {
     ['constructor via eval', "eval.constructor('return 42')()"],
     ['constructor via a timer', "setTimeout.constructor('return 42')()"],
     ['computed constructor', "Function['constructor']('return 42')()"],
+    // Round 15: `.constructor` reached from an ORDINARY function. Round 14
+    // only continued the chain once a KNOWN sink had already been resolved,
+    // so any function that is not itself a sink still handed out `Function`
+    // for free. Which receivers are functions is undecidable statically, so
+    // an invoked `.constructor` is now the sink whatever it hangs off.
+    ['constructor on an arrow function', "(()=>{}).constructor('return 42')()"],
+    ['constructor on a function expression', "(function(){}).constructor('return 42')()"],
+    [
+      'constructor on a function expression, unparenthesised',
+      "x = function(){}.constructor('return 42')()",
+    ],
+    ['constructor on an async arrow', "(async()=>{}).constructor('return 42')()"],
+    ['constructor on a declared function', 'function f(){}; f.constructor("return 42")()'],
+    ['constructor on a built-in method', "[].map.constructor('return 42')()"],
+    ['constructor on Object.prototype.toString', "({}).toString.constructor('return 42')()"],
+    ['computed constructor on a function literal', "(()=>{})['constructor']('return 42')()"],
+    ['optional constructor on a function literal', "(()=>{})?.constructor?.('return 42')()"],
     // Round 8: computed access on `Reflect` itself.
     ['computed Reflect accessor', "Reflect['apply'](Function, null, ['return 42'])();"],
     ['computed Reflect.construct', 'Reflect["construct"](Function, ["x"])();'],
@@ -98,7 +115,18 @@ describe('the Function constructor', () => {
     ['a reflective call on an unrelated callee', 'Reflect.apply(handler, null, [arg]);'],
     ['the same with a computed accessor', "Reflect['apply'](handler, null, [arg]);"],
     ['an unrelated Reflect method', 'Reflect.ownKeys(obj);'],
-    ['a .constructor on an unrelated value', "obj.constructor('x')"],
+    // The boundary for `.constructor` is CALL vs READ, not what it hangs off:
+    // `obj.constructor('x')` used to be asserted clean here, and round 15
+    // showed that is precisely the hole (`obj` may be any function). Reading
+    // the property is not evaluation, so these stay clean.
+    ['a .constructor comparison', 'if (x.constructor === Foo) {}'],
+    ['a .constructor.name read', 'const n = x.constructor.name;'],
+    ['a destructured constructor', 'const { constructor } = x;'],
+    ['a class constructor definition', 'class A { constructor(a) { this.a = a; } }'],
+    ['a derived class constructor', 'class B extends A { constructor() { super(); } }'],
+    ['a constructor property in an object literal', 'const o = { constructor: 1 };'],
+    ['a constructor key in a type position', "type T = A['constructor'];"],
+    ['an array literal holding the name', "const arr = ['constructor'];"],
     ['a .prototype read with no call', 'const p = Function.prototype;'],
   ])('does not flag %s', (_label, code) => {
     expect(fires(code)).toBe(false);

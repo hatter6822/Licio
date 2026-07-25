@@ -222,6 +222,37 @@ describe('findOverlongIdentifiers', () => {
       ).toHaveLength(1);
     });
 
+    // Round 15: a conversion is `%[position$][flags][width]type`, so the
+    // character after `%` is not necessarily the type. Reading only that
+    // character mis-parses `%1$I` as a `%1` conversion, drops the argument
+    // entirely, and lets an over-long name through to PostgreSQL's silent
+    // truncation.
+    it.each([
+      ['positional', "format('CREATE INDEX %1$I ON t(c)', '@')"],
+      ['positional, reordered', "format('CREATE INDEX %2$I ON %1$I(c)', 't', '@')"],
+      ['flagged and width-padded', "format('CREATE INDEX %-10I ON t(c)', '@')"],
+      ['star width (consumes an argument)', "format('CREATE INDEX %*I ON t(c)', 10, '@')"],
+      ['positional %s', "format('CREATE INDEX %1$s ON t(c)', '@')"],
+      ['a literal %% before the conversion', "format('CREATE INDEX %s /*%%*/ ON t(c)', '@')"],
+    ])('expands a %s format() conversion', (_label, call) => {
+      const name = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE ${call.replace('@', name)}; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a within-limit positional identifier alone', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('CREATE INDEX %1$I ON t(c)', '${'w'.repeat(60)}'); END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('treats a %L argument as DATA, not an identifier', () => {
       // A value substituted at `%L` is a literal; measuring its length as an
       // identifier would fail a valid migration.

@@ -323,25 +323,61 @@ function expandFormatCall(sql: string, open: number): { text: string; end: numbe
   return null;
 }
 
-/** Substitute `format()` arguments into its template. */
+/**
+ * Substitute `format()` arguments into its template.
+ *
+ * A conversion is PostgreSQL's full `%[position$][flags][width]type`, not just
+ * `%` followed by the type character: `format('CREATE INDEX %1$I ON t(c)', n)`
+ * names its argument positionally, and `%-10s` carries a flag and a width.
+ * Reading only the character after `%` mis-reads the position digits as the
+ * type, drops the argument, and hides an over-long identifier that PostgreSQL
+ * would go on to create and silently truncate.
+ */
 function substituteFormat(args: ReadonlyArray<string | null>): string {
   const template = args[0];
   if (typeof template !== 'string') return '';
   let out = '';
   let next = 1;
-  for (let i = 0; i < template.length; i += 1) {
-    if (template[i] !== '%') {
-      out += template[i];
+  let i = 0;
+  while (i < template.length) {
+    const ch = template[i] as string;
+    if (ch !== '%') {
+      out += ch;
+      i += 1;
       continue;
     }
-    const kind = template[i + 1];
-    i += 1;
-    if (kind === '%') {
+
+    let k = i + 1;
+    // `position$` — an explicit 1-based index into the arguments AFTER the
+    // template, which is exactly this array's own indexing.
+    let position: number | null = null;
+    const positionDigits = /^\d+/.exec(template.slice(k));
+    if (positionDigits && template[k + positionDigits[0].length] === '$') {
+      position = Number(positionDigits[0]);
+      k += positionDigits[0].length + 1;
+    }
+    // flags — only `-` (left-justify) is defined.
+    while (template[k] === '-') k += 1;
+    // width — literal digits, or `*` taking the width from an argument (which
+    // consumes one, shifting every later sequential conversion), or `*n$`.
+    if (template[k] === '*') {
+      k += 1;
+      const widthDigits = /^\d+/.exec(template.slice(k));
+      if (widthDigits && template[k + widthDigits[0].length] === '$')
+        k += widthDigits[0].length + 1;
+      else next += 1;
+    } else {
+      while (/^\d$/.test(template[k] ?? '')) k += 1;
+    }
+
+    const kind = template[k];
+    i = k + 1;
+    if (kind === undefined || kind === '%') {
       out += '%';
       continue;
     }
-    const value = args[next];
-    next += 1;
+    const value = position === null ? args[next] : args[position];
+    if (position === null) next += 1;
     if (kind === 'I') out += typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : 'x';
     else if (kind === 's') out += typeof value === 'string' ? value : 'x';
     // `%L` yields DATA — a short placeholder, so its length is never measured

@@ -429,6 +429,20 @@ function readMember(tokens: readonly Token[], i: number): { name: string; next: 
   return null;
 }
 
+/**
+ * Does `token` end an expression, so that a following `.`/`?.`/`[` is a MEMBER
+ * ACCESS on it rather than the start of something new?
+ *
+ * `}` counts: `const f = function(){}.constructor('code')` is a member access
+ * on a function expression.
+ */
+function endsExpression(token: Token | undefined): boolean {
+  if (!token) return false;
+  if (token.kind === 'punct')
+    return token.value === ')' || token.value === ']' || token.value === '}';
+  return true;
+}
+
 /** Index just past the group opened at `open` (`(`, `[` or `{`), or -1. */
 function matchGroup(tokens: readonly Token[], open: number): number {
   const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
@@ -741,7 +755,16 @@ function analyse(
   const readReference = (i: number): { spec: SinkSpec; next: number } | null =>
     referenceAt(i, aliasMap);
 
+  // One invocation, one finding. The same call can now be reached by two
+  // routes — from its rooted reference (`eval.constructor('x')`) and from the
+  // `.constructor` entry point below — so findings are keyed on the sink and
+  // the token index the invocation ENDS at, which is identical for both.
+  const recorded = new Set<string>();
+
   const record = (spec: SinkSpec, startTok: Token, endIndex: number): void => {
+    const key = `${spec.label}:${endIndex}`;
+    if (recorded.has(key)) return;
+    recorded.add(key);
     const endTok = tokens[Math.min(endIndex, tokens.length) - 1];
     const end = endTok ? endTok.end : startTok.end;
     out.push({
@@ -851,6 +874,28 @@ function analyse(
         }
       }
       continue;
+    }
+
+    // `<receiver>.constructor(…)` — EVERY function's `.constructor` is the
+    // `Function` constructor, so this call compiles source no matter what the
+    // receiver is: `(()=>{}).constructor('return 42')()`,
+    // `function f(){}; f.constructor(…)`, `[].map.constructor(…)`,
+    // `({}).toString.constructor(…)` all build the same object.
+    //
+    // Which receivers are functions is NOT statically decidable — the set is
+    // every function literal, every declared function, every built-in method,
+    // every value flowing in from elsewhere — so gating on a recognised
+    // receiver is the enumerate-the-spellings mistake this module exists to
+    // end. An INVOKED `.constructor` is therefore the sink unconditionally.
+    //
+    // Reached only through a MEMBER ACCESS (`.constructor`, `?.constructor`,
+    // `['constructor']`) on something that ends an expression, so a class's
+    // `constructor(){}` method definition — a bare name — never matches. A
+    // `.constructor` that is merely READ (`x.constructor === Foo`,
+    // `x.constructor.name`) is not a call and is not recorded.
+    if (functionSpec && endsExpression(tokens[i - 1])) {
+      const ctor = readMember(tokens, i);
+      if (ctor?.name === 'constructor') walkInvocation(functionSpec, i, ctor.next);
     }
 
     const reference = readReference(i);
