@@ -29,16 +29,30 @@ import { fileURLToPath } from 'node:url';
 export const PG_MAX_IDENTIFIER_BYTES = 63;
 
 /**
+ * Keywords after which a dollar-quoted span is PROCEDURAL CODE rather than a
+ * data value: `DO $$ … $$` and `CREATE FUNCTION … AS $$ … $$`. Only after one
+ * of these is the body real SQL whose identifiers must be measured.
+ */
+const PROCEDURAL_BEFORE_DOLLAR: ReadonlySet<string> = new Set(['do', 'as']);
+
+/**
  * Split SQL into the spans that can hold an identifier, discarding the spans
  * that cannot: `--` line comments, `/* … *\/` block comments (nesting, which
  * Postgres allows), `'…'` string literals (with the `''` escape), and
- * `$tag$ … $tag$` dollar-quoted bodies' delimiters.
+ * dollar-quoted VALUE literals.
  *
  * Scanning rather than regex-replacing because the constructs interleave: a
  * string can contain `--`, a comment can contain an apostrophe, and a
- * sequential set of replaces gets both wrong. Dollar-quoted BODIES are kept
- * (migration 0097's `DO $$ … $$` block contains real DDL), while the string
- * literals inside them are still dropped.
+ * sequential set of replaces gets both wrong.
+ *
+ * Dollar quoting is CONTEXT-DEPENDENT and both readings are needed. After `DO`
+ * or `AS` the body is procedural code — migration 0097's `DO $$ … $$` block
+ * contains real DDL whose identifiers must be measured — so only the
+ * delimiters are skipped. Everywhere else `$$…$$` is just a string literal
+ * (`INSERT … VALUES ($$text$$)`), and tokenising that as SQL would report the
+ * prose inside it as an over-long identifier and fail a perfectly valid
+ * migration. Treating every dollar-quoted span as code makes the gate reject
+ * correct input; treating every one as data would blind it to 0097's DDL.
  *
  * Yields `{ text, quoted }` runs: `quoted` marks a `"…"` delimited identifier,
  * which may legally contain characters a bare identifier may not.
@@ -46,6 +60,12 @@ export const PG_MAX_IDENTIFIER_BYTES = 63;
 export function* identifierCandidates(sql: string): Generator<{ text: string; quoted: boolean }> {
   let i = 0;
   const n = sql.length;
+  // The last bare token seen, lower-cased — decides how the next `$tag$` reads.
+  let lastToken = '';
+  // The tag of the PROCEDURAL body currently open, if any. Its matching close
+  // is a delimiter to skip, not the start of a new literal (the token before it
+  // is `END`, which would otherwise read as data).
+  let openProceduralTag: string | null = null;
   while (i < n) {
     const two = sql.slice(i, i + 2);
     // -- line comment
@@ -84,10 +104,28 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       }
       continue;
     }
-    // $tag$ … $tag$ — skip only the DELIMITERS so the body is still scanned
+    // $tag$ … $tag$ — data literal or procedural body, per the context above.
     const dollar = /^\$[A-Za-z_]*\$/.exec(sql.slice(i));
     if (dollar) {
-      i += dollar[0].length;
+      const tag = dollar[0];
+      if (openProceduralTag === tag) {
+        // Closing delimiter of the procedural body: skip the delimiter only.
+        openProceduralTag = null;
+        i += tag.length;
+        continue;
+      }
+      if (openProceduralTag === null && PROCEDURAL_BEFORE_DOLLAR.has(lastToken)) {
+        // `DO $$` / `AS $$`: the body is code, so scan it.
+        openProceduralTag = tag;
+        i += tag.length;
+        continue;
+      }
+      // A value literal (including one nested inside a procedural body): skip
+      // the ENTIRE span. An unterminated literal consumes the rest rather than
+      // spilling its prose into the identifier stream.
+      const close = sql.indexOf(tag, i + tag.length);
+      i = close === -1 ? n : close + tag.length;
+      lastToken = '';
       continue;
     }
     // "quoted identifier" — `""` is an ESCAPED quote inside the name, not a
@@ -124,8 +162,15 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
     // shorter suffix, letting a 64-byte name through.
     const bare = /^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*/.exec(sql.slice(i));
     if (bare) {
-      yield { text: bare[0], quoted: false };
-      i += bare[0].length;
+      // `$` is legal INSIDE a bare identifier, so `END$$` would otherwise be
+      // consumed whole and the dollar-quote delimiter never seen \u2014 leaving a
+      // procedural body open for the rest of the file. Stop the token at a
+      // `$$`, which can only be a delimiter.
+      const dd = bare[0].indexOf('$$');
+      const text = dd > 0 ? bare[0].slice(0, dd) : bare[0];
+      lastToken = text.toLowerCase();
+      yield { text, quoted: false };
+      i += text.length;
       continue;
     }
     i += 1;
@@ -138,15 +183,40 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
  * schema carries the short names; the SQL text cannot be edited without
  * diverging from every database that has already run it.
  *
+ * Each exemption is SCOPED TO THE FILES that already contain it: the migration
+ * that originally created the name, plus 0097 itself (which must spell the old
+ * name to rename it). A name-only exemption would be a permanent licence to
+ * reuse these five names — a NEW migration spelling one would inherit the pass
+ * and be truncated exactly as before, which is the very defect this gate
+ * exists to catch. Immutable history is the reason to exempt; it does not
+ * extend to files that have not been written yet.
+ *
  * This list is CLOSED. Do not add to it: a new over-long identifier is a bug to
  * fix in the migration being written, not a precedent to extend.
  */
-const HISTORICAL_EXEMPTIONS: ReadonlySet<string> = new Set([
-  'debate_arenas_challenger_contribution_id_contributions_contribution_id_fk',
-  'debate_arenas_target_contribution_id_contributions_contribution_id_fk',
-  'steward_governance_vote_election_id_steward_election_election_id_fk',
-  'room_governance_prompt_model_id_room_governance_model_model_id_fk',
-  'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk',
+const RENAME_MIGRATION = '0097_constraint_name_truncation.sql';
+
+const HISTORICAL_EXEMPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [
+    'debate_arenas_challenger_contribution_id_contributions_contribution_id_fk',
+    new Set(['0056_ws_t_debate_arena.sql', RENAME_MIGRATION]),
+  ],
+  [
+    'debate_arenas_target_contribution_id_contributions_contribution_id_fk',
+    new Set(['0056_ws_t_debate_arena.sql', RENAME_MIGRATION]),
+  ],
+  [
+    'steward_governance_vote_election_id_steward_election_election_id_fk',
+    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
+  ],
+  [
+    'room_governance_prompt_model_id_room_governance_model_model_id_fk',
+    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
+  ],
+  [
+    'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk',
+    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
+  ],
 ]);
 
 export interface IdentifierViolation {
@@ -183,7 +253,7 @@ export function findOverlongIdentifiers(filename: string, sql: string): Identifi
     if (seen.has(text)) continue;
     seen.add(text);
     const bytes = Buffer.byteLength(text, 'utf8');
-    if (bytes > PG_MAX_IDENTIFIER_BYTES && !HISTORICAL_EXEMPTIONS.has(text)) {
+    if (bytes > PG_MAX_IDENTIFIER_BYTES && !HISTORICAL_EXEMPTIONS.get(text)?.has(filename)) {
       violations.push({ file: filename, identifier: text, bytes });
     }
   }

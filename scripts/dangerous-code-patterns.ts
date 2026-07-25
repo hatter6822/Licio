@@ -63,20 +63,32 @@ const sink = (source: string): RegExp => new RegExp(source.split('~').join(GAP))
  *     Function`…`()             — the tag form: the strings array is coerced
  *                                 with String(), so the template body becomes
  *                                 the function body and the trailing () runs it
+ *     Function.call(null, '…')()          Function.apply(null, ['…'])()
+ *     Function.bind(null)('…')()          Reflect.apply(Function, null, ['…'])()
  *
  * The direct pattern's lookbehind excludes a member/private access
  * (`.Function(`, `#Function(`) and word-suffix false positives (`getFunction(`,
  * `AsyncFunction(`), so the qualified and computed forms need their own
  * patterns — that lookbehind would otherwise skip them.
  *
+ * The FUNCTION-METHOD forms are the reason the reference and the call have to
+ * be matched separately. Every pattern above requires the reference to be
+ * followed DIRECTLY by a call token, so interposing an inherited method
+ * (`.call`/`.apply`/`.bind`, which every function object carries) defeated all
+ * of them while still constructing and running the code — verified by
+ * execution, all four returning 42. There is no legitimate use of these three
+ * methods ON the `Function` constructor itself, so they are matched without
+ * requiring an argument shape.
+ *
  * SCOPE, stated honestly: this is a text scan, so it recognises the syntactic
  * forms an author or a minifier actually emits, not every semantically
- * equivalent route to the constructor (`Reflect.construct(Function, …)`,
- * `[]['constructor']['constructor']`, a name assembled at runtime). Those are
+ * equivalent route to the constructor (`[]['constructor']['constructor']`, a
+ * name assembled at runtime, a reference stored in a variable first). Those are
  * unreachable by ANY regex; the runtime enforcement is the CSP, which ships
  * without `'unsafe-eval'` so the constructor throws in the browser however it
  * is spelled. This gate is the build-time half that keeps the reachable
- * spellings from landing in the first place.
+ * spellings from landing in the first place — and it matters most in `apps/api`,
+ * where there is no CSP behind it.
  */
 export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   // Direct call, with or without `new`, and with an optional call `?.()`.
@@ -88,6 +100,12 @@ export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\((?:[^()]*,~)?~Function~\)~(?:\?\.)?~[(\`]`),
   // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
   sink(String.raw`\[~(['"\`])Function\1~\]~(?:\?\.)?~[(\`]`),
+  // Invoked through an inherited function method: `Function.call(null, '…')()`.
+  sink(String.raw`(?<![.\w$#])Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  // The same, qualified by a global receiver: `globalThis.Function.apply(…)`.
+  sink(String.raw`\b(?:globalThis|window|self)~\??\.~Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  // Reflective invocation: `Reflect.apply(Function, …)`, `Reflect.construct(Function, …)`.
+  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~Function\b`),
 ];
 
 /**
@@ -112,10 +130,13 @@ export const FUNCTION_TAGGED_TEMPLATE_PATTERN = sink(String.raw`(?<![.\w$#])Func
  *     (eval)('…')           parenthesized reference
  *     globalThis.eval('…')  window.eval('…')  self.eval('…')
  *     globalThis['eval']('…')                 eval?.('…')
+ *     eval.call(null, '…')  eval.apply(null, ['…'])  Reflect.apply(eval, …)
  *
  * The bare {@link EVAL_PATTERN} deliberately excludes member access so a Redis
  * Lua wrapper (`redis.eval(script, 0)`) is not flagged; the GLOBAL-object
  * receivers are named explicitly here because those are never a library method.
+ * The `.call`/`.apply` forms carry the SAME lookbehind for the same reason —
+ * `redis.eval.call(…)` is a library method invocation, not a sink.
  */
 export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   // `(eval)('…')` and the sequence form `(0, eval)('…')`.
@@ -124,6 +145,11 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~(?:\?\.)?~\(`),
   // Optional call on the bare binding: `eval?.('…')`.
   sink(String.raw`(?<![.\w$#])eval~\?\.~\(`),
+  // Invoked through an inherited function method: `eval.call(null, '…')`.
+  sink(String.raw`(?<![.\w$#])eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  // Reflective invocation: `Reflect.apply(eval, null, ['…'])`.
+  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~eval\b`),
 ];
 
 /** The two timer names that compile a string argument as source. */
@@ -142,11 +168,17 @@ const TIMER = 'set(?:Timeout|Interval)';
  *     globalThis.setTimeout('…')  window.setTimeout?.('…')
  *     (0, setTimeout)('…')        (setInterval)('…')
  *     globalThis['setTimeout']('…')            self["setInterval"]('…')
+ *     setTimeout.call(window, '…', 0)  setTimeout.apply(window, ['…', 0])
  *
- * Covering only the bare `name(` form left the other four passing every gate,
- * so the set mirrors {@link INDIRECT_EVAL_PATTERNS} rather than standing alone
+ * Covering only the bare `name(` form left the others passing every gate, so
+ * the set mirrors {@link INDIRECT_EVAL_PATTERNS} rather than standing alone
  * — a sink closed for `eval` must be closed here too, or the shared list is
  * canonical in name only.
+ *
+ * The `.call`/`.apply` forms move the code to the SECOND argument, so unlike
+ * `Function.call` they still have to pin the string's position: a timer really
+ * is called with a function through `.call` in ordinary code, and a pattern
+ * that flagged the shape alone would fire on `setTimeout.call(window, tick, 0)`.
  */
 export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
   // Direct or member call, with an optional call `?.()`:
@@ -156,6 +188,10 @@ export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\((?:[^()]*,~)?~${TIMER}~\)~(?:\?\.)?~\(~['"\`]`),
   // Computed member access: `globalThis['setTimeout']('…')`.
   sink(String.raw`\[~(['"\`])${TIMER}\1~\]~(?:\?\.)?~\(~['"\`]`),
+  // `setTimeout.call(thisArg, '…')` — the code is the second argument.
+  sink(String.raw`\b${TIMER}~\.~call~(?:\?\.)?~\(~[^,()]*,~['"\`]`),
+  // `setTimeout.apply(thisArg, ['…', …])` — the code is the array's head.
+  sink(String.raw`\b${TIMER}~\.~apply~(?:\?\.)?~\(~[^,()]*,~\[~['"\`]`),
 ];
 
 /**

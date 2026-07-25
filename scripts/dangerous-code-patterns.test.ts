@@ -60,8 +60,25 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
 
+  // Round-5 finding: every pattern above requires the reference to be followed
+  // DIRECTLY by a call token, so interposing an inherited function method
+  // defeated all of them. Each form below was verified to actually construct
+  // and run code (all return 42) before the pattern was written.
+  it.each([
+    ['call', "const f = Function.call(null, 'return 42')();"],
+    ['apply', "const f = Function.apply(null, ['return 42'])();"],
+    ['bind', "const f = Function.bind(null)('return 42')();"],
+    ['global receiver + apply', "globalThis.Function.apply(null, ['x'])();"],
+    ['Reflect.apply', "Reflect.apply(Function, null, ['return 42'])();"],
+    ['Reflect.construct', "Reflect.construct(Function, ['return 42'])();"],
+  ])('catches the METHOD form: %s', (_label, code) => {
+    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
+  });
+
   it.each([
     ['a suffixed identifier', 'const v = getFunction(name);'],
+    ['an ordinary .call on some other callee', "handler.call(null, 'x');"],
+    ['an ordinary .apply on some other callee', 'fn.apply(this, args);'],
     ['an AsyncFunction-suffixed identifier', 'const v = isAsyncFunction(fn);'],
     ['a member access with no call', 'const t = registry.Function;'],
     ['a type annotation', 'function apply(fn: Function): void {}'],
@@ -99,6 +116,9 @@ describe('STRING_TIMER_PATTERNS', () => {
     ['parenthesized reference', "(setInterval)('evil()', 10)"],
     ['sequence idiom', "(0, setTimeout)('evil()', 0)"],
     ['comment gap', 'setTimeout/* c */("evil()", 0)'],
+    // Round-5: the code moves to the SECOND argument through .call/.apply.
+    ['call', "setTimeout.call(window, 'evil()', 0)"],
+    ['apply', 'setInterval.apply(window, ["evil()", 10])'],
   ])('catches the INDIRECT form: %s', (_label, code) => {
     expect(
       hits(
@@ -117,6 +137,10 @@ describe('STRING_TIMER_PATTERNS', () => {
     "globalThis['setTimeout'](tick, 0)",
     'setTimeout?.(() => run(), 0)',
     '(0, setTimeout)(handler, 0)',
+    // `.call`/`.apply` with a FUNCTION is ordinary code — unlike Function.call,
+    // the timer forms must pin the string's position rather than the shape.
+    'setTimeout.call(window, tick, 0);',
+    'setTimeout.apply(window, [tick, 0]);',
   ])('does not flag the function form %s', (code) => {
     expect(
       hits(
@@ -196,8 +220,28 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
     expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
 
+  // Round-5: `eval.call`/`eval.apply` are indirect eval — they evaluate in
+  // GLOBAL scope — and every pattern above required a call token straight
+  // after the reference, so all of them passed.
+  it.each([
+    ['call', "eval.call(null, '40+2')"],
+    ['apply', "eval.apply(null, ['40+2'])"],
+    ['bind', "eval.bind(null)('40+2')"],
+    ['global receiver + call', "globalThis.eval.call(null, 'x')"],
+    ['Reflect.apply', "Reflect.apply(eval, null, ['x'])"],
+  ])('catches the METHOD form: %s', (_label, code) => {
+    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
+  });
+
   it('does not flag a LIBRARY member eval — the Redis Lua wrapper must survive', () => {
-    for (const code of ['await redis.eval(script, 0);', 'await client.eval(lua, keys);']) {
+    for (const code of [
+      'await redis.eval(script, 0);',
+      'await client.eval(lua, keys);',
+      // The method forms carry the same lookbehind, so a library wrapper
+      // invoked through `.call` is still not a sink.
+      'await redis.eval.call(client, script, 0);',
+      'await client.eval.apply(client, [lua, keys]);',
+    ]) {
       expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(false);
     }
   });

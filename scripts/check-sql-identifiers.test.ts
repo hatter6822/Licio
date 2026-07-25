@@ -81,6 +81,37 @@ describe('findOverlongIdentifiers', () => {
     expect(findOverlongIdentifiers('0097_x.sql', sql)).toHaveLength(1);
   });
 
+  it('scans a dollar-quoted FUNCTION body too (`AS $$ … $$`)', () => {
+    const name = `q_${'w'.repeat(70)}`;
+    const sql = `CREATE FUNCTION f() RETURNS void AS $$ BEGIN CREATE INDEX ${name} ON t (c); END $$ LANGUAGE plpgsql;`;
+    expect(findOverlongIdentifiers('0100_x.sql', sql)).toHaveLength(1);
+  });
+
+  // Round 6: dollar quoting is context-dependent. Outside `DO`/`AS` it is an
+  // ordinary string literal, and tokenising one as SQL reported the prose
+  // inside it as an over-long identifier — failing a perfectly valid
+  // migration, since a mandatory CI gate that rejects correct input is worse
+  // than no gate at all.
+  it('does not flag long prose inside a dollar-quoted VALUE literal (regression)', () => {
+    const word = 'z'.repeat(80);
+    const sql = [
+      `INSERT INTO notes (body) VALUES ($$${word}$$);`,
+      `INSERT INTO notes (body) VALUES ($tag$${word}$tag$);`,
+      `COMMENT ON TABLE t IS $$a note with 'quotes' and ${word}$$;`,
+    ].join('\n');
+    expect(findOverlongIdentifiers('0100_x.sql', sql)).toEqual([]);
+  });
+
+  it('treats a nested dollar-quoted literal inside a DO block as data', () => {
+    // The body is procedural, but a value literal WITHIN it is still a string.
+    const word = 'z'.repeat(80);
+    const name = `d_${'w'.repeat(70)}`;
+    const sql = `DO $$ BEGIN INSERT INTO notes (body) VALUES ($x$${word}$x$); CREATE INDEX ${name} ON t (c); END $$;`;
+    expect(findOverlongIdentifiers('0100_x.sql', sql)).toEqual([
+      { file: '0100_x.sql', identifier: name, bytes: Buffer.byteLength(name, 'utf8') },
+    ]);
+  });
+
   it('reports each distinct over-long identifier once, however often it repeats', () => {
     const name = ident(70);
     const sql = `ALTER TABLE "t" ADD CONSTRAINT "${name}" FOREIGN KEY ("c") REFERENCES "u"("d");
@@ -88,19 +119,55 @@ describe('findOverlongIdentifiers', () => {
     expect(findOverlongIdentifiers('0099_x.sql', sql)).toHaveLength(1);
   });
 
+  // Each exemption is keyed to the migration that actually contains it: the
+  // file that created the name, plus 0097 (which must spell the old name to
+  // rename it).
+  const HISTORICAL: ReadonlyArray<[string, string]> = [
+    [
+      'debate_arenas_challenger_contribution_id_contributions_contribution_id_fk',
+      '0056_ws_t_debate_arena.sql',
+    ],
+    [
+      'debate_arenas_target_contribution_id_contributions_contribution_id_fk',
+      '0056_ws_t_debate_arena.sql',
+    ],
+    [
+      'steward_governance_vote_election_id_steward_election_election_id_fk',
+      '0035_ws_u_ai_governed_rooms.sql',
+    ],
+    [
+      'room_governance_prompt_model_id_room_governance_model_model_id_fk',
+      '0035_ws_u_ai_governed_rooms.sql',
+    ],
+    [
+      'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk',
+      '0035_ws_u_ai_governed_rooms.sql',
+    ],
+  ];
+
   it('exempts the CLOSED set of names in already-applied, immutable migrations', () => {
     // Renamed in the live schema by migration 0097; the historical SQL that
     // created them cannot be edited without diverging from applied databases.
-    const historical = [
-      'debate_arenas_challenger_contribution_id_contributions_contribution_id_fk',
-      'debate_arenas_target_contribution_id_contributions_contribution_id_fk',
-      'steward_governance_vote_election_id_steward_election_election_id_fk',
-      'room_governance_prompt_model_id_room_governance_model_model_id_fk',
-      'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk',
-    ];
-    for (const name of historical) {
+    for (const [name, origin] of HISTORICAL) {
       expect(Buffer.byteLength(name, 'utf8')).toBeGreaterThan(PG_MAX_IDENTIFIER_BYTES);
-      expect(findOverlongIdentifiers('0035_x.sql', `ADD CONSTRAINT "${name}"`)).toEqual([]);
+      expect(findOverlongIdentifiers(origin, `ADD CONSTRAINT "${name}"`)).toEqual([]);
+      // 0097 spells every one of them to perform the rename.
+      expect(
+        findOverlongIdentifiers('0097_constraint_name_truncation.sql', `RENAME "${name}" TO "x"`),
+      ).toEqual([]);
+    }
+  });
+
+  // The gap Codex found in round 6: a name-only exemption is a permanent
+  // licence to reuse these five names. A NEW migration spelling one would
+  // inherit the pass and be truncated exactly as before — the very defect the
+  // gate exists to catch. Immutable history justifies exempting the files that
+  // already contain the name, not files not yet written.
+  it('does NOT exempt an exempted name reused in a NEW migration (regression)', () => {
+    for (const [name] of HISTORICAL) {
+      expect(findOverlongIdentifiers('0100_future.sql', `CREATE INDEX ${name} ON t (c);`)).toEqual([
+        { file: '0100_future.sql', identifier: name, bytes: Buffer.byteLength(name, 'utf8') },
+      ]);
     }
   });
 
