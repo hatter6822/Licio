@@ -8,6 +8,15 @@
 // a proposal whose requested action cannot be POSITIVELY classified as safe is
 // rejected and routed to review, never allowed by default.
 
+/**
+ * The denylist/allowlist revision.  Carried in every rejection reason below, so
+ * a refused proposal is attributable to the exact list revision that refused it
+ * — a member disputing a rejection, or a steward reviewing one months later, can
+ * tell which vocabulary was in force.  BUMP THIS whenever either list changes.
+ *
+ * It was previously declared and never read, which made "a versioned denylist"
+ * in the header a claim nothing realized.
+ */
 export const PROHIBITED_TARGETS_VERSION = 1;
 
 /** Action kinds that always reject (SPEC §17.3.3 prohibited list). */
@@ -66,14 +75,14 @@ export function classifyProposalTarget(
     return {
       allowed: false,
       code: 'unclassifiable_action',
-      reason: 'The requested action must declare a string `kind` (fail-closed).',
+      reason: `The requested action must declare a string \`kind\` (fail-closed; target list v${PROHIBITED_TARGETS_VERSION}).`,
     };
   }
   if (PROHIBITED_ACTION_KINDS.has(kind)) {
     return {
       allowed: false,
       code: 'prohibited_target',
-      reason: `Action kind "${kind}" targets the platform legal floor (SPEC §17.3.3).`,
+      reason: `Action kind "${kind}" targets the platform legal floor (SPEC §17.3.3; target list v${PROHIBITED_TARGETS_VERSION}).`,
     };
   }
   const allowlist = ALLOWED_ACTION_KINDS[proposalType] ?? [];
@@ -81,7 +90,7 @@ export function classifyProposalTarget(
     return {
       allowed: false,
       code: 'unclassifiable_action',
-      reason: `Action kind "${kind}" is not a known-safe action for "${proposalType}" (fail-closed).`,
+      reason: `Action kind "${kind}" is not a known-safe action for "${proposalType}" (fail-closed; target list v${PROHIBITED_TARGETS_VERSION}).`,
     };
   }
   return { allowed: true };

@@ -24,6 +24,7 @@ import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
+import { verifyTotp } from '../../lib/auth-api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
@@ -45,6 +46,7 @@ import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
+import { Input } from '../ui/Input/index.js';
 import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
@@ -90,6 +92,19 @@ const slaTone: Record<string, string> = {
 
 function isForbidden(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403;
+}
+
+/**
+ * The session holds the steward role but has NOT cleared MFA on THIS session.
+ *
+ * Distinct from a role denial even though both are 403: `mfa_required` is
+ * recoverable right here, and a role denial is not.  Only the ENROLLING session
+ * is marked verified server-side (`/mfa/totp/confirm`), so every later sign-in
+ * starts unverified — without this branch a steward saw "your role does not
+ * have access", which is both wrong and a dead end.
+ */
+function isMfaRequired(error: unknown): boolean {
+  return error instanceof ApiClientError && error.status === 403 && error.code === 'mfa_required';
 }
 
 /** A TRUE authentication failure (the api client has already flipped the auth
@@ -227,6 +242,72 @@ function AccessNotice(): React.ReactElement {
   );
 }
 
+/**
+ * Clear MFA on the CURRENT session (WS-D.1.5b) and retry.
+ *
+ * `denyCapability` requires `mfa_verified` for every steward action, and only
+ * `/v1/auth/mfa/totp/verify` sets it on an already-authenticated session.  This
+ * is the affordance that calls it — a steward whose enrolment session has ended
+ * has no other way back into the console.  Recovery codes are accepted by the
+ * same endpoint, so a steward without their authenticator is not locked out.
+ */
+function MfaVerifyNotice({ onVerified }: { onVerified: () => void }): React.ReactElement {
+  const t = useT();
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const submit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    if (code.trim().length === 0 || busy) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      await verifyTotp(code);
+      setCode('');
+      onVerified();
+    } catch {
+      // Any failure is reported the same way: a wrong code and an unknown code
+      // must not be distinguishable (no oracle on which codes exist).
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={(event) => void submit(event)}
+      className="flex flex-col gap-3 rounded-md border border-line bg-canvas p-4"
+    >
+      <p className="text-ink-muted">
+        {t(
+          'console.mfaRequired',
+          'Verify your authenticator to use the moderation console on this session.',
+        )}
+      </p>
+      <Input
+        label={t('console.mfaCodeLabel', 'Authenticator or recovery code')}
+        value={code}
+        onChange={(event) => setCode(event.target.value)}
+        autoComplete="one-time-code"
+        inputMode="numeric"
+        disabled={busy}
+      />
+      {failed ? (
+        <p role="alert" className="text-error">
+          {t('console.mfaFailed', 'That code was not accepted. Try again.')}
+        </p>
+      ) : null}
+      <div>
+        <Button type="submit" disabled={busy || code.trim().length === 0}>
+          {t('console.mfaVerify', 'Verify')}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 /** The session lapsed mid-use (401 — the api client already flipped the auth
  *  store to `session-expired`; the route guards redirect on the next protected
  *  navigation). Say so and point at sign-in — never "retry". */
@@ -244,13 +325,15 @@ function SessionExpiredNotice(): React.ReactElement {
 }
 
 /**
- * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome (the
- * access notice), a 401 is an AUTHENTICATION outcome (the session lapsed —
- * sign in again; retrying cannot succeed), and only everything else —
- * network, 5xx, malformed payload — is a transient error with a retry.
- * Collapsing these told a fully-authorized steward their role lost access
- * whenever the API blipped, or that an expired session was "not a
- * permissions problem, retry", both wrong.
+ * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome, a 401 is an
+ * AUTHENTICATION outcome (the session lapsed — sign in again; retrying cannot
+ * succeed), and only everything else — network, 5xx, malformed payload — is a
+ * transient error with a retry.  Collapsing these told a fully-authorized
+ * steward their role lost access whenever the API blipped, or that an expired
+ * session was "not a permissions problem, retry", both wrong.
+ *
+ * The 403s split further: `mfa_required` is RECOVERABLE on this session, so it
+ * gets the verification form rather than the dead-end access notice.
  */
 function PanelError({
   error,
@@ -260,6 +343,7 @@ function PanelError({
   onRetry: () => void;
 }): React.ReactElement {
   const t = useT();
+  if (isMfaRequired(error)) return <MfaVerifyNotice onVerified={onRetry} />;
   if (isForbidden(error)) return <AccessNotice />;
   if (isUnauthenticated(error)) return <SessionExpiredNotice />;
   return (

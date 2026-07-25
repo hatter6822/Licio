@@ -4,7 +4,11 @@
 // palette + revert, appeals (independence), block/mute enforcement, audit +
 // transparency, notices, review projections, authz, and fail-closed config —
 // exercised against in-memory stores + recording stub ports.
-import type { CreateReportRequest, UserAccountState } from '@licio/shared';
+import {
+  CO_APPROVAL_CAPABILITIES,
+  type CreateReportRequest,
+  type UserAccountState,
+} from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import { applyAction, parseDurationDays, revertAction } from '../moderation/actions.js';
@@ -12,6 +16,7 @@ import { checkEligibility, decideAppeal, submitAppeal } from '../moderation/appe
 import { buildTransparencyExport, writeAudit } from '../moderation/audit.js';
 import {
   availableConsoleActions,
+  type CoApprover,
   denyCapability,
   denyQueue,
   effectiveStewardRoles,
@@ -2169,6 +2174,89 @@ describe('authz', () => {
     expect(denyQueue(safetyActor(), 'appeal-queue')?.code).toBe('insufficient_capability');
     expect(availableConsoleActions(safetyActor())).toContain('remove');
     expect(availableConsoleActions(safetyActor())).not.toContain('ban'); // not senior
+  });
+
+  // STEWARD_ROLES.md: "`treasury-freeze` | `ROLE_INTEGRITY` only | Requires
+  // counsel co-approval (WS-A.1.2c)", and MODERATION_TAXONOMY.md's
+  // machine-readable row `{"action_type": "Treasury freeze", …, "co_approver":
+  // "counsel"}`.  `CO_APPROVAL_CAPABILITIES` encodes that set; these pin that
+  // the gate actually CONSULTS it, in the fail-closed direction.
+  describe('counsel co-approval (WS-A.1.2c)', () => {
+    const integrityActor = (): StewardActor => ({
+      userId: '00000000-0000-4000-8000-0000000000d1',
+      platformRoles: ['steward'],
+      stewardRoles: ['ROLE_INTEGRITY'],
+      mfaActive: true,
+      mfaVerified: true,
+    });
+    const COUNSEL: CoApprover = {
+      userId: '00000000-0000-4000-8000-0000000000d2',
+      platformRoles: ['counsel'],
+    };
+
+    it('DENIES a co-approval capability when no co-approver is presented', () => {
+      // The role DOES grant it — only the missing second approver refuses.
+      expect(denyCapability(integrityActor(), 'treasury-freeze')?.code).toBe(
+        'co_approval_required',
+      );
+    });
+
+    it('denies self-co-approval (four eyes, not two)', () => {
+      const actor = integrityActor();
+      expect(
+        denyCapability(actor, 'treasury-freeze', {
+          userId: actor.userId,
+          platformRoles: ['counsel'],
+        })?.code,
+      ).toBe('co_approval_required');
+    });
+
+    it('denies a second approver who is NOT counsel', () => {
+      expect(
+        denyCapability(integrityActor(), 'treasury-freeze', {
+          userId: '00000000-0000-4000-8000-0000000000d3',
+          platformRoles: ['steward'], // a second steward is not counsel
+        })?.code,
+      ).toBe('co_approval_required');
+    });
+
+    it('ALLOWS a distinct counsel co-approver', () => {
+      expect(denyCapability(integrityActor(), 'treasury-freeze', COUNSEL)).toBeNull();
+      // `admin` carries `compliance.counsel.approve` (the final-line-of-defense
+      // grant), so it satisfies the co-approver requirement too.
+      expect(
+        denyCapability(integrityActor(), 'treasury-freeze', {
+          userId: '00000000-0000-4000-8000-0000000000d4',
+          platformRoles: ['admin'],
+        }),
+      ).toBeNull();
+    });
+
+    it('still enforces role and MFA ahead of co-approval', () => {
+      // A SAFETY steward does not hold treasury-freeze at all — the role denial
+      // must win, so a co-approver can never launder a missing grant.
+      expect(denyCapability(safetyActor(), 'treasury-freeze', COUNSEL)?.code).toBe(
+        'insufficient_capability',
+      );
+      expect(
+        denyCapability({ ...integrityActor(), mfaVerified: false }, 'treasury-freeze', COUNSEL)
+          ?.code,
+      ).toBe('mfa_required');
+    });
+
+    it('leaves NON-co-approval capabilities unaffected by the new parameter', () => {
+      expect(denyCapability(safetyActor(), 'remove')).toBeNull();
+      expect(denyCapability(safetyActor(), 'remove', COUNSEL)).toBeNull();
+    });
+
+    it('the palette offers no capability that cannot be invoked alone', () => {
+      // `availableConsoleActions` reports role grants without a co-approver, so
+      // it must never contain one — otherwise the UI offers a guaranteed 403.
+      const offered = availableConsoleActions({ ...integrityActor(), platformRoles: ['admin'] });
+      for (const capability of offered) {
+        expect(CO_APPROVAL_CAPABILITIES.has(capability)).toBe(false);
+      }
+    });
   });
 });
 

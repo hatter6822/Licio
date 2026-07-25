@@ -333,7 +333,6 @@ export const killSwitchIdSchema = z.enum(KILL_SWITCH_IDS);
 
 export const KILL_SWITCH_SCOPE_TYPES = ['global', 'region', 'room'] as const;
 export type KillSwitchScopeType = (typeof KILL_SWITCH_SCOPE_TYPES)[number];
-export const killSwitchScopeTypeSchema = z.enum(KILL_SWITCH_SCOPE_TYPES);
 
 /** One switch's engaged scopes (empty everywhere ⇒ inactive). */
 export const killSwitchScopesSchema = z
@@ -478,9 +477,17 @@ export const SIM_ASSET_PREFIX = 'SIM-' as const;
 /** The persistent simulation banner text (WS-L.4.1c — cannot be dismissed). */
 export const SIMULATION_LABEL = 'SIMULATED — NO REAL VALUE' as const;
 
-const simAssetSchema = z
-  .string()
-  .regex(/^SIM-[A-Z0-9]{1,28}$/, { message: 'simulated assets must use the SIM- prefix' });
+/**
+ * The validator that MAKES the prefix above true, built FROM it.  The prefix was
+ * previously spelled twice — once as the exported constant, once baked into this
+ * regex three lines below — so the constant documented a rule the regex
+ * independently enforced, and either could be changed without the other.  The
+ * whole point of `SIM-` is that a simulated balance can never be mistaken for a
+ * real asset symbol; that guarantee should have exactly one spelling.
+ */
+const simAssetSchema = z.string().regex(new RegExp(`^${SIM_ASSET_PREFIX}[A-Z0-9]{1,28}$`), {
+  message: `simulated assets must use the ${SIM_ASSET_PREFIX} prefix`,
+});
 
 export const governanceProposalCreateSchema = z
   .object({

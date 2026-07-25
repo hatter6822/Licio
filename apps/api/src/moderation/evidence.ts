@@ -25,7 +25,7 @@ import type {
   EvidenceQueueRow,
 } from '@licio/shared';
 import { writeAudit } from './audit.js';
-import { denyCapability, denyQueue, type StewardActor } from './authz.js';
+import { type CapabilityDenial, denyCapability, denyQueue, type StewardActor } from './authz.js';
 import type { ModerationServices } from './services.js';
 import type { EvidenceDecisionRecord } from './stores.js';
 
@@ -120,8 +120,7 @@ export type EvidenceDecisionOutcome =
   | {
       ok: false;
       code:
-        | 'insufficient_capability'
-        | 'mfa_required'
+        | CapabilityDenial['code']
         | 'target_not_found'
         | 'citation_not_found'
         | 'citation_malicious'

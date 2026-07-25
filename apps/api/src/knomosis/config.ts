@@ -13,6 +13,7 @@
 // only a validated boolean `true` in the config store can enable it; any read
 // or parse failure keeps it false (fail-closed in the OFF direction).
 
+import { PAYMENT_INTENT_DEFAULT_MAX_RETRIES } from '@licio/governance';
 import { z } from 'zod';
 import type { PwattConfigStore } from '../events/stores.js';
 
@@ -100,7 +101,12 @@ export const DEFAULT_KNOMOSIS_CONFIG: KnomosisRuntimeConfig = {
   wsmIntentPreflightedTtlMs: 10 * 60_000,
   wsmIntentQuotedTtlMs: 5 * 60_000,
   wsmIntentSignedTtlMs: 5 * 60_000,
-  wsmIntentMaxRetries: 3,
+  // The WS-M lifecycle package OWNS this bound (it is the retry edge
+  // `failed`/`reverted` → `created` in the payment-intent state machine); this
+  // is only where an operator may override it.  Spelling `3` again here made
+  // the domain constant a dead duplicate that could silently disagree with the
+  // value actually enforced.
+  wsmIntentMaxRetries: PAYMENT_INTENT_DEFAULT_MAX_RETRIES,
   wsmIntentReorgRecoveryMs: 60 * 60_000,
   wsmDeliberationSeconds: 24 * 3600,
   wsmVotingSeconds: 3 * 24 * 3600,
