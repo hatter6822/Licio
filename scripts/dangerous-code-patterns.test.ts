@@ -544,7 +544,42 @@ describe('aliased sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  // Round 20: an alias of a RECEIVER is itself a receiver. `globalThis`,
+  // `window` and `self` were recognised only by their literal names, so
+  // `const g = globalThis; g.eval(payload)` reached the same sink with no
+  // finding. The table is shared rather than copied, so an alias of an alias
+  // resolves through the same lookup.
   it.each([
+    ['an aliased globalThis', 'const g = globalThis; g.eval(payload)'],
+    ['an aliased window', "const w = window; w.Function('return 1')()"],
+    ['an aliased self timer', "const g = self; g.setTimeout('evil()', 0)"],
+    ['an alias of a receiver alias', "const g = globalThis; const h = g; h.eval('x')"],
+    ['a computed access on an aliased receiver', "const g = globalThis; g['eval']('x')"],
+    [
+      'a destructure from an aliased receiver',
+      "const g = globalThis; const { eval: r } = g; r('x')",
+    ],
+    ['a parenthesised receiver alias', "const g = (globalThis); g.eval('x')"],
+    ['a typed receiver alias', "const g: typeof globalThis = globalThis; g.eval('x')"],
+    [
+      'a reflective call through an alias',
+      "const g = globalThis; Reflect.apply(g.eval, null, ['x'])",
+    ],
+    ['a .constructor reached through an alias', "const g = globalThis; g.eval.constructor('x')()"],
+    ['a receiver alias in a multi-declarator', "const g = globalThis, h = self; h.eval('x')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    // The boundary: only a BARE receiver reference aliases the OBJECT.
+    // `const e = globalThis.eval` binds the eval FUNCTION, so `e` must not
+    // become a receiver — otherwise `e.anything(…)` would resolve to a sink.
+    ['a member-access initializer used as a receiver', 'const e = globalThis.eval; e.other(x)'],
+    ['an aliased receiver method that is not a sink', 'const g = self; g.skipWaiting()'],
+    ['an aliased receiver timer given a function', 'const g = self; g.setTimeout(tick, 0)'],
+    ['an unrelated object with a sink-named property', "const g = registry; g.eval('x')"],
+    ['a call result treated as a receiver', "const g = makeCtx(); g.eval('x')"],
     ['a parenthesised unrelated binding', "const f = (handler); f('x')"],
     ['a parenthesised comparison', "if ((f) === Function) { f('x') }"],
     ['an unrelated destructured name', 'const { fetch: f } = globalThis; f(url)'],

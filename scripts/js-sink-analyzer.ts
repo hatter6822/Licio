@@ -832,7 +832,12 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
  */
 interface AliasTable {
   readonly direct: Map<string, SinkSpec>;
-  readonly members: Map<string, Map<string, SinkSpec>>;
+  /**
+   * Read-only by contract: aliasing a receiver SHARES its table rather than
+   * copying it (`const g = globalThis` hands `g` the global sink map itself),
+   * so a mutation through one name would silently change the other.
+   */
+  readonly members: Map<string, ReadonlyMap<string, SinkSpec>>;
 }
 
 /**
@@ -1008,6 +1013,26 @@ function collectAliases(
           if (spec) table.set(entry.key, spec);
         }
         if (table.size > 0) aliases.members.set(name.value, table);
+        continue;
+      }
+
+      // `const g = globalThis` — an alias of a RECEIVER is itself a receiver,
+      // so `g.eval(payload)` reaches the same sink `globalThis.eval(payload)`
+      // does. The table is shared rather than copied, so an alias of an alias
+      // (`const h = g`) resolves through the same lookup.
+      //
+      // Only a BARE receiver reference counts. `const e = globalThis.eval`
+      // binds the eval FUNCTION, not the global object, so a member access
+      // after the initializer disqualifies it and it falls through to the
+      // direct binding below — treating that as a receiver would have made
+      // `e.anything(…)` resolve to a sink.
+      const receiver = receiverAt(initializer);
+      if (
+        receiver &&
+        !readMember(tokens, initializer + 1) &&
+        !isPunct(tokens[initializer + 1], '(')
+      ) {
+        aliases.members.set(name.value, receiver);
         continue;
       }
 
