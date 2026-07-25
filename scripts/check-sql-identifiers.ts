@@ -29,11 +29,106 @@ import { fileURLToPath } from 'node:url';
 export const PG_MAX_IDENTIFIER_BYTES = 63;
 
 /**
- * Keywords after which a dollar-quoted span is PROCEDURAL CODE rather than a
- * data value: `DO $$ … $$` and `CREATE FUNCTION … AS $$ … $$`. Only after one
- * of these is the body real SQL whose identifiers must be measured.
+ * Keywords immediately after which a dollar-quoted span is PROCEDURAL CODE
+ * rather than a data value: `DO $$ … $$` and `CREATE FUNCTION … AS $$ … $$`.
  */
 const PROCEDURAL_BEFORE_DOLLAR: ReadonlySet<string> = new Set(['do', 'as']);
+
+/**
+ * Does the token history immediately before a `$tag$` mark it as procedural?
+ *
+ * `recent` holds the last three tokens, oldest first. The adjacent case covers
+ * `DO $$` and `AS $$`, but `DO` also takes an optional language clause —
+ * `DO LANGUAGE plpgsql $$ … $$` is valid and puts `plpgsql` next to the
+ * delimiter, so an adjacency-only test read the body as DATA and skipped it
+ * whole. That is the dangerous direction: the gate goes BLIND to real DDL
+ * rather than merely noisy, which is how an over-long name would reach
+ * Postgres and be truncated with the gate still green.
+ */
+function isProceduralContext(recent: readonly string[]): boolean {
+  const last = recent[recent.length - 1] ?? '';
+  if (PROCEDURAL_BEFORE_DOLLAR.has(last)) return true;
+  // `DO LANGUAGE <lang> $$`
+  return recent[recent.length - 3] === 'do' && recent[recent.length - 2] === 'language';
+}
+
+/**
+ * Read a `"…"` body starting just after the opening quote, honouring the `""`
+ * escape. Returns the raw body and the offset just past the closing quote, or
+ * `null` when unterminated.
+ */
+function parseQuotedBody(sql: string, start: number): { body: string; end: number } | null {
+  let body = '';
+  let i = start;
+  while (i < sql.length) {
+    if (sql[i] === '"') {
+      if (sql[i + 1] === '"') {
+        body += '"';
+        i += 2;
+      } else return { body, end: i + 1 };
+    } else {
+      body += sql[i];
+      i += 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the optional `UESCAPE '<char>'` clause that may follow a `U&"…"`
+ * literal and redefine its escape character. Returns the character in force
+ * (default `\`) and the offset just past the clause.
+ */
+function readUescape(sql: string, start: number): { char: string; end: number } {
+  const m = /^\s*UESCAPE\s*'(.)'/i.exec(sql.slice(start));
+  if (!m?.[1]) return { char: '\\', end: start };
+  return { char: m[1], end: start + m[0].length };
+}
+
+/**
+ * Decode the escapes inside a `U&"…"` body: `EE` is a literal escape
+ * character, `EXXXX` a UTF-16 code unit, and `E+XXXXXX` a code point.
+ *
+ * The 4-hex form is decoded with `fromCharCode` rather than `fromCodePoint` so
+ * that a surrogate PAIR written as two escapes combines into one character, as
+ * Postgres treats it — decoding each half independently would count three
+ * bytes per lone surrogate and inflate the measurement.
+ */
+function decodeUnicodeEscapes(body: string, escapeChar: string): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    if (body[i] !== escapeChar) {
+      out += body[i];
+      i += 1;
+      continue;
+    }
+    if (body[i + 1] === escapeChar) {
+      out += escapeChar;
+      i += 2;
+      continue;
+    }
+    if (body[i + 1] === '+') {
+      const hex = body.slice(i + 2, i + 8);
+      if (/^[0-9A-Fa-f]{6}$/.test(hex)) {
+        out += String.fromCodePoint(Number.parseInt(hex, 16));
+        i += 8;
+        continue;
+      }
+    }
+    const hex = body.slice(i + 1, i + 5);
+    if (/^[0-9A-Fa-f]{4}$/.test(hex)) {
+      out += String.fromCharCode(Number.parseInt(hex, 16));
+      i += 5;
+      continue;
+    }
+    // Not a well-formed escape: Postgres would reject the literal outright, so
+    // keep the character and let the length check see it rather than guessing.
+    out += body[i];
+    i += 1;
+  }
+  return out;
+}
 
 /**
  * Split SQL into the spans that can hold an identifier, discarding the spans
@@ -60,8 +155,9 @@ const PROCEDURAL_BEFORE_DOLLAR: ReadonlySet<string> = new Set(['do', 'as']);
 export function* identifierCandidates(sql: string): Generator<{ text: string; quoted: boolean }> {
   let i = 0;
   const n = sql.length;
-  // The last bare token seen, lower-cased — decides how the next `$tag$` reads.
-  let lastToken = '';
+  // The last three bare tokens seen, lower-cased, oldest first — enough to
+  // recognise `DO LANGUAGE <lang> $$` as well as the adjacent `DO`/`AS` forms.
+  let recent: string[] = [];
   // The tag of the PROCEDURAL body currently open, if any. Its matching close
   // is a delimiter to skip, not the start of a new literal (the token before it
   // is `END`, which would otherwise read as data).
@@ -105,7 +201,11 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       continue;
     }
     // $tag$ … $tag$ — data literal or procedural body, per the context above.
-    const dollar = /^\$[A-Za-z_]*\$/.exec(sql.slice(i));
+    // The TAG follows unquoted-identifier rules, so it may contain digits after
+    // its first character (`$q1$`, `$version_2$`). A letters-only class failed
+    // to recognise those as delimiters at all, so the quoted prose between them
+    // was tokenised as SQL and reported as an over-long identifier.
+    const dollar = /^\$(?:[A-Za-z_-￿][A-Za-z0-9_-￿]*)?\$/.exec(sql.slice(i));
     if (dollar) {
       const tag = dollar[0];
       if (openProceduralTag === tag) {
@@ -114,8 +214,8 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
         i += tag.length;
         continue;
       }
-      if (openProceduralTag === null && PROCEDURAL_BEFORE_DOLLAR.has(lastToken)) {
-        // `DO $$` / `AS $$`: the body is code, so scan it.
+      if (openProceduralTag === null && isProceduralContext(recent)) {
+        // `DO $$` / `AS $$` / `DO LANGUAGE … $$`: the body is code, so scan it.
         openProceduralTag = tag;
         i += tag.length;
         continue;
@@ -125,7 +225,20 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // spilling its prose into the identifier stream.
       const close = sql.indexOf(tag, i + tag.length);
       i = close === -1 ? n : close + tag.length;
-      lastToken = '';
+      recent = [];
+      continue;
+    }
+    // U&"…" — a Unicode-escaped identifier. Postgres stores the DECODED name,
+    // so measuring the escape notation over-counts by up to 6x and would reject
+    // a migration whose real identifier is far inside the limit.
+    const uAmp = /^[Uu]&"/.exec(sql.slice(i));
+    if (uAmp) {
+      const parsed = parseQuotedBody(sql, i + uAmp[0].length);
+      if (parsed === null) return; // unterminated: stop rather than mis-parse
+      const uescape = readUescape(sql, parsed.end);
+      yield { text: decodeUnicodeEscapes(parsed.body, uescape.char), quoted: true };
+      i = uescape.end;
+      recent = [];
       continue;
     }
     // "quoted identifier" — `""` is an ESCAPED quote inside the name, not a
@@ -168,7 +281,8 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // `$$`, which can only be a delimiter.
       const dd = bare[0].indexOf('$$');
       const text = dd > 0 ? bare[0].slice(0, dd) : bare[0];
-      lastToken = text.toLowerCase();
+      recent.push(text.toLowerCase());
+      if (recent.length > 3) recent.shift();
       yield { text, quoted: false };
       i += text.length;
       continue;

@@ -102,6 +102,33 @@ describe('findOverlongIdentifiers', () => {
     expect(findOverlongIdentifiers('0100_x.sql', sql)).toEqual([]);
   });
 
+  // Round 7: `DO` takes an optional language clause, which puts `plpgsql` next
+  // to the delimiter. An adjacency-only check read the body as DATA and skipped
+  // it whole — the gate going BLIND to real DDL, which is the dangerous
+  // direction: a truncated name reaches Postgres with the gate still green.
+  it('scans a DO body written with an explicit LANGUAGE clause (regression)', () => {
+    const name = `d_${'w'.repeat(70)}`;
+    expect(
+      findOverlongIdentifiers(
+        '0100_x.sql',
+        `DO LANGUAGE plpgsql $$ BEGIN CREATE INDEX ${name} ON t (c); END $$;`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  // Round 7: a dollar-quote TAG follows unquoted-identifier rules, so it may
+  // carry digits after the first character. A letters-only class did not
+  // recognise `$q1$` as a delimiter at all, so the prose between the two
+  // delimiters was tokenised as SQL and reported.
+  it('accepts digits in a dollar-quote tag (regression)', () => {
+    const word = 'z'.repeat(80);
+    for (const tag of ['$q1$', '$version_2$']) {
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `INSERT INTO t (b) VALUES (${tag}${word}${tag});`),
+      ).toEqual([]);
+    }
+  });
+
   it('treats a nested dollar-quoted literal inside a DO block as data', () => {
     // The body is procedural, but a value literal WITHIN it is still a string.
     const word = 'z'.repeat(80);
@@ -212,6 +239,50 @@ describe('findOverlongIdentifiers', () => {
       `COMMENT ON TABLE "stories" IS 'a long note; see "the spec" for detail';`,
     ].join('\n');
     expect(findOverlongIdentifiers('0080_x.sql', sql)).toEqual([]);
+  });
+
+  // Round 7: Postgres stores the DECODED name of a `U&"…"` identifier, so
+  // measuring the escape notation over-counts by up to 6x and would reject a
+  // migration whose real identifier is far inside the limit.
+  describe('U&"…" Unicode-escaped identifiers', () => {
+    it('measures the DECODED name, not the escape notation (regression)', () => {
+      const written = '\\0061'.repeat(13); // 65 bytes as written, 13 decoded
+      expect(Buffer.byteLength(written, 'utf8')).toBeGreaterThan(PG_MAX_IDENTIFIER_BYTES);
+      expect(findOverlongIdentifiers('0100_x.sql', `CREATE TABLE U&"${written}" ();`)).toEqual([]);
+    });
+
+    it('honours a UESCAPE clause that redefines the escape character', () => {
+      const written = '!0061'.repeat(13);
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `CREATE TABLE U&"${written}" UESCAPE '!' ();`),
+      ).toEqual([]);
+    });
+
+    // The positive control: without it the two cases above would also pass if
+    // the decoder silently produced an empty string — which is exactly the bug
+    // the first cut of this had.
+    it('still flags a U&"…" name that is over the limit once decoded', () => {
+      const found = findOverlongIdentifiers(
+        '0100_x.sql',
+        `CREATE TABLE U&"${'\\0061'.repeat(64)}" ();`,
+      );
+      expect(found).toEqual([{ file: '0100_x.sql', identifier: 'a'.repeat(64), bytes: 64 }]);
+    });
+
+    it('decodes the 6-hex `\\+XXXXXX` form and a doubled escape', () => {
+      // `\+000061` is one `a`; `\\` is one literal backslash.
+      const found = findOverlongIdentifiers('0100_x.sql', `CREATE TABLE U&"\\+000061\\\\" ();`);
+      expect(found).toEqual([]);
+    });
+
+    it('lowercase `u&"…"` is the same syntax', () => {
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `CREATE TABLE u&"${'\\0061'.repeat(13)}" ();`),
+      ).toEqual([]);
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `CREATE TABLE u&"${'\\0061'.repeat(64)}" ();`),
+      ).toHaveLength(1);
+    });
   });
 
   it('passes ordinary migration SQL untouched', () => {

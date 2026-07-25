@@ -50,6 +50,27 @@ const GAP = String.raw`(?:\s|/\*[^*]*\*+(?:[^/*][^*]*\*+)*/)*`;
 const sink = (source: string): RegExp => new RegExp(source.split('~').join(GAP));
 
 /**
+ * Every way a sink's REFERENCE can be spelled where an expression is expected —
+ * bare, or reached through a global object by dot or computed access.
+ *
+ * Shared so a reflective call site (`Reflect.apply(<ref>, …)`) accepts the same
+ * spellings the direct call sites do. Writing the reference inline at each site
+ * is what let `Reflect.apply(globalThis.Function, …)` through while
+ * `Reflect.apply(Function, …)` was caught: the file recognised qualified
+ * references everywhere else, so the asymmetry was an oversight, not a policy.
+ *
+ * The computed form is deliberately not backreferenced (`['"\`]…['"\`]` rather
+ * than a capture and `\1`) so this fragment can be embedded at any position in
+ * a larger pattern without its group number shifting. The only cost is
+ * accepting a mismatched quote pair, which no real code contains and which can
+ * only ever WIDEN detection.
+ */
+const reference = (name: string): string =>
+  String.raw`(?:(?:globalThis|window|self)~\??\.~${name}\b` +
+  String.raw`|(?:globalThis|window|self)~\[~['"\`]${name}['"\`]~\]` +
+  String.raw`|${name}\b)`;
+
+/**
  * Every textual form that reaches the **Function constructor**, an
  * eval-equivalent sink. `Function(src)` and `new Function(src)` are the same
  * operation (the `new` is optional per ECMA-262), and the reference itself can
@@ -104,8 +125,9 @@ export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   sink(String.raw`(?<![.\w$#])Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
   // The same, qualified by a global receiver: `globalThis.Function.apply(…)`.
   sink(String.raw`\b(?:globalThis|window|self)~\??\.~Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
-  // Reflective invocation: `Reflect.apply(Function, …)`, `Reflect.construct(Function, …)`.
-  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~Function\b`),
+  // Reflective invocation, accepting any spelling of the reference:
+  // `Reflect.apply(Function, …)`, `Reflect.construct(globalThis.Function, …)`.
+  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('Function')}`),
 ];
 
 /**
@@ -148,8 +170,9 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   // Invoked through an inherited function method: `eval.call(null, '…')`.
   sink(String.raw`(?<![.\w$#])eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
   sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
-  // Reflective invocation: `Reflect.apply(eval, null, ['…'])`.
-  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~eval\b`),
+  // Reflective invocation, accepting any spelling of the reference:
+  // `Reflect.apply(eval, null, ['…'])`, `Reflect.apply(globalThis.eval, …)`.
+  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('eval')}`),
 ];
 
 /** The two timer names that compile a string argument as source. */
@@ -169,6 +192,7 @@ const TIMER = 'set(?:Timeout|Interval)';
  *     (0, setTimeout)('…')        (setInterval)('…')
  *     globalThis['setTimeout']('…')            self["setInterval"]('…')
  *     setTimeout.call(window, '…', 0)  setTimeout.apply(window, ['…', 0])
+ *     setTimeout.bind(window, '…')()   Reflect.apply(setTimeout, window, ['…'])
  *
  * Covering only the bare `name(` form left the others passing every gate, so
  * the set mirrors {@link INDIRECT_EVAL_PATTERNS} rather than standing alone
@@ -188,10 +212,14 @@ export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\((?:[^()]*,~)?~${TIMER}~\)~(?:\?\.)?~\(~['"\`]`),
   // Computed member access: `globalThis['setTimeout']('…')`.
   sink(String.raw`\[~(['"\`])${TIMER}\1~\]~(?:\?\.)?~\(~['"\`]`),
-  // `setTimeout.call(thisArg, '…')` — the code is the second argument.
-  sink(String.raw`\b${TIMER}~\.~call~(?:\?\.)?~\(~[^,()]*,~['"\`]`),
+  // `setTimeout.call(thisArg, '…')` and `setTimeout.bind(thisArg, '…')()` —
+  // the code is the second argument in both.
+  sink(String.raw`\b${TIMER}~\.~(?:call|bind)~(?:\?\.)?~\(~[^,()]*,~['"\`]`),
   // `setTimeout.apply(thisArg, ['…', …])` — the code is the array's head.
   sink(String.raw`\b${TIMER}~\.~apply~(?:\?\.)?~\(~[^,()]*,~\[~['"\`]`),
+  // `Reflect.apply(setTimeout, thisArg, ['…', …])` — reference, thisArg, then
+  // the argument array whose head is the code.
+  sink(String.raw`\bReflect~\.~apply~\(~${reference(TIMER)}~,~[^,()]*,~\[~['"\`]`),
 ];
 
 /**

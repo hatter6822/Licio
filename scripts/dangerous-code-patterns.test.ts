@@ -71,6 +71,10 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     ['global receiver + apply', "globalThis.Function.apply(null, ['x'])();"],
     ['Reflect.apply', "Reflect.apply(Function, null, ['return 42'])();"],
     ['Reflect.construct', "Reflect.construct(Function, ['return 42'])();"],
+    // Round-6: the reflective pattern accepted only the BARE identifier, even
+    // though every direct call site already recognised qualified references.
+    ['Reflect.apply + global receiver', "Reflect.apply(globalThis.Function, null, ['x'])();"],
+    ['Reflect.construct + computed', "Reflect.construct(window['Function'], ['x'])();"],
   ])('catches the METHOD form: %s', (_label, code) => {
     expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
@@ -119,6 +123,10 @@ describe('STRING_TIMER_PATTERNS', () => {
     // Round-5: the code moves to the SECOND argument through .call/.apply.
     ['call', "setTimeout.call(window, 'evil()', 0)"],
     ['apply', 'setInterval.apply(window, ["evil()", 10])'],
+    // Round-6: bound and reflective invocation compile the string too.
+    ['bind', "setTimeout.bind(globalThis, 'evil()')()"],
+    ['Reflect.apply', "Reflect.apply(setTimeout, globalThis, ['evil()'])"],
+    ['Reflect.apply + global receiver', "Reflect.apply(globalThis.setTimeout, self, ['evil()'])"],
   ])('catches the INDIRECT form: %s', (_label, code) => {
     expect(
       hits(
@@ -141,6 +149,8 @@ describe('STRING_TIMER_PATTERNS', () => {
     // the timer forms must pin the string's position rather than the shape.
     'setTimeout.call(window, tick, 0);',
     'setTimeout.apply(window, [tick, 0]);',
+    'setTimeout.bind(globalThis, tick)();',
+    'Reflect.apply(setTimeout, globalThis, [tick, 0]);',
   ])('does not flag the function form %s', (code) => {
     expect(
       hits(
@@ -229,6 +239,8 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
     ['bind', "eval.bind(null)('40+2')"],
     ['global receiver + call', "globalThis.eval.call(null, 'x')"],
     ['Reflect.apply', "Reflect.apply(eval, null, ['x'])"],
+    ['Reflect.apply + global receiver', "Reflect.apply(globalThis.eval, null, ['payload'])"],
+    ['Reflect.apply + computed', "Reflect.apply(self['eval'], null, ['payload'])"],
   ])('catches the METHOD form: %s', (_label, code) => {
     expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
