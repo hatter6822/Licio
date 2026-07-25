@@ -652,4 +652,38 @@ pnpm --filter web test:e2e     # Playwright + axe (Chromium, Firefox, WebKit)
 pnpm test                      # unit/component tests (Vitest)
 pnpm check:sw                  # service-worker security scan (after a build)
 pnpm check:no-raw-egress       # static no-raw-egress attention-privacy gate
+pnpm check:csp-parity          # the built index.html carries exactly the injected shared CSP
 ```
+
+### One CSP, three delivery points
+
+The directives are defined ONCE, in `packages/shared/src/security/csp.ts`.
+They have to reach the browser three different ways, and every one of them
+derives from that module:
+
+| Delivery point | How it gets the policy |
+|---|---|
+| `apps/api/src/middleware/security-headers.ts` — the production response header | imports `contentSecurityPolicyHeader()` |
+| `apps/web/vite.config.ts` `server.headers` — the `vite preview` origin the Playwright suite asserts against | imports the same function, by RELATIVE path |
+| `<meta http-equiv>` — the ONLY policy in the WS-R.15.4a courier WebView (bundled assets from `https://localhost`, no server headers) | INJECTED at build time by the `licio:inject-csp-meta` plugin |
+
+`apps/web/index.html` carries no policy of its own.  It used to, and that copy
+had to be kept in step by hand with the other two — a header tightened without
+a matching edit here left the courier, the most constrained runtime, running the
+older and weaker rules, with nothing to catch it.
+
+The Vite config imports the shared module by RELATIVE path rather than as
+`@licio/shared`: Vite's config loader externalises a bare workspace specifier,
+and Node then cannot resolve the package's `.js`-suffixed TypeScript source at
+config-eval time.  A relative import is bundled into the config.
+
+The meta form is the header minus `frame-ancestors` / `report-uri` /
+`report-to`, the three directives a user agent IGNORES in a meta element
+(CSP L3 §3.3) — emitting them there would read as protection that is not in
+force, so `check:csp-parity` rejects them too.
+
+That gate now asserts on the BUILT artifact, because the compiler already
+guarantees the two TypeScript consumers agree.  What it cannot guarantee is
+that the injection actually fired: a renamed hook, the wrong `apply`, a
+transform ordered after the HTML is emitted, and the courier ships with NO
+policy while the app still builds, boots and passes its tests.

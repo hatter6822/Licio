@@ -86,6 +86,21 @@ Mitigations, layered in request order:
    schema: NaN/±Infinity/malformed/negative amounts reject up front
    (`invalid_amount`, `kernel.ts`). This closes the classic
    "amount = 1e21 passes every float comparison" drain.
+
+   The guard covers **every decimal the arithmetic touches**, not only the
+   action's own amount: the history entries the window total sums and the
+   law-pack bounds each comparison runs against. Those inputs are guarded for
+   two distinct failure modes. An unparseable one *throws* out of
+   `decSum`/`decCompare` — so without the guard a malformed history row or
+   cap string escapes as an exception instead of the typed `Verdict` the
+   proof-carrying contract promises, and the caller's transition fails on an
+   unrelated path. A non-finite one *passes vacuously* — every comparison
+   against NaN is false, so it clears the bound it was meant to be tested
+   against. `checkInvestmentBands` gets the same treatment on both sides of
+   its comparisons (the proposed fractions AND the policy band edges), because
+   a NaN fraction otherwise satisfied both band bounds and the grand-total
+   ceiling and returned `accepted: true` carrying a positive
+   `investment_bands passed` proof for an allocation satisfying no band.
 5. **Per-category capability gates.** Agent-path execution requires both the
    coarse `gateway.submit_signed_action` capability and the per-category
    capability (`TREASURY_ACTION_CAPABILITY` in

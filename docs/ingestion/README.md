@@ -371,9 +371,18 @@ through the same `applyLifecycleTrigger` seam.
   redirect hop's included) passes the gate, so a DNS answer changing between
   check and connect cannot reach a private address.  Blocked: loopback, RFC
   1918 + CGNAT, link-local (incl. 169.254.169.254), multicast/reserved/
-  documentation ranges, IPv6 ULA/link-local/NAT64, and IPv4-mapped forms;
-  only ports 80/443; ≤ 5 redirects re-validated per hop; response bytes
-  capped WHILE streaming; one deadline across the chain.  The only gate
+  documentation ranges, the withdrawn 6to4 relay anycast (192.88.99.0/24),
+  IPv6 ULA/link-local, and EVERY IPv6 form that embeds an IPv4 — mapped
+  (`::ffff:0:0/96`), compatible (`::/96`), NAT64 (`64:ff9b::/96`), 6to4
+  (`2002::/16`) and Teredo (`2001:0000::/32`, both the server field and the
+  one's-complement-obfuscated client field).  The transition prefixes matter
+  because they carry the IPv4 somewhere OTHER than the last four bytes, so the
+  mapped/compatible decoders cannot see it and the address reaches the IPv6
+  range tests looking like ordinary global unicast: `2002:a9fe:a9fe::` decodes
+  to 169.254.169.254.  Each is DECODED and classified by the same IPv4 rules
+  rather than blanket-blocked, so a 6to4 address wrapping a public IPv4 stays
+  reachable.  Only ports 80/443; ≤ 5 redirects re-validated per hop; response
+  bytes capped WHILE streaming; one deadline across the chain.  The only gate
   override is a test-only function that throws outside `NODE_ENV=test`.
 - **robots.txt (WS-F.1.4f):** RFC 9309 matching (most-specific agent group,
   longest rule, Allow wins ties, `*`/`$` patterns), TTL cache, crawl-delay
