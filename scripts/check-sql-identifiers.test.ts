@@ -357,6 +357,45 @@ describe('findOverlongIdentifiers', () => {
     });
   });
 
+  // Round 11: three more forms Postgres accepts.
+  describe('further procedural and data spellings', () => {
+    const name = `q_${'w'.repeat(70)}`;
+
+    it("scans a single-quoted DO body (`DO 'BEGIN … END'`)", () => {
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `DO 'BEGIN CREATE TABLE ${name} (id int); END';`),
+      ).toHaveLength(1);
+    });
+
+    it("honours a backslash-escaped quote inside an E'…' EXECUTE argument", () => {
+      // `\'` is an apostrophe INSIDE the literal, not its terminator; ending
+      // the scan there truncated the statement and hid what followed.
+      const sql = `DO $$ BEGIN EXECUTE E'CREATE VIEW v AS SELECT \\'x\\' AS ${name}'; END $$;`;
+      expect(findOverlongIdentifiers('0100_x.sql', sql)).toHaveLength(1);
+    });
+
+    it('leaves a C-language object path in a dollar-quoted AS body as DATA', () => {
+      // `AS $$$libdir/…$$ LANGUAGE C` is a file path, not SQL. The
+      // single-quoted form already had this guard; the two must agree.
+      const path = 'p'.repeat(80);
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `CREATE FUNCTION f() RETURNS integer AS $$$libdir/${path}$$ LANGUAGE C;`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('still scans a dollar-quoted AS body that IS procedural SQL', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `CREATE FUNCTION f() RETURNS void AS $$ BEGIN CREATE INDEX ${name} ON t (c); END $$ LANGUAGE plpgsql;`,
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
   it('passes ordinary migration SQL untouched', () => {
     const sql = `CREATE TABLE "debate_arenas" ("debate_id" uuid PRIMARY KEY);
                  CREATE INDEX "debate_arenas_story_idx" ON "debate_arenas" ("story_id");

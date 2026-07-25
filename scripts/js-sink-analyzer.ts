@@ -37,8 +37,15 @@
 /** A lexical token. `value` is the raw source text of the token. */
 export interface Token {
   readonly kind: 'ident' | 'punct' | 'string' | 'template' | 'regex' | 'number';
+  /**
+   * For an identifier this is the DECODED name — JavaScript permits Unicode
+   * escapes inside identifiers, so `\u0065val` IS `eval` and must compare equal
+   * to it. For every other kind it is the raw source text.
+   */
   readonly value: string;
   readonly start: number;
+  /** Offset just past the token's RAW source text. */
+  readonly end: number;
 }
 
 /**
@@ -64,6 +71,42 @@ const KEYWORDS_BEFORE_REGEX: ReadonlySet<string> = new Set([
 
 const IDENT_START = /[A-Za-z_$-￿]/;
 const IDENT_PART = /[A-Za-z0-9_$-￿]/;
+
+/**
+ * Decode a `\uXXXX` / `\u{X…}` escape at `i`, or return null.
+ *
+ * Identifier escapes are why this exists: `eval('x')` is a call to `eval`,
+ * and a lexer treating the backslash as punctuation would compare the wrong
+ * name and let it through.
+ */
+function readUnicodeEscape(source: string, i: number): { char: string; end: number } | null {
+  if (source[i] !== '\\' || source[i + 1] !== 'u') return null;
+  if (source[i + 2] === '{') {
+    const close = source.indexOf('}', i + 3);
+    if (close === -1) return null;
+    const hex = source.slice(i + 3, close);
+    if (!/^[0-9A-Fa-f]{1,6}$/.test(hex)) return null;
+    return { char: String.fromCodePoint(Number.parseInt(hex, 16)), end: close + 1 };
+  }
+  const hex = source.slice(i + 2, i + 6);
+  if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return null;
+  return { char: String.fromCharCode(Number.parseInt(hex, 16)), end: i + 6 };
+}
+
+/** Read an identifier (honouring escapes) at `i`; returns its DECODED name. */
+function readIdentifier(source: string, i: number): { name: string; end: number } | null {
+  let k = i;
+  let name = '';
+  while (k < source.length) {
+    const decoded = readUnicodeEscape(source, k);
+    const char = decoded ? decoded.char : (source[k] as string);
+    const ok = name === '' ? IDENT_START.test(char) : IDENT_PART.test(char);
+    if (!ok) break;
+    name += char;
+    k = decoded ? decoded.end : k + 1;
+  }
+  return name === '' ? null : { name, end: k };
+}
 
 /**
  * Lex `source` into tokens, discarding comments and whitespace.
@@ -201,33 +244,32 @@ export function tokenize(source: string, preferRegex = false): Token[] {
     }
     if (c === '"' || c === "'") {
       const end = readQuoted(c);
-      tokens.push({ kind: 'string', value: source.slice(i, end), start: i });
+      tokens.push({ kind: 'string', value: source.slice(i, end), start: i, end });
       i = end;
       continue;
     }
     if (c === '`') {
       const end = readTemplate();
-      tokens.push({ kind: 'template', value: source.slice(i, end), start: i });
+      tokens.push({ kind: 'template', value: source.slice(i, end), start: i, end });
       i = end;
       continue;
     }
     if (c === '/' && opensRegex()) {
       const end = readRegex();
-      tokens.push({ kind: 'regex', value: source.slice(i, end), start: i });
+      tokens.push({ kind: 'regex', value: source.slice(i, end), start: i, end });
       i = end;
       continue;
     }
-    if (IDENT_START.test(c)) {
-      let k = i;
-      while (k < n && IDENT_PART.test(source[k] as string)) k += 1;
-      tokens.push({ kind: 'ident', value: source.slice(i, k), start: i });
-      i = k;
+    const identifier = readIdentifier(source, i);
+    if (identifier) {
+      tokens.push({ kind: 'ident', value: identifier.name, start: i, end: identifier.end });
+      i = identifier.end;
       continue;
     }
     if (/[0-9]/.test(c)) {
       let k = i;
       while (k < n && /[0-9a-fA-FxXoObBeE._n]/.test(source[k] as string)) k += 1;
-      tokens.push({ kind: 'number', value: source.slice(i, k), start: i });
+      tokens.push({ kind: 'number', value: source.slice(i, k), start: i, end: k });
       i = k;
       continue;
     }
@@ -236,16 +278,16 @@ export function tokenize(source: string, preferRegex = false): Token[] {
     const three = source.slice(i, i + 3);
     const two = source.slice(i, i + 2);
     if (three === '**=' || three === '...' || three === '===' || three === '!==') {
-      tokens.push({ kind: 'punct', value: three, start: i });
+      tokens.push({ kind: 'punct', value: three, start: i, end: i + 3 });
       i += 3;
       continue;
     }
     if (two === '?.' || two === '++' || two === '--' || two === '=>' || two === '?？') {
-      tokens.push({ kind: 'punct', value: two, start: i });
+      tokens.push({ kind: 'punct', value: two, start: i, end: i + 2 });
       i += 2;
       continue;
     }
-    tokens.push({ kind: 'punct', value: c, start: i });
+    tokens.push({ kind: 'punct', value: c, start: i, end: i + 1 });
     i += 1;
   }
   return tokens;
@@ -255,13 +297,80 @@ export function tokenize(source: string, preferRegex = false): Token[] {
 const isPunct = (t: Token | undefined, value: string): boolean =>
   t?.kind === 'punct' && t.value === value;
 
-/** The decoded content of a string token, or `null` when it is not a string. */
+/** Decode the escape sequences inside a string/template BODY. */
+function decodeStringBody(body: string): string {
+  let out = '';
+  let i = 0;
+  const SIMPLE: Record<string, string> = {
+    n: '\n',
+    t: '\t',
+    r: '\r',
+    b: '\b',
+    f: '\f',
+    v: '\v',
+    '0': '\0',
+  };
+  while (i < body.length) {
+    if (body[i] !== '\\') {
+      out += body[i];
+      i += 1;
+      continue;
+    }
+    const decoded = readUnicodeEscape(body, i);
+    if (decoded) {
+      out += decoded.char;
+      i = decoded.end;
+      continue;
+    }
+    const hex = /^x([0-9A-Fa-f]{2})/.exec(body.slice(i + 1));
+    if (hex?.[1]) {
+      out += String.fromCharCode(Number.parseInt(hex[1], 16));
+      i += 1 + hex[0].length;
+      continue;
+    }
+    const next = body[i + 1] ?? '';
+    out += SIMPLE[next] ?? next;
+    i += 2;
+  }
+  return out;
+}
+
+/**
+ * The decoded content of a string token, or `null` when it is not a string.
+ *
+ * A template WITH interpolations has no single value, so this returns null for
+ * it — callers that only need the static head use {@link stringPrefix}.
+ */
 export function stringValue(t: Token | undefined): string | null {
   if (!t) return null;
-  if (t.kind === 'string') return t.value.slice(1, -1);
+  if (t.kind === 'string') return decodeStringBody(t.value.slice(1, -1));
   // A template with no substitution is a string literal for our purposes.
-  if (t.kind === 'template' && !t.value.includes('${')) return t.value.slice(1, -1);
+  if (t.kind === 'template' && !t.value.includes('${')) {
+    return decodeStringBody(t.value.slice(1, -1));
+  }
   return null;
+}
+
+/** Is this token a STRING VALUE — a quoted literal or ANY template literal? */
+export function isStringToken(t: Token | undefined): boolean {
+  return t?.kind === 'string' || t?.kind === 'template';
+}
+
+/**
+ * The STATIC leading text of a string token: a whole quoted literal, or a
+ * template's head up to its first interpolation.
+ *
+ * `\`https://evil.example/${name}.js\`` is still a remote URL — the scheme and
+ * host are fixed and only the path varies — so a check that rejected every
+ * interpolated template would miss it.
+ */
+export function stringPrefix(t: Token | undefined): string | null {
+  if (!t) return null;
+  if (t.kind === 'string') return decodeStringBody(t.value.slice(1, -1));
+  if (t.kind !== 'template') return null;
+  const body = t.value.slice(1, t.value.endsWith('`') ? -1 : undefined);
+  const interpolation = body.indexOf('${');
+  return decodeStringBody(interpolation === -1 ? body : body.slice(0, interpolation));
 }
 
 /** Global objects through which a sink can be reached by property access. */
@@ -353,15 +462,75 @@ export interface SinkSpec {
   readonly codeArgument?: (arg: readonly Token[]) => boolean;
 }
 
-/** The code argument is a STRING LITERAL — the implicit-eval timer form. */
+/**
+ * The code argument is a STRING — the implicit-eval timer form.
+ *
+ * An INTERPOLATED template counts: `setTimeout(\`evil(${v})\`, 0)` is still a
+ * string the host compiles, so requiring a fully static literal would miss the
+ * form an attacker is most likely to use.
+ */
 export const isStringLiteral = (arg: readonly Token[]): boolean =>
-  arg.length > 0 && stringValue(arg[0]) !== null;
+  arg.length > 0 && isStringToken(arg[0]);
 
-/** The code argument is a string literal naming a REMOTE (cross-origin) script. */
+/** The code argument is a string whose STATIC prefix names a REMOTE script. */
 export const isRemoteUrl = (arg: readonly Token[]): boolean => {
-  const value = stringValue(arg[0]);
+  const value = stringPrefix(arg[0]);
   return value !== null && (/^https?:\/\//i.test(value) || value.startsWith('//'));
 };
+
+/**
+ * The `${…}` interpolation bodies of a template literal, with the absolute
+ * offset of each. Nested templates, strings and braces are skipped so a `}`
+ * inside one cannot end the span early.
+ */
+function interpolationSpans(raw: string, base: number): Array<{ text: string; offset: number }> {
+  const spans: Array<{ text: string; offset: number }> = [];
+  let i = 1; // past the opening backtick
+  while (i < raw.length) {
+    if (raw[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (raw[i] === '$' && raw[i + 1] === '{') {
+      const start = i + 2;
+      let depth = 1;
+      let k = start;
+      while (k < raw.length && depth > 0) {
+        const c = raw[k] as string;
+        if (c === '\\') {
+          k += 2;
+          continue;
+        }
+        if (c === '{') depth += 1;
+        else if (c === '}') depth -= 1;
+        else if (c === '"' || c === "'") {
+          const quote = c;
+          k += 1;
+          while (k < raw.length && raw[k] !== quote) k += raw[k] === '\\' ? 2 : 1;
+        } else if (c === '`') {
+          // A nested template: skip it whole here — `tokenize` will see it as a
+          // token of the span and this function recurses on it in turn.
+          let inner = 1;
+          k += 1;
+          while (k < raw.length && inner > 0) {
+            if (raw[k] === '\\') k += 2;
+            else {
+              if (raw[k] === '`') inner -= 1;
+              k += 1;
+            }
+          }
+          continue;
+        }
+        if (depth > 0) k += 1;
+      }
+      spans.push({ text: raw.slice(start, k), offset: base + start });
+      i = k + 1;
+      continue;
+    }
+    i += 1;
+  }
+  return spans;
+}
 
 export interface SinkFinding {
   readonly label: string;
@@ -403,11 +572,35 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
     return lo + 1;
   };
 
-  for (const preferRegex of [false, true]) {
-    for (const found of analyse(tokenize(source, preferRegex), specs, source, lineOf)) {
+  /**
+   * Analyse a token stream, then RECURSE into every template interpolation it
+   * contains.
+   *
+   * A template's `${…}` spans are EXECUTABLE CODE, not text. The literal stays
+   * one token so a tag call and a string argument still read correctly, and
+   * each span is analysed in its own right with offsets shifted back onto the
+   * original source so reported lines stay true. The recursion is what makes
+   * a NESTED interpolation work, which a single extra pass would have missed.
+   */
+  const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
+    for (const found of analyse(tokens, specs, source, lineOf)) {
       byKey.set(`${found.line}:${found.label}:${found.text}`, found);
     }
-  }
+    if (depth >= 16) return; // real code never nests templates this deep
+    for (const token of tokens) {
+      if (token.kind !== 'template') continue;
+      for (const span of interpolationSpans(token.value, token.start)) {
+        const inner = tokenize(span.text, preferRegex).map((t) => ({
+          ...t,
+          start: t.start + span.offset,
+          end: t.end + span.offset,
+        }));
+        visit(inner, preferRegex, depth + 1);
+      }
+    }
+  };
+
+  for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
   return [...byKey.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
 }
 
@@ -448,7 +641,7 @@ function analyse(
 
   const record = (spec: SinkSpec, startTok: Token, endIndex: number): void => {
     const endTok = tokens[Math.min(endIndex, tokens.length) - 1];
-    const end = endTok ? endTok.start + endTok.value.length : startTok.start;
+    const end = endTok ? endTok.end : startTok.end;
     out.push({
       label: spec.label,
       line: lineOf(startTok.start),

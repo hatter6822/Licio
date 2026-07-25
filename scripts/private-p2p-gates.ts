@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import {
   BUILT_CODE_SINKS,
   findDynamicCodeSinks,
+  type SinkSpec,
   scanSourceForSinks,
 } from './dangerous-code-patterns.js';
 
@@ -107,13 +108,24 @@ export function scanPublicGatewayEgress(
 // runtime; this is the static half over the private trees.
 // ---------------------------------------------------------------------------
 
+/**
+ * ANY `importScripts` in a private bundle — not merely a remote one. A private
+ * room's bundle must be fully accounted for by the transparency manifest, so
+ * pulling in a further script at all defeats the point.
+ *
+ * Declared as a SINK SPEC rather than a pattern so it is analysed the way
+ * `check:sw` analyses it: `self['importScripts'](…)` and
+ * `importScripts.call(self, …)` load the same code as the bare call, and a
+ * direct-call regex saw none of them.
+ */
+const ANY_IMPORT_SCRIPTS: SinkSpec = { name: 'importScripts', label: 'importScripts()' };
+
 export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
   // The eval/Function-constructor/string-timer sinks come from the shared
   // definition (`dangerous-code-patterns.ts`) so this gate, lint:security,
   // check:sw, and check:update-channel cannot drift apart on what counts as
   // runtime code evaluation — they previously all pinned only `new Function(`,
   // leaving the equivalent bare `Function(` call open in every one of them.
-  { pattern: /importScripts\s*\(/, label: 'importScripts()' },
   // A dynamic import() of an http(s) URL string (remote code).
   { pattern: /import\s*\(\s*['"`]https?:/i, label: 'dynamic import() of a remote URL' },
 ];
@@ -133,7 +145,7 @@ export function scanDynamicRemoteCode(
       // The eval/Function/string-timer sinks are TOKENISED and walked rather
       // than pattern-matched, so this gate covers every invocation spelling
       // that lint:security and check:sw do, from the same definition.
-      ...findDynamicCodeSinks(content, BUILT_CODE_SINKS),
+      ...findDynamicCodeSinks(content, [...BUILT_CODE_SINKS, ANY_IMPORT_SCRIPTS]),
     ]) {
       violations.push({ file: path, line, detail: label });
     }

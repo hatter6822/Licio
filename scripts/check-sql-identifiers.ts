@@ -269,6 +269,14 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       i += 1;
       let literal = '';
       while (i < n) {
+        // In an ESCAPE string a backslash escapes the NEXT character, so `\'`
+        // is an apostrophe inside the literal, not its terminator. Ending the
+        // scan there truncated the statement and hid everything after it.
+        if (pendingEscapeString && sql[i] === '\\' && i + 1 < n) {
+          literal += sql.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
         if (sql[i] === "'") {
           if (sql[i + 1] === "'") {
             literal += "'";
@@ -297,7 +305,13 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // procedural code, exactly as in the dollar-quoted spelling that is
       // already scanned. It carries the `looksLikeSql` guard because `AS` also
       // introduces the C-language `AS 'objfile', 'symbol'` form, which is data.
-      if (previous === 'execute' || (previous === 'as' && looksLikeSql(decoded))) {
+      // `DO '…'` is the string spelling of a procedural body, exactly as
+      // `DO $$…$$` is the dollar-quoted one, and Postgres executes it during
+      // the migration.
+      if (
+        previous === 'execute' ||
+        ((previous === 'as' || previous === 'do') && looksLikeSql(decoded))
+      ) {
         yield* identifierCandidates(decoded);
       }
       recent = [];
@@ -318,10 +332,19 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
         continue;
       }
       if (openProceduralTag === null && isProceduralContext(recent)) {
-        // `DO $$` / `AS $$` / `DO LANGUAGE … $$`: the body is code, so scan it.
-        openProceduralTag = tag;
-        i += tag.length;
-        continue;
+        // `DO $$` / `AS $$` / `DO LANGUAGE … $$`: the body is code, so scan it
+        // — but only if it LOOKS like SQL. `CREATE FUNCTION … AS $$$libdir/x$$
+        // LANGUAGE C` puts an object-file path here, and reporting a long path
+        // as an over-long identifier would fail a valid migration. The
+        // single-quoted form already carried this guard; applying it here too
+        // makes the two spellings agree.
+        const close = sql.indexOf(tag, i + tag.length);
+        const body = sql.slice(i + tag.length, close === -1 ? n : close);
+        if (looksLikeSql(body)) {
+          openProceduralTag = tag;
+          i += tag.length;
+          continue;
+        }
       }
       // A value literal (including one nested inside a procedural body): skip
       // the ENTIRE span. An unterminated literal consumes the rest rather than
