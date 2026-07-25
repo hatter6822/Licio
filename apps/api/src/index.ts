@@ -428,7 +428,17 @@ if (env.REDIS_URL !== undefined) {
 // Durable identity + audit projection (WS-D): Postgres-backed behind the same
 // IdentityStore/AuditStore interfaces the in-memory adapters satisfy.  The
 // schema must be migrated (`pnpm db:migrate`) before serving traffic.
-const db = env.DATABASE_URL !== undefined ? createDbClient(env.DATABASE_URL) : null;
+//
+// `onNotice` is passed explicitly so server diagnostics reach PINO — structured,
+// level-gated, and redaction-aware — instead of postgres.js's unset-`onnotice`
+// default, which writes the whole notice object to stdout with `console.log`
+// (the one logging path in this process that pino never sees).
+const db =
+  env.DATABASE_URL !== undefined
+    ? createDbClient(env.DATABASE_URL, {
+        onNotice: (notice) => logger.debug({ pgNotice: notice }, 'postgres notice'),
+      })
+    : null;
 if (db) readinessProbes.push({ name: 'postgres', check: () => pingDatabase(db) });
 // The distributed scheduler lease is Postgres-backed in production; without a
 // database (dev/test) it falls back to the in-memory lease so the hourly

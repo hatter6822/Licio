@@ -126,4 +126,45 @@ describe('compression + bomb caps (WS-R.3.4)', () => {
       decompress(compressed, 'gzip', { maxUncompressedBytes: 1 << 30, maxExpansionRatio: 2 }),
     ).rejects.toBeInstanceOf(CompressionBombError);
   });
+
+  // `compress` pumps its input concurrently so the transform cannot deadlock on
+  // a full buffer.  That pump must be SETTLED, not floated: a bare
+  // `write().then(close)` rejects with no handler when the stream errors, and
+  // Node's default `--unhandled-rejections=throw` turns that into a process
+  // abort — the API server dying on a corrupt block rather than failing the one
+  // request.  `decompress` has always guarded its identical pump; this pins the
+  // two as symmetric.
+  it('surfaces a stream failure to the caller, never as an unhandled rejection', async () => {
+    const realCompressionStream = globalThis.CompressionStream;
+    const failure = new Error('compression transform failed');
+    // A stream whose writer AND reader both reject — the shape a transform in an
+    // errored state presents to both sides.
+    class FailingCompressionStream {
+      readonly writable = {
+        getWriter: () => ({
+          write: () => Promise.reject(failure),
+          close: () => Promise.reject(failure),
+        }),
+      };
+      readonly readable = {
+        getReader: () => ({ read: () => Promise.reject(failure) }),
+      };
+    }
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', record);
+    (globalThis as { CompressionStream: unknown }).CompressionStream = FailingCompressionStream;
+    try {
+      await expect(compress(bytes(64), 'gzip')).rejects.toThrow('compression transform failed');
+      // Node flags an unhandled rejection on a later turn of the loop, so give it
+      // one before asserting none was raised.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      (globalThis as { CompressionStream: unknown }).CompressionStream = realCompressionStream;
+      process.off('unhandledRejection', record);
+    }
+    expect(unhandled).toEqual([]);
+  });
 });

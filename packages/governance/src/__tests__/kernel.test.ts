@@ -257,4 +257,106 @@ describe('checkInvestmentBands', () => {
       ),
     ).toMatchObject({ code: 'investment_band_violated' });
   });
+
+  // A band check is a MACHINE-CHECKABLE PROOF, so an uncheckable input must fail
+  // closed rather than pass vacuously.  Every comparison against NaN is false, so
+  // before these guards a NaN fraction cleared BOTH band bounds and the
+  // grand-total ceiling and the function returned `accepted: true` carrying an
+  // `investment_bands passed` proof for an allocation satisfying no band at all.
+  describe('non-finite inputs fail closed (no vacuous proof)', () => {
+    // A cap-only policy: every floor is 0, so an omitted asset is legal and the
+    // ONLY thing that can reject the entry below is the non-finite guard itself.
+    const capsOnly = {
+      allocationBands: [
+        { asset: 'STABLE', minFraction: 0, maxFraction: 0.9 },
+        { asset: 'ETH', minFraction: 0, maxFraction: 0.1 },
+      ],
+      rebalanceMinIntervalSeconds: 86_400,
+    };
+
+    it.each([
+      ['NaN', Number.NaN],
+      ['+Infinity', Number.POSITIVE_INFINITY],
+      ['-Infinity', Number.NEGATIVE_INFINITY],
+    ])('rejects a %s fraction', (_label, fraction) => {
+      expect(checkInvestmentBands([{ asset: 'ETH', fraction }], capsOnly)).toMatchObject({
+        accepted: false,
+        code: 'investment_band_violated',
+      });
+    });
+
+    it('rejects a NaN fraction that would otherwise poison the grand total', () => {
+      expect(
+        checkInvestmentBands(
+          [
+            { asset: 'STABLE', fraction: 0.9 },
+            { asset: 'ETH', fraction: Number.NaN },
+          ],
+          capsOnly,
+        ),
+      ).toMatchObject({ accepted: false, code: 'investment_band_violated' });
+    });
+
+    it('rejects a non-finite POLICY band edge (the other half of every compare)', () => {
+      expect(
+        checkInvestmentBands([{ asset: 'ETH', fraction: 0.05 }], {
+          allocationBands: [{ asset: 'ETH', minFraction: 0, maxFraction: Number.NaN }],
+          rebalanceMinIntervalSeconds: 86_400,
+        }),
+      ).toMatchObject({ accepted: false, code: 'investment_band_violated' });
+    });
+  });
+});
+
+// `decSum`/`decCompare` THROW outside the decimal domain, so an unguarded
+// history amount or law-pack bound escaped as an exception instead of the typed
+// verdict this kernel promises every caller (schemas/treasury.ts: "the kernel
+// re-guards validity ... so the proof-carrying contract holds for any direct
+// caller").  The timestamp guard already covered history; amounts now match.
+describe('evaluateTreasuryAction — every compared amount is guarded', () => {
+  it('returns invalid_amount (never throws) for a malformed HISTORY amount', () => {
+    const history: TreasuryHistoryEntry[] = [
+      { category: 'member_distribution', amount: 'not-a-number', timestamp: NOW },
+    ];
+    let verdict: ReturnType<typeof evaluateTreasuryAction> | undefined;
+    expect(() => {
+      verdict = evaluateTreasuryAction(action(), bounds, history, opts);
+    }).not.toThrow();
+    expect(verdict).toMatchObject({ accepted: false, code: 'invalid_amount' });
+  });
+
+  it('returns invalid_amount (never throws) for a malformed law-pack CAP', () => {
+    const bad: TreasuryBounds = {
+      ...bounds,
+      caps: [
+        {
+          category: 'member_distribution',
+          perActionMax: 'oops',
+          perWindowMax: 250,
+          windowSeconds: 86_400,
+        },
+      ],
+    };
+    let verdict: ReturnType<typeof evaluateTreasuryAction> | undefined;
+    expect(() => {
+      verdict = evaluateTreasuryAction(action(), bad, [], opts);
+    }).not.toThrow();
+    expect(verdict).toMatchObject({ accepted: false, code: 'invalid_amount' });
+  });
+
+  it('returns invalid_amount (never throws) for a malformed materialThreshold', () => {
+    const bad: TreasuryBounds = { ...bounds, materialThreshold: 'NaN-ish' };
+    let verdict: ReturnType<typeof evaluateTreasuryAction> | undefined;
+    expect(() => {
+      verdict = evaluateTreasuryAction(action(), bad, [], opts);
+    }).not.toThrow();
+    expect(verdict).toMatchObject({ accepted: false, code: 'invalid_amount' });
+  });
+
+  it('still accepts a well-formed action once the guard is in place', () => {
+    const history: TreasuryHistoryEntry[] = [
+      { category: 'member_distribution', amount: '10', timestamp: '2026-06-19T10:00:00.000Z' },
+    ];
+    expect(evaluateTreasuryAction(action(), bounds, history, opts).accepted).toBe(true);
+  });
 });

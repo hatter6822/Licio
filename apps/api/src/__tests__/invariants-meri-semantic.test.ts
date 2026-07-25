@@ -77,4 +77,58 @@ describe('MERI semantic independence (WS-O.4.5)', () => {
     // and the distinct text has no MinHash collision → no group at all.
     expect(await groupOf(a.storyId)).toBeNull();
   });
+
+  // The union-find behind this grouping uses path compression and a
+  // tallied-once member count.  A CLUSTER is exactly the input shape that
+  // distinguishes a correct implementation from a subtly wrong one: it is the
+  // case that builds a multi-hop parent chain, so a compression bug would
+  // re-root part of the cluster and split it into two groups (or drop a member
+  // below the ≥2 threshold and yield null).
+  it('keeps a whole multi-member cluster in ONE group', async () => {
+    const seeded = [];
+    for (const title of [
+      'Reservoir capacity holds near seasonal norms',
+      'Water storage close to the usual level for the season',
+      'District reports reservoirs at typical seasonal capacity',
+      'Seasonal norms met by regional water storage figures',
+      'Regional storage figures match the seasonal expectation',
+    ]) {
+      seeded.push(await seedStory(fixture, { title }));
+    }
+    // One shared embedding direction ⇒ every pair unions, in seeding order —
+    // the chain the compression must collapse without moving the root.
+    for (const story of seeded) await seedEmbedding(story.storyId, 3);
+
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
+    const groups = seeded.map(
+      (s) => candidates.find((c) => c.id === s.storyId)?.nearDuplicateGroupId ?? null,
+    );
+    expect(groups.every((g) => g !== null)).toBe(true);
+    // ALL five share one group id — not two roots, not a dropped member.
+    expect(new Set(groups).size).toBe(1);
+  });
+
+  // The counts are tallied once, after every union settles.  A story outside the
+  // cluster must still read as ungrouped — the tally must not leak a neighbour's
+  // membership into a singleton's root.
+  it('leaves a singleton ungrouped alongside a cluster', async () => {
+    const clustered = [
+      await seedStory(fixture, { title: 'Ferry timetable revised for the winter season' }),
+      await seedStory(fixture, { title: 'Winter ferry schedule updated by the operator' }),
+    ];
+    for (const story of clustered) await seedEmbedding(story.storyId, 4);
+    const lone = await seedStory(fixture, { title: 'Library extends weekend opening hours' });
+    await seedEmbedding(lone.storyId, 5); // orthogonal to the cluster
+
+    const candidates = await assembleMeriCandidates(fixture.ingestion, null, null, 100, 0.7, 0.85);
+    const groupFor = (id: string): string | null =>
+      candidates.find((c) => c.id === id)?.nearDuplicateGroupId ?? null;
+    const first = clustered[0];
+    const second = clustered[1];
+    expect(first && second).toBeTruthy();
+    if (!first || !second) return;
+    expect(groupFor(first.storyId)).not.toBeNull();
+    expect(groupFor(first.storyId)).toBe(groupFor(second.storyId));
+    expect(groupFor(lone.storyId)).toBeNull();
+  });
 });
