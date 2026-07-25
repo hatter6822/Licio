@@ -11,6 +11,7 @@ import {
   EVAL_PATTERN,
   EVAL_PATTERN_STRICT,
   FUNCTION_CONSTRUCTOR_PATTERNS,
+  FUNCTION_TAGGED_TEMPLATE_PATTERN,
   findSinkMatches,
   INDIRECT_EVAL_PATTERNS,
   SOURCE_CODE_SINKS,
@@ -210,6 +211,90 @@ describe('scanSourceForSinks (raw ∪ stripped)', () => {
 
   it('finds nothing in ordinary code', () => {
     expect(scanSourceForSinks('export const go = () => getFunction(name);')).toEqual([]);
+  });
+});
+
+describe('the in-pattern comment gap', () => {
+  // The patterns themselves tolerate an interposed comment, so the comment-gap
+  // form is caught on RAW source — no whole-file lexing required. That is what
+  // makes the scan robust against a mis-lex rather than dependent on a correct
+  // one.
+  it.each([
+    ['constructor', "Function/*gap*/('return 1')"],
+    ['eval', "eval/*gap*/('1')"],
+    ['multi-line comment gap', 'Function/* a\n b */("x")'],
+    ['several comments', 'Function/*a*//*b*/("x")'],
+  ])('matches through the gap on RAW source: %s', (_label, code) => {
+    expect(findSinkMatches(code).length).toBeGreaterThan(0);
+  });
+
+  it('catches a sink the STRIP cannot reach — nested braces in an interpolation', () => {
+    // An object literal inside `${…}` used to end the interpolation early, so
+    // the strip left the comment in place. The raw pass no longer cares.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this string IS the source text under test — the `${…}` must stay literal, not interpolate.
+    const source = "const x = `${{a:1}.a, Function/*gap*/('payload')()}`;";
+    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
+  });
+
+  it('does not run away on ordinary comment-heavy code', () => {
+    const clean = [
+      '/** doc */',
+      'export const go = () => {',
+      '  // note',
+      '  return 1;',
+      '};',
+    ].join('\n');
+    expect(findSinkMatches(clean)).toEqual([]);
+  });
+});
+
+describe('FUNCTION_TAGGED_TEMPLATE_PATTERN', () => {
+  // Round-4: `Function` as a TEMPLATE TAG constructs and runs the same function
+  // (verified by execution, not assumed) — every other pattern requires `(`.
+  it.each([
+    ['tagged template', 'Function`globalThis.pwned=true`();'],
+    ['tagged template with a comment gap', 'Function /* c */ `body`();'],
+  ])('catches %s through scanSourceForSinks: %#', (_label, code) => {
+    expect(scanSourceForSinks(code).length).toBeGreaterThan(0);
+  });
+
+  it('is COMMENT-SENSITIVE, so markdown prose does not trip it', () => {
+    // A doc comment writing `` `new Function` `` puts a backtick straight after
+    // the word — textually identical to a tag. Running this pattern on raw
+    // source produced exactly that false positive on `update/sw-pinning.ts`.
+    const prose = '// it issues no `importScripts`, `eval`, or `new Function`, and runs no code';
+    expect(scanSourceForSinks(prose)).toEqual([]);
+  });
+
+  it('is flagged commentSensitive in both sink sets', () => {
+    for (const set of [SOURCE_CODE_SINKS, BUILT_CODE_SINKS]) {
+      const tag = set.find((s) => s.pattern === FUNCTION_TAGGED_TEMPLATE_PATTERN);
+      expect(tag?.commentSensitive).toBe(true);
+    }
+  });
+});
+
+describe('linearity (ReDoS canary)', () => {
+  // The first cut of the in-pattern gap used `\s+` inside the outer `*`, which
+  // nests two quantifiers over the same characters and made `lint:security` run
+  // unbounded (killed at 9+ minutes of 100% CPU). These bound the shape that
+  // triggered it so a future edit to GAP cannot quietly reintroduce it.
+  it('matches a long whitespace gap followed by a NON-match in linear-ish time', () => {
+    const started = Date.now();
+    findSinkMatches(`Function${' '.repeat(5000)}X`);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('scans a large, deeply indented file quickly', () => {
+    const started = Date.now();
+    findSinkMatches(`${'\n    '.repeat(20000)}const a = 1;`);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('scans a comment-heavy file quickly', () => {
+    const started = Date.now();
+    findSinkMatches(`${'/* filler comment */\n'.repeat(5000)}const a = 1;`);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
 

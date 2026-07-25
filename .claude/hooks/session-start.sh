@@ -41,6 +41,9 @@ DB_NAME=licio_ci
 # is also what this asks for, so the common case matches CI exactly.
 PG_PORT=5432
 REDIS_URL="redis://localhost:6379"
+# CI runs redis:7. The floor that actually matters is 6.2 (GETDEL); requiring
+# the CI major keeps a session reproducing CI rather than approximating it.
+REDIS_MIN_MAJOR=7
 
 log() { echo "[session-start] $*"; }
 
@@ -128,9 +131,17 @@ done
 log "Ensuring role/database ${DB_USER}/${DB_NAME}"
 # SUPERUSER so the suites may CREATE EXTENSION and the migration chain may
 # install `vector` itself — the CI image's `licio` role is a superuser too.
-su postgres -c "psql -p ${PG_PORT} -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" \
-  | grep -q 1 \
-  || su postgres -c "psql -p ${PG_PORT} -q -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}' SUPERUSER\""
+#
+# Existence is NOT sufficient. A cluster left over from an earlier session (or
+# an image that ships its own `licio`) may carry a different password or lack
+# SUPERUSER, and merely skipping the create would leave the hook authenticating
+# with the wrong credentials a few lines below — or the migrations failing on a
+# missing privilege. ALTER is idempotent, so reconcile unconditionally instead.
+if su postgres -c "psql -p ${PG_PORT} -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" | grep -q 1; then
+  su postgres -c "psql -p ${PG_PORT} -q -c \"ALTER ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}' SUPERUSER\""
+else
+  su postgres -c "psql -p ${PG_PORT} -q -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}' SUPERUSER\""
+fi
 
 su postgres -c "psql -p ${PG_PORT} -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" \
   | grep -q 1 \
@@ -152,13 +163,29 @@ fi
 # --------------------------------------------------------------------------
 # 3. Redis
 # --------------------------------------------------------------------------
-if ! command -v redis-server >/dev/null 2>&1; then
-  log "Installing Redis"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y --no-install-recommends redis-server >/dev/null
+# A daemon ANSWERING on 6379 is not automatically a usable one. The WS-D
+# transient-state store issues `GETDEL`, which does not exist before Redis 6.2,
+# so reusing an older daemon would export REDIS_URL and then fail the gated
+# suites — the opposite of what this hook promises. Require the CI major (7) and
+# replace anything older.
+redis_major() {
+  redis-cli -p 6379 INFO server 2>/dev/null | awk -F: '/^redis_version:/ { split($2, v, "."); print v[1] }'
+}
+
+REDIS_MAJOR="$(redis_major || true)"
+if [ -n "${REDIS_MAJOR}" ] && [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
+  log "Redis on 6379 is major ${REDIS_MAJOR} (< ${REDIS_MIN_MAJOR}); replacing it"
+  redis-cli -p 6379 shutdown nosave >/dev/null 2>&1 || true
+  sleep 1
+  REDIS_MAJOR=""
 fi
 
-if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
+if [ -z "${REDIS_MAJOR}" ]; then
+  if ! command -v redis-server >/dev/null 2>&1; then
+    log "Installing Redis"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y --no-install-recommends redis-server >/dev/null
+  fi
   log "Starting Redis on 6379"
   # No persistence: this instance is a disposable CSRF/session/transient-state
   # fixture, and an RDB/AOF write would only burn the session's disk allowance.
@@ -167,7 +194,14 @@ if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
     redis-cli -p 6379 ping >/dev/null 2>&1 && break
     sleep 1
   done
+  REDIS_MAJOR="$(redis_major || true)"
 fi
+
+if [ -z "${REDIS_MAJOR}" ] || [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
+  log "ERROR: Redis on 6379 is major '${REDIS_MAJOR:-none}', need >= ${REDIS_MIN_MAJOR} (GETDEL) — the REDIS_URL-gated suites would fail"
+  exit 1
+fi
+log "Redis major ${REDIS_MAJOR} on 6379"
 
 # --------------------------------------------------------------------------
 # 4. Export the gate variables for the rest of the session

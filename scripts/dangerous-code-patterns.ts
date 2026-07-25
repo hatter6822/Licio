@@ -20,16 +20,49 @@
 // can unit test it directly.
 
 /**
+ * Whitespace and/or BLOCK COMMENTS that may legally sit between a callee and
+ * its `(` — the separator every sink pattern uses in place of a bare `\s*`.
+ *
+ * Building the comment into the PATTERN is what makes these robust. A call can
+ * be split by an interposed comment (`Function/*gap*\/('…')`), and the previous
+ * design handled that by stripping comments first — which made every detection
+ * depend on lexing the WHOLE FILE correctly, and review found three separate
+ * ways to defeat that lexer (a `/*` inside a string, a `/` after `a++`, an
+ * object literal inside a template interpolation). Matching the gap in place
+ * needs no lexer at all, so a mis-lex can no longer hide a call.
+ *
+ * LINEARITY MATTERS HERE, and the first cut of this got it wrong: writing the
+ * whitespace branch as `\s+` inside the outer `*` nests two quantifiers over
+ * the same characters, so a long run of indentation followed by a non-match can
+ * be split exponentially many ways. That took `lint:security` from ~2s to
+ * unbounded (killed at 9+ minutes of 100% CPU on this repo).
+ *
+ * The safe form below consumes exactly ONE whitespace character per iteration,
+ * so a whitespace run has a single possible split; the block-comment branch is
+ * the standard unrolled (`[^*]*\*+(?:[^/*][^*]*\*+)*`) construction; and the
+ * two alternatives are disjoint at their first character (`\s` vs `/`). With no
+ * ambiguity at any step the match is linear, which `dangerous-code-patterns`
+ * pins with a timing canary.
+ */
+const GAP = String.raw`(?:\s|/\*[^*]*\*+(?:[^/*][^*]*\*+)*/)*`;
+
+/** Build a sink pattern from a template whose `~` placeholders become {@link GAP}. */
+const sink = (source: string): RegExp => new RegExp(source.split('~').join(GAP));
+
+/**
  * Every textual form that reaches the **Function constructor**, an
  * eval-equivalent sink. `Function(src)` and `new Function(src)` are the same
  * operation (the `new` is optional per ECMA-262), and the reference itself can
- * be reached indirectly — parenthesized, through the global object by dot OR
- * by computed member access:
+ * be reached indirectly — parenthesized, through the global object by dot or by
+ * computed member access, called optionally, or invoked as a TEMPLATE TAG:
  *
- *     Function('…')            new Function('…')
- *     (Function)('…')          new (Function)('…')
- *     globalThis.Function('…')  window.Function('…')  self.Function('…')
- *     globalThis['Function']('…')                     self["Function"]('…')
+ *     Function('…')             new Function('…')          Function?.('…')
+ *     (Function)('…')           new (Function)('…')        (0, Function)('…')
+ *     globalThis.Function('…')  window.Function('…')       self.Function('…')
+ *     globalThis['Function']('…')                          self["Function"]('…')
+ *     Function`…`()             — the tag form: the strings array is coerced
+ *                                 with String(), so the template body becomes
+ *                                 the function body and the trailing () runs it
  *
  * The direct pattern's lookbehind excludes a member/private access
  * (`.Function(`, `#Function(`) and word-suffix false positives (`getFunction(`,
@@ -42,20 +75,32 @@
  * `[]['constructor']['constructor']`, a name assembled at runtime). Those are
  * unreachable by ANY regex; the runtime enforcement is the CSP, which ships
  * without `'unsafe-eval'` so the constructor throws in the browser however it
- * is spelled. This gate is the build-time half that keeps the obvious routes
- * from landing in the first place.
+ * is spelled. This gate is the build-time half that keeps the reachable
+ * spellings from landing in the first place.
  */
 export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   // Direct call, with or without `new`, and with an optional call `?.()`.
-  /(?<![.\w$#])Function\s*(?:\?\.)?\s*\(/,
+  sink(String.raw`(?<![.\w$#])Function~(?:\?\.)?~\(`),
   // Reached through the global object by dot access.
-  /\b(?:globalThis|window|self|globalThis\?\.|window\?\.|self\?\.)\s*\.?\s*Function\s*(?:\?\.)?\s*\(/,
+  sink(String.raw`\b(?:globalThis|window|self)~\??\.~Function~(?:\?\.)?~[(\`]`),
   // Parenthesized reference: `(Function)('…')`, `new (Function)('…')`, and the
   // comma/sequence idiom `(0, Function)('…')`.
-  /\((?:[^()]*,\s*)?\s*Function\s*\)\s*(?:\?\.)?\s*\(/,
+  sink(String.raw`\((?:[^()]*,~)?~Function~\)~(?:\?\.)?~[(\`]`),
   // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
-  /\[\s*(['"`])Function\1\s*\]\s*(?:\?\.)?\s*\(/,
+  sink(String.raw`\[~(['"\`])Function\1~\]~(?:\?\.)?~[(\`]`),
 ];
+
+/**
+ * `Function` invoked as a TEMPLATE TAG: `` Function`body`() `` constructs the
+ * same function object (the strings array is coerced with String()) and runs it.
+ *
+ * Held separately because it is COMMENT-SENSITIVE — prose that writes
+ * `` `new Function` `` in markdown is textually identical — so it runs only
+ * against comment-stripped source. (`eval` needs no equivalent: a tag receives
+ * the strings ARRAY, and eval returns a non-string argument unchanged rather
+ * than evaluating it — verified, not assumed.)
+ */
+export const FUNCTION_TAGGED_TEMPLATE_PATTERN = sink(String.raw`(?<![.\w$#])Function~\``);
 
 /**
  * `eval` reached other than as a bare call. Each of these evaluates arbitrary
@@ -74,11 +119,11 @@ export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
  */
 export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   // `(eval)('…')` and the sequence form `(0, eval)('…')`.
-  /\((?:[^()]*,\s*)?\s*eval\s*\)\s*(?:\?\.)?\s*\(/,
-  /\[\s*(['"`])eval\1\s*\]\s*(?:\?\.)?\s*\(/,
-  /\b(?:globalThis|window|self)\s*\??\.\s*eval\s*(?:\?\.)?\s*\(/,
+  sink(String.raw`\((?:[^()]*,~)?~eval~\)~(?:\?\.)?~\(`),
+  sink(String.raw`\[~(['"\`])eval\1~\]~(?:\?\.)?~\(`),
+  sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~(?:\?\.)?~\(`),
   // Optional call on the bare binding: `eval?.('…')`.
-  /(?<![.\w$#])eval\s*\?\.\s*\(/,
+  sink(String.raw`(?<![.\w$#])eval~\?\.~\(`),
 ];
 
 /**
@@ -87,7 +132,7 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
  * (the only legitimate use) never matches, because the pattern requires a
  * quote character in the first-argument position.
  */
-export const STRING_TIMER_PATTERN = /\bset(?:Timeout|Interval)\s*\(\s*['"`]/;
+export const STRING_TIMER_PATTERN = sink(String.raw`\bset(?:Timeout|Interval)~\(~['"\`]`);
 
 /**
  * The bare global `eval(` call. The lookbehind excludes a member/private
@@ -96,19 +141,27 @@ export const STRING_TIMER_PATTERN = /\bset(?:Timeout|Interval)\s*\(\s*['"`]/;
  * Source-tree gates want this narrow form; a gate scanning BUILT output should
  * prefer {@link EVAL_PATTERN_STRICT}.
  */
-export const EVAL_PATTERN = /(?<![.\w$#])eval\s*\(/;
+export const EVAL_PATTERN = sink(String.raw`(?<![.\w$#])eval~\(`);
 
 /**
  * The strict `eval(` form used over BUILT artifacts (service worker, bundle),
  * where a member call such as `x.eval(` has no legitimate meaning either and
  * a bundler may have rewritten the reference.
  */
-export const EVAL_PATTERN_STRICT = /\beval\s*\(/;
+export const EVAL_PATTERN_STRICT = sink(String.raw`\beval~\(`);
 
 export interface CodeSinkPattern {
   readonly pattern: RegExp;
   /** Short human label naming the sink (gates wrap this in their own phrasing). */
   readonly label: string;
+  /**
+   * True when the pattern cannot safely run over RAW text because prose can
+   * spell it. Only the tagged-template form is like this: a doc comment that
+   * writes `` `new Function` `` in markdown puts a backtick straight after the
+   * word, which is textually identical to a template tag. Such patterns are
+   * applied to the COMMENT-STRIPPED copy only.
+   */
+  readonly commentSensitive?: boolean;
 }
 
 /**
@@ -126,6 +179,11 @@ export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
     pattern: STRING_TIMER_PATTERN,
     label: 'setTimeout/setInterval with a string body (implicit eval)',
   },
+  {
+    pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
+    label: 'Function() constructor (equivalent to eval) as a template tag',
+    commentSensitive: true,
+  },
 ];
 
 /**
@@ -142,6 +200,11 @@ export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
   {
     pattern: STRING_TIMER_PATTERN,
     label: 'setTimeout/setInterval with a string body (implicit eval)',
+  },
+  {
+    pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
+    label: 'Function() constructor as a template tag',
+    commentSensitive: true,
   },
 ];
 
@@ -218,8 +281,11 @@ export function stripComments(source: string): string {
     return true;
   };
 
-  // Template-literal `${…}` spans push onto this stack; a `}` at depth pops
-  // back into the enclosing template.
+  // Template-literal `${…}` spans push a BRACE-DEPTH counter onto this stack.
+  // Tracking depth (not merely presence) is required: an interpolation may hold
+  // an object literal or a block, and treating its first `}` as the end of the
+  // interpolation resumes template scanning early — which swallowed a later
+  // comment and hid the call after it.
   const templateStack: number[] = [];
   let i = 0;
   while (i < n) {
@@ -263,15 +329,29 @@ export function stripComments(source: string): string {
           i += 1;
           break;
         } else if (ch === '$' && source[i + 1] === '{') {
-          // Enter an interpolation: ordinary scanning resumes inside it.
-          templateStack.push(1);
+          // Enter an interpolation: ordinary scanning resumes inside it, at
+          // brace depth 0.
+          templateStack.push(0);
           i += 2;
           break;
         } else i += 1;
       }
       continue;
     }
+    // Inside an interpolation, a nested `{` must be balanced before the `}`
+    // that actually closes it.
+    if (c === '{' && templateStack.length > 0) {
+      templateStack[templateStack.length - 1] = (templateStack.at(-1) as number) + 1;
+      i += 1;
+      continue;
+    }
     if (c === '}' && templateStack.length > 0) {
+      const depth = templateStack.at(-1) as number;
+      if (depth > 0) {
+        templateStack[templateStack.length - 1] = depth - 1;
+        i += 1;
+        continue;
+      }
       templateStack.pop();
       // Resume the enclosing template literal after the interpolation closes.
       i += 1;
@@ -282,7 +362,7 @@ export function stripComments(source: string): string {
           i += 1;
           break;
         } else if (ch === '$' && source[i + 1] === '{') {
-          templateStack.push(1);
+          templateStack.push(0);
           i += 2;
           break;
         } else i += 1;
@@ -348,8 +428,11 @@ export function scanSourceForSinks(
 ): SinkMatch[] {
   const seen = new Set<string>();
   const merged: SinkMatch[] = [];
+  // Comment-sensitive patterns are excluded from the RAW pass: prose can spell
+  // them, and a false positive on a doc comment would be a gate nobody trusts.
+  const rawSafe = sinks.filter((s) => s.commentSensitive !== true);
   for (const match of [
-    ...findSinkMatches(source, sinks),
+    ...findSinkMatches(source, rawSafe),
     ...findSinkMatches(stripComments(source), sinks),
   ]) {
     const key = `${match.line}:${match.label}`;

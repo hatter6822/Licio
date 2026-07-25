@@ -234,24 +234,38 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
   // out.  Runs against the harness's throwaway database, so it sees the full
   // chain exactly as a fresh deployment would.
   it('leaves NO truncated identifier in the catalog after the full chain', async () => {
-    // pg_constraint + pg_class (tables, indexes, sequences, views) + pg_type:
-    // every namespace where a migration can mint a name.  A name at exactly 63
-    // bytes is legal and stored whole — only a name that WOULD have been longer
-    // is evidence of truncation, and the only way to see that after the fact is
-    // that it sits exactly at the cap, so the assertion reports those for
-    // review rather than failing on the one pre-existing legitimate case.
-    const truncated = await client.unsafe(
-      `SELECT n.nspname || '.' || c.conname AS name
+    // Postgres cannot STORE a name longer than 63 bytes, so querying for
+    // `length > 63` is necessarily empty and proves nothing. The only evidence
+    // truncation leaves behind is a name sitting EXACTLY at the cap — so that
+    // is what this checks, against an explicit allowlist of the names known to
+    // be legitimately 63 bytes.
+    //
+    // This is the half the static scanner cannot cover: it reads the migration
+    // SQL, so it sees names that are SPELLED OUT, while an inline
+    // `.references()` lets Drizzle DERIVE a name that never appears there. A
+    // derived name over the limit reaches the catalog already truncated, and
+    // this assertion is what notices.
+    const LEGITIMATE_63_BYTE_NAMES = [
+      // Exactly 63 bytes as written — stored whole, never truncated. Adding to
+      // this list means asserting the same of a NEW name; the safer fix is
+      // almost always to shorten it.
+      'model_ratification_ballot_vote_id_model_ratification_vote_id_fk',
+    ];
+    const atCap = await client.unsafe(
+      `SELECT c.conname AS name
          FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
-        WHERE length(c.conname) > 63
+        WHERE length(c.conname) >= 63
        UNION ALL
-       SELECT n.nspname || '.' || c.relname
+       SELECT c.relname
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE length(c.relname) > 63 AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
+        WHERE length(c.relname) >= 63 AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
     );
-    // Postgres cannot even STORE a name over 63 bytes, so a non-empty result
-    // would mean the limit moved; the real assertion is the pair below.
-    expect(truncated).toEqual([]);
+    const unexpected = atCap
+      .map((r) => (r as unknown as { name: string }).name)
+      .filter((name) => !LEGITIMATE_63_BYTE_NAMES.includes(name));
+    // A name here is either a genuine 63-byte identifier (add it above, having
+    // checked it) or the visible residue of a silent truncation (shorten it).
+    expect(unexpected).toEqual([]);
 
     // The five FKs migration 0097 renamed now carry their short names, and the
     // truncated originals are gone.
