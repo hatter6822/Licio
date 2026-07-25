@@ -642,10 +642,39 @@ export interface SinkSpec {
  */
 export const isStringLiteral = (arg: readonly Token[]): boolean => foldString(arg).isString;
 
-/** The code argument is a string whose STATIC prefix names a REMOTE script. */
-export const isRemoteUrl = (arg: readonly Token[]): boolean => {
+/**
+ * The code argument is a statically known URL that is NOT same-origin.
+ *
+ * An ALLOWLIST, not a denylist of remote schemes. Listing the bad schemes is
+ * the enumerate-the-spellings mistake in another costume: `http(s)://` and
+ * protocol-relative `//` were listed, so `data:text/javascript,…`,
+ * `blob:`, `javascript:` and `file:` all read as same-origin and loaded
+ * executable code past the gate. What the gate actually enforces is
+ * "same-origin imports only", and the same-origin forms are the CLOSED set —
+ * a relative reference, with no scheme and no authority. Everything else is
+ * rejected, including schemes that do not exist yet.
+ *
+ * A non-static argument yields `false`: the gate cannot evaluate
+ * `importScripts(url)` and does not pretend to. The CSP is the runtime half.
+ *
+ * URL-parser quirks are normalised first, because the browser normalises them
+ * too and a check that skipped it would be reading a different URL than the
+ * one that gets fetched: tabs and newlines are STRIPPED anywhere in a URL, and
+ * leading control characters and spaces are trimmed, so `'ht\ttps://evil/x.js'`
+ * fetches `https://evil/x.js`. A leading `\` is a `/` for a special scheme, so
+ * `\\evil.example/x.js` is protocol-relative just as `//evil.example/x.js` is.
+ */
+export const isNonSameOriginUrl = (arg: readonly Token[]): boolean => {
   const { prefix, isString } = foldString(arg);
-  return isString && (/^https?:\/\//i.test(prefix) || prefix.startsWith('//'));
+  if (!isString) return false;
+  // Written without a control-character regex class (which the linter forbids,
+  // rightly - they are unreadable) but doing exactly what the URL parser does.
+  const stripped = [...prefix].filter((c) => c !== '\t' && c !== '\n' && c !== '\r').join('');
+  let from = 0;
+  while (from < stripped.length && (stripped.codePointAt(from) ?? 0x21) <= 0x20) from += 1;
+  const url = stripped.slice(from);
+  if (/^[/\\]{2}/.test(url)) return true; // protocol-relative (either slash)
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url); // ANY scheme is off-origin
 };
 
 /**

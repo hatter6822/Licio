@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILT_CODE_SINKS,
   findDynamicCodeSinks,
+  REMOTE_DYNAMIC_IMPORT_SINK,
   REMOTE_IMPORT_SCRIPTS_SINK,
 } from './dangerous-code-patterns.js';
 
@@ -27,7 +28,13 @@ export function findSwSecurityIssues(filename: string, content: string): string[
   // `importScripts.call(self, …)` are one walk, not four patterns. Comments
   // are discarded while tokenising, so prose ("no remote code, no eval") can
   // never trip the gate and no comment-stripping pass is load-bearing.
-  for (const { label, line } of findDynamicCodeSinks(content, [REMOTE_IMPORT_SCRIPTS_SINK])) {
+  // A dynamic `import()` of a foreign URL loads remote code exactly as
+  // `importScripts` does — a module worker can do it — so the same-origin
+  // invariant this gate exists for covers both, from one shared definition.
+  for (const { label, line } of findDynamicCodeSinks(content, [
+    REMOTE_IMPORT_SCRIPTS_SINK,
+    REMOTE_DYNAMIC_IMPORT_SINK,
+  ])) {
     issues.push(`${filename}:${line}: ${label}`);
   }
   // Dynamic-code sinks from the shared definition: eval(), every

