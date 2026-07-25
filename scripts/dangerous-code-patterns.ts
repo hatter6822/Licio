@@ -71,19 +71,31 @@ const reference = (name: string): string =>
   String.raw`|${name}\b)`;
 
 /**
- * An inherited function method (`call`/`apply`/`bind`) accessed and invoked, in
- * every spelling the language allows:
+ * Access to one of `names` on a receiver, in every spelling the language
+ * allows — plain, optional-chained, computed, or both:
  *
- *     .call(…)      ?.call(…)      ['call'](…)      ?.["apply"](…)
+ *     .call     ?.call     ['call']     ?.["apply"]
  *
- * Matching only a plain `.` left `Function['call'](null, '…')()` and
- * `globalThis.Function?.call(null, '…')()` passing every gate — the SAME
- * computed/optional access the reference side already handled, so the method
- * side had to learn it too. Written once and shared by all three sinks.
+ * Written once because EVERY dot-only access in this file has turned out to be
+ * a bypass: first on the sink reference, then on the inherited method, then on
+ * `Reflect` itself. Sharing one fragment is what stops the next member access
+ * added here from repeating it.
  */
-const INVOKE_METHOD =
-  String.raw`(?:\??\.~(?:call|apply|bind)` +
-  String.raw`|(?:\?\.)?~\[~['"\`](?:call|apply|bind)['"\`]~\])~(?:\?\.)?~\(`;
+const member = (names: string): string =>
+  String.raw`(?:\??\.~(?:${names})|(?:\?\.)?~\[~['"\`](?:${names})['"\`]~\])`;
+
+/** An inherited function method accessed and then CALLED: `.call(`, `['apply'](`, … */
+const INVOKE_METHOD = `${member('call|apply|bind')}~(?:\\?\\.)?~\\(`;
+
+/**
+ * `Reflect.apply` / `Reflect.construct` and their computed and optional
+ * spellings — `Reflect['apply'](…)`, `Reflect?.construct(…)`.
+ *
+ * The receiver is `Reflect`, a global that is never a local variable here, so
+ * no lookbehind is needed; the accessor gets the same treatment as every other
+ * member access rather than being the one place still pinned to a dot.
+ */
+const REFLECT_INVOKE = `\\bReflect${member('apply|construct')}~(?:\\?\\.)?~\\(`;
 
 /**
  * Every textual form that reaches the **Function constructor**, an
@@ -142,7 +154,7 @@ export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   sink(String.raw`(?<![.\w$#])${reference('Function')}${INVOKE_METHOD}`),
   // Reflective invocation, accepting any spelling of the reference:
   // `Reflect.apply(Function, …)`, `Reflect.construct(globalThis.Function, …)`.
-  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('Function')}`),
+  sink(`${REFLECT_INVOKE}~(?:\\(~)*${reference('Function')}`),
 ];
 
 /**
@@ -186,7 +198,7 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   sink(String.raw`(?<![.\w$#])${reference('eval')}${INVOKE_METHOD}`),
   // Reflective invocation, accepting any spelling of the reference:
   // `Reflect.apply(eval, null, ['…'])`, `Reflect.apply(globalThis.eval, …)`.
-  sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('eval')}`),
+  sink(`${REFLECT_INVOKE}~(?:\\(~)*${reference('eval')}`),
 ];
 
 /** The two timer names that compile a string argument as source. */
@@ -233,7 +245,7 @@ export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\b${TIMER}~\.~apply~(?:\?\.)?~\(~[^,()]*,~\[~['"\`]`),
   // `Reflect.apply(setTimeout, thisArg, ['…', …])` — reference, thisArg, then
   // the argument array whose head is the code.
-  sink(String.raw`\bReflect~\.~apply~\(~${reference(TIMER)}~,~[^,()]*,~\[~['"\`]`),
+  sink(`${REFLECT_INVOKE}~${reference(TIMER)}~,~[^,()]*,~\\[~['"\`]`),
 ];
 
 /**

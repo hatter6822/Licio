@@ -15,14 +15,31 @@ const SW_FILES = ['sw.js', 'sw-push.js'];
 
 /** Find SW security violations in one file's source. Pure (testable). */
 export function findSwSecurityIssues(filename: string, content: string): string[] {
-  const code = stripComments(content);
   const issues: string[] = [];
-  for (const call of code.match(/importScripts\s*\([^)]*\)/g) ?? []) {
-    // Flag absolute (`https://…`) AND protocol-relative (`"//evil/x.js"`) remote
-    // loads — both fetch cross-origin code; only same-origin/relative is allowed.
-    if (/https?:\/\//i.test(call) || /['"]\s*\/\//.test(call)) {
-      issues.push(`${filename}: external importScripts (remote code): ${call}`);
+  // Remote `importScripts` is scanned over the RAW text UNIONED with the
+  // stripped copy, for the same reason the dynamic-code sinks below are: a
+  // mis-lex in the comment strip can blank the call away entirely, and this
+  // sink loads cross-origin CODE — the most severe thing the gate looks for.
+  // Leaving it strip-only would have made the heuristic stripper load-bearing
+  // for precisely the check that can least afford it.
+  //
+  // Scanning raw does mean a comment containing a COMPLETE remote call is
+  // reported. That is deliberate: the pattern needs the call shape *and* a
+  // remote URL, which prose does not have — the real workers say "no remote
+  // code, no importScripts" and "imported … via importScripts", neither of
+  // which matches — and a built worker is generated output where a commented
+  // remote call would itself be worth a look.
+  const remoteImports = new Set<string>();
+  for (const text of [content, stripComments(content)]) {
+    for (const call of text.match(/importScripts\s*\([^)]*\)/g) ?? []) {
+      // Flag absolute (`https://…`) AND protocol-relative (`"//evil/x.js"`)
+      // remote loads — both fetch cross-origin code; only same-origin/relative
+      // is allowed.
+      if (/https?:\/\//i.test(call) || /['"]\s*\/\//.test(call)) remoteImports.add(call);
     }
+  }
+  for (const call of remoteImports) {
+    issues.push(`${filename}: external importScripts (remote code): ${call}`);
   }
   // Dynamic-code sinks from the shared definition: eval(), every
   // Function-constructor form, and the string-argument timers.

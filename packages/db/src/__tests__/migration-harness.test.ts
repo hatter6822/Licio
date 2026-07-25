@@ -255,19 +255,28 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
     // length, while `length()` counts CHARACTERS. A non-ASCII name truncated to
     // 63 bytes holds fewer than 63 characters — a 61-byte ASCII prefix plus one
     // `é` is 62 characters — so a character-counting predicate omits exactly
-    // the truncated rows this assertion exists to surface. Truncation can also
-    // clip mid-sequence, leaving 62 bytes plus a dropped partial character, so
-    // the threshold is `>= 62` for the multibyte case rather than `>= 63`.
+    // the truncated rows this assertion exists to surface.
+    //
+    // Truncation also clips on a CHARACTER boundary, so a multibyte name can
+    // land well below 63 bytes. Worst case in UTF-8: the character straddling
+    // byte 63 is four bytes long and starts at byte 61, so the kept prefix ends
+    // at byte 60 — three bytes of boundary loss, not one. The multibyte arm
+    // therefore starts at `>= 60`; it is gated on the byte and character counts
+    // DIFFERING, so it cannot widen the ASCII case (where clipping is exact)
+    // into noise.
+    const MULTIBYTE_FLOOR = 63 - 3;
     const atCap = await client.unsafe(
       `SELECT c.conname AS name
          FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
         WHERE octet_length(c.conname) >= 63
-           OR (octet_length(c.conname) >= 62 AND octet_length(c.conname) <> length(c.conname))
+           OR (octet_length(c.conname) >= ${MULTIBYTE_FLOOR}
+               AND octet_length(c.conname) <> length(c.conname))
        UNION ALL
        SELECT c.relname
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE (octet_length(c.relname) >= 63
-           OR (octet_length(c.relname) >= 62 AND octet_length(c.relname) <> length(c.relname)))
+           OR (octet_length(c.relname) >= ${MULTIBYTE_FLOOR}
+               AND octet_length(c.relname) <> length(c.relname)))
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
     );
     const unexpected = atCap

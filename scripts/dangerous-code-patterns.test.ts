@@ -76,6 +76,10 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     // though every direct call site already recognised qualified references.
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.Function, null, ['x'])();"],
     ['Reflect.construct + computed', "Reflect.construct(window['Function'], ['x'])();"],
+    // Round-8: the accessor on Reflect ITSELF was still dot-only.
+    ['computed Reflect accessor', "Reflect['apply'](Function, null, ['return 42'])();"],
+    ['computed Reflect.construct', 'Reflect["construct"](Function, ["x"])();'],
+    ['optional Reflect accessor', "Reflect?.apply(Function, null, ['x'])();"],
     // Round-7: the METHOD side accepted only a plain `.`, so computed and
     // optional access to the very same inherited method slipped through.
     ['computed method', "Function['call'](null, 'return 42')();"],
@@ -90,6 +94,9 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     ['a suffixed identifier', 'const v = getFunction(name);'],
     ['an ordinary .call on some other callee', "handler.call(null, 'x');"],
     ['an ordinary .apply on some other callee', 'fn.apply(this, args);'],
+    ['a reflective call on an unrelated callee', 'Reflect.apply(handler, null, [arg]);'],
+    ['the same with a computed accessor', "Reflect['apply'](handler, null, [arg]);"],
+    ['an unrelated Reflect method', 'Reflect.ownKeys(obj);'],
     ['an AsyncFunction-suffixed identifier', 'const v = isAsyncFunction(fn);'],
     ['a member access with no call', 'const t = registry.Function;'],
     ['a type annotation', 'function apply(fn: Function): void {}'],
@@ -134,6 +141,7 @@ describe('STRING_TIMER_PATTERNS', () => {
     ['bind', "setTimeout.bind(globalThis, 'evil()')()"],
     ['Reflect.apply', "Reflect.apply(setTimeout, globalThis, ['evil()'])"],
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.setTimeout, self, ['evil()'])"],
+    ['computed Reflect accessor', "Reflect['apply'](setTimeout, globalThis, ['evil()'])"],
   ])('catches the INDIRECT form: %s', (_label, code) => {
     expect(
       hits(
@@ -271,6 +279,7 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
     ['Reflect.apply', "Reflect.apply(eval, null, ['x'])"],
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.eval, null, ['payload'])"],
     ['Reflect.apply + computed', "Reflect.apply(self['eval'], null, ['payload'])"],
+    ['computed Reflect accessor', "Reflect['apply'](eval, null, ['payload'])"],
     ['computed method', "eval['call'](null, '40+2')"],
     ['optional computed receiver + optional method', "self?.['eval']?.call(null, 'x')"],
   ])('catches the METHOD form: %s', (_label, code) => {

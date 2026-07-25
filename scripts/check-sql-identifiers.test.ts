@@ -164,6 +164,26 @@ describe('findOverlongIdentifiers', () => {
       ).toHaveLength(1);
     });
 
+    // Round-8: `E'…'` is a valid escape-string literal, and its `E` prefix
+    // tokenised as a bare identifier — displacing `execute` from the history,
+    // so the dynamic DDL inside read as ordinary data and went unscanned.
+    it("scans an EXECUTE with an E'…' escape-string argument (regression)", () => {
+      for (const prefix of ['E', 'e']) {
+        expect(
+          findOverlongIdentifiers(
+            '0100_x.sql',
+            `DO $$ BEGIN EXECUTE ${prefix}'CREATE INDEX ${name} ON t (c)'; END $$;`,
+          ),
+        ).toHaveLength(1);
+      }
+    });
+
+    it("leaves an ordinary E'…' data literal alone", () => {
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `INSERT INTO t (b) VALUES (E'${'z'.repeat(80)}');`),
+      ).toEqual([]);
+    });
+
     it('leaves an ORDINARY string literal as data', () => {
       // The widening must not turn every quoted string back into SQL.
       expect(

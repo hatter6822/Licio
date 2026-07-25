@@ -304,6 +304,15 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // `$$`, which can only be a delimiter.
       const dd = bare[0].indexOf('$$');
       const text = dd > 0 ? bare[0].slice(0, dd) : bare[0];
+      // A single-letter STRING PREFIX is part of the literal's syntax, not a
+      // token of its own: `E'…'` (escape), `B'…'` (bit), `X'…'` (hex). Pushing
+      // it onto the history would displace the `EXECUTE` that precedes it, so
+      // `EXECUTE E'CREATE INDEX …'` would read as an ordinary data literal and
+      // the dynamic DDL inside would go unscanned.
+      if (/^[EeBbXx]$/.test(text) && sql[i + text.length] === "'") {
+        i += text.length;
+        continue;
+      }
       recent.push(text.toLowerCase());
       if (recent.length > 3) recent.shift();
       yield { text, quoted: false };
