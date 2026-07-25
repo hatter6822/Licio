@@ -240,6 +240,59 @@ function isProceduralBody(sql: string, bodyStart: number, bodyEnd: number, body:
 }
 
 /**
+ * Fold a `||` chain of STRING LITERALS that follows an already-read literal,
+ * returning the concatenated text and the offset just past the chain.
+ *
+ * Only literal operands are folded. A variable operand (`… || quote_ident(n)`)
+ * is not statically known, so the chain stops there — the fragments already
+ * gathered are still scanned, which is what surfaces an over-long name written
+ * as its own literal.
+ */
+function foldConcatenation(sql: string, from: number, head: string): { text: string; end: number } {
+  const n = sql.length;
+  let text = head;
+  let k = from;
+  for (;;) {
+    let j = k;
+    while (j < n && /\s/.test(sql[j] as string)) j += 1;
+    if (sql.slice(j, j + 2) !== '||') break;
+    j += 2;
+    while (j < n && /\s/.test(sql[j] as string)) j += 1;
+    // An operand may carry an escape-string prefix of its own.
+    let escaped = false;
+    if (/^[EeBbXx]$/.test(sql[j] ?? '') && sql[j + 1] === "'") {
+      escaped = /^[Ee]$/.test(sql[j] as string);
+      j += 1;
+    }
+    if (sql[j] !== "'") break; // not a literal: the value is not static
+    j += 1;
+    let literal = '';
+    while (j < n) {
+      if (escaped && sql[j] === '\\' && j + 1 < n) {
+        literal += sql.slice(j, j + 2);
+        j += 2;
+        continue;
+      }
+      if (sql[j] === "'") {
+        if (sql[j + 1] === "'") {
+          literal += "'";
+          j += 2;
+        } else {
+          j += 1;
+          break;
+        }
+      } else {
+        literal += sql[j];
+        j += 1;
+      }
+    }
+    text += escaped ? decodeEscapeString(literal) : literal;
+    k = j;
+  }
+  return { text, end: k };
+}
+
+/**
  * Split SQL into the spans that can hold an identifier, discarding the spans
  * that cannot: `--` line comments, `/* … *\/` block comments (nesting, which
  * Postgres allows), `'…'` string literals (with the `''` escape), and
@@ -328,9 +381,19 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // The `''` escapes are already collapsed above; an ESCAPE string needs
       // its backslash sequences decoded too, since that is what the server
       // parses.
-      const decoded = pendingEscapeString ? decodeEscapeString(literal) : literal;
+      let decoded = pendingEscapeString ? decodeEscapeString(literal) : literal;
       pendingEscapeString = false;
       const previous = recent[recent.length - 1];
+      // PL/pgSQL's EXECUTE takes any string EXPRESSION, and the common dynamic
+      // -SQL idiom composes one: `EXECUTE 'CREATE INDEX ' || name || ' ON t'`.
+      // Scanning only the literal adjacent to `EXECUTE` saw a fragment, so an
+      // over-long name in a later fragment went unreported. Fold the statically
+      // known `||` operands into one statement before scanning.
+      if (previous === 'execute') {
+        const folded = foldConcatenation(sql, i, decoded);
+        decoded = folded.text;
+        i = folded.end;
+      }
       // A literal that is the argument of PL/pgSQL's `EXECUTE` is not data —
       // Postgres runs it as SQL, so an over-long name inside it truncates
       // exactly like one written out.

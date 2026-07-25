@@ -118,10 +118,18 @@ function readIdentifier(source: string, i: number): { name: string; end: number 
  * can hide nothing: whichever way the real code goes, one of the two passes
  * lexes it correctly.
  */
-export function tokenize(source: string, preferRegex = false): Token[] {
+export function tokenize(
+  source: string,
+  preferRegex = false,
+  options: { readonly from?: number; readonly stopAtUnmatchedBrace?: boolean } = {},
+): Token[] {
   const tokens: Token[] = [];
   const n = source.length;
-  let i = 0;
+  let i = options.from ?? 0;
+  // Only meaningful with `stopAtUnmatchedBrace`: the depth of `{` … `}` pairs
+  // seen so far, so the terminator of a template interpolation can be found
+  // without lexing the rest of the file.
+  let braceDepth = 0;
 
   /** The last token that can decide whether a `/` opens a regex. */
   const previous = (): Token | undefined => tokens[tokens.length - 1];
@@ -286,6 +294,15 @@ export function tokenize(source: string, preferRegex = false): Token[] {
       tokens.push({ kind: 'punct', value: two, start: i, end: i + 2 });
       i += 2;
       continue;
+    }
+    if (options.stopAtUnmatchedBrace && (c === '{' || c === '}')) {
+      if (c === '}' && braceDepth === 0) {
+        // The interpolation's terminator. Pushed so the caller can read its
+        // offset, then the scan stops — this is what keeps span-finding linear.
+        tokens.push({ kind: 'punct', value: c, start: i, end: i + 1 });
+        return tokens;
+      }
+      braceDepth += c === '{' ? 1 : -1;
     }
     tokens.push({ kind: 'punct', value: c, start: i, end: i + 1 });
     i += 1;
@@ -495,7 +512,21 @@ export const isRemoteUrl = (arg: readonly Token[]): boolean => {
  * offset of each. Nested templates, strings and braces are skipped so a `}`
  * inside one cannot end the span early.
  */
-function interpolationSpans(raw: string, base: number): Array<{ text: string; offset: number }> {
+/**
+ * The `${…}` interpolation bodies of a template literal, with the absolute
+ * offset of each.
+ *
+ * The matching `}` is found by TOKENISING the span, not by counting braces:
+ * a hand-rolled counter is a second, weaker lexer, and it read the `}` inside
+ * a regex literal (`${/}/.test(x); eval(p)}`) as the end of the span. Reusing
+ * the one tokeniser means regex literals, strings, templates and comments are
+ * all handled by the code that already gets them right.
+ */
+function interpolationSpans(
+  raw: string,
+  base: number,
+  preferRegex: boolean,
+): Array<{ text: string; offset: number }> {
   const spans: Array<{ text: string; offset: number }> = [];
   let i = 1; // past the opening backtick
   while (i < raw.length) {
@@ -503,40 +534,17 @@ function interpolationSpans(raw: string, base: number): Array<{ text: string; of
       i += 2;
       continue;
     }
+    if (raw[i] === '`') break; // the template's own closing backtick
     if (raw[i] === '$' && raw[i + 1] === '{') {
       const start = i + 2;
-      let depth = 1;
-      let k = start;
-      while (k < raw.length && depth > 0) {
-        const c = raw[k] as string;
-        if (c === '\\') {
-          k += 2;
-          continue;
-        }
-        if (c === '{') depth += 1;
-        else if (c === '}') depth -= 1;
-        else if (c === '"' || c === "'") {
-          const quote = c;
-          k += 1;
-          while (k < raw.length && raw[k] !== quote) k += raw[k] === '\\' ? 2 : 1;
-        } else if (c === '`') {
-          // A nested template: skip it whole here — `tokenize` will see it as a
-          // token of the span and this function recurses on it in turn.
-          let inner = 1;
-          k += 1;
-          while (k < raw.length && inner > 0) {
-            if (raw[k] === '\\') k += 2;
-            else {
-              if (raw[k] === '`') inner -= 1;
-              k += 1;
-            }
-          }
-          continue;
-        }
-        if (depth > 0) k += 1;
-      }
-      spans.push({ text: raw.slice(start, k), offset: base + start });
-      i = k + 1;
+      // Lex FROM `start` and stop at the terminator, rather than slicing and
+      // re-lexing the whole remaining template for every interpolation — that
+      // was O(n²) in the number of spans, which the performance canary caught.
+      const tokens = tokenize(raw, preferRegex, { from: start, stopAtUnmatchedBrace: true });
+      const last = tokens[tokens.length - 1];
+      const end = last && last.kind === 'punct' && last.value === '}' ? last.start : raw.length; // unterminated: take the rest
+      spans.push({ text: raw.slice(start, end), offset: base + start });
+      i = end + 1;
       continue;
     }
     i += 1;
@@ -601,7 +609,7 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
     if (depth >= 16) return; // real code never nests templates this deep
     for (const token of tokens) {
       if (token.kind !== 'template') continue;
-      for (const span of interpolationSpans(token.value, token.start)) {
+      for (const span of interpolationSpans(token.value, token.start, preferRegex)) {
         const inner = tokenize(span.text, preferRegex).map((t) => ({
           ...t,
           start: t.start + span.offset,
@@ -630,6 +638,34 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
  * flow, not lexing. The CSP remains the runtime half in the browser; in
  * `apps/api`, where there is none, this is the reachable-spelling half.
  */
+/**
+ * The index of a declaration's INITIALIZER, given the declared name at
+ * `nameIndex`, or null when there is no `=`.
+ *
+ * A TypeScript annotation sits between the two — `const F: FunctionConstructor
+ * = Function` — so requiring `=` immediately after the name missed every typed
+ * alias, which in a TypeScript-first repository is the normal way to write one.
+ * `=>` and `===` lex as their own tokens, so neither can be mistaken for the
+ * assignment.
+ */
+function initializerIndex(tokens: readonly Token[], nameIndex: number): number | null {
+  let k = nameIndex + 1;
+  if (isPunct(tokens[k], '=')) return k + 1;
+  if (!isPunct(tokens[k], ':')) return null;
+  let depth = 0;
+  for (let steps = 0; steps < 64 && k < tokens.length; steps += 1, k += 1) {
+    const t = tokens[k];
+    if (t?.kind !== 'punct') continue;
+    if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+    else if (t.value === ')' || t.value === ']' || t.value === '}') {
+      if (depth === 0) return null;
+      depth -= 1;
+    } else if (depth === 0 && t.value === ';') return null;
+    else if (depth === 0 && t.value === '=') return k + 1;
+  }
+  return null;
+}
+
 function collectAliases(
   tokens: readonly Token[],
   specByName: ReadonlyMap<string, SinkSpec>,
@@ -644,11 +680,11 @@ function collectAliases(
     for (let i = 0; i + 2 < tokens.length; i += 1) {
       const name = tokens[i];
       if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
-      // A single `=`; `==`/`=>`/`===` lex differently and are not assignment.
-      if (!isPunct(tokens[i + 1], '=')) continue;
       const previous = tokens[i - 1];
       if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
-      const spec = resolve(i + 2, aliases);
+      const initializer = initializerIndex(tokens, i);
+      if (initializer === null) continue;
+      const spec = resolve(initializer, aliases);
       if (spec) aliases.set(name.value, spec);
     }
     if (aliases.size === before) break;

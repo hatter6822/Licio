@@ -184,6 +184,38 @@ describe('findOverlongIdentifiers', () => {
       ).toEqual([]);
     });
 
+    // Round 13: PL/pgSQL's EXECUTE takes a string EXPRESSION, and composing one
+    // with `||` is the common dynamic-SQL idiom. Scanning only the adjacent
+    // literal saw a fragment and missed the name in a later one.
+    it('folds a statically composed EXECUTE statement', () => {
+      const composed = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE 'CREATE INDEX ' || '${composed}' || ' ON t(c)'; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('stops folding at a non-literal operand but keeps the literals', () => {
+      // `quote_ident(n)` is not statically known, so the chain ends there —
+      // and the literals already gathered are still scanned.
+      const composed = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE 'CREATE INDEX ' || '${composed}' || quote_ident(n); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('does not fold ordinary concatenation outside EXECUTE', () => {
+      const long = 'z'.repeat(80);
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `SELECT 'a' || '${long}' || 'b' FROM t;`),
+      ).toEqual([]);
+    });
+
     it('leaves an ORDINARY string literal as data', () => {
       // The widening must not turn every quoted string back into SQL.
       expect(

@@ -306,6 +306,14 @@ describe('lexical grammar coverage', () => {
     expect(fires(code)).toBe(true);
   });
 
+  it('finds a sink past a REGEX LITERAL inside an interpolation', () => {
+    // The `}` inside `/}/ ` is regex content, not the end of the span. A
+    // hand-rolled brace counter read it as the terminator and stopped early;
+    // the span end is now found by tokenising, which already handles regex.
+    expect(fires(`const x = ${tpl('/}/.test(y); eval(payload)')};`)).toBe(true);
+    expect(fires(`const x = ${tpl('/}/.test(y); Function("return 1")()')};`)).toBe(true);
+  });
+
   it('treats an INTERPOLATED template as a string argument', () => {
     // Still a string the host compiles, so the timer form fires…
     expect(fires(`setTimeout(\`evil($${'{'}value})\`, 0)`)).toBe(true);
@@ -358,9 +366,24 @@ describe('aliased sinks', () => {
     expect(fires('const t = setTimeout; t(tick, 0)')).toBe(false);
   });
 
+  // Round 13: a TypeScript annotation sits between the name and the `=`, and
+  // this repository is TypeScript-first, so a typed alias is the NORMAL way to
+  // write one.
+  it.each([
+    ['FunctionConstructor', "const F: FunctionConstructor = Function; F('return 42')()"],
+    ['typeof eval', 'const e: typeof eval = eval; e(payload)'],
+    ['typeof setTimeout', "const t: typeof setTimeout = setTimeout; t('evil()', 0)"],
+  ])('follows a typed alias declaration: %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
   it('does not flag an unrelated binding', () => {
     expect(fires("const f = handler; f('x')")).toBe(false);
     expect(fires("const f = obj.method; f('x')")).toBe(false);
+  });
+
+  it('does not treat an annotation with no initializer as a binding', () => {
+    expect(fires("let F: FunctionConstructor; F('x')()")).toBe(false);
   });
 
   it('does not treat a comparison as a binding', () => {
@@ -455,6 +478,27 @@ describe('scanSourceForSinks (textual DOM patterns)', () => {
 });
 
 describe('linearity (performance canary)', () => {
+  // A wall-clock bound alone is a weak and flaky way to assert an algorithmic
+  // property, and this one caught a REAL O(n²) — span finding re-lexed the
+  // whole remaining template for every interpolation — only intermittently.
+  // This asserts the SCALING instead, which is the property that matters and
+  // does not depend on machine load.
+  it('scales linearly in the number of template interpolations', () => {
+    const build = (k: number): string => `\`${`${'$'}{a}`.repeat(k)}\``;
+    const time = (code: string): number => {
+      const started = performance.now();
+      findDynamicCodeSinks(code);
+      return performance.now() - started;
+    };
+    // Warm the JIT so the first measurement is not the slow one.
+    time(build(500));
+    const small = Math.max(time(build(1000)), 1);
+    const large = time(build(8000));
+    // 8x the input. Linear predicts ~8x; quadratic predicts ~64x. A generous
+    // 24x ceiling separates the two without being sensitive to load.
+    expect(large / small).toBeLessThan(24);
+  });
+
   // The regex family this replaced once shipped a nested quantifier that took
   // `lint:security` from ~2s to unbounded (killed at 9+ minutes at 100% CPU).
   // The analyzer is a linear scan, but these keep any future regression in the
@@ -462,10 +506,7 @@ describe('linearity (performance canary)', () => {
   it.each([
     ['deep indentation before a non-match', `${' '.repeat(5000)}notASink(x);`],
     ['a long comment run', `${'// filler\n'.repeat(2000)}const a = 1;`],
-    // `'$' + '{a}'` rather than a literal `${a}`: the fixture needs the
-    // characters, and writing them in a plain string would read as an
-    // interpolation this file never intends to perform.
-    ['a long template with interpolations', `\`${`${'$'}{a}`.repeat(2000)}\``],
+    ['a long template with interpolations', `\`${`${'$'}{a}`.repeat(500)}\``],
     ['a long unterminated block comment', `/*${'x'.repeat(20000)}`],
   ])('completes in bounded time: %s', (_label, code) => {
     const started = Date.now();
