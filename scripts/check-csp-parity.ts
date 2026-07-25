@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Content-Security-Policy delivery gate.
+//
+// The policy is defined ONCE, in `packages/shared/src/security/csp.ts`.  Both
+// TypeScript consumers — the `apps/api` response header and the `vite preview`
+// header — import it, so the compiler already guarantees they agree and there is
+// nothing here to compare.  This gate exists for the delivery point the compiler
+// CANNOT reach: the `<meta http-equiv>` in the built HTML.
+//
+// That tag is injected by a Vite plugin at build time, and the WS-R.15.4a native
+// courier WebView (which serves the built assets from `https://localhost` with
+// no server headers) has NO other policy.  A plugin that silently stops firing —
+// renamed hook, wrong `apply`, a transform ordered after the HTML is emitted —
+// produces a courier with no CSP at all, and nothing else in the pipeline
+// notices: the app still builds, still boots, still passes its tests.  So the
+// gate asserts on the ARTIFACT.
+//
+// It also fails when `index.html` reintroduces a hand-written policy: a source
+// copy would be additive with the injected one (two `<meta>` policies INTERSECT
+// per CSP L3 §8.1), which is a confusing way to enforce something that already
+// has one definition.
+//
+// Deliberately dependency-free so the `scripts`-rooted vitest project can unit
+// test the pure core directly.
+import { readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  contentSecurityPolicyMeta,
+  META_INELIGIBLE_DIRECTIVES,
+} from '../packages/shared/src/security/csp.js';
+
+const ROOT = resolve(import.meta.dirname, '..');
+
+export const INDEX_HTML_FILE = 'apps/web/index.html';
+/** The BUILT html — checked only when a build has produced it. */
+export const BUILT_INDEX_HTML_FILE = 'apps/web/dist/index.html';
+
+/** The directive name of a full directive (`script-src 'self'` → `script-src`). */
+function directiveName(directive: string): string {
+  return (directive.trim().split(/\s+/)[0] ?? '').toLowerCase();
+}
+
+/** Split a serialized policy into trimmed, non-empty directives. */
+export function parsePolicyString(policy: string): string[] {
+  return policy
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * Every `<meta http-equiv="Content-Security-Policy">` content value in a
+ * document.  ALL of them, not the first: two such tags intersect rather than
+ * override, so a stray second one changes the effective policy.
+ */
+export function extractMetaPolicies(html: string): string[] {
+  const found: string[] = [];
+  for (const tag of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const text = tag[0];
+    if (!/http-equiv\s*=\s*["']content-security-policy["']/i.test(text)) continue;
+    const content = /content\s*=\s*"([^"]*)"|content\s*=\s*'([^']*)'/i.exec(text);
+    const value = content?.[1] ?? content?.[2];
+    if (value !== undefined) found.push(value);
+  }
+  return found;
+}
+
+export interface CspDelivery {
+  /** `apps/web/index.html` — the SOURCE document (must carry no policy). */
+  indexHtml: string;
+  /** `apps/web/dist/index.html` when a build has produced one. */
+  builtIndexHtml?: string | undefined;
+}
+
+/** Pure: every delivery problem (empty ⇒ the built artifact carries the policy). */
+export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
+  const problems: string[] = [];
+  const expected = contentSecurityPolicyMeta();
+
+  // The SOURCE must stay policy-free: the plugin injects, and a second policy
+  // would silently intersect with it.
+  const inSource = extractMetaPolicies(delivery.indexHtml);
+  if (inSource.length > 0) {
+    problems.push(
+      `${INDEX_HTML_FILE}: carries a hand-written CSP <meta>. The policy is injected at ` +
+        'build time from packages/shared/src/security/csp.ts — a source copy would ' +
+        'INTERSECT with the injected one (CSP L3 §8.1), not replace it.',
+    );
+  }
+
+  if (delivery.builtIndexHtml === undefined) return problems;
+
+  const built = extractMetaPolicies(delivery.builtIndexHtml);
+  if (built.length === 0) {
+    problems.push(
+      `${BUILT_INDEX_HTML_FILE}: no <meta http-equiv="Content-Security-Policy"> — the ` +
+        'injection plugin did not fire, and the native courier WebView would ship ' +
+        'with NO policy at all.',
+    );
+    return problems;
+  }
+  if (built.length > 1) {
+    problems.push(`${BUILT_INDEX_HTML_FILE}: ${built.length} CSP <meta> tags; expected exactly 1.`);
+  }
+  const actual = parsePolicyString(built[0] ?? '');
+  if (actual.join('; ') !== parsePolicyString(expected).join('; ')) {
+    problems.push(
+      `${BUILT_INDEX_HTML_FILE}: the injected policy does not match the shared source.\n` +
+        `      expected: ${expected}\n` +
+        `      actual:   ${actual.join('; ')}`,
+    );
+  }
+  // A meta-ineligible directive is silently IGNORED by the browser, so its
+  // presence reads as protection that is not in force.
+  for (const directive of actual) {
+    if (META_INELIGIBLE_DIRECTIVES.includes(directiveName(directive))) {
+      problems.push(
+        `${BUILT_INDEX_HTML_FILE}: "${directiveName(directive)}" is IGNORED in a <meta> ` +
+          'policy (CSP L3 §3.3) — it belongs in the response header only',
+      );
+    }
+  }
+  return problems;
+}
+
+function main(): void {
+  const read = (relative: string): string => readFileSync(resolve(ROOT, relative), 'utf-8');
+  // Present only after a web build; the static-gates job runs BEFORE one, and the
+  // build job runs this gate again once `dist` exists.
+  const builtPath = resolve(ROOT, BUILT_INDEX_HTML_FILE);
+  const builtIndexHtml = statSync(builtPath, { throwIfNoEntry: false })?.isFile()
+    ? read(BUILT_INDEX_HTML_FILE)
+    : undefined;
+
+  const problems = findCspDeliveryProblems({ indexHtml: read(INDEX_HTML_FILE), builtIndexHtml });
+  if (problems.length > 0) {
+    console.error('check:csp-parity FAILED — the CSP is not being delivered as defined:');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    console.error(
+      '\n  packages/shared/src/security/csp.ts is the ONLY definition. The API header and\n' +
+        '  the vite preview header import it; the <meta> is injected into the built HTML\n' +
+        '  by the `licio:inject-csp-meta` plugin in apps/web/vite.config.ts.',
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    'check:csp-parity passed: one CSP definition' +
+      `${builtIndexHtml === undefined ? '; no build to check' : `, correctly injected into ${BUILT_INDEX_HTML_FILE}`}.`,
+  );
+}
+
+// Run as a CLI only; importing for tests must not trigger the scan.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}

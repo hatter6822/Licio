@@ -6,31 +6,40 @@ import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { stripDevCspMeta } from './src/dev/strip-csp-meta.js';
+// RELATIVE, not `@licio/shared`: Vite's config loader EXTERNALISES a bare
+// workspace specifier, and Node then cannot resolve this package's
+// `.js`-suffixed TypeScript source at config-eval time.  A relative import is
+// bundled into the config, so the policy really is single-sourced.
+import {
+  contentSecurityPolicyHeader,
+  contentSecurityPolicyMeta,
+} from '../../packages/shared/src/security/csp.js';
+import { injectCspMeta } from './src/dev/inject-csp-meta.js';
 
 /**
- * Strip the production CSP `<meta>` from the served `index.html` in the DEV
- * SERVER ONLY (`vite dev`).  The pure transform lives in `stripDevCspMeta` (a
- * unit-tested dev helper); this plugin just applies it on `serve`.  `index.html`
- * carries the full production Content-Security-Policy as a `<meta http-equiv>`
- * because it is the SOLE CSP source in the WS-R.15.4a native-courier WebView
- * (which serves the built assets from `https://localhost` with no server
- * headers).  That policy is correct for the production build and the preview
- * server (whose header sends the same CSP), but in the Vite DEV server it breaks
- * the app: HMR injects CSS as inline `<style>` elements and uses inline/eval
- * script + a dev WebSocket, all of which `style-src 'self'` /
- * `require-trusted-types-for 'script'` / `connect-src 'self'` block — leaving
- * the app completely unstyled and flooding the console with CSP violations.
- * `apply: 'serve'` scopes this to dev only; `vite build` (and therefore the
- * courier `dist` + the preview) keeps the meta untouched, and the real CSP is
- * always enforced in production by the API's `security-headers.ts` header.
+ * INJECT the Content-Security-Policy `<meta http-equiv>` into the BUILT
+ * `index.html`, from the single source in `@licio/shared` (`security/csp.ts`).
+ *
+ * `index.html` deliberately carries no policy of its own.  It used to, and that
+ * copy had to be kept in step by hand with the API response header and the
+ * preview header below — three spellings of one policy, where tightening the
+ * header alone left the WS-R.15.4a native courier WebView (which serves the
+ * built assets from `https://localhost`, so the `<meta>` is its ONLY policy) on
+ * the older, weaker rules.
+ *
+ * `apply: 'build'` also disposes of the previous dev-only STRIP plugin: the Vite
+ * dev server simply never receives a tag, which it could not tolerate anyway
+ * (HMR uses inline `<style>`, inline/eval script and a dev WebSocket, all
+ * blocked by `style-src 'self'` / `require-trusted-types-for 'script'` /
+ * `connect-src 'self'`).  `vite build` — and therefore the courier `dist` and
+ * the preview server — gets the real policy.
  */
-function devStripCspMeta(): Plugin {
+function buildInjectCspMeta(): Plugin {
   return {
-    name: 'licio:dev-strip-csp-meta',
-    apply: 'serve',
+    name: 'licio:inject-csp-meta',
+    apply: 'build',
     transformIndexHtml(html: string): string {
-      return stripDevCspMeta(html);
+      return injectCspMeta(html, contentSecurityPolicyMeta());
     },
   };
 }
@@ -51,9 +60,10 @@ const API_PROXY_TARGET =
 export default defineConfig({
   base: '/',
   plugins: [
-    // Dev-only: remove the production CSP <meta> so Vite HMR (inline styles +
-    // scripts + dev WebSocket) is not blocked. No-op in `vite build`/preview.
-    devStripCspMeta(),
+    // Build-only: inject the production CSP <meta> from the shared SSOT (the
+    // courier WebView's only policy). No-op in `vite dev`, whose HMR the policy
+    // would block.
+    buildInjectCspMeta(),
     // File-based routing (WS-C.1.1a). Generates src/routeTree.gen.ts from the
     // route files and auto-code-splits each route's component. Must precede react().
     tanstackRouter({
@@ -299,24 +309,7 @@ export default defineConfig({
         }
       : {}),
     headers: {
-      'Content-Security-Policy': [
-        "default-src 'self'",
-        "script-src 'self'",
-        "style-src 'self'",
-        "img-src 'self' data:",
-        "font-src 'self'",
-        "connect-src 'self'",
-        "worker-src 'self'",
-        "manifest-src 'self'",
-        "frame-ancestors 'self'",
-        "object-src 'none'",
-        "base-uri 'self'",
-        "form-action 'self'",
-        'trusted-types default dompurify licio-ugc',
-        "require-trusted-types-for 'script'",
-        'report-uri /api/security/csp-report',
-        'report-to csp-endpoint',
-      ].join('; '),
+      'Content-Security-Policy': contentSecurityPolicyHeader(),
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'SAMEORIGIN',
       'Referrer-Policy': 'strict-origin-when-cross-origin',

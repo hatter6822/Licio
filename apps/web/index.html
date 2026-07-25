@@ -3,19 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      Defense-in-depth CSP + Trusted Types mirrored as a meta-equivalent of the
-      server `Content-Security-Policy` header (apps/api security-headers.ts), for the
-      enforceable-in-meta directives only (frame-ancestors / report-uri / report-to
-      are header-only and intentionally omitted).  On the web this is redundant with
-      the header (identical policy → no behaviour change); it is the SOLE CSP source
-      in the WS-R.15.4a native courier WebView, which serves these same bundled
-      assets from https://localhost with no server headers — so the script/object/
-      base/Trusted-Types posture survives the WebView with no relaxation.
+      The Content-Security-Policy `<meta>` is INJECTED AT BUILD TIME from the
+      single source in `@licio/shared` (`security/csp.ts`) — see the
+      `licio:inject-csp-meta` plugin in vite.config.ts.  It is deliberately not
+      written here: this file used to hold a hand-maintained copy of the API's
+      response header, and a header tightened without a matching edit here left
+      the native courier WebView — where the meta is the ONLY policy — running
+      the older, weaker rules.
     -->
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; trusted-types default dompurify licio-ugc; require-trusted-types-for 'script'"
-    />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!-- Theme-color matches the neumorphic fabric canvas in each colour scheme. -->
     <meta name="theme-color" content="#F4ECDF" media="(prefers-color-scheme: light)" />
