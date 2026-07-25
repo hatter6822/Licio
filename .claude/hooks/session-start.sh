@@ -29,7 +29,21 @@ fi
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$PROJECT_DIR"
 
-PG_VERSION=16
+# The service majors are DERIVED from the workflow, not duplicated here. The
+# header claims a session mirrors `ci.yml` exactly, and a second hard-coded
+# copy of a version is precisely how such a claim goes stale — CI could move to
+# `redis:8` and this file would keep asserting parity it no longer had. Each
+# falls back to the value CI uses today if the workflow cannot be read.
+CI_WORKFLOW=".github/workflows/ci.yml"
+ci_image_major() { # $1 = image name, e.g. `redis`
+  [ -r "$CI_WORKFLOW" ] || return 0
+  # `|` as the delimiter, because an image name contains `/`
+  # (`pgvector/pgvector`) and would otherwise close the `s///` expression.
+  sed -n "s|.*image:[[:space:]]*$1:\([0-9][0-9]*\).*|\1|p" "$CI_WORKFLOW" | head -1
+}
+
+PG_VERSION="$(ci_image_major 'pgvector/pgvector:pg' || true)"
+PG_VERSION="${PG_VERSION:-16}"
 DB_USER=licio
 DB_PASSWORD=licio_ci
 DB_NAME=licio_ci
@@ -41,9 +55,14 @@ DB_NAME=licio_ci
 # is also what this asks for, so the common case matches CI exactly.
 PG_PORT=5432
 REDIS_URL="redis://localhost:6379"
-# CI runs redis:7. The floor that actually matters is 6.2 (GETDEL); requiring
-# the CI major keeps a session reproducing CI rather than approximating it.
-REDIS_MIN_MAJOR=7
+# The EXACT major CI runs, not a floor. A floor (`>= 7`) silently accepted a
+# newer Redis already listening on 6379 — an image shipping Redis 8 would be
+# reused and the session would report results from a different major while this
+# file claimed CI parity. The functional floor for our usage is 6.2 (GETDEL),
+# but "the suites can run" is a weaker property than "the suites ran against
+# what CI runs", and the latter is what is claimed above.
+REDIS_MAJOR_REQUIRED="$(ci_image_major 'redis' || true)"
+REDIS_MAJOR_REQUIRED="${REDIS_MAJOR_REQUIRED:-7}"
 
 log() { echo "[session-start] $*"; }
 
@@ -237,8 +256,8 @@ redis_binary_major() {
 }
 
 REDIS_MAJOR="$(redis_major || true)"
-if [ -n "${REDIS_MAJOR}" ] && [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
-  log "Redis on 6379 is major ${REDIS_MAJOR} (< ${REDIS_MIN_MAJOR}); replacing it"
+if [ -n "${REDIS_MAJOR}" ] && [ "${REDIS_MAJOR}" != "${REDIS_MAJOR_REQUIRED}" ]; then
+  log "Redis on 6379 is major ${REDIS_MAJOR}, not CI's ${REDIS_MAJOR_REQUIRED}; replacing it"
   redis-cli -p 6379 shutdown nosave >/dev/null 2>&1 || true
   sleep 1
   REDIS_MAJOR=""
@@ -252,8 +271,8 @@ if [ -z "${REDIS_MAJOR}" ]; then
   # exact scenario the version floor exists to repair, so install whenever the
   # binary is absent OR below the floor.
   REDIS_BINARY_MAJOR="$(redis_binary_major)"
-  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
-    log "Installing Redis (binary major '${REDIS_BINARY_MAJOR:-none}' < ${REDIS_MIN_MAJOR})"
+  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" != "${REDIS_MAJOR_REQUIRED}" ]; then
+    log "Installing Redis (binary major '${REDIS_BINARY_MAJOR:-none}' != CI's ${REDIS_MAJOR_REQUIRED})"
     export DEBIAN_FRONTEND=noninteractive
     # Refresh first: a stale index is the usual reason the candidate is old.
     # Neither step is fatal on its own — the floor check below is what decides,
@@ -262,10 +281,12 @@ if [ -z "${REDIS_MAJOR}" ]; then
     apt-get install -y --no-install-recommends redis-server >/dev/null 2>&1 || true
     REDIS_BINARY_MAJOR="$(redis_binary_major)"
   fi
-  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
-    log "ERROR: no redis-server >= ${REDIS_MIN_MAJOR} is obtainable (best available: '${REDIS_BINARY_MAJOR:-none}')."
-    log "       This distribution's redis-server predates the CI image (redis:${REDIS_MIN_MAJOR});"
-    log "       add a backports or upstream Redis apt source to the container image."
+  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" != "${REDIS_MAJOR_REQUIRED}" ]; then
+    log "ERROR: no redis-server major ${REDIS_MAJOR_REQUIRED} is obtainable (best available: '${REDIS_BINARY_MAJOR:-none}')."
+    log "       CI runs redis:${REDIS_MAJOR_REQUIRED}, and running the gated suites against a"
+    log "       DIFFERENT major would report parity this session does not have."
+    log "       Add an apt source carrying that major to the container image, or"
+    log "       change the CI service image and this hook follows it automatically."
     exit 1
   fi
   log "Starting Redis on 6379"
@@ -279,11 +300,11 @@ if [ -z "${REDIS_MAJOR}" ]; then
   REDIS_MAJOR="$(redis_major || true)"
 fi
 
-if [ -z "${REDIS_MAJOR}" ] || [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
-  log "ERROR: Redis on 6379 is major '${REDIS_MAJOR:-none}', need >= ${REDIS_MIN_MAJOR} (GETDEL) — the REDIS_URL-gated suites would fail"
+if [ -z "${REDIS_MAJOR}" ] || [ "${REDIS_MAJOR}" != "${REDIS_MAJOR_REQUIRED}" ]; then
+  log "ERROR: Redis on 6379 is major '${REDIS_MAJOR:-none}', need exactly ${REDIS_MAJOR_REQUIRED} (the CI service image)"
   exit 1
 fi
-log "Redis major ${REDIS_MAJOR} on 6379"
+log "Redis major ${REDIS_MAJOR} on 6379 (matches CI)"
 
 # --------------------------------------------------------------------------
 # 4. Export the gate variables for the rest of the session

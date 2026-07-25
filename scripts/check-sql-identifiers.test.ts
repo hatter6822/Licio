@@ -299,6 +299,43 @@ describe('findOverlongIdentifiers', () => {
       ).toEqual([]);
     });
 
+    // Round 22: the DOLLAR-QUOTED spelling of a composed EXECUTE. Dynamic SQL
+    // uses it precisely when the statement contains quotes, and the branch
+    // scanned only the first operand — so a name in a later one was discarded
+    // as data. One folder now reads both spellings, including a mix.
+    it.each([
+      ['distinct tags', '$a$CREATE INDEX $a$ || $b$@$b$ || $c$ ON t(c)$c$'],
+      ['a repeated tag', '$q$CREATE INDEX $q$ || $q$@$q$'],
+      ['single-quoted first', "'CREATE INDEX ' || $b$@$b$ || ' ON t(c)'"],
+      ['dollar-quoted first', "$a$CREATE INDEX $a$ || '@'"],
+    ])('folds a dollar-quoted EXECUTE with %s', (_label, expression) => {
+      const name = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE ${expression.replace('@', name)}; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a short dollar-quoted concatenation alone', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE $a$CREATE INDEX $a$ || $b$${'w'.repeat(20)}$b$; END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('stops folding at a non-literal operand', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE $a$CREATE INDEX $a$ || quote_ident(v) || $c$ ON t(c)$c$; END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('folds a concatenated format TEMPLATE', () => {
       expect(
         findOverlongIdentifiers(

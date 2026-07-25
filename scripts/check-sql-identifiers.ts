@@ -436,38 +436,33 @@ function foldConcatenation(sql: string, from: number, head: string): { text: str
     if (sql.slice(j, j + 2) !== '||') break;
     j += 2;
     while (j < n && /\s/.test(sql[j] as string)) j += 1;
-    // An operand may carry an escape-string prefix of its own.
-    let escaped = false;
-    if (/^[EeBbXx]$/.test(sql[j] ?? '') && sql[j + 1] === "'") {
-      escaped = /^[Ee]$/.test(sql[j] as string);
-      j += 1;
-    }
-    if (sql[j] !== "'") break; // not a literal: the value is not static
-    j += 1;
-    let literal = '';
-    while (j < n) {
-      if (escaped && sql[j] === '\\' && j + 1 < n) {
-        literal += sql.slice(j, j + 2);
-        j += 2;
-        continue;
-      }
-      if (sql[j] === "'") {
-        if (sql[j + 1] === "'") {
-          literal += "'";
-          j += 2;
-        } else {
-          j += 1;
-          break;
-        }
-      } else {
-        literal += sql[j];
-        j += 1;
-      }
-    }
-    text += escaped ? decodeEscapeString(literal) : literal;
-    k = j;
+    const operand = readConcatOperand(sql, j);
+    if (!operand) break; // not a literal: the value is not static
+    text += operand.value;
+    k = operand.end;
   }
   return { text, end: k };
+}
+
+/**
+ * Read ONE concatenation operand: a single-quoted literal (optionally
+ * `E`-prefixed) or a DOLLAR-QUOTED span.
+ *
+ * Both spellings are literals PostgreSQL concatenates identically, and dynamic
+ * SQL uses the dollar-quoted one precisely when the statement contains quotes
+ * — so a folder that read only `'…'` dropped every later operand of
+ * `EXECUTE $a$CREATE INDEX $a$ || $b$<name>$b$`, discarding the identifier.
+ */
+function readConcatOperand(sql: string, at: number): { value: string; end: number } | null {
+  const dollar = /^\$(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF]*)?\$/.exec(sql.slice(at));
+  if (dollar) {
+    const tag = dollar[0];
+    const close = sql.indexOf(tag, at + tag.length);
+    if (close === -1) return null; // unterminated: not statically known
+    return { value: sql.slice(at + tag.length, close), end: close + tag.length };
+  }
+  const literal = readSqlLiteral(sql, at);
+  return literal ? { value: literal.value, end: literal.end } : null;
 }
 
 /**
@@ -635,7 +630,18 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // case above, and the form used precisely when the dynamic statement
       // contains quotes.
       if (recent[recent.length - 1] === 'execute') {
-        yield* identifierCandidates(sql.slice(i + tag.length, bodyEnd));
+        // The statement may be COMPOSED, and the dollar-quoted spelling is the
+        // one used when it contains quotes. Folded with the same helper the
+        // single-quoted path uses, so a name in a later operand is measured.
+        const folded = foldConcatenation(
+          sql,
+          close === -1 ? n : close + tag.length,
+          sql.slice(i + tag.length, bodyEnd),
+        );
+        yield* identifierCandidates(folded.text);
+        i = folded.end;
+        recent = [];
+        continue;
       }
       i = close === -1 ? n : close + tag.length;
       recent = [];

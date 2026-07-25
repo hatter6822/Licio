@@ -16,8 +16,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   BUILT_CODE_SINKS,
+  DOM_MEMBER_SINKS,
   DYNAMIC_CODE_SINKS,
   findDynamicCodeSinks,
+  findMemberSinkUses,
   REMOTE_DYNAMIC_IMPORT_SINK,
   REMOTE_IMPORT_SCRIPTS_SINK,
   SOURCE_CODE_SINKS,
@@ -628,6 +630,49 @@ describe('aliased sinks', () => {
   });
 });
 
+describe('member-named DOM sinks', () => {
+  // Round 22. These were patterns (`/\.innerHTML\s*=/`) on the theory that a
+  // DOM sink has no call chain to walk. Wrong in both directions:
+  // `document['write'](payload)` IS a member access with a call, and
+  // `node['innerHTML'] = payload` assigns the same property — so both walked
+  // past a merge-blocking XSS gate. Walked structurally now, which also gives
+  // them the member-name folding every other lookup has.
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    'node.innerHTML = payload;',
+    "node['innerHTML'] = payload;",
+    'node["innerHTML"] = payload;',
+    "node['inner' + 'HTML'] = payload;",
+    'node?.innerHTML = payload;',
+    'node.innerHTML += payload;', // compound assignment appends markup too
+    "el['outerHTML'] = x;",
+    'document.write(payload);',
+    "document['write'](payload);",
+    "document['writeln'](payload);",
+    'document.write?.(payload);',
+    'document . write (payload);',
+  ])('catches %s', (code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    'const h = node.innerHTML;', // a READ is not a write
+    'if (node.innerHTML === x) {}',
+    'if (node.innerHTML == x) {}',
+    // `write` is only a sink on `document` — a stream or a file handle is the
+    // overwhelmingly common use and must stay clean.
+    'stream.write(chunk); res.write(body);',
+    "logger.write('x'); fh['write']('y');",
+    'const o = { innerHTML: 1 };',
+    '// never do node.innerHTML = x',
+    '/* document.write(y) */',
+    'const s = "node.innerHTML = x";',
+  ])('does not flag %s', (code) => {
+    expect(dom(code)).toBe(false);
+  });
+});
+
 describe('constant string folding', () => {
   // Round 16. Every string predicate used to read only the FIRST token of an
   // argument, which made `+` a universal bypass: the pieces of a URL or a
@@ -672,6 +717,46 @@ describe('constant string folding', () => {
     ['a numeric first argument', 'setTimeout(delay + 1, 0)'],
     ['an indexed handler lookup', "setTimeout(handlers['x'], 0)"],
     ['an arrow body containing a string', "setTimeout(() => f('str'), 0)"],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
+describe('sinks written INTO an existing container', () => {
+  // Round 22. Building a registry empty and filling it afterwards is the
+  // ordinary way one is populated, so reading only the LITERAL left the whole
+  // pattern open — this was the remaining entry on the docstring's "does NOT
+  // do" list after the container work.
+  it.each([
+    ['an object property', 'const handlers = {}; handlers.run = eval; handlers.run(payload)'],
+    ['an array index', "const handlers = []; handlers[0] = Function; handlers[0]('x')()"],
+    ['a computed key', "const o = {}; o['run'] = eval; o.run('x')"],
+    ['a qualified reference', "const o = {}; o.run = globalThis.eval; o.run('x')"],
+    ['an alias', "const F = Function; const o = {}; o.f = F; o.f('x')()"],
+    ['a timer', "const o = {}; o.t = setTimeout; o.t('evil()', 0)"],
+    // COPY-ON-WRITE: the assignment takes effect on this name…
+    ['a property added to a receiver alias', "const g = globalThis; g.zzz = eval; g.zzz('x')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('extends a literal table rather than replacing it', () => {
+    expect(
+      findDynamicCodeSinks("const o = { a: eval }; o.b = Function; o.b('x')(); o.a('y')"),
+    ).toHaveLength(2);
+  });
+
+  it('does not leak an assigned property into the SHARED global table', () => {
+    // …and must NOT reach every other holder of that table, which is why the
+    // extension copies rather than mutating in place.
+    expect(fires("const g = globalThis; g.zzz = eval; self.zzz('x')")).toBe(false);
+  });
+
+  it.each([
+    ['a non-sink assignment', "const o = {}; o.run = handler; o.run('x')"],
+    ['an equality test', 'const o = {}; if (o.run === eval) {}'],
+    ['a property that is only READ', 'const o = {}; o.run = eval; const r = o.run;'],
+    ['an assigned timer given a function', 'const o = {}; o.t = setTimeout; o.t(tick, 0)'],
   ])('does not flag %s', (_label, code) => {
     expect(fires(code)).toBe(false);
   });

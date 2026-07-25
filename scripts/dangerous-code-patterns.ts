@@ -32,11 +32,12 @@
 // `scripts`-rooted vitest project — which resolves no external packages —
 // can unit test it directly.
 
-import type { SinkSpec } from './js-sink-analyzer.js';
+import type { MemberSinkSpec, SinkSpec } from './js-sink-analyzer.js';
 import { findSinkInvocations, isNonSameOriginUrl, isStringLiteral } from './js-sink-analyzer.js';
 
-export type { SinkSpec, Token } from './js-sink-analyzer.js';
+export type { MemberSinkSpec, SinkSpec, Token } from './js-sink-analyzer.js';
 export {
+  findMemberSinkUses,
   findSinkInvocations,
   isNonSameOriginUrl,
   isStringLiteral,
@@ -129,8 +130,22 @@ export function findDynamicCodeSinks(
   return findSinkInvocations(source, sinks).map(({ label, line }) => ({ label, line }));
 }
 
+/**
+ * The DOM sinks named by a PROPERTY. Walked structurally, not matched: a
+ * pattern anchored on `.innerHTML` reads only the dotted spelling, so
+ * `node['innerHTML'] = payload` and `document['write'](payload)` reached the
+ * same sinks past a merge-blocking XSS gate.
+ */
+export const DOM_MEMBER_SINKS: readonly MemberSinkSpec[] = [
+  { property: 'innerHTML', form: 'assign', label: 'Direct innerHTML assignment (use DOMPurify)' },
+  { property: 'outerHTML', form: 'assign', label: 'Direct outerHTML assignment' },
+  { receiver: 'document', property: 'write', form: 'call', label: 'document.write() call' },
+  { receiver: 'document', property: 'writeln', form: 'call', label: 'document.writeln() call' },
+];
+
 // ---------------------------------------------------------------------------
-// Textual DOM sinks. No call chain to walk, so a pattern is the right tool.
+// Textual sinks. A `javascript:` URL is string CONTENT with no call chain, so
+// a pattern remains the right tool for it.
 // ---------------------------------------------------------------------------
 
 export interface CodeSinkPattern {

@@ -732,6 +732,81 @@ function interpolationSpans(
   return spans;
 }
 
+/**
+ * A DOM sink named by a PROPERTY rather than by a global: `x.innerHTML = …`,
+ * `document.write(…)`.
+ *
+ * These were patterns (`/\.innerHTML\s*=/`) on the theory that a DOM sink has
+ * no call chain to walk. That was wrong in both directions: `document['write']`
+ * IS a member access with a call, and `node['innerHTML'] = payload` assigns the
+ * same property the dotted spelling does — so both walked past a
+ * merge-blocking XSS gate. Reading them here means they get the same
+ * member-name folding (`['inner' + 'HTML']`) every other lookup gets.
+ */
+export interface MemberSinkSpec {
+  /** The identifier the property must hang off, or undefined for ANY receiver. */
+  readonly receiver?: string;
+  readonly property: string;
+  /** `assign` — `x.p = …` (and `+=`); `call` — `x.p(…)`. */
+  readonly form: 'assign' | 'call';
+  readonly label: string;
+}
+
+/** Find uses of member-named DOM sinks, in every access spelling. */
+export function findMemberSinkUses(
+  source: string,
+  specs: readonly MemberSinkSpec[],
+): SinkFinding[] {
+  const byKey = new Map<string, SinkFinding>();
+  const lineStarts: number[] = [0];
+  for (let k = 0; k < source.length; k += 1) if (source[k] === '\n') lineStarts.push(k + 1);
+  const lineOf = (offset: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if ((lineStarts[mid] as number) <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+
+  for (const preferRegex of [false, true]) {
+    const tokens = tokenize(source, preferRegex);
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (!endsExpression(tokens[i - 1])) continue;
+      const member = readMember(tokens, i);
+      if (!member) continue;
+      for (const spec of specs) {
+        if (spec.property !== member.name) continue;
+        if (spec.receiver !== undefined) {
+          const receiver = tokens[i - 1];
+          if (receiver?.kind !== 'ident' || receiver.value !== spec.receiver) continue;
+        }
+        const next = tokens[member.next];
+        const after = tokens[member.next + 1];
+        const matched =
+          spec.form === 'call'
+            ? isPunct(next, '(') || (isPunct(next, '?.') && isPunct(after, '('))
+            : // `=` but not `==`/`===`, or the compound `+=` (which appends
+              // markup just as destructively as a plain assignment does).
+              (isPunct(next, '=') && !isPunct(after, '=')) ||
+              (isPunct(next, '+') && isPunct(after, '='));
+        if (!matched) continue;
+        const startTok = tokens[i - 1] as Token;
+        const endTok = tokens[Math.min(member.next + 1, tokens.length) - 1] ?? startTok;
+        const finding: SinkFinding = {
+          label: spec.label,
+          line: lineOf(startTok.start),
+          text: source.slice(startTok.start, endTok.end).replace(/\s+/g, ' ').trim(),
+        };
+        byKey.set(`${finding.line}:${finding.label}`, finding);
+      }
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
+}
+
 export interface SinkFinding {
   readonly label: string;
   readonly line: number;
@@ -1168,6 +1243,30 @@ function collectAliases(
       if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
       const previous = tokens[i - 1];
       if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
+
+      // `handlers.run = eval` / `handlers[0] = Function` — a sink written INTO
+      // a container that already exists. Building the container empty and
+      // filling it afterwards is the ordinary way a registry is populated, so
+      // reading only the literal left the whole pattern open.
+      //
+      // COPY-ON-WRITE: an existing table may be SHARED (`const g = globalThis`
+      // hands `g` the global sink map itself), so extending it in place would
+      // add the property to every other holder — including the globals.
+      const assigned = readMember(tokens, i + 1);
+      if (assigned) {
+        const at = tokens[assigned.next];
+        const isAssignment = isPunct(at, '=') && !isPunct(tokens[assigned.next + 1], '=');
+        if (isAssignment) {
+          const spec = resolve(unwrapReference(tokens, assigned.next + 1), aliases);
+          if (spec) {
+            const extended = new Map<string, ReceiverEntry>(aliases.members.get(name.value));
+            extended.set(assigned.name, { kind: 'sink', spec });
+            aliases.members.set(name.value, extended);
+          }
+          continue;
+        }
+      }
+
       const declared = initializerIndex(tokens, i);
       if (declared === null) continue;
       // `(Function)`, `(0, Function)`, `({ run: eval })` — punctuation around

@@ -3,7 +3,9 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   type CodeSinkPattern,
+  DOM_MEMBER_SINKS,
   findDynamicCodeSinks,
+  findMemberSinkUses,
   SOURCE_CODE_SINKS,
   scanSourceForSinks,
 } from './dangerous-code-patterns.js';
@@ -27,11 +29,12 @@ const SOURCE_DIRS = [
   resolve(ROOT, 'packages/private-p2p/src'),
 ];
 
+// A `javascript:` URL is string CONTENT — no receiver, no call chain — so a
+// pattern is the right tool for it. The DOM sinks that ARE member accesses
+// (`innerHTML`, `document.write`) moved to `DOM_MEMBER_SINKS`, which is walked
+// structurally: a pattern anchored on `.innerHTML` reads only the dotted
+// spelling, and `node['innerHTML'] = payload` reaches the same sink.
 const BLOCKED_PATTERNS: CodeSinkPattern[] = [
-  { pattern: /\.innerHTML\s*=/, label: 'Direct innerHTML assignment (use DOMPurify)' },
-  { pattern: /\.outerHTML\s*=/, label: 'Direct outerHTML assignment' },
-  { pattern: /document\s*\.\s*write\s*\(/, label: 'document.write() call' },
-  { pattern: /document\s*\.\s*writeln\s*\(/, label: 'document.writeln() call' },
   {
     pattern: /['"`]javascript\s*:/i,
     label: 'javascript: URL (XSS vector)',
@@ -74,15 +77,19 @@ function lint(): void {
 
       const relative = filePath.replace(ROOT, '');
       const source = readFileSync(filePath, 'utf-8');
-      // Two scans, because the two sink classes need different machinery.
-      //   • TEXTUAL DOM sinks (`innerHTML =`, `javascript:`) — whole-text
-      //     regex over both lexings of the ambiguous `/`. Whole-text, not per
-      //     line, because a match may span a newline.
+      // Three scans, because the sink classes need different machinery.
+      //   • TEXTUAL sinks (`javascript:`) — string CONTENT with no receiver
+      //     and no call chain, so a whole-text regex over both lexings of the
+      //     ambiguous `/` is the right tool. Whole-text, not per line, because
+      //     a match may span a newline.
+      //   • MEMBER DOM sinks (`innerHTML =`, `document.write(…)`) — tokenised,
+      //     so the computed spellings reach the same finding the dotted ones do.
       //   • DYNAMIC-CODE sinks — tokenised and walked, so every spelling of
       //     "reference, member accesses, call" is covered structurally rather
       //     than enumerated, and comments cannot produce a finding.
       for (const { label, line } of [
         ...scanSourceForSinks(source, BLOCKED_PATTERNS),
+        ...findMemberSinkUses(source, DOM_MEMBER_SINKS),
         ...findDynamicCodeSinks(source, SOURCE_CODE_SINKS),
       ]) {
         errors.push(`${relative}:${line}: ${label}`);
