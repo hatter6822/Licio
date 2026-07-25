@@ -244,6 +244,52 @@ describe('findOverlongIdentifiers', () => {
       ).toHaveLength(1);
     });
 
+    // Round 16: a format ARGUMENT may itself be a `||` chain. Keeping only the
+    // last literal measured a fragment, so a 64-byte name split into two
+    // 32-byte pieces passed while PostgreSQL created and truncated the whole.
+    it.each([
+      ['two operands', 2],
+      ['three operands', 3],
+    ])('folds a concatenated %s format argument', (_label, operands) => {
+      // 64 bytes of name split evenly, so no single fragment reaches the limit
+      // and only the folded whole can be over it.
+      const each = Math.ceil(64 / operands);
+      const pieces = Array.from({ length: operands }, () => `'${'w'.repeat(each)}'`);
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON t(c)', ${pieces.join(' || ')}); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('folds a concatenated format TEMPLATE', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('CREATE ' || 'INDEX %I ON t(c)', '${'w'.repeat(64)}'); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a short concatenated argument alone', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON t(c)', '${'w'.repeat(20)}' || '${'y'.repeat(20)}'); END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
+    it('treats a concatenated %L argument as DATA', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('INSERT INTO t VALUES (%L)', '${'w'.repeat(40)}' || '${'y'.repeat(40)}'); END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('leaves a within-limit positional identifier alone', () => {
       expect(
         findOverlongIdentifiers(

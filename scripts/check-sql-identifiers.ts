@@ -299,9 +299,14 @@ function expandFormatCall(sql: string, open: number): { text: string; end: numbe
     if (c === "'" || (/^[EeBbXx]$/.test(c) && sql[i + 1] === "'")) {
       const literal = readSqlLiteral(sql, i);
       if (!literal) return null;
-      if (depth === 0) current = literal.value;
+      // An ARGUMENT may itself be a `||` chain — `format('… %I', 'aaa' ||
+      // 'bbb')` builds one identifier out of two literals, and taking only the
+      // last would measure a fragment. Folded with the same helper `EXECUTE`
+      // uses, so a name split across operands is measured whole.
+      const folded = foldConcatenation(sql, literal.end, literal.value);
+      if (depth === 0) current = folded.text;
       sawAny = true;
-      i = literal.end;
+      i = folded.end;
       continue;
     }
     if (c === '(') depth += 1;

