@@ -21,7 +21,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BUILT_CODE_SINKS, stripComments } from './dangerous-code-patterns.js';
+import { BUILT_CODE_SINKS, scanSourceForSinks, stripComments } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'apps', 'web', 'dist');
@@ -149,7 +149,6 @@ export const REQUIRED_FILES: readonly RequiredFile[] = [
  *  previously pinned only `new Function(`, leaving the equivalent bare
  *  `Function(` call open in every one of them. */
 const SW_FORBIDDEN: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  ...BUILT_CODE_SINKS.map(({ pattern, label }) => ({ pattern, detail: `sw ${label}` })),
   { pattern: /importScripts\s*\(\s*['"`]?\s*https?:/i, detail: 'sw remote importScripts' },
 ];
 
@@ -160,19 +159,31 @@ const SW_FORBIDDEN: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
 export function runUpdateChannelGate(read: (relPath: string) => string): UpdateGateViolation[] {
   const violations: UpdateGateViolation[] = [];
   for (const { file, markers } of REQUIRED_FILES) {
-    let code: string;
+    let raw: string;
     try {
-      code = stripComments(read(file));
+      raw = read(file);
     } catch {
       violations.push({ file, detail: 'required update-channel file not found' });
       continue;
     }
+    // Markers must be REAL wiring, so they are looked for in the stripped copy
+    // — a marker named in a comment does not wire anything up.
+    const code = stripComments(raw);
     for (const marker of markers) {
       if (!code.includes(marker)) {
         violations.push({ file, detail: `missing required wiring marker: ${marker}` });
       }
     }
     if (file.endsWith('sw-push.js')) {
+      // The dynamic-code sinks are scanned over the RAW ∪ STRIPPED union, not
+      // the stripped copy alone: the strip's regex-vs-division heuristic is a
+      // heuristic, and a mis-lex there can blank a real `Function('…')()` out
+      // of existence and leave this gate green. Scanning the raw text as well
+      // means a lexing mistake can only add a false positive, never hide a
+      // sink. (The marker check above is unaffected — it wants the strip.)
+      const seen = new Set<string>();
+      for (const { label } of scanSourceForSinks(raw, BUILT_CODE_SINKS)) seen.add(label);
+      for (const label of seen) violations.push({ file, detail: `sw ${label}` });
       for (const { pattern, detail } of SW_FORBIDDEN) {
         if (pattern.test(code)) violations.push({ file, detail });
       }

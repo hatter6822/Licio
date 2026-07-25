@@ -129,6 +129,58 @@ describe('findOverlongIdentifiers', () => {
     }
   });
 
+  // Round 7: PL/pgSQL's `EXECUTE` runs its argument as SQL, so an over-long
+  // name inside that string truncates exactly like one written out — but the
+  // literal was being discarded as data, leaving the gate blind to it.
+  describe('EXECUTE dynamic SQL inside a procedural body', () => {
+    const name = `x_${'w'.repeat(70)}`;
+
+    it('scans a string-literal EXECUTE argument (regression)', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE 'CREATE INDEX ${name} ON t (c)'; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('scans a dollar-quoted EXECUTE argument', () => {
+      // The form used precisely when the dynamic statement itself contains
+      // quotes, so it cannot be the one left unscanned.
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE $x$CREATE INDEX ${name} ON t (c)$x$; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('decodes the doubled-quote escape before scanning', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE 'CREATE INDEX "${name}" ON t (c)'; END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('leaves an ORDINARY string literal as data', () => {
+      // The widening must not turn every quoted string back into SQL.
+      expect(
+        findOverlongIdentifiers('0100_x.sql', `INSERT INTO t (b) VALUES ('${'z'.repeat(80)}');`),
+      ).toEqual([]);
+    });
+
+    it('passes an EXECUTE whose statement is within the limit', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE 'CREATE INDEX ok_idx ON t (c)'; END $$;`,
+        ),
+      ).toEqual([]);
+    });
+  });
+
   it('treats a nested dollar-quoted literal inside a DO block as data', () => {
     // The body is procedural, but a value literal WITHIN it is still a string.
     const word = 'z'.repeat(80);

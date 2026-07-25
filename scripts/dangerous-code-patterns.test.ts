@@ -10,6 +10,7 @@ import {
   BUILT_CODE_SINKS,
   EVAL_PATTERN,
   EVAL_PATTERN_STRICT,
+  EVAL_STRING_ARG_PATTERN,
   FUNCTION_CONSTRUCTOR_PATTERNS,
   FUNCTION_TAGGED_TEMPLATE_PATTERN,
   findSinkMatches,
@@ -75,6 +76,12 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     // though every direct call site already recognised qualified references.
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.Function, null, ['x'])();"],
     ['Reflect.construct + computed', "Reflect.construct(window['Function'], ['x'])();"],
+    // Round-7: the METHOD side accepted only a plain `.`, so computed and
+    // optional access to the very same inherited method slipped through.
+    ['computed method', "Function['call'](null, 'return 42')();"],
+    ['computed method, double quotes', 'Function["apply"](null, ["return 42"])();'],
+    ['optional method on a global', "globalThis.Function?.call(null, 'return 42')();"],
+    ['optional method, bare', "Function?.bind(null)('return 42')();"],
   ])('catches the METHOD form: %s', (_label, code) => {
     expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
@@ -174,6 +181,29 @@ describe('eval patterns', () => {
     expect(EVAL_PATTERN_STRICT.test('const x = eval("1");')).toBe(true);
     expect(EVAL_PATTERN_STRICT.test('a.eval("1");')).toBe(true);
   });
+
+  // Both general eval patterns match ordinary PROSE — the real service worker
+  // carries `// …no remote code, no eval (WS-C.2.1d)` — so they are marked
+  // commentSensitive and run only on the stripped copy. The string-argument
+  // form is what keeps eval covered on the RAW pass, so a strip mis-lex cannot
+  // hide `eval('…')` the way it can hide a call the strip blanks away.
+  it('the general eval patterns match prose, which is why they are comment-sensitive', () => {
+    const prose = '// no remote code, no eval (WS-C.2.1d)';
+    expect(EVAL_PATTERN.test(prose)).toBe(true);
+    expect(EVAL_PATTERN_STRICT.test(prose)).toBe(true);
+    // …and the union therefore does NOT report it.
+    expect(scanSourceForSinks(prose, SOURCE_CODE_SINKS)).toEqual([]);
+    expect(scanSourceForSinks(prose, BUILT_CODE_SINKS)).toEqual([]);
+  });
+
+  it('the string-argument form is prose-safe, so it covers the RAW pass', () => {
+    expect(EVAL_STRING_ARG_PATTERN.test('// no eval (WS-C.2.1d)')).toBe(false);
+    expect(EVAL_STRING_ARG_PATTERN.test(`eval('payload')`)).toBe(true);
+    // The payoff: a file the strip mis-lexes still reports the eval.
+    const misLexed = `if (ok) /[/*]/.test(x); eval('payload'); const tail = '*/';`;
+    expect(stripComments(misLexed)).not.toContain('eval');
+    expect(scanSourceForSinks(misLexed, BUILT_CODE_SINKS).length).toBeGreaterThan(0);
+  });
 });
 
 describe('the assembled sink sets', () => {
@@ -241,6 +271,8 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
     ['Reflect.apply', "Reflect.apply(eval, null, ['x'])"],
     ['Reflect.apply + global receiver', "Reflect.apply(globalThis.eval, null, ['payload'])"],
     ['Reflect.apply + computed', "Reflect.apply(self['eval'], null, ['payload'])"],
+    ['computed method', "eval['call'](null, '40+2')"],
+    ['optional computed receiver + optional method', "self?.['eval']?.call(null, 'x')"],
   ])('catches the METHOD form: %s', (_label, code) => {
     expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
@@ -253,6 +285,9 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
       // invoked through `.call` is still not a sink.
       'await redis.eval.call(client, script, 0);',
       'await client.eval.apply(client, [lua, keys]);',
+      // The computed-method widening must not reach a library wrapper either.
+      "await redis['eval'].call(client, script, 0);",
+      "await redis.eval['apply'](client, [lua, keys]);",
     ]) {
       expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(false);
     }

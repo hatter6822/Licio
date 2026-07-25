@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BUILT_CODE_SINKS, stripComments } from './dangerous-code-patterns.js';
+import { BUILT_CODE_SINKS, scanSourceForSinks, stripComments } from './dangerous-code-patterns.js';
 
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const SW_FILES = ['sw.js', 'sw-push.js'];
@@ -24,11 +24,24 @@ export function findSwSecurityIssues(filename: string, content: string): string[
       issues.push(`${filename}: external importScripts (remote code): ${call}`);
     }
   }
-  // Dynamic-code sinks from the shared definition: eval(), BOTH
-  // Function-constructor call forms, and the string-argument timers.
-  for (const { pattern, label } of BUILT_CODE_SINKS) {
-    if (pattern.test(code)) issues.push(`${filename}: ${label} is forbidden in the worker`);
-  }
+  // Dynamic-code sinks from the shared definition: eval(), every
+  // Function-constructor form, and the string-argument timers.
+  //
+  // Scanned through `scanSourceForSinks`, which unions the RAW text with the
+  // comment-stripped copy, rather than against `code` alone. A strip-only scan
+  // makes every detection depend on lexing the whole file correctly, and the
+  // regex-vs-division heuristic is not a parser: in
+  //
+  //     if (ok) /[/*]/.test(x); Function('return 42')(); const tail = '*/';
+  //
+  // the `/` after `)` is read as division, so the strip treats the `/*` inside
+  // the regex as a comment opener and blanks everything through the trailing
+  // `*/` — deleting the constructor call and leaving the gate green. Matching
+  // the raw text too means a mis-lex can only ever ADD a false positive, never
+  // hide a real sink.
+  const seen = new Set<string>();
+  for (const { label } of scanSourceForSinks(content, BUILT_CODE_SINKS)) seen.add(label);
+  for (const label of seen) issues.push(`${filename}: ${label} is forbidden in the worker`);
   return issues;
 }
 

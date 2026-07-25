@@ -71,4 +71,26 @@ describe('findSwSecurityIssues', () => {
       '// no eval (allowed in prose)\n/* importScripts("https://x") */\nself.skipWaiting();';
     expect(findSwSecurityIssues('sw.js', content)).toEqual([]);
   });
+
+  // Round-7: this gate scanned only the comment-STRIPPED copy, which made every
+  // detection depend on lexing the whole file correctly. The strip's
+  // regex-vs-division rule is a heuristic, not a parser, and a mis-lex there can
+  // blank a real sink out of existence — strictly worse than not stripping.
+  // Scanning the raw text as well means a lexing mistake can only ADD a false
+  // positive, never hide a constructor call.
+  it('catches a sink the comment strip would erase (regression)', () => {
+    // The `/` after `)` is read as division, so the `/*` inside the regex
+    // literal opens a "comment" that runs to the trailing `*/` — deleting the
+    // Function call in between.
+    const content = `if (ok) /[/*]/.test(x); Function('return 42')(); const tail = '*/';`;
+    const issues = findSwSecurityIssues('sw.js', content);
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues.join('\n')).toMatch(/Function/);
+  });
+
+  it('reports each sink label once even when the raw and stripped passes agree', () => {
+    // Both passes see this one, and a worker listing the same violation twice
+    // would be noise rather than signal.
+    expect(findSwSecurityIssues('sw.js', 'const f = Function("return 1");')).toHaveLength(1);
+  });
 });

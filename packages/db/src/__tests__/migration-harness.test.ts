@@ -251,14 +251,24 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
       // almost always to shorten it.
       'model_ratification_ballot_vote_id_model_ratification_vote_id_fk',
     ];
+    // OCTET_LENGTH, not LENGTH: `NAMEDATALEN` bounds the identifier's BYTE
+    // length, while `length()` counts CHARACTERS. A non-ASCII name truncated to
+    // 63 bytes holds fewer than 63 characters — a 61-byte ASCII prefix plus one
+    // `é` is 62 characters — so a character-counting predicate omits exactly
+    // the truncated rows this assertion exists to surface. Truncation can also
+    // clip mid-sequence, leaving 62 bytes plus a dropped partial character, so
+    // the threshold is `>= 62` for the multibyte case rather than `>= 63`.
     const atCap = await client.unsafe(
       `SELECT c.conname AS name
          FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
-        WHERE length(c.conname) >= 63
+        WHERE octet_length(c.conname) >= 63
+           OR (octet_length(c.conname) >= 62 AND octet_length(c.conname) <> length(c.conname))
        UNION ALL
        SELECT c.relname
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE length(c.relname) >= 63 AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
+        WHERE (octet_length(c.relname) >= 63
+           OR (octet_length(c.relname) >= 62 AND octet_length(c.relname) <> length(c.relname)))
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
     );
     const unexpected = atCap
       .map((r) => (r as unknown as { name: string }).name)

@@ -189,15 +189,30 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
     // 'string literal' — '' is an escaped quote, not a terminator
     if (sql[i] === "'") {
       i += 1;
+      let literal = '';
       while (i < n) {
         if (sql[i] === "'") {
-          if (sql[i + 1] === "'") i += 2;
-          else {
+          if (sql[i + 1] === "'") {
+            literal += "'";
+            i += 2;
+          } else {
             i += 1;
             break;
           }
-        } else i += 1;
+        } else {
+          literal += sql[i];
+          i += 1;
+        }
       }
+      // A literal that is the argument of PL/pgSQL's `EXECUTE` is not data —
+      // Postgres runs it as SQL, so an over-long name inside it truncates
+      // exactly like one written out. Recurse into the DECODED text (the `''`
+      // escapes are already collapsed above, which is the form the server
+      // sees). Ordinary literals are still discarded.
+      if (recent[recent.length - 1] === 'execute') {
+        yield* identifierCandidates(literal);
+      }
+      recent = [];
       continue;
     }
     // $tag$ … $tag$ — data literal or procedural body, per the context above.
@@ -224,6 +239,14 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // the ENTIRE span. An unterminated literal consumes the rest rather than
       // spilling its prose into the identifier stream.
       const close = sql.indexOf(tag, i + tag.length);
+      const bodyEnd = close === -1 ? n : close;
+      // …unless it is the argument of `EXECUTE`, in which case the span is
+      // SQL the server runs — the dollar-quoted counterpart of the string
+      // case above, and the form used precisely when the dynamic statement
+      // contains quotes.
+      if (recent[recent.length - 1] === 'execute') {
+        yield* identifierCandidates(sql.slice(i + tag.length, bodyEnd));
+      }
       i = close === -1 ? n : close + tag.length;
       recent = [];
       continue;

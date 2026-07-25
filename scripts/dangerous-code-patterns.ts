@@ -67,8 +67,23 @@ const sink = (source: string): RegExp => new RegExp(source.split('~').join(GAP))
  */
 const reference = (name: string): string =>
   String.raw`(?:(?:globalThis|window|self)~\??\.~${name}\b` +
-  String.raw`|(?:globalThis|window|self)~\[~['"\`]${name}['"\`]~\]` +
+  String.raw`|(?:globalThis|window|self)~(?:\?\.)?~\[~['"\`]${name}['"\`]~\]` +
   String.raw`|${name}\b)`;
+
+/**
+ * An inherited function method (`call`/`apply`/`bind`) accessed and invoked, in
+ * every spelling the language allows:
+ *
+ *     .call(…)      ?.call(…)      ['call'](…)      ?.["apply"](…)
+ *
+ * Matching only a plain `.` left `Function['call'](null, '…')()` and
+ * `globalThis.Function?.call(null, '…')()` passing every gate — the SAME
+ * computed/optional access the reference side already handled, so the method
+ * side had to learn it too. Written once and shared by all three sinks.
+ */
+const INVOKE_METHOD =
+  String.raw`(?:\??\.~(?:call|apply|bind)` +
+  String.raw`|(?:\?\.)?~\[~['"\`](?:call|apply|bind)['"\`]~\])~(?:\?\.)?~\(`;
 
 /**
  * Every textual form that reaches the **Function constructor**, an
@@ -121,10 +136,10 @@ export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
   sink(String.raw`\((?:[^()]*,~)?~Function~\)~(?:\?\.)?~[(\`]`),
   // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
   sink(String.raw`\[~(['"\`])Function\1~\]~(?:\?\.)?~[(\`]`),
-  // Invoked through an inherited function method: `Function.call(null, '…')()`.
-  sink(String.raw`(?<![.\w$#])Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
-  // The same, qualified by a global receiver: `globalThis.Function.apply(…)`.
-  sink(String.raw`\b(?:globalThis|window|self)~\??\.~Function~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  // Invoked through an inherited function method, in any spelling of BOTH the
+  // reference and the method: `Function.call(null, '…')()`,
+  // `globalThis.Function?.call(…)`, `Function['apply'](…)`.
+  sink(String.raw`(?<![.\w$#])${reference('Function')}${INVOKE_METHOD}`),
   // Reflective invocation, accepting any spelling of the reference:
   // `Reflect.apply(Function, …)`, `Reflect.construct(globalThis.Function, …)`.
   sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('Function')}`),
@@ -168,8 +183,7 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   // Optional call on the bare binding: `eval?.('…')`.
   sink(String.raw`(?<![.\w$#])eval~\?\.~\(`),
   // Invoked through an inherited function method: `eval.call(null, '…')`.
-  sink(String.raw`(?<![.\w$#])eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
-  sink(String.raw`\b(?:globalThis|window|self)~\??\.~eval~\.~(?:call|apply|bind)~(?:\?\.)?~\(`),
+  sink(String.raw`(?<![.\w$#])${reference('eval')}${INVOKE_METHOD}`),
   // Reflective invocation, accepting any spelling of the reference:
   // `Reflect.apply(eval, null, ['…'])`, `Reflect.apply(globalThis.eval, …)`.
   sink(String.raw`\bReflect~\.~(?:apply|construct)~\(~(?:\(~)*${reference('eval')}`),
@@ -238,6 +252,25 @@ export const EVAL_PATTERN = sink(String.raw`(?<![.\w$#])eval~\(`);
  */
 export const EVAL_PATTERN_STRICT = sink(String.raw`\beval~\(`);
 
+/**
+ * `eval` called with a STRING LITERAL — the raw-text-safe half of the eval
+ * coverage.
+ *
+ * The two patterns above are COMMENT-SENSITIVE in a way the other sinks are
+ * not: ordinary prose writes "no remote code, no eval (WS-C.2.1d)", and
+ * `eval~\(` matches that, so they can only run against comment-stripped text.
+ * That would make eval detection depend entirely on the strip lexing correctly
+ * — the exact single point of failure the raw ∪ stripped union exists to
+ * remove.
+ *
+ * Requiring a quote in the argument position fixes the asymmetry: prose puts a
+ * word after the paren, never a quote, so this form is safe on RAW text and
+ * covers `eval('…')` — the dangerous case, and the one an injected payload
+ * uses — even if the strip mis-lexes the surrounding file. A dynamic
+ * `eval(userInput)` is still caught, on the stripped pass.
+ */
+export const EVAL_STRING_ARG_PATTERN = sink(String.raw`\beval~\(~['"\`]`);
+
 export interface CodeSinkPattern {
   readonly pattern: RegExp;
   /** Short human label naming the sink (gates wrap this in their own phrasing). */
@@ -257,7 +290,11 @@ export interface CodeSinkPattern {
  * form plus every Function-constructor form plus the string-timer implicit eval.
  */
 export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
-  { pattern: EVAL_PATTERN, label: 'eval()' },
+  // Prose writes "no eval (…)", which `eval~\(` matches, so the general form
+  // runs on the STRIPPED copy only; the string-argument form is prose-safe and
+  // therefore also covers the raw pass. See EVAL_STRING_ARG_PATTERN.
+  { pattern: EVAL_PATTERN, label: 'eval()', commentSensitive: true },
+  { pattern: EVAL_STRING_ARG_PATTERN, label: 'eval()' },
   ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
   ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
     pattern,
@@ -279,7 +316,8 @@ export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
  * except that `eval` is matched in its strict form.
  */
 export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
-  { pattern: EVAL_PATTERN_STRICT, label: 'eval()' },
+  { pattern: EVAL_PATTERN_STRICT, label: 'eval()', commentSensitive: true },
+  { pattern: EVAL_STRING_ARG_PATTERN, label: 'eval()' },
   ...INDIRECT_EVAL_PATTERNS.map((pattern) => ({ pattern, label: 'indirect eval()' })),
   ...FUNCTION_CONSTRUCTOR_PATTERNS.map((pattern) => ({
     pattern,
@@ -560,13 +598,24 @@ export function findSinkMatches(
     }
     return lo + 1;
   };
+  // One SINK may be described by several patterns — `eval()` by both the
+  // general form and the prose-safe string-argument form — so the same call
+  // can match more than once. Report each (label, line) once: a consumer wants
+  // the distinct findings, not a count of how many patterns happened to cover
+  // the same text.
+  const seen = new Set<string>();
   for (const { pattern, label } of sinks) {
     const global = new RegExp(
       pattern.source,
       pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
     );
     for (const match of code.matchAll(global)) {
-      if (match.index !== undefined) matches.push({ label, line: lineOf(match.index) });
+      if (match.index === undefined) continue;
+      const line = lineOf(match.index);
+      const key = `${line}:${label}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matches.push({ label, line });
     }
   }
   return matches.sort((a, b) => a.line - b.line);
