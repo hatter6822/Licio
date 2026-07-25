@@ -386,6 +386,29 @@ describe('findOverlongIdentifiers', () => {
       ).toEqual([]);
     });
 
+    // Round 12: the body's language is what decides, not a keyword allowlist.
+    // `AS $$ TABLE t; $$ LANGUAGE SQL` is a valid body whose only verb is
+    // `TABLE`, and an incomplete allowlist made the gate BLIND to it.
+    it('classifies a function body by its LANGUAGE clause', () => {
+      const name = `t_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `CREATE FUNCTION f() RETURNS SETOF bigint AS $$ TABLE ${name}; $$ LANGUAGE SQL;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('reads a LANGUAGE clause written BEFORE the body', () => {
+      const path = 'p'.repeat(80);
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `CREATE FUNCTION f() RETURNS integer LANGUAGE C AS $$$libdir/${path}$$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('still scans a dollar-quoted AS body that IS procedural SQL', () => {
       expect(
         findOverlongIdentifiers(

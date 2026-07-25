@@ -202,7 +202,41 @@ function decodeEscapeString(body: string): string {
  * every `AS` literal into SQL.
  */
 function looksLikeSql(text: string): boolean {
-  return /\b(?:begin|create|alter|drop|select|insert|update|delete|execute)\b/i.test(text);
+  return /\b(?:begin|create|alter|drop|select|insert|update|delete|execute|table|with|values)\b/i.test(
+    text,
+  );
+}
+
+/**
+ * Languages whose function body is NOT SQL — it names an object file and a
+ * link symbol, so an over-long path there is data, not an identifier.
+ */
+const NON_SQL_LANGUAGES: ReadonlySet<string> = new Set(['c', 'internal']);
+
+/**
+ * Is the function body delimited around `[bodyStart, bodyEnd)` procedural code?
+ *
+ * Decided by the statement's `LANGUAGE` clause where there is one, which is
+ * what Postgres itself uses — a keyword allowlist over the body cannot be
+ * complete (`AS $$ TABLE t; $$ LANGUAGE SQL` is a valid body whose only verb
+ * is `TABLE`), and getting it wrong in that direction makes the gate BLIND.
+ * The clause may sit on either side of the body, so both are searched, and
+ * only the nearest one within the statement counts.
+ *
+ * With no clause at all, fall back to inspecting the body: that is the legacy
+ * `DO '…'` / `EXECUTE '…'` case, where there is no language to read.
+ */
+function isProceduralBody(sql: string, bodyStart: number, bodyEnd: number, body: string): boolean {
+  // Look forward from the end of the body to the statement terminator.
+  const after = sql.slice(bodyEnd, sql.indexOf(';', bodyEnd) + 1 || undefined);
+  const forward = /\bLANGUAGE\s+"?([A-Za-z_][A-Za-z0-9_]*)"?/i.exec(after);
+  if (forward?.[1]) return !NON_SQL_LANGUAGES.has(forward[1].toLowerCase());
+  // …then backward, to the start of this statement.
+  const statementStart = sql.lastIndexOf(';', bodyStart) + 1;
+  const before = sql.slice(statementStart, bodyStart);
+  const backward = /\bLANGUAGE\s+"?([A-Za-z_][A-Za-z0-9_]*)"?/i.exec(before);
+  if (backward?.[1]) return !NON_SQL_LANGUAGES.has(backward[1].toLowerCase());
+  return looksLikeSql(body);
 }
 
 /**
@@ -266,6 +300,7 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
     }
     // 'string literal' — '' is an escaped quote, not a terminator
     if (sql[i] === "'") {
+      const literalStart = i;
       i += 1;
       let literal = '';
       while (i < n) {
@@ -310,7 +345,8 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // the migration.
       if (
         previous === 'execute' ||
-        ((previous === 'as' || previous === 'do') && looksLikeSql(decoded))
+        ((previous === 'as' || previous === 'do') &&
+          isProceduralBody(sql, literalStart, i, decoded))
       ) {
         yield* identifierCandidates(decoded);
       }
@@ -339,8 +375,10 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
         // single-quoted form already carried this guard; applying it here too
         // makes the two spellings agree.
         const close = sql.indexOf(tag, i + tag.length);
-        const body = sql.slice(i + tag.length, close === -1 ? n : close);
-        if (looksLikeSql(body)) {
+        const bodyStart = i + tag.length;
+        const bodyEnd = close === -1 ? n : close;
+        const body = sql.slice(bodyStart, bodyEnd);
+        if (isProceduralBody(sql, bodyStart, bodyEnd + tag.length, body)) {
           openProceduralTag = tag;
           i += tag.length;
           continue;

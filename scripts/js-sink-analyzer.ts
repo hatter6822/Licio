@@ -329,6 +329,18 @@ function decodeStringBody(body: string): string {
       continue;
     }
     const next = body[i + 1] ?? '';
+    // A LINE CONTINUATION — a backslash immediately before a line terminator —
+    // contributes NOTHING to the string. `'https:\<newline>//evil/x.js'` is
+    // the single URL `https://evil/x.js` at runtime, so keeping the newline
+    // would stop the remote scheme from being recognised.
+    if (next === '\n' || next === '\u2028' || next === '\u2029') {
+      i += 2;
+      continue;
+    }
+    if (next === '\r') {
+      i += body[i + 2] === '\n' ? 3 : 2;
+      continue;
+    }
     out += SIMPLE[next] ?? next;
     i += 2;
   }
@@ -604,6 +616,46 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
   return [...byKey.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
 }
 
+/**
+ * Names bound directly to a sink, so `const F = Function; F('x')()` is caught.
+ *
+ * Deliberately SIMPLE and flow-insensitive: it recognises `NAME = <sink
+ * reference>` and treats the binding as holding for the whole file, iterating
+ * to a fixpoint so an alias of an alias resolves too. That covers the form an
+ * obfuscator or a careless commit actually produces.
+ *
+ * What it does NOT do, stated plainly rather than implied: destructuring
+ * (`const { eval: e } = globalThis`), a sink stored in an object property or
+ * array element, and anything requiring real scope analysis. Those need data
+ * flow, not lexing. The CSP remains the runtime half in the browser; in
+ * `apps/api`, where there is none, this is the reachable-spelling half.
+ */
+function collectAliases(
+  tokens: readonly Token[],
+  specByName: ReadonlyMap<string, SinkSpec>,
+  resolve: (i: number, aliases: ReadonlyMap<string, SinkSpec>) => SinkSpec | null,
+): Map<string, SinkSpec> {
+  const aliases = new Map<string, SinkSpec>();
+  // A fixpoint: each pass can bind a name to a sink that the previous pass
+  // only just learned about. Bounded because every pass either adds a binding
+  // or stops.
+  for (let pass = 0; pass < 8; pass += 1) {
+    const before = aliases.size;
+    for (let i = 0; i + 2 < tokens.length; i += 1) {
+      const name = tokens[i];
+      if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
+      // A single `=`; `==`/`=>`/`===` lex differently and are not assignment.
+      if (!isPunct(tokens[i + 1], '=')) continue;
+      const previous = tokens[i - 1];
+      if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
+      const spec = resolve(i + 2, aliases);
+      if (spec) aliases.set(name.value, spec);
+    }
+    if (aliases.size === before) break;
+  }
+  return aliases;
+}
+
 function analyse(
   tokens: readonly Token[],
   specs: readonly SinkSpec[],
@@ -618,7 +670,10 @@ function analyse(
    * Covers the bare identifier and the global-object forms; the parenthesized
    * form is handled by the caller, which already knows it is inside a group.
    */
-  const readReference = (i: number): { spec: SinkSpec; next: number } | null => {
+  const referenceAt = (
+    i: number,
+    aliases: ReadonlyMap<string, SinkSpec>,
+  ): { spec: SinkSpec; next: number } | null => {
     const t = tokens[i];
     if (t?.kind !== 'ident') return null;
 
@@ -630,7 +685,8 @@ function analyse(
       return null;
     }
 
-    const spec = specByName.get(t.value);
+    // The sink itself, or a NAME BOUND TO IT (`const F = Function`).
+    const spec = specByName.get(t.value) ?? aliases.get(t.value);
     if (!spec) return null;
     // A bare name preceded by a member access is somebody else's property
     // (`redis.eval`, `registry.Function`), not the global sink.
@@ -638,6 +694,16 @@ function analyse(
     if (isPunct(prev, '.') || isPunct(prev, '?.') || isPunct(prev, '#')) return null;
     return { spec, next: i + 1 };
   };
+
+  // Aliases are resolved first, so `const F = Function; F('x')()` is caught.
+  const aliasMap = collectAliases(
+    tokens,
+    specByName,
+    (i, known) => referenceAt(i, known)?.spec ?? null,
+  );
+
+  const readReference = (i: number): { spec: SinkSpec; next: number } | null =>
+    referenceAt(i, aliasMap);
 
   const record = (spec: SinkSpec, startTok: Token, endIndex: number): void => {
     const endTok = tokens[Math.min(endIndex, tokens.length) - 1];
@@ -708,7 +774,7 @@ function analyse(
           const first = args[0] ?? [];
           // The callee argument is itself a reference expression, so it is
           // resolved with the SAME reader rather than a bespoke pattern.
-          const inner = first.length > 0 ? findReferenceIn(first, specByName) : null;
+          const inner = first.length > 0 ? findReferenceIn(first, specByName, aliasMap) : null;
           if (inner) {
             const isConstruct = member.name === 'construct';
             // apply(fn, thisArg, [args]) → args are the 3rd; construct(fn, [args]) → 2nd.
@@ -743,6 +809,7 @@ function analyse(
 function findReferenceIn(
   argument: readonly Token[],
   specByName: ReadonlyMap<string, SinkSpec>,
+  aliases: ReadonlyMap<string, SinkSpec>,
 ): SinkSpec | null {
   const first = argument[0];
   if (first?.kind !== 'ident') return null;
@@ -750,5 +817,5 @@ function findReferenceIn(
     const member = readMember(argument, 1);
     return member ? (specByName.get(member.name) ?? null) : null;
   }
-  return specByName.get(first.value) ?? null;
+  return specByName.get(first.value) ?? aliases.get(first.value) ?? null;
 }
