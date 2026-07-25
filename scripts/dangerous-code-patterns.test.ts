@@ -15,7 +15,7 @@ import {
   findSinkMatches,
   INDIRECT_EVAL_PATTERNS,
   SOURCE_CODE_SINKS,
-  STRING_TIMER_PATTERN,
+  STRING_TIMER_PATTERNS,
   scanSourceForSinks,
   stripComments,
 } from './dangerous-code-patterns.js';
@@ -71,22 +71,59 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
   });
 });
 
-describe('STRING_TIMER_PATTERN', () => {
+describe('STRING_TIMER_PATTERNS', () => {
   it.each([
     'setTimeout("evil()", 0)',
     "setInterval('evil()', 10)",
     'setTimeout(`evil()`, 0)',
     'setTimeout( "evil()" , 0)',
+    'globalThis.setTimeout("evil()", 0)',
   ])('catches the implicit eval in %s', (code) => {
-    expect(STRING_TIMER_PATTERN.test(code)).toBe(true);
+    expect(
+      hits(
+        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
+        code,
+      ),
+    ).toBe(true);
+  });
+
+  // The round-5 gap: the timer reference is reachable by exactly the same
+  // indirections as `eval`/`Function`, and the host compiles the string
+  // argument either way — so covering only the bare `name(` form left every
+  // one of these passing all four gates.
+  it.each([
+    ['optional call', "setTimeout?.('evil()', 0)"],
+    ['optional call on a global', "globalThis.setTimeout?.('evil()', 0)"],
+    ['computed on globalThis', "globalThis['setTimeout']('evil()', 0)"],
+    ['computed on self', 'self["setInterval"]("evil()", 10)'],
+    ['parenthesized reference', "(setInterval)('evil()', 10)"],
+    ['sequence idiom', "(0, setTimeout)('evil()', 0)"],
+    ['comment gap', 'setTimeout/* c */("evil()", 0)'],
+  ])('catches the INDIRECT form: %s', (_label, code) => {
+    expect(
+      hits(
+        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
+        code,
+      ),
+    ).toBe(true);
   });
 
   it.each([
     'setTimeout(() => run(), 0)',
     'setInterval(tick, 1000)',
     'setTimeout(handler, delayMs)',
+    // The indirect forms must stay quiet on a FUNCTION argument too, or the
+    // widened set would flag ordinary scheduling code.
+    "globalThis['setTimeout'](tick, 0)",
+    'setTimeout?.(() => run(), 0)',
+    '(0, setTimeout)(handler, 0)',
   ])('does not flag the function form %s', (code) => {
-    expect(STRING_TIMER_PATTERN.test(code)).toBe(false);
+    expect(
+      hits(
+        STRING_TIMER_PATTERNS.map((pattern) => ({ pattern })),
+        code,
+      ),
+    ).toBe(false);
   });
 });
 

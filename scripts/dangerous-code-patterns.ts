@@ -126,13 +126,37 @@ export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
   sink(String.raw`(?<![.\w$#])eval~\?\.~\(`),
 ];
 
+/** The two timer names that compile a string argument as source. */
+const TIMER = 'set(?:Timeout|Interval)';
+
 /**
  * `setTimeout`/`setInterval` with a STRING first argument — an implicit eval:
  * the host compiles the string exactly as `eval` would. A function argument
- * (the only legitimate use) never matches, because the pattern requires a
+ * (the only legitimate use) never matches, because every pattern requires a
  * quote character in the first-argument position.
+ *
+ * The timer reference is reachable by the SAME indirections as `eval` and
+ * `Function`, and the host compiles the string either way:
+ *
+ *     setTimeout('…')            setTimeout?.('…')
+ *     globalThis.setTimeout('…')  window.setTimeout?.('…')
+ *     (0, setTimeout)('…')        (setInterval)('…')
+ *     globalThis['setTimeout']('…')            self["setInterval"]('…')
+ *
+ * Covering only the bare `name(` form left the other four passing every gate,
+ * so the set mirrors {@link INDIRECT_EVAL_PATTERNS} rather than standing alone
+ * — a sink closed for `eval` must be closed here too, or the shared list is
+ * canonical in name only.
  */
-export const STRING_TIMER_PATTERN = sink(String.raw`\bset(?:Timeout|Interval)~\(~['"\`]`);
+export const STRING_TIMER_PATTERNS: readonly RegExp[] = [
+  // Direct or member call, with an optional call `?.()`:
+  // `setTimeout('…')`, `setTimeout?.('…')`, `globalThis.setTimeout?.('…')`.
+  sink(String.raw`\b${TIMER}~(?:\?\.)?~\(~['"\`]`),
+  // Parenthesized reference and the comma/sequence idiom `(0, setTimeout)('…')`.
+  sink(String.raw`\((?:[^()]*,~)?~${TIMER}~\)~(?:\?\.)?~\(~['"\`]`),
+  // Computed member access: `globalThis['setTimeout']('…')`.
+  sink(String.raw`\[~(['"\`])${TIMER}\1~\]~(?:\?\.)?~\(~['"\`]`),
+];
 
 /**
  * The bare global `eval(` call. The lookbehind excludes a member/private
@@ -175,10 +199,10 @@ export const SOURCE_CODE_SINKS: readonly CodeSinkPattern[] = [
     pattern,
     label: 'Function() constructor (equivalent to eval)',
   })),
-  {
-    pattern: STRING_TIMER_PATTERN,
+  ...STRING_TIMER_PATTERNS.map((pattern) => ({
+    pattern,
     label: 'setTimeout/setInterval with a string body (implicit eval)',
-  },
+  })),
   {
     pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
     label: 'Function() constructor (equivalent to eval) as a template tag',
@@ -197,10 +221,10 @@ export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
     pattern,
     label: 'Function() constructor',
   })),
-  {
-    pattern: STRING_TIMER_PATTERN,
+  ...STRING_TIMER_PATTERNS.map((pattern) => ({
+    pattern,
     label: 'setTimeout/setInterval with a string body (implicit eval)',
-  },
+  })),
   {
     pattern: FUNCTION_TAGGED_TEMPLATE_PATTERN,
     label: 'Function() constructor as a template tag',

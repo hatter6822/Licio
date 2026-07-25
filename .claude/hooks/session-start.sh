@@ -172,6 +172,13 @@ redis_major() {
   redis-cli -p 6379 INFO server 2>/dev/null | awk -F: '/^redis_version:/ { split($2, v, "."); print v[1] }'
 }
 
+# The major of the redis-server BINARY on PATH, empty when there is none.
+# `redis-server --version` prints `Redis server v=7.0.15 sha=… bits=64 …`.
+redis_binary_major() {
+  command -v redis-server >/dev/null 2>&1 || return 0
+  redis-server --version 2>/dev/null | sed -n 's/.*[[:space:]]v=\([0-9][0-9]*\)\..*/\1/p'
+}
+
 REDIS_MAJOR="$(redis_major || true)"
 if [ -n "${REDIS_MAJOR}" ] && [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
   log "Redis on 6379 is major ${REDIS_MAJOR} (< ${REDIS_MIN_MAJOR}); replacing it"
@@ -181,10 +188,28 @@ if [ -n "${REDIS_MAJOR}" ] && [ "${REDIS_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; the
 fi
 
 if [ -z "${REDIS_MAJOR}" ]; then
-  if ! command -v redis-server >/dev/null 2>&1; then
-    log "Installing Redis"
+  # PRESENCE of `redis-server` is not the condition — its VERSION is. An image
+  # that ships Redis 6 satisfies `command -v`, so a presence check would skip
+  # the install, restart the very binary just shut down for being too old, and
+  # then die at the floor check below having provisioned nothing. That is the
+  # exact scenario the version floor exists to repair, so install whenever the
+  # binary is absent OR below the floor.
+  REDIS_BINARY_MAJOR="$(redis_binary_major)"
+  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
+    log "Installing Redis (binary major '${REDIS_BINARY_MAJOR:-none}' < ${REDIS_MIN_MAJOR})"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y --no-install-recommends redis-server >/dev/null
+    # Refresh first: a stale index is the usual reason the candidate is old.
+    # Neither step is fatal on its own — the floor check below is what decides,
+    # and it reports the version actually obtained rather than an apt error.
+    apt-get update >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends redis-server >/dev/null 2>&1 || true
+    REDIS_BINARY_MAJOR="$(redis_binary_major)"
+  fi
+  if [ -z "${REDIS_BINARY_MAJOR}" ] || [ "${REDIS_BINARY_MAJOR}" -lt "${REDIS_MIN_MAJOR}" ]; then
+    log "ERROR: no redis-server >= ${REDIS_MIN_MAJOR} is obtainable (best available: '${REDIS_BINARY_MAJOR:-none}')."
+    log "       This distribution's redis-server predates the CI image (redis:${REDIS_MIN_MAJOR});"
+    log "       add a backports or upstream Redis apt source to the container image."
+    exit 1
   fi
   log "Starting Redis on 6379"
   # No persistence: this instance is a disposable CSRF/session/transient-state
