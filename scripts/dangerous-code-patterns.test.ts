@@ -571,7 +571,40 @@ describe('aliased sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  // Round 21: a sink held in an ARRAY. This was the last entry on the alias
+  // docstring's "does NOT do" list, so under the implement-the-improvement rule
+  // it had to be closed rather than left described. An array is an INDEXED
+  // container — every JS property key is a string, so `a[0]` IS `a['0']` and
+  // the object lookup serves unchanged. Containers NEST, because a receiver's
+  // property may hold another receiver.
   it.each([
+    ['a sink in an array', 'const handlers = [eval]; handlers[0](payload)'],
+    ['the constructor in an array', "const h = [Function]; h[0]('return 1')()"],
+    ['a sink at a later index', "const h = [noop, eval]; h[1]('x')"],
+    ['array destructuring', "const [run] = [eval]; run('x')"],
+    ['array destructuring at a later index', "const [a, b] = [noop, eval]; b('x')"],
+    ['an array literal indexed in place', "[eval][0]('x')"],
+    ['an object literal indexed in place', "({ run: eval }).run('x')"],
+    ['a qualified reference in an array', "const h = [globalThis.eval]; h[0]('x')"],
+    ['a hole keeping later indices aligned', "const h = [, eval]; h[1]('x')"],
+    ['an array inside an array', "const h = [[eval]]; h[0][0]('x')"],
+    ['an array inside an object', "const o = { list: [eval] }; o.list[0]('x')"],
+    ['an object inside an array', "const h = [{ run: eval }]; h[0].run('x')"],
+    ['a destructured nested container', "const { list } = { list: [eval] }; list[0]('x')"],
+    ['a timer held in an array', "const h = [setTimeout]; h[0]('evil()', 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['an array of non-sinks', "const h = [handler]; h[0]('x')"],
+    ['an index that holds nothing', "const h = [eval]; h[1]('x')"],
+    ['an array of sink NAMES as strings', "const arr = ['eval']; arr[0]"],
+    ['an arrayed timer given a function', 'const h = [setTimeout]; h[0](tick, 0)'],
+    ['an indexed sink that is never called', 'const x = [eval][0];'],
+    ['ordinary array indexing', 'const rows = [1, 2, 3]; rows[0]'],
+    ['a nested container at the wrong key', "const o = { list: [eval] }; o.list[1]('x')"],
+    ['a nested container under the wrong property', "const o = { list: [eval] }; o.other[0]('x')"],
     // The boundary: only a BARE receiver reference aliases the OBJECT.
     // `const e = globalThis.eval` binds the eval FUNCTION, so `e` must not
     // become a receiver — otherwise `e.anything(…)` would resolve to a sink.

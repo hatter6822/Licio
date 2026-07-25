@@ -35,6 +35,25 @@ class FakeDuplex implements DataChannelLike {
   }
 }
 
+/**
+ * Await an observable CONDITION rather than a fixed delay.
+ *
+ * A `setTimeout` between two injected frames only makes an ordering LIKELY:
+ * the inbound handler starts `handleInboundExchangeMessage` without awaiting
+ * it, so under load the second frame can still overtake the first — the exact
+ * class of coupling that made the bidirectional test flaky. Polling a real
+ * condition makes the ordering hold whatever the scheduler does, and the
+ * timeout turns a genuine hang into a clear failure rather than a wrong value.
+ */
+async function waitUntil(condition: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 let peerA: IDBDatabase;
 let peerB: IDBDatabase;
 
@@ -150,13 +169,20 @@ describe('runWebrtcBidirectionalExchange', () => {
 
     const channel = new FakeDuplex(); // no `.peer`: only the frames we inject reach A
     const p2p = await import('@licio/lcap-p2p');
-    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 5000 });
-    await new Promise((r) => setTimeout(r, 20)); // A sends its own request first
+    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 60_000 });
     const inject = (msg: Uint8Array): void => {
       for (const f of p2p.fragmentMessage(msg, 0)) channel.onmessage?.({ data: f.buffer });
     };
+    // A is ready to receive once it has installed its inbound handler.
+    await waitUntil(() => channel.onmessage !== null, "A's inbound handler");
     inject(bResp as Uint8Array); // the RESPONSE lands first…
-    await new Promise((r) => setTimeout(r, 20));
+    // …and is fully COMMITTED before the request-borne push can race it. The
+    // block landing in A's store is the observable proof of that, so the
+    // response is unambiguously the leg that delivered it.
+    await waitUntil(
+      async () => (await readBlockBytes(peerA, blockCid)) !== undefined,
+      'the response to be committed',
+    );
     inject(bReq); // …then the request, so the round settles without the timeout
     const result = await run;
 
@@ -275,16 +301,22 @@ describe('runWebrtcBidirectionalExchange', () => {
     } as unknown as DataChannelLike;
 
     const p2p = await import('@licio/lcap-p2p');
-    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 2000 });
-    await new Promise((r) => setTimeout(r, 20)); // A sends its own request
+    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 60_000 });
+    const withOnmessage = channel as unknown as {
+      onmessage: ((e: { data: unknown }) => void) | null;
+    };
     const inject = (msg: Uint8Array): void => {
-      const withOnmessage = channel as unknown as {
-        onmessage: ((e: { data: unknown }) => void) | null;
-      };
       for (const f of p2p.fragmentMessage(msg, 0)) withOnmessage.onmessage?.({ data: f });
     };
+    // The race this test exists for needs OUR RESPONSE ingested BEFORE the
+    // peer's request arrives. Both steps wait on the observable state rather
+    // than on elapsed time, so the ordering holds under any scheduling.
+    await waitUntil(() => withOnmessage.onmessage !== null, "A's inbound handler");
     inject(bRespToA as Uint8Array); // deliver our RESPONSE first → gotResponse = true
-    await new Promise((r) => setTimeout(r, 20));
+    await waitUntil(
+      async () => (await readBlockBytes(peerA, xCid)) !== undefined,
+      'our response to be ingested',
+    );
     inject(bReq); // THEN the peer's REQUEST → served = true + a reply queued
     const result = await run;
 

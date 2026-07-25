@@ -492,9 +492,19 @@ function computedName(
 ): { name: string; next: number } | null {
   const end = matchGroup(tokens, open);
   if (end === -1) return null;
-  const folded = foldString(tokens.slice(open + 1, end - 1));
-  if (!folded.complete || !folded.isString) return null;
-  return { name: folded.prefix, next: end };
+  const inner = tokens.slice(open + 1, end - 1);
+  const folded = foldString(inner);
+  if (folded.complete && folded.isString) return { name: folded.prefix, next: end };
+  // A NUMERIC subscript names the same property a string one does — every
+  // JavaScript property key IS a string, so `a[0]` is exactly `a['0']`. That
+  // is what lets an ARRAY element be reached by the same lookup an object
+  // property is, rather than needing a parallel mechanism for arrays.
+  const only = inner.length === 1 ? inner[0] : undefined;
+  if (only?.kind === 'number') {
+    const value = Number(only.value);
+    if (Number.isFinite(value)) return { name: String(value), next: end };
+  }
+  return null;
 }
 
 /**
@@ -830,6 +840,19 @@ export function findSinkInvocations(source: string, specs: readonly SinkSpec[]):
  * user-defined `const o = { run: eval }` is resolved by the same lookup rather
  * than by a second mechanism.
  */
+/**
+ * What a receiver's property holds: a SINK, or ANOTHER RECEIVER.
+ *
+ * Recursive because containers nest — `const h = [[eval]]` and
+ * `const o = { list: [eval] }` are as ordinary as the one-level forms, and a
+ * table that could only hold sinks would have supported arrays "one level
+ * deep", which is exactly the sort of caveat that becomes the next bypass.
+ */
+type ReceiverEntry =
+  | { readonly kind: 'sink'; readonly spec: SinkSpec }
+  | { readonly kind: 'table'; readonly table: ReceiverTable };
+type ReceiverTable = ReadonlyMap<string, ReceiverEntry>;
+
 interface AliasTable {
   readonly direct: Map<string, SinkSpec>;
   /**
@@ -837,7 +860,37 @@ interface AliasTable {
    * copying it (`const g = globalThis` hands `g` the global sink map itself),
    * so a mutation through one name would silently change the other.
    */
-  readonly members: Map<string, ReadonlyMap<string, SinkSpec>>;
+  readonly members: Map<string, ReceiverTable>;
+}
+
+/** The globals adapted to a receiver table, so every lookup is the same lookup. */
+function globalReceiverTable(specByName: ReadonlyMap<string, SinkSpec>): ReceiverTable {
+  return new Map([...specByName].map(([key, spec]) => [key, { kind: 'sink', spec } as const]));
+}
+
+/**
+ * Follow member accesses from `start` through `table`, returning the sink the
+ * chain lands on. Descends while a property holds another receiver, so
+ * `h[0][0](…)` and `o.list[0](…)` resolve by the same walk that `o.run(…)`
+ * does.
+ */
+function descendReceiver(
+  tokens: readonly Token[],
+  table: ReceiverTable,
+  start: number,
+): { spec: SinkSpec; next: number } | null {
+  let current = table;
+  let j = start;
+  for (let steps = 0; steps < 16; steps += 1) {
+    const member = readMember(tokens, j);
+    if (!member) return null;
+    const entry = current.get(member.name);
+    if (!entry) return null;
+    if (entry.kind === 'sink') return { spec: entry.spec, next: member.next };
+    current = entry.table;
+    j = member.next;
+  }
+  return null;
 }
 
 /**
@@ -845,20 +898,27 @@ interface AliasTable {
  *
  * Deliberately flow-INSENSITIVE: a binding is recognised wherever it is
  * written and treated as holding for the whole file, iterating to a fixpoint
- * so an alias of an alias resolves too. Three binding FORMS are read, because
- * they are three spellings of one act — giving a sink a second name:
+ * so an alias of an alias resolves too. Every binding FORM below is one
+ * spelling of a single act — giving a sink another name — so all of them
+ * resolve through the same two tables rather than through separate rules:
  *
  *     const F = Function                  → direct
  *     const { eval: run } = globalThis    → direct, via a receiver's property
+ *     const [run] = [eval]                → direct, via an index
  *     const o = { run: eval }             → member, making `o` a receiver
+ *     const h = [eval]                    → member, indexed by position
+ *     const g = globalThis                → member, ALIASING a receiver
  *
- * What it still does NOT do, stated plainly rather than implied: a sink stored
- * in an ARRAY element or reached through one, reassignment (the last binding
- * seen wins), and anything needing real scope analysis — a shadowed name in an
- * inner block is treated as the outer one. Those need data flow, not lexing;
- * erring toward reporting is the safe direction for a gate. The CSP remains
- * the runtime half in the browser; in `apps/api`, where there is none, this is
- * the reachable-spelling half.
+ * Containers nest (`{ list: [eval] }`, `[[eval]]`) because a receiver's
+ * property may hold another receiver, and the member walk descends.
+ *
+ * What it still does NOT do, stated plainly rather than implied: reassignment
+ * (the last binding seen wins), a sink placed into a container after it is
+ * built (`h.push(eval)`, `o.run = eval`), and anything needing real scope
+ * analysis — a shadowed name in an inner block is treated as the outer one.
+ * Those need data flow, not lexing; erring toward reporting is the safe
+ * direction for a gate. The CSP remains the runtime half in the browser; in
+ * `apps/api`, where there is none, this is the reachable-spelling half.
  */
 /**
  * The index of a declaration's INITIALIZER, given the declared name at
@@ -953,19 +1013,108 @@ function braceEntries(
   return { entries, next: end };
 }
 
+/**
+ * The token index at which each top-level element of the `[ … ]` opened at
+ * `open` begins. A hole (`[, eval]`) still occupies its position, so indices
+ * line up with the runtime ones.
+ */
+function arrayElementIndices(tokens: readonly Token[], open: number): number[] {
+  const end = matchGroup(tokens, open);
+  if (end === -1) return [];
+  const starts: number[] = [];
+  let depth = 0;
+  let expectElement = true;
+  for (let k = open + 1; k < end - 1; k += 1) {
+    const t = tokens[k] as Token;
+    if (expectElement) {
+      starts.push(k);
+      expectElement = false;
+    }
+    if (t.kind === 'punct') {
+      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
+      else if (t.value === ',' && depth === 0) expectElement = true;
+    }
+  }
+  return starts;
+}
+
+/**
+ * The sink table an object or array LITERAL at `i` exposes, or null.
+ *
+ * An array is an indexed container, so its keys are its index strings and
+ * nothing else about the lookup differs from an object's. Shared by the alias
+ * collector (which binds the table to a NAME) and the scan loop (which indexes
+ * a literal IN PLACE), so the two cannot disagree about what a literal holds.
+ */
+function literalReceiverTable(
+  tokens: readonly Token[],
+  i: number,
+  resolveAt: (index: number) => SinkSpec | null,
+  depth = 0,
+): ReceiverTable | null {
+  if (depth > 8) return null; // real code never nests containers this deep
+  const table = new Map<string, ReceiverEntry>();
+  /** A value is either a nested container or a plain sink reference. */
+  const entryAt = (index: number): ReceiverEntry | null => {
+    const at = unwrapReference(tokens, index);
+    const nested = literalReceiverTable(tokens, at, resolveAt, depth + 1);
+    if (nested) return { kind: 'table', table: nested };
+    const spec = resolveAt(at);
+    return spec ? { kind: 'sink', spec } : null;
+  };
+  if (isPunct(tokens[i], '{')) {
+    const group = braceEntries(tokens, i);
+    if (!group) return null;
+    for (const entry of group.entries) {
+      const value = entryAt(entry.valueIndex);
+      if (value) table.set(entry.key, value);
+    }
+  } else if (isPunct(tokens[i], '[')) {
+    arrayElementIndices(tokens, i).forEach((start, index) => {
+      const value = entryAt(start);
+      if (value) table.set(String(index), value);
+    });
+  } else return null;
+  return table.size > 0 ? table : null;
+}
+
 function collectAliases(
   tokens: readonly Token[],
   specByName: ReadonlyMap<string, SinkSpec>,
   resolve: (i: number, aliases: AliasTable) => SinkSpec | null,
 ): AliasTable {
   const aliases: AliasTable = { direct: new Map(), members: new Map() };
+  // The globals ARE a receiver table; adapting them once means every lookup
+  // below is the same lookup, whatever the receiver turned out to be.
+  const globalTable = globalReceiverTable(specByName);
 
-  /** The sink table a receiver expression at `i` exposes, if it is one. */
-  const receiverAt = (i: number): ReadonlyMap<string, SinkSpec> | null => {
+  /**
+   * The sink table an expression at `i` exposes, if it is a RECEIVER — an
+   * object through which sinks are reachable by property name.
+   *
+   * Four things qualify, and they are deliberately one function rather than
+   * four branches at four call sites: a global (`globalThis`), a name already
+   * bound to a table, an object LITERAL, and an ARRAY literal. An array is
+   * just an indexed container, so its keys are its index strings and nothing
+   * about the lookup changes.
+   */
+  const receiverAt = (i: number): ReceiverTable | null => {
     const t = tokens[i];
-    if (t?.kind !== 'ident') return null;
-    if (GLOBAL_RECEIVERS.has(t.value)) return specByName;
-    return aliases.members.get(t.value) ?? null;
+    if (t?.kind === 'ident') {
+      if (GLOBAL_RECEIVERS.has(t.value)) return globalTable;
+      return aliases.members.get(t.value) ?? null;
+    }
+    return literalReceiverTable(tokens, i, (index) => resolve(index, aliases));
+  };
+
+  /** The index just past a receiver expression at `i`. */
+  const receiverEnd = (i: number): number => {
+    if (isPunct(tokens[i], '{') || isPunct(tokens[i], '[')) {
+      const end = matchGroup(tokens, i);
+      return end === -1 ? i + 1 : end;
+    }
+    return i + 1;
   };
 
   // A fixpoint: each pass can bind a name to a sink that the previous pass
@@ -983,10 +1132,33 @@ function collectAliases(
           const table = receiverAt(unwrapReference(tokens, group.next + 1));
           if (table) {
             for (const entry of group.entries) {
-              const spec = table.get(entry.key);
+              const held = table.get(entry.key);
               const local = tokens[entry.valueIndex];
-              if (spec && local?.kind === 'ident') aliases.direct.set(local.value, spec);
+              if (!held || local?.kind !== 'ident') continue;
+              // A destructured property may itself be a container, so the
+              // local name becomes a receiver rather than a direct binding.
+              if (held.kind === 'sink') aliases.direct.set(local.value, held.spec);
+              else aliases.members.set(local.value, held.table);
             }
+          }
+        }
+        continue;
+      }
+
+      // `const [run] = [eval]` — the same act, POSITIONALLY. The index is the
+      // property name, so the identical table lookup serves.
+      if (isPunct(tokens[i], '[')) {
+        const close = matchGroup(tokens, i);
+        if (close !== -1 && isPunct(tokens[close], '=')) {
+          const table = receiverAt(unwrapReference(tokens, close + 1));
+          if (table) {
+            arrayElementIndices(tokens, i).forEach((start, index) => {
+              const held = table.get(String(index));
+              const local = tokens[start];
+              if (!held || local?.kind !== 'ident') return;
+              if (held.kind === 'sink') aliases.direct.set(local.value, held.spec);
+              else aliases.members.set(local.value, held.table);
+            });
           }
         }
         continue;
@@ -1002,38 +1174,24 @@ function collectAliases(
       // the initializer, not a different initializer.
       const initializer = unwrapReference(tokens, declared);
 
-      // `const o = { run: eval }` — an object LITERAL holding sinks makes `o`
-      // a receiver, resolved by the same lookup as `globalThis`.
-      if (isPunct(tokens[initializer], '{')) {
-        const group = braceEntries(tokens, initializer);
-        if (!group) continue;
-        const table = new Map<string, SinkSpec>();
-        for (const entry of group.entries) {
-          const spec = resolve(unwrapReference(tokens, entry.valueIndex), aliases);
-          if (spec) table.set(entry.key, spec);
-        }
-        if (table.size > 0) aliases.members.set(name.value, table);
-        continue;
-      }
-
-      // `const g = globalThis` — an alias of a RECEIVER is itself a receiver,
-      // so `g.eval(payload)` reaches the same sink `globalThis.eval(payload)`
-      // does. The table is shared rather than copied, so an alias of an alias
-      // (`const h = g`) resolves through the same lookup.
+      // The initializer is a RECEIVER — `const o = { run: eval }`,
+      // `const h = [eval]`, or an alias of one (`const g = globalThis`). All
+      // three make `name` an object through which sinks are reachable, and all
+      // three resolve through the one `receiverAt` lookup. An aliased table is
+      // SHARED rather than copied, so an alias of an alias cannot diverge.
       //
-      // Only a BARE receiver reference counts. `const e = globalThis.eval`
-      // binds the eval FUNCTION, not the global object, so a member access
-      // after the initializer disqualifies it and it falls through to the
-      // direct binding below — treating that as a receiver would have made
-      // `e.anything(…)` resolve to a sink.
+      // Only a receiver expression taken WHOLE counts. `const e =
+      // globalThis.eval` binds the eval FUNCTION, not the global object, so a
+      // member access or call after the expression disqualifies it and it
+      // falls through to the direct binding below — treating that as a
+      // receiver would have made `e.anything(…)` resolve to a sink.
       const receiver = receiverAt(initializer);
-      if (
-        receiver &&
-        !readMember(tokens, initializer + 1) &&
-        !isPunct(tokens[initializer + 1], '(')
-      ) {
-        aliases.members.set(name.value, receiver);
-        continue;
+      if (receiver) {
+        const after = receiverEnd(initializer);
+        if (!readMember(tokens, after) && !isPunct(tokens[after], '(')) {
+          aliases.members.set(name.value, receiver);
+          continue;
+        }
       }
 
       const spec = resolve(initializer, aliases);
@@ -1053,6 +1211,7 @@ function analyse(
 ): SinkFinding[] {
   const out: SinkFinding[] = [];
   const specByName = new Map(specs.map((s) => [s.name, s]));
+  const globalSinkTable = globalReceiverTable(specByName);
 
   /**
    * If a sink REFERENCE starts at `i`, return it and the index just past it.
@@ -1065,13 +1224,8 @@ function analyse(
 
     // A RECEIVER: `globalThis.eval`, `self['Function']`, `window?.setTimeout`,
     // and a user object that was seen holding sinks (`const o = { run: eval }`).
-    const table = GLOBAL_RECEIVERS.has(t.value) ? specByName : aliases.members.get(t.value);
-    if (table) {
-      const member = readMember(tokens, i + 1);
-      const spec = member ? table.get(member.name) : undefined;
-      if (member && spec) return { spec, next: member.next };
-      return null;
-    }
+    const table = GLOBAL_RECEIVERS.has(t.value) ? globalSinkTable : aliases.members.get(t.value);
+    if (table) return descendReceiver(tokens, table, i + 1);
 
     // The sink itself, or a NAME BOUND TO IT (`const F = Function`).
     const spec = specByName.get(t.value) ?? aliases.direct.get(t.value);
@@ -1221,6 +1375,22 @@ function analyse(
       continue;
     }
 
+    // A receiver LITERAL indexed IN PLACE, with no name in between:
+    // `[eval][0]('x')` and `({ run: eval }).run('x')` reach the same sinks the
+    // named forms do. `unwrapReference` finds the literal inside any
+    // parentheses; the member is read after the OUTERMOST group so both
+    // spellings land on the same lookup.
+    if (isPunct(t, '(') || isPunct(t, '[') || isPunct(t, '{')) {
+      const outerEnd = matchGroup(tokens, i);
+      const literal = unwrapReference(tokens, i);
+      const table =
+        outerEnd === -1
+          ? null
+          : literalReceiverTable(tokens, literal, (index) => readReference(index)?.spec ?? null);
+      const reached = table ? descendReceiver(tokens, table, outerEnd) : null;
+      if (reached) walkInvocation(reached.spec, i, reached.next);
+    }
+
     // `<receiver>.constructor(…)` — EVERY function's `.constructor` is the
     // `Function` constructor, so this call compiles source no matter what the
     // receiver is: `(()=>{}).constructor('return 42')()`,
@@ -1267,10 +1437,9 @@ function findReferenceIn(
 ): SinkSpec | null {
   const first = argument[start];
   if (first?.kind !== 'ident') return null;
-  const table = GLOBAL_RECEIVERS.has(first.value) ? specByName : aliases.members.get(first.value);
-  if (table) {
-    const member = readMember(argument, start + 1);
-    return member ? (table.get(member.name) ?? null) : null;
-  }
+  const table = GLOBAL_RECEIVERS.has(first.value)
+    ? globalReceiverTable(specByName)
+    : aliases.members.get(first.value);
+  if (table) return descendReceiver(argument, table, start + 1)?.spec ?? null;
   return specByName.get(first.value) ?? aliases.direct.get(first.value) ?? null;
 }
