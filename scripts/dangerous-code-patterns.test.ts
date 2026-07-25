@@ -446,7 +446,29 @@ describe('aliased sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  // Round 17: PARENTHESES around the thing being bound. `(Function)` is
+  // `Function`, and a sequence expression `(0, Function)` evaluates to its last
+  // operand — the scan loop already knew this about a reference in CALL
+  // position, but each site that resolved one from an initializer or an
+  // argument started at the `(`, where no identifier is found. One shared
+  // unwrapper is applied at all four.
   it.each([
+    ['a parenthesised initializer', "const F = (Function); F('return 42')()"],
+    ['a doubly parenthesised initializer', "const F = ((Function)); F('return 42')()"],
+    ['a sequence initializer', "const F = (0, Function); F('return 42')()"],
+    ['a parenthesised qualified reference', "const e = (globalThis.eval); e('x')"],
+    ['a typed parenthesised initializer', "const F: FunctionConstructor = (Function); F('x')()"],
+    ['a parenthesised reflective callee', "Reflect.apply((Function), null, ['x'])()"],
+    ['a parenthesised object literal', "const o = ({ run: eval }); o.run('x')"],
+    ['a parenthesised object value', "const o = { run: (eval) }; o.run('x')"],
+    ['a parenthesised destructuring source', "const { eval: r } = (globalThis); r('x')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a parenthesised unrelated binding', "const f = (handler); f('x')"],
+    ['a parenthesised comparison', "if ((f) === Function) { f('x') }"],
     ['an unrelated destructured name', 'const { fetch: f } = globalThis; f(url)'],
     ['an unrelated object property', "const o = { run: handler }; o.run('x')"],
     ['a different property of a sink-holding object', "const o = { run: eval }; o.other('x')"],

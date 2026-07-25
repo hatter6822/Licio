@@ -528,6 +528,38 @@ function endsExpression(token: Token | undefined): boolean {
   return true;
 }
 
+/**
+ * Skip the parentheses wrapping a reference expression at `i`, returning the
+ * index where the reference itself starts.
+ *
+ * `(Function)` is `Function`, `((Function))` is `Function`, and a SEQUENCE
+ * expression `(0, Function)` evaluates to its LAST operand — so all three are
+ * the same reference with punctuation around it. The scan loop already knew
+ * this about a reference in call position; every place that resolves a
+ * reference from an INITIALIZER or an ARGUMENT resolved it from the `(`
+ * instead, where no identifier is found. One helper, applied at each of them,
+ * keeps the four sites from drifting apart again.
+ */
+function unwrapReference(tokens: readonly Token[], i: number): number {
+  let k = i;
+  for (let steps = 0; steps < 16; steps += 1) {
+    if (!isPunct(tokens[k], '(')) return k;
+    const end = matchGroup(tokens, k);
+    if (end === -1) return k;
+    let last = k + 1;
+    let depth = 0;
+    for (let j = k + 1; j < end - 1; j += 1) {
+      const t = tokens[j];
+      if (t?.kind !== 'punct') continue;
+      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
+      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
+      else if (t.value === ',' && depth === 0) last = j + 1;
+    }
+    k = last;
+  }
+  return k;
+}
+
 /** Index just past the group opened at `open` (`(`, `[` or `{`), or -1. */
 function matchGroup(tokens: readonly Token[], open: number): number {
   const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
@@ -876,7 +908,7 @@ function collectAliases(
       if (isPunct(tokens[i], '{')) {
         const group = braceEntries(tokens, i);
         if (group && isPunct(tokens[group.next], '=')) {
-          const table = receiverAt(group.next + 1);
+          const table = receiverAt(unwrapReference(tokens, group.next + 1));
           if (table) {
             for (const entry of group.entries) {
               const spec = table.get(entry.key);
@@ -892,8 +924,11 @@ function collectAliases(
       if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
       const previous = tokens[i - 1];
       if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
-      const initializer = initializerIndex(tokens, i);
-      if (initializer === null) continue;
+      const declared = initializerIndex(tokens, i);
+      if (declared === null) continue;
+      // `(Function)`, `(0, Function)`, `({ run: eval })` — punctuation around
+      // the initializer, not a different initializer.
+      const initializer = unwrapReference(tokens, declared);
 
       // `const o = { run: eval }` — an object LITERAL holding sinks makes `o`
       // a receiver, resolved by the same lookup as `globalThis`.
@@ -902,7 +937,7 @@ function collectAliases(
         if (!group) continue;
         const table = new Map<string, SinkSpec>();
         for (const entry of group.entries) {
-          const spec = resolve(entry.valueIndex, aliases);
+          const spec = resolve(unwrapReference(tokens, entry.valueIndex), aliases);
           if (spec) table.set(entry.key, spec);
         }
         if (table.size > 0) aliases.members.set(name.value, table);
@@ -1073,7 +1108,10 @@ function analyse(
           const first = args[0] ?? [];
           // The callee argument is itself a reference expression, so it is
           // resolved with the SAME reader rather than a bespoke pattern.
-          const inner = first.length > 0 ? findReferenceIn(first, specByName, aliasMap) : null;
+          const inner =
+            first.length > 0
+              ? findReferenceIn(first, unwrapReference(first, 0), specByName, aliasMap)
+              : null;
           if (inner) {
             const isConstruct = member.name === 'construct';
             // apply(fn, thisArg, [args]) → args are the 3rd; construct(fn, [args]) → 2nd.
@@ -1131,14 +1169,15 @@ function analyse(
 /** Resolve a sink reference written as a standalone expression (an argument). */
 function findReferenceIn(
   argument: readonly Token[],
+  start: number,
   specByName: ReadonlyMap<string, SinkSpec>,
   aliases: AliasTable,
 ): SinkSpec | null {
-  const first = argument[0];
+  const first = argument[start];
   if (first?.kind !== 'ident') return null;
   const table = GLOBAL_RECEIVERS.has(first.value) ? specByName : aliases.members.get(first.value);
   if (table) {
-    const member = readMember(argument, 1);
+    const member = readMember(argument, start + 1);
     return member ? (table.get(member.name) ?? null) : null;
   }
   return specByName.get(first.value) ?? aliases.direct.get(first.value) ?? null;

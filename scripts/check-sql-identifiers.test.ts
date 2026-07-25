@@ -263,6 +263,42 @@ describe('findOverlongIdentifiers', () => {
       ).toHaveLength(1);
     });
 
+    // Round 17: a SCHEMA-QUALIFIED name is one name. Reading `pg_catalog` as a
+    // token of its own displaced the `EXECUTE` from the history, so the call
+    // read as data and the identifier inside went unmeasured.
+    it.each([
+      ['schema-qualified', 'pg_catalog.format'],
+      ['schema-qualified with spacing', 'pg_catalog . format '],
+    ])('expands a %s format() call', (_label, callee) => {
+      const name = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE ${callee}('CREATE INDEX %I ON t(c)', '${name}'); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('still measures an over-long SCHEMA qualifier', () => {
+      // The qualifier is an identifier in its own right and carries its own
+      // limit, so consuming the dotted path whole must not stop measuring it.
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE ${'q'.repeat(64)}.format('CREATE INDEX %I ON t(c)', 'ok'); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('does not expand a qualified format() outside EXECUTE', () => {
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN SELECT pg_catalog.format('CREATE INDEX %I ON t(c)', '${'w'.repeat(64)}'); END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('folds a concatenated format TEMPLATE', () => {
       expect(
         findOverlongIdentifiers(

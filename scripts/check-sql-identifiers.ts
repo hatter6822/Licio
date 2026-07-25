@@ -276,6 +276,30 @@ function readSqlLiteral(sql: string, i: number): { value: string; end: number } 
 }
 
 /**
+ * Read a dotted name starting with the bare word `head` at `i`, returning its
+ * final component, the components before it, and the offset of the `(` that
+ * follows (whitespace skipped), if any.
+ *
+ * `pg_catalog . format (…)` is all legal spacing for one call.
+ */
+function readQualifiedName(
+  sql: string,
+  i: number,
+  head: string,
+): { name: string; qualifiers: string[]; open: number } {
+  const parts = [head];
+  let end = i + head.length;
+  for (;;) {
+    const next = /^\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)/.exec(sql.slice(end));
+    if (!next?.[1]) break;
+    parts.push(next[1]);
+    end += next[0].length;
+  }
+  while (end < sql.length && /\s/.test(sql[end] as string)) end += 1;
+  return { name: parts[parts.length - 1] as string, qualifiers: parts.slice(0, -1), open: end };
+}
+
+/**
  * Expand a statically-known `format(…)` call into the statement it produces.
  *
  * `EXECUTE format('CREATE INDEX %I ON t(c)', '<name>')` runs real DDL, and the
@@ -677,13 +701,24 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // the dynamic DDL inside would go unscanned.
       // `EXECUTE format('…', …)` builds the statement, so expand it rather
       // than discarding both the template and its arguments as data.
+      //
+      // A SCHEMA-QUALIFIED name is ONE name: `pg_catalog.format` IS `format`,
+      // and PL/pgSQL accepts it. Reading the qualifier as a token of its own
+      // pushed it onto the history, displacing the `EXECUTE` that decides
+      // whether this is dynamic DDL — so the call was discarded as data and
+      // the gate went blind to the identifier inside it. The qualified path is
+      // therefore consumed whole, and its function is its LAST component.
+      const qualified = readQualifiedName(sql, i, text);
       if (
-        text.toLowerCase() === 'format' &&
+        qualified.name.toLowerCase() === 'format' &&
         recent[recent.length - 1] === 'execute' &&
-        sql[i + text.length] === '('
+        sql[qualified.open] === '('
       ) {
-        const expanded = expandFormatCall(sql, i + text.length);
+        const expanded = expandFormatCall(sql, qualified.open);
         if (expanded) {
+          // Each component is an identifier in its own right and carries its
+          // own 63-byte limit, so the qualifiers are still measured.
+          for (const part of qualified.qualifiers) yield { text: part, quoted: false };
           yield* identifierCandidates(expanded.text);
           i = expanded.end;
           recent = [];
