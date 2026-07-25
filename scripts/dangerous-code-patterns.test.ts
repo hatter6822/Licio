@@ -72,6 +72,13 @@ describe('the Function constructor', () => {
     ['computed method, double quotes', 'Function["apply"](null, ["return 42"])();'],
     ['optional method on a global', "globalThis.Function?.call(null, 'return 42')();"],
     ['optional method, bare', "Function?.bind(null)('return 42')();"],
+    // Round 14: a property that RESOLVES BACK to the constructor. Every
+    // function's `.constructor` IS `Function`, so these build the same object.
+    ['constructor', "Function.constructor('return 42')()"],
+    ['prototype.constructor', "Function.prototype.constructor('return 42')()"],
+    ['constructor via eval', "eval.constructor('return 42')()"],
+    ['constructor via a timer', "setTimeout.constructor('return 42')()"],
+    ['computed constructor', "Function['constructor']('return 42')()"],
     // Round 8: computed access on `Reflect` itself.
     ['computed Reflect accessor', "Reflect['apply'](Function, null, ['return 42'])();"],
     ['computed Reflect.construct', 'Reflect["construct"](Function, ["x"])();'],
@@ -91,6 +98,8 @@ describe('the Function constructor', () => {
     ['a reflective call on an unrelated callee', 'Reflect.apply(handler, null, [arg]);'],
     ['the same with a computed accessor', "Reflect['apply'](handler, null, [arg]);"],
     ['an unrelated Reflect method', 'Reflect.ownKeys(obj);'],
+    ['a .constructor on an unrelated value', "obj.constructor('x')"],
+    ['a .prototype read with no call', 'const p = Function.prototype;'],
   ])('does not flag %s', (_label, code) => {
     expect(fires(code)).toBe(false);
   });

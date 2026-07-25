@@ -240,6 +240,119 @@ function isProceduralBody(sql: string, bodyStart: number, bodyEnd: number, body:
 }
 
 /**
+ * Read a single-quoted literal at `i` (optionally `E`-prefixed), returning its
+ * decoded value and the offset just past it.
+ */
+function readSqlLiteral(sql: string, i: number): { value: string; end: number } | null {
+  let j = i;
+  let escaped = false;
+  if (/^[EeBbXx]$/.test(sql[j] ?? '') && sql[j + 1] === "'") {
+    escaped = /^[Ee]$/.test(sql[j] as string);
+    j += 1;
+  }
+  if (sql[j] !== "'") return null;
+  j += 1;
+  let literal = '';
+  while (j < sql.length) {
+    if (escaped && sql[j] === '\\' && j + 1 < sql.length) {
+      literal += sql.slice(j, j + 2);
+      j += 2;
+      continue;
+    }
+    if (sql[j] === "'") {
+      if (sql[j + 1] === "'") {
+        literal += "'";
+        j += 2;
+      } else {
+        j += 1;
+        return { value: escaped ? decodeEscapeString(literal) : literal, end: j };
+      }
+    } else {
+      literal += sql[j];
+      j += 1;
+    }
+  }
+  return null; // unterminated
+}
+
+/**
+ * Expand a statically-known `format(…)` call into the statement it produces.
+ *
+ * `EXECUTE format('CREATE INDEX %I ON t(c)', '<name>')` runs real DDL, and the
+ * identifier arrives through the `%I` placeholder — so neither the format
+ * string nor the argument is an identifier on its own, and scanning them
+ * separately finds nothing.
+ *
+ * `%I` and `%s` take their argument's value; `%L` becomes a SHORT placeholder
+ * literal, because a value substituted there is data and its length must not
+ * be reported as an identifier. A non-literal argument becomes a short
+ * placeholder for the same reason.
+ */
+function expandFormatCall(sql: string, open: number): { text: string; end: number } | null {
+  const args: Array<string | null> = [];
+  let i = open + 1;
+  let depth = 0;
+  let current: string | null = null;
+  let sawAny = false;
+  while (i < sql.length) {
+    const c = sql[i] as string;
+    if (c === "'" || (/^[EeBbXx]$/.test(c) && sql[i + 1] === "'")) {
+      const literal = readSqlLiteral(sql, i);
+      if (!literal) return null;
+      if (depth === 0) current = literal.value;
+      sawAny = true;
+      i = literal.end;
+      continue;
+    }
+    if (c === '(') depth += 1;
+    else if (c === ')') {
+      if (depth === 0) {
+        if (sawAny) args.push(current);
+        return { text: substituteFormat(args), end: i + 1 };
+      }
+      depth -= 1;
+    } else if (c === ',' && depth === 0) {
+      args.push(current);
+      current = null;
+      sawAny = true;
+    } else if (!/\s/.test(c) && depth === 0 && current === null) {
+      sawAny = true; // a non-literal operand: value not statically known
+    }
+    i += 1;
+  }
+  return null;
+}
+
+/** Substitute `format()` arguments into its template. */
+function substituteFormat(args: ReadonlyArray<string | null>): string {
+  const template = args[0];
+  if (typeof template !== 'string') return '';
+  let out = '';
+  let next = 1;
+  for (let i = 0; i < template.length; i += 1) {
+    if (template[i] !== '%') {
+      out += template[i];
+      continue;
+    }
+    const kind = template[i + 1];
+    i += 1;
+    if (kind === '%') {
+      out += '%';
+      continue;
+    }
+    const value = args[next];
+    next += 1;
+    if (kind === 'I') out += typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : 'x';
+    else if (kind === 's') out += typeof value === 'string' ? value : 'x';
+    // `%L` yields DATA — a short placeholder, so its length is never measured
+    // as an identifier.
+    else if (kind === 'L') out += "'v'";
+    else out += 'x';
+  }
+  return out;
+}
+
+/**
  * Fold a `||` chain of STRING LITERALS that follows an already-read literal,
  * returning the concatenated text and the offset just past the chain.
  *
@@ -521,6 +634,21 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       // it onto the history would displace the `EXECUTE` that precedes it, so
       // `EXECUTE E'CREATE INDEX …'` would read as an ordinary data literal and
       // the dynamic DDL inside would go unscanned.
+      // `EXECUTE format('…', …)` builds the statement, so expand it rather
+      // than discarding both the template and its arguments as data.
+      if (
+        text.toLowerCase() === 'format' &&
+        recent[recent.length - 1] === 'execute' &&
+        sql[i + text.length] === '('
+      ) {
+        const expanded = expandFormatCall(sql, i + text.length);
+        if (expanded) {
+          yield* identifierCandidates(expanded.text);
+          i = expanded.end;
+          recent = [];
+          continue;
+        }
+      }
       if (/^[EeBbXx]$/.test(text) && sql[i + text.length] === "'") {
         // `E'…'` additionally makes the NEXT literal an escape string, whose
         // backslash sequences the server decodes before parsing.

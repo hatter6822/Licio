@@ -209,6 +209,30 @@ describe('findOverlongIdentifiers', () => {
       ).toHaveLength(1);
     });
 
+    // Round 14: `format()` builds the statement, and the identifier arrives
+    // through `%I` — so neither the template nor the argument is an identifier
+    // on its own and scanning them separately finds nothing.
+    it('expands a statically known EXECUTE format() call', () => {
+      const name = `n_${'w'.repeat(64)}`;
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('CREATE INDEX %I ON t(c)', '${name}'); END $$;`,
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('treats a %L argument as DATA, not an identifier', () => {
+      // A value substituted at `%L` is a literal; measuring its length as an
+      // identifier would fail a valid migration.
+      expect(
+        findOverlongIdentifiers(
+          '0100_x.sql',
+          `DO $$ BEGIN EXECUTE format('INSERT INTO t VALUES (%L)', '${'z'.repeat(80)}'); END $$;`,
+        ),
+      ).toEqual([]);
+    });
+
     it('does not fold ordinary concatenation outside EXECUTE', () => {
       const long = 'z'.repeat(80);
       expect(

@@ -757,7 +757,20 @@ function analyse(
    * chain of accesses is consumed structurally, so no spelling of `.call` /
    * `['call']` / `?.call` needs to be enumerated.
    */
-  const walkInvocation = (spec: SinkSpec, refStart: number, afterRef: number): void => {
+  /**
+   * `Function` reached through a property that RESOLVES BACK to it.
+   *
+   * `.prototype` yields `Function.prototype`, whose `.constructor` is
+   * `Function`; and every function's `.constructor` is `Function`, so
+   * `eval.constructor('return 42')()` and `setTimeout.constructor(…)` build
+   * the same object. These are chain CONTINUATIONS, not invocation methods —
+   * treating them as unknown methods stopped the walk and let the call
+   * through.
+   */
+  const functionSpec = specByName.get('Function');
+
+  const walkInvocation = (initial: SinkSpec, refStart: number, afterRef: number): void => {
+    let spec = initial;
     let j = afterRef;
     let method: string | undefined;
     // Guard against a pathological chain; real code never approaches this.
@@ -791,6 +804,20 @@ function analyse(
       }
       const member = readMember(tokens, j);
       if (!member) return;
+      if (member.name === 'prototype') {
+        // `Function.prototype…` — still the same sink's chain.
+        method = undefined;
+        j = member.next;
+        continue;
+      }
+      if (member.name === 'constructor') {
+        // Any function's `.constructor` IS the Function constructor.
+        if (!functionSpec) return;
+        spec = functionSpec;
+        method = undefined;
+        j = member.next;
+        continue;
+      }
       method = member.name;
       j = member.next;
     }
