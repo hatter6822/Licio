@@ -121,8 +121,47 @@ describe('runWebrtcBidirectionalExchange', () => {
       runWebrtcBidirectionalExchange({ db: peerB, channel: b, timeoutMs: 2000 }),
     ]);
 
-    expect(resultA.ingested?.blocks).toBe(1); // A ingested the served block
+    // WHICH LEG delivers the block is a genuine race, not a fixed outcome: B's own request carries
+    // a gossip PUSH of the same block, and B's served RESPONSE carries it too.  Both are correct
+    // and both leave A holding it — but if the push lands first the response then reports
+    // `alreadyHave: 1, blocks: 0`.  Asserting `blocks === 1` here therefore pinned a scheduling
+    // order rather than a guarantee, and failed under load once the push won the race.  The
+    // response-leg count is asserted where it IS deterministic, in the injected-order test below.
+    expect(resultA.ingested).not.toBeNull();
+    const counts = resultA.ingested as NonNullable<typeof resultA.ingested>;
+    expect(counts.blocks + counts.alreadyHave).toBeGreaterThanOrEqual(1); // accounted for, either leg
     expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes); // A now HOLDS it
+  });
+
+  it('counts the block as INGESTED when the served response is processed first', async () => {
+    // The order-dependent half of the test above, made deterministic by injecting the frames by
+    // hand: A sees B's RESPONSE before B's request-borne push, so the response is the leg that
+    // delivers the block and `blocks` must be 1 — the guarantee, decoupled from the scheduler.
+    const bytes = new Uint8Array([5, 6, 7, 8, 9, 10]);
+    const blockCid = await cidFor('block', bytes);
+    await putBlock(peerB, { blockCid, state: 'integrity_verified', size: bytes.length }, [bytes]);
+    await putPublicRecordWithBlock(peerB, blockCid);
+    await quarantineMissing(peerA, [blockCid]);
+
+    const aReq = await buildClientExchangeRequest(peerA, 'relay');
+    const bResp = await respondToClientExchange(peerB, aReq); // B's served response, carrying it
+    const bReq = await buildClientExchangeRequest(peerB, 'relay'); // B's request — settles A's round
+    expect(bResp).not.toBeNull();
+
+    const channel = new FakeDuplex(); // no `.peer`: only the frames we inject reach A
+    const p2p = await import('@licio/lcap-p2p');
+    const run = runWebrtcBidirectionalExchange({ db: peerA, channel, timeoutMs: 5000 });
+    await new Promise((r) => setTimeout(r, 20)); // A sends its own request first
+    const inject = (msg: Uint8Array): void => {
+      for (const f of p2p.fragmentMessage(msg, 0)) channel.onmessage?.({ data: f.buffer });
+    };
+    inject(bResp as Uint8Array); // the RESPONSE lands first…
+    await new Promise((r) => setTimeout(r, 20));
+    inject(bReq); // …then the request, so the round settles without the timeout
+    const result = await run;
+
+    expect(result.ingested?.blocks).toBe(1); // the response leg delivered it
+    expect(await readBlockBytes(peerA, blockCid)).toEqual(bytes);
   });
 
   it('does NOT commit a peer response delivered AFTER the exchange settled (#W)', async () => {

