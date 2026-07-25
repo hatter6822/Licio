@@ -44,9 +44,10 @@ export interface RendezvousServiceConfig {
   readonly clockSkewToleranceMs: number;
 }
 
-/** Mirrors the §15.3.2 client bounds (`@licio/private-p2p` RENDEZVOUS_MAX_TTL_MS /
- *  RENDEZVOUS_MAX_RECORDS_PER_POLL); defined here so the server stays free of the
- *  client plane's package. */
+/** The §15.3.1/§15.3.2 server bounds.  `apps/api` does not depend on
+ *  `@licio/private-p2p` at all (PRIV-API-RENDEZVOUS-1), so these cannot be
+ *  imported from the protocol package and are AUTHORITATIVE here — this is the
+ *  only place the poll cap and TTL ceiling are enforced. */
 export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
   maxRecordsPerPoll: 256,

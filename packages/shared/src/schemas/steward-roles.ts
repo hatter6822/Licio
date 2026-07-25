@@ -51,7 +51,6 @@ export function isStewardRoleId(value: string): value is StewardRoleId {
  */
 export const PALETTE_ACTIONS = ['warn', 'hide', 'remove', 'restrict', 'escalate', 'clear'] as const;
 export type PaletteAction = (typeof PALETTE_ACTIONS)[number];
-export const paletteActionSchema = z.enum(PALETTE_ACTIONS);
 
 /** Appeal-decision verbs (ROLE_APPEALS only). */
 export const APPEAL_DECISIONS = ['overturn', 'uphold', 'modify'] as const;

@@ -36,7 +36,6 @@ export const CRYPTO_FEATURE_CELLS = [
   'governance',
 ] as const;
 export type CryptoFeatureCell = (typeof CRYPTO_FEATURE_CELLS)[number];
-export const cryptoFeatureCellSchema = z.enum(CRYPTO_FEATURE_CELLS);
 
 /** ISO 3166-1 alpha-2, a sub-national code (`US-CA`), or a grouping key (`EU`). */
 export const regionCodeSchema = z.string().regex(/^[A-Z0-9][A-Z0-9-]{0,62}[A-Z0-9]$/, {

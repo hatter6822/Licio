@@ -43,10 +43,6 @@ const POSITIVE_RANK: Readonly<Record<PositiveState, number>> = {
   witnessed: 7,
 };
 
-export function positiveRank(state: PositiveState): number {
-  return POSITIVE_RANK[state];
-}
-
 /**
  * The higher of two positive states.  Never downgrades, and preserves a
  * `stale_authorized` already reached at rank 3 (a tie does not replace it with

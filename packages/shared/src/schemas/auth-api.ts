@@ -233,6 +233,3 @@ export type CredentialListResponse = z.infer<typeof credentialListResponseSchema
 
 /** Age band echoed to the client after registration (drives UI gating, never DOB). */
 export const registeredAgeBandSchema = z.object({ age_band: ageBandSchema }).strict();
-
-/** Path param shape for session revocation. */
-export const sessionIdParamSchema = z.object({ sessionId: uuidSchema }).strict();

@@ -10,12 +10,10 @@
 // legal, and what gate does it require?".
 
 import {
-  CHALLENGE_RECORD_STATES,
   GOVERNANCE_MODES,
   type GovernanceMode,
   PAYMENT_INTENT_STATES,
   type PaymentIntentState,
-  PROPOSAL_CHALLENGE_TYPES,
   type ProposalChallengeState,
   type ProposalChallengeType,
 } from '@licio/shared';
@@ -132,11 +130,7 @@ export function modeTransitionGate(
 // ---------------------------------------------------------------------------
 // Proposal challenge lifecycle (WS-M.4.3a).
 // ---------------------------------------------------------------------------
-
-export const CHALLENGE_TYPES = PROPOSAL_CHALLENGE_TYPES;
 export type ChallengeType = ProposalChallengeType;
-
-export const CHALLENGE_STATES = CHALLENGE_RECORD_STATES;
 export type ChallengeState = ProposalChallengeState;
 
 const CHALLENGE_EDGES: Readonly<Record<ChallengeState, readonly ChallengeState[]>> = {

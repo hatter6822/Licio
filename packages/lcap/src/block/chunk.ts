@@ -13,13 +13,6 @@ import type { ChunkDescriptorV2 } from '../schemas/records.js';
 /** Recommended fixed chunk sizes per transport profile (§13.2). */
 export type ChunkProfile = 'unstable' | 'mobile' | 'https' | 'lan';
 
-export const CHUNK_SIZE: Readonly<Record<ChunkProfile, number>> = {
-  unstable: 16 * 1024,
-  mobile: 32 * 1024,
-  https: 64 * 1024,
-  lan: 128 * 1024,
-};
-
 export interface ChunkedBlock {
   readonly parentBlockCid: string;
   readonly chunks: readonly Uint8Array[];

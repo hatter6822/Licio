@@ -16,7 +16,6 @@ import type {
   RoomPostingPolicy,
   RoomStewardRole,
   RoomSummary,
-  RoomType,
   RoomVisibility,
   StoryVisibility,
 } from '@licio/shared';
@@ -442,13 +441,4 @@ export async function isRoomSteward(
   if (roles.length === 0) return false;
   if (!requiredRoles) return true;
   return roles.some((role) => requiredRoles.includes(role));
-}
-
-/** List filter for GET /v1/rooms (WS-G.2.3a). */
-export interface RoomListFilter {
-  roomType?: RoomType | undefined;
-  joined?: boolean | undefined;
-  recommended?: boolean | undefined;
-  query?: string | undefined;
-  visibilitiesForAnonymous: readonly RoomVisibility[];
 }

@@ -61,10 +61,6 @@ export function isSuiteEnabled(id: CryptoSuiteId): boolean {
   return SUITES[id].enabled;
 }
 
-export function suiteById(id: CryptoSuiteId): SuiteDescriptor {
-  return SUITES[id];
-}
-
 /** Strongest-first preference order used for downgrade-resistant negotiation. */
 const PREFERENCE: readonly CryptoSuiteId[] = ['Ed25519', 'ES256'];
 

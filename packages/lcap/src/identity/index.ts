@@ -28,7 +28,6 @@ export {
   type IdentityChainDeps,
   type IdentityChainResult,
   type MissingDependency,
-  missingCids,
   validateIdentityChain,
 } from './chain.js';
 export {

@@ -233,13 +233,6 @@ export function nearbyCourierAvailable(): boolean {
   return Boolean(c?.registerPlugin && (c.isNativePlatform?.() ?? false));
 }
 
-/** Resolve the typed native plugin proxy, or `null` outside the native shell. */
-export function resolveNearbyCourierPlugin(): NearbyCourierPlugin | null {
-  const c = capacitor();
-  if (!c?.registerPlugin || !(c.isNativePlatform?.() ?? false)) return null;
-  return c.registerPlugin<NearbyCourierPlugin>('NearbyCourier');
-}
-
 // --- the zod-validated native payload boundary -------------------------------------
 
 /** A `payloadReceived` event from the native side: an endpoint id + base64 bytes. */

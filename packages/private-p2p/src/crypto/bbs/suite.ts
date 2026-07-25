@@ -22,7 +22,6 @@ export type G2Point = InstanceType<typeof G2>;
 /** The BLS12-381 subgroup order (the scalar field modulus `r`). */
 export const ORDER: bigint = bls.fields.Fr.ORDER;
 export const OCTET_SCALAR_LENGTH = 32;
-export const OCTET_POINT_LENGTH = 48; // G1 compressed; G2 is 96
 const EXPAND_LEN = 48;
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
@@ -110,11 +109,6 @@ export const interfaceDsts = (apiId: string): InterfaceDsts => dstsFor(apiId);
  *  Single-arg by design so it is safe as an `Array.map` callback. */
 export function messageToScalar(message: Uint8Array): bigint {
   return hashToScalar(message, BASE_DSTS.mapMsg);
-}
-
-/** `messages_to_scalars` for an arbitrary interface (the blind interface, blind.ts). */
-export function messageToScalarWith(message: Uint8Array, mapDst: Uint8Array): bigint {
-  return hashToScalar(message, mapDst);
 }
 
 /**

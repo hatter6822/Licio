@@ -19,7 +19,6 @@ export {
   buildDeviceForkEvidence,
   DeviceForkDetector,
   type DeviceForkObservation,
-  encodeForkEvidence,
   forkEvidencePriority,
 } from './fork.js';
 export {

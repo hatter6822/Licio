@@ -167,10 +167,3 @@ export function createRelationshipReader(services: ModerationServices): Relation
     },
   };
 }
-
-/** The set of author-ids to hide from a viewer (blocked ∪ muted). */
-export function hideAuthorIds(sets: RelationshipSets): Set<string> {
-  const out = new Set<string>(sets.blocked);
-  for (const id of sets.muted) out.add(id);
-  return out;
-}

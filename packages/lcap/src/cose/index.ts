@@ -44,5 +44,4 @@ export {
   type SuiteDescriptor,
   type SuiteFailure,
   type SuiteResolution,
-  suiteById,
 } from './suites.js';

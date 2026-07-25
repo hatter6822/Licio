@@ -94,20 +94,6 @@ export async function subscribeToPush(): Promise<PushSubscriptionJson | null> {
   return json;
 }
 
-/** Renew after a `pushsubscriptionchange` (silent re-subscribe). */
-export async function renewSubscription(): Promise<PushSubscriptionJson | null> {
-  if (!isPushSupported() || Notification.permission !== 'granted') return null;
-  const registration = await navigator.serviceWorker.ready;
-  const subscription = await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlBase64ToUint8Array(await fetchVapidPublicKey()),
-  });
-  const json = subscription.toJSON() as PushSubscriptionJson;
-  await registerPushSubscription(json);
-  track({ name: 'push_lifecycle', metric: 'renewed' });
-  return json;
-}
-
 /**
  * On app load: if permission is ALREADY granted, ensure the server has the
  * current subscription — re-registering the existing one, or silently

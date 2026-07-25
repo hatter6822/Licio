@@ -107,8 +107,6 @@ export const AUDIT_EVENT_TYPES = [
   'kyc_verification_change',
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
-/** The LIVE vocabulary — what a writer may append today. */
-export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 
 /**
  * RETIRED labels the append-only log may still HOLD: their writers were

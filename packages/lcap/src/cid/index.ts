@@ -42,10 +42,6 @@ const HUMAN_PREFIX: Readonly<Record<CidKind, string>> = {
   chunk: 'lcapc_',
 };
 
-const KIND_BY_CODE: ReadonlyMap<number, CidKind> = new Map(
-  (Object.keys(KIND_CODE) as CidKind[]).map((kind) => [KIND_CODE[kind], kind]),
-);
-
 const KINDS = Object.keys(KIND_CODE) as CidKind[];
 
 /** Why a CID string failed to parse (every check fails closed). */
@@ -133,9 +129,4 @@ export async function verifyCid(cid: string, bytes: Uint8Array): Promise<boolean
   const parsed = parseCid(cid);
   const expected = await cidBytesFor(parsed.kind, bytes);
   return compareBytes(parsed.bytes, expected) === 0;
-}
-
-/** Map a numeric `kind_code` back to its `CidKind` (or `undefined`). */
-export function kindForCode(code: number): CidKind | undefined {
-  return KIND_BY_CODE.get(code);
 }

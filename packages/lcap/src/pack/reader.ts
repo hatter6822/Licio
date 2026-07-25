@@ -41,25 +41,6 @@ export const DEFAULT_READER_CAPS: ReaderCaps = {
   maxEntries: SERVER_CAPS.maxManifestEntries,
 };
 
-/** Project a {@link ResourceCaps} profile into the reader's cap view. */
-export function readerCapsFromCaps(caps: {
-  readonly maxPackBytes: number;
-  readonly maxHeaderBytes: number;
-  readonly maxTableBytes: number;
-  readonly maxFrameHeaderBytes: number;
-  readonly maxFramePayloadBytes: number;
-  readonly maxManifestEntries: number;
-}): ReaderCaps {
-  return {
-    maxPackBytes: caps.maxPackBytes,
-    maxHeaderBytes: caps.maxHeaderBytes,
-    maxTableBytes: caps.maxTableBytes,
-    maxFrameHeaderBytes: caps.maxFrameHeaderBytes,
-    maxFramePayloadBytes: caps.maxFramePayloadBytes,
-    maxEntries: caps.maxManifestEntries,
-  };
-}
-
 export type PackReadStatus =
   | 'bad_magic'
   | 'oversized_pack'
