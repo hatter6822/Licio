@@ -9,7 +9,11 @@
 // effects and stay fast file scanners (the `check:no-applause` pattern).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { BUILT_CODE_SINKS } from './dangerous-code-patterns.js';
+import {
+  BUILT_CODE_SINKS,
+  findSinkMatches,
+  stripComments as sharedStripComments,
+} from './dangerous-code-patterns.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
 
@@ -103,16 +107,16 @@ export function scanPublicGatewayEgress(
 // runtime; this is the static half over the private trees.
 // ---------------------------------------------------------------------------
 
-export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
+export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
   // The eval/Function-constructor/string-timer sinks come from the shared
   // definition (`dangerous-code-patterns.ts`) so this gate, lint:security,
   // check:sw, and check:update-channel cannot drift apart on what counts as
   // runtime code evaluation — they previously all pinned only `new Function(`,
   // leaving the equivalent bare `Function(` call open in every one of them.
-  ...BUILT_CODE_SINKS.map(({ pattern, label }) => ({ pattern, detail: label })),
-  { pattern: /importScripts\s*\(/, detail: 'importScripts()' },
+  ...BUILT_CODE_SINKS,
+  { pattern: /importScripts\s*\(/, label: 'importScripts()' },
   // A dynamic import() of an http(s) URL string (remote code).
-  { pattern: /import\s*\(\s*['"`]https?:/i, detail: 'dynamic import() of a remote URL' },
+  { pattern: /import\s*\(\s*['"`]https?:/i, label: 'dynamic import() of a remote URL' },
 ];
 
 export function scanDynamicRemoteCode(
@@ -120,13 +124,15 @@ export function scanDynamicRemoteCode(
 ): GateViolation[] {
   const violations: GateViolation[] = [];
   for (const { path, content } of files) {
-    const code = stripComments(content);
-    const lines = code.split('\n');
-    lines.forEach((line, i) => {
-      for (const { pattern, detail } of DYNAMIC_REMOTE_CODE_PATTERNS) {
-        if (pattern.test(line)) violations.push({ file: path, line: i + 1, detail });
-      }
-    });
+    // Whole-text scan (not line by line): every sink pattern permits whitespace
+    // between the callee and its `(`, and that whitespace may be a NEWLINE —
+    // `Function\n('x')` is an ordinary call a per-line scan can never see.
+    // The shared, comment-blanking strip preserves offsets, so `findSinkMatches`
+    // still reports the true source line.
+    const code = sharedStripComments(content);
+    for (const { label, line } of findSinkMatches(code, DYNAMIC_REMOTE_CODE_PATTERNS)) {
+      violations.push({ file: path, line, detail: label });
+    }
   }
   return violations;
 }

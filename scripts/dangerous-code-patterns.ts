@@ -128,25 +128,215 @@ export const BUILT_CODE_SINKS: readonly CodeSinkPattern[] = [
   },
 ];
 
+/** Keywords after which a `/` begins a REGEX literal rather than a division. */
+const KEYWORDS_BEFORE_REGEX = new Set([
+  'return',
+  'typeof',
+  'instanceof',
+  'in',
+  'of',
+  'new',
+  'delete',
+  'void',
+  'throw',
+  'case',
+  'do',
+  'else',
+  'yield',
+  'await',
+]);
+
 /**
- * Strip block + line comments so gate doctrine may be DISCUSSED in prose (e.g.
- * "no eval here") while a real call still trips the scan.
+ * Blank out COMMENTS so gate doctrine may be DISCUSSED in prose ("no eval
+ * here") while a real call still trips the scan.
  *
- * The line-comment rule ignores a `//` preceded by `:` or by a quote, so both
- * an absolute `https://…` URL and a protocol-relative `"//host/x.js"` string
- * literal survive for the importScripts checks that need to see them.
+ * STRING-AWARE, and that is the whole point rather than a refinement. A
+ * regex-based strip treats comment delimiters that appear INSIDE string
+ * literals as real delimiters, so
  *
- * A block comment is replaced by a SPACE when it sits on one line, so
- * `a/**\/b` cannot fuse into a single token — and by its own NEWLINES when it
- * spans several, so every later line keeps its original number. Gates report
- * `file:line`, and collapsing a 20-line licence header to one space would have
- * pointed every subsequent violation at the wrong line.
+ *     const start = "/*"; eval("payload"); const end = "*\/";
+ *
+ * collapses to `const start = " ";` — the strip itself HIDES the `eval` from
+ * every gate that consumes it. That is strictly worse than not stripping at
+ * all, so this walks the source instead: single/double-quoted strings,
+ * template literals (tracking `${…}` nesting, which can hold further strings
+ * and comments), and regex literals are skipped intact; only true comment
+ * spans are blanked.
+ *
+ * LENGTH- AND NEWLINE-PRESERVING: every blanked character becomes a space and
+ * newlines are kept, so the result is the same length as the input and each
+ * character keeps its original offset and line. Gates report `file:line` and
+ * can therefore map a match index straight back to the source.
+ *
+ * The one construct not disambiguated perfectly is `/` as division versus a
+ * regex literal — that needs a real parser. The heuristic below (a regex may
+ * follow an operator, a punctuator, or one of the keywords above, but not an
+ * identifier, literal, `)`, `]`, or `}`) is the standard one and is exercised
+ * against the whole repository by the gate's own run.
  */
 export function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (match) => {
-      const newlines = match.match(/\n/g)?.length ?? 0;
-      return newlines === 0 ? ' ' : '\n'.repeat(newlines);
-    })
-    .replace(/(^|[^:'"])\/\/.*$/gm, '$1');
+  const out = source.split('');
+  const n = source.length;
+
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to && k < n; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  };
+
+  /** Does the `/` at `at` open a regex literal (rather than divide)? */
+  const opensRegex = (at: number): boolean => {
+    let k = at - 1;
+    while (k >= 0 && /\s/.test(source[k] as string)) k -= 1;
+    if (k < 0) return true;
+    const prev = source[k] as string;
+    if (/[)\]}]/.test(prev)) return false;
+    if (/[A-Za-z0-9_$]/.test(prev)) {
+      let s = k;
+      while (s >= 0 && /[A-Za-z0-9_$]/.test(source[s] as string)) s -= 1;
+      return KEYWORDS_BEFORE_REGEX.has(source.slice(s + 1, k + 1));
+    }
+    return true;
+  };
+
+  // Template-literal `${…}` spans push onto this stack; a `}` at depth pops
+  // back into the enclosing template.
+  const templateStack: number[] = [];
+  let i = 0;
+  while (i < n) {
+    const c = source[i] as string;
+    const two = source.slice(i, i + 2);
+
+    if (two === '//') {
+      const nl = source.indexOf('\n', i);
+      const end = nl === -1 ? n : nl;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (two === '/*') {
+      const close = source.indexOf('*/', i + 2);
+      const end = close === -1 ? n : close + 2;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      i += 1;
+      while (i < n) {
+        const ch = source[i] as string;
+        if (ch === '\\') i += 2;
+        else if (ch === c) {
+          i += 1;
+          break;
+        } else if (ch === '\n')
+          break; // unterminated: do not run past the line
+        else i += 1;
+      }
+      continue;
+    }
+    if (c === '`') {
+      i += 1;
+      while (i < n) {
+        const ch = source[i] as string;
+        if (ch === '\\') i += 2;
+        else if (ch === '`') {
+          i += 1;
+          break;
+        } else if (ch === '$' && source[i + 1] === '{') {
+          // Enter an interpolation: ordinary scanning resumes inside it.
+          templateStack.push(1);
+          i += 2;
+          break;
+        } else i += 1;
+      }
+      continue;
+    }
+    if (c === '}' && templateStack.length > 0) {
+      templateStack.pop();
+      // Resume the enclosing template literal after the interpolation closes.
+      i += 1;
+      while (i < n) {
+        const ch = source[i] as string;
+        if (ch === '\\') i += 2;
+        else if (ch === '`') {
+          i += 1;
+          break;
+        } else if (ch === '$' && source[i + 1] === '{') {
+          templateStack.push(1);
+          i += 2;
+          break;
+        } else i += 1;
+      }
+      continue;
+    }
+    if (c === '/' && opensRegex(i)) {
+      i += 1;
+      let inClass = false;
+      while (i < n) {
+        const ch = source[i] as string;
+        if (ch === '\\') i += 2;
+        else if (ch === '[') {
+          inClass = true;
+          i += 1;
+        } else if (ch === ']') {
+          inClass = false;
+          i += 1;
+        } else if (ch === '/' && !inClass) {
+          i += 1;
+          break;
+        } else if (ch === '\n')
+          break; // unterminated: not a regex after all
+        else i += 1;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+/** One sink match, with the 1-based line it sits on (for `file:line` output). */
+export interface SinkMatch {
+  readonly label: string;
+  readonly line: number;
+}
+
+/**
+ * Find every sink match in a WHOLE source text, reporting the line of each.
+ *
+ * Scanning the whole text — not line by line — is what makes the patterns'
+ * `\s*` meaningful: `Function\n('x')` and `(Function)\n('x')` are legal calls,
+ * and a per-line scan can never match them however permissive the pattern is.
+ * Offsets are converted to line numbers only for reporting.
+ *
+ * `code` is expected to be {@link stripComments} output, which preserves both
+ * length and newlines, so a match index maps to the original file's line.
+ */
+export function findSinkMatches(
+  code: string,
+  sinks: readonly CodeSinkPattern[] = SOURCE_CODE_SINKS,
+): SinkMatch[] {
+  const matches: SinkMatch[] = [];
+  // Precompute newline offsets once: line = (count of newlines before index) + 1.
+  const newlines: number[] = [];
+  for (let k = 0; k < code.length; k += 1) if (code[k] === '\n') newlines.push(k);
+  const lineOf = (index: number): number => {
+    let lo = 0;
+    let hi = newlines.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((newlines[mid] as number) < index) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo + 1;
+  };
+  for (const { pattern, label } of sinks) {
+    const global = new RegExp(
+      pattern.source,
+      pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
+    );
+    for (const match of code.matchAll(global)) {
+      if (match.index !== undefined) matches.push({ label, line: lineOf(match.index) });
+    }
+  }
+  return matches.sort((a, b) => a.line - b.line);
 }

@@ -11,6 +11,7 @@ import {
   EVAL_PATTERN,
   EVAL_PATTERN_STRICT,
   FUNCTION_CONSTRUCTOR_PATTERNS,
+  findSinkMatches,
   INDIRECT_EVAL_PATTERNS,
   SOURCE_CODE_SINKS,
   STRING_TIMER_PATTERN,
@@ -140,6 +141,29 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
   });
 });
 
+describe('findSinkMatches (whole-text scan)', () => {
+  // Every sink pattern allows whitespace between the callee and its `(`, and
+  // that whitespace may be a NEWLINE — a per-line scan can never match these
+  // however permissive the pattern is.
+  it.each([
+    ['Function across a newline', "const f = Function\n('return 1');"],
+    ['parenthesized across a newline', "const f = (Function)\n('return 1');"],
+    ['eval across a newline', "const v = eval\n('1');"],
+  ])('catches %s', (_label, code) => {
+    expect(findSinkMatches(code).length).toBeGreaterThan(0);
+  });
+
+  it('reports the line the match STARTS on', () => {
+    const code = ['const a = 1;', 'const b = 2;', "eval('x');"].join('\n');
+    expect(findSinkMatches(code)).toEqual([{ label: 'eval()', line: 3 }]);
+  });
+
+  it('finds nothing in ordinary multi-line code', () => {
+    const code = ['export function build(x) {', '  return getFunction(x);', '}'].join('\n');
+    expect(findSinkMatches(code)).toEqual([]);
+  });
+});
+
 describe('stripComments', () => {
   // A comment placed INSIDE a call — `Function/*gap*/('…')` — split the token
   // stream so no pattern matched; stripping first closes that route.
@@ -155,6 +179,39 @@ describe('stripComments', () => {
     const stripped = stripComments(source);
     expect(stripped.split('\n')).toHaveLength(source.split('\n').length);
     expect(stripped.split('\n').findIndex((l) => /eval/.test(l))).toBe(4);
+  });
+
+  // The regression a regex-based strip introduced: comment delimiters INSIDE
+  // string literals were treated as real delimiters, so the strip itself
+  // deleted the code between them — hiding a sink from every gate. Strictly
+  // worse than not stripping at all.
+  it('does NOT treat comment delimiters inside string literals as comments', () => {
+    const source = 'const start = "/*"; eval("payload"); const end = "*/";';
+    const stripped = stripComments(source);
+    expect(stripped).toBe(source); // nothing here is a comment
+    expect(hits(SOURCE_CODE_SINKS, stripped)).toBe(true);
+  });
+
+  it.each([
+    ['single quotes', "const s = '/*'; eval('x'); const e = '*/';"],
+    ['template literal', 'const s = `/*`; eval("x"); const e = `*/`;'],
+    ['a // inside a string', 'const s = "// not a comment"; eval("x");'],
+    ['a regex literal containing a slash', 'const re = /a\\/b/; eval("x");'],
+  ])('keeps code visible past a comment delimiter in %s', (_label, source) => {
+    expect(hits(SOURCE_CODE_SINKS, stripComments(source))).toBe(true);
+  });
+
+  it('is LENGTH- and NEWLINE-preserving, so match offsets map to real lines', () => {
+    const source = [
+      'const a = 1; // trailing',
+      '/* one',
+      '   two */',
+      'const s = "/* not a comment */";',
+      "eval('x');",
+    ].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped).toHaveLength(source.length);
+    expect((stripped.match(/\n/g) ?? []).length).toBe((source.match(/\n/g) ?? []).length);
   });
 
   it('lets doctrine be discussed in prose without tripping a scan', () => {
@@ -173,7 +230,12 @@ describe('stripComments', () => {
     expect(stripComments('importScripts("//evil/x.js");')).toContain('//evil/x.js');
   });
 
-  it('collapses a block comment to a space so identifiers cannot fuse', () => {
-    expect(stripComments('a/* joiner */b')).toBe('a b');
+  it('blanks a block comment to WHITESPACE so identifiers cannot fuse', () => {
+    // Length is preserved (offsets stay valid), and the tokens either side stay
+    // separate — `ab` would be a new identifier the scan never saw in the source.
+    const stripped = stripComments('a/* joiner */b');
+    expect(stripped).toHaveLength('a/* joiner */b'.length);
+    expect(stripped).toMatch(/^a\s+b$/);
+    expect(stripped).not.toContain('ab');
   });
 });

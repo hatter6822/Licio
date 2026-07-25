@@ -90,12 +90,31 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       i += dollar[0].length;
       continue;
     }
-    // "quoted identifier"
+    // "quoted identifier" — `""` is an ESCAPED quote inside the name, not a
+    // terminator. Stopping at the first quote would split a single 64-byte
+    // identifier into two sub-limit halves, and both would pass. The DECODED
+    // name is what Postgres stores and therefore what must be measured.
     if (sql[i] === '"') {
-      const end = sql.indexOf('"', i + 1);
-      if (end === -1) return;
-      yield { text: sql.slice(i + 1, end), quoted: true };
-      i = end + 1;
+      i += 1;
+      let decoded = '';
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            decoded += '"';
+            i += 2;
+          } else {
+            i += 1;
+            closed = true;
+            break;
+          }
+        } else {
+          decoded += sql[i];
+          i += 1;
+        }
+      }
+      if (!closed) return; // unterminated: stop rather than mis-parse the rest
+      yield { text: decoded, quoted: true };
       continue;
     }
     // bare identifier / keyword token

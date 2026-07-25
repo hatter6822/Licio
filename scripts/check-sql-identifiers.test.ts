@@ -104,6 +104,25 @@ describe('findOverlongIdentifiers', () => {
     }
   });
 
+  // Postgres writes a literal `"` inside a quoted identifier as `""`. Stopping
+  // at the first quote splits one over-long name into two sub-limit halves, and
+  // both pass — so the DECODED name is what must be measured.
+  it('treats "" as an escaped quote inside ONE identifier (regression)', () => {
+    const decoded = `${'a'.repeat(32)}"${'b'.repeat(31)}`; // 64 bytes decoded
+    expect(Buffer.byteLength(decoded, 'utf8')).toBe(64);
+    const written = `${'a'.repeat(32)}""${'b'.repeat(31)}`; // as it appears in SQL
+    expect(findOverlongIdentifiers('0099_x.sql', `CREATE INDEX "${written}" ON t (c);`)).toEqual([
+      { file: '0099_x.sql', identifier: decoded, bytes: 64 },
+    ]);
+  });
+
+  it('does not split a SHORT identifier containing an escaped quote', () => {
+    const written = 'we""ird';
+    expect(findOverlongIdentifiers('0099_x.sql', `CREATE INDEX "${written}" ON t (c);`)).toEqual(
+      [],
+    );
+  });
+
   it('does not mistake prose or JSON paths between quotes for identifiers', () => {
     // Comments and string literals are skipped by the scanner, so a `"` inside
     // either cannot pair with a later one and report the span between them as

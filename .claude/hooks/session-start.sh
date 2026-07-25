@@ -12,7 +12,7 @@
 #
 # Service versions/credentials mirror `.github/workflows/ci.yml` exactly, so a
 # session reproduces CI rather than an approximation of it:
-#   postgres://licio:licio_ci@localhost:5432/licio_ci   (pg16 + pgvector)
+#   postgres://licio:licio_ci@localhost:<pg16 main port>/licio_ci  (pg16 + pgvector)
 #   redis://localhost:6379
 #
 # Idempotent: every step is a no-op when it has already been done, so a resume
@@ -33,7 +33,13 @@ PG_VERSION=16
 DB_USER=licio
 DB_PASSWORD=licio_ci
 DB_NAME=licio_ci
-DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}"
+# The port is NOT hard-coded: `pg_createcluster` allocates the next free one
+# (5433, 5434, …) when something already occupies 5432, so a fixed URL could
+# point at a DIFFERENT, older cluster — one without pgvector and without this
+# schema. `PG_PORT` is resolved from `pg_lsclusters` after the cluster exists,
+# and every probe and the exported URL derive from it. CI publishes 5432, which
+# is also what this asks for, so the common case matches CI exactly.
+PG_PORT=5432
 REDIS_URL="redis://localhost:6379"
 
 log() { echo "[session-start] $*"; }
@@ -81,8 +87,11 @@ fi
 # fails, taking the whole hook down with it under `set -e`.  Create it first
 # when it is absent.
 if ! pg_lsclusters -h 2>/dev/null | awk -v v="${PG_VERSION}" '$1 == v && $2 == "main"' | grep -q .; then
-  log "Creating PostgreSQL cluster ${PG_VERSION}/main"
-  pg_createcluster "${PG_VERSION}" main
+  log "Creating PostgreSQL cluster ${PG_VERSION}/main on port ${PG_PORT}"
+  # Ask for the advertised port; if it is taken, fall back and let the resolved
+  # port below carry the truth rather than failing the whole hook.
+  pg_createcluster --port "${PG_PORT}" "${PG_VERSION}" main \
+    || pg_createcluster "${PG_VERSION}" main
 fi
 
 # `pg_ctlcluster … status` exits non-zero both when the cluster is DOWN and for
@@ -96,27 +105,49 @@ if ! pg_ctlcluster "${PG_VERSION}" main status >/dev/null 2>&1; then
   fi
 fi
 
+# Resolve the port THIS cluster actually listens on. An unqualified psql/
+# pg_isready would take libpq's default (5432) and could therefore configure —
+# and hand the suites — a DIFFERENT, older cluster that happens to hold that
+# port, one with neither pgvector nor this schema. Every command below, and the
+# exported URL, is pinned to the resolved value instead.
+PG_PORT="$(pg_lsclusters -h 2>/dev/null | awk -v v="${PG_VERSION}" '$1 == v && $2 == "main" { print $3 }')"
+if [ -z "${PG_PORT}" ]; then
+  log "ERROR: could not resolve the port for PostgreSQL ${PG_VERSION}/main"
+  exit 1
+fi
+DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@localhost:${PG_PORT}/${DB_NAME}"
+log "PostgreSQL ${PG_VERSION}/main is on port ${PG_PORT}"
+
 # Wait for the socket before issuing DDL (the cluster reports "online" slightly
 # before it accepts connections on a cold start).
 for _ in $(seq 1 30); do
-  su postgres -c "pg_isready -q" && break
+  su postgres -c "pg_isready -q -p ${PG_PORT}" && break
   sleep 1
 done
 
 log "Ensuring role/database ${DB_USER}/${DB_NAME}"
 # SUPERUSER so the suites may CREATE EXTENSION and the migration chain may
 # install `vector` itself — the CI image's `licio` role is a superuser too.
-su postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" \
+su postgres -c "psql -p ${PG_PORT} -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" \
   | grep -q 1 \
-  || su postgres -c "psql -q -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}' SUPERUSER\""
+  || su postgres -c "psql -p ${PG_PORT} -q -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}' SUPERUSER\""
 
-su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" \
+su postgres -c "psql -p ${PG_PORT} -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" \
   | grep -q 1 \
-  || su postgres -c "createdb -O ${DB_USER} ${DB_NAME}"
+  || su postgres -c "createdb -p ${PG_PORT} -O ${DB_USER} ${DB_NAME}"
 
 log "Enabling the vector extension"
-PGPASSWORD="${DB_PASSWORD}" psql -h 127.0.0.1 -U "${DB_USER}" -d "${DB_NAME}" \
+PGPASSWORD="${DB_PASSWORD}" psql -h 127.0.0.1 -p "${PG_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
   -q -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Prove the cluster we are about to advertise is the pg16 one WITH pgvector,
+# rather than an older cluster that answered on the same port.
+SERVER_MAJOR="$(PGPASSWORD="${DB_PASSWORD}" psql -h 127.0.0.1 -p "${PG_PORT}" -U "${DB_USER}" \
+  -d "${DB_NAME}" -tAc "SHOW server_version_num" | cut -c1-2)"
+if [ "${SERVER_MAJOR}" != "${PG_VERSION}" ]; then
+  log "ERROR: port ${PG_PORT} is served by PostgreSQL major ${SERVER_MAJOR}, not ${PG_VERSION}"
+  exit 1
+fi
 
 # --------------------------------------------------------------------------
 # 3. Redis
