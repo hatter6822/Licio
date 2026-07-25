@@ -123,6 +123,17 @@ describe('findOverlongIdentifiers', () => {
     );
   });
 
+  it('flags a NON-ASCII unquoted identifier (regression)', () => {
+    // Postgres accepts any high-bit character as a letter in a bare identifier,
+    // so this is ONE 64-byte name the server truncates — an ASCII-only token
+    // class skipped the leading `é` and measured only the shorter suffix.
+    const name = `é${'a'.repeat(62)}`;
+    expect(Buffer.byteLength(name, 'utf8')).toBe(64);
+    expect(findOverlongIdentifiers('0099_x.sql', `CREATE INDEX ${name} ON t (c);`)).toEqual([
+      { file: '0099_x.sql', identifier: name, bytes: 64 },
+    ]);
+  });
+
   it('does not mistake prose or JSON paths between quotes for identifiers', () => {
     // Comments and string literals are skipped by the scanner, so a `"` inside
     // either cannot pair with a later one and report the span between them as

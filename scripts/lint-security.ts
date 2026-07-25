@@ -3,9 +3,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   type CodeSinkPattern,
-  findSinkMatches,
   SOURCE_CODE_SINKS,
-  stripComments,
+  scanSourceForSinks,
 } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -71,20 +70,21 @@ function lint(): void {
     for (const filePath of files) {
       if (ALLOWLIST_PATHS.some((p) => p.test(filePath))) continue;
 
-      // Strip comments BEFORE scanning. Two reasons, both real: a doctrine
-      // comment naming a forbidden sink in prose is not a violation, and a
-      // comment placed INSIDE a call — `Function/*gap*/('…')` — otherwise split
-      // the token stream so the pattern never matched. The strip is
-      // string-aware (a `/*` inside a literal is not a comment) and preserves
-      // both length and newlines, so match offsets map back to real lines.
-      const content = stripComments(readFileSync(filePath, 'utf-8'));
-
-      // Scan the WHOLE text, not line by line. Every pattern here allows
-      // whitespace between the callee and its `(`, and that whitespace may be a
-      // NEWLINE: `Function\n('x')` and `(Function)\n('x')` are ordinary calls
-      // that a per-line scan can never see, however permissive the pattern.
+      // `scanSourceForSinks` scans the RAW source AND the comment-stripped copy
+      // and unions the results, over the WHOLE text rather than line by line.
+      //   • raw    — no strip bug can ever hide a sink (every regression found
+      //              in review was a strip that deleted the call it should have
+      //              revealed).
+      //   • strip  — adds the one form raw cannot see, a call split by an
+      //              interposed comment: `Function/*gap*/('…')`.
+      //   • whole  — the patterns allow whitespace before `(`, and that
+      //              whitespace may be a NEWLINE, which a per-line scan cannot
+      //              match however permissive the pattern.
       const relative = filePath.replace(ROOT, '');
-      for (const { label, line } of findSinkMatches(content, BLOCKED_PATTERNS)) {
+      for (const { label, line } of scanSourceForSinks(
+        readFileSync(filePath, 'utf-8'),
+        BLOCKED_PATTERNS,
+      )) {
         errors.push(`${relative}:${line}: ${label}`);
       }
     }

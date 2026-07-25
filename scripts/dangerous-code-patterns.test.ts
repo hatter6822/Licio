@@ -15,6 +15,7 @@ import {
   INDIRECT_EVAL_PATTERNS,
   SOURCE_CODE_SINKS,
   STRING_TIMER_PATTERN,
+  scanSourceForSinks,
   stripComments,
 } from './dangerous-code-patterns.js';
 
@@ -46,6 +47,15 @@ describe('FUNCTION_CONSTRUCTOR_PATTERNS', () => {
     ['computed on window', 'const f = window["Function"]("x");'],
     ['computed on self', "const f = self['Function']('x');"],
   ])('catches the INDIRECT form: %s', (_label, code) => {
+    expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
+  });
+
+  // Round-3 indirections: dot-qualified on a global, optional call, and the
+  // comma/sequence idiom.
+  it.each([
+    ['optional call', "const f = Function?.('x');"],
+    ['sequence idiom', "const f = (0, Function)('x');"],
+  ])('catches %s', (_label, code) => {
     expect(FUNCTION_CONSTRUCTOR_PATTERNS.some((p) => p.test(code))).toBe(true);
   });
 
@@ -136,8 +146,22 @@ describe('INDIRECT_EVAL_PATTERNS', () => {
     },
   );
 
-  it('does not flag a direct or member eval call (those have their own patterns)', () => {
-    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test('await redis.eval(script, 0);'))).toBe(false);
+  // Round-3: the global-object receivers, the optional call, and the canonical
+  // `(0, eval)` idiom all reach the same sink.
+  it.each([
+    "globalThis.eval('x')",
+    "window.eval('x')",
+    "self.eval('x')",
+    "eval?.('x')",
+    "(0, eval)('x')",
+  ])('catches %s', (code) => {
+    expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(true);
+  });
+
+  it('does not flag a LIBRARY member eval — the Redis Lua wrapper must survive', () => {
+    for (const code of ['await redis.eval(script, 0);', 'await client.eval(lua, keys);']) {
+      expect(INDIRECT_EVAL_PATTERNS.some((p) => p.test(code))).toBe(false);
+    }
   });
 });
 
@@ -161,6 +185,31 @@ describe('findSinkMatches (whole-text scan)', () => {
   it('finds nothing in ordinary multi-line code', () => {
     const code = ['export function build(x) {', '  return getFunction(x);', '}'].join('\n');
     expect(findSinkMatches(code)).toEqual([]);
+  });
+});
+
+describe('scanSourceForSinks (raw ∪ stripped)', () => {
+  // The class of bug found three times in review: a strip that DELETED the call
+  // it was meant to reveal. Scanning raw as well makes the strip non-load-bearing
+  // — it can only ever ADD findings, never remove them.
+  it('catches a sink even when the strip mis-lexes the surrounding code', () => {
+    // `a++ / b` is a division; a lexer that reads the `/` as a regex start
+    // swallows the following `/*gap*/` comment and hides the constructor.
+    const source = "a++ / b; Function/*gap*/('globalThis.pwned=true')();";
+    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
+  });
+
+  it('still catches the comment-gap form the raw pass cannot see', () => {
+    const source = "const f = Function/*gap*/('return 1');";
+    expect(scanSourceForSinks(source).length).toBeGreaterThan(0);
+  });
+
+  it('reports each (line, label) once despite scanning twice', () => {
+    expect(scanSourceForSinks("eval('x');")).toEqual([{ label: 'eval()', line: 1 }]);
+  });
+
+  it('finds nothing in ordinary code', () => {
+    expect(scanSourceForSinks('export const go = () => getFunction(name);')).toEqual([]);
   });
 });
 

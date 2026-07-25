@@ -117,8 +117,12 @@ export function* identifierCandidates(sql: string): Generator<{ text: string; qu
       yield { text: decoded, quoted: true };
       continue;
     }
-    // bare identifier / keyword token
-    const bare = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(i));
+    // Bare identifier / keyword token. Postgres's unquoted-identifier set is
+    // NOT ASCII-only: any character with the high bit set is a valid letter, so
+    // `é…` is one identifier the server truncates like any other. An
+    // ASCII-only class silently skipped the leading `é` and measured only the
+    // shorter suffix, letting a 64-byte name through.
+    const bare = /^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*/.exec(sql.slice(i));
     if (bare) {
       yield { text: bare[0], quoted: false };
       i += bare[0].length;

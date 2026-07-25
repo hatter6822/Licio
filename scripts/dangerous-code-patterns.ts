@@ -46,22 +46,39 @@
  * from landing in the first place.
  */
 export const FUNCTION_CONSTRUCTOR_PATTERNS: readonly RegExp[] = [
-  /(?<![.\w$#])Function\s*\(/,
-  /\b(?:globalThis|window|self)\s*\.\s*Function\s*\(/,
-  // Parenthesized reference: `(Function)('…')` and `new (Function)('…')`.
-  /\(\s*Function\s*\)\s*\(/,
+  // Direct call, with or without `new`, and with an optional call `?.()`.
+  /(?<![.\w$#])Function\s*(?:\?\.)?\s*\(/,
+  // Reached through the global object by dot access.
+  /\b(?:globalThis|window|self|globalThis\?\.|window\?\.|self\?\.)\s*\.?\s*Function\s*(?:\?\.)?\s*\(/,
+  // Parenthesized reference: `(Function)('…')`, `new (Function)('…')`, and the
+  // comma/sequence idiom `(0, Function)('…')`.
+  /\((?:[^()]*,\s*)?\s*Function\s*\)\s*(?:\?\.)?\s*\(/,
   // Computed member access: `globalThis['Function']('…')`, `x["Function"](…)`.
-  /\[\s*(['"`])Function\1\s*\]\s*\(/,
+  /\[\s*(['"`])Function\1\s*\]\s*(?:\?\.)?\s*\(/,
 ];
 
 /**
- * The same indirection applied to `eval`: a parenthesized or computed reference
- * reaches the same sink. (Indirect eval runs in global scope rather than the
- * caller's, which is if anything the more dangerous of the two.)
+ * `eval` reached other than as a bare call. Each of these evaluates arbitrary
+ * source, and several are the CANONICAL way to ask for *indirect* eval — which
+ * runs in global scope rather than the caller's, if anything the worse of the
+ * two:
+ *
+ *     (0, eval)('…')        the classic indirect-eval idiom
+ *     (eval)('…')           parenthesized reference
+ *     globalThis.eval('…')  window.eval('…')  self.eval('…')
+ *     globalThis['eval']('…')                 eval?.('…')
+ *
+ * The bare {@link EVAL_PATTERN} deliberately excludes member access so a Redis
+ * Lua wrapper (`redis.eval(script, 0)`) is not flagged; the GLOBAL-object
+ * receivers are named explicitly here because those are never a library method.
  */
 export const INDIRECT_EVAL_PATTERNS: readonly RegExp[] = [
-  /\(\s*eval\s*\)\s*\(/,
-  /\[\s*(['"`])eval\1\s*\]\s*\(/,
+  // `(eval)('…')` and the sequence form `(0, eval)('…')`.
+  /\((?:[^()]*,\s*)?\s*eval\s*\)\s*(?:\?\.)?\s*\(/,
+  /\[\s*(['"`])eval\1\s*\]\s*(?:\?\.)?\s*\(/,
+  /\b(?:globalThis|window|self)\s*\??\.\s*eval\s*(?:\?\.)?\s*\(/,
+  // Optional call on the bare binding: `eval?.('…')`.
+  /(?<![.\w$#])eval\s*\?\.\s*\(/,
 ];
 
 /**
@@ -189,6 +206,10 @@ export function stripComments(source: string): string {
     if (k < 0) return true;
     const prev = source[k] as string;
     if (/[)\]}]/.test(prev)) return false;
+    // POSTFIX `++`/`--` yields a value, so the `/` after it divides. Looking at
+    // the previous CHARACTER alone gets this wrong: `+` is an operator (a regex
+    // may follow `a + /re/`), but `++` is not (`a++ / b` is a division).
+    if ((prev === '+' || prev === '-') && source[k - 1] === prev) return false;
     if (/[A-Za-z0-9_$]/.test(prev)) {
       let s = k;
       while (s >= 0 && /[A-Za-z0-9_$]/.test(source[s] as string)) s -= 1;
@@ -298,6 +319,45 @@ export function stripComments(source: string): string {
 export interface SinkMatch {
   readonly label: string;
   readonly line: number;
+}
+
+/**
+ * THE entry point every source-tree gate should use: scan a file for sinks in a
+ * way no comment-stripping bug can defeat.
+ *
+ * The strip is deliberately NOT load-bearing here. It is scanned IN ADDITION to
+ * the raw source, and the results are unioned:
+ *
+ *   • the RAW pass guarantees that however the strip mis-lexes a construct —
+ *     a regex-versus-division call, an exotic template nesting, a form nobody
+ *     has thought of yet — it can never DELETE a sink from view. Every
+ *     regression found on PR #169 was of exactly that shape: a strip that hid
+ *     the call it was supposed to reveal.
+ *   • the STRIPPED pass adds the one thing the raw pass cannot see: a call
+ *     split by an interposed comment, `Function/*gap*\/('…')`.
+ *
+ * The cost is that a sink call written literally inside a COMMENT is reported.
+ * That is the right trade: it is trivially fixed by rewording the comment,
+ * whereas the opposite failure silently disarms the gate. (Before the strip
+ * existed this gate already scanned raw source and passed, so no such comment
+ * exists in the scanned trees today.)
+ */
+export function scanSourceForSinks(
+  source: string,
+  sinks: readonly CodeSinkPattern[] = SOURCE_CODE_SINKS,
+): SinkMatch[] {
+  const seen = new Set<string>();
+  const merged: SinkMatch[] = [];
+  for (const match of [
+    ...findSinkMatches(source, sinks),
+    ...findSinkMatches(stripComments(source), sinks),
+  ]) {
+    const key = `${match.line}:${match.label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(match);
+  }
+  return merged.sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
 }
 
 /**
