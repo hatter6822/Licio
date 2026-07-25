@@ -21,6 +21,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  stripComments,
+} from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DIST = join(ROOT, 'apps', 'web', 'dist');
@@ -141,16 +146,15 @@ export const REQUIRED_FILES: readonly RequiredFile[] = [
   },
 ];
 
-/** A token that MUST NOT appear in the service worker (no remote dynamic code). */
+/** A token that MUST NOT appear in the service worker (no remote dynamic code).
+ *  The eval/Function-constructor/string-timer sinks come from the shared
+ *  definition (`dangerous-code-patterns.ts`) so this gate cannot drift from
+ *  lint:security, check:sw, and check:private-bundle-transparency — all four
+ *  previously pinned only `new Function(`, leaving the equivalent bare
+ *  `Function(` call open in every one of them. */
 const SW_FORBIDDEN: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  { pattern: /\beval\s*\(/, detail: 'sw eval()' },
-  { pattern: /new\s+Function\s*\(/, detail: 'sw new Function()' },
   { pattern: /importScripts\s*\(\s*['"`]?\s*https?:/i, detail: 'sw remote importScripts' },
 ];
-
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
-}
 
 /**
  * Run the gate over an injected file reader (PURE).  Returns the list of
@@ -159,19 +163,30 @@ function stripComments(source: string): string {
 export function runUpdateChannelGate(read: (relPath: string) => string): UpdateGateViolation[] {
   const violations: UpdateGateViolation[] = [];
   for (const { file, markers } of REQUIRED_FILES) {
-    let code: string;
+    let raw: string;
     try {
-      code = stripComments(read(file));
+      raw = read(file);
     } catch {
       violations.push({ file, detail: 'required update-channel file not found' });
       continue;
     }
+    // Markers must be REAL wiring, so they are looked for in the stripped copy
+    // — a marker named in a comment does not wire anything up.
+    const code = stripComments(raw);
     for (const marker of markers) {
       if (!code.includes(marker)) {
         violations.push({ file, detail: `missing required wiring marker: ${marker}` });
       }
     }
     if (file.endsWith('sw-push.js')) {
+      // The dynamic-code sinks are found by TOKENISING, so comments are
+      // discarded correctly rather than by a heuristic strip that could blank
+      // a real `Function('…')()` out of existence and leave this gate green.
+      // (The marker check above still uses the strip — it deliberately wants
+      // a marker named in a comment to not count as wiring.)
+      const seen = new Set<string>();
+      for (const { label } of findDynamicCodeSinks(raw, BUILT_CODE_SINKS)) seen.add(label);
+      for (const label of seen) violations.push({ file, detail: `sw ${label}` });
       for (const { pattern, detail } of SW_FORBIDDEN) {
         if (pattern.test(code)) violations.push({ file, detail });
       }

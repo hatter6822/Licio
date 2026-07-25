@@ -9,10 +9,19 @@
   // re-checked here with the same strict flag set — a few seconds, no build
   // order, no emit. Widening `include` to the check-* gates is a one-line
   // change. Wired into `pnpm typecheck` / `typecheck:ci` at the root.
+  //
+  // `dangerous-code-patterns.ts` — the SSOT the four code-scan gates share — is
+  // included because it is DEPENDENCY-FREE and so needs no extra resolution
+  // setup. The remaining check-* gates are NOT a one-line addition despite the
+  // note above: they import `zod` and `@licio/*` (unresolvable from this
+  // standalone project) and reference DOM lib types this `lib` set omits, so
+  // widening `include` to `**/*.ts` currently reports ~30 resolution errors.
+  // Bringing them in means giving this project the workspace paths + lib —
+  // worth doing, but a real change, not a one-liner.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["setup-local-llm.ts", "bench-local-llm.ts"]
+  "include": ["setup-local-llm.ts", "bench-local-llm.ts", "dangerous-code-patterns.ts"]
 }

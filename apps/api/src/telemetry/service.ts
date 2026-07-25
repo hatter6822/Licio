@@ -154,8 +154,3 @@ export function getTelemetryServices(): TelemetryServices {
 export function setTelemetryServices(next: TelemetryServices): void {
   singleton = next;
 }
-
-/** Test helper: drop the singleton so the next getter builds a fresh one. */
-export function resetTelemetryServicesForTests(): void {
-  singleton = null;
-}

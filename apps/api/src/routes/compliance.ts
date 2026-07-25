@@ -72,7 +72,7 @@ import {
   resolveCaseInTx,
   transitionCase,
 } from '../compliance/cases.js';
-import { validateComplianceConfigValue } from '../compliance/config.js';
+import { storeComplianceConfigValue, validateComplianceConfigValue } from '../compliance/config.js';
 import {
   acknowledgeDisclosure,
   disclosureGate,
@@ -1659,15 +1659,10 @@ export function createComplianceRoutes() {
         }
         const problem = validateComplianceConfigValue(key, value);
         if (problem !== null) return c.json(deny('invalid_config_value', problem), 400);
-        // WHO changed it rides the SAME write as the change.  These are the
-        // counsel-approved retention schedule and the operational risk limits:
-        // once the write lands the setting is live, reloaded, and possibly
-        // already propagated to the events job, so an attribution recorded
-        // afterwards and lost to a failure leaves a live compliance control
-        // that no durable record accounts for.  The loader reads `value` and
-        // nothing else, so the envelope carries this without touching it.
-        await services.configStore.set(`compliance.${key}`, {
-          value,
+        // WHO changed it rides the SAME write as the change (see
+        // `storeComplianceConfigValue`, which owns the `compliance.` key prefix
+        // jointly with the loader that reads it).
+        await storeComplianceConfigValue(services.configStore, key, value, {
           changed_by_ref: services.opaqueRef(auth.userId),
           changed_at: new Date(services.now()).toISOString(),
         });

@@ -673,6 +673,13 @@
       "when": 1783728000020,
       "tag": "0096_challenge_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1783728000021,
+      "tag": "0097_constraint_name_truncation",
+      "breakpoints": true
     }
   ]
 }

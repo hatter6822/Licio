@@ -163,7 +163,18 @@ export function availableConsoleActions(actor: StewardActor): StewardCapability[
   });
 }
 
-/** Queues the actor may access (for UI shaping). */
-export function actorQueues(actor: StewardActor): ModerationQueue[] {
-  return stewardRolesQueues(effectiveStewardRoles(actor.platformRoles, actor.stewardRoles));
+/**
+ * Queues an actor may access — for console UI shaping AND for WS-J #18
+ * reviewer auto-assignment (which must only pick reviewers who can actually
+ * open the queue).  Takes the two ROLE LISTS rather than a full
+ * {@link StewardActor}, matching its siblings `effectiveStewardRoles` /
+ * `isSenior`, so the assignment path (which holds a user record, not an
+ * authenticated console actor) resolves queues through this one definition
+ * instead of recomposing `stewardRolesQueues(effectiveStewardRoles(…))` inline.
+ */
+export function actorQueues(
+  platformRoles: readonly Role[],
+  stewardRoles: readonly StewardRoleId[],
+): ModerationQueue[] {
+  return stewardRolesQueues(effectiveStewardRoles(platformRoles, stewardRoles));
 }

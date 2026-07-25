@@ -13,6 +13,7 @@
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -100,9 +101,10 @@ export type StewardElectionRow = typeof stewardElections.$inferSelect;
 export const stewardGovernanceVotes = knomosisSchema.table(
   'steward_governance_vote',
   {
-    electionId: uuid('election_id')
-      .notNull()
-      .references(() => stewardElections.electionId, { onDelete: 'cascade' }),
+    /** FK declared table-level with an EXPLICIT short name: the derived
+     *  `steward_governance_vote_election_id_steward_election_election_id_fk` is
+     *  67 bytes, past Postgres's 63-byte limit (it would be truncated). */
+    electionId: uuid('election_id').notNull(),
     voterUserId: uuid('voter_user_id')
       .notNull()
       .references(() => users.userId, { onDelete: 'cascade' }),
@@ -112,7 +114,14 @@ export const stewardGovernanceVotes = knomosisSchema.table(
     weight: numeric('weight').notNull(),
     castAt: tz('cast_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.electionId, t.voterUserId] })],
+  (t) => [
+    primaryKey({ columns: [t.electionId, t.voterUserId] }),
+    foreignKey({
+      columns: [t.electionId],
+      foreignColumns: [stewardElections.electionId],
+      name: 'steward_governance_vote_election_fk',
+    }).onDelete('cascade'),
+  ],
 );
 export type StewardGovernanceVoteRow = typeof stewardGovernanceVotes.$inferSelect;
 
@@ -157,19 +166,30 @@ export const roomGovernanceModels = knomosisSchema.table(
 export type RoomGovernanceModelRow = typeof roomGovernanceModels.$inferSelect;
 
 /** The in-room prompt bound to a model proposal (WS-U.2.1b). */
-export const roomGovernancePrompts = knomosisSchema.table('room_governance_prompt', {
-  promptId: uuid('prompt_id').primaryKey().defaultRandom(),
-  roomId: uuid('room_id').notNull(), // soft ref
-  modelId: uuid('model_id')
-    .notNull()
-    .references(() => roomGovernanceModels.modelId, { onDelete: 'cascade' }),
-  promptDigest: text('prompt_digest').notNull(),
-  promptText: text('prompt_text').notNull(),
-  proposedByUserId: uuid('proposed_by_user_id').references(() => users.userId, {
-    onDelete: 'set null',
-  }),
-  createdAt: tz('created_at').notNull().defaultNow(),
-});
+export const roomGovernancePrompts = knomosisSchema.table(
+  'room_governance_prompt',
+  {
+    promptId: uuid('prompt_id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id').notNull(), // soft ref
+    /** FK declared table-level with an EXPLICIT short name: the derived
+     *  `room_governance_prompt_model_id_room_governance_model_model_id_fk` is
+     *  65 bytes, past Postgres's 63-byte limit (it would be truncated). */
+    modelId: uuid('model_id').notNull(),
+    promptDigest: text('prompt_digest').notNull(),
+    promptText: text('prompt_text').notNull(),
+    proposedByUserId: uuid('proposed_by_user_id').references(() => users.userId, {
+      onDelete: 'set null',
+    }),
+    createdAt: tz('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.modelId],
+      foreignColumns: [roomGovernanceModels.modelId],
+      name: 'room_governance_prompt_model_fk',
+    }).onDelete('cascade'),
+  ],
+);
 export type RoomGovernancePromptRow = typeof roomGovernancePrompts.$inferSelect;
 
 export const modelRatificationStatusEnum = knomosisSchema.enum('model_ratification_status', [
@@ -284,25 +304,38 @@ export const roomLawPacks = knomosisSchema.table(
 export type RoomLawPackRow = typeof roomLawPacks.$inferSelect;
 
 /** The active (model, prompt, law-pack) binding per room (WS-U.2.4a). */
-export const roomAgentBindings = knomosisSchema.table('room_agent_binding', {
-  roomId: uuid('room_id').primaryKey(), // soft ref; one binding per room
-  modelId: uuid('model_id')
-    .notNull()
-    .references(() => roomGovernanceModels.modelId, { onDelete: 'restrict' }),
-  promptId: uuid('prompt_id')
-    .notNull()
-    .references(() => roomGovernancePrompts.promptId, { onDelete: 'restrict' }),
-  lawPackId: uuid('law_pack_id').references(() => roomLawPacks.lawPackId, { onDelete: 'set null' }),
-  approvedByElectionId: uuid('approved_by_election_id'), // soft intra-context ref
-  capabilityDescriptor: jsonb('capability_descriptor').notNull(), // the derived descriptor
-  active: boolean('active').notNull().default(false),
-  // Durable platform-floor freeze (WS-U.3.3b): distinct from `active`, set ONLY by
-  // the WS-J-gated floor freeze and cleared ONLY by the floor unfreeze. A member
-  // ratification may flip `active` but must never clear this, so a community vote
-  // can never re-activate a floor-frozen agent (the legal floor is non-overridable).
-  floorFrozen: boolean('floor_frozen').notNull().default(false),
-  approvedAt: tz('approved_at').notNull().defaultNow(),
-});
+export const roomAgentBindings = knomosisSchema.table(
+  'room_agent_binding',
+  {
+    roomId: uuid('room_id').primaryKey(), // soft ref; one binding per room
+    modelId: uuid('model_id')
+      .notNull()
+      .references(() => roomGovernanceModels.modelId, { onDelete: 'restrict' }),
+    /** FK declared table-level with an EXPLICIT short name: the derived
+     *  `room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk` is
+     *  64 bytes, past Postgres's 63-byte limit (it would be truncated). */
+    promptId: uuid('prompt_id').notNull(),
+    lawPackId: uuid('law_pack_id').references(() => roomLawPacks.lawPackId, {
+      onDelete: 'set null',
+    }),
+    approvedByElectionId: uuid('approved_by_election_id'), // soft intra-context ref
+    capabilityDescriptor: jsonb('capability_descriptor').notNull(), // the derived descriptor
+    active: boolean('active').notNull().default(false),
+    // Durable platform-floor freeze (WS-U.3.3b): distinct from `active`, set ONLY by
+    // the WS-J-gated floor freeze and cleared ONLY by the floor unfreeze. A member
+    // ratification may flip `active` but must never clear this, so a community vote
+    // can never re-activate a floor-frozen agent (the legal floor is non-overridable).
+    floorFrozen: boolean('floor_frozen').notNull().default(false),
+    approvedAt: tz('approved_at').notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.promptId],
+      foreignColumns: [roomGovernancePrompts.promptId],
+      name: 'room_agent_binding_prompt_fk',
+    }).onDelete('restrict'),
+  ],
+);
 export type RoomAgentBindingRow = typeof roomAgentBindings.$inferSelect;
 
 /** Append-only log of every agent action with its provenance triple (WS-U.3.2b). */

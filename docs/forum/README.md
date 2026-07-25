@@ -427,6 +427,17 @@ user activation, story submission renders with shared-schema validation, and the
 * **WS-K**: governed classifiers behind the `ContributionSafetyClassifier`
   and `classifyLowInfoReplyV0` seams; automated draft summaries.
 * **WS-L/M**: governance-mode transitions (read-only `ordinary` here).
+* **WS-T adjudicator source reliability.**  `toJudgeSide`
+  (`apps/api/src/forum/debate.ts`) currently feeds the debate judge
+  `reliability: null` for every citation, so `effectiveReliability` is
+  identically 0 on both sides and the verdict rests on the remaining five
+  content-structural features (source count, independent domains, link
+  safety, substance, rebuttal).  Wiring the WS-F source-profile reader would
+  let the judge weigh *which* sources a side cites, not only how many — a
+  behaviour change to a live adjudication surface, so it is deliberately not
+  folded into a cleanup pass.  Until then the feature is honestly inert
+  rather than silently wrong: `null` means "unknown", `coverage` is 0, and
+  the clamp keeps it out of the score.
 * **WS-P**: BFF-in-the-loop browser E2E for authenticated thread/submit
   flows (the composer + UGC sink are real-browser covered via the
   workbench; the composer < 300 ms budget is instrumented via perf marks

@@ -294,6 +294,17 @@ const DWELL_CODE: Record<DwellBucket, string> = {
 export const BEHAVIOR_STREAM_VERSION = 'bhv1';
 
 /**
+ * Semver of the behavioral-authenticity MATHEMATICS — the version stamped into
+ * every WS-H output envelope for this invariant, and the sibling of
+ * `MERI_VERSION` / `SCOI_VERSION` / … in the other invariant modules.
+ *
+ * Distinct from {@link BEHAVIOR_STREAM_VERSION}, which versions only the
+ * on-the-wire stream SERIALIZATION: the two move independently (a scoring
+ * change bumps this without reshaping the stream, and vice versa).
+ */
+export const BEHAVIOR_VERSION = '1.0.0';
+
+/**
  * Serialize an actor's window sequence into the canonical text stream whose
  * MinHash signature (text/minhash.ts) detects cross-account duplication: two
  * accounts driven by the same script emit near-identical streams, and the

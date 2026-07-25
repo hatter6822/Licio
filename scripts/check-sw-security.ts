@@ -8,36 +8,40 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  REMOTE_DYNAMIC_IMPORT_SINK,
+  REMOTE_IMPORT_SCRIPTS_SINK,
+} from './dangerous-code-patterns.js';
 
 const DIST_DIR = resolve(import.meta.dirname, '..', 'apps', 'web', 'dist');
 const SW_FILES = ['sw.js', 'sw-push.js'];
 
-/**
- * Strip comments so doctrine may be DISCUSSED in prose (e.g. "no eval") while a
- * real call still trips the scan. Removes block + line comments; the line-comment
- * rule ignores `//` preceded by `:` or a quote, so both `https://…` and a
- * protocol-relative `"//…"` URL inside a string literal survive for the
- * importScripts check (a `// comment` still strips).
- */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
-}
-
+/** Find SW security violations in one file's source. Pure (testable). */
 /** Find SW security violations in one file's source. Pure (testable). */
 export function findSwSecurityIssues(filename: string, content: string): string[] {
-  const code = stripComments(content);
   const issues: string[] = [];
-  for (const call of code.match(/importScripts\s*\([^)]*\)/g) ?? []) {
-    // Flag absolute (`https://…`) AND protocol-relative (`"//evil/x.js"`) remote
-    // loads — both fetch cross-origin code; only same-origin/relative is allowed.
-    if (/https?:\/\//i.test(call) || /['"]\s*\/\//.test(call)) {
-      issues.push(`${filename}: external importScripts (remote code): ${call}`);
-    }
+  // Both checks go through the token analyzer, so every invocation form is
+  // covered structurally: `importScripts('https://…')`,
+  // `self['importScripts'](…)`, `self.importScripts?.(…)` and
+  // `importScripts.call(self, …)` are one walk, not four patterns. Comments
+  // are discarded while tokenising, so prose ("no remote code, no eval") can
+  // never trip the gate and no comment-stripping pass is load-bearing.
+  // A dynamic `import()` of a foreign URL loads remote code exactly as
+  // `importScripts` does — a module worker can do it — so the same-origin
+  // invariant this gate exists for covers both, from one shared definition.
+  for (const { label, line } of findDynamicCodeSinks(content, [
+    REMOTE_IMPORT_SCRIPTS_SINK,
+    REMOTE_DYNAMIC_IMPORT_SINK,
+  ])) {
+    issues.push(`${filename}:${line}: ${label}`);
   }
-  if (/\beval\s*\(/.test(code)) issues.push(`${filename}: eval() is forbidden in the worker`);
-  if (/new\s+Function\s*\(/.test(code)) {
-    issues.push(`${filename}: new Function() is forbidden in the worker`);
-  }
+  // Dynamic-code sinks from the shared definition: eval(), every
+  // Function-constructor form, and the string-argument timers.
+  const seen = new Set<string>();
+  for (const { label } of findDynamicCodeSinks(content, BUILT_CODE_SINKS)) seen.add(label);
+  for (const label of seen) issues.push(`${filename}: ${label} is forbidden in the worker`);
   return issues;
 }
 

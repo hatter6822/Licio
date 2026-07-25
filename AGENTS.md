@@ -59,11 +59,17 @@ pnpm lint / lint:fix                # Biome check / auto-fix
 pnpm typecheck                      # TypeScript strict-mode (tsc -b; see the cache warning below)
 
 # Security and static gates (what each enforces lives in its scripts/check-*.ts header).
-pnpm lint:security                  # innerHTML/eval/javascript:-URL scan
+pnpm lint:security                  # innerHTML/eval/Function()/javascript:-URL scan (the
+                                    #   dynamic-code sinks are defined once in
+                                    #   scripts/dangerous-code-patterns.ts and shared with
+                                    #   check:sw, check:update-channel, and
+                                    #   check:private-bundle-transparency)
 pnpm lint:lockfile                  # lockfile integrity
 pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
+pnpm check:sql-identifiers          # no migration identifier over Postgres's 63-byte limit
+                                    #   (over-long names TRUNCATE silently and can collide)
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation
@@ -95,7 +101,7 @@ every build command; consult it before adding new scripts.
 **Toolchain.**  Node 22 (pinned in `.nvmrc`), pnpm 11.15.1 (pinned
 in `package.json` `packageManager`; engines require pnpm >= 11 — the
 security overrides live in `pnpm-workspace.yaml`, which pnpm 9 would
-silently ignore), TypeScript 7.0.2, Vite 8.1.5, Biome 2.5.4.  pnpm 11's
+silently ignore), TypeScript 7.0.2, Vite 8.1.5, Biome 2.5.5.  pnpm 11's
 default supply-chain gate (24h `minimumReleaseAge`) vets every
 resolution: a version published less than 24 hours ago is held back
 until it ages — do NOT weaken or bypass the gate to force a
@@ -228,7 +234,10 @@ licio/
 │   ├── lcap-p2p/            -- WS-R optional WebRTC/IPFS transports (code-split)
 │   └── private-p2p/         -- WS-S private-room plane: canonical DAG-CBOR, schemas,
 │                               MLS/HPKE/AEAD crypto, Lamport reducer, sync
-├── scripts/                -- build validation + CI static gates (check-*, validate-build)
+├── scripts/                -- build validation + CI static gates (check-*, validate-build);
+│                              dangerous-code-patterns.ts is the SSOT for the eval /
+│                              Function-constructor / string-timer sinks every code-scan
+│                              gate shares
 ├── docs/                   -- SPEC.md, OFFLINE_SPEC.md, PRIVATE_SPEC.md, planning/
 │                               (00-index.md), per-workstream + policy references
 └── .github/workflows/      -- ci.yml (9 jobs), codeql.yml (dependabot RAISES
@@ -294,6 +303,8 @@ in `package.json`, so an override placed there is silently ignored.
 
 | Pin | Reason | Drop when |
 |-----|--------|-----------|
+| `brace-expansion ^5.0.8` | GHSA-mh99-v99m-4gvg (unbounded-expansion OOM) lists EVERY prior release vulnerable (`<=5.0.7`) — there is no backported 1.x/2.x fix, so 5.0.8 is the only patched version | the advisory gains a backported fix, or nothing resolves brace-expansion below 5.0.8 |
+| `filelist ^2.0.2` | pairs with the pin above: the workbox dev chain (`…off-main-thread`→ejs→jake→filelist) pulled `minimatch@5`, whose CJS `require('brace-expansion')` expects the pre-5.x DEFAULT export and throws `expand is not a function` under 5.0.8.  filelist 2.x moves to `minimatch@^10.2.1`, which uses the patched line | jake ships a release depending on `filelist >= 2` |
 | `ws ^8.21.0` | patched line for viem→isows (old `ws@8.20.1` DoS advisory); no `ws` server runs here | viem/isows guarantees a patched `ws` |
 | `fast-uri ^3.1.4` | dev-only toolchain (ajv→workbox-build→vite-plugin-pwa); patches the 3.1.3 host-confusion advisory | ajv/workbox resolve `fast-uri >= 3.1.4` |
 | `undici ^7.28.0` | test-only (jsdom `fetch`); patches two 7.27.2 advisories | jsdom pins `undici >= 7.28.0` |
@@ -707,13 +718,17 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈8700 pass without
-the gated integration env; ≈8950 with live Postgres/Redis).  Only monotonic
-growth is enforced — exact numbers drift, so the per-suite breakdown lives
-in each `docs/*/README.md`, not here.  WS-D/E/F/G/H/I/U and WS-R add
-**gated** Postgres+Redis integration suites that run only with
-`DATABASE_URL`/`REDIS_URL` set (CI provisions `pgvector/pgvector:pg16` +
-`redis:7`, so they run in CI and skip on a bare local run).
+**Test counts.**  `pnpm test` is the canonical query (≈8800 pass without
+the gated integration env; ≈9100 with live Postgres/Redis — the gated env
+also drops the skip count from ≈270 to ≈10, the residual being the
+`RUN_PERF` benchmarks).  Only monotonic growth is enforced — exact numbers
+drift, so the per-suite breakdown lives in each `docs/*/README.md`, not
+here.  WS-D/E/F/G/H/I/U and WS-R add **gated** Postgres+Redis integration
+suites that run only with `DATABASE_URL`/`REDIS_URL` set (CI provisions
+`pgvector/pgvector:pg16` + `redis:7`).  Locally they are provisioned by the
+`.claude/hooks/session-start.sh` SessionStart hook (Postgres 16 + the
+`vector` extension + Redis on the CI ports); without either service the
+suites self-skip, so a bare run proves strictly less than CI does.
 
 **Coverage.**  The 80% gate is only ENFORCED when coverage is actually
 enabled — `pnpm test --coverage`, never `pnpm test -- --coverage` (pnpm

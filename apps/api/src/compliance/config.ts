@@ -216,11 +216,34 @@ export async function loadComplianceConfig(
   return config;
 }
 
-/** Admin write path (the route validates BEFORE calling this). */
+/** Optional change attribution written in the SAME store operation as the value. */
+export interface ComplianceConfigAttribution {
+  /** Opaque actor reference (never a raw user id) — §19.1. */
+  changed_by_ref: string;
+  /** ISO-8601 instant of the change. */
+  changed_at: string;
+}
+
+/**
+ * THE admin write path (the route validates BEFORE calling this).
+ *
+ * Every writer goes through here so the `compliance.` key prefix exists in
+ * exactly one place alongside the loader that reads it — the admin route used
+ * to rebuild the prefixed key inline, which meant a prefix change would have
+ * left writes landing on keys the loader never reads (a silently ineffective
+ * compliance control).
+ *
+ * Attribution, when supplied, rides the SAME write as the value: once the write
+ * lands the setting is live, reloaded, and possibly already propagated, so an
+ * attribution recorded afterwards and lost to a failure would leave a live
+ * compliance control that no durable record accounts for. The loader reads
+ * `value` and nothing else, so the envelope carries this without touching it.
+ */
 export async function storeComplianceConfigValue(
   configStore: PwattConfigStore,
   key: string,
   value: unknown,
+  attribution?: ComplianceConfigAttribution,
 ): Promise<void> {
-  await configStore.set(`${CONFIG_PREFIX}${key}`, { value });
+  await configStore.set(`${CONFIG_PREFIX}${key}`, { value, ...attribution });
 }

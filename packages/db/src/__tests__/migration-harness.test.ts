@@ -224,6 +224,136 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
     expect((commons[0] as unknown as { n: number }).n).toBe(1);
   });
 
+  // Schema hygiene (migration 0097): Postgres SILENTLY TRUNCATES an identifier
+  // over `NAMEDATALEN - 1` (63 bytes) and emits only a NOTICE, so two different
+  // intended names that agree on their first 63 bytes collapse to one stored
+  // name — a duplicate-object failure at migrate time, or a later DROP/RENAME
+  // hitting whichever survived.  `pnpm check:sql-identifiers` scans the
+  // hand-authored SQL; this asserts the SAME property over the REAL post-chain
+  // catalog, which additionally covers names Drizzle DERIVES rather than spells
+  // out.  Runs against the harness's throwaway database, so it sees the full
+  // chain exactly as a fresh deployment would.
+  it('leaves NO truncated identifier in the catalog after the full chain', async () => {
+    // Postgres cannot STORE a name longer than 63 bytes, so querying for
+    // `length > 63` is necessarily empty and proves nothing. The only evidence
+    // truncation leaves behind is a name sitting EXACTLY at the cap — so that
+    // is what this checks, against an explicit allowlist of the names known to
+    // be legitimately 63 bytes.
+    //
+    // This is the half the static scanner cannot cover: it reads the migration
+    // SQL, so it sees names that are SPELLED OUT, while an inline
+    // `.references()` lets Drizzle DERIVE a name that never appears there. A
+    // derived name over the limit reaches the catalog already truncated, and
+    // this assertion is what notices.
+    const LEGITIMATE_63_BYTE_NAMES = [
+      // Exactly 63 bytes as written — stored whole, never truncated. Adding to
+      // this list means asserting the same of a NEW name; the safer fix is
+      // almost always to shorten it.
+      'model_ratification_ballot_vote_id_model_ratification_vote_id_fk',
+    ];
+    // OCTET_LENGTH, not LENGTH: `NAMEDATALEN` bounds the identifier's BYTE
+    // length, while `length()` counts CHARACTERS. A non-ASCII name truncated to
+    // 63 bytes holds fewer than 63 characters — a 61-byte ASCII prefix plus one
+    // `é` is 62 characters — so a character-counting predicate omits exactly
+    // the truncated rows this assertion exists to surface.
+    //
+    // Truncation also clips on a CHARACTER boundary, so a multibyte name can
+    // land well below 63 bytes. Worst case in UTF-8: the character straddling
+    // byte 63 is four bytes long and starts at byte 61, so the kept prefix ends
+    // at byte 60 — three bytes of boundary loss, not one. The multibyte arm
+    // therefore starts at `>= 60`; it is gated on the byte and character counts
+    // DIFFERING, so it cannot widen the ASCII case (where clipping is exact)
+    // into noise.
+    const MULTIBYTE_FLOOR = 63 - 3;
+    const atCap = await client.unsafe(
+      `SELECT c.conname AS name
+         FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE octet_length(c.conname) >= 63
+           OR (octet_length(c.conname) >= ${MULTIBYTE_FLOOR}
+               AND octet_length(c.conname) <> length(c.conname))
+       UNION ALL
+       SELECT c.relname
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE (octet_length(c.relname) >= 63
+           OR (octet_length(c.relname) >= ${MULTIBYTE_FLOOR}
+               AND octet_length(c.relname) <> length(c.relname)))
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
+    );
+    const unexpected = atCap
+      .map((r) => (r as unknown as { name: string }).name)
+      .filter((name) => !LEGITIMATE_63_BYTE_NAMES.includes(name));
+    // A name here is either a genuine 63-byte identifier (add it above, having
+    // checked it) or the visible residue of a silent truncation (shorten it).
+    expect(unexpected).toEqual([]);
+
+    // The five FKs migration 0097 renamed now carry their short names, and the
+    // truncated originals are gone.
+    const named = await client.unsafe(
+      `SELECT conname FROM pg_constraint
+        WHERE conname IN (
+          'debate_arenas_challenger_contribution_fk',
+          'debate_arenas_target_contribution_fk',
+          'steward_governance_vote_election_fk',
+          'room_governance_prompt_model_fk',
+          'room_agent_binding_prompt_fk')
+        ORDER BY conname`,
+    );
+    expect(named.map((r) => (r as unknown as { conname: string }).conname)).toEqual([
+      'debate_arenas_challenger_contribution_fk',
+      'debate_arenas_target_contribution_fk',
+      'room_agent_binding_prompt_fk',
+      'room_governance_prompt_model_fk',
+      'steward_governance_vote_election_fk',
+    ]);
+
+    const leftovers = await client.unsafe(
+      `SELECT conname FROM pg_constraint WHERE conname IN (
+         'debate_arenas_challenger_contribution_id_contributions_contribu',
+         'debate_arenas_target_contribution_id_contributions_contribution',
+         'steward_governance_vote_election_id_steward_election_election_i',
+         'room_governance_prompt_model_id_room_governance_model_model_id_',
+         'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_f')`,
+    );
+    expect(leftovers).toEqual([]);
+  });
+
+  // The renamed constraints must still ENFORCE what they always did — a rename
+  // that quietly dropped an ON DELETE action would be worse than the truncation.
+  it('keeps every renamed foreign key enforcing its original reference', async () => {
+    const rows = await client.unsafe(
+      `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname IN (
+          'debate_arenas_challenger_contribution_fk',
+          'debate_arenas_target_contribution_fk',
+          'steward_governance_vote_election_fk',
+          'room_governance_prompt_model_fk',
+          'room_agent_binding_prompt_fk')
+        ORDER BY conname`,
+    );
+    const defs = Object.fromEntries(
+      rows.map((r) => {
+        const row = r as unknown as { conname: string; def: string };
+        return [row.conname, row.def];
+      }),
+    );
+    expect(defs['debate_arenas_challenger_contribution_fk']).toBe(
+      'FOREIGN KEY (challenger_contribution_id) REFERENCES contributions(contribution_id) ON DELETE CASCADE',
+    );
+    expect(defs['debate_arenas_target_contribution_fk']).toBe(
+      'FOREIGN KEY (target_contribution_id) REFERENCES contributions(contribution_id) ON DELETE CASCADE',
+    );
+    expect(defs['steward_governance_vote_election_fk']).toBe(
+      'FOREIGN KEY (election_id) REFERENCES knomosis.steward_election(election_id) ON DELETE CASCADE',
+    );
+    expect(defs['room_governance_prompt_model_fk']).toBe(
+      'FOREIGN KEY (model_id) REFERENCES knomosis.room_governance_model(model_id) ON DELETE CASCADE',
+    );
+    // RESTRICT, not CASCADE: a prompt still bound to a room must not be deletable.
+    expect(defs['room_agent_binding_prompt_fk']).toBe(
+      'FOREIGN KEY (prompt_id) REFERENCES knomosis.room_governance_prompt(prompt_id) ON DELETE RESTRICT',
+    );
+  });
+
   // WS-S.1.3b / §8.3 — the database guard (migration 0045): NO server table may
   // accumulate rows for a Private P2P room.  Proves the trigger applied cleanly
   // AND rejects p2p-room rows on EVERY room-referencing table (the content roots

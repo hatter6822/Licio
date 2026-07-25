@@ -335,6 +335,17 @@ pnpm exec lefthook install
 > when you want durable dev data or are running the gated integration tests.
 > Production always requires both.
 
+> **Claude Code on the web sessions provision this automatically.**
+> [`.claude/hooks/session-start.sh`](../.claude/hooks/session-start.sh) is a
+> `SessionStart` hook that installs and starts PostgreSQL 16 **plus the
+> `pgvector` extension** (the WS-F embedding suites need it — CI gets it from
+> the `pgvector/pgvector:pg16` image) and Redis on the same ports and
+> credentials CI uses, then exports `DATABASE_URL`/`REDIS_URL` for the
+> session. It is idempotent and remote-only (`CLAUDE_CODE_REMOTE=true`), so it
+> never starts clusters underneath a developer's own machine. Without it the
+> `DATABASE_URL`/`REDIS_URL`-gated suites self-skip — roughly 260 tests — and a
+> green local run proves strictly less than CI does.
+
 The repository ships a [`docker-compose.yml`](../docker-compose.yml) that
 provisions both services with development credentials:
 
@@ -1444,6 +1455,37 @@ Keep each migration **online-safe** (expand/contract; no long-lived table
 locks) and mirror any invariant into the schema as a `CHECK`/trigger where
 possible — see the existing chain for the house style. All queries in the
 codebase use Drizzle's parameterized queries — never string-concatenated SQL.
+
+**Name every object under 64 bytes.** Postgres does not reject an identifier
+longer than `NAMEDATALEN - 1` (63 bytes) — it silently **truncates** it and
+emits only a `NOTICE`, which scrolls past in migrate output. Two different
+names that agree on their first 63 bytes therefore collapse into one stored
+name: the second `CREATE` fails with a duplicate-object error, or a later
+`DROP CONSTRAINT` / `ALTER … RENAME` targets whichever one exists. Five
+Drizzle-derived foreign keys were already landing truncated before migration
+`0097` renamed them.
+
+`pnpm check:sql-identifiers` fails CI on any migration identifier over the
+limit, and the gated migration harness asserts the same property over the
+real post-chain catalog (which also covers names Drizzle derives rather than
+spells out). The usual offender is an inline `.references()`, which **cannot**
+name its constraint and so derives
+`<table>_<column>_<fktable>_<fkcolumn>_fk` — easily past 63. Use the
+table-level form instead:
+
+```ts
+// packages/db/src/schema/<table>.ts — third pgTable argument
+foreignKey({
+  columns: [t.targetContributionId],
+  foreignColumns: [contributions.contributionId],
+  name: 'debate_arenas_target_contribution_fk', // explicit, short, stable
+}).onDelete('cascade'),
+```
+
+Renaming an ALREADY-APPLIED constraint is forward-only: add a new migration
+with a guarded `ALTER TABLE … RENAME CONSTRAINT` (see `0097` for the
+idempotent `DO $$` pattern) rather than editing the historical SQL, which
+every deployed database has already run.
 
 ---
 

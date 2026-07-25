@@ -9,6 +9,12 @@
 // effects and stay fast file scanners (the `check:no-applause` pattern).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import {
+  BUILT_CODE_SINKS,
+  findDynamicCodeSinks,
+  REMOTE_DYNAMIC_IMPORT_SINK,
+  type SinkSpec,
+} from './dangerous-code-patterns.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
 
@@ -102,12 +108,33 @@ export function scanPublicGatewayEgress(
 // runtime; this is the static half over the private trees.
 // ---------------------------------------------------------------------------
 
-export const DYNAMIC_REMOTE_CODE_PATTERNS: ReadonlyArray<{ pattern: RegExp; detail: string }> = [
-  { pattern: /\beval\s*\(/, detail: 'eval()' },
-  { pattern: /new\s+Function\s*\(/, detail: 'new Function()' },
-  { pattern: /importScripts\s*\(/, detail: 'importScripts()' },
-  // A dynamic import() of an http(s) URL string (remote code).
-  { pattern: /import\s*\(\s*['"`]https?:/i, detail: 'dynamic import() of a remote URL' },
+/**
+ * ANY `importScripts` in a private bundle — not merely a remote one. A private
+ * room's bundle must be fully accounted for by the transparency manifest, so
+ * pulling in a further script at all defeats the point.
+ *
+ * Declared as a SINK SPEC rather than a pattern so it is analysed the way
+ * `check:sw` analyses it: `self['importScripts'](…)` and
+ * `importScripts.call(self, …)` load the same code as the bare call, and a
+ * direct-call regex saw none of them.
+ */
+const ANY_IMPORT_SCRIPTS: SinkSpec = { name: 'importScripts', label: 'importScripts()' };
+
+/**
+ * Every sink this gate rejects, from the SHARED definitions so it cannot drift
+ * apart from lint:security / check:sw / check:update-channel on what counts as
+ * runtime code evaluation — they previously all pinned only `new Function(`,
+ * leaving the equivalent bare `Function(` call open in every one of them.
+ *
+ * The dynamic `import()` of a remote URL used to be a REGEX anchored on the
+ * scheme immediately after the opening quote, which a split literal
+ * (`import('ht' + 'tps://evil/x.js')`) walked straight past. It is a sink spec
+ * now, so the analyzer folds the specifier and covers every call spelling.
+ */
+const PRIVATE_BUNDLE_SINKS: readonly SinkSpec[] = [
+  ...BUILT_CODE_SINKS,
+  ANY_IMPORT_SCRIPTS,
+  REMOTE_DYNAMIC_IMPORT_SINK,
 ];
 
 export function scanDynamicRemoteCode(
@@ -115,13 +142,17 @@ export function scanDynamicRemoteCode(
 ): GateViolation[] {
   const violations: GateViolation[] = [];
   for (const { path, content } of files) {
-    const code = stripComments(content);
-    const lines = code.split('\n');
-    lines.forEach((line, i) => {
-      for (const { pattern, detail } of DYNAMIC_REMOTE_CODE_PATTERNS) {
-        if (pattern.test(line)) violations.push({ file: path, line: i + 1, detail });
-      }
-    });
+    // Whole-text scan (not line by line): every sink pattern permits whitespace
+    // between the callee and its `(`, and that whitespace may be a NEWLINE —
+    // `Function\n('x')` is an ordinary call a per-line scan can never see.
+    // The shared, comment-blanking strip preserves offsets, so `findSinkMatches`
+    // still reports the true source line.
+    // Every sink is TOKENISED and walked rather than pattern-matched, so this
+    // gate covers exactly the invocation spellings lint:security and check:sw
+    // do, from the same definitions.
+    for (const { label, line } of findDynamicCodeSinks(content, PRIVATE_BUNDLE_SINKS)) {
+      violations.push({ file: path, line, detail: label });
+    }
   }
   return violations;
 }

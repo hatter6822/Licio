@@ -1465,8 +1465,13 @@ function toJudgeSide(
       url: c.url,
       domain: domainOf(c.url),
       // The citation schema already rejects dangerous schemes; an http(s) URL is
-      // treated as link-safe here (the WS-F reliability signal is null = unknown
-      // until the source-profile reader is wired).
+      // treated as link-safe here.  `reliability: null` means UNKNOWN, not
+      // "unreliable": `extractSideFeatures` then reports coverage 0 and clamps
+      // `effectiveReliability` to 0 on BOTH sides, so the feature is inert
+      // rather than silently mis-weighting one side.  Wiring the WS-F
+      // source-profile reader would change live adjudication outcomes, so it is
+      // tracked as a residual (`docs/forum/README.md` → Residuals, WS-T
+      // adjudicator source reliability) rather than carried as a source TODO.
       link_safe: /^https?:\/\//i.test(c.url),
       reliability: null,
     })),

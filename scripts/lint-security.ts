@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import {
+  type CodeSinkPattern,
+  DOM_MEMBER_SINKS,
+  findDynamicCodeSinks,
+  findMemberSinkUses,
+  SOURCE_CODE_SINKS,
+  scanSourceForSinks,
+} from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -21,23 +29,25 @@ const SOURCE_DIRS = [
   resolve(ROOT, 'packages/private-p2p/src'),
 ];
 
-const BLOCKED_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
-  { pattern: /\.innerHTML\s*=/, message: 'Direct innerHTML assignment (use DOMPurify)' },
-  { pattern: /\.outerHTML\s*=/, message: 'Direct outerHTML assignment' },
-  { pattern: /document\.write\s*\(/, message: 'document.write() call' },
-  { pattern: /document\.writeln\s*\(/, message: 'document.writeln() call' },
+// A `javascript:` URL is string CONTENT — no receiver, no call chain — so a
+// pattern is the right tool for it. The DOM sinks that ARE member accesses
+// (`innerHTML`, `document.write`) moved to `DOM_MEMBER_SINKS`, which is walked
+// structurally: a pattern anchored on `.innerHTML` reads only the dotted
+// spelling, and `node['innerHTML'] = payload` reaches the same sink.
+const BLOCKED_PATTERNS: CodeSinkPattern[] = [
   {
     pattern: /['"`]javascript\s*:/i,
-    message: 'javascript: URL (XSS vector)',
+    label: 'javascript: URL (XSS vector)',
   },
-  { pattern: /new\s+Function\s*\(/, message: 'new Function() (equivalent to eval)' },
-  // Bare global eval(). The lookbehind excludes a member/private access
-  // (`.eval(`, `#eval(` — e.g. a Redis Lua wrapper method), a `$eval(` helper,
-  // and word-suffix false positives (`retrieval(`, `medieval(`); only the
-  // dangerous global call is flagged. (CLAUDE.md documents this gate as the
-  // mechanical check for eval() — Biome 2.x cannot block it at the AST level.)
-  { pattern: /(?<![.\w$#])eval\s*\(/, message: 'eval() call' },
 ];
+// The DYNAMIC-CODE sinks are not patterns: `eval`, the `Function` constructor
+// and the string-argument timers are found by tokenising and walking the
+// access chain (`findDynamicCodeSinks`), because the spellings that reach them
+// are unbounded. Same shared definition, so this gate, check:sw,
+// check:update-channel and check:private-bundle-transparency cannot drift on
+// what counts as runtime code evaluation. (CLAUDE.md documents this gate as
+// the mechanical check for eval() — Biome 2.x cannot block it at the AST
+// level.)
 
 const ALLOWLIST_PATHS = [/trusted-types\.ts$/, /\.test\.ts$/, /\.test\.tsx$/, /\.spec\.ts$/];
 
@@ -65,18 +75,24 @@ function lint(): void {
     for (const filePath of files) {
       if (ALLOWLIST_PATHS.some((p) => p.test(filePath))) continue;
 
-      const content = readFileSync(filePath, 'utf-8');
-      const lines = content.split('\n');
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line) continue;
-        for (const { pattern, message } of BLOCKED_PATTERNS) {
-          if (pattern.test(line)) {
-            const relative = filePath.replace(ROOT, '');
-            errors.push(`${relative}:${i + 1}: ${message}`);
-          }
-        }
+      const relative = filePath.replace(ROOT, '');
+      const source = readFileSync(filePath, 'utf-8');
+      // Three scans, because the sink classes need different machinery.
+      //   • TEXTUAL sinks (`javascript:`) — string CONTENT with no receiver
+      //     and no call chain, so a whole-text regex over both lexings of the
+      //     ambiguous `/` is the right tool. Whole-text, not per line, because
+      //     a match may span a newline.
+      //   • MEMBER DOM sinks (`innerHTML =`, `document.write(…)`) — tokenised,
+      //     so the computed spellings reach the same finding the dotted ones do.
+      //   • DYNAMIC-CODE sinks — tokenised and walked, so every spelling of
+      //     "reference, member accesses, call" is covered structurally rather
+      //     than enumerated, and comments cannot produce a finding.
+      for (const { label, line } of [
+        ...scanSourceForSinks(source, BLOCKED_PATTERNS),
+        ...findMemberSinkUses(source, DOM_MEMBER_SINKS),
+        ...findDynamicCodeSinks(source, SOURCE_CODE_SINKS),
+      ]) {
+        errors.push(`${relative}:${line}: ${label}`);
       }
     }
   }
