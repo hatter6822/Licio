@@ -5,7 +5,7 @@
 // genuine signed checkpoint) so the verifier tests exercise the actual crypto +
 // Merkle paths, not stubs.  Not exported from the package index.
 
-import { sha256Concat } from './crypto.js';
+import { LOG_LEAF_DOMAIN, sha256Concat } from './crypto.js';
 import { leafHash, nodeHash } from './merkle.js';
 import {
   canonicalCheckpointBody,
@@ -13,8 +13,6 @@ import {
   type UpdateManifest,
   type UpdateManifestBody,
 } from './schema.js';
-
-const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
 
 function toBase64Url(bytes: Uint8Array): string {
   let binary = '';

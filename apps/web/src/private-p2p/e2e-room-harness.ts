@@ -19,7 +19,11 @@ export {
   serializeJoinGrant,
 } from './room-manager.js';
 
-/** Dynamically load the code-split `@licio/private-p2p` chunk (for `roomStateCommitment`,
+/** dead-exports-entry: this module is fetched by URL through the Vite dev module
+ *  graph from `e2e/private-room-bff.realwebrtc.spec.ts`, so no TypeScript import edge to it
+ *  exists and binding resolution cannot see the call.
+ *
+ *  Dynamically load the code-split `@licio/private-p2p` chunk (for `roomStateCommitment`,
  *  used by the E2E to assert byte-identical convergence). */
 export function loadP2p(): Promise<typeof import('@licio/private-p2p')> {
   return import('@licio/private-p2p');

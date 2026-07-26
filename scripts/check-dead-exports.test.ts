@@ -1,27 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Unit tests for the unreferenced-export gate's pure core, plus one test that
-// runs it against the REAL repository — so the suite, not only CI, fails the
-// moment an unreferenced exported value lands.
+// Unit tests for the DECLARATION side of the unreferenced-export gate: what a
+// source file exports, and which declarations are in scope to be judged.
+//
+// Whether an export is REFERENCED is a different question, answered by
+// `resolve-export-references.ts` against a real TypeScript program and tested
+// there.  A stub for it here would only restate "no uses ⇒ dead"; the semantics
+// worth pinning — a same-named local is not a consumer, a barrel does not vouch
+// for what it republishes, a destructured dynamic import IS a consumer — are
+// only observable against a compiler.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   exportedValues,
   findDeadExports,
   findInternalOnlyExports,
-  identifierCounts,
+  isReferenceOnlyPath,
   isTestPath,
   type SourceFile,
 } from './check-dead-exports.js';
+import { resolveExportReferences } from './resolve-export-references.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
 const file = (path: string, content: string): SourceFile => ({
   path,
   content,
-  isTest: isTestPath(path),
+  isTest: isReferenceOnlyPath(path),
 });
 
 describe('exportedValues', () => {
@@ -78,17 +84,28 @@ describe('exportedValues', () => {
   it('reports a value published by an export CLAUSE', () => {
     const source = 'function main() {}\nexport { main as buildIt };';
     expect(exportedValues(source)).toContainEqual(
-      expect.objectContaining({ name: 'buildIt', kind: 'export', selfOccurrences: 1 }),
+      expect.objectContaining({ name: 'buildIt', kind: 'export' }),
     );
   });
 
-  it('counts an UNALIASED clause specifier as two self-occurrences', () => {
-    // `export { foo }` writes `foo` in the clause AND at its local declaration,
-    // so two occurrences still mean nothing uses it.
+  it('reports a clause specifier that publishes a LOCAL declaration', () => {
     const source = 'function foo() {}\nexport { foo };';
-    expect(exportedValues(source)).toContainEqual(
-      expect.objectContaining({ name: 'foo', selfOccurrences: 2 }),
-    );
+    expect(exportedValues(source).map((v) => v.name)).toEqual(['foo']);
+  });
+
+  it('treats import-then-export as PLUMBING, like `export { X } from`', () => {
+    // `import { X } from './a.js'; export { X };` republishes the same binding
+    // under the same name — scanned at the declaration it came from.
+    const source = "import { X } from './a.js';\nexport { X };";
+    expect(exportedValues(source)).toEqual([]);
+    // …but an ALIASED republish introduces a name that exists nowhere else.
+    const aliased = "import { X } from './a.js';\nexport { X as Y };";
+    expect(exportedValues(aliased).map((v) => v.name)).toEqual(['Y']);
+  });
+
+  it('records the declaration OFFSET, the handle the resolver needs', () => {
+    const source = 'export const A = 1;';
+    expect(exportedValues(source)[0]?.offset).toBe(source.indexOf('A'));
   });
 
   it('ignores a RE-export clause (barrel plumbing, scanned where it is declared)', () => {
@@ -155,12 +172,15 @@ describe('exportedValues', () => {
     ]);
   });
 
-  it('reports a later binding nothing consumes', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', 'export const live = 1, UNUSED = 2;'),
-      file('src/b.ts', "import { live } from './a.js';\nuse(live);"),
+  it('gives every binding of a list its own offset', () => {
+    // The resolver keys on the offset, so two bindings sharing one declaration
+    // must still be distinguishable.
+    const source = 'export const live = 1, UNUSED = 2;';
+    const offsets = exportedValues(source).map((v) => [v.name, v.offset]);
+    expect(offsets).toEqual([
+      ['live', source.indexOf('live')],
+      ['UNUSED', source.indexOf('UNUSED')],
     ]);
-    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['const UNUSED']);
   });
 
   // A block comment is legal between `export` and the keyword, and beside a
@@ -247,7 +267,7 @@ describe('exportedValues', () => {
     // Neither the keyword pattern nor the clause parser sees it, so a dead one
     // used to slip through the gate entirely.
     expect(exportedValues("export * as queue from './queue.js';")).toEqual([
-      { name: 'queue', kind: 'namespace', line: 1, selfOccurrences: 1, isDefault: false },
+      expect.objectContaining({ name: 'queue', kind: 'namespace', line: 1, isDefault: false }),
     ]);
   });
 
@@ -267,326 +287,93 @@ describe('exportedValues', () => {
   });
 });
 
-describe('identifierCounts', () => {
-  it('counts identifiers in CODE', () => {
-    expect(identifierCounts('const a = 1; a + a;').get('a')).toBe(3);
-  });
-
-  it('does NOT count a name mentioned only in a comment', () => {
-    // A declaration's own JSDoc almost always names it, so counting prose would
-    // let every documented export pass the gate with no consumer at all.
-    const counts = identifierCounts('/** Foo does a thing. {@link Foo} */\nexport const Foo = 1;');
-    expect(counts.get('Foo')).toBe(1);
-  });
-
-  it('does NOT count a name inside a string literal', () => {
-    expect(identifierCounts('const x = 1;\nthrow new Error("x is bad");').get('x')).toBe(1);
-  });
-
-  it('DOES count a name inside a template interpolation — that is code', () => {
-    // Fixtures are SOURCE TEXT, so the backticks and `${` belong to the code
-    // under test; written as a template with escapes so the literal reads as one
-    // string rather than a concatenation.
-    const source = `const x = 1;\nconst m = \`v=\${x}\`;`;
-    expect(identifierCounts(source).get('x')).toBe(2);
-  });
-
-  it('does NOT count the template TEXT around an interpolation', () => {
-    const source = `const m = \`prose about Foo here \${y}\`;`;
-    expect(identifierCounts(source).get('Foo')).toBeUndefined();
-  });
-
-  it('survives a regex literal containing quote characters', () => {
-    // The dangerous case, and why this delegates to the repo's tokeniser: a
-    // hand-rolled stripper reads the quote inside this regex as an unterminated
-    // string and swallows the code after it, reporting LIVE symbols as dead.
-    const source = `const re = /['"\`]/g;\nconst live = 1;\nuse(live);`;
-    expect(identifierCounts(source).get('live')).toBe(2);
-  });
-});
+// The dead/alive SEMANTICS now live in the resolver, which is tested against a
+// real compiler in `resolve-export-references.test.ts` — a stub here would only
+// restate the trivial "no uses ⇒ dead". What these cover is the part that stayed
+// in this module: which declarations are IN SCOPE to be judged at all.
+const oracle = (used: Iterable<string>) => {
+  const live = new Set(used);
+  return {
+    usesOf: (file: string, offset: number) =>
+      live.has(`${file} ${offset}`) ? [{ file: 'src/other.ts', offset: 0 }] : [],
+  };
+};
 
 describe('findDeadExports', () => {
-  it('reports an exported value nothing references', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', 'export const UNUSED = 1;'),
-      file('src/b.ts', 'export const USED = 2;'),
-      file('src/c.ts', "import { USED } from './b.js';\nconsole.log(USED);"),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['UNUSED']);
+  it('reports an exported value the oracle finds no use for', () => {
+    const dead = findDeadExports([file('src/a.ts', 'export const UNUSED = 1;')], oracle([]));
+    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['const UNUSED']);
   });
 
-  it('reports an export whose only other mention is its own JSDoc', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', '/** UNUSED is the thing. */\nexport const UNUSED = 1;'),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['UNUSED']);
+  it('does not report one the oracle has a use for', () => {
+    const source = 'export const USED = 1;';
+    const at = `src/a.ts ${source.indexOf('USED')}`;
+    expect(findDeadExports([file('src/a.ts', source)], oracle([at]))).toEqual([]);
   });
 
-  it('reports an ALIASED clause export that nothing consumes', () => {
-    // The reviewer's case: `export { main as buildUpdateManifest }` publishes a
-    // name that appears exactly once repo-wide.
-    const dead = findDeadExports([
-      file('scripts/x.ts', 'function main() {}\nmain();\nexport { main as buildIt };'),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['buildIt']);
-  });
-
-  it('does NOT report a clause export that IS consumed', () => {
-    const dead = findDeadExports([
-      file('scripts/x.ts', 'function main() {}\nexport { main as buildIt };'),
-      file('scripts/y.ts', "import { buildIt } from './x.js';\nbuildIt();"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('accepts a value referenced ONLY by a test (exporting for testability is legitimate)', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', 'export function helper() {}'),
-      file('src/__tests__/a.test.ts', "import { helper } from '../a.js';\nhelper();"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('does not scan declarations INSIDE test files', () => {
-    const dead = findDeadExports([file('src/__tests__/a.test.ts', 'export const FIXTURE = 1;')]);
-    expect(dead).toEqual([]);
-  });
-
-  it('never reports a DEFAULT export — the importer picks the name, not the file', () => {
-    // `import Anything from './Lazy.js'` binds whatever name it likes, so the
-    // declaration name carries no information about who uses the module.
-    const dead = findDeadExports([
-      file('src/Lazy.tsx', 'export default function Lazy() {}'),
-      file('src/Host.tsx', "const L = lazy(() => import('./Lazy.js'));"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('never reports a default export even with NO importer at all', () => {
-    // Whether the MODULE is reachable is a different question from the one this
-    // gate answers, and the identifier count cannot distinguish the two cases.
-    expect(findDeadExports([file('src/Lazy.tsx', 'export default function Lazy() {}')])).toEqual(
-      [],
-    );
-  });
-
-  it('DOES report the named exports of a dynamically imported module', () => {
-    // The blind spot this closed: a whole-module exemption blanked 112 non-test
-    // files.  A dynamic import spells its symbols at the call site exactly as a
-    // static one does, so the scan can see them — and must.
-    const dead = findDeadExports([
-      file(
-        'src/Lazy.tsx',
-        'export default function Lazy() {}\nexport const USED = 1;\nexport const DEAD = 2;',
-      ),
-      file(
-        'src/Host.tsx',
-        "const L = lazy(() => import('./Lazy.js'));\nconst { USED } = await import('./Lazy.js');\nuse(USED);",
-      ),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['DEAD']);
-  });
-
-  it('reports a namespace re-export nothing consumes', () => {
-    const dead = findDeadExports([
-      file('src/queue.ts', 'export const enqueue = 1;\nuse(enqueue);'),
-      file('src/index.ts', "export * as queue from './queue.js';"),
-      // Consumers reach the module directly, so the barrel binding is dead.
-      file('src/host.ts', "import { enqueue } from './queue.js';\nenqueue();"),
-    ]);
-    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['namespace queue']);
-  });
-
-  it('does NOT report a namespace re-export the barrel consumers use', () => {
-    // The live case in this repo: `offline/index.ts` publishes `queue`, and
-    // `CommentParts.tsx` imports it from the barrel and calls `queue.enqueue()`.
-    const dead = findDeadExports([
-      file('src/queue.ts', 'export const enqueue = 1;'),
-      file('src/index.ts', "export * as queue from './queue.js';"),
-      file('src/host.ts', "import { queue } from './index.js';\nqueue.enqueue();"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('reports an unused ALIAS published by a re-export', () => {
-    // `export { live as obsolete } from` introduces a public runtime name that
-    // exists nowhere else, so skipping the whole clause let an entirely unused
-    // alias pass forever while `live` stayed busy elsewhere.
-    const dead = findDeadExports([
-      file('src/m.ts', 'export const live = 1;'),
-      file('src/barrel.ts', "export { live as obsolete } from './m.js';"),
-      file('src/c.ts', "import { live } from './m.js';\nuse(live);"),
-    ]);
-    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['reexport obsolete']);
-  });
-
-  it('does NOT report an alias a consumer imports', () => {
-    const dead = findDeadExports([
-      file('src/m.ts', 'export const live = 1;'),
-      file('src/barrel.ts', "export { live as obsolete } from './m.js';"),
-      file('src/c.ts', "import { live } from './m.js';\nuse(live);"),
-      file('src/d.ts', "import { obsolete } from './barrel.js';\nuse(obsolete);"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('still treats an UNALIASED re-export as plumbing', () => {
-    // Same name, already scanned at its declaration — recording it again would
-    // report one dead export twice under two files.
-    expect(exportedValues("export { live } from './m.js';")).toEqual([]);
+  it('does not judge declarations inside TEST or GENERATED files', () => {
+    // Both are scanned for REFERENCES and never judged: a test may export
+    // fixtures freely, and the router tree is rewritten by a plugin.
     expect(
-      exportedValues("export { live as obsolete } from './m.js';").map((d) => [d.kind, d.name]),
-    ).toEqual([['reexport', 'obsolete']]);
-  });
-
-  it('reports a value whose only "reference" is an unused BARREL', () => {
-    // A barrel republishing a name is not a consumer of it.  Counting its
-    // occurrence let an export be declared once, re-exported once, imported
-    // nowhere — and still pass, because its own barrel vouched for it.
-    const dead = findDeadExports([
-      file('src/module.ts', 'export const orphan = 1;'),
-      file('src/barrel.ts', "export { orphan } from './module.js';"),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['orphan']);
-  });
-
-  it('does NOT report one a consumer reaches THROUGH the barrel', () => {
-    const dead = findDeadExports([
-      file('src/module.ts', 'export const orphan = 1;'),
-      file('src/barrel.ts', "export { orphan } from './module.js';"),
-      file('src/consumer.ts', "import { orphan } from './barrel.js';\nuse(orphan);"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('still counts an IMPORT as a reference', () => {
-    // Only re-export plumbing is discounted; an unused import is a lint error,
-    // so an import genuinely implies a use.
-    const dead = findDeadExports([
-      file('src/module.ts', 'export const orphan = 1;'),
-      file('src/consumer.ts', "import { orphan } from './module.js';\nuse(orphan);"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('reports an OVERLOAD SET nothing consumes', () => {
-    // Every signature plus the implementation writes the name once, so compared
-    // one at a time the set looks referenced BY ITSELF: three declarations give
-    // a corpus total of three against a baseline of one apiece.  The footprint
-    // is summed per file+name, and the set is reported once.
-    const overloads = [
-      'export function orphan(a: string): void;',
-      'export function orphan(a: number): void;',
-      'export function orphan(a: unknown): void {}',
-    ].join('\n');
-    expect(findDeadExports([file('src/a.ts', overloads)]).map((d) => d.name)).toEqual(['orphan']);
-  });
-
-  it('does NOT report an overload set that IS consumed', () => {
-    const overloads = [
-      'export function used(a: string): void;',
-      'export function used(a: unknown): void {}',
-    ].join('\n');
+      findDeadExports([file('src/__tests__/a.test.ts', 'export const FIXTURE = 1;')], oracle([])),
+    ).toEqual([]);
     expect(
-      findDeadExports([
-        file('src/a.ts', overloads),
-        file('src/b.ts', "import { used } from './a.js';\nused('x');"),
-      ]),
+      findDeadExports([file('src/routeTree.gen.ts', 'export const Route = 1;')], oracle([])),
     ).toEqual([]);
   });
 
-  it('reports a dead `const enum`', () => {
+  it('never judges a DEFAULT export — the importer picks the name', () => {
     expect(
-      findDeadExports([file('src/a.ts', 'export const enum Orphan { A }')]).map(
-        (d) => `${d.kind} ${d.name}`,
-      ),
-    ).toEqual(['enum Orphan']);
+      findDeadExports([file('src/a.tsx', 'export default function Lazy() {}')], oracle([])),
+    ).toEqual([]);
   });
 
-  it('sees a symbol reached through the NAMESPACE object of a dynamic import', () => {
-    const dead = findDeadExports([
-      file('src/mod.ts', 'export const createRoom = 1;'),
-      file('src/host.ts', "const m = await import('./mod.js');\nm.createRoom();"),
-    ]);
-    expect(dead).toEqual([]);
+  it('skips a declaration carrying a reasoned ENTRY marker', () => {
+    // The one shape binding resolution cannot see: a module fetched by URL at
+    // runtime, so no import edge to it exists.
+    const source = [
+      '/** dead-exports-entry: fetched by URL from a Playwright page.evaluate. */',
+      'export function loadIt() {}',
+    ].join('\n');
+    expect(findDeadExports([file('src/h.ts', source)], oracle([]))).toEqual([]);
   });
 
-  it('still reports a module reached only by a STATIC import', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', 'export const UNUSED = 1;\nexport const USED = 2;'),
-      file('src/b.ts', "import { USED } from './a.js';\nconsole.log(USED);"),
+  it('REJECTS an entry marker with no reason', () => {
+    const source = ['// dead-exports-entry:', 'export function loadIt() {}'].join('\n');
+    expect(findDeadExports([file('src/h.ts', source)], oracle([])).map((d) => d.name)).toEqual([
+      'loadIt',
     ]);
-    expect(dead.map((d) => d.name)).toEqual(['UNUSED']);
-  });
-
-  it('does not confuse a SUBSTRING of another identifier for a reference', () => {
-    const dead = findDeadExports([
-      file('src/a.ts', 'export const RATE = 1;'),
-      file('src/b.ts', 'const RATE_LIMIT = 5;\nconsole.log(RATE_LIMIT);'),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['RATE']);
-  });
-
-  it('reports a dead CLUSTER one layer at a time (documented convergence)', () => {
-    // `f` is dead; `A` is kept alive only BY `f`, so this run reports just `f`.
-    const dead = findDeadExports([
-      file('src/a.ts', 'export const A = 1;\nexport function f() {\n  return A;\n}'),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['f']);
   });
 });
 
 describe('findInternalOnlyExports', () => {
-  it('reports an export used only inside the file that declares it', () => {
-    const dead = findInternalOnlyExports([
-      file('src/a.ts', 'export const LIMIT = 1;\nfunction f() {\n  return LIMIT;\n}\nf();'),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['LIMIT']);
+  const usedFrom = (file: string, offset: number, from: string) => ({
+    usesOf: (f: string, o: number) =>
+      f === file && o === offset ? [{ file: from, offset: 0 }] : [],
   });
 
-  it('does NOT report one a test reaches — exporting for testability is legitimate', () => {
-    const dead = findInternalOnlyExports([
-      file('src/a.ts', 'export const LIMIT = 1;\nexport function f() {\n  return LIMIT;\n}'),
-      file('src/__tests__/a.test.ts', "import { LIMIT } from '../a.js';\nexpect(LIMIT);"),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual([]);
+  it('reports a value used only from the file declaring it', () => {
+    const source = 'export const KEPT = 1;\nuse(KEPT);';
+    const at = source.indexOf('KEPT');
+    const internal = findInternalOnlyExports(
+      [file('src/a.ts', source)],
+      usedFrom('src/a.ts', at, 'src/a.ts'),
+    );
+    expect(internal.map((d) => d.name)).toEqual(['KEPT']);
   });
 
-  it('does NOT report one another module imports', () => {
-    const dead = findInternalOnlyExports([
-      file('src/a.ts', 'export const LIMIT = 1;\nuse(LIMIT);'),
-      file('src/b.ts', "import { LIMIT } from './a.js';\nuse(LIMIT);"),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('is DISJOINT from findDeadExports — a symbol used nowhere is dead, not internal', () => {
-    // Otherwise the same declaration would be reported twice, under two names
-    // for two different problems, and fixing one would not clear the other.
-    const files = [file('src/a.ts', 'export const NEVER_USED = 1;')];
-    expect(findDeadExports(files).map((d) => d.name)).toEqual(['NEVER_USED']);
-    expect(findInternalOnlyExports(files)).toEqual([]);
-  });
-
-  it('skips default exports, whose name is module-local either way', () => {
-    const dead = findInternalOnlyExports([
-      file('src/a.tsx', 'export default function Lazy() {}\nconst x = Lazy;\nuse(x);'),
-    ]);
-    expect(dead).toEqual([]);
-  });
-
-  it('handles a clause export confined to its file', () => {
-    const dead = findInternalOnlyExports([
-      file('src/a.ts', 'function main() {}\nmain();\nmain();\nexport { main as runIt };'),
-    ]);
-    // `runIt` occurs once, in the clause — which IS its self-occurrence, so it is
-    // DEAD rather than internal-only.
-    expect(dead).toEqual([]);
+  it('does NOT report one another file uses', () => {
+    const source = 'export const SHARED = 1;';
+    const at = source.indexOf('SHARED');
     expect(
-      findDeadExports([file('src/a.ts', 'function main() {}\nexport { main as runIt };')]).map(
-        (d) => d.name,
-      ),
-    ).toEqual(['runIt']);
+      findInternalOnlyExports([file('src/a.ts', source)], usedFrom('src/a.ts', at, 'src/b.ts')),
+    ).toEqual([]);
+  });
+
+  it('is DISJOINT from findDeadExports — used nowhere is dead, not internal', () => {
+    const files = [file('src/a.ts', 'export const NEVER = 1;')];
+    expect(findDeadExports(files, oracle([])).map((d) => d.name)).toEqual(['NEVER']);
+    expect(findInternalOnlyExports(files, oracle([]))).toEqual([]);
   });
 });
 
@@ -610,12 +397,17 @@ describe('isTestPath', () => {
 });
 
 describe('the REAL repository', () => {
-  // This one test lexes the WHOLE tracked corpus (~13 MB, twice — the tokeniser's
-  // `preferRegex` dual pass).  Standalone that is ~2s, but it runs alongside
-  // eleven other vitest projects competing for the same cores, where the 5s
-  // default is not a meaningful budget.  The CLI is the thing with a real
-  // performance contract, and `pnpm check:dead-exports` is ~2s.
-  it('has no exported value that nothing references', () => {
+  // The dead/alive answer itself needs a full compiler snapshot (~45s), which
+  // belongs to the gate — `pnpm check:dead-exports`, run in CI's lint job — not
+  // to a unit suite running eleven projects in parallel.
+  //
+  // What IS worth asserting here is the gate's PRECONDITION: every tracked
+  // source file must belong to some tsconfig, because a file outside every
+  // program is invisible to the resolver and an export only it consumes would be
+  // reported dead.  The gate refuses to run in that state, so a workspace added
+  // without a tsconfig `include` would turn the whole check off — with a message
+  // that only appears in a job nobody reads on a green build.
+  it('has every tracked source file inside a TypeScript project', () => {
     const tracked = execFileSync('git', ['ls-files', '*.ts', '*.tsx'], {
       cwd: ROOT,
       encoding: 'utf-8',
@@ -623,21 +415,17 @@ describe('the REAL repository', () => {
     })
       .split('\n')
       .filter((path) => path.length > 0)
-      .filter((path) => !path.includes('/dist/') && !path.endsWith('.d.ts'))
-      .filter((path) => !path.endsWith('routeTree.gen.ts'));
+      .filter((path) => !path.includes('/dist/') && !path.endsWith('.d.ts'));
+    expect(tracked.length).toBeGreaterThan(1000);
 
-    const files: SourceFile[] = [];
-    for (const path of tracked) {
-      try {
-        files.push({
-          path,
-          content: readFileSync(resolve(ROOT, path), 'utf-8'),
-          isTest: isTestPath(path),
-        });
-      } catch {
-        // Tracked but removed from the working tree (mid-refactor): skip.
-      }
-    }
-    expect(findDeadExports(files).map((d) => `${d.file}: ${d.kind} ${d.name}`)).toEqual([]);
-  }, 60_000);
+    // No identifier offsets: this asks only which files the programs contain,
+    // so it is a program load rather than a resolution pass.
+    const resolved = resolveExportReferences({
+      files: tracked,
+      identifierOffsets: () => [],
+      importedNames: () => [],
+      declarations: [],
+    });
+    expect(resolved.uncovered).toEqual([]);
+  }, 120_000);
 });

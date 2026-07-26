@@ -13,6 +13,20 @@
 // Everything fails closed: an unavailable subtle, a wrong-length signature, or
 // any WebCrypto error resolves to `false` / rejects, never a soft pass.
 
+/**
+ * Domain separator for the transparency-log leaf input (§22.4).
+ *
+ * Declared HERE, in the module the producer and the verifier both already
+ * depend on, because it is one half of a cryptographic agreement between them:
+ * `produceSignedManifest` hashes the leaf with it and `verifyUpdateManifest`
+ * recomputes the same leaf.  It previously existed as three separate literals —
+ * one exported from `produce.ts` that nothing imported, plus private copies in
+ * `verify.ts` and the test helpers — so a change on one side would have left
+ * verification silently disagreeing with production while every test that
+ * carried its own copy still passed.
+ */
+export const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
+
 /** Ed25519 raw public-key length, in bytes (RFC 8032). */
 export const ED25519_PUBLIC_KEY_LENGTH = 32;
 /** Ed25519 signature length, in bytes (RFC 8032). */

@@ -20,7 +20,7 @@
 // codec) — no WebCrypto import here, so it builds in any environment and the
 // build tool supplies the platform `crypto.subtle` wiring.
 
-import { sha256Concat } from './crypto.js';
+import { LOG_LEAF_DOMAIN, sha256Concat } from './crypto.js';
 import { appendLeaf, proveInclusion, signCheckpoint, type TransparencyLogState } from './log.js';
 import {
   canonicalManifestBody,
@@ -28,9 +28,6 @@ import {
   type UpdateManifest,
   type UpdateManifestBody,
 } from './schema.js';
-
-/** The domain separator for the transparency-log leaf input (§22.4). */
-const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
 
 /**
  * The injected signing context.  Both signers produce a DETACHED Ed25519

@@ -49,27 +49,35 @@
 // a property worth more than the absence of the handful nothing imports yet,
 // and pruning to only-the-used ones would make the surface arbitrary.
 //
-// The analysis is intentionally simple and errs toward SILENCE: an identifier is
-// "referenced" if it appears as a whole word anywhere in the tracked TypeScript
-// CODE outside its own declaration.  Comments and string literals are stripped
-// first — a JSDoc naming the symbol it documents is the most common thing
-// written next to a declaration, and counting it would let every documented
-// export pass with no consumer.  A name that collides with an unrelated symbol
-// still hides a dead export, but that is a false NEGATIVE, which merely lets one
-// through, rather than a false positive that would block a correct branch.
+// "REFERENCED" MEANS THE BINDING, NOT THE NAME.  This module finds WHAT is
+// exported; `resolve-export-references.ts` asks the TypeScript compiler which
+// sites actually use each one.  The split matters: an earlier cut counted
+// occurrences of the NAME across the corpus, which is exact only when a name is
+// unique — an unused `export const status` passed the moment any file mentioned
+// an unrelated `status`, so common names were effectively exempt.  Binding
+// resolution has no such blind spot, and it retired several special cases with
+// it: an overload set needs no aggregation (every signature is a declaration of
+// one symbol), and "which mentions belong to the declaration" is the symbol's
+// own declaration ranges rather than an occurrence baseline.
 //
-// A CLUSTER of dead exports that reference each other is reported one layer per
-// run: a dead `f()` that reads a dead `A` keeps `A` "referenced" until `f` goes.
-// That converges (each run removes a layer) and the direction is the safe one —
-// it never demands the deletion of something still in use.
+// A CLUSTER of dead exports that reference each other is still reported one
+// layer per run: a dead `f()` that reads a dead `A` keeps `A` referenced until
+// `f` goes.  That converges, and the direction is the safe one — it never
+// demands the deletion of something still in use.
 //
-// Deliberately dependency-free so the `scripts`-rooted vitest project can unit
-// test the pure core directly.
+// The PARSING here stays dependency-free and pure, so the `scripts`-rooted
+// vitest project unit-tests it directly; the resolver is tested against a real
+// compiler in `resolve-export-references.test.ts`.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { interpolationSpans, type Token, tokenize } from './js-sink-analyzer.js';
+import {
+  declarationKey,
+  type ReferenceSite,
+  resolveExportReferences,
+} from './resolve-export-references.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -178,15 +186,16 @@ export interface ExportedValue {
    */
   isDefault: boolean;
   /**
-   * How many times the name occurs in its own DECLARATION — the baseline a real
-   * reference has to exceed.
+   * Byte offset of the declaration's NAME.
    *
-   * `export const X` writes `X` once.  `export { X }` writes it once in the
-   * clause AND once at the local declaration the clause publishes, so two
-   * occurrences still mean "nothing uses it".  `export { local as X }` writes
-   * the exported name only in the clause, so one.
+   * The handle the reference resolver needs: it asks the compiler which BINDING
+   * lives at this position, then reports the sites that use it.  There is no
+   * occurrence-baseline field any more — "which mentions belong to the
+   * declaration itself" is answered by the symbol's own declaration ranges,
+   * which is exact and, unlike a count, needs no special case for an overload
+   * set (every signature is a declaration of one symbol).
    */
-  selfOccurrences: number;
+  offset: number;
 }
 
 /** `export declare …`, `export abstract class …`, `export async function …`. */
@@ -217,6 +226,7 @@ function parseExportedValues(
   tokens: readonly Token[],
 ): Array<{ value: ExportedValue; start: number }> {
   const out: Array<{ value: ExportedValue; start: number }> = [];
+  const imported = importedLocalNames(tokens);
   const identAt = (index: number): string | null => {
     const token = tokens[index];
     return token?.kind === 'ident' ? token.value : null;
@@ -225,19 +235,13 @@ function parseExportedValues(
     const token = tokens[index];
     return token?.kind === 'punct' ? token.value : null;
   };
-  const emit = (
-    name: string,
-    kind: string,
-    start: number,
-    selfOccurrences: number,
-    isDefault: boolean,
-  ): void => {
+  const emit = (name: string, kind: string, start: number, isDefault: boolean): void => {
     out.push({
       value: {
         name,
         kind,
         line: source.slice(0, start).split('\n').length,
-        selfOccurrences,
+        offset: start,
         isDefault,
       },
       start,
@@ -263,7 +267,7 @@ function parseExportedValues(
     if (keyword === 'const' && identAt(j + 1) === 'enum') {
       const name = identAt(j + 2);
       const at = tokens[j + 2]?.start;
-      if (name !== null && at !== undefined) emit(name, 'enum', at, 1, isDefault);
+      if (name !== null && at !== undefined) emit(name, 'enum', at, isDefault);
       continue;
     }
 
@@ -272,7 +276,7 @@ function parseExportedValues(
       const k = punctAt(j + 1) === '*' ? j + 2 : j + 1;
       const name = identAt(k);
       const at = tokens[k]?.start;
-      if (name !== null && at !== undefined) emit(name, keyword, at, 1, isDefault);
+      if (name !== null && at !== undefined) emit(name, keyword, at, isDefault);
       continue;
     }
 
@@ -280,7 +284,7 @@ function parseExportedValues(
       // A declarator LIST: every binding it introduces, not just the first.
       const slice = tokens.slice(j + 1, j + 1 + MAX_DECLARATOR_TOKENS);
       for (const binding of declarationBindings(slice)) {
-        emit(binding.name, keyword, binding.start, 1, false);
+        emit(binding.name, keyword, binding.start, false);
       }
       continue;
     }
@@ -325,12 +329,14 @@ function parseExportedValues(
           // A re-export clause body is excluded from the identifier count (it is
           // not a USE — see `reexportClauseSpans`), so the alias has no
           // self-occurrence to discount: any count at all is a real consumer.
-          emit(exported, 'reexport', first.start, 0, false);
+          emit(exported, 'reexport', first.start, false);
           continue;
         }
-        // An UNALIASED specifier repeats the local declaration's name, so the
-        // name occurs twice before any real use.
-        emit(exported, 'export', first.start, exported === local ? 2 : 1, false);
+        // An UNALIASED specifier republishing an IMPORTED name is the
+        // two-statement spelling of `export { X } from` — plumbing, scanned at
+        // the declaration it came from.
+        if (exported === local && imported.has(local)) continue;
+        emit(exported, 'export', first.start, false);
       }
       continue;
     }
@@ -345,11 +351,190 @@ function parseExportedValues(
       // `export * as default from '…'` is legal ES2020 and publishes `default`,
       // whose name is module-local at every importer — out of scope.
       if (name !== null && name !== 'default' && at !== undefined) {
-        emit(name, 'namespace', at, 1, false);
+        emit(name, 'namespace', at, false);
       }
     }
   }
   return out;
+}
+
+/** A site that names exports of another module: `import { A } from 'M'`, or
+ *  `const { A } = await import('M')`. */
+export interface ImportedNames {
+  /** Byte offset of the module-specifier STRING token. */
+  readonly specifierOffset: number;
+  /** The EXPORT-side names taken from that module. */
+  readonly names: readonly string[];
+  /** Where to record the reference. */
+  readonly offset: number;
+}
+
+/**
+ * Every place this file names exports OF ANOTHER MODULE, static or dynamic.
+ *
+ * Resolving identifiers alone is not enough for either form, for the same
+ * underlying reason: the identifier the file writes is not the symbol the other
+ * module declares.
+ *
+ *   • `const { readCourierPower } = await import(M)` binds a NEW LOCAL, so the
+ *     compiler answers with that local and M's export looks unreferenced.
+ *   • `import { queue } from './index.js'` resolves through `getAliasedSymbol`,
+ *     which walks all the way to the ORIGINAL declaration — so a barrel's own
+ *     `export * as queue from './queue.js'` binding is skipped over and looks
+ *     unreferenced even though that is precisely the name being imported.
+ *
+ * Both are fixed by asking the COMPILER which module the specifier denotes and
+ * crediting the export it names.  Nothing is guessed: an import clause and a
+ * destructuring pattern both bind BY EXPORT NAME, so the name written here IS
+ * the export's name, with no aliasing or shadowing possible.
+ *
+ * `export … from 'M'` is deliberately NOT included — republishing is not
+ * consuming, which is the rule the declaration parser already applies.
+ */
+export function importedNames(source: string): ImportedNames[] {
+  const found = new Map<number, ImportedNames>();
+  for (const preferRegex of [false, true]) {
+    const tokens = tokenize(source, preferRegex);
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (token?.kind !== 'ident') continue;
+
+      // STATIC: `import { A, B as c } from 'M'` — the export side is before `as`.
+      if (token.value === 'import' && tokens[i + 1]?.value === '{') {
+        const names: string[] = [];
+        let k = i + 2;
+        let expect = true;
+        for (
+          let guard = 0;
+          k < tokens.length && guard < MAX_DECLARATOR_TOKENS;
+          k += 1, guard += 1
+        ) {
+          const inner = tokens[k];
+          if (inner === undefined) break;
+          if (inner.kind === 'punct') {
+            if (inner.value === '}') break;
+            if (inner.value === ',') expect = true;
+            continue;
+          }
+          if (inner.kind !== 'ident') continue;
+          if (inner.value === 'type') continue; // a type-only specifier
+          if (inner.value === 'as') {
+            expect = false; // the local alias follows; the export name is taken
+            continue;
+          }
+          if (expect) {
+            names.push(inner.value);
+            expect = false;
+          }
+        }
+        const from = tokens[k + 1];
+        const specifier = tokens[k + 2];
+        if (from?.value === 'from' && specifier?.kind === 'string' && names.length > 0) {
+          found.set(specifier.start, {
+            specifierOffset: specifier.start,
+            names,
+            offset: token.start,
+          });
+        }
+        i = k;
+        continue;
+      }
+
+      // DYNAMIC: `const { A } = await import('M')`.
+      if (token.value !== 'import') continue;
+      const open = tokens[i + 1];
+      const specifier = tokens[i + 2];
+      if (open?.value !== '(' || specifier?.kind !== 'string') continue;
+      if (tokens[i + 3]?.value !== ')') continue;
+      let k = i - 1;
+      while (k >= 0 && tokens[k]?.kind === 'ident' && tokens[k]?.value === 'await') k -= 1;
+      if (tokens[k]?.value !== '=') continue;
+      k -= 1;
+      if (tokens[k]?.value !== '}') continue;
+      const patternEnd = k;
+      let depth = 0;
+      for (; k >= 0; k -= 1) {
+        const inner = tokens[k];
+        if (inner?.kind !== 'punct') continue;
+        if (inner.value === '}') depth += 1;
+        else if (inner.value === '{') {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (k < 0) continue;
+      const names: string[] = [];
+      for (let m = k + 1; m < patternEnd; m += 1) {
+        const inner = tokens[m];
+        if (inner?.kind !== 'ident') continue;
+        // `{ a: renamed }` binds `renamed`; the EXPORT is the key `a`.
+        if (tokens[m - 1]?.kind === 'punct' && tokens[m - 1]?.value === ':') continue;
+        names.push(inner.value);
+      }
+      if (names.length > 0) {
+        found.set(specifier.start, {
+          specifierOffset: specifier.start,
+          names,
+          offset: tokens[k]?.start ?? specifier.start,
+        });
+      }
+    }
+  }
+  return [...found.values()].sort((a, b) => a.specifierOffset - b.specifierOffset);
+}
+
+/**
+ * Local names bound by an `import { … } from '…'` clause.
+ *
+ * `import { X } from './a.js'; export { X };` is the two-statement spelling of
+ * `export { X } from './a.js'` — the same binding, republished under the same
+ * name.  The gate already treats the one-statement form as PLUMBING, scanned at
+ * the declaration it comes from, and the two-statement form has to follow, or
+ * every module that imports-then-exports reports that surface dead.
+ *
+ * An ALIASED republish (`export { X as Y }`) stays a declaration: `Y` is a new
+ * public name that exists nowhere else.
+ */
+function importedLocalNames(tokens: readonly Token[]): Set<string> {
+  const names = new Set<string>();
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token?.kind !== 'ident' || token.value !== 'import') continue;
+    const after = tokens[i + 1];
+    // `import(` is a dynamic import EXPRESSION, not a binding clause.
+    if (after?.kind === 'punct' && after.value === '(') continue;
+    let j = i + 1;
+    let sawFrom = false;
+    const local: string[] = [];
+    let expectBinding = true;
+    for (let guard = 0; j < tokens.length && guard < MAX_DECLARATOR_TOKENS; j += 1, guard += 1) {
+      const current = tokens[j];
+      if (current === undefined) break;
+      if (current.kind === 'string') break; // the specifier ends the statement
+      if (current.kind === 'punct') {
+        if (current.value === ',' || current.value === '{') expectBinding = true;
+        continue;
+      }
+      if (current.kind !== 'ident') continue;
+      if (current.value === 'from') {
+        sawFrom = true;
+        break;
+      }
+      if (current.value === 'as') {
+        local.pop(); // the name AFTER `as` is the local binding
+        expectBinding = true;
+        continue;
+      }
+      if (current.value === 'type') continue;
+      if (expectBinding) {
+        local.push(current.value);
+        expectBinding = false;
+      }
+    }
+    if (sawFrom) for (const name of local) names.add(name);
+    i = j;
+  }
+  return names;
 }
 
 /**
@@ -372,14 +557,16 @@ export function exportedValues(source: string): ExportedValue[] {
 }
 
 /**
- * The `{ … }` bodies of `export { … } from '…'` RE-EXPORT clauses.
+ * The `{ … }` bodies of EVERY `export { … }` clause, re-export or not.
  *
- * A barrel republishing a name is not a consumer of it.  Counting the barrel's
- * occurrence as a reference meant an export could be dead — declared once,
- * re-exported once, imported nowhere — and still pass, because its own barrel
- * vouched for it.  `export * from` needs no span: it names nothing.
+ * Publishing a name is not consuming it.  A barrel's `export { orphan } from
+ * './x.js'` would otherwise keep `orphan` alive on its own, and a local
+ * `export { foo }` clause would vouch for `foo` — in both cases an export
+ * standing as its own only reference.  The resolver skips identifiers inside
+ * these spans, which is the same rule the declaration parser applies when it
+ * treats a clause as a DECLARATION rather than a use.
  */
-function reexportClauseSpans(tokens: readonly Token[]): Array<[number, number]> {
+function exportClauseSpans(tokens: readonly Token[]): Array<[number, number]> {
   const spans: Array<[number, number]> = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -395,62 +582,55 @@ function reexportClauseSpans(tokens: readonly Token[]): Array<[number, number]> 
       if (inner?.kind === 'punct' && inner.value === '}') break;
     }
     const close = tokens[k];
-    const after = tokens[k + 1];
-    if (close !== undefined && after?.kind === 'ident' && after.value === 'from') {
-      spans.push([open.start, close.end]);
-    }
+    if (close !== undefined) spans.push([open.start, close.end]);
     i = k;
   }
   return spans;
 }
 
 /**
- * Every IDENTIFIER occurrence in one source, as code — comments, strings, regex
- * literals and template TEXT excluded, template INTERPOLATIONS included.
+ * Byte offsets of every IDENTIFIER in one source that could be a USE.
  *
  * Lexed with the repo's existing tokeniser (`js-sink-analyzer.ts`) rather than a
  * second hand-rolled stripper.  A naive one is not merely imprecise, it is
  * WRONG in the dangerous direction: this file's own regexes contain quote
  * characters (`/['"`]/`), so a stripper that does not understand regex literals
- * treats one as an unterminated string and swallows the code after it — turning
- * live symbols into false "dead" reports that would block a correct branch.
- * The tokeniser already handles all four constructs, and its `preferRegex`
- * dual-pass resolves the one genuinely undecidable `/` case; both passes are
- * unioned by taking the HIGHER count, so a mis-lex can only over-count (a false
- * negative — safe) and never under-count.
+ * treats one as an unterminated string and swallows the code after it — leaving
+ * real references unseen and turning live symbols into false "dead" reports.
+ *
+ * The two `preferRegex` lexings are UNIONED.  Only positions matter here, and
+ * the compiler decides what actually lives at each one — an offset that is not
+ * an identifier resolves to nothing and costs a slot in one batched request.
+ * Over-offering is therefore free, while missing an offset would hide a real
+ * reference, so the union is the safe direction.
  */
-export function identifierCounts(source: string): Map<string, number> {
-  const best = new Map<string, number>();
+export function identifierOffsets(source: string): number[] {
+  const offsets = new Set<number>();
   for (const preferRegex of [false, true]) {
     const top = tokenize(source, preferRegex);
-    // A RE-EXPORT is plumbing, not a use.  `export { orphan } from './x.js'` in
-    // a barrel nobody imports would otherwise keep `orphan` "referenced" by the
-    // barrel alone, and a dead export could hide behind one indefinitely — the
-    // same reasoning that already excludes re-export clauses from being counted
-    // as DECLARATIONS.  A real consumer still spells the name where it imports
-    // it, so a live symbol is unaffected.
-    const plumbing = reexportClauseSpans(top);
-    const isPlumbing = (offset: number): boolean =>
-      plumbing.some(([start, end]) => offset >= start && offset < end);
-    const pass = new Map<string, number>();
-    const add = (name: string): void => pass.set(name, (pass.get(name) ?? 0) + 1);
+    const plumbing = exportClauseSpans(top);
+    const inPlumbing = (offset: number): boolean =>
+      plumbing.some(([from, to]) => offset >= from && offset < to);
     const walk = (tokens: readonly Token[]): void => {
       for (const token of tokens) {
         if (token.kind === 'ident') {
-          if (!isPlumbing(token.start)) add(token.value);
+          if (!inPlumbing(token.start)) offsets.add(token.start);
         } else if (token.kind === 'template' && token.value.includes('${')) {
-          // Only the `${…}` bodies are code; the literal chunks between them are
-          // prose and stay excluded.
-          for (const span of interpolationSpans(token.value, 0, preferRegex)) {
-            walk(tokenize(span.text, preferRegex));
+          // Only the `${…}` bodies are code; the chunks between them are prose.
+          for (const span of interpolationSpans(token.value, token.start, preferRegex)) {
+            for (const inner of tokenize(source, preferRegex, {
+              from: span.offset,
+              stopAtUnmatchedBrace: true,
+            })) {
+              if (inner.kind === 'ident' && !inPlumbing(inner.start)) offsets.add(inner.start);
+            }
           }
         }
       }
     };
     walk(top);
-    for (const [name, count] of pass) best.set(name, Math.max(best.get(name) ?? 0, count));
   }
-  return best;
+  return [...offsets].sort((a, b) => a - b);
 }
 
 export interface DeadExport {
@@ -463,33 +643,39 @@ export interface DeadExport {
 export interface SourceFile {
   path: string;
   content: string;
-  /** Declarations here are scanned only when false (tests may export freely). */
+  /** True ⇒ scanned for references, never judged ({@link isReferenceOnlyPath}). */
   isTest: boolean;
 }
 
 /**
- * Identifier counts per file and summed across the corpus.
+ * An explicit, REASONED opt-out for an export the compiler cannot see a use of.
  *
- * ONE pass building the tables, rather than re-scanning every file per
- * declaration.  The naive form is O(declarations × bytes) — thousands of exports
- * against a ~13 MB corpus — which took long enough that the gate's own test
- * timed out.
+ * There is exactly one such shape here: a module loaded by URL at RUNTIME.  The
+ * two `/src/private-p2p/e2e-*-harness.ts` files are fetched through the Vite dev
+ * module graph by a Playwright `page.evaluate`, because a raw evaluate cannot
+ * resolve a bare specifier — so no TypeScript import edge exists by
+ * construction, and no amount of binding resolution will invent one.
  *
- * Counted over CODE ONLY: a declaration's own JSDoc almost always names it, so
- * counting prose would let every documented export pass with no consumer.
+ * Deliberately PER-DECLARATION and reason-bearing, not a path rule and not a
+ * whole-module pass: a new export added to one of those harnesses that nothing
+ * loads is still reported.  `\S` after the colon makes the reason mandatory —
+ * a bare marker is indistinguishable from a mistake.
  */
-function indexCorpus(files: readonly SourceFile[]): {
-  perFile: Map<string, Map<string, number>>;
-  total: Map<string, number>;
-} {
-  const perFile = new Map<string, Map<string, number>>();
-  const total = new Map<string, number>();
-  for (const file of files) {
-    const counts = identifierCounts(file.content);
-    perFile.set(file.path, counts);
-    for (const [name, count] of counts) total.set(name, (total.get(name) ?? 0) + count);
+const ENTRY_MARKER = /(?:\/\/|\/\*|^\s*\*).*dead-exports-entry:\s*\S/;
+
+/** A line that is nothing but comment — how far up {@link isEntryPoint} walks. */
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*\/?)/;
+
+/** Whether the declaration on `line` (1-based) carries a reasoned entry marker. */
+function isEntryPoint(lines: readonly string[], line: number): boolean {
+  if (ENTRY_MARKER.test(lines[line - 1] ?? '')) return true;
+  for (let i = line - 2; i >= 0; i -= 1) {
+    const candidate = lines[i] ?? '';
+    if (candidate.trim() === '') continue;
+    if (!COMMENT_LINE.test(candidate)) return false;
+    if (ENTRY_MARKER.test(candidate)) return true;
   }
-  return { perFile, total };
+  return false;
 }
 
 /** Exported values of a non-test file that are in scope for either analysis. */
@@ -498,77 +684,71 @@ function* scannableDeclarations(
 ): Generator<{ file: SourceFile; declaration: ExportedValue }> {
   for (const file of files) {
     if (file.isTest) continue;
-    // AGGREGATE by name within the file before yielding.  A TypeScript OVERLOAD
-    // SET is several declarations of one name — every signature plus the
-    // implementation — and each writes the name once.  Compared individually,
-    // three declarations of an unused `orphan` give a corpus total of three
-    // against a baseline of one apiece, so the export looks referenced by its
-    // own signatures.  Summing the footprint makes the comparison honest, and
-    // the set is reported once, at its FIRST declaration.
-    const byName = new Map<string, ExportedValue>();
+    const lines = file.content.split('\n');
     for (const declaration of exportedValues(file.content)) {
       // A default export's name is module-local (see `ExportedValue.isDefault`),
-      // so its occurrence count carries no information either way.
+      // so nothing outside the module is obliged to spell it.
       if (declaration.isDefault) continue;
-      const seen = byName.get(declaration.name);
-      if (seen === undefined) byName.set(declaration.name, { ...declaration });
-      else seen.selfOccurrences += declaration.selfOccurrences;
+      if (isEntryPoint(lines, declaration.line)) continue;
+      yield { file, declaration };
     }
-    for (const declaration of byName.values()) yield { file, declaration };
   }
 }
 
+/** How the analyses learn which sites USE a binding. */
+export interface ReferenceOracle {
+  usesOf(file: string, offset: number): readonly ReferenceSite[];
+}
+
 /**
- * Pure: every exported value referenced NOWHERE but its own declaration.
+ * Pure: every exported value the oracle finds NO use for.
  *
- * References are counted across ALL files including tests — exporting a helper
- * so a unit test can reach it is a legitimate reason to export, and this gate
- * has no business second-guessing it.
+ * Uses are counted across ALL files including tests — exporting a helper so a
+ * unit test can reach it is a legitimate reason to export, and this gate has no
+ * business second-guessing it.
  */
-export function findDeadExports(files: readonly SourceFile[]): DeadExport[] {
-  const { total } = indexCorpus(files);
+export function findDeadExports(
+  files: readonly SourceFile[],
+  oracle: ReferenceOracle,
+): DeadExport[] {
   const dead: DeadExport[] = [];
   for (const { file, declaration } of scannableDeclarations(files)) {
-    // At or below the declaration's own footprint means nothing USES it.
-    if ((total.get(declaration.name) ?? 0) <= declaration.selfOccurrences) {
-      dead.push({
-        file: file.path,
-        name: declaration.name,
-        kind: declaration.kind,
-        line: declaration.line,
-      });
-    }
+    if (oracle.usesOf(file.path, declaration.offset).length > 0) continue;
+    dead.push({
+      file: file.path,
+      name: declaration.name,
+      kind: declaration.kind,
+      line: declaration.line,
+    });
   }
   return dead;
 }
 
 /**
- * Pure: every exported value USED, but only inside the file that declares it —
+ * Pure: every exported value that IS used, but only from the file declaring it —
  * the `export` keyword buys nothing and widens the module's surface.
  *
  * Reported by `--internal-only`, NOT by the default gate and NOT in CI.  The
- * repository has ~894 of these and they are not one defect repeated: a large
- * share are deliberate API surface (`@licio/shared` is the schema/constant SSOT
- * and `@licio/db` follows Drizzle's export-every-table idiom), and 56 are the
- * `Drizzle*`/`InMemory*` store adapters whose EXPORTED name is what
- * `check:prod-parity` matches on.  Un-exporting those would be a regression, so
- * the sweep needs per-site judgement and lands as its own work
- * (`docs/planning/audit-residuals-2026-07.md`).  This mode exists so that debt
- * is a command rather than a memory, and it already exits non-zero so it can
- * become a gate the day the list is empty.
+ * repository has hundreds and they are not one defect repeated: a large share
+ * are deliberate API surface (`@licio/shared` is the schema/constant SSOT and
+ * `@licio/db` follows Drizzle's export-every-table idiom), and the
+ * `Drizzle*`/`InMemory*` store adapters are matched BY THEIR EXPORTED NAME by
+ * `check:prod-parity`.  Un-exporting those would be a regression, so the sweep
+ * needs per-site judgement and lands as its own work
+ * (`docs/planning/audit-residuals-2026-07.md`).
  *
  * Disjoint from {@link findDeadExports}: a symbol used nowhere at all is dead,
- * not internal-only, and is reported there instead.
+ * not internal-only.
  */
-export function findInternalOnlyExports(files: readonly SourceFile[]): DeadExport[] {
-  const { perFile, total } = indexCorpus(files);
+export function findInternalOnlyExports(
+  files: readonly SourceFile[],
+  oracle: ReferenceOracle,
+): DeadExport[] {
   const internal: DeadExport[] = [];
   for (const { file, declaration } of scannableDeclarations(files)) {
-    const own = perFile.get(file.path)?.get(declaration.name) ?? 0;
-    // Used somewhere (else it is DEAD, reported by the gate above) …
-    if (own <= declaration.selfOccurrences) continue;
-    // … and every occurrence in the corpus is one of this file's own.
-    if ((total.get(declaration.name) ?? 0) !== own) continue;
+    const uses = oracle.usesOf(file.path, declaration.offset);
+    if (uses.length === 0) continue; // dead, reported by the gate above
+    if (uses.some((use) => use.file !== file.path)) continue;
     internal.push({
       file: file.path,
       name: declaration.name,
@@ -577,6 +757,27 @@ export function findInternalOnlyExports(files: readonly SourceFile[]): DeadExpor
     });
   }
   return internal;
+}
+
+/** Generated sources: rewritten by a plugin, so their exports are nobody's to fix. */
+function isGeneratedPath(path: string): boolean {
+  return path.endsWith('routeTree.gen.ts') || path.endsWith('.generated.ts');
+}
+
+/**
+ * Files scanned for REFERENCES but never judged.
+ *
+ * Tests may export fixtures freely, and a generated file's declarations are
+ * rewritten by its plugin — but both are real consumers, and dropping either
+ * from the corpus would report what only they use as dead (the TanStack router
+ * tree is the ONLY consumer of every route module's `Route`).
+ *
+ * One predicate rather than a rule spelled at each call site: the boot and the
+ * analyses have to agree about which files are judged, and they disagreed for
+ * exactly as long as generated paths were folded in at the boot alone.
+ */
+export function isReferenceOnlyPath(path: string): boolean {
+  return isTestPath(path) || isGeneratedPath(path);
 }
 
 /** Test-ish paths: their own exports are not scanned (references still count). */
@@ -590,6 +791,51 @@ export function isTestPath(path: string): boolean {
   );
 }
 
+/**
+ * The real oracle: resolve every identifier in the corpus to its binding.
+ *
+ * Refuses to answer on incomplete input.  A tracked file no project's program
+ * contains is invisible, and an export used only from such a file would look
+ * dead — a FALSE POSITIVE, which is the one failure mode a gate in CI must
+ * never have.  Likewise a declaration whose name offset resolves to no symbol:
+ * the parser found an export the compiler does not agree exists, and guessing
+ * either way is worse than stopping.
+ */
+function buildOracle(files: readonly SourceFile[]): ReferenceOracle {
+  const declarations = [...scannableDeclarations(files)].map(({ file, declaration }) => ({
+    file: file.path,
+    offset: declaration.offset,
+  }));
+  const resolved = resolveExportReferences({
+    files: files.map((file) => file.path),
+    identifierOffsets: (_file, source) => identifierOffsets(source),
+    importedNames: (_file, source) => importedNames(source),
+    declarations,
+  });
+  if (resolved.uncovered.length > 0) {
+    console.error(
+      `check:dead-exports CANNOT RUN — ${resolved.uncovered.length} tracked file(s) belong to no\n` +
+        '  TypeScript project, so references from them are invisible and every export they\n' +
+        '  alone consume would be reported dead. Add them to a tsconfig `include`:',
+    );
+    for (const file of resolved.uncovered.slice(0, 20)) console.error(`  - ${file}`);
+    process.exit(2);
+  }
+  if (resolved.unresolved.length > 0) {
+    console.error(
+      `check:dead-exports CANNOT RUN — ${resolved.unresolved.length} parsed declaration(s) resolved\n` +
+        '  to no symbol. The parser and the compiler disagree about what is exported here:',
+    );
+    for (const entry of resolved.unresolved.slice(0, 20)) {
+      console.error(`  - ${entry.file} @${entry.offset}`);
+    }
+    process.exit(2);
+  }
+  return {
+    usesOf: (file, offset) => resolved.uses.get(declarationKey(file, offset)) ?? [],
+  };
+}
+
 function main(): void {
   const tracked = execFileSync('git', ['ls-files', '*.ts', '*.tsx'], {
     cwd: ROOT,
@@ -598,9 +844,7 @@ function main(): void {
   })
     .split('\n')
     .filter((path) => path.length > 0)
-    .filter((path) => !path.includes('/dist/') && !path.endsWith('.d.ts'))
-    // Generated: the router tree is rewritten by the TanStack plugin.
-    .filter((path) => !path.endsWith('routeTree.gen.ts'));
+    .filter((path) => !path.includes('/dist/') && !path.endsWith('.d.ts'));
 
   // `git ls-files` reports paths git TRACKS, which during a refactor includes a
   // file already removed from the working tree.  Skip what cannot be read rather
@@ -613,11 +857,13 @@ function main(): void {
     } catch {
       continue;
     }
-    files.push({ path, content, isTest: isTestPath(path) });
+    files.push({ path, content, isTest: isReferenceOnlyPath(path) });
   }
 
+  const oracle = buildOracle(files);
+
   if (process.argv.includes('--internal-only')) {
-    const internal = findInternalOnlyExports(files);
+    const internal = findInternalOnlyExports(files, oracle);
     if (internal.length > 0) {
       console.error(`${internal.length} exported value(s) used ONLY inside their own file:`);
       for (const entry of internal) {
@@ -638,7 +884,7 @@ function main(): void {
     return;
   }
 
-  const dead = findDeadExports(files);
+  const dead = findDeadExports(files, oracle);
   if (dead.length > 0) {
     console.error(
       `check:dead-exports FAILED — ${dead.length} exported value(s) nothing references:`,

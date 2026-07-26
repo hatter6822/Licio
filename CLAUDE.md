@@ -387,8 +387,16 @@ write for a file the foreground agent may also touch.
     3. genuinely **vestigial** — delete it.
   Used only inside its own file?  Drop the `export`, keep the symbol —
   `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
-  the ~939 standing cases are worked through
+  the ~967 standing cases are worked through
   (`docs/planning/audit-residuals-2026-07.md`).
+  **References are resolved to the module BINDING**, by the TypeScript compiler
+  (`scripts/resolve-export-references.ts`), not by matching the name — so an
+  unrelated local, parameter or property that happens to share a spelling is not
+  a consumer.  The gate REFUSES to run if any tracked file falls outside every
+  tsconfig, since a file the compiler cannot see would make what only it uses
+  look dead.  The one thing resolution cannot see is a module fetched by URL at
+  runtime (the Playwright `/src` harnesses); those carry a
+  `dead-exports-entry: <reason>` comment.
   **`export default` is out of scope**, and not as an exemption: it publishes the
   binding `default`, so the declaration's own name is module-local and every
   importer picks its own — the name is under no obligation to appear anywhere

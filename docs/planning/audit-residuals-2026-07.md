@@ -42,12 +42,12 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
 
 ## Export hygiene — the internal-only sweep
 
-**Tracked debt — 939 exported values used only inside their declaring file.**
+**Tracked debt — 967 exported values used only inside their declaring file.**
 `check:dead-exports` reports an exported value nothing references *anywhere*.
 The narrower question — "is the `export` keyword buying anything?" — is
 implemented in the same script (`findInternalOnlyExports`, surfaced by
 `pnpm survey:internal-exports`) but is **not** in CI, because the answer today
-is 939 declarations and they are not one defect repeated:
+is 967 declarations and they are not one defect repeated:
 
 | Share | Category | Is the export deliberate? |
 |-------|----------|---------------------------|
@@ -68,32 +68,36 @@ surface. When the survey is empty, it exits 0 and can move into CI's lint job
 beside `check:dead-exports`; it already exits non-zero on a non-empty list, so no
 semantics change at that point.
 
-### Precision limit — references are matched by NAME, not by binding
+### Precision limit — references are matched by NAME, not by binding — **CLOSED**
 
-**Tracked debt — `check:dead-exports` resolves consumers by identifier spelling.**
-The corpus index sums occurrences of a name across all tracked code, so an
-unrelated local, parameter, property or method with the same spelling reads as a
-consumer. An unused `export const status` passes as soon as any file mentions an
-unrelated `status`. Common names are therefore under-covered.
+`check:dead-exports` used to resolve consumers by identifier spelling, so an
+unrelated local, parameter, property or method with the same name read as a
+consumer: an unused `export const status` passed as soon as any file mentioned
+an unrelated `status`. This was recorded here as tracked debt, with the closure
+target "resolve references to the exported MODULE BINDING via the TypeScript
+LanguageService".
 
-This is deliberate and is stated in the gate's header, but it is a real ceiling
-on recall, not a design anyone should be content with. The reason it has not
-been fixed by heuristic: every cheap tightening moves the failure direction the
-wrong way. The current analysis cannot produce a FALSE POSITIVE — it never
-demands the deletion of something in use — and that property is the only reason
-it is safe to run in CI at all. A name-scoping heuristic that guesses wrong
-fails a correct branch.
+**Done.** `scripts/resolve-export-references.ts` resolves every identifier in
+the corpus through the TypeScript 7 API (`typescript/unstable/sync`), keyed by
+DECLARATION SITE rather than symbol id — the same file can belong to two
+projects, and each program mints its own symbol for one declaration. Four
+consumption forms are covered: direct identifier resolution, alias chains
+through barrels, names taken via a module specifier (static or dynamic), and
+destructured bindings (whose type carries the origin symbol). The gate refuses
+to run if any tracked file falls outside every tsconfig, since an unseen file
+would make what only it consumes look dead.
 
-**Closure target:** resolve references to the exported MODULE BINDING rather
-than the spelling — for each declaration, count only occurrences in files whose
-import graph reaches the declaring module, following `export … from` edges. The
-resolver already exists in usable form: the initial survey for this workstream
-was produced with the TypeScript LanguageService (`findReferences` per exported
-symbol), which is exact. The work is to make that fast enough for CI and to
-keep the gate dependency-free, or to accept a `typescript` devDependency for
-this one script. Until then the gate's guarantee stays "no false positives,
-imperfect recall on common names", which is the correct half to keep if only one
-is available.
+Retired with it: the overload-set aggregation, the `selfOccurrences` baseline,
+and the rule excluding barrel occurrences — binding resolution answers all three
+directly. What it cannot see is a module fetched by URL at runtime; the two
+Playwright `/src` harnesses carry a `dead-exports-entry: <reason>` comment.
+
+Turning it on found two real defects the name-matching gate had never been able
+to see, both of them the "two spellings of a live value" case the gate warns
+about: `LOG_LEAF_DOMAIN`, the transparency-log domain separator, existed as
+three copies (producer, verifier, test helpers) so a change on one side would
+have left verification silently disagreeing with production; and an exported
+`toBase64Url` nothing imported while two tests copy-pasted its body.
 
 ## Correctness / privacy — tractable, not yet done
 
