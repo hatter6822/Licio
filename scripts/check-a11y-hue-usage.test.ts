@@ -106,6 +106,31 @@ describe('the bare hue on normal text', () => {
     expect(hues(`<span className={\`text-\${hue}error\`} />`)).toEqual([]);
   });
 
+  it.each([
+    ['a grouped operand', `<span className={('text-') + 'error'} />`],
+    ['an as-const operand', `<span className={('text-' as const) + 'error'} />`],
+    ['a grouped whole', `<span className={('text-' + 'error')} />`],
+  ])('folds a concatenation through %s', (_label, source) => {
+    expect(hues(source)).toHaveLength(1);
+  });
+
+  it('does NOT fold across a CALL, which renders something else entirely', () => {
+    // `f('text-') + 'error'` is one token different from `('text-') + 'error'`
+    // and renders nothing like it.  Folding it would invent a class that never
+    // exists — a false positive that fails a correct build — so a `(` directly
+    // after an identifier, `)` or `]` ends the run.
+    expect(hues(`<span className={f('text-') + 'error'} />`)).toEqual([]);
+    expect(hues(`<span className={xs['text-'] + 'error'} />`)).toEqual([]);
+  });
+
+  it('folds a nested static hole', () => {
+    expect(hues(`<span className={\`text-\${\`\${'error'}\`}\`} />`)).toHaveLength(1);
+  });
+
+  it('does NOT fold a nested hole with a runtime inner value', () => {
+    expect(hues(`<span className={\`text-\${\`\${hue}\`}\`} />`)).toEqual([]);
+  });
+
   it('does not invent a hue across a NON-concatenated boundary', () => {
     // Two unrelated arguments are not one class string.  Joining them blindly
     // would report a violation that does not exist, which fails a correct build.
@@ -198,9 +223,25 @@ describe('what is NOT a violation', () => {
   });
 
   it('accepts every other suffixed token in the family', () => {
-    for (const suffix of ['-on-soft', '-soft', '-fg', '-strong']) {
+    // `-fg` is NOT among them: it is white, contrast-tested only against the
+    // SOLID `bg-<hue>`, so it has its own pairing rule below.
+    for (const suffix of ['-on-soft', '-soft', '-strong']) {
       expect(hues(`const a = 'text-warning${suffix}';`)).toEqual([]);
     }
+  });
+
+  it('accepts a -fg token PAIRED with its own solid background', () => {
+    // What the token is for: a destructive button's label on `bg-error`.
+    expect(hues(`const a = 'border border-error-hover bg-error text-error-fg';`)).toEqual([]);
+    expect(hues(`<span className="bg-warning text-warning-fg">x</span>`)).toEqual([]);
+  });
+
+  it('REJECTS a -fg token on the canvas, where it is white on near-white', () => {
+    // The live defect this found: ~20 `role="alert"` messages rendering white
+    // text on the default surface, invisible in the light theme, while the gate
+    // reported that every hue on normal text used the `-on-soft` pair.
+    expect(hues(`<p role="alert" className="text-sm text-error-fg">x</p>`)).toEqual(['1:error']);
+    expect(hues(`const a = 'text-warning-fg';`)).toEqual(['1:warning']);
   });
 
   it('accepts an icon, which is a graphical object at 3:1 (WCAG 1.4.11)', () => {

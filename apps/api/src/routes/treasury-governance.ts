@@ -487,6 +487,22 @@ export function createTreasuryGovernanceRoutes() {
               if (denial) return c.json(deny(denial.code, denial.message), 403);
             }
           }
+          // An UNFREEZE is `restrict` whoever asks — the room's own steward
+          // included — so the `ownSteward` bypass above must not hide an MFA
+          // STEP-UP behind the domain's `platform_review_required`.  A
+          // ROLE_SAFETY operator who also stewards this room and has not
+          // verified MFA holds the authority and is told they do not, with a
+          // code the step-up path cannot act on.
+          //
+          // Only the MFA denial is surfaced: a genuine capability shortfall is
+          // the domain's answer to give, and reporting it here would change who
+          // is refused rather than only what they are told.
+          if (clearingAHold) {
+            const stepUp = denyCapability(actor, 'restrict');
+            if (stepUp?.code === 'mfa_required') {
+              return c.json(deny(stepUp.code, stepUp.message), 403);
+            }
+          }
           const result = await setGovernanceFreeze(services, {
             roomId,
             action: body.action,

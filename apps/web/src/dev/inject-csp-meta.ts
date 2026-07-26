@@ -85,7 +85,16 @@ export interface HtmlTag {
 }
 
 const ASCII_LETTER = /[a-zA-Z]/;
-const SPACE = /\s/;
+/**
+ * HTML whitespace: exactly TAB, LF, FF, CR and SPACE.
+ *
+ * NOT JavaScript's `\s`, which also matches U+00A0 and the Unicode spaces.  The
+ * difference is not cosmetic: `<head\u00a0>` is an element NAMED `head\u00a0`,
+ * so the browser implies an empty head and leaves a CSP `<meta>` after it in the
+ * body, ineffective — while a scanner using `\s` reads a perfectly good `head`
+ * and certifies the document.
+ */
+const SPACE = /[\t\n\f\r ]/;
 
 /**
  * Read the tag starting at `at`, or `null` when a `<` there is ordinary text.
@@ -260,12 +269,31 @@ export function scanNodes(html: string): HtmlNode[] {
   return nodes;
 }
 
-/** Offset of `</name>` at or after `from`, or the end of the document. */
+/**
+ * The `</name>` that ends a raw-text element, read as a TAG.
+ *
+ * An end tag may carry attributes — the parser ignores them, but they are part
+ * of the tag — so `</title data='</title><meta …>'>` ends the title at the
+ * FIRST `</title`, and the `</title>` inside that attribute value is character
+ * data.  A `</name\s*>` pattern matches the quoted one instead, ending the
+ * element in the wrong place and exposing the `<meta>` inside it as a delivered
+ * policy.  Reading the tag with {@link readTag} is what gets the extent right.
+ *
+ * A `</` whose name does NOT match is ordinary text inside raw content, so it is
+ * stepped over rather than treated as a close.
+ */
+function closeTagOf(html: string, name: string, from: number): HtmlTag | null {
+  for (let i = from; i < html.length; i += 1) {
+    if (html[i] !== '<' || html[i + 1] !== '/') continue;
+    const tag = readTag(html, i);
+    if (tag?.closing === true && tag.name === name) return tag;
+  }
+  return null;
+}
+
+/** Offset of the close tag at or after `from`, or the end of the document. */
 function indexOfClose(html: string, name: string, from: number): number {
-  const close = new RegExp(`</${name}\\s*>`, 'i');
-  const rest = html.slice(from);
-  const found = close.exec(rest);
-  return found === null ? html.length : from + found.index;
+  return closeTagOf(html, name, from)?.at ?? html.length;
 }
 
 /**
@@ -306,8 +334,7 @@ function skipNonMarkup(html: string, i: number): number {
   }
   const tag = readTag(html, i);
   if (tag === null || tag.closing || !RAW_TEXT.has(tag.name)) return i;
-  const close = new RegExp(`</${tag.name}\\s*>`, 'i').exec(html.slice(tag.end));
-  return close === null ? html.length : tag.end + close.index + close[0].length;
+  return closeTagOf(html, tag.name, tag.end)?.end ?? html.length;
 }
 
 /**

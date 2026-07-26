@@ -319,6 +319,16 @@ function isElementAccessKey(node: NodeHandle): boolean {
   return parent.argumentExpression?.getStart() === node.getStart();
 }
 
+/** Past every wrapper that yields the value it wraps: `(x)`, `x as T`, `x!`. */
+function unwrap(node: NodeHandle | undefined): NodeHandle | undefined {
+  let current = node;
+  for (let hop = 0; current !== undefined && hop < MAX_ALIAS_HOPS; hop += 1) {
+    if (!TRANSPARENT_WRAPPERS.has(current.kind)) return current;
+    current = current.expression;
+  }
+  return current;
+}
+
 /**
  * The object binding pattern that destructures an `import('M')` namespace.
  *
@@ -385,11 +395,7 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   // The callback may itself sit behind transparent wrappers — `.then((({ A }) =>
   // …))` is the same consumer as `.then(({ A }) => …)` — so the unwrapping that
   // finds the import's receiver has to apply to the ARGUMENT too.
-  let callback = call.arguments?.[0];
-  for (let hop = 0; callback !== undefined && hop < MAX_ALIAS_HOPS; hop += 1) {
-    if (!TRANSPARENT_WRAPPERS.has(callback.kind)) break;
-    callback = callback.expression;
-  }
+  const callback = unwrap(call.arguments?.[0]);
   if (callback === undefined || !CALLBACK_KINDS.has(callback.kind)) return undefined;
   return asPattern(callback.parameters?.[0]?.name);
 }
@@ -491,11 +497,14 @@ function scanFile(root: NodeHandle): FileScan {
       }
     } else if (
       node.kind === SyntaxKind.VariableDeclaration &&
-      node.name?.kind === SyntaxKind.ObjectBindingPattern &&
-      node.initializer?.kind === SyntaxKind.Identifier
+      node.name?.kind === SyntaxKind.ObjectBindingPattern
     ) {
-      // `const { A } = mod`, where `mod` holds a dynamic import's namespace.
-      deferredDestructures.push({ pattern: node.name, from: node.initializer });
+      // `const { A } = mod`, where `mod` holds a dynamic import's namespace —
+      // and `= (mod)` or `= (mod as typeof …)`, which are the same read.
+      const from = unwrap(node.initializer);
+      if (from?.kind === SyntaxKind.Identifier) {
+        deferredDestructures.push({ pattern: node.name, from });
+      }
     }
     node.forEachChild(visit);
   };

@@ -428,7 +428,7 @@ export function DepositFlow({
           signing={busy}
         />
         {error ? (
-          <p role="alert" className="text-sm text-error-fg">
+          <p role="alert" className="text-sm text-error-on-soft">
             {error}
           </p>
         ) : null}
@@ -474,12 +474,12 @@ export function DepositFlow({
         </Button>
       </div>
       {paused ? (
-        <p className="text-sm text-warning-fg">
+        <p className="text-sm text-warning-on-soft">
           {t('room.deposit.paused', 'Deposits are paused by the room stewards.')}
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

@@ -61,6 +61,27 @@ export const WEB_SRC = 'apps/web/src';
  */
 const BARE_HUE = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)(?![\w-])/;
 
+/**
+ * `text-<hue>-fg` — the token meant for text ON a solid hue background.
+ *
+ * `#FFFFFF` in every theme, and `tokens.test.ts` contrast-tests it against the
+ * SOLID `bg-<hue>` token and nothing else.  Used with that background it is
+ * correct (a primary button's label); used on the canvas it is white text on a
+ * near-white surface — worse than the bare hue this gate already refuses, and
+ * it was slipping through because the bare-hue pattern deliberately excludes a
+ * following `-`.
+ *
+ * So it is a violation UNLESS the same class string also sets its own
+ * `bg-<hue>`.  Pairing is what the token is FOR, and it is what distinguishes
+ * `bg-error text-error-fg` on a destructive button from a bare `text-error-fg`
+ * on an alert paragraph.
+ */
+const HUE_FG = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)-fg(?![\w-])/;
+
+/** The solid background that makes a `-fg` token legible, in any variant. */
+const pairedBackground = (hue: string): RegExp =>
+  new RegExp(`(?:^|[\\s'"\`{:!])bg-${hue}(?![\\w-])`);
+
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
 const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;
 
@@ -158,6 +179,7 @@ function literalGroups(source: string): LiteralGroup[] {
   const isLiteral = (token: Token | undefined): boolean =>
     token?.kind === 'string' || token?.kind === 'template';
   const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
+    const grouping = groupingParens(tokens);
     for (let i = 0; i < tokens.length; i += 1) {
       const token = tokens[i];
       if (!isLiteral(token) || token === undefined) continue;
@@ -166,16 +188,14 @@ function literalGroups(source: string): LiteralGroup[] {
       // two halves separately finds neither the utility nor a violation.
       const group: Token[] = [token];
       let j = i + 1;
-      while (
-        tokens[j]?.kind === 'punct' &&
-        tokens[j]?.value === '+' &&
-        isLiteral(tokens[j + 1]) &&
-        group.length < MAX_CONCAT_OPERANDS
-      ) {
-        const next = tokens[j + 1];
-        if (next === undefined) break;
+      while (group.length < MAX_CONCAT_OPERANDS) {
+        const plus = skipTransparent(tokens, j, grouping);
+        if (tokens[plus]?.kind !== 'punct' || tokens[plus]?.value !== '+') break;
+        const operand = skipTransparent(tokens, plus + 1, grouping);
+        const next = tokens[operand];
+        if (!isLiteral(next) || next === undefined) break;
         group.push(next);
-        j += 2;
+        j = operand + 1;
       }
       byKey.set(group.map((each) => each.start).join(','), { tokens: group, preferRegex });
       if (depth < MAX_INTERPOLATION_DEPTH) {
@@ -195,6 +215,75 @@ function literalGroups(source: string): LiteralGroup[] {
   };
   for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
   return [...byKey.values()].sort((a, b) => (a.tokens[0]?.start ?? 0) - (b.tokens[0]?.start ?? 0));
+}
+
+/**
+ * Indices of `(`/`)` tokens that GROUP rather than call.
+ *
+ * `('text-') + 'error'` renders `text-error`; `f('text-') + 'error'` does not,
+ * and folding it would invent a class that never renders — a false positive
+ * that fails a correct build.  The two differ by one token: a `(` directly
+ * after an identifier, `)` or `]` opens a CALL or an index.  Anything else —
+ * including a keyword, which this lexer also reports as an identifier, so
+ * `return ('a') + 'b'` conservatively does not fold — leaves the run unextended.
+ *
+ * One linear pass with a stack, so the question is answered once per lexing
+ * rather than re-derived at each operand.
+ */
+function groupingParens(tokens: readonly Token[]): ReadonlySet<number> {
+  const grouping = new Set<number>();
+  const open: Array<{ index: number; isGroup: boolean }> = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token?.kind !== 'punct') continue;
+    if (token.value === '(') {
+      const before = tokens[i - 1];
+      const isCall =
+        before?.kind === 'ident' ||
+        (before?.kind === 'punct' && (before.value === ')' || before.value === ']'));
+      open.push({ index: i, isGroup: !isCall });
+      continue;
+    }
+    if (token.value !== ')') continue;
+    const start = open.pop();
+    if (start?.isGroup === true) {
+      grouping.add(start.index);
+      grouping.add(i);
+    }
+  }
+  return grouping;
+}
+
+/**
+ * Past tokens that carry no characters between two concatenation operands:
+ * grouping parentheses, and an `as`/`satisfies` naming a single-word type.
+ *
+ * A more elaborate type is left alone — the run simply does not extend, which
+ * is the direction that cannot invent a class.
+ */
+function skipTransparent(
+  tokens: readonly Token[],
+  from: number,
+  grouping: ReadonlySet<number>,
+): number {
+  let i = from;
+  for (let hop = 0; hop < MAX_CONCAT_OPERANDS && i < tokens.length; hop += 1) {
+    const token = tokens[i];
+    if (token?.kind === 'punct' && grouping.has(i)) {
+      i += 1;
+      continue;
+    }
+    if (
+      token?.kind === 'ident' &&
+      (token.value === 'as' || token.value === 'satisfies') &&
+      tokens[i + 1]?.kind === 'ident'
+    ) {
+      i += 2;
+      continue;
+    }
+    return i;
+  }
+  return i;
 }
 
 /** A `+`-joined run of literals, with the lexing that found it. */
@@ -385,13 +474,35 @@ function groupContent(group: LiteralGroup): Decoded {
 }
 
 /**
+ * A whole template's value when every hole in it is statically known.
+ *
+ * `raw` includes its backticks.  Returns `null` the moment one hole is a
+ * runtime value, because a partially-known class is not a class.
+ */
+function foldStaticTemplate(raw: string, preferRegex: boolean, depth: number): string | null {
+  if (depth > MAX_INTERPOLATION_DEPTH) return null;
+  let out = '';
+  let cursor = 1;
+  for (const span of interpolationSpans(raw, 0, preferRegex)) {
+    const holeAt = Math.max(cursor, span.offset - 2);
+    out += raw.slice(cursor, holeAt);
+    const folded = foldStaticHole(span.text, preferRegex, depth + 1);
+    if (folded === null) return null;
+    out += folded;
+    cursor = span.offset + span.text.length + 1;
+  }
+  return out + raw.slice(cursor, Math.max(cursor, raw.length - 1));
+}
+
+/**
  * A template hole's value when it is statically known, else `null`.
  *
  * Only a literal, or a `+`-joined run of literals, is folded — anything else
  * (an identifier, a call, a ternary) is a value this scan cannot know, and
  * guessing at one would invent class names that never render.
  */
-function foldStaticHole(hole: string, preferRegex: boolean): string | null {
+function foldStaticHole(hole: string, preferRegex: boolean, depth = 0): string | null {
+  if (depth > MAX_INTERPOLATION_DEPTH) return null;
   const tokens: Token[] = [];
   for (const token of tokenize(hole, preferRegex)) {
     if (token.kind === 'comment') continue;
@@ -411,7 +522,16 @@ function foldStaticHole(hole: string, preferRegex: boolean): string | null {
     if (token.kind !== 'string' && token.kind !== 'template') return null;
     // A template operand with a hole of its own is not statically known here;
     // the descent in `literalGroups` examines it separately.
-    if (token.kind === 'template' && token.value.includes('${')) return null;
+    if (token.kind === 'template' && token.value.includes('${')) {
+      // A template with holes of its OWN: fold it the same way, so
+      // `` `text-${`${'error'}`}` `` reads as the class it renders.  Recursion
+      // rather than a second rule — the nesting has no depth limit in source,
+      // and `MAX_INTERPOLATION_DEPTH` already bounds how far this walks.
+      const inner = foldStaticTemplate(token.value, preferRegex, depth + 1);
+      if (inner === null) return null;
+      parts.push(inner);
+      continue;
+    }
     parts.push(token.value.slice(1, Math.max(1, token.value.length - 1)));
     const joiner = tokens[i + 1];
     if (joiner === undefined) break;
@@ -437,7 +557,12 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       if (ICON_SIZE.test(text) && enclosingElement(file.content, start) === ICON_ELEMENT) {
         continue;
       }
-      const match = BARE_HUE.exec(text);
+      const bare = BARE_HUE.exec(text);
+      // A `-fg` token is legible only over its own solid background.
+      const fg = HUE_FG.exec(text);
+      const unpaired =
+        fg !== null && fg[1] !== undefined && !pairedBackground(fg[1]).test(text) ? fg : null;
+      const match = bare ?? unpaired;
       if (match === null) continue;
       // A template may span lines, so anchor on the HUE rather than the token
       // start: the reported line is where the class actually sits.  `+ 1` skips

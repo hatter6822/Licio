@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
+import { buildSessionCookie, createSession } from '../identity/sessions.js';
 import { storeKnomosisConfigValue } from '../knomosis/config.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -855,6 +856,40 @@ describe('WS-M treasury + payment intents', () => {
         reason: 'governance paused pending review',
       });
       expect(placed.status).toBe(200);
+    });
+
+    it('tells a platform operator to STEP UP MFA rather than that they lack authority', async () => {
+      // A ROLE_SAFETY operator who ALSO stewards this room holds `restrict` —
+      // the release authority — but has not verified MFA on this session.  The
+      // `ownSteward` branch skips every capability check, so the domain answered
+      // `platform_review_required`: "only platform staff can lift a freeze", to
+      // someone who IS platform staff, with a code the step-up path cannot act
+      // on.  The actionable denial is `mfa_required`.
+      const fixture = await wsmFixture({ steward: true });
+      const seeded = await seedUserWithSession(fixture.identity, {
+        handle: 'safety_steward_nomfa',
+        stewardRoles: ['ROLE_SAFETY'],
+      });
+      // A session for the same account with MFA NOT verified.
+      const unverified = await createSession(fixture.identity.sessions, {
+        userId: seeded.userId,
+        authMethod: 'webauthn',
+        credentialRef: `cred-${seeded.userId}`,
+        deviceLabel: 'test',
+        rememberMe: false,
+        mfaVerified: false,
+      });
+      const cookie = buildSessionCookie(unverified.token, unverified.maxAgeSec).split(
+        ';',
+      )[0] as string;
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'review complete',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('mfa_required');
     });
 
     it('does NOT let that operator lift it — releasing is `restrict`, a separate grant', async () => {

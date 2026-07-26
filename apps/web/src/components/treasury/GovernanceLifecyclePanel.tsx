@@ -56,7 +56,7 @@ function AuditIntegritySection({ roomId }: { roomId: string }): React.ReactEleme
         ) : null}
       </div>
       {verification.data !== undefined && verification.data.problems.length > 0 ? (
-        <ul role="alert" className="mt-2 list-disc pl-5 text-sm text-error-fg">
+        <ul role="alert" className="mt-2 list-disc pl-5 text-sm text-error-on-soft">
           {verification.data.problems.map((problem) => (
             <li key={problem}>{problem}</li>
           ))}
@@ -108,7 +108,7 @@ function StewardFreezeSection({
     <section aria-label={t('room.freeze.heading', 'Emergency freeze')}>
       <h3 className="text-sm font-medium">{t('room.freeze.heading', 'Emergency freeze')}</h3>
       {frozen ? (
-        <p className="mt-1 text-sm text-warning-fg">
+        <p className="mt-1 text-sm text-warning-on-soft">
           {t(
             'room.freeze.frozen',
             'Governance is frozen. Only platform stewards can lift a freeze (the non-overridable floor).',
@@ -138,7 +138,7 @@ function StewardFreezeSection({
         </form>
       )}
       {error ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

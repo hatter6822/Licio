@@ -159,7 +159,7 @@ export function RegionDeclarationCard(): React.JSX.Element {
         </form>
       )}
       {error !== null ? (
-        <p role="alert" className="mt-2 text-sm text-error-fg">
+        <p role="alert" className="mt-2 text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

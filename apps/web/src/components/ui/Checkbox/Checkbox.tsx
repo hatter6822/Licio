@@ -32,6 +32,11 @@ export interface CheckboxProps
 // The visible box mirrors the native input's state. It is driven entirely by the
 // peer input so the rendering can never drift from the accessibility tree.
 const boxBase =
+  // a11y-bare-hue-ok: `text-primary-fg` colours the CHECK GLYPH, which is only
+  // visible under `peer-checked:` / `peer-indeterminate:` — the same states that
+  // set `bg-primary` below, the solid background this token is contrast-tested
+  // against. The pairing is real; it spans two arguments of one `cn()` call,
+  // which a per-literal scan cannot see. On `bg-canvas` the glyph is opacity-0.
   'flex size-6 shrink-0 items-center justify-center rounded-sm border bg-canvas text-primary-fg transition-colors';
 
 export function Checkbox({
