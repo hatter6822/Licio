@@ -218,6 +218,16 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: the namespace STORED, then destructured a statement later ─
+  'src/stored.ts': ['export const STORED_LIVE = 11;'].join('\n'),
+  'src/stored-consumer.ts': [
+    'export async function readLater(): Promise<number> {',
+    "  const mod = await import('./stored.js');",
+    '  const { STORED_LIVE } = mod;',
+    '  return STORED_LIVE;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: an ARBITRARY MODULE NAMESPACE NAME (ES2022) ──────────────
   // `export { value as "foo-bar" }` publishes a name no identifier can spell,
   // and the importer names it with a string literal.  Reading the source
@@ -420,6 +430,14 @@ describe('resolution: which sites use a binding', () => {
       expect(usesOf('src/wrapped.ts', name).length).toBeGreaterThan(0);
     },
   );
+
+  it('counts a namespace STORED in a local and destructured later', () => {
+    // `const mod = await import(M); const { A } = mod` — the pattern is a
+    // statement away from the import, so a walk from the import alone never
+    // reaches it, and a PRIMITIVE export has no origin symbol for the type
+    // route to recover.
+    expect(usesOf('src/stored.ts', 'STORED_LIVE').length).toBeGreaterThan(0);
+  });
 
   it('counts an ARBITRARY MODULE NAMESPACE NAME, imported by string literal', () => {
     // `export { value as "foo-bar" }` consumed as

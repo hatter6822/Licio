@@ -392,7 +392,17 @@ function groupContent(group: LiteralGroup): Decoded {
  * guessing at one would invent class names that never render.
  */
 function foldStaticHole(hole: string, preferRegex: boolean): string | null {
-  const tokens = tokenize(hole, preferRegex).filter((token) => token.kind !== 'comment');
+  const tokens: Token[] = [];
+  for (const token of tokenize(hole, preferRegex)) {
+    if (token.kind === 'comment') continue;
+    // Wrappers that yield the value they wrap: `('error')` renders exactly what
+    // `'error'` does, and a `('error' as const)` does too.  Including them in
+    // the run is what made an otherwise static hole read as unknown.
+    if (token.kind === 'punct' && (token.value === '(' || token.value === ')')) continue;
+    // `as` / `satisfies` open a TYPE, which contributes no characters.
+    if (token.kind === 'ident' && (token.value === 'as' || token.value === 'satisfies')) break;
+    tokens.push(token);
+  }
   if (tokens.length === 0) return null;
   const parts: string[] = [];
   for (let i = 0; i < tokens.length; i += 1) {

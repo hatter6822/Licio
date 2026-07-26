@@ -83,6 +83,16 @@ describe('the bare hue on normal text', () => {
     expect(hues(`<span className={\`text-\${'error'}\`} />`)).toEqual(['1:error']);
   });
 
+  it.each([
+    ['parentheses', "('error')"],
+    ['an as-const', "('error' as const)"],
+    ['nested parens around a concat', "(('er') + ('ror'))"],
+  ])('folds a static hole wrapped in %s', (_label, expr) => {
+    // `(…)`, `as` and `satisfies` yield the value they wrap, so including them
+    // in the run made an otherwise static hole read as unknown.
+    expect(hues(`<span className={\`text-\${${expr}}\`} />`)).toHaveLength(1);
+  });
+
   it('does NOT fold a hole whose value it cannot know', () => {
     // An identifier, a call or a ternary is a runtime value; guessing at one
     // would invent class names that never render.

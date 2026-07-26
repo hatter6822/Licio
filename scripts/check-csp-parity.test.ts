@@ -236,6 +236,31 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       expect(problems(html).join('\n')).toContain('not inside <head>');
     });
 
+    // A non-whitespace CHARACTER token closes the head too — text is a token
+    // with tree-construction consequences, not decoration, and a model built
+    // from tags alone sees a perfectly ordinary head.
+    it.each([
+      ['plain text', `<!doctype html><html><head>hello${META}</head><body></body></html>`],
+      // `&nbsp;` decodes to U+00A0, which is NOT HTML whitespace (only tab, LF,
+      // FF, CR and space are), so it closes the head like any other character.
+      ['a decoded &nbsp;', `<!doctype html><html><head>&nbsp;${META}</head><body></body></html>`],
+      ['text before the head', `<!doctype html><html>hello<head>${META}</head></html>`],
+    ])('rejects a policy after %s in the head', (_label, html) => {
+      expect(problems(html).join('\n')).toMatch(/outside <head>|not inside <head>/);
+    });
+
+    it.each([
+      ['indentation', `<!doctype html><html><head>\n  ${META}\n</head><body></body></html>`],
+      // A child element's CONTENT is not a character token in the head.
+      [
+        'a <title> child',
+        `<!doctype html><html><head><title>hello</title>${META}</head><body></body></html>`,
+      ],
+      ['a comment', `<!doctype html><html><head><!-- hi -->${META}</head><body></body></html>`],
+    ])('does NOT treat %s as text that closes the head', (_label, html) => {
+      expect(problems(html)).toEqual([]);
+    });
+
     it.each([
       [
         'first in head',

@@ -366,10 +366,16 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   }
 
   const parent = node.parent;
-  // `const { A } = await import('M')` — a bare `import('M')` without `await`
-  // yields a PROMISE, whose destructuring names promise members, not exports.
+  // `const { A } = await import('M')` destructures the namespace directly;
+  // `const mod = await import('M')` STORES it, and the caller records the local
+  // so a later `const { A } = mod` can be credited to the same specifier.
+  // A bare `import('M')` without `await` yields a PROMISE either way, whose
+  // destructuring names promise members rather than exports.
   if (parent?.kind === SyntaxKind.VariableDeclaration) {
-    return awaited ? asPattern(parent.name) : undefined;
+    if (!awaited) return undefined;
+    const name = parent.name;
+    if (name?.kind === SyntaxKind.ObjectBindingPattern) return name;
+    return name?.kind === SyntaxKind.Identifier ? name : undefined;
   }
   // `import('M').then(({ A }) => …)`
   if (parent?.kind !== SyntaxKind.PropertyAccessExpression) return undefined;
@@ -390,6 +396,19 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
  */
 function scanFile(root: NodeHandle): FileScan {
   const scan: FileScan = { offsets: [], imports: [] };
+  /**
+   * Locals holding a dynamic import's namespace: `const mod = await import(M)`.
+   *
+   * A LIST per name, not one entry: if a file binds the same name to two
+   * different modules in two scopes, crediting BOTH specifiers is the safe
+   * direction — over-crediting makes a dead export look live (a false negative
+   * the next run catches), while picking the wrong one would report a live
+   * export as dead and fail a correct branch.
+   */
+  const namespaceLocals = new Map<string, number[]>();
+  /** `const { A } = mod` sites, resolved after the whole file is walked, since
+   *  the binding they read may be declared anywhere in it. */
+  const deferredDestructures: Array<{ pattern: NodeHandle; from: NodeHandle }> = [];
 
   const namesOfPattern = (pattern: NodeHandle): string[] => {
     const names: string[] = [];
@@ -441,21 +460,49 @@ function scanFile(root: NodeHandle): FileScan {
       // its identifiers resolve to those and never to M's exports.
       const specifier = node.arguments?.[0];
       if (specifier !== undefined && specifier.kind === SyntaxKind.StringLiteral) {
-        const pattern = namespaceReceiver(node);
-        const names = pattern === undefined ? [] : namesOfPattern(pattern);
-        if (pattern !== undefined && names.length > 0) {
-          scan.imports.push({
-            specifierOffset: specifier.getStart(),
-            names,
-            offset: pattern.getStart(),
-          });
+        const received = namespaceReceiver(node);
+        if (received?.kind === SyntaxKind.ObjectBindingPattern) {
+          const names = namesOfPattern(received);
+          if (names.length > 0) {
+            scan.imports.push({
+              specifierOffset: specifier.getStart(),
+              names,
+              offset: received.getStart(),
+            });
+          }
+        } else if (received !== undefined) {
+          // `const mod = await import('M')` — the namespace is STORED, and any
+          // later `const { A } = mod` destructures it a statement away.  Record
+          // the local so that destructuring can be credited to this specifier.
+          const local = nameOf(received);
+          if (local !== undefined) {
+            const seen = namespaceLocals.get(local);
+            if (seen === undefined) namespaceLocals.set(local, [specifier.getStart()]);
+            else seen.push(specifier.getStart());
+          }
         }
       }
+    } else if (
+      node.kind === SyntaxKind.VariableDeclaration &&
+      node.name?.kind === SyntaxKind.ObjectBindingPattern &&
+      node.initializer?.kind === SyntaxKind.Identifier
+    ) {
+      // `const { A } = mod`, where `mod` holds a dynamic import's namespace.
+      deferredDestructures.push({ pattern: node.name, from: node.initializer });
     }
     node.forEachChild(visit);
   };
 
   visit(root);
+  for (const { pattern, from } of deferredDestructures) {
+    const local = nameOf(from);
+    if (local === undefined) continue;
+    const names = namesOfPattern(pattern);
+    if (names.length === 0) continue;
+    for (const specifierOffset of namespaceLocals.get(local) ?? []) {
+      scan.imports.push({ specifierOffset, names, offset: pattern.getStart() });
+    }
+  }
   return scan;
 }
 

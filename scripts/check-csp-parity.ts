@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type HtmlTag, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
+import { type HtmlNode, scanNodes, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -260,10 +260,22 @@ const HEAD_CONTENT: ReadonlySet<string> = new Set([
  * head.
  */
 function findHeadRange(
-  tags: readonly HtmlTag[],
-): { from: number; to: number; endedBy?: HtmlTag } | undefined {
+  nodes: readonly HtmlNode[],
+): { from: number; to: number; endedBy?: HtmlNode } | undefined {
   let from: number | undefined;
-  for (const tag of tags) {
+  for (const tag of nodes) {
+    if (tag.kind === 'text') {
+      // A WHITESPACE character token is inserted into the head and changes
+      // nothing; any other character closes it.  `&nbsp;` is not HTML
+      // whitespace (only tab, LF, FF, CR and space are), so it closes the head
+      // too — hence the decode before the test.
+      // Whitespace is harmless WHEREVER it falls: before the head it is
+      // ignored, inside it is inserted.  Only other characters imply the head's
+      // end — and reaching one before a `<head>` means the parser implied an
+      // EMPTY head, so there is none for a `<meta>` to be a child of.
+      if (HTML_WHITESPACE_ONLY.test(decodeHtmlReferences(tag.text))) continue;
+      return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
+    }
     if (tag.closing) {
       if (tag.name === 'head' || tag.name === 'body' || tag.name === 'html') {
         return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
@@ -283,14 +295,17 @@ function findHeadRange(
   return from === undefined ? undefined : { from, to: Number.POSITIVE_INFINITY };
 }
 
+/** Only tab, LF, FF, CR and space are HTML whitespace — notably NOT `&nbsp;`. */
+const HTML_WHITESPACE_ONLY = /^[\t\n\f\r ]*$/;
+
 /** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
 function findPlacementProblem(html: string, policyAt: number): string | null {
   // The same element walk the policy itself was found by: a `<head>` or a
   // `<script>` named inside a comment, inside inert content, or inside an
   // attribute value is not an element, and treating one as markup would move
   // the very boundary this check is about.
-  const tags = scanTags(html);
-  const head = findHeadRange(tags);
+  const nodes = scanNodes(html);
+  const head = findHeadRange(nodes);
   if (head === undefined || policyAt < head.from) {
     return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
   }
@@ -299,15 +314,19 @@ function findPlacementProblem(html: string, policyAt: number): string | null {
     const how =
       ended === undefined
         ? 'outside <head>'
-        : ended.closing
-          ? `AFTER </${ended.name}>`
-          : `outside <head> — the parser closes the head implicitly at <${ended.name}>`;
+        : ended.kind === 'text'
+          ? 'outside <head> — the parser closes the head at the text before it'
+          : ended.closing
+            ? `AFTER </${ended.name}>`
+            : `outside <head> — the parser closes the head implicitly at <${ended.name}>`;
     return (
       `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits ${how}. A meta policy is honoured only ` +
       'as a child of <head> (CSP L3 §3.3), and the courier WebView has no header to fall back on.'
     );
   }
-  const controlled = tags.find((tag) => !tag.closing && CONTROLLED_TAGS.has(tag.name));
+  const controlled = nodes.find(
+    (node) => node.kind === 'tag' && !node.closing && CONTROLLED_TAGS.has(node.name),
+  );
   if (controlled !== undefined && controlled.at < policyAt) {
     return (
       `${BUILT_INDEX_HTML_FILE}: a <${controlled.name}> precedes the CSP <meta>. A meta policy ` +

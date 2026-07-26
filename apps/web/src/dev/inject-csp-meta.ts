@@ -71,6 +71,7 @@ const PLAINTEXT = 'plaintext';
 
 /** One tag a parser would actually create, with the text it spans. */
 export interface HtmlTag {
+  readonly kind: 'tag';
   /** Lower-cased tag name (HTML names are ASCII case-insensitive). */
   readonly name: string;
   /** `</name>` rather than an open tag. */
@@ -111,7 +112,14 @@ function readTag(html: string, at: number): HtmlTag | null {
   const nameFrom = i;
   while (i < len && !SPACE.test(html[i] ?? '') && html[i] !== '/' && html[i] !== '>') i += 1;
   const name = html.slice(nameFrom, i).toLowerCase();
-  const done = (end: number): HtmlTag => ({ name, closing, at, end, raw: html.slice(at, end) });
+  const done = (end: number): HtmlTag => ({
+    kind: 'tag',
+    name,
+    closing,
+    at,
+    end,
+    raw: html.slice(at, end),
+  });
 
   while (i < len) {
     const char = html[i] ?? '';
@@ -168,13 +176,50 @@ function readTag(html: string, at: number): HtmlTag | null {
  * against it) from what this returns.
  */
 export function scanTags(html: string): HtmlTag[] {
-  const tags: HtmlTag[] = [];
+  return scanNodes(html).filter((node): node is HtmlTag => node.kind === 'tag');
+}
+
+/** Character data a parser would insert, between the tags around it. */
+export interface HtmlText {
+  readonly kind: 'text';
+  readonly at: number;
+  readonly end: number;
+  /** The raw source text, references undecoded. */
+  readonly text: string;
+}
+
+/** One thing a parser produces: an element, or the characters between elements. */
+export type HtmlNode = HtmlTag | HtmlText;
+
+/**
+ * {@link scanTags}, keeping the CHARACTER DATA between the tags as well.
+ *
+ * Text is not decoration to a parser — it is a token with tree-construction
+ * consequences.  A non-whitespace character in `<head>` CLOSES the head, so
+ * `<head>hello<meta …>` puts the policy in the body where CSP L3 §3.3 does not
+ * honour it, and a model built from tags alone sees a perfectly ordinary head.
+ *
+ * What is NOT text: comment bodies, doctypes, and the content of the inert
+ * elements — the scan steps over all three, so `<title>hello</title>` in a head
+ * contributes the two tags and no character data, which is what the parser does
+ * with it too.
+ */
+export function scanNodes(html: string): HtmlNode[] {
+  const nodes: HtmlNode[] = [];
   let i = 0;
+  let textFrom = -1;
+  const flushText = (end: number): void => {
+    if (textFrom === -1) return;
+    nodes.push({ kind: 'text', at: textFrom, end, text: html.slice(textFrom, end) });
+    textFrom = -1;
+  };
   while (i < html.length) {
     if (html[i] !== '<') {
+      if (textFrom === -1) textFrom = i;
       i += 1;
       continue;
     }
+    flushText(i);
     if (html.startsWith('<!--', i)) {
       const close = html.indexOf('-->', i + 4);
       // An unterminated comment runs to the end of the document, as in a parser.
@@ -189,13 +234,19 @@ export function scanTags(html: string): HtmlTag[] {
     }
     const tag = readTag(html, i);
     if (tag === null) {
+      // A `<` that is ordinary text — and it IS text, so it counts as one.
+      if (textFrom === -1) textFrom = i;
       i += 1;
       continue;
     }
-    tags.push(tag);
+    nodes.push(tag);
     i = tag.end;
     // PLAINTEXT has no exit state: the rest of the document is character data.
-    if (!tag.closing && tag.name === PLAINTEXT) break;
+    if (!tag.closing && tag.name === PLAINTEXT) {
+      if (i < html.length)
+        nodes.push({ kind: 'text', at: i, end: html.length, text: html.slice(i) });
+      return nodes;
+    }
     if (tag.closing || !INERT_CONTENT.has(tag.name)) continue;
     // `<template>` NESTS; the raw-text elements cannot, so their first close tag
     // ends them.  Depth-counting only the nesting case keeps this exact.
@@ -205,7 +256,8 @@ export function scanTags(html: string): HtmlTag[] {
         : indexOfClose(html, tag.name, tag.end);
     i = Math.max(contentEnd, tag.end);
   }
-  return tags;
+  flushText(html.length);
+  return nodes;
 }
 
 /** Offset of `</name>` at or after `from`, or the end of the document. */
