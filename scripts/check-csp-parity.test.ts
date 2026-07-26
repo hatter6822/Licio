@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { injectCspMeta, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
+import { injectCspMeta } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   CSP_DIRECTIVES,
   contentSecurityPolicyHeader,
@@ -15,7 +15,6 @@ import {
 } from '../packages/shared/src/security/csp.js';
 import {
   BUILT_INDEX_HTML_FILE,
-  decodeHtmlReferences,
   extractMetaPolicies,
   findCspDeliveryProblems,
   INDEX_HTML_FILE,
@@ -94,18 +93,6 @@ describe('injectCspMeta', () => {
   it('leaves a document alone when its only <head> is inside a comment', () => {
     const html = '<html><!-- <head> --><body></body></html>';
     expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
-  });
-
-  it('reads an UNTERMINATED comment to the end, as a parser would', () => {
-    expect(scanTags('a<!-- b <head> c').map((tag) => tag.name)).toEqual([]);
-  });
-
-  it('reports offsets into the ORIGINAL string, so a splice lands correctly', () => {
-    const html = 'a<!-- x\ny --><b>c';
-    const [tag] = scanTags(html);
-    expect(tag?.name).toBe('b');
-    expect(tag?.at).toBe(html.indexOf('<b>'));
-    expect(html.slice(tag?.at ?? 0, tag?.end ?? 0)).toBe('<b>');
   });
 });
 
@@ -220,9 +207,8 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
     it.each([
       ['<body>', `<!doctype html><html><head><body>${META}</body></html>`],
       ['<p>', `<!doctype html><html><head><p>${META}</p></html>`],
-      ['an explicit </head>', `<!doctype html><html><head></head>${META}<body></body></html>`],
     ])('rejects a policy placed after %s', (_label, html) => {
-      expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\/|not inside <head>/);
+      expect(problems(html).join('\n')).toContain('not a child of <head>');
     });
 
     // A `<head>` START TAG once body content has begun is ignored outright —
@@ -233,7 +219,7 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       ['<body>', `<!doctype html><html><body><head>${META}</head></body></html>`],
       ['other body content', `<!doctype html><html><p>x</p><head>${META}</head></html>`],
     ])('rejects a <head> opened after %s', (_label, html) => {
-      expect(problems(html).join('\n')).toContain('not inside <head>');
+      expect(problems(html).join('\n')).toContain('not a child of <head>');
     });
 
     // A non-whitespace CHARACTER token closes the head too — text is a token
@@ -246,7 +232,7 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       ['a decoded &nbsp;', `<!doctype html><html><head>&nbsp;${META}</head><body></body></html>`],
       ['text before the head', `<!doctype html><html>hello<head>${META}</head></html>`],
     ])('rejects a policy after %s in the head', (_label, html) => {
-      expect(problems(html).join('\n')).toMatch(/outside <head>|not inside <head>/);
+      expect(problems(html).join('\n')).toContain('not a child of <head>');
     });
 
     // HTML whitespace is TAB/LF/FF/CR/SPACE — never JavaScript's `\s`, which also
@@ -301,7 +287,18 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
 
     it('treats `</br>` as closing the head', () => {
       const html = `<!doctype html><html><head></br>${META}</head><body></body></html>`;
-      expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\//);
+      expect(problems(html).join('\n')).toContain('not a child of <head>');
+    });
+
+    it('ACCEPTS a policy written after `</head>`, which the parser puts back in it', () => {
+      // The "after head" insertion mode pushes the head element back onto the
+      // stack for `base`/`link`/`meta`/`script`/`style`/`title` and processes
+      // the token with in-head rules, so this meta IS a child of head and the
+      // browser honours it.  The hand-written model reported it as misplaced —
+      // a FALSE POSITIVE that would have failed a correct build, and one only
+      // a real parser could have settled.
+      const html = `<!doctype html><html><head></head>${META}<body></body></html>`;
+      expect(problems(html)).toEqual([]);
     });
 
     it.each([
@@ -442,10 +439,13 @@ describe('inert content is not markup', () => {
     expect(extractMetaPolicies(html)).toEqual([]);
   });
 
-  it('does not let a <head> inside a template capture the injection', () => {
+  it('does not inject when the only head the parser builds is IMPLIED', () => {
+    // A `<template>` in the "before head" mode implies a head around itself, so
+    // the explicit `<head>` that follows is a parse error and IGNORED.  The
+    // document therefore has no head start tag to splice after, and injecting
+    // anywhere else would produce a policy the parser never places in the head.
     const html = '<html><template><head></head></template><head></head><body></body></html>';
-    const out = injectCspMeta(html, "default-src 'self'");
-    expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
+    expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
   });
 });
 
@@ -551,32 +551,12 @@ describe('extractMetaPolicies', () => {
     expect(extractMetaPolicies(html)).toEqual(["default-src 'self'; img-src *"]);
   });
 
-  it('leaves an unknown named reference alone rather than guessing', () => {
-    // Every named reference outside the ASCII table produces a non-ASCII
-    // character, which cannot spell a directive — so leaving it raw yields a
-    // MISMATCH the gate reports, never a policy it fails to see.
-    expect(decodeHtmlReferences('a &notareference; b')).toBe('a &notareference; b');
-    expect(decodeHtmlReferences('&ampx')).toBe('&ampx');
-  });
-
   it('does not decode a reference in the attribute NAME', () => {
     // The tokenizer does not decode references in names, so this really is a
     // different attribute and the tag carries no policy.
     expect(
       extractMetaPolicies(HEAD(`<meta http-equi&#118;="Content-Security-Policy" content="a">`)),
     ).toEqual([]);
-  });
-
-  it('leaves an out-of-range or surrogate code point raw', () => {
-    expect(decodeHtmlReferences('&#x110000;')).toBe('&#x110000;');
-    expect(decodeHtmlReferences('&#xD800;')).toBe('&#xD800;');
-    expect(decodeHtmlReferences('&#0;')).toBe('&#0;');
-  });
-
-  it('round-trips an ordinary policy unchanged', () => {
-    expect(decodeHtmlReferences("default-src 'self'; frame-ancestors 'none'")).toBe(
-      "default-src 'self'; frame-ancestors 'none'",
-    );
   });
 });
 
@@ -612,9 +592,13 @@ describe('the delivered CSP meta must precede what it governs', () => {
   });
 
   it('REJECTS a tag moved into the body', () => {
+    // Inside `<body>` the parser makes the meta a child of BODY — unlike one
+    // written after `</head>` but before `<body>`, which the "after head" mode
+    // puts back INTO the head.  The two look alike in source order and differ
+    // in the tree, and the tree is what CSP L3 §3.3 turns on.
     const found = problems(`<html><head></head><body>${META}</body></html>`);
     expect(found).toHaveLength(1);
-    expect(found[0]).toContain('AFTER </head>');
+    expect(found[0]).toContain('not a child of <head>');
   });
 });
 

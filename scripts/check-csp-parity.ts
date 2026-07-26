@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type HtmlNode, scanNodes, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
+import { findCspMetas, firstElementNamed } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -52,144 +52,6 @@ export function parsePolicyString(policy: string): string[] {
 }
 
 /**
- * The named character references that produce an ASCII character.
- *
- * Deliberately not the full 2231-entry HTML5 table: every OTHER named reference
- * produces a non-ASCII character, which cannot spell any part of
- * `Content-Security-Policy` or of a CSP directive.  One appearing inside a
- * `content` value therefore yields a MISMATCH the gate reports, which is the
- * fail-loud direction — never a policy it fails to see.
- */
-const NAMED_REFERENCES: ReadonlyMap<string, string> = new Map(
-  Object.entries({
-    amp: '&',
-    apos: "'",
-    ast: '*',
-    colon: ':',
-    comma: ',',
-    dollar: '$',
-    equals: '=',
-    excl: '!',
-    grave: '`',
-    gt: '>',
-    lcub: '{',
-    lowbar: '_',
-    lpar: '(',
-    lsqb: '[',
-    lt: '<',
-    num: '#',
-    percnt: '%',
-    period: '.',
-    plus: '+',
-    quest: '?',
-    quot: '"',
-    rcub: '}',
-    rpar: ')',
-    rsqb: ']',
-    semi: ';',
-    sol: '/',
-    Tab: '\t',
-    verbar: '|',
-  }),
-);
-
-/**
- * Decode the HTML character references in an attribute VALUE.
- *
- * The HTML tokenizer decodes these before the value ever reaches CSP, so
- * `http-equiv="Content-Security-Polic&#121;"` names the same header a browser
- * enforces in full — and a raw string comparison does not recognise it, which
- * would let a hand-written policy sit in the source document while this gate
- * reported it policy-free.
- *
- * The trailing `;` is OPTIONAL on a numeric reference: HTML5 decodes
- * `&#121` too (with a parse error), and this gate must see what the BROWSER
- * sees, not what the spec prefers.  It is required on a NAMED reference,
- * matching the attribute-value rule that leaves `&ampx` literal.
- */
-export function decodeHtmlReferences(value: string): string {
-  return value.replace(
-    /&(?:#([0-9]+);?|#[xX]([0-9a-fA-F]+);?|([a-zA-Z][a-zA-Z0-9]*);)/g,
-    (whole, decimal?: string, hex?: string, name?: string) => {
-      if (decimal !== undefined) return codePointOrRaw(Number.parseInt(decimal, 10), whole);
-      if (hex !== undefined) return codePointOrRaw(Number.parseInt(hex, 16), whole);
-      return name === undefined ? whole : (NAMED_REFERENCES.get(name) ?? whole);
-    },
-  );
-}
-
-/** A code point HTML would render, or the reference unchanged when it would not. */
-function codePointOrRaw(code: number, whole: string): string {
-  // Surrogates and out-of-range values become U+FFFD in a real parser; leaving
-  // them raw keeps this a comparison problem rather than a decoding one, and
-  // neither can spell a directive.
-  if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff) return whole;
-  if (code >= 0xd800 && code <= 0xdfff) return whole;
-  return String.fromCodePoint(code);
-}
-
-/**
- * The tag's attributes as CSP would see them: first spelling wins, values
- * decoded.
- *
- * The PARSING is the reader's — this file no longer has an attribute pattern of
- * its own, which is what let it split `data=x=http-equiv=…` into two attributes
- * and read an `http-equiv` the browser never creates.  What remains here is the
- * gate's own semantics: a DUPLICATE attribute keeps its first value (the
- * tokenizer discards later ones), and values are entity-decoded because the
- * tokenizer decodes them before CSP ever sees them.  Names are NOT decoded —
- * the tokenizer does not decode references in a name, so `http-equi&#118;` is
- * genuinely a different attribute.
- */
-function parseTagAttributes(tag: HtmlTag): Map<string, string> {
-  const attributes = new Map<string, string>();
-  for (const attribute of tag.attributes) {
-    if (attribute.name === '') continue;
-    if (!attributes.has(attribute.name)) {
-      attributes.set(attribute.name, decodeHtmlReferences(attribute.value));
-    }
-  }
-  return attributes;
-}
-
-/**
- * Every `<meta http-equiv="Content-Security-Policy">` content value in a
- * document.  ALL of them, not the first: two such tags intersect rather than
- * override, so a stray second one changes the effective policy.
- *
- * A CSP meta with NO `content` yields `''` rather than being skipped.  It is
- * still a policy-bearing tag as far as this gate is concerned — the source
- * document must carry none, and an empty delivered policy is a mismatch to
- * report, not a tag to overlook.
- */
-export function extractMetaPolicies(html: string): string[] {
-  return findMetaPolicies(html).map((entry) => entry.policy);
-}
-
-/** A CSP `<meta>` and where in the document it sits. */
-export interface MetaPolicy {
-  readonly policy: string;
-  /** Byte offset of the tag's `<`. */
-  readonly at: number;
-}
-
-/** {@link extractMetaPolicies}, keeping each tag's OFFSET for the ordering check. */
-export function findMetaPolicies(html: string): MetaPolicy[] {
-  const found: MetaPolicy[] = [];
-  // Real ELEMENTS, not `<meta` substrings.  A `<meta>` written inside a comment,
-  // inside a `<template>`, or serialized into an attribute value creates no
-  // element — the browser sees no policy — and counting one would let this gate
-  // report the courier as carrying a CSP it does not have.
-  for (const tag of scanTags(html)) {
-    if (tag.name !== 'meta' || tag.closing) continue;
-    const attributes = parseTagAttributes(tag);
-    if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
-    found.push({ policy: attributes.get('content') ?? '', at: tag.at });
-  }
-  return found;
-}
-
-/**
  * Tags whose content a policy delivered AFTER them would never have governed.
  *
  * A `<meta>` policy applies only to what the parser processes once it has been
@@ -212,130 +74,33 @@ const CONTROLLED_TAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * What may appear in `<head>` without ending it (HTML tree construction, the
- * "in head" insertion mode).
- *
- * The head does NOT need a `</head>` to close: the parser closes it IMPLICITLY
- * at the first token that is not head content, so `<head><body><meta …>` puts
- * the policy in the BODY.  CSP L3 §3.3 only honours a `<meta>` that is a child
- * of `<head>`, so such a policy is never applied — and a check looking for a
- * textual `</head>` sees a document that never closes its head and certifies it.
+ * Every CSP `<meta>` policy in a document.  ALL of them, not the first: two such
+ * tags INTERSECT rather than override, so a stray second one changes the
+ * effective policy.
  */
-const HEAD_CONTENT: ReadonlySet<string> = new Set([
-  'base',
-  'basefont',
-  'bgsound',
-  'link',
-  'meta',
-  'noframes',
-  'noscript',
-  'script',
-  'style',
-  'template',
-  'title',
-]);
-
-/**
- * The byte range the parser actually treats as `<head>` content, or `undefined`
- * when the document has no head a `<meta>` could be a child of.
- *
- * Walked as a small state machine rather than "find `<head>`, then find its
- * end", because BOTH boundaries are implied as often as they are written:
- *
- *   • a `<head>` start tag AFTER body content has begun is IGNORED — the parser
- *     is already in the body insertion mode — so `<html><body><head><meta …>`
- *     leaves the policy in the body, ineffective, while a textual search finds
- *     a perfectly good `head` to measure from;
- *   • the head closes at the first token that is not head content, with or
- *     without a `</head>`.
- *
- * A document with NO explicit `<head>` is reported as having none, even though
- * the parser would imply one around leading head content.  That is stricter
- * than the parser and deliberately so: this gate's one unacceptable failure is
- * certifying a courier that ships unprotected, so where the model is unsure it
- * reports rather than accepts.  The built artifact always carries an explicit
- * head.
- */
-function findHeadRange(
-  nodes: readonly HtmlNode[],
-): { from: number; to: number; endedBy?: HtmlNode } | undefined {
-  let from: number | undefined;
-  for (const tag of nodes) {
-    if (tag.kind === 'text') {
-      // A WHITESPACE character token is inserted into the head and changes
-      // nothing; any other character closes it.  `&nbsp;` is not HTML
-      // whitespace (only tab, LF, FF, CR and space are), so it closes the head
-      // too — hence the decode before the test.
-      // Whitespace is harmless WHEREVER it falls: before the head it is
-      // ignored, inside it is inserted.  Only other characters imply the head's
-      // end — and reaching one before a `<head>` means the parser implied an
-      // EMPTY head, so there is none for a `<meta>` to be a child of.
-      if (HTML_WHITESPACE_ONLY.test(decodeHtmlReferences(tag.text))) continue;
-      return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
-    }
-    if (tag.closing) {
-      if (HEAD_CLOSING_END_TAGS.has(tag.name)) {
-        return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
-      }
-      continue; // `</title>`, `</style>`, … — still inside the head
-    }
-    if (tag.name === 'html') continue; // the root element; a head may still follow
-    if (tag.name === 'head') {
-      if (from === undefined) from = tag.end;
-      continue; // a SECOND `<head>` start tag is a parse error and ignored
-    }
-    // Anything else is body content.  Reached before a `<head>`, it means the
-    // parser implied an EMPTY head and moved on, so no later `<head>` counts.
-    if (from === undefined) return undefined;
-    if (!HEAD_CONTENT.has(tag.name)) return { from, to: tag.at, endedBy: tag };
-  }
-  return from === undefined ? undefined : { from, to: Number.POSITIVE_INFINITY };
+export function extractMetaPolicies(html: string): string[] {
+  return findCspMetas(html).map((meta) => meta.policy);
 }
 
 /**
- * End tags that END the head, per the "in head" insertion mode.
+ * Where the CSP meta must sit: a CHILD of `<head>`, ahead of anything it
+ * governs.
  *
- * `</head>` pops it; `</body>`, `</html>` and — the one that reads as a typo but
- * is in the spec — `</br>` are handled by the "anything else" entry, which pops
- * the head and REPROCESSES the token in the body.  Every OTHER end tag there is
- * a parse error and ignored, which is why this is a closed set rather than
- * "any end tag".
+ * The first half is CSP L3 §3.3 and is answered by the parse TREE — every way a
+ * head can begin or end (implied, closed by text, closed by `</br>`, opened
+ * after body content and therefore ignored) is already reflected in whether the
+ * parser made this meta a child of it.  The second half is ordering, which the
+ * tree gives as source offsets.
  */
-const HEAD_CLOSING_END_TAGS: ReadonlySet<string> = new Set(['head', 'body', 'html', 'br']);
-
-/** Only tab, LF, FF, CR and space are HTML whitespace — notably NOT `&nbsp;`. */
-const HTML_WHITESPACE_ONLY = /^[\t\n\f\r ]*$/;
-
-/** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
-function findPlacementProblem(html: string, policyAt: number): string | null {
-  // The same element walk the policy itself was found by: a `<head>` or a
-  // `<script>` named inside a comment, inside inert content, or inside an
-  // attribute value is not an element, and treating one as markup would move
-  // the very boundary this check is about.
-  const nodes = scanNodes(html);
-  const head = findHeadRange(nodes);
-  if (head === undefined || policyAt < head.from) {
-    return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
-  }
-  if (policyAt > head.to) {
-    const ended = head.endedBy;
-    const how =
-      ended === undefined
-        ? 'outside <head>'
-        : ended.kind === 'text'
-          ? 'outside <head> — the parser closes the head at the text before it'
-          : ended.closing
-            ? `AFTER </${ended.name}>`
-            : `outside <head> — the parser closes the head implicitly at <${ended.name}>`;
+function findPlacementProblem(html: string, meta: { at: number; inHead: boolean }): string | null {
+  if (!meta.inHead) {
     return (
-      `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits ${how}. A meta policy is honoured only ` +
-      'as a child of <head> (CSP L3 §3.3), and the courier WebView has no header to fall back on.'
+      `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not a child of <head>. A meta policy is ` +
+      'honoured only there (CSP L3 §3.3), and the courier WebView has no header to fall back on.'
     );
   }
-  const controlled = nodes.find(
-    (node) => node.kind === 'tag' && !node.closing && CONTROLLED_TAGS.has(node.name),
-  );
-  if (controlled !== undefined && controlled.at < policyAt) {
+  const controlled = firstElementNamed(html, CONTROLLED_TAGS);
+  if (controlled !== null && controlled.at < meta.at) {
     return (
       `${BUILT_INDEX_HTML_FILE}: a <${controlled.name}> precedes the CSP <meta>. A meta policy ` +
       'does not apply retroactively, so that element would load OUTSIDE the policy — and in ' +
@@ -343,13 +108,6 @@ function findPlacementProblem(html: string, policyAt: number): string | null {
     );
   }
   return null;
-}
-
-export interface CspDelivery {
-  /** `apps/web/index.html` — the SOURCE document (must carry no policy). */
-  indexHtml: string;
-  /** `apps/web/dist/index.html` when a build has produced one. */
-  builtIndexHtml?: string | undefined;
 }
 
 /** Pure: every delivery problem (empty ⇒ the built artifact carries the policy). */
@@ -370,7 +128,7 @@ export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
 
   if (delivery.builtIndexHtml === undefined) return problems;
 
-  const delivered = findMetaPolicies(delivery.builtIndexHtml);
+  const delivered = findCspMetas(delivery.builtIndexHtml);
   const built = delivered.map((entry) => entry.policy);
   if (built.length === 0) {
     problems.push(
@@ -385,7 +143,9 @@ export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
   }
   // WHERE the tag sits is as load-bearing as what it says: matching the policy
   // text proves nothing about content the parser reached before it.
-  const placement = findPlacementProblem(delivery.builtIndexHtml, delivered[0]?.at ?? 0);
+  const first = delivered[0];
+  const placement =
+    first === undefined ? null : findPlacementProblem(delivery.builtIndexHtml, first);
   if (placement !== null) problems.push(placement);
   const actual = parsePolicyString(built[0] ?? '');
   if (actual.join('; ') !== parsePolicyString(expected).join('; ')) {
