@@ -82,6 +82,16 @@ export interface HtmlTag {
   readonly end: number;
   /** The tag's own text, `<` through `>`, for attribute parsing. */
   readonly raw: string;
+  /**
+   * Offset WITHIN `raw` where the attributes begin — just past the tag name.
+   *
+   * Published because the reader already knows it: a consumer that re-derives
+   * it with its own `^<[a-zA-Z][^\s/>]*` pattern is a second spelling of the
+   * name rule, and this file has now had that rule disagree with itself three
+   * times (character tokens, tag names, attribute names).  One reader, one
+   * answer.
+   */
+  readonly attributesAt: number;
 }
 
 const ASCII_LETTER = /[a-zA-Z]/;
@@ -121,6 +131,7 @@ function readTag(html: string, at: number): HtmlTag | null {
   const nameFrom = i;
   while (i < len && !SPACE.test(html[i] ?? '') && html[i] !== '/' && html[i] !== '>') i += 1;
   const name = html.slice(nameFrom, i).toLowerCase();
+  const attributesAt = i - at;
   const done = (end: number): HtmlTag => ({
     kind: 'tag',
     name,
@@ -128,6 +139,7 @@ function readTag(html: string, at: number): HtmlTag | null {
     at,
     end,
     raw: html.slice(at, end),
+    attributesAt,
   });
 
   while (i < len) {

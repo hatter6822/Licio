@@ -146,10 +146,11 @@ function codePointOrRaw(code: number, whole: string): string {
 }
 
 /** Attributes of a start tag, names lower-cased (HTML names are ASCII-insensitive). */
-function parseTagAttributes(tag: string): Map<string, string> {
+function parseTagAttributes(tag: HtmlTag): Map<string, string> {
   const attributes = new Map<string, string>();
-  // Past `<meta` — otherwise the tag name parses as the first attribute.
-  const body = tag.replace(/^<[a-zA-Z][^\s/>]*/, '');
+  // Where the READER says the name ended.  Re-deriving it here with a second
+  // pattern is how the name rule came to disagree with itself; the tag knows.
+  const body = tag.raw.slice(tag.attributesAt);
   ATTRIBUTE.lastIndex = 0;
   for (const match of body.matchAll(ATTRIBUTE)) {
     const name = match[1]?.toLowerCase();
@@ -192,7 +193,7 @@ export function findMetaPolicies(html: string): MetaPolicy[] {
   // report the courier as carrying a CSP it does not have.
   for (const tag of scanTags(html)) {
     if (tag.name !== 'meta' || tag.closing) continue;
-    const attributes = parseTagAttributes(tag.raw);
+    const attributes = parseTagAttributes(tag);
     if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
     found.push({ policy: attributes.get('content') ?? '', at: tag.at });
   }
