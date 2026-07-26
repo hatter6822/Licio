@@ -721,6 +721,30 @@ describe('constant string folding', () => {
   });
 });
 
+describe('a sink that reaches a name AFTER it is declared', () => {
+  // A declaration is only where a name starts.  Reading solely its initializer
+  // missed every form where the sink arrives later — and `let x; x = eval` is
+  // the plainest of them.
+  it.each([
+    ['a bare declaration then an assignment', 'let execute; execute = eval; execute(payload)'],
+    ['an assignment through a chain', 'let a; let b; b = Function; a = b; a("x")()'],
+    [
+      'an object reached through an alias',
+      'const registry = {}; registry.run = eval; const alias = registry; alias.run(payload)',
+    ],
+    [
+      'an alias of an alias',
+      'const a = {}; a.run = eval; const b = a; const c = b; c.run(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag an unrelated reassignment', () => {
+    expect(fires("let f; f = handler; f('x')")).toBe(false);
+  });
+});
+
 describe('sinks written INTO an existing container', () => {
   // Round 22. Building a registry empty and filling it afterwards is the
   // ordinary way one is populated, so reading only the LITERAL left the whole

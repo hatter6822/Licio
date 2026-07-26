@@ -328,18 +328,31 @@ function analyser(root: Syntax, project: Project, source: string) {
   /**
    * A stable key for the object a property hangs off.
    *
-   * A local binding is keyed on its DECLARATION, so two names for two different
-   * objects never share a slot — and a property written through one alias of
-   * the global object does not leak onto every other holder of it.
+   * CANONICAL, because a second name for the same object is the same object:
+   * `const alias = registry` must key where `registry` does, or a property
+   * written through one name is invisible when read through the other.  So a
+   * binding whose initializer is another identifier is followed to the name it
+   * ultimately holds.
+   *
+   * That following stops at a GLOBAL, which is what keeps the copy-on-write
+   * behaviour honest: `const g = globalThis` canonicalises to `globalThis`, so
+   * `g.zzz = eval` is visible through `globalThis.zzz` — and not through
+   * `self.zzz`, a different name for a different key.
    */
-  const receiverKey = (base: Syntax): string | undefined => {
+  const receiverKey = (base: Syntax, hop = 0): string | undefined => {
     const target = unwrap(base);
-    if (target === undefined || target.kind !== SyntaxKind.Identifier) return undefined;
+    if (target === undefined || target.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) {
+      return undefined;
+    }
     const declaration = symbolAt(target)?.declarations.find(
       (each) => String(each.path) === filePath,
     );
-    if (declaration !== undefined) return `${String(declaration.path)}#${declaration.index}`;
-    return `global:${nameOf(target)}`;
+    if (declaration === undefined) return `global:${nameOf(target)}`;
+    const bound = unwrap(
+      (declaration.resolve(project) as unknown as Syntax | undefined)?.initializer,
+    );
+    if (bound?.kind === SyntaxKind.Identifier) return receiverKey(bound, hop + 1);
+    return `${String(declaration.path)}#${declaration.index}`;
   };
 
   /**
@@ -349,12 +362,25 @@ function analyser(root: Syntax, project: Project, source: string) {
    * is populated, so reading only the literal left the whole pattern open.
    */
   const written = new Map<string, Syntax>();
+  /**
+   * Values assigned to a NAME after it was declared.
+   *
+   * `let execute; execute = eval` gives the binding no initializer to read, and
+   * a declaration is only where a name STARTS.  Every reaching assignment is
+   * collected, because a gate must fire if any of them makes the name a sink.
+   */
+  const rebound = new Map<string, Syntax[]>();
   for (const node of walk(root)) {
     if (node.kind !== SyntaxKind.BinaryExpression) continue;
     if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
     const target = unwrap(node.left);
     const value = node.right;
     if (target === undefined || value === undefined) continue;
+    if (target.kind === SyntaxKind.Identifier) {
+      const key = receiverKey(target);
+      if (key !== undefined) rebound.set(key, [...(rebound.get(key) ?? []), value]);
+      continue;
+    }
     if (
       target.kind !== SyntaxKind.PropertyAccessExpression &&
       target.kind !== SyntaxKind.ElementAccessExpression
@@ -516,6 +542,13 @@ function analyser(root: Syntax, project: Project, source: string) {
 
     if (target.kind === SyntaxKind.Identifier) {
       if (isGlobalBinding(target)) return nameOf(target);
+      // A later assignment reaches this name just as an initializer does, and
+      // either can be the one that makes it a sink.
+      const key = receiverKey(target);
+      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
+        const named = sinkName(assigned, hop + 1);
+        if (named !== undefined) return named;
+      }
       const declaration = localDeclaration(target);
       if (declaration?.kind === SyntaxKind.VariableDeclaration) {
         return sinkName(declaration.initializer, hop + 1);

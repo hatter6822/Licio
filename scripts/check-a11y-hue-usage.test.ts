@@ -176,6 +176,26 @@ describe('the bare hue on normal text', () => {
     expect(await hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
+  it.each([
+    ['large only above a breakpoint', `'text-error text-sm sm:text-3xl'`, 1],
+    ['large only above one, with no base size', `'text-error sm:text-3xl'`, 1],
+    ['large everywhere it renders', `'text-error text-3xl'`, 0],
+  ])('judges the large-text exemption per STATE (%s)', async (_label, cls, want) => {
+    // A size cascades like a colour: reading every declaration at once exempted
+    // the whole class string on the strength of a variant that does not hold
+    // where the hue actually renders as normal-sized text.
+    expect(await hues(`const a = ${cls};`)).toHaveLength(want);
+  });
+
+  it('lets an important bg-none override a gradient', async () => {
+    // `none` is a declaration like any other, so it belongs IN the image
+    // cascade — filtering it out left the gradient looking active and rejected
+    // a pairing whose visible background is the qualifying solid fill.
+    expect(
+      await hues(`const a = 'bg-error text-error-fg bg-linear-to-r from-white to-white bg-none!';`),
+    ).toEqual([]);
+  });
+
   it('rejects a -fg token under a background IMAGE', async () => {
     // A gradient paints OVER the colour, so the solid fill the `-fg` token was
     // measured against is still in the cascade and no longer visible.
@@ -282,8 +302,14 @@ describe('the bare hue on normal text', () => {
   });
 
   it('flags every hue in the family', async () => {
+    // Four bare hues on one element is ONE rendered colour, and only the ink
+    // that paints is judged.  Tailwind orders these error(0) < info(1) <
+    // primary(2) < success(3) < warning(4), so `text-warning` is the one that
+    // shows — not the first by position, which is what a scan without a cascade
+    // would have said.  The loop below is what proves the whole family is
+    // recognised.
     expect(await hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
-      '1:success',
+      '1:warning',
     ]);
     for (const hue of ['primary', 'success', 'warning', 'error', 'info']) {
       expect(await hues(`const a = 'text-${hue}';`)).toEqual([`1:${hue}`]);

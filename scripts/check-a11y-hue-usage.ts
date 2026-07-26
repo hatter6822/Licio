@@ -110,7 +110,7 @@ interface Paint {
 function paintsOf(
   all: readonly Candidate[],
   facts: UtilityFacts,
-  property: 'color' | 'background-color' | 'background-image',
+  property: 'color' | 'background-color' | 'background-image' | 'font-size' | 'font-weight',
 ): Paint[] {
   const paints: Paint[] = [];
   for (const candidate of all) {
@@ -238,13 +238,33 @@ function mentions(value: string, reference: string): boolean {
   return value === reference || value.includes(reference);
 }
 
-/** The bare-hue inks in `all` — the 3:1 colour carrying normal text. */
+/**
+ * The bare-hue inks in `all` that carry NORMAL text.
+ *
+ * An ink shows in every state its own conditions survive into, and the size it
+ * shows at cascades independently — so each state is tried, one per size or
+ * weight declaration, and the hue is reported only where the text is not large
+ * there.  The same shape as the `-fg` pairing check, for the same reason.
+ */
 function bareHuePaints(all: readonly Candidate[], facts: UtilityFacts, hues: readonly HueColors[]) {
+  const inks = paintsOf(all, facts, 'color');
+  const sizes = paintsOf(all, facts, 'font-size');
+  const weights = paintsOf(all, facts, 'font-weight');
   const found: Array<{ candidate: Candidate; hue: string }> = [];
-  for (const paint of paintsOf(all, facts, 'color')) {
+  for (const paint of inks) {
     for (const colors of hues) {
       if (!mentions(paint.declared.value, colors.bare)) continue;
-      found.push({ candidate: paint.candidate, hue: colors.hue });
+      const states = [
+        conditionsOf(paint.declared),
+        ...[...sizes, ...weights].map((other) => [
+          ...conditionsOf(paint.declared),
+          ...conditionsOf(other.declared),
+        ]),
+      ];
+      const normal = states.some(
+        (state) => paintedIn(inks, state).includes(paint) && !isLargeIn(sizes, weights, state),
+      );
+      if (normal) found.push({ candidate: paint.candidate, hue: colors.hue });
     }
   }
   return found;
@@ -273,10 +293,12 @@ function unpairedForegrounds(
   // `-fg` token was measured against — `bg-error text-error-fg bg-linear-to-r
   // from-white to-white` renders white on white while the error fill is still
   // in the cascade underneath it.  What the image contains is not knowable
-  // here, so any active one disqualifies the pairing.
-  const images = paintsOf(all, facts, 'background-image').filter(
-    (paint) => paint.declared.value !== 'none',
-  );
+  // here, so a showing one disqualifies the pairing.
+  //
+  // `none` stays IN the cascade rather than being filtered out of it: it is a
+  // declaration like any other, and `bg-none!` is how a gradient is turned off.
+  // Dropping it left the gradient looking active and rejected a valid pairing.
+  const images = paintsOf(all, facts, 'background-image');
   const found: Array<{ candidate: Candidate; hue: string }> = [];
   for (const ink of inks) {
     for (const colors of hues) {
@@ -287,10 +309,14 @@ function unpairedForegrounds(
         ink.declared.value !== colors.foreground ||
         [
           conditionsOf(ink.declared),
-          ...fills.map((fill) => [...conditionsOf(ink.declared), ...conditionsOf(fill.declared)]),
+          ...[...fills, ...images].map((other) => [
+            ...conditionsOf(ink.declared),
+            ...conditionsOf(other.declared),
+          ]),
         ].some((state) => {
           if (!paintedIn(inks, state).includes(ink)) return false;
-          if (images.some((image) => activeIn(image, state))) return true;
+          if (paintedIn(images, state).some((image) => image.declared.value !== 'none'))
+            return true;
           const showing = paintedIn(fills, state);
           return (
             showing.length === 0 ||
@@ -339,32 +365,34 @@ const LARGE_BOLD_PX = 18.66;
 const BOLD = 700;
 
 /**
- * Whether these classes render LARGE text, which the bare hue IS allowed on.
+ * Whether the text is LARGE in `state`, which the bare hue IS allowed on.
  *
  * The bare hue clears 3:1, and WCAG 1.4.3 permits that for large text exactly
  * as 1.4.11 permits it for a graphical object — so reporting `text-error
- * text-2xl` rejected a use the token suite's own assertions allow, and the
- * gate's own header names large text as a legitimate one.
+ * text-2xl` rejected a use the token suite's own assertions allow.
  *
- * The size and weight are resolved through the theme rather than matched
- * against a table of class names, so a rescaled `text-2xl` stays correctly
- * classified and a variant-prefixed one is read like any other.
+ * STATE-AWARE, because a size is a cascading declaration like a colour: in
+ * `text-error text-sm sm:text-3xl` the hue is large only above the breakpoint
+ * and renders as normal-sized text below it.  Reading every declaration at once
+ * exempted the whole class string on the strength of a variant that does not
+ * hold where the problem is.
+ *
+ * The values are resolved through the theme rather than matched against a table
+ * of class names, so a rescaled step stays correctly classified.
  */
-function isLargeText(all: readonly Candidate[], facts: UtilityFacts): boolean {
-  let size: number | null = null;
-  let weight = 400;
-  for (const candidate of all) {
-    if (facts.orderOf(candidate.name) === undefined) continue;
-    for (const declared of facts.declarationsOf(candidate.name)) {
-      if (declared.property === 'font-size') size = pixels(declared.value) ?? size;
-      if (declared.property === 'font-weight') {
-        const parsed = Number.parseInt(declared.value, 10);
-        if (Number.isFinite(parsed)) weight = parsed;
-      }
-    }
-  }
-  if (size === null) return false;
-  return weight >= BOLD ? size >= LARGE_BOLD_PX : size >= LARGE_PX;
+function isLargeIn(
+  sizes: readonly Paint[],
+  weights: readonly Paint[],
+  state: readonly string[],
+): boolean {
+  const size = paintedIn(sizes, state)
+    .map((paint) => pixels(paint.declared.value))
+    .find((value) => value !== null);
+  if (size === undefined || size === null) return false;
+  const weight = paintedIn(weights, state)
+    .map((paint) => Number.parseInt(paint.declared.value, 10))
+    .find((value) => Number.isFinite(value));
+  return (weight ?? 400) >= BOLD ? size >= LARGE_BOLD_PX : size >= LARGE_PX;
 }
 
 /**
@@ -497,10 +525,9 @@ export async function findBareHueTextUses(files: readonly SourceFile[]): Promise
     // EVERY offending class, not the first: one string can carry several, and
     // the earlier ones may be perfectly paired.
     // The BARE hue is a 3:1 colour, which WCAG allows on a graphical object
-    // (1.4.11) and on LARGE text (1.4.3) — and forbids on normal text.
-    const exempt = isIcon || isLargeText(all, facts);
+    // (1.4.11); LARGE text (1.4.3) is judged per state inside `bareHuePaints`.
     const offenders = [
-      ...(exempt ? [] : bareHuePaints(all, facts, hues)),
+      ...(isIcon ? [] : bareHuePaints(all, facts, hues)),
       ...unpairedForegrounds(all, facts, hues),
     ];
     const match = offenders.sort((left, right) => left.candidate.at - right.candidate.at)[0];
