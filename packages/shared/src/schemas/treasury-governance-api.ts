@@ -674,6 +674,17 @@ export const treasuryFreezeRequestSchema = z
     /** Capped at the READ schemas' 500 (profile/dashboard `freeze_reason`) —
      *  a longer stored reason would fail every subsequent response parse. */
     reason: z.string().trim().min(1).max(500),
+    /**
+     * The counsel co-approver for a PLATFORM `treasury`-scope freeze
+     * (STEWARD_ROLES.md: `treasury-freeze` "Requires counsel co-approval",
+     * WS-A.1.2c).  Only an id — the server resolves that user and verifies they
+     * actually hold `compliance.counsel.approve` and are not the actor; a
+     * client-asserted role would be worth nothing.
+     *
+     * Ignored on the room's OWN steward path and on `room`-scope freezes, which
+     * doctrine does not put behind co-approval.
+     */
+    co_approver_user_id: uuidSchema.optional(),
   })
   .strict();
 export type TreasuryFreezeRequest = z.infer<typeof treasuryFreezeRequestSchema>;

@@ -255,24 +255,45 @@ function MfaVerifyNotice({ onVerified }: { onVerified: () => void }): React.Reac
   const t = useT();
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  /** Which failure to show — the four are NOT interchangeable advice. */
+  const [failure, setFailure] = useState<'none' | 'rejected' | 'expired' | 'throttled' | 'error'>(
+    'none',
+  );
 
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
     if (code.trim().length === 0 || busy) return;
     setBusy(true);
-    setFailed(false);
+    setFailure('none');
     try {
       await verifyTotp(code);
       setCode('');
       onVerified();
-    } catch {
-      // Any failure is reported the same way: a wrong code and an unknown code
-      // must not be distinguishable (no oracle on which codes exist).
-      setFailed(true);
+    } catch (error) {
+      // Only a REJECTED CODE is reported opaquely — a wrong code and an unknown
+      // recovery code must stay indistinguishable so the form is not an oracle
+      // on which codes exist.  The other three say nothing about any code, and
+      // collapsing them into "that code was not accepted" is actively wrong
+      // advice: an expired session can NEVER succeed on retry, and a
+      // rate-limited steward would be told to keep hammering the endpoint.
+      if (error instanceof ApiClientError) {
+        if (error.status === 401) setFailure('expired');
+        else if (error.status === 429) setFailure('throttled');
+        else if (error.status !== undefined && error.status >= 500) setFailure('error');
+        else setFailure('rejected');
+      } else {
+        setFailure('error'); // network / parse: transient, not a code verdict
+      }
     } finally {
       setBusy(false);
     }
+  };
+
+  const message: Record<Exclude<typeof failure, 'none'>, string> = {
+    rejected: t('console.mfaFailed', 'That code was not accepted. Try again.'),
+    expired: t('console.mfaExpired', 'Your session has expired. Sign in again to continue.'),
+    throttled: t('console.mfaThrottled', 'Too many attempts. Wait a moment before trying again.'),
+    error: t('console.mfaUnavailable', 'Verification is unavailable right now. Try again shortly.'),
   };
 
   return (
@@ -291,12 +312,16 @@ function MfaVerifyNotice({ onVerified }: { onVerified: () => void }): React.Reac
         value={code}
         onChange={(event) => setCode(event.target.value)}
         autoComplete="one-time-code"
-        inputMode="numeric"
+        // NOT `numeric`: the field also takes a RECOVERY code, which is
+        // Crockford base32 (`generateRecoveryCodes`) — letters included.  A
+        // digits-only virtual keyboard would make the fallback untypeable on
+        // mobile, precisely when the authenticator is the thing unavailable.
+        inputMode="text"
         disabled={busy}
       />
-      {failed ? (
+      {failure !== 'none' ? (
         <p role="alert" className="text-error-on-soft">
-          {t('console.mfaFailed', 'That code was not accepted. Try again.')}
+          {message[failure]}
         </p>
       ) : null}
       <div>

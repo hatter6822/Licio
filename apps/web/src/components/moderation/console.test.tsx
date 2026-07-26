@@ -126,8 +126,11 @@ describe('ModerationConsole', () => {
       vi.mocked(api.fetchReportQueue).mockRejectedValue(mfaDenied());
       render(<ModerationConsole />, { wrapper: Providers });
       const field = await screen.findByLabelText(/authenticator or recovery code/i);
+      // 400 = the code itself was refused.  A wrong TOTP and an unknown recovery
+      // code must render IDENTICALLY, so the form is not an oracle on which
+      // codes exist.
       vi.mocked(authApi.verifyTotp).mockRejectedValue(
-        new ApiClientError('invalid_code', 'no', 401),
+        new ApiClientError('invalid_code', 'no', 400),
       );
 
       await userEvent.type(field, '000000');
@@ -137,6 +140,61 @@ describe('ModerationConsole', () => {
       // Still on the form — a failed verification must not fall through to the
       // dead-end access notice.
       expect(screen.getByLabelText(/authenticator or recovery code/i)).toBeInTheDocument();
+    });
+
+    // The three NON-code failures must not be dressed up as "wrong code": an
+    // expired session can never succeed on retry, and a throttled steward would
+    // otherwise be told to keep hammering the endpoint.
+    it.each([
+      [401, /session has expired/i, 'an expired session'],
+      [429, /too many attempts/i, 'a rate-limited attempt'],
+      [503, /unavailable right now/i, 'a server failure'],
+    ])('distinguishes %s — %s', async (status, expected) => {
+      vi.mocked(api.fetchReportQueue).mockRejectedValue(mfaDenied());
+      render(<ModerationConsole />, { wrapper: Providers });
+      const field = await screen.findByLabelText(/authenticator or recovery code/i);
+      vi.mocked(authApi.verifyTotp).mockRejectedValue(new ApiClientError('x', 'no', status));
+
+      await userEvent.type(field, '123456');
+      await userEvent.click(screen.getByRole('button', { name: /verify/i }));
+
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(expected));
+      expect(screen.getByRole('alert')).not.toHaveTextContent(/not accepted/i);
+    });
+
+    it('treats a NETWORK failure as transient, not as a rejected code', async () => {
+      vi.mocked(api.fetchReportQueue).mockRejectedValue(mfaDenied());
+      render(<ModerationConsole />, { wrapper: Providers });
+      const field = await screen.findByLabelText(/authenticator or recovery code/i);
+      vi.mocked(authApi.verifyTotp).mockRejectedValue(new TypeError('Failed to fetch'));
+
+      await userEvent.type(field, '123456');
+      await userEvent.click(screen.getByRole('button', { name: /verify/i }));
+
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/unavailable right now/i),
+      );
+    });
+
+    it('accepts a LETTER-bearing recovery code (the field is not digits-only)', async () => {
+      // `generateRecoveryCodes` emits Crockford base32 — an `inputMode="numeric"`
+      // virtual keyboard would make this untypeable on mobile, exactly when the
+      // authenticator is the thing that is unavailable.
+      vi.mocked(api.fetchReportQueue).mockRejectedValue(mfaDenied());
+      render(<ModerationConsole />, { wrapper: Providers });
+      const field = await screen.findByLabelText(/authenticator or recovery code/i);
+      expect(field).toHaveAttribute('inputmode', 'text');
+
+      vi.mocked(authApi.verifyTotp).mockResolvedValue(undefined);
+      vi.mocked(api.fetchReportQueue).mockResolvedValue({
+        emergency: [],
+        standard: [],
+        next_cursor: null,
+        filtered_total: 0,
+      });
+      await userEvent.type(field, 'K4RM9-T2XQ7');
+      await userEvent.click(screen.getByRole('button', { name: /verify/i }));
+      await waitFor(() => expect(authApi.verifyTotp).toHaveBeenCalledWith('K4RM9-T2XQ7'));
     });
   });
 });

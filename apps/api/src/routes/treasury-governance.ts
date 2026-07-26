@@ -53,6 +53,7 @@ import {
   checkGovernanceEligibility,
   requireGovernanceEligibility,
 } from '../governance/eligibility.js';
+import { getIdentityServices } from '../identity/services.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import { createLogger } from '../lib/logger.js';
 import {
@@ -62,7 +63,12 @@ import {
   requireAuth,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
-import { isPlatformStaff } from '../moderation/authz.js';
+import {
+  type CoApprover,
+  denyCapability,
+  isPlatformStaff,
+  stewardActorOf,
+} from '../moderation/authz.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { createCharterVersion } from '../treasury/charter.js';
 import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
@@ -93,6 +99,20 @@ import { createTreasury, treasuryDashboard } from '../treasury/treasury.js';
 const log = createLogger();
 const deny = (code: string, message: string) => ({ error: { code, message } });
 const notFound = { error: { code: 'not_found', message: 'Resource not found' } };
+
+/**
+ * Resolve a co-approver id to the actor `denyCapability` can judge.
+ *
+ * The roles come from the IDENTITY STORE, never from the request: a
+ * client-supplied role claim would make counsel co-approval a formality anyone
+ * could assert.  An unknown id yields `null`, which `denyCapability` treats as
+ * "no co-approver" and refuses — the fail-closed direction.
+ */
+async function resolveCoApprover(userId: string | null): Promise<CoApprover | null> {
+  if (userId === null) return null;
+  const user = await getIdentityServices().store.getUser(userId);
+  return user === null ? null : { userId: user.userId, platformRoles: user.roles };
+}
 
 const roomParam = zValidator('param', z.object({ roomId: uuidSchema }));
 
@@ -399,8 +419,31 @@ export function createTreasuryGovernanceRoutes() {
           if ((await services.rooms.roomGovernance(roomId)) === null) {
             return c.json(notFound, 404);
           }
-          if (!staff && !(await services.rooms.isSteward(roomId, auth.userId))) {
+          const ownSteward = await services.rooms.isSteward(roomId, auth.userId);
+          if (!staff && !ownSteward) {
             return c.json(notFound, 404);
+          }
+          // Acting on a room you do NOT steward is the platform CROSS-ROOM
+          // capability, and STEWARD_ROLES.md scopes it tightly: "`ROLE_INTEGRITY`
+          // owns the cross-room surface and can `room-governance-freeze` /
+          // `treasury-freeze` any room's agent", with treasury-scope additionally
+          // requiring counsel co-approval (WS-A.1.2c).  `isPlatformStaff` is the
+          // `restrict` capability — ROLE_SAFETY — so without this a SAFETY
+          // steward could freeze any room's treasury, which no reading of the
+          // doctrine permits.
+          //
+          // The room's OWN steward keeps the self-protective stop: the doctrine
+          // puts `ELECTED_ROOM_STEWARD` "deliberately outside the platform
+          // ROLE_* namespace", and the cross-room rule is about acting on rooms
+          // you do not steward.  Unfreeze already requires platform staff either
+          // way, so a room can stop its own bleeding but never release itself.
+          if (!ownSteward) {
+            const denial = denyCapability(
+              stewardActorOf(auth),
+              body.scope === 'treasury' ? 'treasury-freeze' : 'room-governance-freeze',
+              await resolveCoApprover(body.co_approver_user_id ?? null),
+            );
+            if (denial) return c.json(deny(denial.code, denial.message), 403);
           }
           const result = await setGovernanceFreeze(services, {
             roomId,
@@ -409,6 +452,7 @@ export function createTreasuryGovernanceRoutes() {
             source: body.source,
             reason: body.reason,
             actorUserId: auth.userId,
+            coApproverUserId: ownSteward ? null : (body.co_approver_user_id ?? null),
             isPlatformStaff: staff,
           });
           if ('code' in result) return tgError(c, result);
