@@ -302,7 +302,20 @@ interface FileScan {
    * already done the dataflow — through aliases, `await`, `as`, parentheses,
    * and a `.then` callback's contextual parameter alike.
    */
-  readonly destructures: Array<{ at: number; source: NodeHandle; names: string[] }>;
+  readonly destructures: Array<{
+    at: number;
+    source: NodeHandle;
+    names: string[];
+    /**
+     * Whether a `...rest` element takes what the names did not.
+     *
+     * Object rest copies EVERY remaining enumerable own property, so it reads
+     * exports it never spells — and a pattern's `rest` binding is a new local,
+     * whose name is not a property of the module at all.  Asking for it by name
+     * credited nothing and reported live exports dead.
+     */
+    rest: boolean;
+  }>;
 }
 
 /** Identifier parents that PUBLISH a name rather than consume one. */
@@ -345,13 +358,21 @@ function isElementAccessKey(node: NodeHandle): boolean {
 function scanFile(root: NodeHandle): FileScan {
   const scan: FileScan = { offsets: [], imports: [], destructures: [] };
 
-  /** The EXPORT-side names a pattern or assignment target takes. */
-  const namesOfPattern = (pattern: NodeHandle): string[] => {
+  /** The EXPORT-side names a pattern or assignment target takes, and whether a
+   *  `...rest` element sweeps up whatever those names left. */
+  const namesOfPattern = (pattern: NodeHandle): { names: string[]; rest: boolean } => {
     const names: string[] = [];
+    let rest = false;
     pattern.forEachChild((element) => {
       // A DECLARATION's pattern holds `BindingElement`s; an ASSIGNMENT's target
       // is an object literal, whose members are shorthand or property
-      // assignments.  Both name the property the same way.
+      // assignments.  Both name the property the same way — and both spell a
+      // rest element their own way, `...x` as a dotted BindingElement in one and
+      // as a SpreadAssignment in the other.
+      if (element.kind === SyntaxKind.SpreadAssignment) {
+        rest = true;
+        return;
+      }
       if (
         element.kind !== SyntaxKind.BindingElement &&
         element.kind !== SyntaxKind.ShorthandPropertyAssignment &&
@@ -359,16 +380,22 @@ function scanFile(root: NodeHandle): FileScan {
       ) {
         return;
       }
+      if (element.dotDotDotToken !== undefined) {
+        rest = true;
+        return;
+      }
       // `{ a: renamed }` binds `renamed`; the EXPORT it names is the key `a`.
       const key = nameOf(element.propertyName ?? element.name);
       if (key !== undefined) names.push(key);
     });
-    return names;
+    return { names, rest };
   };
 
   const destructure = (target: NodeHandle, source: NodeHandle): void => {
-    const names = namesOfPattern(target);
-    if (names.length > 0) scan.destructures.push({ at: target.getStart(), source, names });
+    const { names, rest } = namesOfPattern(target);
+    if (names.length > 0 || rest) {
+      scan.destructures.push({ at: target.getStart(), source, names, rest });
+    }
   };
 
   const visit = (node: NodeHandle): void => {
@@ -635,8 +662,14 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
       for (const site of scan.destructures) {
         const type = project.checker.getTypeAtLocation(site.source);
         if (type === undefined) continue;
-        for (const name of site.names) {
-          const property = project.checker.getPropertyOfType(type, name);
+        // A `...rest` element reads EVERY remaining enumerable property, so the
+        // taken set is the type's whole property list rather than the names the
+        // pattern happens to spell — and asking the type is the same move that
+        // answered the named case, not a second mechanism beside it.
+        const taken = site.rest
+          ? project.checker.getPropertiesOfType(type)
+          : site.names.map((name) => project.checker.getPropertyOfType(type, name));
+        for (const property of taken) {
           if (property !== undefined) {
             creditChain(property, { file, offset: site.at }, project);
           }

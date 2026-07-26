@@ -348,6 +348,31 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: an object REST element, which reads what it never spells ──
+  // `...rest` copies every remaining enumerable own property, so it consumes
+  // exports no name in the pattern mentions — while the local it binds is not a
+  // property of the module at all.  Both are PRIMITIVES, so nothing but the
+  // property list can recover them.
+  'src/rest-source.ts': ['export const REST_SWEPT = 1;', 'export const REST_NAMED = 2;'].join('\n'),
+  'src/rest-consumer.ts': [
+    'export async function sweep(): Promise<unknown> {',
+    "  const { REST_NAMED, ...others } = await import('./rest-source.js');",
+    '  return [REST_NAMED, others];',
+    '}',
+  ].join('\n'),
+
+  // ── Reference: the same sweep spelled as an ASSIGNMENT ───────────────────
+  // An object-literal target spells its rest element as a SpreadAssignment,
+  // not as a dotted BindingElement.
+  'src/rest-assigned-source.ts': ['export const REST_ASSIGNED = 3;'].join('\n'),
+  'src/rest-assigned.ts': [
+    'export async function sweepInto(): Promise<unknown> {',
+    '  let held: Record<string, unknown> = {};',
+    "  ({ ...held } = await import('./rest-assigned-source.js'));",
+    '  return held;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: used only inside its own file ─────────────────────────────
   'src/internal.ts': [
     'export const KEPT_INSIDE = 1;',
@@ -555,8 +580,26 @@ describe('resolution: which sites use a binding', () => {
 
   it('does not OVER-credit the rest of a destructured namespace', () => {
     // Only the names the pattern actually binds are consumed; a sibling export
-    // of the same module stays dead.
+    // of the same module stays dead.  A pattern with NO rest element takes
+    // exactly what it spells — which is what makes the two tests below a real
+    // distinction rather than a blanket credit.
     expect(usesOf('src/static-ns.ts', 'STATIC_NS_DEAD')).toHaveLength(0);
+  });
+
+  it.each(['REST_SWEPT', 'REST_NAMED'])(
+    'counts an export taken by an object REST element (%s)',
+    (name) => {
+      // `const { REST_NAMED, ...others } = await import('M')` reads both: the
+      // rest binding copies every property the names left behind, and asking for
+      // its own local name found no property, so the sweep credited nothing.
+      expect(usesOf('src/rest-source.ts', name).length).toBeGreaterThan(0);
+    },
+  );
+
+  it('counts a rest element in a destructuring ASSIGNMENT', () => {
+    // `({ ...held } = await import('M'))` — the same sweep, spelled as a
+    // SpreadAssignment because the target is an object literal.
+    expect(usesOf('src/rest-assigned-source.ts', 'REST_ASSIGNED').length).toBeGreaterThan(0);
   });
 
   it('counts a namespace STORED in a local and destructured later', () => {

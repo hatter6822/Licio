@@ -259,12 +259,48 @@ describe('what is NOT a violation', () => {
     // One class can carry several: `bg-error text-error-fg sm:bg-canvas
     // sm:text-warning-fg` pairs the first while the second renders white on the
     // canvas at `sm`.  A single `exec` saw only the paired one.
+    //
+    // The first IS paired, and only because the cascade is read on BOTH sides:
+    // `text-error-fg` carries no variant, so it survives into `sm` where the
+    // canvas has replaced the fill — but `sm:text-warning-fg` outranks it there,
+    // so it is not the ink that renders.
     expect(hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-warning-fg';`)).toEqual([
       '1:warning',
+    ]);
+    // With both inks scoped to `sm` neither outranks the other, so the class
+    // string does not say which renders and both are reported — earliest first.
+    expect(hues(`const a = 'bg-error sm:bg-canvas sm:text-error-fg sm:text-warning-fg';`)).toEqual([
+      '1:error',
     ]);
     expect(hues(`const a = 'bg-error text-error-fg sm:bg-warning sm:text-warning-fg';`)).toEqual(
       [],
     );
+  });
+
+  it.each([
+    // A foreground is active in EVERY state its own conditions survive into, so
+    // a background that replaces the fill later still renders under it.
+    [
+      'a responsive fill replacing an unconditional one',
+      `'bg-error text-error-fg sm:bg-canvas'`,
+      1,
+    ],
+    ['a hover fill replacing an unconditional one', `'hover:bg-canvas bg-error text-error-fg'`, 1],
+    ['a responsive fill that KEEPS the hue', `'bg-error text-error-fg sm:bg-error-hover'`, 0],
+    // Importance outranks every specificity, whichever way the class is spelled.
+    ['a v4 important canvas over a solid fill', `'bg-canvas! bg-error text-error-fg'`, 1],
+    ['the dead v3 important spelling', `'!bg-canvas bg-error text-error-fg'`, 1],
+    ['an important SOLID fill', `'bg-error! text-error-fg'`, 0],
+    // Tailwind sorts its own output, so two tied fills leave the winner unsaid.
+    ['two unconditional fills, winner unstated', `'bg-canvas bg-error text-error-fg'`, 1],
+    // Breakpoints are ordered: the wider media block is emitted later and wins.
+    ['an ordinary responsive override', `'sm:bg-canvas md:bg-error md:text-error-fg'`, 0],
+    ['a responsive override to a NON-solid fill', `'sm:bg-error md:bg-canvas sm:text-error-fg'`, 1],
+    // `bg-` is equally the prefix of utilities that paint nothing at all.
+    ['a background POSITION beside a solid fill', `'bg-error bg-center text-error-fg'`, 0],
+    ['a default-palette step', `'bg-error bg-red-500 text-error-fg'`, 1],
+  ])('resolves the painted fill (%s)', (_label, cls, want) => {
+    expect(hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
   it('reads a background as ACTIVE wherever its conditions still hold', () => {

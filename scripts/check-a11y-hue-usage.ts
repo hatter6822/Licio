@@ -38,6 +38,8 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderTokensCss } from '../apps/web/src/design-system/css.js';
+import { breakpoints } from '../apps/web/src/design-system/tokens.js';
 import { interpolationSpans, type Token, tokenize } from './js-sink-analyzer.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -68,10 +70,21 @@ export const WEB_SRC = 'apps/web/src';
 // hover-only background under always-white text, an `sm:` background replacing
 // an unconditional one, and an `sm:` background still in force at `sm:hover`.
 //
-// The model instead is Tailwind's own: a utility is `variant:variant:name`, it
-// is ACTIVE wherever all its conditions hold, and of the active backgrounds the
-// last declared is the one painted.  Three lines of rule, and the states fall
-// out of it rather than being enumerated.
+// Modelling the utilities fixed the parse, but the FIRST cut still asked the
+// question once — at the foreground's own state — and a foreground is active in
+// every state that includes its conditions.  `bg-error text-error-fg
+// sm:bg-canvas` is the whole class of misses: read at the empty state the pair
+// is perfect, and at `sm` the canvas is under white text.  So each foreground is
+// checked in every state it survives into, one per background's conditions,
+// which is provably enough — if some state paints a bad fill, the state formed
+// from that fill's own conditions paints it too.
+//
+// Nor does the class attribute decide WHICH background wins: Tailwind sorts its
+// output, so within one attribute order carries no cascade meaning at all.  What
+// does decide it is CSS's own priority — `!important` first, then conditions,
+// since extra conditions mean a later media block, a pseudo-class, or both.
+// Where that leaves two backgrounds genuinely tied, the honest answer is that
+// the class string does not say, so BOTH have to be solid.
 
 /** The five semantic hues, spelled once for every rule that names them. */
 const HUES: ReadonlySet<string> = new Set(['primary', 'success', 'warning', 'error', 'info']);
@@ -89,11 +102,23 @@ const HUES: ReadonlySet<string> = new Set(['primary', 'success', 'warning', 'err
 interface Utility {
   /** The conditions, in source order: `sm:hover:` → `['sm', 'hover']`. */
   readonly variants: readonly string[];
-  /** The utility itself, `!` stripped: `sm:hover:!bg-error` → `bg-error`. */
+  /** The utility itself, importance stripped: `sm:hover:bg-error!` → `bg-error`. */
   readonly name: string;
+  /** Whether it carries the important marker, which outranks everything. */
+  readonly important: boolean;
   /** Index of the utility's first character within the class string. */
   readonly at: number;
 }
+
+/**
+ * Tailwind's important marker, in BOTH of its spellings.
+ *
+ * v4 moved it to the end (`bg-canvas!`); the v3 leading form (`!bg-canvas`) is
+ * no longer a utility and renders nothing.  Reading either as important is the
+ * safe direction for a gate: a class string carrying the dead v3 form is broken
+ * whichever way it is read, and treating it as inert would hide that.
+ */
+const IMPORTANT = /^!|!$/;
 
 /** Split a class string into utilities, keeping each one's offset. */
 function utilities(text: string): Utility[] {
@@ -101,9 +126,15 @@ function utilities(text: string): Utility[] {
   for (const match of text.matchAll(/[^\s'"`{}(),;]+/g)) {
     const token = match[0];
     const parts = token.split(':');
-    const name = (parts.pop() ?? '').replace(/^!/, '');
+    const raw = parts.pop() ?? '';
+    const name = raw.replace(/^!/, '').replace(/!$/, '');
     if (name === '') continue;
-    found.push({ variants: parts, name, at: (match.index ?? 0) + token.length - name.length });
+    found.push({
+      variants: parts,
+      name,
+      important: IMPORTANT.test(raw),
+      at: (match.index ?? 0) + token.length - raw.length,
+    });
   }
   return found;
 }
@@ -127,25 +158,157 @@ function isSolidFill(name: string, hue: string): boolean {
 }
 
 /**
+ * Every colour Tailwind builds a `bg-*` utility from here, read from the SSOT
+ * that GENERATES the theme rather than from a list kept alongside it.
+ */
+const themeColors: ReadonlySet<string> = new Set(
+  [...renderTokensCss().matchAll(/--color-([a-z0-9-]+)\s*:/g)].map((match) => match[1] ?? ''),
+);
+
+// A colour set that came back empty — a renamed custom property, a generator
+// that stopped emitting the block — would make every `-fg` look unbacked and
+// bury the real findings under noise.  Fail on the spot instead.
+for (const hue of HUES) {
+  if (!themeColors.has(hue)) {
+    throw new Error(
+      `check:a11y-hue-usage: the generated theme declares no --color-${hue}; the pairing ` +
+        'rule cannot name the fills it judges.',
+    );
+  }
+}
+
+/** Colour keywords CSS supplies itself, which no theme has to declare. */
+const CSS_COLOR_KEYWORDS: ReadonlySet<string> = new Set([
+  'transparent',
+  'current',
+  'inherit',
+  'black',
+  'white',
+]);
+
+/**
+ * Whether a utility SETS a colour on `property` (`bg` fills, `text` inks).
+ *
+ * Both prefixes are shared with utilities that set no colour at all — `bg-` with
+ * size, position, repeat, origin, clip and blend; `text-` with the size, align
+ * and wrap scales — and under a rule that requires every candidate to be the
+ * right colour, one `bg-center` or `text-sm` in the string would fail a correct
+ * build.  Four things are colours: a name the theme declares, a keyword CSS
+ * supplies, and anything Tailwind resolves on its own — a default-palette step
+ * (`red-500`) or an arbitrary value (`[#fff]`).  Those last two are colours this
+ * design system never issued, so they can never be the solid hue, which is the
+ * reading that reports them rather than waving them through.
+ */
+function isColorUtility(name: string, property: 'bg' | 'text'): boolean {
+  const prefix = `${property}-`;
+  if (!name.startsWith(prefix)) return false;
+  const colour = name.slice(prefix.length);
+  return (
+    themeColors.has(colour) ||
+    CSS_COLOR_KEYWORDS.has(colour) ||
+    /-\d{2,3}$/.test(colour) ||
+    colour.startsWith('[')
+  );
+}
+
+/**
+ * The breakpoints, in the order Tailwind emits their media blocks — read from
+ * the token SSOT, so a new one participates without being named again here.
+ * Index 0 is "unprefixed", which every media block is emitted after.
+ */
+const BREAKPOINT_ORDER: readonly string[] = ['', ...Object.keys(breakpoints)];
+
+/** The widest breakpoint a utility waits for; 0 when it waits for none. */
+function breakpointRank(variants: readonly string[]): number {
+  let rank = 0;
+  for (const variant of variants) {
+    rank = Math.max(rank, BREAKPOINT_ORDER.indexOf(variant));
+  }
+  return rank;
+}
+
+/** The conditions that are NOT a breakpoint: pseudo-classes, `dark`, arbitrary. */
+function selectorVariants(variants: readonly string[]): string[] {
+  return variants.filter((variant) => !BREAKPOINT_ORDER.includes(variant));
+}
+
+/**
+ * Whether `contender` is painted over `other` wherever both are active.
+ *
+ * The class attribute does NOT decide this: Tailwind sorts its own output, so
+ * the order two utilities appear in a `className` carries no cascade meaning.
+ * What decides it is CSS, along two independent axes — a selector condition
+ * (`hover`, `dark`, an arbitrary variant) adds specificity, and a breakpoint
+ * moves the rule into a later media block.  A utility wins when it is at least
+ * as far along BOTH and strictly further along one; `sm:bg-a md:bg-b` is the
+ * ordinary responsive override that a set-inclusion test alone would call a tie.
+ *
+ * Importance precedes both, since `!important` outranks any specificity.
+ */
+function outranks(contender: Utility, other: Utility): boolean {
+  if (contender.important !== other.important) return contender.important;
+  const selectors = selectorVariants(contender.variants);
+  const rivals = selectorVariants(other.variants);
+  if (!rivals.every((variant) => selectors.includes(variant))) return false;
+  const reach = breakpointRank(contender.variants);
+  const rivalReach = breakpointRank(other.variants);
+  if (reach < rivalReach) return false;
+  return selectors.length > rivals.length || reach > rivalReach;
+}
+
+/**
+ * The backgrounds that could be the one painted in `state`.
+ *
+ * Usually exactly one.  Two that neither outranks — identical conditions, or
+ * conditions that simply do not compare — leave the winner unstated by the class
+ * string, so both are returned rather than guessed between.
+ */
+function paintedIn(backgrounds: readonly Utility[], state: readonly string[]): Utility[] {
+  const active = backgrounds.filter((background) => activeIn(background, state));
+  return active.filter((one) => !active.some((other) => outranks(other, one)));
+}
+
+/**
  * The `text-<hue>-fg` utilities whose background does NOT hold where they render.
  *
  * `-fg` is `#FFFFFF` and the token suite contrast-tests it against the SOLID
- * `bg-<hue>` alone, so it is legible exactly where that fill is in force.  Of
- * the backgrounds ACTIVE at the text's state, the last one declared is the one
- * painted — `bg-error sm:bg-canvas` is canvas at `sm` — so that is the one that
- * has to be the matching solid.  `bg-<hue>-soft` is deliberately not solid: it
- * is a pale tint (`error-soft` is `#FBE7E5`) where white is the same defect as
- * on the canvas.
+ * `bg-<hue>` alone, so it is legible exactly where that fill is in force — and
+ * it renders in EVERY state its own conditions survive into, not just the one
+ * they name.  `bg-error text-error-fg sm:bg-canvas` is the pair that reads
+ * perfectly at the empty state and puts white on the canvas at `sm`.
+ *
+ * So each state is tried: the foreground's own, and its own widened by each
+ * background's conditions.  That is provably every state worth trying — if some
+ * reachable state paints a bad fill, the state built from that fill's own
+ * conditions paints it too, because narrowing to those conditions can only
+ * remove rivals that were already losing to it.
+ *
+ * The cascade governs the TEXT colour the same way, and a rule applied to one
+ * side only reports the wrong half: in `bg-error text-error-fg sm:bg-warning
+ * sm:text-warning-fg` the error token is not painted at `sm` at all, because the
+ * warning token outranks it there.  So a state counts only where this foreground
+ * is still one of the possible inks.
+ *
+ * `bg-<hue>-soft` is deliberately not solid: it is a pale tint (`error-soft` is
+ * `#FBE7E5`) where white is the same defect as on the canvas.
  */
 function unpairedForegrounds(all: readonly Utility[]): Utility[] {
-  const backgrounds = all.filter((utility) => utility.name.startsWith('bg-'));
+  const backgrounds = all.filter((utility) => isColorUtility(utility.name, 'bg'));
+  const inks = all.filter((utility) => isColorUtility(utility.name, 'text'));
   const unpaired: Utility[] = [];
   for (const utility of all) {
     const hue = /^text-(\w+)-fg$/.exec(utility.name)?.[1];
     if (hue === undefined || !HUES.has(hue)) continue;
-    const active = backgrounds.filter((background) => activeIn(background, utility.variants));
-    const painted = active[active.length - 1];
-    if (painted === undefined || !isSolidFill(painted.name, hue)) unpaired.push(utility);
+    const states = [
+      utility.variants,
+      ...backgrounds.map((background) => [...utility.variants, ...background.variants]),
+    ];
+    const broken = states.some((state) => {
+      if (!paintedIn(inks, state).includes(utility)) return false;
+      const painted = paintedIn(backgrounds, state);
+      return painted.length === 0 || !painted.every((fill) => isSolidFill(fill.name, hue));
+    });
+    if (broken) unpaired.push(utility);
   }
   return unpaired;
 }
