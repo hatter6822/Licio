@@ -92,11 +92,12 @@ const HUES: ReadonlySet<string> = new Set(['primary', 'success', 'warning', 'err
 /**
  * One utility as Tailwind reads it: its VARIANT conditions and the utility name.
  *
- * A class is `variant:variant:utility`, optionally `!`-prefixed.  Splitting on
- * `:` is the whole parse — and it replaces four regexes that each embedded
- * their own idea of where a class starts, what a variant prefix looks like and
- * how one ends.  Those regexes could ask "is this token present" but not "is
- * this background IN FORCE where that text renders", which is the question the
+ * A class is `variant:variant:utility`, with an optional importance marker.
+ * Splitting on whitespace and then on `:` — both OUTSIDE any `[…]` value — is
+ * the whole parse, and it replaces four regexes that each embedded their own
+ * idea of where a class starts, what a variant prefix looks like and how one
+ * ends.  Those regexes could ask "is this token present" but not "is this
+ * background IN FORCE where that text renders", which is the question the
  * pairing rule actually turns on.
  */
 interface Utility {
@@ -120,12 +121,90 @@ interface Utility {
  */
 const IMPORTANT = /^!|!$/;
 
+/**
+ * Characters that END a utility — but only outside an arbitrary value.
+ *
+ * Whitespace separates classes; the rest are the JavaScript punctuation a class
+ * string can sit against once the folding layer has joined its operands.
+ */
+const CLASS_BREAK: ReadonlySet<string> = new Set([
+  ' ',
+  '\t',
+  '\n',
+  '\r',
+  '\f',
+  "'",
+  '"',
+  '`',
+  '{',
+  '}',
+  '(',
+  ')',
+  ',',
+  ';',
+]);
+
+/**
+ * The utility spans in a class string, bracket-aware.
+ *
+ * An ARBITRARY VALUE is written `[…]` and may contain any of the characters that
+ * otherwise end a class: `bg-[rgb(255,0,0)]` holds parentheses and commas, and
+ * `[@media(min-width:100px)]:bg-canvas` holds them in a VARIANT.  Ending the
+ * span at the first `(` cut those into fragments, and a background reduced to a
+ * fragment stops taking part in the cascade — which is the direction that hides
+ * a defect rather than inventing one.
+ */
+function classSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  let depth = 0;
+  let start = -1;
+  for (let index = 0; index <= text.length; index += 1) {
+    const character = text[index];
+    const inValue = depth > 0;
+    if (character === '[') depth += 1;
+    else if (character === ']') depth = Math.max(0, depth - 1);
+    if (character === undefined || (!inValue && CLASS_BREAK.has(character))) {
+      if (start !== -1) spans.push({ start, end: index });
+      start = -1;
+    } else if (start === -1) {
+      start = index;
+    }
+  }
+  return spans;
+}
+
+/**
+ * Split on the separators Tailwind reads as separators — those OUTSIDE `[…]`.
+ *
+ * `:` divides a variant from what it qualifies, and an arbitrary value may
+ * contain one of its own: `bg-[color:white]` is a single utility, and
+ * `[&:focus]:bg-error` is a single variant on one.  Splitting on every `:` read
+ * the first as a variant `bg-[color` qualifying a utility `white]` — no utility
+ * at all, so an important arbitrary fill dropped out of the cascade silently.
+ */
+function splitOutsideValues(token: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < token.length; index += 1) {
+    const character = token[index];
+    if (character === '[') depth += 1;
+    else if (character === ']') depth = Math.max(0, depth - 1);
+    else if (character === ':' && depth === 0) {
+      parts.push(token.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(token.slice(start));
+  return parts;
+}
+
 /** Split a class string into utilities, keeping each one's offset. */
 function utilities(text: string): Utility[] {
   const found: Utility[] = [];
-  for (const match of text.matchAll(/[^\s'"`{}(),;]+/g)) {
-    const token = match[0];
-    const parts = token.split(':');
+  for (const span of classSpans(text)) {
+    const token = text.slice(span.start, span.end);
+    const parts = splitOutsideValues(token);
     const raw = parts.pop() ?? '';
     const name = raw.replace(/^!/, '').replace(/!$/, '');
     if (name === '') continue;
@@ -133,7 +212,7 @@ function utilities(text: string): Utility[] {
       variants: parts,
       name,
       important: IMPORTANT.test(raw),
-      at: (match.index ?? 0) + token.length - raw.length,
+      at: span.start + token.length - raw.length,
     });
   }
   return found;

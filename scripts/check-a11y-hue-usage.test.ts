@@ -299,6 +299,25 @@ describe('what is NOT a violation', () => {
     // `bg-` is equally the prefix of utilities that paint nothing at all.
     ['a background POSITION beside a solid fill', `'bg-error bg-center text-error-fg'`, 0],
     ['a default-palette step', `'bg-error bg-red-500 text-error-fg'`, 1],
+    // An ARBITRARY VALUE holds characters that otherwise end a class or a
+    // variant, so the parse has to stay inside `[…]` before it splits on them.
+    [
+      'a TYPED arbitrary fill, whose value holds a colon',
+      `'bg-error text-error-fg bg-[color:white]!'`,
+      1,
+    ],
+    [
+      'an arbitrary fill holding parentheses and commas',
+      `'bg-error text-error-fg bg-[rgb(255,0,0)]'`,
+      1,
+    ],
+    [
+      'an arbitrary VARIANT holding both',
+      `'[@media(min-width:100px)]:bg-canvas bg-error text-error-fg'`,
+      1,
+    ],
+    ['an arbitrary ink over its solid fill', `'bg-error text-[color:white]'`, 0],
+    ['an arbitrary SIZE, which paints nothing', `'bg-error text-error-fg w-[calc(100%-1rem)]'`, 0],
   ])('resolves the painted fill (%s)', (_label, cls, want) => {
     expect(hues(`const a = ${cls};`)).toHaveLength(want);
   });
