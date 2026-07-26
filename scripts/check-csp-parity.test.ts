@@ -245,6 +245,19 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
     });
   });
 
+  it('counts NESTED template depth by real tag bounds, not by quoted text', () => {
+    // An inner `<template data-note="> </template>">` ends, under a `[^>]*>`
+    // pattern, at the `>` inside its value — and the `</template>` in that same
+    // value then reads as a real close.  The OUTER template is treated as ended,
+    // so the still-inert `<meta>` after it counts as the delivered policy and
+    // the courier ships with none.
+    const html =
+      `<!doctype html><html><head><template><template data-note="> </template>">x</template>` +
+      `${META}</template></head><body></body></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+    expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+  });
+
   it('reads a raw-text element inside a TEMPLATE by its real tag bounds', () => {
     // The last place this file spelled tag bounds twice.  A `[^>]*>` open-tag
     // pattern ends `<script data-x="a></script>b">` at the `>` inside the value,

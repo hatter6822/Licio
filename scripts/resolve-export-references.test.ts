@@ -194,6 +194,16 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a namespace ELEMENT ACCESS names the export with a string ─
+  // `mod['ACCESSED']` is the same reference as `mod.ACCESSED`; only the node
+  // kind differs, and an identifier-only walk never asks about it.
+  'src/accessed.ts': ['export const ACCESSED = 3;', 'export const BY_TEMPLATE = 4;'].join('\n'),
+  'src/accessor.ts': [
+    "import * as mod from './accessed.js';",
+    "export const readString = mod['ACCESSED'];",
+    'export const readTemplate = mod[`BY_TEMPLATE`];',
+  ].join('\n'),
+
   // ── Reference: a dynamic import destructured in a `.then` CALLBACK ───────
   // The namespace arrives as a parameter, not an initializer.  `THEN_LIVE` is a
   // PRIMITIVE deliberately: a function export survives this gap anyway, because
@@ -363,6 +373,15 @@ describe('resolution: which sites use a binding', () => {
     // `const { lazilyUsed } = await import('./lazy.js')` resolves the identifier
     // to that new local, never to the export, so this needs the specifier route.
     expect(usesOf('src/lazy.ts', 'lazilyUsed').length).toBeGreaterThan(0);
+  });
+
+  it('counts a namespace ELEMENT ACCESS naming the export with a string', () => {
+    // `mod['ACCESSED']` and ``mod[`BY_TEMPLATE`]`` are ordinary references —
+    // the compiler resolves the literal's position to the export symbol itself.
+    // Only which node kinds get asked made them invisible, and an unasked
+    // reference reports live code as dead.
+    expect(usesOf('src/accessed.ts', 'ACCESSED').length).toBeGreaterThan(0);
+    expect(usesOf('src/accessed.ts', 'BY_TEMPLATE').length).toBeGreaterThan(0);
   });
 
   it('counts a dynamic import destructured in a `.then` CALLBACK', () => {

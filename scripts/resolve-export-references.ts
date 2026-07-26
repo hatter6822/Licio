@@ -264,6 +264,26 @@ const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind
 /** Function shapes that can receive the namespace as a `.then` callback. */
 const CALLBACK_KINDS = new Set<number>([SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
 
+/** Literal kinds that can STATICALLY name a property: `mod['A']`, ``mod[`A`]``. */
+const STATIC_KEY_KINDS = new Set<number>([
+  SyntaxKind.StringLiteral,
+  SyntaxKind.NoSubstitutionTemplateLiteral,
+]);
+
+/**
+ * Whether this literal is the KEY of an element access, not its object.
+ *
+ * `mod['LIVE']` names an export; `'abc'[0]` is a string being indexed, and
+ * asking the compiler about it answers with `String.prototype`, not a module
+ * binding.  The two are the same node kind in different positions, so the
+ * position is what has to be checked.
+ */
+function isElementAccessKey(node: NodeHandle): boolean {
+  const parent = node.parent;
+  if (parent?.kind !== SyntaxKind.ElementAccessExpression) return false;
+  return parent.argumentExpression?.getStart() === node.getStart();
+}
+
 /**
  * The object binding pattern that destructures an `import('M')` namespace.
  *
@@ -338,6 +358,12 @@ function scanFile(root: NodeHandle, text: string): FileScan {
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
         scan.offsets.push(node.getStart());
       }
+    } else if (STATIC_KEY_KINDS.has(node.kind) && isElementAccessKey(node)) {
+      // `mod['LIVE']` names the export with a STRING, not an identifier.  It is
+      // the same reference an identifier walk sees in `mod.LIVE`, and the
+      // compiler resolves the literal's position to the very same symbol — so
+      // the only thing that made it invisible was which node kinds get asked.
+      scan.offsets.push(node.getStart());
     } else if (node.kind === SyntaxKind.ImportDeclaration) {
       // STATIC: `import { A, B as c } from 'M'` — the export side precedes `as`.
       const specifier = node.moduleSpecifier;
