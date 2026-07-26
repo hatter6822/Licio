@@ -405,45 +405,65 @@ export function createTreasuryGovernanceRoutes() {
             return c.json(notFound, 404);
           }
           const ownSteward = await services.rooms.isSteward(roomId, auth.userId);
-          // Which doctrine capability a CROSS-ROOM request exercises.  The
-          // route's own `scope` maps 1:1 onto the two names STEWARD_ROLES.md
-          // uses.
           const actor = stewardActorOf(auth);
-          const capability =
+          // PLACING a cross-room hold is the narrow doctrine capability, and the
+          // route's own `scope` maps 1:1 onto the two names STEWARD_ROLES.md
+          // uses: "`ROLE_INTEGRITY` owns the cross-room surface and can
+          // `room-governance-freeze` / `treasury-freeze` any room's agent",
+          // treasury scope additionally requiring counsel co-approval
+          // (WS-A.1.2c).
+          const holdCapability =
             body.scope === 'treasury' ? 'treasury-freeze' : 'room-governance-freeze';
-          // EXISTENCE first, on the ROLE grant alone: anyone with no business
-          // here at all gets 404, so the endpoint is not a room-enumeration
-          // oracle.  It cannot be `denyCapability` — that checks MFA FIRST, so a
-          // plain member with a stale session would get `mfa_required`, and a 403
-          // confirms the room exists.  It also cannot be `isPlatformStaff`, which
-          // tests `restrict` (ROLE_SAFETY): that 404s the very role —
-          // ROLE_INTEGRITY — the doctrine grants this capability to.
-          if (!ownSteward && !grantsCapability(actor, capability)) {
+          const clearingAHold = body.action === 'unfreeze';
+          // LIFTING a hold is a DIFFERENT and BROADER authority, and keying both
+          // on `holdCapability` is how this route went wrong: the domain's rule
+          // is "stewards may FREEZE but only platform staff may UNFREEZE — a
+          // compromised steward account can stop the bleeding but can never
+          // unlock a platform freeze", and platform staff is the `restrict`
+          // capability (ROLE_SAFETY).  The two grants are DISJOINT in the
+          // doctrine — ROLE_SAFETY holds `restrict` and neither freeze;
+          // ROLE_INTEGRITY holds both freezes and not `restrict` — so an
+          // unfreeze must accept either, or one of the two roles is locked out
+          // of an action the domain grants it.
+          const accepted = clearingAHold
+            ? ([holdCapability, 'restrict'] as const)
+            : ([holdCapability] as const);
+          // EXISTENCE, action-INDEPENDENT and on ROLE grants alone: "could this
+          // actor ever act on this room here?"  Anyone else gets 404, so the
+          // endpoint is not a room-enumeration oracle.  It cannot be
+          // `denyCapability` — that checks MFA FIRST, so a plain member with a
+          // stale session would get `mfa_required`, and a 403 confirms the room
+          // exists.  Nor `isPlatformStaff`, whose MFA gate would 404 a real
+          // operator who merely needs to step up; the ROLE half of it is what
+          // belongs here, alongside the freeze grant, because platform staff DO
+          // have business on this endpoint (they lift holds).
+          const mayEverAct =
+            grantsCapability(actor, holdCapability) || grantsCapability(actor, 'restrict');
+          if (!ownSteward && !mayEverAct) {
             return c.json(notFound, 404);
           }
-          // Acting on a room you do NOT steward is the platform CROSS-ROOM
-          // capability, and STEWARD_ROLES.md scopes it tightly: "`ROLE_INTEGRITY`
-          // owns the cross-room surface and can `room-governance-freeze` /
-          // `treasury-freeze` any room's agent", with treasury-scope additionally
-          // requiring counsel co-approval (WS-A.1.2c).  `isPlatformStaff` is the
-          // `restrict` capability — ROLE_SAFETY — so without this a SAFETY
-          // steward could freeze any room's treasury, which no reading of the
-          // doctrine permits.
-          //
           // The room's OWN steward keeps the self-protective stop: the doctrine
           // puts `ELECTED_ROOM_STEWARD` "deliberately outside the platform
           // ROLE_* namespace", and the cross-room rule is about acting on rooms
-          // you do not steward.  Unfreeze already requires platform staff either
-          // way, so a room can stop its own bleeding but never release itself.
+          // you do not steward.  Unfreeze still requires platform staff either
+          // way (enforced in `setGovernanceFreeze`), so a room can stop its own
+          // bleeding but never release itself.
           if (!ownSteward) {
-            const denial = denyCapability(actor, capability);
+            const denials = accepted.map((capability) => denyCapability(actor, capability));
             // Doctrine attaches counsel co-approval to PLACING a treasury hold,
-            // not to clearing one, and requiring it on the way out could strand a
-            // room whose counsel is unavailable.  An unfreeze keeps the existing
-            // rule: platform staff, enforced in `setGovernanceFreeze`.
-            const clearingAHold = body.action === 'unfreeze';
-            if (denial && !(clearingAHold && denial.code === 'co_approval_required')) {
-              return c.json(deny(denial.code, denial.message), 403);
+            // not to clearing one, and demanding it on the way out could strand a
+            // room whose counsel is unavailable.
+            const allowed = denials.some(
+              (denial) =>
+                denial === null || (clearingAHold && denial.code === 'co_approval_required'),
+            );
+            if (!allowed) {
+              // Report the ACTIONABLE denial when there is one: an operator whose
+              // session merely needs an MFA step-up should be told that, not
+              // handed a capability refusal from the other accepted capability.
+              const denial =
+                denials.find((entry) => entry?.code === 'mfa_required') ?? denials[0] ?? null;
+              if (denial) return c.json(deny(denial.code, denial.message), 403);
             }
           }
           const result = await setGovernanceFreeze(services, {

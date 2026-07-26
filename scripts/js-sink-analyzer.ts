@@ -171,37 +171,39 @@ export function tokenize(
   /** Consume a template literal (with `${…}` nesting) starting at `i`. */
   const readTemplate = (): number => {
     let k = i + 1;
-    let depth = 0;
     while (k < n) {
       const c = source[k] as string;
       if (c === '\\') {
         k += 2;
         continue;
       }
-      if (depth === 0 && c === '`') return k + 1;
-      if (depth === 0 && c === '$' && source[k + 1] === '{') {
-        depth = 1;
-        k += 2;
+      if (c === '`') return k + 1;
+      if (c === '$' && source[k + 1] === '{') {
+        // The interpolation's closing `}` is found by TOKENISING the span, not
+        // by counting braces with a side-scan.  A side-scan is a second, weaker
+        // lexer, and this one did not know regex literals: given
+        //
+        //   out += `"${value.replace(/"/g, '""')}"`;
+        //
+        // it read the `"` INSIDE the regex as opening a string, lost brace
+        // sync, and ran to the next stray backtick — swallowing 20 000
+        // characters of `scripts/check-sql-identifiers.ts` into one bogus
+        // template token.  Everything inside a template token is invisible to
+        // every consumer of this lexer, so that file's second half was unseen
+        // by `lint:security`, `check:dead-exports`, and the rest.
+        //
+        // {@link interpolationSpans} already reached this conclusion for the
+        // same reason (its counter mis-read a `}` inside a regex).  Reusing the
+        // one tokeniser means regex literals, strings, nested templates and
+        // comments are all handled by the code that already gets them right.
+        const inner = tokenize(source, preferRegex, {
+          from: k + 2,
+          stopAtUnmatchedBrace: true,
+        });
+        const last = inner[inner.length - 1];
+        // Unterminated interpolation: take the rest, as the loop below would.
+        k = last && last.kind === 'punct' && last.value === '}' ? last.end : n;
         continue;
-      }
-      if (depth > 0) {
-        // Inside `${…}`: track braces, and skip nested strings/templates so a
-        // brace or backtick inside one cannot end the interpolation early.
-        if (c === '{') depth += 1;
-        else if (c === '}') depth -= 1;
-        else if (c === '"' || c === "'") {
-          const saved = i;
-          i = k;
-          k = readQuoted(c);
-          i = saved;
-          continue;
-        } else if (c === '`') {
-          const saved = i;
-          i = k;
-          k = readTemplate();
-          i = saved;
-          continue;
-        }
       }
       k += 1;
     }

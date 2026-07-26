@@ -39,6 +39,9 @@ const fires = (code: string): boolean => findDynamicCodeSinks(code).length > 0;
  */
 const tpl = (expr: string): string => `\`$${'{'}${expr}}\``;
 
+/** Just the `${expr}` HOLE, for fixtures that supply their own backticks. */
+const hole = (expr: string): string => `$${'{'}${expr}}`;
+
 describe('the Function constructor', () => {
   it.each([
     ['new Function("…")', 'const f = new Function("return 1");'],
@@ -813,6 +816,46 @@ describe('tokenize', () => {
     // An unterminated literal must not swallow the rest of the file and hide
     // whatever follows it.
     expect(fires("const bad = 'oops\neval('x');")).toBe(true);
+  });
+
+  // The interpolation scan used to count braces on the side, which is a second,
+  // weaker lexer: it did not know regex literals, so a QUOTE inside one read as
+  // opening a string, brace sync was lost, and the template ran to the next
+  // stray backtick.  In `scripts/check-sql-identifiers.ts` that swallowed 20 000
+  // characters — 466 lines — into a single template token, and everything
+  // inside a template is invisible to every consumer of this lexer.
+  it('ends a template whose interpolation holds a regex containing a QUOTE', () => {
+    // Exactly the shape from that file: `"${value.replace(/"/g, '""')}"`.
+    const template = ['`"', hole('value.replace(/"/g, \'""\')'), '"`'].join('');
+    const tokens = tokenize(`${template} ; after`);
+    expect(tokens.map((t) => t.kind)).toEqual(['template', 'punct', 'ident']);
+    expect(tokens[2]?.value).toBe('after');
+  });
+
+  it('still sees a sink AFTER such a template', () => {
+    // The security consequence: `lint:security` scans the token stream, so a
+    // swallowed region is an unscanned region.
+    const template = ['`"', hole('v.replace(/"/g, \'""\')'), '"`'].join('');
+    expect(fires(`const s = ${template};\neval('x');`)).toBe(true);
+  });
+
+  it('ends a template whose interpolation holds a regex containing a BRACE', () => {
+    // The sibling case `interpolationSpans` records: a `}` inside a regex must
+    // not be read as the end of the span.
+    const tokens = tokenize(`${['`a', hole('/}/.test(x)'), 'b`'].join('')} ; after`);
+    expect(tokens.map((t) => t.kind)).toEqual(['template', 'punct', 'ident']);
+  });
+
+  it('ends a template whose interpolation holds a BACKTICK in a regex', () => {
+    const tokens = tokenize(`${['`a', hole('/`/.test(x)'), 'b`'].join('')} ; after`);
+    expect(tokens.map((t) => t.kind)).toEqual(['template', 'punct', 'ident']);
+  });
+
+  it('still handles nested strings, templates and comments in an interpolation', () => {
+    for (const inner of ['"}"', "'}'", '`}`', '/* } */ x', '(1) /* ` */']) {
+      const tokens = tokenize(`${['`a', hole(inner), 'b`'].join('')} ; after`);
+      expect(tokens.map((t) => t.kind)).toEqual(['template', 'punct', 'ident']);
+    }
   });
 });
 

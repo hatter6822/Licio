@@ -16,6 +16,7 @@ import {
   defaultPrivacySettings,
   type PrivacySettings,
   type SourceOpenedAggregateEvent,
+  type StewardRoleId,
   sourceOpenedAggregateEventSchema,
 } from '@licio/shared';
 import { ensureComplianceServicesForTests } from '../compliance/services.js';
@@ -92,6 +93,11 @@ export async function seedUserWithSession(
     admin?: boolean;
     /** Seed a platform `expert` (WS-D RBAC; may post in expert-gated rooms). */
     expert?: boolean;
+    /** Doctrine steward roles (STEWARD_ROLES.md).  A non-empty list seeds the
+     *  same TOTP-cleared session `steward` does, since every console action
+     *  requires verified MFA — and it grants ONLY the listed roles, unlike
+     *  `admin`, which implicitly holds all five and so cannot distinguish them. */
+    stewardRoles?: readonly StewardRoleId[];
     /** The suite's pinned clock (account creation backdates from it). */
     nowMs?: number;
     /** Override the seeded account's age (0 ⇒ created exactly "now"). */
@@ -120,10 +126,13 @@ export async function seedUserWithSession(
           : opts.expert
             ? ['user', 'expert']
             : ['user'],
+      ...(opts.stewardRoles === undefined ? {} : { stewardRoles: [...opts.stewardRoles] }),
     },
     (opts.nowMs ?? Date.now()) - (opts.accountAgeMs ?? SEEDED_ACCOUNT_AGE_MS),
   );
-  if (opts.steward || opts.admin) {
+  const stewardish =
+    opts.steward === true || opts.admin === true || (opts.stewardRoles?.length ?? 0) > 0;
+  if (stewardish) {
     await identity.store.setAuth(user.userId, { mfaEnabled: true });
   }
   if (opts.kyc !== false) {
@@ -159,7 +168,7 @@ export async function seedUserWithSession(
     credentialRef: `cred-${user.userId}`,
     deviceLabel: 'test',
     rememberMe: false,
-    mfaVerified: opts.steward === true || opts.admin === true,
+    mfaVerified: stewardish,
   });
   const cookie = buildSessionCookie(created.token, created.maxAgeSec).split(';')[0] as string;
   return { userId: user.userId, cookie };

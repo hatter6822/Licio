@@ -73,8 +73,17 @@ const VALUE_KEYWORDS = ['const', 'let', 'var', 'function', 'class', 'enum'] as c
 
 // `[ \t]*` rather than `\s*`: with the `m` flag a `\s*` would let the match
 // START on the preceding newline, putting every reported line number one early.
+//
+// The separator between the keyword and the name is an alternation, not plain
+// whitespace, because a GENERATOR puts a `*` there and may leave no space at
+// all: `function* gen`, `function *gen`, and `function * gen` are all valid and
+// all publish `gen`.  Requiring whitespace missed every one of them — two live
+// exports in this repo (`identifierCandidates`, `writePackChunks`) sat outside
+// the gate entirely.  `[ \t]+` alone still covers the non-generator case, and
+// `const`/`class` can never take a `*`, so the wider alternation cannot match
+// anything that is not already valid syntax.
 const EXPORTED_VALUE_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${VALUE_KEYWORDS.join('|')})[ \\t]+([A-Za-z_$][\\w$]*)`,
+  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${VALUE_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
   'gm',
 );
 

@@ -101,6 +101,26 @@ describe('exportedValues', () => {
     expect(exportedValues('export { type A, b };').map((d) => d.name)).toEqual(['b']);
   });
 
+  it('finds a GENERATOR export in every spacing the grammar allows', () => {
+    // `function*` puts a `*` where the scan required whitespace, so none of
+    // these were seen at all — `identifierCandidates` and `writePackChunks`
+    // were live exports sitting outside the gate.
+    const source = [
+      'export function* a() {}',
+      'export function *b() {}',
+      'export function * c() {}',
+      'export async function* d() {}',
+      'export default function* e() {}',
+    ].join('\n');
+    expect(exportedValues(source).map((v) => [v.name, v.kind, v.isDefault])).toEqual([
+      ['a', 'function', false],
+      ['b', 'function', false],
+      ['c', 'function', false],
+      ['d', 'function', false],
+      ['e', 'function', true],
+    ]);
+  });
+
   it('reports a NAMESPACE re-export, which no declaration keyword introduces', () => {
     // `export * as queue from './queue.js'` publishes one named runtime binding.
     // Neither the keyword pattern nor the clause parser sees it, so a dead one
