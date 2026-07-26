@@ -218,6 +218,14 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a `.then` callback behind transparent wrappers ───────────
+  'src/wrapped-callback.ts': ['export const CALLBACK_LIVE = 12;'].join('\n'),
+  'src/wrapped-callback-consumer.ts': [
+    "export const pending = import('./wrapped-callback.js').then(",
+    '  (({ CALLBACK_LIVE }) => CALLBACK_LIVE),',
+    ');',
+  ].join('\n'),
+
   // ── Reference: the namespace STORED, then destructured a statement later ─
   'src/stored.ts': ['export const STORED_LIVE = 11;'].join('\n'),
   'src/stored-consumer.ts': [
@@ -430,6 +438,13 @@ describe('resolution: which sites use a binding', () => {
       expect(usesOf('src/wrapped.ts', name).length).toBeGreaterThan(0);
     },
   );
+
+  it('counts a `.then` callback wrapped in parentheses', () => {
+    // The unwrapping that finds the import's receiver has to apply to the
+    // ARGUMENT too: `.then((({ A }) => …))` is the same consumer as
+    // `.then(({ A }) => …)`.
+    expect(usesOf('src/wrapped-callback.ts', 'CALLBACK_LIVE').length).toBeGreaterThan(0);
+  });
 
   it('counts a namespace STORED in a local and destructured later', () => {
     // `const mod = await import(M); const { A } = mod` — the pattern is a

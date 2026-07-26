@@ -382,7 +382,14 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   if (nameOf(parent.name) !== 'then') return undefined;
   const call = parent.parent;
   if (call?.kind !== SyntaxKind.CallExpression) return undefined;
-  const callback = call.arguments?.[0];
+  // The callback may itself sit behind transparent wrappers — `.then((({ A }) =>
+  // …))` is the same consumer as `.then(({ A }) => …)` — so the unwrapping that
+  // finds the import's receiver has to apply to the ARGUMENT too.
+  let callback = call.arguments?.[0];
+  for (let hop = 0; callback !== undefined && hop < MAX_ALIAS_HOPS; hop += 1) {
+    if (!TRANSPARENT_WRAPPERS.has(callback.kind)) break;
+    callback = callback.expression;
+  }
   if (callback === undefined || !CALLBACK_KINDS.has(callback.kind)) return undefined;
   return asPattern(callback.parameters?.[0]?.name);
 }
