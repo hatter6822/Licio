@@ -123,7 +123,7 @@ WS-J `restrict` capability:
 | `POST/GET governance/charter` | publish (steward) / history |
 | `POST governance/law-packs/wsm` + `…/validate` + `…/:id/adopt` + `…/history` | register (publish-immutable) / dry-run / pre-enablement adoption (upgrades go through a `law_pack_upgrade` proposal) / history |
 | `POST governance/attestations` | readiness attestations (external audit = platform) |
-| `POST governance/freeze` / `pause` | stewards freeze, ONLY platform unfreezes; per-operation pauses |
+| `POST governance/freeze` / `pause` | a room's OWN steward freezes it; acting on a room you do NOT steward is the cross-room capability (`ROLE_INTEGRITY`, + counsel co-approval on `treasury` scope); ONLY platform unfreezes; per-operation pauses |
 | `POST rooms/:id/treasury` + `GET …/dashboard` | real-asset treasury creation (steward) + reconciled dashboard |
 | `POST/GET treasury/payment-intents(+/:id)` + `POST …/advance` | the WS-M.3.1 intent machine (advance: preflight/quote/signed/retry; quote returns the fee) |
 | `GET treasury/grants` + review/milestones/clawback | grants (clawback = platform) |
@@ -194,9 +194,17 @@ a non-`ordinary` mode) plus the room header:
 7. **Hash-chained audit.** Every governance action appends to the per-room
    chain; `GET governance/audit-chain` recomputes the whole chain (tamper,
    deletion-gap, and fork evidence) on demand — member-visible.
-8. **Platform-moderation supremacy.** Stewards can freeze; only the platform
-   legal floor (WS-J `restrict` capability) unfreezes, resolves legal/capture
-   challenges, attests external audits, and claws back grants.
+8. **Platform-moderation supremacy.** A room's OWN steward can freeze it — the
+   self-protective stop; `ELECTED_ROOM_STEWARD` sits deliberately outside the
+   platform `ROLE_*` namespace (STEWARD_ROLES.md).  Freezing a room you do NOT
+   steward is the platform CROSS-ROOM capability and carries its full doctrine
+   requirements: `ROLE_INTEGRITY` + verified MFA for `room-governance-freeze`,
+   and additionally a distinct counsel co-approver (`compliance.counsel.approve`,
+   resolved server-side and recorded in the chained audit as an opaque ref) for
+   `treasury-freeze` — WS-A.1.2c.  `isPlatformStaff` alone is the WS-J `restrict`
+   capability, i.e. ROLE_SAFETY, which is NOT sufficient for either freeze.  Only
+   the platform legal floor unfreezes, resolves legal/capture challenges, attests
+   external audits, and claws back grants.
 9. **No pay-to-rank.** The treasury tables live in the isolated `knomosis`
    schema (soft room refs, `packages/db/src/isolation.ts` allowlist); nothing
    here feeds ranking.
