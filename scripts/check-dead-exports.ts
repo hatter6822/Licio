@@ -12,7 +12,12 @@
 // prefix spelled twice.  "Nothing references it" is exactly the signal that
 // separates those from working code, which is why it is worth a gate.
 //
-// SCOPE: NAMED exported values — `const`/`let`/`var`/`function`/`class`/`enum`.
+// SCOPE: NAMED exported values — `const`/`let`/`var`/`function`/`class`/`enum`,
+// the local values an `export { … }` clause publishes, and the binding an
+// `export * as name from '…'` namespace re-export publishes (that last one is a
+// runtime name no declaration keyword introduces, so it needs its own pattern —
+// a plain `export * from` does NOT, since those names keep the spelling they are
+// already scanned under).
 //
 // DEFAULT EXPORTS ARE OUT OF SCOPE, and not as an exemption: `export default`
 // publishes the binding `default`, so the declaration's own name is module-local
@@ -108,6 +113,22 @@ export interface ExportedValue {
  */
 const EXPORT_CLAUSE_RE = /^[ \t]*export[ \t]*\{([^}]*)\}[ \t]*(?!from)[;\s]*$/gm;
 
+/**
+ * `export * as name from './x.js'` — a NAMESPACE re-export.
+ *
+ * Unlike the plain `export * from` beside it, this publishes one named runtime
+ * binding (`name`, a module-namespace object), and no declaration keyword
+ * introduces it — so neither the keyword pattern nor the clause parser sees it,
+ * and a dead one would slip through.  Consumers spell the name (`queue.enqueue`
+ * after `import { queue } from '…'`), so the ordinary identifier scan judges it
+ * once it is reported.
+ *
+ * `export * from './x.js'` stays out: it republishes names under their own
+ * spelling, each already scanned at the declaration it comes from — the same
+ * reasoning that excludes `export { x } from './y.js'`.
+ */
+const EXPORT_NAMESPACE_RE = /^[ \t]*export[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][\w$]*)[ \t]+from\b/gm;
+
 /** Every exported value declared in one source file. */
 export function exportedValues(source: string): ExportedValue[] {
   const out: ExportedValue[] = [];
@@ -156,6 +177,27 @@ export function exportedValues(source: string): ExportedValue[] {
       }
     }
     clause = EXPORT_CLAUSE_RE.exec(source);
+  }
+
+  EXPORT_NAMESPACE_RE.lastIndex = 0;
+  let namespace: RegExpExecArray | null = EXPORT_NAMESPACE_RE.exec(source);
+  while (namespace !== null) {
+    const name = namespace[1];
+    // `export * as default from '…'` is legal ES2020 and publishes `default`,
+    // whose name is module-local at every importer — out of scope like any other
+    // default export.
+    if (name !== undefined && name !== 'default') {
+      out.push({
+        name,
+        kind: 'namespace',
+        line: source.slice(0, namespace.index).split('\n').length,
+        // The name is written ONCE, in the clause; the specifier beside it is a
+        // string literal, which the identifier scan does not count.
+        selfOccurrences: 1,
+        isDefault: false,
+      });
+    }
+    namespace = EXPORT_NAMESPACE_RE.exec(source);
   }
   return out;
 }

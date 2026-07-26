@@ -101,6 +101,25 @@ describe('exportedValues', () => {
     expect(exportedValues('export { type A, b };').map((d) => d.name)).toEqual(['b']);
   });
 
+  it('reports a NAMESPACE re-export, which no declaration keyword introduces', () => {
+    // `export * as queue from './queue.js'` publishes one named runtime binding.
+    // Neither the keyword pattern nor the clause parser sees it, so a dead one
+    // used to slip through the gate entirely.
+    expect(exportedValues("export * as queue from './queue.js';")).toEqual([
+      { name: 'queue', kind: 'namespace', line: 1, selfOccurrences: 1, isDefault: false },
+    ]);
+  });
+
+  it('ignores a bare `export * from` — those names keep their own spelling', () => {
+    // Republished under the names their declarations already carry, each scanned
+    // where it lives — the same reasoning that excludes `export { x } from`.
+    expect(exportedValues("export * from './other.js';")).toEqual([]);
+  });
+
+  it('ignores `export * as default from`, whose name is module-local', () => {
+    expect(exportedValues("export * as default from './d.js';")).toEqual([]);
+  });
+
   it('reports the declaration line for the error message', () => {
     const source = ['// SPDX', '', 'export const A = 1;'].join('\n');
     expect(exportedValues(source)[0]).toMatchObject({ name: 'A', kind: 'const', line: 3 });
@@ -225,6 +244,27 @@ describe('findDeadExports', () => {
       ),
     ]);
     expect(dead.map((d) => d.name)).toEqual(['DEAD']);
+  });
+
+  it('reports a namespace re-export nothing consumes', () => {
+    const dead = findDeadExports([
+      file('src/queue.ts', 'export const enqueue = 1;\nuse(enqueue);'),
+      file('src/index.ts', "export * as queue from './queue.js';"),
+      // Consumers reach the module directly, so the barrel binding is dead.
+      file('src/host.ts', "import { enqueue } from './queue.js';\nenqueue();"),
+    ]);
+    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['namespace queue']);
+  });
+
+  it('does NOT report a namespace re-export the barrel consumers use', () => {
+    // The live case in this repo: `offline/index.ts` publishes `queue`, and
+    // `CommentParts.tsx` imports it from the barrel and calls `queue.enqueue()`.
+    const dead = findDeadExports([
+      file('src/queue.ts', 'export const enqueue = 1;'),
+      file('src/index.ts', "export * as queue from './queue.js';"),
+      file('src/host.ts', "import { queue } from './index.js';\nqueue.enqueue();"),
+    ]);
+    expect(dead).toEqual([]);
   });
 
   it('sees a symbol reached through the NAMESPACE object of a dynamic import', () => {

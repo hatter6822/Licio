@@ -372,8 +372,9 @@ write for a file the foreground agent may also touch.
   (pino redaction enforced).
 
 - **Unreferenced exports (enforced by `check:dead-exports`).**  An exported
-  **value** — `const`/`function`/`class`/`enum` — that nothing references is a
-  gate failure, not a style note: it is compiled, bundled, and read by the next
+  **value** — `const`/`function`/`class`/`enum`, a name published by an
+  `export { … }` clause, or the binding of an `export * as name from '…'` —
+  that nothing references is a gate failure, not a style note: it is compiled, bundled, and read by the next
   person as though it were the way to do the thing.  When one appears, decide
   which of three it is before acting:
     1. an **unwired guarantee** — a doctrine constant, a limit, or a client call
