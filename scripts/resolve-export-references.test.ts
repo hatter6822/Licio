@@ -373,6 +373,29 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: an element-access key held in a CONSTANT ──────────────────
+  // `mod[key]` after `const key = 'KEYED_LIVE' as const` reads exactly what
+  // `mod['KEYED_LIVE']` reads; the two differ only in where the string is
+  // written.  PRIMITIVE exports, so nothing but the key's type can recover them.
+  'src/keyed.ts': ['export const KEYED_LIVE = 1;', 'export const KEYED_DEAD = 2;'].join('\n'),
+  'src/keyed-consumer.ts': [
+    "const key = 'KEYED_LIVE' as const;",
+    'export async function readKeyed(): Promise<unknown> {',
+    "  const mod = await import('./keyed.js');",
+    '  return mod[key];',
+    '}',
+  ].join('\n'),
+
+  // ── Enumeration: the IMPORT did the renaming ─────────────────────────────
+  // `import { live as renamedIn }; export { renamedIn }` publishes a name the
+  // source module never had — a new public runtime name, with no `as` on the
+  // export specifier to show it.
+  'src/rename-source.ts': ['export const originalName = 1;'].join('\n'),
+  'src/rename-barrel.ts': [
+    "import { originalName as renamedIn } from './rename-source.js';",
+    'export { renamedIn };',
+  ].join('\n'),
+
   // ── Reference: from TYPE space only ──────────────────────────────────────
   // Neither of these survives compilation, and both are still references: the
   // declaration has to exist for the type to exist, so losing it is a compile
@@ -635,6 +658,23 @@ describe('resolution: which sites use a binding', () => {
       expect(usesOf('src/erased-source.ts', name).length).toBeGreaterThan(0);
     },
   );
+
+  it('counts an element access whose key is a literal-typed CONSTANT', () => {
+    // `const key = 'KEYED_LIVE' as const; mod[key]` reads the same export as
+    // `mod['KEYED_LIVE']`.  Matching literal node kinds saw only the second.
+    expect(usesOf('src/keyed.ts', 'KEYED_LIVE').length).toBeGreaterThan(0);
+  });
+
+  it('does not credit a sibling the keyed access never names', () => {
+    expect(usesOf('src/keyed.ts', 'KEYED_DEAD')).toHaveLength(0);
+  });
+
+  it('judges a name the IMPORT renamed, republished without an `as`', () => {
+    // `import { originalName as renamedIn }; export { renamedIn }` publishes a
+    // public name that exists nowhere else — the export specifier carries no
+    // `propertyName`, so only the alias TARGET's name reveals the rename.
+    expect(namesIn('src/rename-barrel.ts')).toEqual(['renamedIn']);
+  });
 
   it('counts a rest element in a destructuring ASSIGNMENT', () => {
     // `({ ...held } = await import('M'))` — the same sweep, spelled as a

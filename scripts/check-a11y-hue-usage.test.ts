@@ -114,6 +114,32 @@ describe('the bare hue on normal text', () => {
     expect(await hues(source)).toHaveLength(1);
   });
 
+  it.each([
+    ['after `return`', `const f = (): string => { return ('text-') + 'error'; };`],
+    ['after `=>`', `const f = (): string => ('text-') + 'error';`],
+    ['after `&&`', `const f = cond && ('text-') + 'error';`],
+    ['after a comma', `const xs = [1, ('text-') + 'error'];`],
+  ])('folds a grouped concatenation %s', async (_label, source) => {
+    // A `(` is a group or a call, and nothing about the token before it says
+    // which — `return (` and `f(` differ only in the grammar.  Guessing from the
+    // preceding token read `return ('text-')` as a call and scanned the two
+    // literals separately, missing the class the browser receives.
+    expect(await hues(source)).toHaveLength(1);
+  });
+
+  it('does not take `<Icon` in a COMMENT for an enclosing element', async () => {
+    // The icon exemption asks what element renders the class.  Searching
+    // backwards for `<` answered with whatever angle bracket came last, so a
+    // comment — or a string, or a generic — granted the exemption to normal
+    // text.  JSX is in the tree or it is not.
+    const source = ['// <Icon', `const cls = 'size-4 text-error';`].join('\n');
+    expect(await hues(source)).toEqual(['2:error']);
+  });
+
+  it('still exempts a real <Icon> element', async () => {
+    expect(await hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
+  });
+
   it('does NOT fold across a CALL, which renders something else entirely', async () => {
     // `f('text-') + 'error'` is one token different from `('text-') + 'error'`
     // and renders nothing like it.  Folding it would invent a class that never

@@ -283,7 +283,13 @@ function isUnchangedRepublish(node: NodeHandle, project: Project): boolean {
   // `import { live } from './x.js'; export { live }` — the local it publishes
   // is itself an import binding, so this is the same republish in two statements.
   const local = project.checker.getExportSpecifierLocalTargetSymbol(node);
-  return local !== undefined && (local.flags & SymbolFlags.Alias) !== 0;
+  if (local === undefined || (local.flags & SymbolFlags.Alias) === 0) return false;
+  // But the IMPORT may have done the renaming: `import { live as obsolete };
+  // export { obsolete }` publishes a name the source module never had, and this
+  // specifier carries no `propertyName` to show it.  Unchanged means unchanged
+  // ALL THE WAY to the declaration, which is what the alias resolves to — so the
+  // question is asked of the original name rather than of the local's flags.
+  return project.checker.getAliasedSymbol(local)?.name === exported;
 }
 
 /** What one AST walk of a file collects. */
@@ -292,6 +298,14 @@ interface FileScan {
   readonly offsets: number[];
   /** STATIC import clauses, for the specifier route. */
   readonly imports: Array<{ specifierOffset: number; names: string[]; offset: number }>;
+  /**
+   * Element accesses, whose KEY may name an export however it was spelled.
+   *
+   * Kept as nodes rather than offsets because the answer comes from the key's
+   * TYPE, which the walk cannot ask for — the checker is only in hand once the
+   * owning project is.
+   */
+  readonly accesses: NodeHandle[];
   /**
    * Object destructuring sites: the names taken, and the node whose TYPE says
    * what they were taken FROM.
@@ -321,24 +335,27 @@ interface FileScan {
 /** Identifier parents that PUBLISH a name rather than consume one. */
 const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind.NamespaceExport]);
 
-/** Literal kinds that can STATICALLY name a property: `mod['A']`, ``mod[`A`]``. */
-const STATIC_KEY_KINDS = new Set<number>([
-  SyntaxKind.StringLiteral,
-  SyntaxKind.NoSubstitutionTemplateLiteral,
-]);
-
 /**
- * Whether this literal is the KEY of an element access, not its object.
+ * The export an element access names, when it names one statically.
  *
- * `mod['LIVE']` names an export; `'abc'[0]` is a string being indexed, and
- * asking the compiler about it answers with `String.prototype`, not a module
- * binding.  The two are the same node kind in different positions, so the
- * position is what has to be checked.
+ * `mod['LIVE']` reads an export, and so does `mod[key]` after
+ * `const key = 'LIVE' as const` — the two differ only in where the string is
+ * written, which is not a difference the module cares about.  Matching literal
+ * NODE KINDS saw the first and missed the second, so the question is asked of
+ * the key's TYPE instead: a string-literal type is a statically known name,
+ * however it was spelled, and `getPropertyOfType` turns it into the export's own
+ * symbol.  That also settles `'abc'[0]`, whose object type is a string and has
+ * no such property, without a rule about which position the literal sits in.
  */
-function isElementAccessKey(node: NodeHandle): boolean {
-  const parent = node.parent;
-  if (parent?.kind !== SyntaxKind.ElementAccessExpression) return false;
-  return parent.argumentExpression?.getStart() === node.getStart();
+function elementAccessExport(node: NodeHandle, project: Project): TsSymbol | undefined {
+  const argument = node.argumentExpression;
+  const receiver = node.expression;
+  if (argument === undefined || receiver === undefined) return undefined;
+  const key = project.checker.getTypeAtLocation(argument);
+  if (key === undefined || !key.isStringLiteralType()) return undefined;
+  const target = project.checker.getTypeAtLocation(receiver);
+  if (target === undefined) return undefined;
+  return project.checker.getPropertyOfType(target, String(key.value));
 }
 
 /**
@@ -356,7 +373,7 @@ function isElementAccessKey(node: NodeHandle): boolean {
  * so the walk only has to say WHERE to ask.
  */
 function scanFile(root: NodeHandle): FileScan {
-  const scan: FileScan = { offsets: [], imports: [], destructures: [] };
+  const scan: FileScan = { offsets: [], imports: [], destructures: [], accesses: [] };
 
   /** The EXPORT-side names a pattern or assignment target takes, and whether a
    *  `...rest` element sweeps up whatever those names left. */
@@ -404,12 +421,11 @@ function scanFile(root: NodeHandle): FileScan {
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
         scan.offsets.push(node.getStart());
       }
-    } else if (STATIC_KEY_KINDS.has(node.kind) && isElementAccessKey(node)) {
-      // `mod['LIVE']` names the export with a STRING, not an identifier.  It is
-      // the same reference an identifier walk sees in `mod.LIVE`, and the
-      // compiler resolves the literal's position to the very same symbol — so
-      // the only thing that made it invisible was which node kinds get asked.
-      scan.offsets.push(node.getStart());
+    } else if (node.kind === SyntaxKind.ElementAccessExpression) {
+      // `mod['LIVE']` names an export with a STRING rather than an identifier,
+      // and so does `mod[key]` where `key` is a literal-typed constant.  Which
+      // export — if any — is a question for the key's type.
+      scan.accesses.push(node);
     } else if (node.kind === SyntaxKind.ImportDeclaration) {
       // STATIC: `import { A, B as c } from 'M'` — the export side precedes `as`.
       //
@@ -650,6 +666,15 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         for (const name of binding.names) {
           const symbol = exported.get(name);
           if (symbol !== undefined) creditChain(symbol, { file, offset: binding.offset }, project);
+        }
+      }
+
+      // ELEMENT ACCESS, answered by the TYPE of the key rather than by its
+      // node kind, so a constant carrying the name reads the same as the name.
+      for (const access of scan.accesses) {
+        const property = elementAccessExport(access, project);
+        if (property !== undefined) {
+          creditChain(property, { file, offset: access.getStart() }, project);
         }
       }
 
