@@ -32,16 +32,22 @@
 // `scripts`-rooted vitest project — which resolves no external packages —
 // can unit test it directly.
 
-import type { MemberSinkSpec, SinkSpec } from './js-sink-analyzer.js';
-import { findSinkInvocations, isNonSameOriginUrl, isStringLiteral } from './js-sink-analyzer.js';
-
-export type { MemberSinkSpec, SinkSpec, Token } from './js-sink-analyzer.js';
-export {
-  findMemberSinkUses,
+import type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
+import {
   findSinkInvocations,
+  findSinkInvocationsIn,
   isNonSameOriginUrl,
   isStringLiteral,
-  tokenize,
+} from './js-sink-analyzer.js';
+
+export type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
+export {
+  findMemberSinkUses,
+  findMemberSinkUsesIn,
+  findSinkInvocations,
+  findSinkInvocationsIn,
+  isNonSameOriginUrl,
+  isStringLiteral,
 } from './js-sink-analyzer.js';
 
 /**
@@ -128,6 +134,27 @@ export function findDynamicCodeSinks(
   sinks: readonly SinkSpec[] = DYNAMIC_CODE_SINKS,
 ): SinkMatch[] {
   return findSinkInvocations(source, sinks).map(({ label, line }) => ({ label, line }));
+}
+
+/**
+ * The same scan over MANY sources, sharing one parse.
+ *
+ * A gate that walks a directory tree must use this: parsing is batched per
+ * project, and opening one project per file turned a repository-wide scan from
+ * seconds into minutes.
+ */
+export function findDynamicCodeSinksIn(
+  sources: readonly Source[],
+  sinks: readonly SinkSpec[] = DYNAMIC_CODE_SINKS,
+): Map<string, SinkMatch[]> {
+  const found = new Map<string, SinkMatch[]>();
+  for (const [path, sinksFound] of findSinkInvocationsIn(sources, sinks)) {
+    found.set(
+      path,
+      sinksFound.map(({ label, line }) => ({ label, line })),
+    );
+  }
+  return found;
 }
 
 /**

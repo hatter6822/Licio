@@ -21,9 +21,43 @@
 // imports — is the part no scan can do.
 
 import { resolve } from 'node:path';
-import type { NodeHandle } from 'typescript/unstable/ast';
+import type { SyntaxKind } from 'typescript/unstable/ast';
 import { createVirtualFileSystem } from 'typescript/unstable/fs';
 import { API, type Project } from 'typescript/unstable/sync';
+
+/**
+ * The node shape the gates read.
+ *
+ * The API's `Node` is the common base of a large union, so every member below
+ * belongs to SOME node kind and is absent on the others — which is exactly how
+ * they are read here: narrow by `kind` first, then take the member that kind
+ * has.  Declaring it once means a gate describes the tree the same way the next
+ * one does, instead of casting at each use.
+ */
+export interface Syntax {
+  readonly kind: SyntaxKind;
+  readonly parent?: Syntax;
+  readonly expression?: Syntax;
+  readonly tag?: Syntax;
+  readonly arguments?: readonly Syntax[];
+  readonly name?: Syntax;
+  readonly propertyName?: Syntax;
+  readonly initializer?: Syntax;
+  readonly argumentExpression?: Syntax;
+  readonly operatorToken?: { readonly kind: SyntaxKind };
+  readonly left?: Syntax;
+  readonly right?: Syntax;
+  readonly whenTrue?: Syntax;
+  readonly whenFalse?: Syntax;
+  readonly head?: { readonly text?: string };
+  readonly literal?: { readonly text?: string };
+  readonly text?: string;
+  readonly path: unknown;
+  getStart(): number;
+  getEnd(): number;
+  getText(): string;
+  forEachChild(visitor: (node: Syntax) => void): void;
+}
 
 /** A source to parse, named so a finding can point back at it. */
 export interface Source {
@@ -35,7 +69,7 @@ export interface Source {
 export interface ParsedSource {
   readonly path: string;
   readonly content: string;
-  readonly root: NodeHandle;
+  readonly root: Syntax;
 }
 
 const VIRTUAL_ROOT = '/licio-gate-sources';
@@ -109,7 +143,7 @@ export function withParsedSources<T>(
       throw new Error('ts-source: the virtual project could not be opened');
     const parsed: ParsedSource[] = [];
     for (const { at, source } of mounted) {
-      const root = project.program.getSourceFile(resolve(at));
+      const root = project.program.getSourceFile(resolve(at)) as unknown as Syntax | undefined;
       // A source that did not parse cannot be judged, and a gate that skipped
       // it would report clean over code it never read.
       if (root === undefined) {
@@ -124,9 +158,9 @@ export function withParsedSources<T>(
 }
 
 /** Every node in a tree, parents before children. */
-export function* walk(node: NodeHandle): Generator<NodeHandle> {
+export function* walk(node: Syntax): Generator<Syntax> {
   yield node;
-  const children: NodeHandle[] = [];
+  const children: Syntax[] = [];
   node.forEachChild((child) => {
     children.push(child);
   });

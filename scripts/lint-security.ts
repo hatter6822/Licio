@@ -4,8 +4,8 @@ import { join, resolve } from 'node:path';
 import {
   type CodeSinkPattern,
   DOM_MEMBER_SINKS,
-  findDynamicCodeSinks,
-  findMemberSinkUses,
+  findDynamicCodeSinksIn,
+  findMemberSinkUsesIn,
   SOURCE_CODE_SINKS,
   scanSourceForSinks,
 } from './dangerous-code-patterns.js';
@@ -69,31 +69,46 @@ function collectSourceFiles(dir: string): string[] {
 function lint(): void {
   const errors: string[] = [];
 
+  const scanned: Array<{ relative: string; source: string }> = [];
   for (const dir of SOURCE_DIRS) {
-    const files = collectSourceFiles(dir);
-
-    for (const filePath of files) {
+    for (const filePath of collectSourceFiles(dir)) {
       if (ALLOWLIST_PATHS.some((p) => p.test(filePath))) continue;
+      scanned.push({
+        relative: filePath.replace(ROOT, ''),
+        source: readFileSync(filePath, 'utf-8'),
+      });
+    }
+  }
 
-      const relative = filePath.replace(ROOT, '');
-      const source = readFileSync(filePath, 'utf-8');
-      // Three scans, because the sink classes need different machinery.
-      //   • TEXTUAL sinks (`javascript:`) — string CONTENT with no receiver
-      //     and no call chain, so a whole-text regex over both lexings of the
-      //     ambiguous `/` is the right tool. Whole-text, not per line, because
-      //     a match may span a newline.
-      //   • MEMBER DOM sinks (`innerHTML =`, `document.write(…)`) — tokenised,
-      //     so the computed spellings reach the same finding the dotted ones do.
-      //   • DYNAMIC-CODE sinks — tokenised and walked, so every spelling of
-      //     "reference, member accesses, call" is covered structurally rather
-      //     than enumerated, and comments cannot produce a finding.
-      for (const { label, line } of [
-        ...scanSourceForSinks(source, BLOCKED_PATTERNS),
-        ...findMemberSinkUses(source, DOM_MEMBER_SINKS),
-        ...findDynamicCodeSinks(source, SOURCE_CODE_SINKS),
-      ]) {
-        errors.push(`${relative}:${line}: ${label}`);
-      }
+  // ONE parse for the whole tree.  The structural scans below share a project;
+  // opening one per file turned this gate from seconds into three minutes.
+  const sources = scanned.map(({ relative, source }) => ({ path: relative, content: source }));
+  const memberUses = findMemberSinkUsesIn(sources, DOM_MEMBER_SINKS);
+  const codeSinks = findDynamicCodeSinksIn(sources, SOURCE_CODE_SINKS);
+  {
+    const relative = '';
+    const source = '';
+    // Three scans, because the sink classes need different machinery.
+    //   • TEXTUAL sinks (`javascript:`) — string CONTENT with no receiver
+    //     and no call chain, so a whole-text regex over both lexings of the
+    //     ambiguous `/` is the right tool. Whole-text, not per line, because
+    //     a match may span a newline.
+    //   • MEMBER DOM sinks (`innerHTML =`, `document.write(…)`) — tokenised,
+    //     so the computed spellings reach the same finding the dotted ones do.
+    //   • DYNAMIC-CODE sinks — tokenised and walked, so every spelling of
+    //     "reference, member accesses, call" is covered structurally rather
+    //     than enumerated, and comments cannot produce a finding.
+    void relative;
+    void source;
+  }
+
+  for (const entry of scanned) {
+    for (const { label, line } of [
+      ...scanSourceForSinks(entry.source, BLOCKED_PATTERNS),
+      ...(memberUses.get(entry.relative) ?? []),
+      ...(codeSinks.get(entry.relative) ?? []),
+    ]) {
+      errors.push(`${entry.relative}:${line}: ${label}`);
     }
   }
 
