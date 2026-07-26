@@ -40,6 +40,34 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   than the room-key surface, per its tests) — do NOT add an
   `isUpdateChannelConfigured` fast-path without a maintainer security decision.
 
+## Export hygiene — the internal-only sweep
+
+**Tracked debt — 894 exported values used only inside their declaring file.**
+`check:dead-exports` reports an exported value nothing references *anywhere*.
+The narrower question — "is the `export` keyword buying anything?" — is
+implemented in the same script (`findInternalOnlyExports`, surfaced by
+`pnpm survey:internal-exports`) but is **not** in CI, because the answer today
+is 894 declarations and they are not one defect repeated:
+
+| Share | Category | Is the export deliberate? |
+|-------|----------|---------------------------|
+| 314   | `packages/shared` | Yes — the workspace IS the schema/constant/type SSOT surface; a leaf schema is publishable whether or not a consumer composes it today. |
+| 120   | `packages/db` | Yes — Drizzle's idiom exports every table and `pgEnum`; the schema surface is the artifact. |
+| 56    | `Drizzle*` / `InMemory*` store adapters | Yes — `check:prod-parity` matches adapters **by their exported name**; un-exporting one hides it from that gate. |
+| ~390  | `apps/api`, `apps/web`, remaining packages | Mostly no — doctrine constants, helper functions, and lease/window values that could drop the keyword. |
+| 13    | `scripts/` | Mostly no. |
+
+So the sweep needs per-site judgement, not a codemod, and lands as its own work
+rather than riding along with the gate change that measured it.
+
+**Closure target:** clear the ~390 + 13 residue workspace by workspace (each a
+coherent slice that passes `pnpm typecheck` / `lint` / `test`), then decide the
+three deliberate categories explicitly — either carve them out in the survey by
+the same rules `check:prod-parity` already uses, or accept them as published
+surface. When the survey is empty, it exits 0 and can move into CI's lint job
+beside `check:dead-exports`; it already exits non-zero on a non-empty list, so no
+semantics change at that point.
+
 ## Correctness / privacy — tractable, not yet done
 
 - **DSAR omits WS-T debate-arena data** (`forum/data-rights.ts`): the account

@@ -49,7 +49,7 @@ interface DisputeMeta {
 const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
   under_debate: {
     label: 'Challenged',
-    chip: 'border-warning/50 text-warning',
+    chip: 'border-warning/50 text-warning-on-soft',
     banner: 'bg-warning-soft text-warning-on-soft',
     edge: 'border-warning/60',
     icon: 'flag',
@@ -58,7 +58,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
   },
   incorrect: {
     label: 'Incorrect',
-    chip: 'border-error/60 text-error',
+    chip: 'border-error/60 text-error-on-soft',
     banner: 'bg-error-soft text-error-on-soft',
     edge: 'border-error/60',
     icon: 'flag',
@@ -67,7 +67,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
   },
   validated: {
     label: 'Validated',
-    chip: 'border-success/60 text-success',
+    chip: 'border-success/60 text-success-on-soft',
     banner: 'bg-success-soft text-success-on-soft',
     edge: 'border-success/60',
     icon: 'check-circle',
@@ -87,7 +87,7 @@ const DISPUTE_META: Record<ActiveDisputeStatus, DisputeMeta> = {
  */
 const SETTLED_META: DisputeMeta = {
   label: 'Settled',
-  chip: 'border-success/60 text-success',
+  chip: 'border-success/60 text-success-on-soft',
   banner: 'bg-success-soft text-success-on-soft',
   edge: 'border-success/60',
   icon: 'check-badge',

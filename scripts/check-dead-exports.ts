@@ -12,7 +12,23 @@
 // prefix spelled twice.  "Nothing references it" is exactly the signal that
 // separates those from working code, which is why it is worth a gate.
 //
-// SCOPE: exported values — `const`/`let`/`var`/`function`/`class`/`enum`.
+// SCOPE: NAMED exported values — `const`/`let`/`var`/`function`/`class`/`enum`.
+//
+// DEFAULT EXPORTS ARE OUT OF SCOPE, and not as an exemption: `export default`
+// publishes the binding `default`, so the declaration's own name is module-local
+// and every importer picks its own (`import Anything from './x.js'`, or
+// `mod.default` after a dynamic import).  The name is under no obligation to
+// appear anywhere else, so its occurrence count says nothing.  Judging a default
+// export means asking whether the MODULE is reachable, which is a different
+// question from the one this gate answers.
+//
+// Named exports of a DYNAMICALLY imported module are IN scope.  An earlier cut
+// exempted such modules wholesale, on the reasoning that a dynamic import "does
+// not name the symbols it goes on to use" — but it does: `mod.createRoom()` and
+// `const { createRoom } = await import(…)` both spell the name, so the scan sees
+// them exactly as it sees a static import.  What the whole-module exemption
+// actually did was blank 112 non-test files, most of them lazily loaded UI, and
+// the only thing it hid beyond one default export was a genuinely dead symbol.
 //
 // TYPES ARE DELIBERATELY OUT OF SCOPE.  A `type`/`interface` is erased at build:
 // it costs no bytes and no runtime behaviour.  Nearly all of this repo's
@@ -53,7 +69,7 @@ const VALUE_KEYWORDS = ['const', 'let', 'var', 'function', 'class', 'enum'] as c
 // `[ \t]*` rather than `\s*`: with the `m` flag a `\s*` would let the match
 // START on the preceding newline, putting every reported line number one early.
 const EXPORTED_VALUE_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(?:default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${VALUE_KEYWORDS.join('|')})[ \\t]+([A-Za-z_$][\\w$]*)`,
+  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${VALUE_KEYWORDS.join('|')})[ \\t]+([A-Za-z_$][\\w$]*)`,
   'gm',
 );
 
@@ -61,6 +77,15 @@ export interface ExportedValue {
   name: string;
   kind: string;
   line: number;
+  /**
+   * `export default …` — the published binding is `default`, not this name.
+   *
+   * The declaration name is MODULE-LOCAL: every importer chooses its own
+   * (`import Anything from './x.js'`, or `mod.default` after a dynamic import),
+   * so the name need never appear outside the file even when the module is used
+   * constantly.  An identifier scan cannot judge these, so it does not try.
+   */
+  isDefault: boolean;
   /**
    * How many times the name occurs in its own DECLARATION — the baseline a real
    * reference has to exceed.
@@ -89,14 +114,15 @@ export function exportedValues(source: string): ExportedValue[] {
   EXPORTED_VALUE_RE.lastIndex = 0;
   let match: RegExpExecArray | null = EXPORTED_VALUE_RE.exec(source);
   while (match !== null) {
-    const kind = match[1];
-    const name = match[2];
+    const kind = match[2];
+    const name = match[3];
     if (kind !== undefined && name !== undefined) {
       out.push({
         name,
         kind,
         line: source.slice(0, match.index).split('\n').length,
         selfOccurrences: 1,
+        isDefault: match[1] !== undefined,
       });
     }
     match = EXPORTED_VALUE_RE.exec(source);
@@ -123,6 +149,9 @@ export function exportedValues(source: string): ExportedValue[] {
           // An UNALIASED specifier repeats the local declaration's name, so the
           // name occurs twice before any real use.
           selfOccurrences: exported === local ? 2 : 1,
+          // `export { x as default }` is filtered out above, so a clause
+          // specifier that reaches here always publishes its own name.
+          isDefault: false,
         });
       }
     }
@@ -169,79 +198,6 @@ export function identifierCounts(source: string): Map<string, number> {
   return best;
 }
 
-/** Normalize a repo-relative path: collapse `.`/`..` and drop the extension. */
-function normalizePath(path: string): string {
-  const parts: string[] = [];
-  for (const segment of path.split('/')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') parts.pop();
-    else parts.push(segment);
-  }
-  return parts.join('/').replace(/\.(tsx?|jsx?)$/, '');
-}
-
-/**
- * The repo-relative, extension-less paths of every module reached DYNAMICALLY —
- * `import('./X.js')`, or a bare quoted `/src/…` path (how a Playwright
- * `page.evaluate` block loads an in-page harness).  Neither form names the
- * symbols it goes on to use, so a word scan cannot see them.
- *
- * Specifiers are RESOLVED against the importing file rather than reduced to a
- * basename.  Keying on the basename meant one `import('../meri/index.js')`
- * exempted every `index.ts` in the repository — and `index`, `service`,
- * `routes`, `types` are exactly the names a monorepo repeats — silently
- * disabling the gate across most of the tree.
- *
- * A STATIC `import { x } from './X.js'` is NOT included: it spells out every
- * symbol it takes, so the word scan already covers it.  A BARE specifier
- * (`@licio/private-p2p`) is skipped too — a package entry point is reached
- * through its own exports, which the scan sees.
- *
- * Found over the TOKEN STREAM, not by regex over raw text — the same reason the
- * identifier counts are.  A regex would let an `import(…)` written in a doc
- * comment or a test fixture string exempt a real module from scanning, which is
- * a way to silently disable the gate for an entire file with prose.  (This
- * file's own header contains exactly such an example.)
- */
-export function dynamicallyImportedModules(
-  files: ReadonlyArray<{ path: string; content: string }>,
-): Set<string> {
-  const modules = new Set<string>();
-  for (const file of files) {
-    const dir = file.path.split('/').slice(0, -1).join('/');
-    for (const preferRegex of [false, true]) {
-      const tokens = tokenize(file.content, preferRegex);
-      for (let i = 0; i < tokens.length; i += 1) {
-        const token = tokens[i];
-        if (token === undefined) continue;
-        // `import ( '…' )` — the specifier is the STRING TOKEN, so an example
-        // written in a comment or embedded in prose is not one.
-        if (token.kind === 'ident' && token.value === 'import') {
-          const open = tokens[i + 1];
-          const specifier = tokens[i + 2];
-          if (open?.value !== '(' || specifier?.kind !== 'string') continue;
-          const value = specifier.value.slice(1, -1);
-          if (value.startsWith('.')) modules.add(normalizePath(`${dir}/${value}`));
-          continue;
-        }
-        // A bare `'/src/…'` STRING CONSTANT — how a Playwright `page.evaluate`
-        // block names an in-page harness.  Served by the Vite dev server, so it
-        // is rooted at apps/web.
-        if (token.kind === 'string') {
-          const value = token.value.slice(1, -1);
-          if (value.startsWith('/src/')) modules.add(normalizePath(`apps/web${value}`));
-        }
-      }
-    }
-  }
-  return modules;
-}
-
-/** A file's repo-relative, extension-less path, as the set above reports it. */
-export function moduleKeyOf(file: string): string {
-  return normalizePath(file);
-}
-
 export interface DeadExport {
   file: string;
   name: string;
@@ -257,6 +213,46 @@ export interface SourceFile {
 }
 
 /**
+ * Identifier counts per file and summed across the corpus.
+ *
+ * ONE pass building the tables, rather than re-scanning every file per
+ * declaration.  The naive form is O(declarations × bytes) — thousands of exports
+ * against a ~13 MB corpus — which took long enough that the gate's own test
+ * timed out.
+ *
+ * Counted over CODE ONLY: a declaration's own JSDoc almost always names it, so
+ * counting prose would let every documented export pass with no consumer.
+ */
+function indexCorpus(files: readonly SourceFile[]): {
+  perFile: Map<string, Map<string, number>>;
+  total: Map<string, number>;
+} {
+  const perFile = new Map<string, Map<string, number>>();
+  const total = new Map<string, number>();
+  for (const file of files) {
+    const counts = identifierCounts(file.content);
+    perFile.set(file.path, counts);
+    for (const [name, count] of counts) total.set(name, (total.get(name) ?? 0) + count);
+  }
+  return { perFile, total };
+}
+
+/** Exported values of a non-test file that are in scope for either analysis. */
+function* scannableDeclarations(
+  files: readonly SourceFile[],
+): Generator<{ file: SourceFile; declaration: ExportedValue }> {
+  for (const file of files) {
+    if (file.isTest) continue;
+    for (const declaration of exportedValues(file.content)) {
+      // A default export's name is module-local (see `ExportedValue.isDefault`),
+      // so its occurrence count carries no information either way.
+      if (declaration.isDefault) continue;
+      yield { file, declaration };
+    }
+  }
+}
+
+/**
  * Pure: every exported value referenced NOWHERE but its own declaration.
  *
  * References are counted across ALL files including tests — exporting a helper
@@ -264,38 +260,57 @@ export interface SourceFile {
  * has no business second-guessing it.
  */
 export function findDeadExports(files: readonly SourceFile[]): DeadExport[] {
-  const dynamicModules = dynamicallyImportedModules(files);
-  // ONE pass over the corpus building an identifier→count table, rather than
-  // re-scanning every file per declaration.  The naive form is
-  // O(declarations × bytes) — thousands of exports against a ~13 MB corpus —
-  // which took long enough that the gate's own test timed out.
-  //
-  // Counted over CODE ONLY: a declaration's own JSDoc almost always names it, so
-  // counting prose would let every documented export pass with no consumer.
-  const occurrences = new Map<string, number>();
-  for (const file of files) {
-    for (const [name, count] of identifierCounts(file.content)) {
-      occurrences.set(name, (occurrences.get(name) ?? 0) + count);
-    }
-  }
-
+  const { total } = indexCorpus(files);
   const dead: DeadExport[] = [];
-  for (const file of files) {
-    if (file.isTest) continue;
-    if (dynamicModules.has(moduleKeyOf(file.path))) continue;
-    for (const declaration of exportedValues(file.content)) {
-      // At or below the declaration's own footprint means nothing USES it.
-      if ((occurrences.get(declaration.name) ?? 0) <= declaration.selfOccurrences) {
-        dead.push({
-          file: file.path,
-          name: declaration.name,
-          kind: declaration.kind,
-          line: declaration.line,
-        });
-      }
+  for (const { file, declaration } of scannableDeclarations(files)) {
+    // At or below the declaration's own footprint means nothing USES it.
+    if ((total.get(declaration.name) ?? 0) <= declaration.selfOccurrences) {
+      dead.push({
+        file: file.path,
+        name: declaration.name,
+        kind: declaration.kind,
+        line: declaration.line,
+      });
     }
   }
   return dead;
+}
+
+/**
+ * Pure: every exported value USED, but only inside the file that declares it —
+ * the `export` keyword buys nothing and widens the module's surface.
+ *
+ * Reported by `--internal-only`, NOT by the default gate and NOT in CI.  The
+ * repository has ~894 of these and they are not one defect repeated: a large
+ * share are deliberate API surface (`@licio/shared` is the schema/constant SSOT
+ * and `@licio/db` follows Drizzle's export-every-table idiom), and 56 are the
+ * `Drizzle*`/`InMemory*` store adapters whose EXPORTED name is what
+ * `check:prod-parity` matches on.  Un-exporting those would be a regression, so
+ * the sweep needs per-site judgement and lands as its own work
+ * (`docs/planning/audit-residuals-2026-07.md`).  This mode exists so that debt
+ * is a command rather than a memory, and it already exits non-zero so it can
+ * become a gate the day the list is empty.
+ *
+ * Disjoint from {@link findDeadExports}: a symbol used nowhere at all is dead,
+ * not internal-only, and is reported there instead.
+ */
+export function findInternalOnlyExports(files: readonly SourceFile[]): DeadExport[] {
+  const { perFile, total } = indexCorpus(files);
+  const internal: DeadExport[] = [];
+  for (const { file, declaration } of scannableDeclarations(files)) {
+    const own = perFile.get(file.path)?.get(declaration.name) ?? 0;
+    // Used somewhere (else it is DEAD, reported by the gate above) …
+    if (own <= declaration.selfOccurrences) continue;
+    // … and every occurrence in the corpus is one of this file's own.
+    if ((total.get(declaration.name) ?? 0) !== own) continue;
+    internal.push({
+      file: file.path,
+      name: declaration.name,
+      kind: declaration.kind,
+      line: declaration.line,
+    });
+  }
+  return internal;
 }
 
 /** Test-ish paths: their own exports are not scanned (references still count). */
@@ -333,6 +348,28 @@ function main(): void {
       continue;
     }
     files.push({ path, content, isTest: isTestPath(path) });
+  }
+
+  if (process.argv.includes('--internal-only')) {
+    const internal = findInternalOnlyExports(files);
+    if (internal.length > 0) {
+      console.error(`${internal.length} exported value(s) used ONLY inside their own file:`);
+      for (const entry of internal) {
+        console.error(`  - ${entry.file}:${entry.line}  ${entry.kind} ${entry.name}`);
+      }
+      console.error(
+        '\n  Drop the `export` and keep the symbol — UNLESS the export is the point:\n' +
+          '    • `@licio/shared` / `@licio/db` publish their schemas, constants and\n' +
+          '      tables as the SSOT surface, whether or not a consumer exists today;\n' +
+          '    • a `Drizzle*` / `InMemory*` store adapter is matched BY ITS EXPORTED\n' +
+          '      NAME by check:prod-parity, so un-exporting one hides it from that gate.\n' +
+          '  Not run in CI: the list is tracked debt, not a clean baseline\n' +
+          '  (docs/planning/audit-residuals-2026-07.md).',
+      );
+      process.exit(1);
+    }
+    console.log('No exported value is confined to its declaring file.');
+    return;
   }
 
   const dead = findDeadExports(files);

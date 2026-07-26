@@ -51,18 +51,47 @@ export function parsePolicyString(policy: string): string[] {
 }
 
 /**
+ * One HTML attribute: a name, then optionally `=` and a value in any of the
+ * three forms the parser accepts — double-quoted, single-quoted, or UNQUOTED
+ * (WHATWG HTML §13.1.2.3).  The unquoted form is why this is a parser rather
+ * than a pair of `content="…"` / `content='…'` patterns: `<meta
+ * http-equiv=Content-Security-Policy content="…">` is valid HTML that a browser
+ * honours in full, and a quote-only matcher does not see it at all.
+ */
+const ATTRIBUTE = /([^\s/>=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]*)))?/g;
+
+/** Attributes of a start tag, names lower-cased (HTML names are ASCII-insensitive). */
+function parseTagAttributes(tag: string): Map<string, string> {
+  const attributes = new Map<string, string>();
+  // Past `<meta` — otherwise the tag name parses as the first attribute.
+  const body = tag.replace(/^<[a-zA-Z][^\s/>]*/, '');
+  ATTRIBUTE.lastIndex = 0;
+  for (const match of body.matchAll(ATTRIBUTE)) {
+    const name = match[1]?.toLowerCase();
+    if (name === undefined || name === '') continue;
+    if (!attributes.has(name)) attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+  }
+  return attributes;
+}
+
+/**
  * Every `<meta http-equiv="Content-Security-Policy">` content value in a
  * document.  ALL of them, not the first: two such tags intersect rather than
  * override, so a stray second one changes the effective policy.
+ *
+ * A CSP meta with NO `content` yields `''` rather than being skipped.  It is
+ * still a policy-bearing tag as far as this gate is concerned — the source
+ * document must carry none, and an empty delivered policy is a mismatch to
+ * report, not a tag to overlook.
  */
 export function extractMetaPolicies(html: string): string[] {
   const found: string[] = [];
-  for (const tag of html.matchAll(/<meta\b[^>]*>/gi)) {
-    const text = tag[0];
-    if (!/http-equiv\s*=\s*["']content-security-policy["']/i.test(text)) continue;
-    const content = /content\s*=\s*"([^"]*)"|content\s*=\s*'([^']*)'/i.exec(text);
-    const value = content?.[1] ?? content?.[2];
-    if (value !== undefined) found.push(value);
+  // Quoted runs are matched as units so a `>` INSIDE an attribute value cannot
+  // end the tag early and hide the attributes after it.
+  for (const tag of html.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const attributes = parseTagAttributes(tag[0]);
+    if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
+    found.push(attributes.get('content') ?? '');
   }
   return found;
 }

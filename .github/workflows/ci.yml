@@ -37,15 +37,19 @@ jobs:
       # production counterpart; every env key must be schema-validated or a
       # documented dev flag; production adapters hold no in-memory state.
       - run: pnpm check:prod-parity
-      # The CSP lives in three hand-maintained copies (production header, the
-      # courier WebView's <meta>, the E2E preview header).  A header tightened
-      # without the <meta> leaves the native courier on the WEAKER policy.
+      # One CSP SSOT (@licio/shared) reaches the header, the E2E preview, and —
+      # via a build plugin — the courier WebView's <meta>.  This gate proves the
+      # delivered copies still agree, so a tightened header can never leave the
+      # native courier (which has no server headers at all) on a weaker policy.
       - run: pnpm check:csp-parity
       # An exported VALUE nothing references is compiled, bundled and reviewed
       # for nothing — and in this repo several such symbols turned out to be
       # UNWIRED GUARANTEES rather than leftovers (a doctrine constant no gate
       # consulted; a client call for a capability no UI could reach).
       - run: pnpm check:dead-exports
+      # `text-<hue>` clears only 3:1 in dark mode: large text and graphical
+      # objects, never normal text.  Eighteen call sites had drifted onto it.
+      - run: pnpm check:a11y-hue-usage
       # Bot-prevention layer 3: every governance-participation POST route
       # enforces the KYC eligibility guard or carries a written justification.
       - run: pnpm check:governance-kyc

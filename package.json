@@ -47,6 +47,8 @@
     "check:prod-parity": "tsx scripts/check-prod-parity.ts",
     "check:csp-parity": "tsx scripts/check-csp-parity.ts",
     "check:dead-exports": "tsx scripts/check-dead-exports.ts",
+    "survey:internal-exports": "tsx scripts/check-dead-exports.ts --internal-only",
+    "check:a11y-hue-usage": "tsx scripts/check-a11y-hue-usage.ts",
     "check:governance-kyc": "tsx scripts/check-governance-kyc.ts",
     "check:neutrality": "vitest run --project api src/__tests__/ranking-neutrality.test.ts",
     "check:lcap-scheduler": "tsx scripts/check-lcap-scheduler.ts",

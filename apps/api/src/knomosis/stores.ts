@@ -27,7 +27,6 @@ import type {
 import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
-const iso = (now: Clock): string => new Date(now()).toISOString();
 
 // ---------------------------------------------------------------------------
 // Records
@@ -2299,5 +2298,5 @@ export class WalletAbuseLimiter implements WalletAbuseLimiterPort {
   }
 }
 
-export type { Clock };
-export { iso as isoFromClock };
+// `Clock` stays a MODULE-LOCAL type: nothing outside imports it, and the
+// `isoFromClock` helper it was published alongside had no caller at all.

@@ -8,12 +8,11 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  dynamicallyImportedModules,
   exportedValues,
   findDeadExports,
+  findInternalOnlyExports,
   identifierCounts,
   isTestPath,
-  moduleKeyOf,
   type SourceFile,
 } from './check-dead-exports.js';
 
@@ -46,6 +45,19 @@ describe('exportedValues', () => {
       'F',
       'G',
       'H',
+    ]);
+  });
+
+  it('marks which declarations are DEFAULT exports', () => {
+    const source = [
+      'export const A = 1;',
+      'export default function H() {}',
+      'export default class K {}',
+    ].join('\n');
+    expect(exportedValues(source).map((d) => [d.name, d.isDefault])).toEqual([
+      ['A', false],
+      ['H', true],
+      ['K', true],
     ]);
   });
 
@@ -133,67 +145,6 @@ describe('identifierCounts', () => {
   });
 });
 
-describe('dynamicallyImportedModules', () => {
-  const f = (path: string, content: string): { path: string; content: string } => ({
-    path,
-    content,
-  });
-
-  it('resolves a relative dynamic import against the importing file', () => {
-    const mods = dynamicallyImportedModules([
-      f('apps/web/src/components/Host.tsx', "lazy(() => import('./DevFastForward.js'))"),
-    ]);
-    expect(mods.has('apps/web/src/components/DevFastForward')).toBe(true);
-  });
-
-  it('resolves `..` segments', () => {
-    const mods = dynamicallyImportedModules([
-      f('packages/invariants/src/gwei/x.ts', "await import('../meri/index.js')"),
-    ]);
-    expect(mods.has('packages/invariants/src/meri/index')).toBe(true);
-  });
-
-  it('exempts ONLY the resolved module — not every file sharing its basename', () => {
-    // The defect this replaced: keying on the BASENAME meant a single
-    // `import('../meri/index.js')` exempted every `index.ts` in the repository,
-    // and `index` / `service` / `routes` are exactly the names a monorepo
-    // repeats — silently disabling the gate across most of the tree.
-    const mods = dynamicallyImportedModules([
-      f('packages/invariants/src/gwei/x.ts', "await import('../meri/index.js')"),
-    ]);
-    expect(mods.has('packages/invariants/src/meri/index')).toBe(true);
-    expect(mods.has('packages/shared/src/index')).toBe(false);
-    expect(moduleKeyOf('packages/shared/src/index.ts')).toBe('packages/shared/src/index');
-  });
-
-  it('captures an absolute /src path as apps/web-rooted (the Playwright harness form)', () => {
-    const mods = dynamicallyImportedModules([
-      f('apps/web/e2e/x.spec.ts', "const H = '/src/private-p2p/e2e-room-harness.ts';"),
-    ]);
-    expect(mods.has('apps/web/src/private-p2p/e2e-room-harness')).toBe(true);
-  });
-
-  it('does NOT treat an import written in PROSE as a real one', () => {
-    // A doc comment or a fixture string mentioning `import('./Lazy.js')` must not
-    // exempt a real module — that would be a way to disable the gate for a whole
-    // file with a sentence.
-    const mods = dynamicallyImportedModules([
-      f('src/a.ts', "/** e.g. import('./Lazy.js') loads it lazily. */\nconst x = 1;"),
-      f('src/b.ts', 'const doc = "import(\'./Other.js\')";'),
-    ]);
-    expect(mods.has('src/Lazy')).toBe(false);
-    expect(mods.has('src/Other')).toBe(false);
-  });
-
-  it('ignores a STATIC import and a BARE package specifier', () => {
-    const mods = dynamicallyImportedModules([
-      f('a/b.ts', "import { x } from './helpers.js';\nawait import('@licio/private-p2p');"),
-    ]);
-    expect(mods.has('a/helpers')).toBe(false);
-    expect(mods.size).toBe(0);
-  });
-});
-
 describe('findDeadExports', () => {
   it('reports an exported value nothing references', () => {
     const dead = findDeadExports([
@@ -241,7 +192,9 @@ describe('findDeadExports', () => {
     expect(dead).toEqual([]);
   });
 
-  it('exempts a module reached by a DYNAMIC import (the symbol is never named)', () => {
+  it('never reports a DEFAULT export — the importer picks the name, not the file', () => {
+    // `import Anything from './Lazy.js'` binds whatever name it likes, so the
+    // declaration name carries no information about who uses the module.
     const dead = findDeadExports([
       file('src/Lazy.tsx', 'export default function Lazy() {}'),
       file('src/Host.tsx', "const L = lazy(() => import('./Lazy.js'));"),
@@ -249,21 +202,37 @@ describe('findDeadExports', () => {
     expect(dead).toEqual([]);
   });
 
-  it('does NOT exempt a module whose only "import" is in a comment', () => {
-    const dead = findDeadExports([
-      file('src/Lazy.tsx', 'export const THING = 1;'),
-      file('src/Host.tsx', "// see import('./Lazy.js') for the lazy variant\nconst x = 1;"),
-    ]);
-    expect(dead.map((d) => d.name)).toEqual(['THING']);
+  it('never reports a default export even with NO importer at all', () => {
+    // Whether the MODULE is reachable is a different question from the one this
+    // gate answers, and the identifier count cannot distinguish the two cases.
+    expect(findDeadExports([file('src/Lazy.tsx', 'export default function Lazy() {}')])).toEqual(
+      [],
+    );
   });
 
-  it('does NOT exempt an unrelated file sharing the imported basename', () => {
+  it('DOES report the named exports of a dynamically imported module', () => {
+    // The blind spot this closed: a whole-module exemption blanked 112 non-test
+    // files.  A dynamic import spells its symbols at the call site exactly as a
+    // static one does, so the scan can see them — and must.
     const dead = findDeadExports([
-      file('a/index.ts', "await import('../b/index.js');"),
-      file('b/index.ts', 'export const REACHED = 1;'),
-      file('c/index.ts', 'export const UNRELATED = 1;'),
+      file(
+        'src/Lazy.tsx',
+        'export default function Lazy() {}\nexport const USED = 1;\nexport const DEAD = 2;',
+      ),
+      file(
+        'src/Host.tsx',
+        "const L = lazy(() => import('./Lazy.js'));\nconst { USED } = await import('./Lazy.js');\nuse(USED);",
+      ),
     ]);
-    expect(dead.map((d) => d.name)).toEqual(['UNRELATED']);
+    expect(dead.map((d) => d.name)).toEqual(['DEAD']);
+  });
+
+  it('sees a symbol reached through the NAMESPACE object of a dynamic import', () => {
+    const dead = findDeadExports([
+      file('src/mod.ts', 'export const createRoom = 1;'),
+      file('src/host.ts', "const m = await import('./mod.js');\nm.createRoom();"),
+    ]);
+    expect(dead).toEqual([]);
   });
 
   it('still reports a module reached only by a STATIC import', () => {
@@ -288,6 +257,60 @@ describe('findDeadExports', () => {
       file('src/a.ts', 'export const A = 1;\nexport function f() {\n  return A;\n}'),
     ]);
     expect(dead.map((d) => d.name)).toEqual(['f']);
+  });
+});
+
+describe('findInternalOnlyExports', () => {
+  it('reports an export used only inside the file that declares it', () => {
+    const dead = findInternalOnlyExports([
+      file('src/a.ts', 'export const LIMIT = 1;\nfunction f() {\n  return LIMIT;\n}\nf();'),
+    ]);
+    expect(dead.map((d) => d.name)).toEqual(['LIMIT']);
+  });
+
+  it('does NOT report one a test reaches — exporting for testability is legitimate', () => {
+    const dead = findInternalOnlyExports([
+      file('src/a.ts', 'export const LIMIT = 1;\nexport function f() {\n  return LIMIT;\n}'),
+      file('src/__tests__/a.test.ts', "import { LIMIT } from '../a.js';\nexpect(LIMIT);"),
+    ]);
+    expect(dead.map((d) => d.name)).toEqual([]);
+  });
+
+  it('does NOT report one another module imports', () => {
+    const dead = findInternalOnlyExports([
+      file('src/a.ts', 'export const LIMIT = 1;\nuse(LIMIT);'),
+      file('src/b.ts', "import { LIMIT } from './a.js';\nuse(LIMIT);"),
+    ]);
+    expect(dead).toEqual([]);
+  });
+
+  it('is DISJOINT from findDeadExports — a symbol used nowhere is dead, not internal', () => {
+    // Otherwise the same declaration would be reported twice, under two names
+    // for two different problems, and fixing one would not clear the other.
+    const files = [file('src/a.ts', 'export const NEVER_USED = 1;')];
+    expect(findDeadExports(files).map((d) => d.name)).toEqual(['NEVER_USED']);
+    expect(findInternalOnlyExports(files)).toEqual([]);
+  });
+
+  it('skips default exports, whose name is module-local either way', () => {
+    const dead = findInternalOnlyExports([
+      file('src/a.tsx', 'export default function Lazy() {}\nconst x = Lazy;\nuse(x);'),
+    ]);
+    expect(dead).toEqual([]);
+  });
+
+  it('handles a clause export confined to its file', () => {
+    const dead = findInternalOnlyExports([
+      file('src/a.ts', 'function main() {}\nmain();\nmain();\nexport { main as runIt };'),
+    ]);
+    // `runIt` occurs once, in the clause — which IS its self-occurrence, so it is
+    // DEAD rather than internal-only.
+    expect(dead).toEqual([]);
+    expect(
+      findDeadExports([file('src/a.ts', 'function main() {}\nexport { main as runIt };')]).map(
+        (d) => d.name,
+      ),
+    ).toEqual(['runIt']);
   });
 });
 

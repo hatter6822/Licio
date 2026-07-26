@@ -62,6 +62,10 @@ export function NotificationBudget({
         aria-labelledby={labelId}
         className={cn(
           'h-2 w-full overflow-hidden rounded-full',
+          // a11y-bare-hue-ok: this colours the BAR FILL, not text — a graphical
+          // UI component, so WCAG 1.4.11 (3:1) applies rather than 1.4.3, and
+          // the bare hue clears it.  The `<p>` below carries the same state as
+          // normal text and uses the `-on-soft` pair.
           atLimit ? 'text-warning' : 'text-primary',
         )}
       />

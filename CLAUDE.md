@@ -72,8 +72,12 @@ pnpm check:csp-parity               # index.html carries NO hand-written CSP, an
                                     #   dist/index.html carries exactly the injected shared policy — the
                                     #   courier WebView's only policy, and the one delivery point the
                                     #   compiler cannot check
-pnpm check:dead-exports             # no exported VALUE is referenced nowhere (types are out of scope —
-                                    #   see "Unreferenced exports" under Key conventions)
+pnpm check:dead-exports             # no exported VALUE is referenced nowhere (NAMED exports only —
+                                    #   types and `export default` are out of scope; see "Unreferenced
+                                    #   exports" under Key conventions).  survey:internal-exports is the
+                                    #   narrower, NOT-in-CI report of exports confined to their own file
+pnpm check:a11y-hue-usage           # `text-<hue>` (3:1 in dark mode) is never used for NORMAL text —
+                                    #   only `text-<hue>-on-soft` clears WCAG 1.4.3 AA there
 pnpm check:sql-identifiers          # no migration identifier over Postgres's 63-byte limit
                                     #   (over-long names TRUNCATE silently and can collide)
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
@@ -141,6 +145,7 @@ components, routes, or the signals layer; `check:governance-kyc` when
 touching governance-participation routes; `check:csp-parity` when touching
 the CSP or its injection plugin; `check:dead-exports` when removing a call site
 (the last caller going away is what turns an export dead);
+`check:a11y-hue-usage` when touching component class names;
 `check:update-channel` when touching the private-mode update path; and — after
 a production build
 (`pnpm --filter web build`) — `check:sw`.  CI runs all of the above on
@@ -378,7 +383,15 @@ write for a file the foreground agent may also touch.
     2. one of **two spellings of a live value** — make the exported, documented
        one the single source and delete the duplicate literal, never the reverse.
     3. genuinely **vestigial** — delete it.
-  Used only inside its own file?  Drop the `export`, keep the symbol.
+  Used only inside its own file?  Drop the `export`, keep the symbol —
+  `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
+  the ~894 standing cases are worked through
+  (`docs/planning/audit-residuals-2026-07.md`).
+  **`export default` is out of scope**, and not as an exemption: it publishes the
+  binding `default`, so the declaration's own name is module-local and every
+  importer picks its own — the name is under no obligation to appear anywhere
+  else.  Named exports of a DYNAMICALLY imported module ARE in scope: `mod.foo()`
+  and `const { foo } = await import(…)` both spell the name.
   **Types are deliberately out of scope.**  A `type`/`interface` is erased at
   build, and nearly every unreferenced one here is a mechanical projection of a
   value that IS live (`z.infer<typeof xSchema>`, `typeof table.$inferSelect`,

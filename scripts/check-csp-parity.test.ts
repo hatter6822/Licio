@@ -85,6 +85,49 @@ describe('extractMetaPolicies', () => {
     );
     expect(extractMetaPolicies(html)).toEqual(["a 'self'", "b 'self'"]);
   });
+
+  // HTML5 attribute values need no quotes (WHATWG HTML §13.1.2.3), and a browser
+  // honours the tag either way.  A quote-only matcher does not see these at all,
+  // which would let a hand-written policy back into the source document — the
+  // exact thing this gate exists to refuse.
+  it('reads an UNQUOTED http-equiv', () => {
+    const html = HEAD(`<meta http-equiv=Content-Security-Policy content="default-src 'self'">`);
+    expect(extractMetaPolicies(html)).toEqual(["default-src 'self'"]);
+  });
+
+  it('reads an unquoted content value (which cannot hold a space)', () => {
+    const html = HEAD(`<meta http-equiv=Content-Security-Policy content=default-src>`);
+    expect(extractMetaPolicies(html)).toEqual(['default-src']);
+  });
+
+  it('reads single-quoted attributes', () => {
+    const html = HEAD(`<meta http-equiv='Content-Security-Policy' content='default-src *'>`);
+    expect(extractMetaPolicies(html)).toEqual(['default-src *']);
+  });
+
+  it('matches http-equiv case-insensitively, in name AND value', () => {
+    const html = HEAD(`<meta HTTP-EQUIV="content-security-policy" CONTENT="default-src *">`);
+    expect(extractMetaPolicies(html)).toEqual(['default-src *']);
+  });
+
+  it('reports a CSP meta with NO content as an empty policy, not as absent', () => {
+    // Skipping it would let `<meta http-equiv=Content-Security-Policy>` sit in
+    // the source unnoticed; an empty policy is a mismatch to report.
+    expect(extractMetaPolicies(HEAD(`<meta http-equiv=Content-Security-Policy>`))).toEqual(['']);
+  });
+
+  it('is not fooled by a `>` inside an attribute value', () => {
+    const html = HEAD(
+      `<meta name="x" content="a>b" http-equiv="Content-Security-Policy" content="default-src 'self'">`,
+    );
+    // One tag: `content` is first-wins, and `http-equiv` is still found after
+    // the value carrying the `>`.
+    expect(extractMetaPolicies(html)).toEqual(['a>b']);
+  });
+
+  it('ignores the tag name, not just the first attribute', () => {
+    expect(extractMetaPolicies(HEAD(`<metadata http-equiv=Content-Security-Policy>`))).toEqual([]);
+  });
 });
 
 describe('findCspDeliveryProblems', () => {

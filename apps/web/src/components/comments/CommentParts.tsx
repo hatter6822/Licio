@@ -792,7 +792,7 @@ export function CorrectionComposer({
       ) : account !== null ? (
         <p
           role={account.blocked ? 'alert' : undefined}
-          className={cn('text-sm', account.blocked ? 'text-error' : 'text-ink-muted')}
+          className={cn('text-sm', account.blocked ? 'text-error-on-soft' : 'text-ink-muted')}
         >
           {account.text}
         </p>
