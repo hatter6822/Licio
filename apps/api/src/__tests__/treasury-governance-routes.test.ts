@@ -743,10 +743,12 @@ describe('WS-M treasury + payment intents', () => {
   // STEWARD_ROLES.md: "`ROLE_INTEGRITY` owns the cross-room surface and can
   // `room-governance-freeze` / `treasury-freeze` any room's agent", with
   // treasury scope additionally "Requires counsel co-approval" (WS-A.1.2c).
-  // `isPlatformStaff` is the `restrict` capability — ROLE_SAFETY — so acting on
-  // a room you do NOT steward has to clear the real doctrine capability.
   describe('cross-room freeze carries the doctrine capability', () => {
-    it('refuses a platform TREASURY freeze with no counsel co-approver', async () => {
+    it('refuses a cross-room TREASURY freeze — counsel co-approval is unprovable today', async () => {
+      // Fail-closed, and deliberately so: proving a SECOND person consented needs
+      // an authenticated approval bound to this room and reason, which does not
+      // exist yet (tracked in docs/treasury/README.md).  Accepting a
+      // client-named counsel id would have recorded an approval nobody gave.
       const fixture = await wsmFixture({ steward: false });
       const staff = await seedUserWithSession(fixture.identity, { admin: true });
       const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
@@ -761,79 +763,9 @@ describe('WS-M treasury + payment intents', () => {
       );
     });
 
-    it('refuses SELF co-approval (four eyes, not two)', async () => {
-      const fixture = await wsmFixture({ steward: false });
-      const staff = await seedUserWithSession(fixture.identity, { admin: true });
-      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
-        action: 'freeze',
-        scope: 'treasury',
-        source: 'platform_security',
-        reason: 'suspected drain',
-        co_approver_user_id: staff.userId,
-      });
-      expect(res.status).toBe(403);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        'co_approval_required',
-      );
-    });
-
-    it('refuses a co-approver who does not hold counsel', async () => {
-      const fixture = await wsmFixture({ steward: false });
-      const staff = await seedUserWithSession(fixture.identity, { admin: true });
-      const plain = await seedUserWithSession(fixture.identity, { handle: 'not_counsel' });
-      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
-        action: 'freeze',
-        scope: 'treasury',
-        source: 'platform_security',
-        reason: 'suspected drain',
-        co_approver_user_id: plain.userId,
-      });
-      expect(res.status).toBe(403);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        'co_approval_required',
-      );
-    });
-
-    it('refuses an UNKNOWN co-approver id rather than trusting it', async () => {
-      const fixture = await wsmFixture({ steward: false });
-      const staff = await seedUserWithSession(fixture.identity, { admin: true });
-      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
-        action: 'freeze',
-        scope: 'treasury',
-        source: 'platform_security',
-        reason: 'suspected drain',
-        co_approver_user_id: '11111111-1111-4111-8111-111111111111',
-      });
-      expect(res.status).toBe(403);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        'co_approval_required',
-      );
-    });
-
-    it('ACCEPTS a distinct counsel co-approver', async () => {
-      const fixture = await wsmFixture({ steward: false });
-      const staff = await seedUserWithSession(fixture.identity, { admin: true });
-      // `admin` carries `compliance.counsel.approve` (the final-line-of-defense
-      // grant), so a SECOND admin satisfies the co-approver requirement.
-      const counsel = await seedUserWithSession(fixture.identity, {
-        admin: true,
-        handle: 'counsel_two',
-      });
-      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
-        action: 'freeze',
-        scope: 'treasury',
-        source: 'platform_security',
-        reason: 'suspected drain',
-        co_approver_user_id: counsel.userId,
-      });
-      // Authorization CLEARED — the request then reaches the domain, where this
-      // fixture's room simply has no treasury to freeze.  Asserting the domain
-      // outcome (rather than a bare `not 403`) is what proves the gate opened.
-      expect(res.status).toBe(404);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
-    });
-
-    it('does NOT require co-approval for a ROOM-scope freeze (doctrine does not)', async () => {
+    it('ALLOWS a cross-room ROOM freeze, which cascades onto the treasury', async () => {
+      // So the emergency capability is never stranded by the refusal above: a
+      // room-scope freeze halts the treasury too (`freezeCascade`).
       const fixture = await wsmFixture({ steward: false });
       const staff = await seedUserWithSession(fixture.identity, { admin: true });
       const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
@@ -843,6 +775,34 @@ describe('WS-M treasury + payment intents', () => {
         reason: 'governance paused pending review',
       });
       expect(res.status).toBe(200);
+    });
+
+    it('does NOT demand co-approval to CLEAR a treasury hold', async () => {
+      // Doctrine attaches co-approval to placing a hold; requiring it to lift one
+      // could strand a room whose counsel is unavailable.  Reaching the domain
+      // (`no_treasury` on this fixture) proves the gate let the unfreeze through.
+      const fixture = await wsmFixture({ steward: false });
+      const staff = await seedUserWithSession(fixture.identity, { admin: true });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'unfreeze',
+        scope: 'treasury',
+        source: 'platform_security',
+        reason: 'investigation closed',
+      });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
+    });
+
+    it('404s a plain member rather than leaking that the room exists', async () => {
+      const fixture = await wsmFixture({ steward: false });
+      const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'plain_one' });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not mine to freeze',
+      });
+      expect(res.status).toBe(404);
     });
 
     it("leaves the room's OWN steward able to stop its treasury unaided", async () => {
@@ -858,7 +818,7 @@ describe('WS-M treasury + payment intents', () => {
         source: 'steward',
         reason: 'pausing while we investigate',
       });
-      // Reaches the domain with NO co-approver — the gate never fired.
+      // Reaches the domain with no co-approver — the gate never fired.
       expect(res.status).toBe(404);
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
     });

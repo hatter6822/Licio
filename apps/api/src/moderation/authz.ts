@@ -66,8 +66,14 @@ export type CapabilityDenial = {
  * (MFA freshness, co-approval).  Factored out because {@link denyCapability} and
  * {@link availableConsoleActions} both need exactly this and previously spelled
  * it out separately — two places deciding one question, free to drift.
+ *
+ * Exported for EXISTENCE checks: a route that answers 404 rather than 403 to
+ * avoid an enumeration oracle needs "could this actor ever act here?" separately
+ * from "may they act right now?".  Answering that with `denyCapability` would
+ * leak, because its MFA check fires FIRST — a plain member with a stale session
+ * would get `mfa_required`, and a 403 confirms the resource exists.
  */
-function grantsCapability(actor: StewardActor, capability: StewardCapability): boolean {
+export function grantsCapability(actor: StewardActor, capability: StewardCapability): boolean {
   const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
   if (!stewardRolesCan(roles, capability)) return false;
   if (SENIOR_ONLY_CAPABILITIES.has(capability) && !isSenior(actor.platformRoles)) return false;

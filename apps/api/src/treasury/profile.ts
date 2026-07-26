@@ -128,14 +128,6 @@ export interface FreezeInput {
   /** SAFE status text — shown to members verbatim (§29.7). */
   reason: string;
   actorUserId: string | null;
-  /**
-   * The counsel who co-approved a PLATFORM `treasury`-scope freeze
-   * (STEWARD_ROLES.md / WS-A.1.2c).  Already VERIFIED by the route — resolved
-   * from the identity store and checked against `CO_APPROVAL_CAPABILITIES` — so
-   * this is recorded, not re-judged.  Null on the room's own steward path and on
-   * `room`-scope freezes, which doctrine does not put behind co-approval.
-   */
-  coApproverUserId?: string | null;
   /** Resolved by the route (platform security/legal/T&S roles). */
   isPlatformStaff: boolean;
 }
@@ -202,18 +194,7 @@ export async function setGovernanceFreeze(
     roomId: input.roomId,
     actionType: frozen ? 'treasury_freeze_set' : 'treasury_freeze_cleared',
     actorUserId: input.actorUserId,
-    details: {
-      scope: input.scope,
-      source: input.source,
-      reason: input.reason,
-      // STEWARD_ROLES.md requires `co_approver` on an irreversible/high-impact
-      // steward action.  Recorded as the OPAQUE ref, exactly like the actor: the
-      // entry's preimage is immutable and hashed, so a raw user id here would be
-      // a user identifier no erasure request could ever remove.
-      ...(input.coApproverUserId != null
-        ? { co_approver_ref: deps.opaqueRef(input.coApproverUserId) }
-        : {}),
-    },
+    details: { scope: input.scope, source: input.source, reason: input.reason },
     treasuryId: treasury?.treasuryId ?? null,
   });
   const updated = await ensureProfile(deps, input.roomId);

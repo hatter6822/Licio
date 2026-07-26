@@ -197,14 +197,32 @@ a non-`ordinary` mode) plus the room header:
 8. **Platform-moderation supremacy.** A room's OWN steward can freeze it — the
    self-protective stop; `ELECTED_ROOM_STEWARD` sits deliberately outside the
    platform `ROLE_*` namespace (STEWARD_ROLES.md).  Freezing a room you do NOT
-   steward is the platform CROSS-ROOM capability and carries its full doctrine
-   requirements: `ROLE_INTEGRITY` + verified MFA for `room-governance-freeze`,
-   and additionally a distinct counsel co-approver (`compliance.counsel.approve`,
-   resolved server-side and recorded in the chained audit as an opaque ref) for
-   `treasury-freeze` — WS-A.1.2c.  `isPlatformStaff` alone is the WS-J `restrict`
-   capability, i.e. ROLE_SAFETY, which is NOT sufficient for either freeze.  Only
+   steward is the platform CROSS-ROOM capability and carries the doctrine
+   requirements: `ROLE_INTEGRITY` + verified MFA.  `isPlatformStaff` alone is the
+   WS-J `restrict` capability, i.e. ROLE_SAFETY, which is NOT sufficient.  Only
    the platform legal floor unfreezes, resolves legal/capture challenges, attests
    external audits, and claws back grants.
+
+   **Tracked debt — counsel co-approval for a cross-room `treasury` freeze.**
+   WS-A.1.2c requires it, and the capability set + the `denyCapability` gate that
+   consults it both exist, so that path is currently REFUSED
+   (`co_approval_required`) — fail-closed, which is the doctrine's own posture:
+   if you cannot produce the co-approval, you cannot take the action.  Operators
+   are not stranded, because a cross-room `room`-scope freeze is available and
+   CASCADES onto the treasury.
+
+   What is missing is proof of *consent*.  An earlier cut accepted a
+   `co_approver_user_id` in the request and verified that the named account holds
+   `compliance.counsel.approve` — but that proves the account exists, not that its
+   owner reviewed or agreed to this freeze: any `ROLE_INTEGRITY` caller who knows
+   a counsel user's id could name them, and the tamper-evident audit would then
+   record an approval nobody gave.  That is worse than no control, so it was
+   removed rather than shipped.
+
+   **Closure target:** an authenticated approval bound to (room, scope, reason),
+   single-use and short-lived — counsel POSTs an approval having seen the reason,
+   the freeze consumes it.  Needs an approval store (in-memory + Drizzle, per
+   `check:prod-parity`) and a migration.  Until then the refusal above stands.
 9. **No pay-to-rank.** The treasury tables live in the isolated `knomosis`
    schema (soft room refs, `packages/db/src/isolation.ts` allowlist); nothing
    here feeds ranking.
