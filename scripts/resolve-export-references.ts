@@ -197,6 +197,22 @@ function labelOf(node: NodeHandle, text: string): string {
   return 'value';
 }
 
+/**
+ * The name a node declares, as the COMPILER decodes it.
+ *
+ * Never the source spelling.  ES2022 allows an arbitrary module namespace name
+ * — `import { "foo-bar" as local } from './a.js'`, `export { value as
+ * "foo-bar" }` — and slicing the source yields `"foo-bar"` WITH its quotes,
+ * which matches nothing in the module's export table (keyed `foo-bar`).  The
+ * export then looks unreferenced and a correct branch fails.  `text` is the
+ * decoded value for an identifier and a string literal alike, so reading it is
+ * both simpler and right.
+ */
+function nameOf(node: NodeHandle | undefined): string | undefined {
+  const value: unknown = node?.text;
+  return typeof value === 'string' ? value : undefined;
+}
+
 /** Follow an alias to what it ultimately denotes; `undefined` if unresolvable. */
 function aliasTarget(symbol: TsSymbol, project: Project): TsSymbol | undefined {
   if (!(symbol.flags & SymbolFlags.Alias)) return undefined;
@@ -234,14 +250,12 @@ function publishesValue(symbol: TsSymbol, project: Project): boolean {
  * as obsolete }` introduces `obsolete`, a public runtime name that exists
  * NOWHERE else, so an entirely unused alias would otherwise pass forever.
  */
-function isUnchangedRepublish(node: NodeHandle, project: Project, text: string): boolean {
+function isUnchangedRepublish(node: NodeHandle, project: Project): boolean {
   const name = node.name;
   if (name === undefined) return false;
-  const exported = text.slice(name.getStart(), name.getEnd());
-  const property = node.propertyName;
-  const source =
-    property === undefined ? exported : text.slice(property.getStart(), property.getEnd());
-  if (exported !== source) return false; // `as` introduced a new public name
+  const exported = nameOf(name);
+  const source = nameOf(node.propertyName) ?? exported;
+  if (exported === undefined || exported !== source) return false; // `as` renamed it
   // `export { live } from './x.js'` — the specifier's own module specifier.
   if (node.parent?.parent?.moduleSpecifier !== undefined) return true;
   // `import { live } from './x.js'; export { live }` — the local it publishes
@@ -319,9 +333,7 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   if (parent?.kind !== SyntaxKind.PropertyAccessExpression) return undefined;
   const accessed = parent.name;
   if (accessed === undefined) return undefined;
-  if (accessed.getSourceFile().text.slice(accessed.getStart(), accessed.getEnd()) !== 'then') {
-    return undefined;
-  }
+  if (nameOf(accessed) !== 'then') return undefined;
   const call = parent.parent;
   if (call?.kind !== SyntaxKind.CallExpression) return undefined;
   const callback = call.arguments?.[0];
@@ -336,7 +348,7 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
  * a template interpolation inside another template interpolation is simply a
  * node inside a node, so there is no depth for the collector to get wrong.
  */
-function scanFile(root: NodeHandle, text: string): FileScan {
+function scanFile(root: NodeHandle): FileScan {
   const scan: FileScan = { offsets: [], imports: [] };
 
   const namesOfPattern = (pattern: NodeHandle): string[] => {
@@ -344,10 +356,8 @@ function scanFile(root: NodeHandle, text: string): FileScan {
     pattern.forEachChild((element) => {
       if (element.kind !== SyntaxKind.BindingElement) return;
       // `{ a: renamed }` binds `renamed`; the EXPORT it names is the key `a`.
-      const key = element.propertyName ?? element.name;
-      if (key !== undefined && key.kind === SyntaxKind.Identifier) {
-        names.push(text.slice(key.getStart(), key.getEnd()));
-      }
+      const key = nameOf(element.propertyName ?? element.name);
+      if (key !== undefined) names.push(key);
     });
     return names;
   };
@@ -372,8 +382,8 @@ function scanFile(root: NodeHandle, text: string): FileScan {
         const names: string[] = [];
         named.forEachChild((element) => {
           if (element.kind !== SyntaxKind.ImportSpecifier || element.isTypeOnly) return;
-          const key = element.propertyName ?? element.name;
-          if (key !== undefined) names.push(text.slice(key.getStart(), key.getEnd()));
+          const key = nameOf(element.propertyName ?? element.name);
+          if (key !== undefined) names.push(key);
         });
         if (names.length > 0) {
           scan.imports.push({
@@ -441,7 +451,7 @@ function exportsOfFile(
       const node = handle.resolve(project);
       const name = node?.name;
       if (node === undefined || name === undefined) continue;
-      if (node.kind === SyntaxKind.ExportSpecifier && isUnchangedRepublish(node, project, text)) {
+      if (node.kind === SyntaxKind.ExportSpecifier && isUnchangedRepublish(node, project)) {
         continue;
       }
       const offset = name.getStart();
@@ -580,7 +590,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         declared.push(entry);
       }
 
-      const scan = scanFile(source.getOrCreateNodeAtIndex(0), text);
+      const scan = scanFile(source.getOrCreateNodeAtIndex(0));
 
       // Names taken from ANOTHER module, resolved through the module symbol
       // rather than through the local identifier.  A destructured dynamic

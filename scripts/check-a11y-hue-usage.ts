@@ -153,29 +153,52 @@ const MAX_INTERPOLATION_DEPTH = 8;
  * template — would otherwise pass the gate.  Each hole is re-lexed against the
  * ORIGINAL source so the offsets stay absolute and the reported line is right.
  */
-function stringTokens(source: string): Token[] {
-  const byStart = new Map<number, Token>();
+function literalGroups(source: string): Token[][] {
+  const byKey = new Map<string, Token[]>();
+  const isLiteral = (token: Token | undefined): boolean =>
+    token?.kind === 'string' || token?.kind === 'template';
   const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
-    for (const token of tokens) {
-      if (token.kind === 'string') {
-        byStart.set(token.start, token);
-        continue;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (!isLiteral(token) || token === undefined) continue;
+      // A maximal `+`-joined run of literals is ONE class string at runtime:
+      // `className={'text-' + 'error'}` renders `text-error`, and examining the
+      // two halves separately finds neither the utility nor a violation.
+      const group: Token[] = [token];
+      let j = i + 1;
+      while (
+        tokens[j]?.kind === 'punct' &&
+        tokens[j]?.value === '+' &&
+        isLiteral(tokens[j + 1]) &&
+        group.length < MAX_CONCAT_OPERANDS
+      ) {
+        const next = tokens[j + 1];
+        if (next === undefined) break;
+        group.push(next);
+        j += 2;
       }
-      if (token.kind !== 'template') continue;
-      byStart.set(token.start, token);
-      if (depth >= MAX_INTERPOLATION_DEPTH) continue;
-      for (const span of interpolationSpans(token.value, token.start, preferRegex)) {
-        visit(
-          tokenize(source, preferRegex, { from: span.offset, stopAtUnmatchedBrace: true }),
-          preferRegex,
-          depth + 1,
-        );
+      byKey.set(group.map((each) => each.start).join(','), group);
+      if (depth < MAX_INTERPOLATION_DEPTH) {
+        for (const part of group) {
+          if (part.kind !== 'template') continue;
+          for (const span of interpolationSpans(part.value, part.start, preferRegex)) {
+            visit(
+              tokenize(source, preferRegex, { from: span.offset, stopAtUnmatchedBrace: true }),
+              preferRegex,
+              depth + 1,
+            );
+          }
+        }
       }
+      i = j - 1;
     }
   };
   for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
-  return [...byStart.values()].sort((a, b) => a.start - b.start);
+  return [...byKey.values()].sort((a, b) => (a[0]?.start ?? 0) - (b[0]?.start ?? 0));
 }
+
+/** A runaway guard: no real class expression concatenates this many literals. */
+const MAX_CONCAT_OPERANDS = 64;
 
 /**
  * A template literal's `${…}` holes hold EXPRESSIONS, not class text.  Blank
@@ -326,19 +349,45 @@ function decodeStringEscapes(raw: string): Decoded {
   return { text: units.join(''), offsets };
 }
 
+/**
+ * The runtime string a `+`-joined literal group produces, with ABSOLUTE offsets.
+ *
+ * The delimiters are dropped rather than kept, because the joined value is what
+ * the browser receives: `'text-' + 'error'` is `text-error`, and a quote sitting
+ * between them exists only in the source.  {@link BARE_HUE} anchors on `^` as
+ * well as on a separator, so a class that begins the string still matches while
+ * `my-text-error` — a different utility — still does not.
+ */
+function groupContent(group: readonly Token[]): Decoded {
+  const units: string[] = [];
+  const offsets: number[] = [];
+  for (const token of group) {
+    const raw = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
+    // Past the opening delimiter, and short of the closing one.
+    const inner = raw.slice(1, Math.max(1, raw.length - 1));
+    const decoded = decodeStringEscapes(inner);
+    for (let i = 0; i < decoded.text.length; i += 1) {
+      units.push(decoded.text[i] ?? '');
+      offsets.push(token.start + 1 + (decoded.offsets[i] ?? i));
+    }
+  }
+  return { text: units.join(''), offsets };
+}
+
 /** Every bare-hue text use in `files` that is neither an icon nor exempted. */
 export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] {
   const findings: HueFinding[] = [];
   for (const file of files) {
     const newlines = newlineIndex(file.content);
     const lines = file.content.split('\n');
-    for (const token of stringTokens(file.content)) {
-      const raw = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
-      // What the RUNTIME sees: `'text-error'` is the class `text-error`.
-      const { text, offsets } = decodeStringEscapes(raw);
+    for (const group of literalGroups(file.content)) {
+      const start = group[0]?.start ?? 0;
+      // What the RUNTIME sees: the operands joined, delimiters dropped, escapes
+      // decoded.  `'text-' + 'error'` is the class `text-error`.
+      const { text, offsets } = groupContent(group);
       // An ICON is a graphical object (WCAG 1.4.11, 3:1).  BOTH halves are
       // required: the size class alone describes a box, not a glyph.
-      if (ICON_SIZE.test(text) && enclosingElement(file.content, token.start) === ICON_ELEMENT) {
+      if (ICON_SIZE.test(text) && enclosingElement(file.content, start) === ICON_ELEMENT) {
         continue;
       }
       const match = BARE_HUE.exec(text);
@@ -346,9 +395,8 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       // A template may span lines, so anchor on the HUE rather than the token
       // start: the reported line is where the class actually sits.  `+ 1` skips
       // the delimiter the pattern consumed before `text-`, and the offset map
-      // carries that decoded index back to the source it was written at.
-      const hueAt = offsets[match.index + 1] ?? offsets[match.index] ?? match.index;
-      const line = lineOf(newlines, token.start + hueAt);
+      // carries that joined index back to the source it was written at.
+      const line = lineOf(newlines, offsets[match.index + 1] ?? offsets[match.index] ?? start);
       if (isExempt(lines, line)) continue;
       findings.push({
         file: file.path,

@@ -8,6 +8,8 @@
 // `LCAP_NETWORK_ID`.
 
 import { createDbClient } from '@licio/db';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
 import { DrizzleLcapServerStore } from './drizzle-store.js';
 import {
   DrizzlePublishAuditStore,
@@ -60,7 +62,20 @@ let publishAudit: PublishAuditStore | undefined;
 let sharedDb: { url: string; client: ReturnType<typeof createDbClient> } | undefined;
 
 function dbClientFor(dbUrl: string): ReturnType<typeof createDbClient> {
-  if (sharedDb?.url !== dbUrl) sharedDb = { url: dbUrl, client: createDbClient(dbUrl) };
+  if (sharedDb?.url !== dbUrl) {
+    // `onNotice` is passed for the same reason the main boot passes one: the db
+    // wrapper ALWAYS installs its own `onnotice` (never postgres.js's
+    // `console.log` default), so omitting the sink does not fall back to
+    // anything — it DISCARDS every notice from every LCAP store.
+    const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
+    sharedDb = {
+      url: dbUrl,
+      client: createDbClient(dbUrl, {
+        onNotice: (notice) =>
+          logger[pgNoticeLogLevel(notice.severity)]({ pgNotice: notice }, 'postgres notice (lcap)'),
+      }),
+    };
+  }
   return sharedDb.client;
 }
 

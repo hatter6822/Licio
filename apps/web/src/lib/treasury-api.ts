@@ -31,7 +31,7 @@ import {
   type ProposalChallengeRequest,
   type ProposalSignRequest,
   type ProposalSignResponse,
-  paymentIntentSchema,
+  paymentIntentResponseSchema,
   productionProposalListResponseSchema,
   productionProposalResponseSchema,
   proposalSignResponseSchema,
@@ -207,7 +207,7 @@ export async function fetchPaymentIntent(
   const res = await client.v1.rooms[':roomId'].treasury['payment-intents'][':paymentIntentId'].$get(
     { param: { roomId, paymentIntentId } },
   );
-  return (await parseResponse(res, z.object({ intent: paymentIntentSchema }).strict())).intent;
+  return (await parseResponse(res, paymentIntentResponseSchema)).intent;
 }
 
 export type IntentAdvanceStep = 'preflight' | 'quote' | 'signed' | 'retry';

@@ -225,6 +225,17 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\/|not inside <head>/);
     });
 
+    // A `<head>` START TAG once body content has begun is ignored outright —
+    // the parser is already in the body insertion mode — so the meta is body
+    // content, while a textual search finds a perfectly good `head` to measure
+    // from and certifies a courier with no effective policy.
+    it.each([
+      ['<body>', `<!doctype html><html><body><head>${META}</head></body></html>`],
+      ['other body content', `<!doctype html><html><p>x</p><head>${META}</head></html>`],
+    ])('rejects a <head> opened after %s', (_label, html) => {
+      expect(problems(html).join('\n')).toContain('not inside <head>');
+    });
+
     it.each([
       [
         'first in head',

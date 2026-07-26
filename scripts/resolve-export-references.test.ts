@@ -194,6 +194,17 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: an ARBITRARY MODULE NAMESPACE NAME (ES2022) ──────────────
+  // `export { value as "foo-bar" }` publishes a name no identifier can spell,
+  // and the importer names it with a string literal.  Reading the source
+  // spelling yields `"foo-bar"` WITH quotes, which matches nothing in the
+  // export table and makes a consumed export look dead.
+  'src/arbitrary.ts': ['const value = 9;', 'export { value as "foo-bar" };'].join('\n'),
+  'src/arbitrary-consumer.ts': [
+    'import { "foo-bar" as renamedLocal } from \'./arbitrary.js\';',
+    'export const readsArbitrary = renamedLocal;',
+  ].join('\n'),
+
   // ── Reference: a namespace ELEMENT ACCESS names the export with a string ─
   // `mod['ACCESSED']` is the same reference as `mod.ACCESSED`; only the node
   // kind differs, and an identifier-only walk never asks about it.
@@ -373,6 +384,13 @@ describe('resolution: which sites use a binding', () => {
     // `const { lazilyUsed } = await import('./lazy.js')` resolves the identifier
     // to that new local, never to the export, so this needs the specifier route.
     expect(usesOf('src/lazy.ts', 'lazilyUsed').length).toBeGreaterThan(0);
+  });
+
+  it('counts an ARBITRARY MODULE NAMESPACE NAME, imported by string literal', () => {
+    // `export { value as "foo-bar" }` consumed as
+    // `import { "foo-bar" as renamedLocal }`.  The export table keys it
+    // `foo-bar`; the source spells it `"foo-bar"`, quotes included.
+    expect(usesOf('src/arbitrary.ts', 'foo-bar').length).toBeGreaterThan(0);
   });
 
   it('counts a namespace ELEMENT ACCESS naming the export with a string', () => {

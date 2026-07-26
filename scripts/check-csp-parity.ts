@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
+import { type HtmlTag, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -238,6 +238,51 @@ const HEAD_CONTENT: ReadonlySet<string> = new Set([
   'title',
 ]);
 
+/**
+ * The byte range the parser actually treats as `<head>` content, or `undefined`
+ * when the document has no head a `<meta>` could be a child of.
+ *
+ * Walked as a small state machine rather than "find `<head>`, then find its
+ * end", because BOTH boundaries are implied as often as they are written:
+ *
+ *   • a `<head>` start tag AFTER body content has begun is IGNORED — the parser
+ *     is already in the body insertion mode — so `<html><body><head><meta …>`
+ *     leaves the policy in the body, ineffective, while a textual search finds
+ *     a perfectly good `head` to measure from;
+ *   • the head closes at the first token that is not head content, with or
+ *     without a `</head>`.
+ *
+ * A document with NO explicit `<head>` is reported as having none, even though
+ * the parser would imply one around leading head content.  That is stricter
+ * than the parser and deliberately so: this gate's one unacceptable failure is
+ * certifying a courier that ships unprotected, so where the model is unsure it
+ * reports rather than accepts.  The built artifact always carries an explicit
+ * head.
+ */
+function findHeadRange(
+  tags: readonly HtmlTag[],
+): { from: number; to: number; endedBy?: HtmlTag } | undefined {
+  let from: number | undefined;
+  for (const tag of tags) {
+    if (tag.closing) {
+      if (tag.name === 'head' || tag.name === 'body' || tag.name === 'html') {
+        return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
+      }
+      continue; // `</title>`, `</style>`, … — still inside the head
+    }
+    if (tag.name === 'html') continue; // the root element; a head may still follow
+    if (tag.name === 'head') {
+      if (from === undefined) from = tag.end;
+      continue; // a SECOND `<head>` start tag is a parse error and ignored
+    }
+    // Anything else is body content.  Reached before a `<head>`, it means the
+    // parser implied an EMPTY head and moved on, so no later `<head>` counts.
+    if (from === undefined) return undefined;
+    if (!HEAD_CONTENT.has(tag.name)) return { from, to: tag.at, endedBy: tag };
+  }
+  return from === undefined ? undefined : { from, to: Number.POSITIVE_INFINITY };
+}
+
 /** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
 function findPlacementProblem(html: string, policyAt: number): string | null {
   // The same element walk the policy itself was found by: a `<head>` or a
@@ -245,24 +290,18 @@ function findPlacementProblem(html: string, policyAt: number): string | null {
   // attribute value is not an element, and treating one as markup would move
   // the very boundary this check is about.
   const tags = scanTags(html);
-  const headOpen = tags.find((tag) => tag.name === 'head' && !tag.closing);
-  if (headOpen === undefined || policyAt < headOpen.end) {
+  const head = findHeadRange(tags);
+  if (head === undefined || policyAt < head.from) {
     return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
   }
-  // Where the PARSER ends the head — an explicit close, or the first token that
-  // implies one.  Tags inside inert content never reach here: `scanTags` steps
-  // over it, so a `<p>` in a `<template>` does not close the head.
-  const headClose = tags.find(
-    (tag) =>
-      tag.at >= headOpen.end &&
-      (tag.closing
-        ? tag.name === 'head' || tag.name === 'html' || tag.name === 'body'
-        : !HEAD_CONTENT.has(tag.name)),
-  );
-  if (headClose !== undefined && policyAt > headClose.at) {
-    const how = headClose.closing
-      ? `AFTER </${headClose.name}>`
-      : `outside <head> — the parser closes the head implicitly at <${headClose.name}>`;
+  if (policyAt > head.to) {
+    const ended = head.endedBy;
+    const how =
+      ended === undefined
+        ? 'outside <head>'
+        : ended.closing
+          ? `AFTER </${ended.name}>`
+          : `outside <head> — the parser closes the head implicitly at <${ended.name}>`;
     return (
       `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits ${how}. A meta policy is honoured only ` +
       'as a child of <head> (CSP L3 §3.3), and the courier WebView has no header to fall back on.'

@@ -56,6 +56,24 @@ describe('the bare hue on normal text', () => {
     expect(hues(source)).toEqual(['1:error']);
   });
 
+  it.each([
+    ['two literals', `<span className={'text-' + 'error'} />`],
+    ['three literals', `<span className={'te' + 'xt-' + 'error'} />`],
+    ['a template operand', '<span className={`text-` + `error`} />'],
+    ['a joined suffix', `<span className={'flex text-' + 'warning'} />`],
+  ])('folds a class built by static concatenation (%s)', (_label, source) => {
+    // The browser receives the JOINED string; examining the operands separately
+    // finds neither the complete utility nor a violation.
+    expect(hues(source)).toHaveLength(1);
+  });
+
+  it('does not invent a hue across a NON-concatenated boundary', () => {
+    // Two unrelated arguments are not one class string.  Joining them blindly
+    // would report a violation that does not exist, which fails a correct build.
+    expect(hues(`<p className={cn('text-', 'error')} />`)).toEqual([]);
+    expect(hues(`const a = 'text-'; const b = 'error';`)).toEqual([]);
+  });
+
   it('flags a hue inside a cn(...) argument', () => {
     expect(
       hues(`<p className={cn('text-sm', blocked ? 'text-error' : 'text-ink-muted')} />`),

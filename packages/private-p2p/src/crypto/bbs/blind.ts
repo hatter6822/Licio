@@ -119,14 +119,20 @@ function deserializeCommit(bytes: Uint8Array, m: number): ParsedCommit {
   if (c.is0()) throw new Error('blind: identity commitment');
   c.assertValidity();
   const sc = (o: number): bigint => {
-    const s = os2ip(bytes.slice(o, o + 32));
+    const s = os2ip(bytes.slice(o, o + OCTET_SCALAR_LENGTH));
     if (s <= 0n || s >= ORDER) throw new Error('blind: scalar out of range');
     return s;
   };
   const ch = sc(OCTET_POINT_LENGTH);
+  // Past `c || ch`.  Spelled from the two wire widths rather than as `80`, so
+  // the length check above and these field offsets can never describe different
+  // layouts — that disagreement would not throw, it would parse the next
+  // field's bytes as a scalar.  Deliberately NOT `SIGNATURE_LENGTH`, which is
+  // the same number for an unrelated reason.
+  const zBase = OCTET_POINT_LENGTH + OCTET_SCALAR_LENGTH;
   const zMsgs: bigint[] = [];
-  for (let i = 0; i < m; i++) zMsgs.push(sc(80 + i * 32));
-  const zS = sc(80 + m * 32);
+  for (let i = 0; i < m; i++) zMsgs.push(sc(zBase + i * OCTET_SCALAR_LENGTH));
+  const zS = sc(zBase + m * OCTET_SCALAR_LENGTH);
   return { c, ch, zMsgs, zS };
 }
 

@@ -153,7 +153,23 @@ it"). Both are now fixed:
   equal only by coincidence of this ciphersuite) is kept separate and is now
   exported rather than declared twice.
 
-A pass over the remaining 44 found the rest correctly classified — aliases of
+- `paymentIntentResponseSchema` — the single-intent response ENVELOPE. Filed as
+  vestigial because nothing imported it; in fact the same wire contract was
+  recreated inline at `apps/web/src/lib/treasury-api.ts` as
+  `z.object({ intent: paymentIntentSchema }).strict()`, so this was outcome 2
+  ("two spellings of a live value"), not outcome 3. A change to the envelope
+  would have updated the server while that TanStack Query boundary went on
+  validating the old shape — a zod boundary describing an obsolete contract
+  fails closed on correct data. Restored and imported at the call site. Its
+  sibling `paymentIntentListResponseSchema` is NOT restored: nothing spells that
+  shape anywhere, so it was genuinely vestigial.
+
+The two misclassifications above share a shape worth naming: both were judged by
+asking "does anything import this?" when the question the gate actually poses is
+"is this the only spelling of the thing?" An unreferenced export sitting beside
+a hand-copied duplicate is the strongest evidence of outcome 2, not of outcome 3.
+
+A pass over the remaining 43 found the rest correctly classified — aliases of
 live constants (`CHALLENGE_STATES`, `CHALLENGE_TYPES`) and genuinely vestigial
 values — with two exceptions that need a decision rather than a restore,
 recorded here:
