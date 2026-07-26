@@ -281,6 +281,24 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       expect(problems(html)).toEqual([]);
     });
 
+    it('keeps a LEADING `=` in an attribute name', () => {
+      // `<meta =http-equiv=…>` has an attribute NAMED `=http-equiv`: a `=` in
+      // the before-attribute-name position is a parse error and becomes the
+      // first character of the name.  Skipping it invented the very attribute
+      // the browser refuses to create.
+      const html = `<!doctype html><html><head><meta =http-equiv=Content-Security-Policy content="${POLICY}"></head><body></body></html>`;
+      expect(extractMetaPolicies(html)).toEqual([]);
+      expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+    });
+
+    it('never leaves PLAINTEXT, even inside a template', () => {
+      // The tokenizer has no exit from PLAINTEXT, so the `</template>` after it
+      // is character data and the template runs to the end of the document.
+      const html = `<!doctype html><html><head><template><plaintext></template>${META}</head><body></body></html>`;
+      expect(extractMetaPolicies(html)).toEqual([]);
+      expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+    });
+
     it('treats `</br>` as closing the head', () => {
       const html = `<!doctype html><html><head></br>${META}</head><body></body></html>`;
       expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\//);

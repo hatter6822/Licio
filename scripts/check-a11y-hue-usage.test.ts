@@ -242,6 +242,19 @@ describe('what is NOT a violation', () => {
     expect(hues(`const a = 'bg-primary-active text-primary-fg';`)).toEqual([]);
   });
 
+  it.each([
+    ['a hover-only background under always-white text', `'hover:bg-error text-error-fg'`, 1],
+    ['matching variants', `'hover:bg-error hover:text-error-fg'`, 0],
+    ['an unconditional background under variant text', `'bg-error hover:text-error-fg'`, 0],
+    ['an arbitrary variant on both', `'[&:focus]:bg-error [&:focus]:text-error-fg'`, 0],
+    ['an important-modified background', `'!bg-error text-error-fg'`, 0],
+  ])('matches the VARIANT of a -fg token and its background (%s)', (_label, cls, want) => {
+    // Co-occurrence is not pairing: `hover:bg-error text-error-fg` paints the
+    // background only on hover while the text is white always, so at rest it is
+    // white on the canvas.  An UNCONDITIONAL background covers every state.
+    expect(hues(`const a = ${cls};`)).toHaveLength(want);
+  });
+
   it('REJECTS a -fg token over the SOFT tint, which is nearly white', () => {
     // `error-soft` is #FBE7E5 — white text on it is the same defect as white
     // text on the canvas.  That pairing wants `-on-soft`.

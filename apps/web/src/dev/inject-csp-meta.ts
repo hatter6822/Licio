@@ -154,12 +154,17 @@ function readTag(html: string, at: number): HtmlTag | null {
   while (i < len) {
     const char = html[i] ?? '';
     if (char === '>') return done(i + 1);
-    if (SPACE.test(char) || char === '/' || char === '=') {
+    if (SPACE.test(char) || char === '/') {
       i += 1;
       continue;
     }
-    // An attribute name, then optionally `=` and a value.
+    // An attribute name, then optionally `=` and a value.  A `=` in the
+    // BEFORE-ATTRIBUTE-NAME position is a parse error and becomes the first
+    // character OF THE NAME, so `<meta =http-equiv=…>` has an attribute called
+    // `=http-equiv` and no `http-equiv` at all.  Skipping it invented the very
+    // attribute the browser refuses to create.
     const nameStart = i;
+    if (char === '=') i += 1;
     while (i < len) {
       const inner = html[i] ?? '';
       if (SPACE.test(inner) || inner === '=' || inner === '>' || inner === '/') break;
@@ -400,6 +405,12 @@ function endOfTemplate(html: string, from: number): number {
       i += 1;
       continue;
     }
+    // PLAINTEXT has no exit state, INSIDE a template as much as outside it: the
+    // tokenizer never returns to markup, so the `</template>` that appears to
+    // close this one is character data and the template runs to the end of the
+    // document.  Treating that apparent close as real exposed everything after
+    // it — including a `<meta>` the browser never creates.
+    if (!tag.closing && tag.name === PLAINTEXT) return html.length;
     if (tag.name === 'template') {
       if (!tag.closing) depth += 1;
       else {

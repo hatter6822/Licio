@@ -426,7 +426,16 @@ function scanFile(root: NodeHandle): FileScan {
   const namesOfPattern = (pattern: NodeHandle): string[] => {
     const names: string[] = [];
     pattern.forEachChild((element) => {
-      if (element.kind !== SyntaxKind.BindingElement) return;
+      // A DECLARATION's pattern holds `BindingElement`s; an ASSIGNMENT's target
+      // is an object literal, whose members are shorthand or property
+      // assignments.  Both name the export the same way, so both are read.
+      if (
+        element.kind !== SyntaxKind.BindingElement &&
+        element.kind !== SyntaxKind.ShorthandPropertyAssignment &&
+        element.kind !== SyntaxKind.PropertyAssignment
+      ) {
+        return;
+      }
       // `{ a: renamed }` binds `renamed`; the EXPORT it names is the key `a`.
       const key = nameOf(element.propertyName ?? element.name);
       if (key !== undefined) names.push(key);
@@ -511,11 +520,24 @@ function scanFile(root: NodeHandle): FileScan {
       node.kind === SyntaxKind.VariableDeclaration &&
       node.name?.kind === SyntaxKind.ObjectBindingPattern
     ) {
-      // `const { A } = mod`, where `mod` holds a dynamic import's namespace —
-      // and `= (mod)` or `= (mod as typeof …)`, which are the same read.
+      // `const { A } = mod`, where `mod` holds a namespace — and `= (mod)` or
+      // `= (mod as typeof …)`, which are the same read.
       const from = unwrap(node.initializer);
       if (from?.kind === SyntaxKind.Identifier) {
         deferredDestructures.push({ pattern: node.name, from });
+      }
+    } else if (
+      node.kind === SyntaxKind.BinaryExpression &&
+      node.operatorToken?.kind === SyntaxKind.EqualsToken &&
+      node.left?.kind === SyntaxKind.ObjectLiteralExpression
+    ) {
+      // `({ A } = mod)` — a destructuring ASSIGNMENT into bindings that already
+      // exist.  Its target parses as an object LITERAL rather than a binding
+      // pattern, so a check keyed on `VariableDeclaration` never saw it, and the
+      // assigned identifier resolves to the pre-existing local.
+      const from = unwrap(node.right);
+      if (from?.kind === SyntaxKind.Identifier) {
+        deferredDestructures.push({ pattern: node.left, from });
       }
     }
     node.forEachChild(visit);

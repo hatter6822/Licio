@@ -44,6 +44,27 @@ const ROOT = resolve(import.meta.dirname, '..');
 export const WEB_SRC = 'apps/web/src';
 
 /**
+ * Where a class STARTS in a string, and where it ends.
+ *
+ * Spelled ONCE because four patterns need it — the bare hue, the `-fg` token,
+ * its paired background, and the icon size — and they had three spellings
+ * between them: `ICON_SIZE` omitted `:` and `!`, so a variant-prefixed
+ * `md:size-4` did not read as a size and an icon carrying one lost its
+ * exemption.  A rule that four patterns each restate is a rule that disagrees
+ * with itself the first time one of them is edited.
+ *
+ * The separators include `:` and `!` so a VARIANT-prefixed class matches:
+ * `hover:text-error`, `md:text-warning`, `[&:focus]:text-error`, `!text-error`.
+ * The colour is still rendered as normal text in that state — a state a user is
+ * very likely to be reading in — so the contrast obligation is identical.
+ */
+const CLASS_BOUNDARY = String.raw`(?:^|[\s'"\`{:!])`;
+/** A class ends at anything that is not a further name character. */
+const CLASS_END = String.raw`(?![\w-])`;
+/** The five semantic hues, spelled once for every pattern that names them. */
+const HUES = 'primary|success|warning|error|info';
+
+/**
  * `text-<hue>` NOT followed by `-` (so not `-on-soft`).
  *
  * All FIVE tokens, `primary` included: `tokens.test.ts` asserts the same
@@ -59,7 +80,7 @@ export const WEB_SRC = 'apps/web/src';
  * is still rendered as normal text in that state — a state a user is very
  * likely to be reading in — so the contrast obligation is identical.
  */
-const BARE_HUE = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)(?![\w-])/;
+const BARE_HUE = new RegExp(`${CLASS_BOUNDARY}text-(${HUES})${CLASS_END}`);
 
 /**
  * `text-<hue>-fg` — the token meant for text ON a solid hue background.
@@ -76,21 +97,46 @@ const BARE_HUE = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)(?![\
  * `bg-error text-error-fg` on a destructive button from a bare `text-error-fg`
  * on an alert paragraph.
  */
-const HUE_FG = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)-fg(?![\w-])/;
+const HUE_FG = new RegExp(`${CLASS_BOUNDARY}([\\w[\\]&:.-]*?)text-(${HUES})-fg${CLASS_END}`);
 
 /**
- * The SOLID background that makes a `-fg` token legible.
+ * Whether a solid `bg-<hue>` covers the states in which this `-fg` text renders.
  *
  * `bg-<hue>` and its interaction variants (`-hover`, `-active`) are the solid
  * fills the token is contrast-tested against.  `-soft` is deliberately NOT among
  * them: it is a pale tint (`error-soft` is `#FBE7E5`), and white text on it is
  * the same defect as white text on the canvas — that pairing wants `-on-soft`.
+ *
+ * The VARIANT has to match, which mere co-occurrence does not check:
+ * `hover:bg-error text-error-fg` paints the background only on hover while the
+ * text is white always, so at rest it is white on the canvas.  A background
+ * qualifies when it carries the same variant prefix as the text, or NO prefix —
+ * an unconditional fill covers every state the text can render in, including
+ * the prefixed ones.
  */
-const pairedBackground = (hue: string): RegExp =>
-  new RegExp(`(?:^|[\\s'"\`{:!])bg-${hue}(?:-hover|-active)?(?![\\w-])`);
+const pairedBackground = (hue: string, variant: string): RegExp =>
+  new RegExp(
+    `${BACKGROUND_BOUNDARY}(?:${escapeVariant(variant)})?bg-${hue}(?:-hover|-active)?${CLASS_END}`,
+  );
+
+/**
+ * Like {@link CLASS_BOUNDARY} but WITHOUT `:`, for matching a background.
+ *
+ * The variant prefix is matched explicitly here, so a `:` must not also be able
+ * to serve as the boundary — with it, an empty variant matched `hover:bg-error`
+ * as though it were unconditional, which is the very pairing this check exists
+ * to reject.  A prefixed background still matches when the prefix is the one
+ * asked for, because that prefix is part of the pattern rather than skipped by
+ * the boundary.
+ */
+const BACKGROUND_BOUNDARY = String.raw`(?:^|[\s'"\`{!])`;
+
+/** A variant prefix, safe to embed: Tailwind's are `[&:focus]:`-shaped. */
+const escapeVariant = (variant: string): string =>
+  variant === '' ? '' : variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
-const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;
+const ICON_SIZE = new RegExp(`${CLASS_BOUNDARY}size-\\d`);
 
 /** The component that renders an icon here; the ONLY element `size-*` exempts. */
 const ICON_ELEMENT = 'Icon';
@@ -598,8 +644,11 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       const bare = BARE_HUE.exec(text);
       // A `-fg` token is legible only over its own solid background.
       const fg = HUE_FG.exec(text);
+      // Group 1 is the variant prefix (`hover:`, `md:`, …), group 2 the hue.
       const unpaired =
-        fg !== null && fg[1] !== undefined && !pairedBackground(fg[1]).test(text) ? fg : null;
+        fg !== null && fg[2] !== undefined && !pairedBackground(fg[2], fg[1] ?? '').test(text)
+          ? fg
+          : null;
       const match = bare ?? unpaired;
       if (match === null) continue;
       // A template may span lines, so anchor on the HUE rather than the token
@@ -611,8 +660,7 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       findings.push({
         file: file.path,
         line,
-        // biome-ignore lint/style/noNonNullAssertion: group 1 of a matched regex.
-        hue: match[1]!,
+        hue: (match === bare ? match[1] : match[2]) ?? '',
         source: (lines[line - 1] ?? '').trim(),
       });
     }

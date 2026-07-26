@@ -239,6 +239,21 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a destructuring ASSIGNMENT, not a declaration ────────────
+  'src/assigned.ts': ['export const ASSIGN_LIVE = 15;', 'export const ASSIGN_RENAMED = 16;'].join(
+    '\n',
+  ),
+  'src/assigned-consumer.ts': [
+    "import * as ns from './assigned.js';",
+    'export function read(): number {',
+    '  let ASSIGN_LIVE: number;',
+    '  let local: number;',
+    '  ({ ASSIGN_LIVE } = ns);',
+    '  ({ ASSIGN_RENAMED: local } = ns);',
+    '  return ASSIGN_LIVE + local;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: the namespace STORED, then destructured a statement later ─
   'src/stored.ts': ['export const STORED_LIVE = 11;'].join('\n'),
   'src/stored-consumer.ts': [
@@ -458,6 +473,15 @@ describe('resolution: which sites use a binding', () => {
     // `.then(({ A }) => …)`.
     expect(usesOf('src/wrapped-callback.ts', 'CALLBACK_LIVE').length).toBeGreaterThan(0);
   });
+
+  it.each(['ASSIGN_LIVE', 'ASSIGN_RENAMED'])(
+    'counts a destructuring ASSIGNMENT into existing bindings (%s)',
+    (name) => {
+      // `({ A } = ns)` targets an object LITERAL rather than a binding pattern,
+      // so a check keyed on `VariableDeclaration` never saw it.
+      expect(usesOf('src/assigned.ts', name).length).toBeGreaterThan(0);
+    },
+  );
 
   it('counts a STATIC namespace import destructured later', () => {
     // `import * as ns from 'M'; const { A } = ns` binds the namespace exactly
