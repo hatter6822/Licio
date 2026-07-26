@@ -43,8 +43,17 @@ import { interpolationSpans, type Token, tokenize } from './js-sink-analyzer.js'
 const ROOT = resolve(import.meta.dirname, '..');
 export const WEB_SRC = 'apps/web/src';
 
-/** `text-success|warning|error|info` NOT followed by `-` (so not `-on-soft`). */
-const BARE_HUE = /(?:^|[\s'"`{])text-(success|warning|error|info)(?![\w-])/;
+/**
+ * `text-<hue>` NOT followed by `-` (so not `-on-soft`).
+ *
+ * All FIVE tokens, `primary` included: `tokens.test.ts` asserts the same
+ * property of every one of them (`>= 3:1` on the canvas, and in dark mode
+ * `< 4.5:1`), so covering only the four "semantic" hues would leave the gate
+ * enforcing four fifths of an invariant the palette states about five.  The
+ * BottomNav "Submit" tab is the precedent — it was `text-primary` at ~3.3:1 on
+ * the dark canvas, and it is not a different defect from `text-error` at 3.35.
+ */
+const BARE_HUE = /(?:^|[\s'"`{])text-(primary|success|warning|error|info)(?![\w-])/;
 
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
 const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;

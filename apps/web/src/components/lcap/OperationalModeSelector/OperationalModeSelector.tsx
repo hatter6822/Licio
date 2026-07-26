@@ -362,6 +362,9 @@ export function OperationalModeSelector({
                         aria-hidden="true"
                         className={cn(
                           'flex size-5 shrink-0 items-center justify-center rounded-full border',
+                          // a11y-bare-hue-ok: `aria-hidden` radio INDICATOR — the
+                          // hue is the ring plus the `bg-current` dot below, a
+                          // graphical UI component (WCAG 1.4.11, 3:1), never text.
                           selected ? 'border-primary text-primary' : 'border-line-strong',
                         )}
                       >

@@ -444,7 +444,7 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
                 href={item.url}
                 target="_blank"
                 rel="noreferrer"
-                className="font-medium text-primary underline"
+                className="font-medium text-primary-on-soft underline"
               >
                 Open the GIF deliberately
               </a>

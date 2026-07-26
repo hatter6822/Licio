@@ -66,7 +66,7 @@ describe('the bare hue on normal text', () => {
     expect(hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
       '1:success',
     ]);
-    for (const hue of ['success', 'warning', 'error', 'info']) {
+    for (const hue of ['primary', 'success', 'warning', 'error', 'info']) {
       expect(hues(`const a = 'text-${hue}';`)).toEqual([`1:${hue}`]);
     }
   });

@@ -158,7 +158,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
     <>
       <button
         type="button"
-        className="text-left text-primary underline"
+        className="text-left text-primary-on-soft underline"
         onClick={activate}
         title={t('console.linkCheckTitle', 'Checks this link for malware before opening')}
       >
