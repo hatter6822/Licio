@@ -58,97 +58,107 @@ export const WEB_SRC = 'apps/web/src';
  * The colour is still rendered as normal text in that state — a state a user is
  * very likely to be reading in — so the contrast obligation is identical.
  */
-const CLASS_BOUNDARY = String.raw`(?:^|[\s'"\`{:!])`;
-/** A class ends at anything that is not a further name character. */
-const CLASS_END = String.raw`(?![\w-])`;
-/** The five semantic hues, spelled once for every pattern that names them. */
-const HUES = 'primary|success|warning|error|info';
+// PAIRING IS A CASCADE QUESTION, not a text-matching one.
+//
+// `text-<hue>-fg` is `#FFFFFF`, and the token suite contrast-tests it against
+// the SOLID `bg-<hue>` alone — so it is legible exactly where that fill is
+// painted, and nowhere else.  Deciding that means knowing which background is
+// in force where the text renders, which four regexes searching for token names
+// could not express.  Each round found the next state they got wrong: a
+// hover-only background under always-white text, an `sm:` background replacing
+// an unconditional one, and an `sm:` background still in force at `sm:hover`.
+//
+// The model instead is Tailwind's own: a utility is `variant:variant:name`, it
+// is ACTIVE wherever all its conditions hold, and of the active backgrounds the
+// last declared is the one painted.  Three lines of rule, and the states fall
+// out of it rather than being enumerated.
+
+/** The five semantic hues, spelled once for every rule that names them. */
+const HUES: ReadonlySet<string> = new Set(['primary', 'success', 'warning', 'error', 'info']);
 
 /**
- * `text-<hue>` NOT followed by `-` (so not `-on-soft`).
+ * One utility as Tailwind reads it: its VARIANT conditions and the utility name.
  *
- * All FIVE tokens, `primary` included: `tokens.test.ts` asserts the same
- * property of every one of them (`>= 3:1` on the canvas, and in dark mode
- * `< 4.5:1`), so covering only the four "semantic" hues would leave the gate
- * enforcing four fifths of an invariant the palette states about five.  The
- * BottomNav "Submit" tab is the precedent — it was `text-primary` at ~3.3:1 on
- * the dark canvas, and it is not a different defect from `text-error` at 3.35.
- *
- * `:` and `!` join the delimiters so a VARIANT-prefixed class is matched too:
- * `hover:text-error`, `md:text-warning`, `dark:text-info`,
- * `group-hover:text-error`, `[&:focus]:text-error`, `!text-error`.  The colour
- * is still rendered as normal text in that state — a state a user is very
- * likely to be reading in — so the contrast obligation is identical.
+ * A class is `variant:variant:utility`, optionally `!`-prefixed.  Splitting on
+ * `:` is the whole parse — and it replaces four regexes that each embedded
+ * their own idea of where a class starts, what a variant prefix looks like and
+ * how one ends.  Those regexes could ask "is this token present" but not "is
+ * this background IN FORCE where that text renders", which is the question the
+ * pairing rule actually turns on.
  */
-const BARE_HUE = new RegExp(`${CLASS_BOUNDARY}text-(${HUES})${CLASS_END}`);
+interface Utility {
+  /** The conditions, in source order: `sm:hover:` → `['sm', 'hover']`. */
+  readonly variants: readonly string[];
+  /** The utility itself, `!` stripped: `sm:hover:!bg-error` → `bg-error`. */
+  readonly name: string;
+  /** Index of the utility's first character within the class string. */
+  readonly at: number;
+}
 
-/**
- * `text-<hue>-fg` — the token meant for text ON a solid hue background.
- *
- * `#FFFFFF` in every theme, and `tokens.test.ts` contrast-tests it against the
- * SOLID `bg-<hue>` token and nothing else.  Used with that background it is
- * correct (a primary button's label); used on the canvas it is white text on a
- * near-white surface — worse than the bare hue this gate already refuses, and
- * it was slipping through because the bare-hue pattern deliberately excludes a
- * following `-`.
- *
- * So it is a violation UNLESS the same class string also sets its own
- * `bg-<hue>`.  Pairing is what the token is FOR, and it is what distinguishes
- * `bg-error text-error-fg` on a destructive button from a bare `text-error-fg`
- * on an alert paragraph.
- */
-const HUE_FG = new RegExp(`${CLASS_BOUNDARY}([\\w[\\]&:.-]*?)text-(${HUES})-fg${CLASS_END}`, 'g');
-
-/**
- * Whether a solid `bg-<hue>` covers the states in which this `-fg` text renders.
- *
- * `bg-<hue>` and its interaction variants (`-hover`, `-active`) are the solid
- * fills the token is contrast-tested against.  `-soft` is deliberately NOT among
- * them: it is a pale tint (`error-soft` is `#FBE7E5`), and white text on it is
- * the same defect as white text on the canvas — that pairing wants `-on-soft`.
- *
- * The VARIANT has to match, which mere co-occurrence does not check:
- * `hover:bg-error text-error-fg` paints the background only on hover while the
- * text is white always, so at rest it is white on the canvas.  A background
- * qualifies when it carries the same variant prefix as the text, or NO prefix —
- * an unconditional fill covers every state the text can render in, including
- * the prefixed ones.
- */
-function pairedBackground(text: string, hue: string, variant: string): boolean {
-  const isSolid = new RegExp(`^bg-${hue}(?:-hover|-active)?$`);
-  if (variant !== '') {
-    // Whatever background the class sets AT this state is the one in force
-    // there.  `bg-error text-error-fg sm:bg-canvas sm:text-error-fg` is white on
-    // the canvas at `sm`: the unconditional fill is REPLACED, not inherited.
-    const atState = [
-      ...text.matchAll(
-        new RegExp(`${BACKGROUND_BOUNDARY}${escapeVariant(variant)}(bg-[\\w-]+)`, 'g'),
-      ),
-    ];
-    if (atState.length > 0) return atState.some((match) => isSolid.test(match[1] ?? ''));
+/** Split a class string into utilities, keeping each one's offset. */
+function utilities(text: string): Utility[] {
+  const found: Utility[] = [];
+  for (const match of text.matchAll(/[^\s'"`{}(),;]+/g)) {
+    const token = match[0];
+    const parts = token.split(':');
+    const name = (parts.pop() ?? '').replace(/^!/, '');
+    if (name === '') continue;
+    found.push({ variants: parts, name, at: (match.index ?? 0) + token.length - name.length });
   }
-  // Otherwise an UNCONDITIONAL solid fill covers every state the text renders in.
-  return new RegExp(`${BACKGROUND_BOUNDARY}bg-${hue}(?:-hover|-active)?${CLASS_END}`).test(text);
+  return found;
 }
 
 /**
- * Like {@link CLASS_BOUNDARY} but WITHOUT `:`, for matching a background.
+ * Whether a utility's conditions all hold wherever `state` holds.
  *
- * The variant prefix is matched explicitly here, so a `:` must not also be able
- * to serve as the boundary — with it, an empty variant matched `hover:bg-error`
- * as though it were unconditional, which is the very pairing this check exists
- * to reject.  A prefixed background still matches when the prefix is the one
- * asked for, because that prefix is part of the pattern rather than skipped by
- * the boundary.
+ * An UNCONDITIONAL utility is active everywhere; `sm:bg-canvas` is active at
+ * `sm:hover` because `sm` still holds there.  Requiring the prefixes to be
+ * EQUAL missed exactly that: `bg-error sm:bg-canvas sm:hover:text-error-fg`
+ * found no `sm:hover:` background, fell back to the unconditional `bg-error`,
+ * and called white-on-canvas paired.
  */
-const BACKGROUND_BOUNDARY = String.raw`(?:^|[\s'"\`{!])`;
+function activeIn(utility: Utility, state: readonly string[]): boolean {
+  return utility.variants.every((variant) => state.includes(variant));
+}
 
-/** A variant prefix, safe to embed: Tailwind's are `[&:focus]:`-shaped. */
-const escapeVariant = (variant: string): string =>
-  variant === '' ? '' : variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** The solid fills a `-fg` token is contrast-tested against. */
+function isSolidFill(name: string, hue: string): boolean {
+  return name === `bg-${hue}` || name === `bg-${hue}-hover` || name === `bg-${hue}-active`;
+}
 
-/** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
-const ICON_SIZE = new RegExp(`${CLASS_BOUNDARY}size-\\d`);
+/**
+ * The `text-<hue>-fg` utilities whose background does NOT hold where they render.
+ *
+ * `-fg` is `#FFFFFF` and the token suite contrast-tests it against the SOLID
+ * `bg-<hue>` alone, so it is legible exactly where that fill is in force.  Of
+ * the backgrounds ACTIVE at the text's state, the last one declared is the one
+ * painted — `bg-error sm:bg-canvas` is canvas at `sm` — so that is the one that
+ * has to be the matching solid.  `bg-<hue>-soft` is deliberately not solid: it
+ * is a pale tint (`error-soft` is `#FBE7E5`) where white is the same defect as
+ * on the canvas.
+ */
+function unpairedForegrounds(all: readonly Utility[]): Utility[] {
+  const backgrounds = all.filter((utility) => utility.name.startsWith('bg-'));
+  const unpaired: Utility[] = [];
+  for (const utility of all) {
+    const hue = /^text-(\w+)-fg$/.exec(utility.name)?.[1];
+    if (hue === undefined || !HUES.has(hue)) continue;
+    const active = backgrounds.filter((background) => activeIn(background, utility.variants));
+    const painted = active[active.length - 1];
+    if (painted === undefined || !isSolidFill(painted.name, hue)) unpaired.push(utility);
+  }
+  return unpaired;
+}
+
+/** The BARE `text-<hue>` utilities — no suffix, so not `-on-soft` or `-fg`. */
+function bareHues(all: readonly Utility[]): Utility[] {
+  return all.filter((utility) => {
+    const hue = /^text-(\w+)$/.exec(utility.name)?.[1];
+    return hue !== undefined && HUES.has(hue);
+  });
+}
+
+const ICON_SIZE = /^size-\d/;
 
 /** The component that renders an icon here; the ONLY element `size-*` exempts. */
 const ICON_ELEMENT = 'Icon';
@@ -657,32 +667,26 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       // text-error-fg" />` on the canvas is near-invisible whether or not the
       // glyph counts as graphical — 1.4.11 asks for 3:1 against the ADJACENT
       // colour, and white on near-white clears nothing.
-      const isIcon = ICON_SIZE.test(text) && enclosingElement(file.content, start) === ICON_ELEMENT;
-      const bare = isIcon ? null : BARE_HUE.exec(text);
-      // A `-fg` token is legible only over its own solid background.
-      // EVERY `-fg` in the string, not just the first: one class can carry
-      // several, and `bg-error text-error-fg sm:bg-canvas sm:text-warning-fg`
-      // pairs the first while the second renders white on the canvas at `sm`.
-      HUE_FG.lastIndex = 0;
-      let unpaired: RegExpExecArray | null = null;
-      for (const fg of text.matchAll(HUE_FG)) {
-        // Group 1 is the variant prefix (`hover:`, `md:`, …), group 2 the hue.
-        if (fg[2] === undefined || pairedBackground(text, fg[2], fg[1] ?? '')) continue;
-        unpaired = fg as RegExpExecArray;
-        break;
-      }
-      const match = bare ?? unpaired;
-      if (match === null) continue;
-      // A template may span lines, so anchor on the HUE rather than the token
-      // start: the reported line is where the class actually sits.  `+ 1` skips
-      // the delimiter the pattern consumed before `text-`, and the offset map
-      // carries that joined index back to the source it was written at.
-      const line = lineOf(newlines, offsets[match.index + 1] ?? offsets[match.index] ?? start);
+      const all = utilities(text);
+      // A size class is a UTILITY, wherever it sits in the string — matching it
+      // against the raw text made its position load-bearing.
+      const isIcon =
+        all.some((utility) => ICON_SIZE.test(utility.name)) &&
+        enclosingElement(file.content, start) === ICON_ELEMENT;
+      // EVERY offending utility, not the first: one class can carry several,
+      // and the earlier ones may be perfectly paired.
+      const offenders = [...(isIcon ? [] : bareHues(all)), ...unpairedForegrounds(all)];
+      const match = offenders.sort((left, right) => left.at - right.at)[0];
+      if (match === undefined) continue;
+      // A template may span lines, so anchor on the UTILITY rather than the
+      // token start: the reported line is where the class actually sits, and
+      // the offset map carries that folded index back to the source.
+      const line = lineOf(newlines, offsets[match.at] ?? start);
       if (isExempt(lines, line)) continue;
       findings.push({
         file: file.path,
         line,
-        hue: (match === bare ? match[1] : match[2]) ?? '',
+        hue: /^text-(\w+)/.exec(match.name)?.[1] ?? '',
         source: (lines[line - 1] ?? '').trim(),
       });
     }

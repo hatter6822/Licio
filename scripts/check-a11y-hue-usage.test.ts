@@ -267,6 +267,16 @@ describe('what is NOT a violation', () => {
     );
   });
 
+  it('reads a background as ACTIVE wherever its conditions still hold', () => {
+    // `sm:bg-canvas` is in force at `sm:hover` — `sm` still holds there.  An
+    // exact-prefix match found no `sm:hover:` background, fell back to the
+    // unconditional `bg-error`, and called white-on-canvas paired.  Written for
+    // a finding that arrived AFTER the cascade model replaced that matching,
+    // and passed with no rule added for it.
+    expect(hues(`const a = 'bg-error sm:bg-canvas sm:hover:text-error-fg';`)).toEqual(['1:error']);
+    expect(hues(`const a = 'bg-error sm:bg-error sm:hover:text-error-fg';`)).toEqual([]);
+  });
+
   it('rejects a -fg whose state REPLACES the qualifying background', () => {
     // `sm:bg-canvas` overrides the unconditional `bg-error` at `sm`, where the
     // text is still white — the fill is replaced, not inherited.

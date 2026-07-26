@@ -236,6 +236,21 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: an ASSIGNMENT-expression alias (not a declaration) ───────
+  // Written for a finding that arrived AFTER the resolver stopped tracing
+  // dataflow by hand, and passed with no code written for it: the pattern's
+  // type is the namespace however the value reached the binding.
+  'src/assign-alias.ts': ['export const VIA_ASSIGNMENT = 20;'].join('\n'),
+  'src/assign-alias-consumer.ts': [
+    "import * as original from './assign-alias.js';",
+    'export function read(): number {',
+    '  let alias: typeof original;',
+    '  alias = original;',
+    '  const { VIA_ASSIGNMENT } = alias;',
+    '  return VIA_ASSIGNMENT;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: namespace provenance across an identifier ALIAS ──────────
   'src/aliased-ns.ts': ['export const VIA_ALIAS = 18;', 'export const VIA_CHAIN = 19;'].join('\n'),
   'src/aliased-ns-consumer.ts': [
@@ -515,6 +530,11 @@ describe('resolution: which sites use a binding', () => {
     // and the import is its right-hand side, so neither the declaration path
     // nor the stored-namespace path saw it.
     expect(usesOf('src/direct-assign.ts', 'DIRECT_ASSIGN').length).toBeGreaterThan(0);
+  });
+
+  it('counts an ASSIGNMENT-expression alias, with no rule written for it', () => {
+    // `let alias: typeof original; alias = original; const { A } = alias`.
+    expect(usesOf('src/assign-alias.ts', 'VIA_ASSIGNMENT').length).toBeGreaterThan(0);
   });
 
   it.each(['VIA_ALIAS', 'VIA_CHAIN'])(

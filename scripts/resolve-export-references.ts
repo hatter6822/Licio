@@ -66,13 +66,23 @@
 //
 // DESTRUCTURING is the one form where an identifier is not the binding.  In
 // `const { readCourierPower } = await import(M)` the name introduces a new
-// LOCAL, so the compiler answers with that local and the export it came from
-// looks unreferenced.  Two routes cover it: the module-specifier route credits
-// the export the pattern names (an import clause and a destructuring pattern
-// both bind BY EXPORT NAME, so no aliasing is possible), and the TYPE route
-// asks what type the local has and credits that type's symbol, which works
-// through arbitrary indirection.  The specifier route in turn covers exports
-// whose type carries no symbol, such as a plain string constant.
+// LOCAL, so resolving it answers with that local and the export it came from
+// looks unreferenced.
+//
+// The answer is the TYPE of what is destructured: `getPropertyOfType` on it
+// returns the export's own symbol.  That is deliberately the ONLY rule here,
+// because the alternative was tried.  A hand-written dataflow analysis grew a
+// receiver walk (through parentheses, `as`, `await`, and a `.then` callback), a
+// map of locals holding a namespace, and alias edges followed to a fixed point
+// — and review still found six positions it did not cover: a parenthesized
+// receiver, a parenthesized callback, a stored namespace, a static namespace
+// import, an assignment target, an identifier alias.  Each fix was correct and
+// the next position was always there, because a dataflow analysis was being
+// written by hand beside a compiler that had already done one.
+//
+// The type knows every hop the value took.  A seventh position — an
+// ASSIGNMENT-expression alias — arrived while this rewrite was in progress and
+// needed no code at all.
 //
 // COVERAGE IS ASSERTED, not assumed.  A tracked file that belongs to no
 // project's program is invisible, and an export used only from such a file would
@@ -280,24 +290,23 @@ function isUnchangedRepublish(node: NodeHandle, project: Project): boolean {
 interface FileScan {
   /** Offsets of identifiers that could be a USE (plumbing already removed). */
   readonly offsets: number[];
-  /** Sites naming exports of another module, for the specifier route. */
+  /** STATIC import clauses, for the specifier route. */
   readonly imports: Array<{ specifierOffset: number; names: string[]; offset: number }>;
+  /**
+   * Object destructuring sites: the names taken, and the node whose TYPE says
+   * what they were taken FROM.
+   *
+   * The type is the whole answer.  `const { A } = mod` after
+   * `import * as original from 'M'; const alias = original; const mod = alias`
+   * has a pattern whose type is still M's namespace, so the compiler has
+   * already done the dataflow — through aliases, `await`, `as`, parentheses,
+   * and a `.then` callback's contextual parameter alike.
+   */
+  readonly destructures: Array<{ at: number; source: NodeHandle; names: string[] }>;
 }
 
 /** Identifier parents that PUBLISH a name rather than consume one. */
 const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind.NamespaceExport]);
-
-/** Wrappers that yield the value they wrap, so a receiver may sit behind them. */
-const TRANSPARENT_WRAPPERS = new Set<number>([
-  SyntaxKind.ParenthesizedExpression,
-  SyntaxKind.AsExpression,
-  SyntaxKind.SatisfiesExpression,
-  SyntaxKind.NonNullExpression,
-  SyntaxKind.TypeAssertionExpression,
-]);
-
-/** Function shapes that can receive the namespace as a `.then` callback. */
-const CALLBACK_KINDS = new Set<number>([SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
 
 /** Literal kinds that can STATICALLY name a property: `mod['A']`, ``mod[`A`]``. */
 const STATIC_KEY_KINDS = new Set<number>([
@@ -319,137 +328,30 @@ function isElementAccessKey(node: NodeHandle): boolean {
   return parent.argumentExpression?.getStart() === node.getStart();
 }
 
-/** Past every wrapper that yields the value it wraps: `(x)`, `x as T`, `x!`. */
-function unwrap(node: NodeHandle | undefined): NodeHandle | undefined {
-  let current = node;
-  for (let hop = 0; current !== undefined && hop < MAX_ALIAS_HOPS; hop += 1) {
-    if (!TRANSPARENT_WRAPPERS.has(current.kind)) return current;
-    current = current.expression;
-  }
-  return current;
-}
-
 /**
- * The object binding pattern that destructures an `import('M')` namespace.
+ * Collect, in one walk, the identifier offsets, the static import clauses, and
+ * the destructuring sites.
  *
- * A dynamic import's namespace reaches a pattern in exactly two ways, and both
- * must be read here — the identifiers a pattern binds are new LOCALS, so
- * resolving them answers with the local and M's export goes uncredited:
- *
- *   • by ASSIGNMENT — `const { A } = await import('M')`;
- *   • by CALLBACK — `import('M').then(({ A }) => …)`, where the namespace is the
- *     first parameter rather than an initializer.
- *
- * Reading only the first is a live false positive, not a hypothetical: this
- * repository already writes the second (`apps/web/src/routes/__root.tsx`), and
- * it survives today only because the export it names happens to be a FUNCTION,
- * whose type carries the origin symbol the fallback route recovers.  A primitive
- * export — a string or number constant, whose type carries no symbol — in that
- * same position would be reported dead and would fail a correct branch.
- */
-function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
-  const asPattern = (node: NodeHandle | undefined): NodeHandle | undefined =>
-    node?.kind === SyntaxKind.ObjectBindingPattern ? node : undefined;
-
-  // Climb through wrappers that do not change the VALUE — parentheses, `as`,
-  // `satisfies`, a non-null `!`, an angle-bracket assertion — and through the
-  // one `await`.  `const { A } = (await import('M'))` is the same consumer as
-  // `const { A } = await import('M')`, and stopping at the parenthesis credited
-  // neither; for a PRIMITIVE export the type route cannot recover it either, so
-  // a correct branch failed.  Order is not fixed (`await (import(M))` is equally
-  // valid), which is why this is a loop rather than two `if`s.
-  let node = importCall;
-  let awaited = false;
-  for (let hop = 0; hop < MAX_ALIAS_HOPS; hop += 1) {
-    const parent = node.parent;
-    if (parent === undefined) return undefined;
-    if (TRANSPARENT_WRAPPERS.has(parent.kind)) {
-      node = parent;
-      continue;
-    }
-    if (parent.kind === SyntaxKind.AwaitExpression && !awaited) {
-      awaited = true;
-      node = parent;
-      continue;
-    }
-    break;
-  }
-
-  const parent = node.parent;
-  // `({ A } = await import('M'))` — a destructuring ASSIGNMENT straight from the
-  // import, whose target parses as an object LITERAL.  Same consumer as the
-  // declaration form one line down, a different node kind.
-  if (
-    awaited &&
-    parent?.kind === SyntaxKind.BinaryExpression &&
-    parent.operatorToken?.kind === SyntaxKind.EqualsToken &&
-    parent.left?.kind === SyntaxKind.ObjectLiteralExpression
-  ) {
-    return parent.left;
-  }
-  // `const { A } = await import('M')` destructures the namespace directly;
-  // `const mod = await import('M')` STORES it, and the caller records the local
-  // so a later `const { A } = mod` can be credited to the same specifier.
-  // A bare `import('M')` without `await` yields a PROMISE either way, whose
-  // destructuring names promise members rather than exports.
-  if (parent?.kind === SyntaxKind.VariableDeclaration) {
-    if (!awaited) return undefined;
-    const name = parent.name;
-    if (name?.kind === SyntaxKind.ObjectBindingPattern) return name;
-    return name?.kind === SyntaxKind.Identifier ? name : undefined;
-  }
-  // `import('M').then(({ A }) => …)`
-  if (parent?.kind !== SyntaxKind.PropertyAccessExpression) return undefined;
-  if (nameOf(parent.name) !== 'then') return undefined;
-  const call = parent.parent;
-  if (call?.kind !== SyntaxKind.CallExpression) return undefined;
-  // The callback may itself sit behind transparent wrappers — `.then((({ A }) =>
-  // …))` is the same consumer as `.then(({ A }) => …)` — so the unwrapping that
-  // finds the import's receiver has to apply to the ARGUMENT too.
-  const callback = unwrap(call.arguments?.[0]);
-  if (callback === undefined || !CALLBACK_KINDS.has(callback.kind)) return undefined;
-  return asPattern(callback.parameters?.[0]?.name);
-}
-
-/**
- * Collect, in one walk, every identifier offset and every module-specifier site.
- *
- * Walking the AST rather than a token stream is what makes nesting a non-issue:
- * a template interpolation inside another template interpolation is simply a
- * node inside a node, so there is no depth for the collector to get wrong.
+ * What this walk deliberately does NOT do is trace where a destructured value
+ * came from.  It used to: a receiver walk through parentheses / `as` / `await`
+ * / a `.then` callback, a map of locals holding a namespace, alias edges
+ * followed to a fixed point.  Review found six positions that machinery did not
+ * cover — a parenthesized receiver, a parenthesized callback, a stored
+ * namespace, a static namespace import, an assignment target, an identifier
+ * alias — because it was a dataflow analysis written by hand beside a compiler
+ * that had already done one.  The TYPE of the pattern answers all six at once,
+ * so the walk only has to say WHERE to ask.
  */
 function scanFile(root: NodeHandle): FileScan {
-  const scan: FileScan = { offsets: [], imports: [] };
-  /**
-   * Locals holding a dynamic import's namespace: `const mod = await import(M)`.
-   *
-   * A LIST per name, not one entry: if a file binds the same name to two
-   * different modules in two scopes, crediting BOTH specifiers is the safe
-   * direction — over-crediting makes a dead export look live (a false negative
-   * the next run catches), while picking the wrong one would report a live
-   * export as dead and fail a correct branch.
-   */
-  const namespaceLocals = new Map<string, number[]>();
-  /** `const { A } = mod` sites, resolved after the whole file is walked, since
-   *  the binding they read may be declared anywhere in it. */
-  const deferredDestructures: Array<{ pattern: NodeHandle; from: NodeHandle }> = [];
-  /**
-   * `const alias = original` — an identifier copied from another identifier.
-   *
-   * A namespace keeps its provenance across such a hop, so
-   * `import * as original from 'M'; const alias = original; const { A } = alias`
-   * names M's export exactly as the un-aliased form does.  Collected during the
-   * walk and followed afterwards, because the alias may be written before the
-   * binding it copies.
-   */
-  const aliasEdges: Array<{ to: string; from: string }> = [];
+  const scan: FileScan = { offsets: [], imports: [], destructures: [] };
 
+  /** The EXPORT-side names a pattern or assignment target takes. */
   const namesOfPattern = (pattern: NodeHandle): string[] => {
     const names: string[] = [];
     pattern.forEachChild((element) => {
       // A DECLARATION's pattern holds `BindingElement`s; an ASSIGNMENT's target
       // is an object literal, whose members are shorthand or property
-      // assignments.  Both name the export the same way, so both are read.
+      // assignments.  Both name the property the same way.
       if (
         element.kind !== SyntaxKind.BindingElement &&
         element.kind !== SyntaxKind.ShorthandPropertyAssignment &&
@@ -462,6 +364,11 @@ function scanFile(root: NodeHandle): FileScan {
       if (key !== undefined) names.push(key);
     });
     return names;
+  };
+
+  const destructure = (target: NodeHandle, source: NodeHandle): void => {
+    const names = namesOfPattern(target);
+    if (names.length > 0) scan.destructures.push({ at: target.getStart(), source, names });
   };
 
   const visit = (node: NodeHandle): void => {
@@ -478,20 +385,13 @@ function scanFile(root: NodeHandle): FileScan {
       scan.offsets.push(node.getStart());
     } else if (node.kind === SyntaxKind.ImportDeclaration) {
       // STATIC: `import { A, B as c } from 'M'` — the export side precedes `as`.
+      //
+      // This route exists for a reason the property route does not cover: a
+      // named import resolves through `getAliasedSymbol` all the way to the
+      // ORIGINAL declaration, stepping over any barrel binding in between, so
+      // the barrel's own alias would look unreferenced.
       const specifier = node.moduleSpecifier;
       const named = node.importClause?.namedBindings;
-      // `import * as mod from 'M'` — the namespace is bound to a local, and a
-      // later `const { A } = mod` destructures it exactly as a stored dynamic
-      // import does.  Recorded in the SAME map, so the two spellings of "this
-      // local holds a module" are answered by one lookup rather than two rules.
-      if (specifier !== undefined && named?.kind === SyntaxKind.NamespaceImport) {
-        const local = nameOf(named.name);
-        if (local !== undefined) {
-          const seen = namespaceLocals.get(local);
-          if (seen === undefined) namespaceLocals.set(local, [specifier.getStart()]);
-          else seen.push(specifier.getStart());
-        }
-      }
       if (specifier !== undefined && named?.kind === SyntaxKind.NamedImports) {
         const names: string[] = [];
         named.forEachChild((element) => {
@@ -507,103 +407,26 @@ function scanFile(root: NodeHandle): FileScan {
           });
         }
       }
-    } else if (
-      node.kind === SyntaxKind.CallExpression &&
-      node.expression?.kind === SyntaxKind.ImportKeyword
-    ) {
-      // DYNAMIC: the pattern that destructures the module binds new LOCALS, so
-      // its identifiers resolve to those and never to M's exports.
-      const specifier = node.arguments?.[0];
-      if (specifier !== undefined && specifier.kind === SyntaxKind.StringLiteral) {
-        const received = namespaceReceiver(node);
-        // A DECLARATION's target is a binding pattern; an ASSIGNMENT's is an
-        // object literal.  Both destructure the namespace.
-        if (
-          received?.kind === SyntaxKind.ObjectBindingPattern ||
-          received?.kind === SyntaxKind.ObjectLiteralExpression
-        ) {
-          const names = namesOfPattern(received);
-          if (names.length > 0) {
-            scan.imports.push({
-              specifierOffset: specifier.getStart(),
-              names,
-              offset: received.getStart(),
-            });
-          }
-        } else if (received !== undefined) {
-          // `const mod = await import('M')` — the namespace is STORED, and any
-          // later `const { A } = mod` destructures it a statement away.  Record
-          // the local so that destructuring can be credited to this specifier.
-          const local = nameOf(received);
-          if (local !== undefined) {
-            const seen = namespaceLocals.get(local);
-            if (seen === undefined) namespaceLocals.set(local, [specifier.getStart()]);
-            else seen.push(specifier.getStart());
-          }
-        }
-      }
-    } else if (
-      node.kind === SyntaxKind.VariableDeclaration &&
-      node.name?.kind === SyntaxKind.Identifier &&
-      unwrap(node.initializer)?.kind === SyntaxKind.Identifier
-    ) {
-      // `const alias = original` — carry any namespace provenance across it.
-      const to = nameOf(node.name);
-      const from = nameOf(unwrap(node.initializer));
-      if (to !== undefined && from !== undefined && to !== from) aliasEdges.push({ to, from });
-    } else if (
-      node.kind === SyntaxKind.VariableDeclaration &&
-      node.name?.kind === SyntaxKind.ObjectBindingPattern
-    ) {
-      // `const { A } = mod`, where `mod` holds a namespace — and `= (mod)` or
-      // `= (mod as typeof …)`, which are the same read.
-      const from = unwrap(node.initializer);
-      if (from?.kind === SyntaxKind.Identifier) {
-        deferredDestructures.push({ pattern: node.name, from });
-      }
+    } else if (node.name?.kind === SyntaxKind.ObjectBindingPattern) {
+      // A binding pattern in a declaration or a parameter.  Its OWN type is
+      // what it destructures — contextually typed for a callback parameter, so
+      // `import(M).then(({ A }) => …)` needs no special case.
+      destructure(node.name, node.name);
     } else if (
       node.kind === SyntaxKind.BinaryExpression &&
       node.operatorToken?.kind === SyntaxKind.EqualsToken &&
-      node.left?.kind === SyntaxKind.ObjectLiteralExpression
+      node.left?.kind === SyntaxKind.ObjectLiteralExpression &&
+      node.right !== undefined
     ) {
-      // `({ A } = mod)` — a destructuring ASSIGNMENT into bindings that already
-      // exist.  Its target parses as an object LITERAL rather than a binding
-      // pattern, so a check keyed on `VariableDeclaration` never saw it, and the
-      // assigned identifier resolves to the pre-existing local.
-      const from = unwrap(node.right);
-      if (from?.kind === SyntaxKind.Identifier) {
-        deferredDestructures.push({ pattern: node.left, from });
-      }
+      // `({ A } = expr)` — the target is an object LITERAL, whose type is the
+      // assignment's result rather than its source, so the RIGHT side is what
+      // says where the names came from.
+      destructure(node.left, node.right);
     }
     node.forEachChild(visit);
   };
 
   visit(root);
-  // Follow alias edges to a fixed point, so a chain of copies still resolves.
-  // Bounded by the edge count: each pass must add at least one binding or stop.
-  for (let pass = 0; pass < aliasEdges.length; pass += 1) {
-    let grew = false;
-    for (const edge of aliasEdges) {
-      const source = namespaceLocals.get(edge.from);
-      if (source === undefined) continue;
-      const existing = namespaceLocals.get(edge.to) ?? [];
-      const merged = [...new Set([...existing, ...source])];
-      if (merged.length !== existing.length) {
-        namespaceLocals.set(edge.to, merged);
-        grew = true;
-      }
-    }
-    if (!grew) break;
-  }
-  for (const { pattern, from } of deferredDestructures) {
-    const local = nameOf(from);
-    if (local === undefined) continue;
-    const names = namesOfPattern(pattern);
-    if (names.length === 0) continue;
-    for (const specifierOffset of namespaceLocals.get(local) ?? []) {
-      scan.imports.push({ specifierOffset, names, offset: pattern.getStart() });
-    }
-  }
   return scan;
 }
 
@@ -800,6 +623,23 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         for (const name of binding.names) {
           const symbol = exported.get(name);
           if (symbol !== undefined) creditChain(symbol, { file, offset: binding.offset }, project);
+        }
+      }
+
+      // DESTRUCTURING, answered by the TYPE of what is destructured.  The
+      // identifiers a pattern binds are new LOCALS, so resolving them answers
+      // with the local; the property on the source type is the export itself.
+      // Every hop the value took to get there — an alias, an `await`, an `as`,
+      // a `.then` callback's contextual parameter — is already in that type,
+      // which is why none of them needs a rule here.
+      for (const site of scan.destructures) {
+        const type = project.checker.getTypeAtLocation(site.source);
+        if (type === undefined) continue;
+        for (const name of site.names) {
+          const property = project.checker.getPropertyOfType(type, name);
+          if (property !== undefined) {
+            creditChain(property, { file, offset: site.at }, project);
+          }
         }
       }
 
