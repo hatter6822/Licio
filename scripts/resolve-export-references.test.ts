@@ -396,6 +396,18 @@ const FILES: Record<string, string> = {
     'export { renamedIn };',
   ].join('\n'),
 
+  // ── Reference: a COMPUTED destructuring key ──────────────────────────────
+  // `const { [key]: value } = mod` reads the same export as `const { LIVE }`;
+  // the key is a ComputedPropertyName, so only its TYPE names the property.
+  'src/computed-key.ts': ['export const COMPUTED_LIVE = 1;'].join('\n'),
+  'src/computed-key-consumer.ts': [
+    "const which = 'COMPUTED_LIVE' as const;",
+    'export async function readComputed(): Promise<unknown> {',
+    "  const { [which]: value } = await import('./computed-key.js');",
+    '  return value;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: from TYPE space only ──────────────────────────────────────
   // Neither of these survives compilation, and both are still references: the
   // declaration has to exist for the type to exist, so losing it is a compile
@@ -674,6 +686,12 @@ describe('resolution: which sites use a binding', () => {
     // public name that exists nowhere else — the export specifier carries no
     // `propertyName`, so only the alias TARGET's name reveals the rename.
     expect(namesIn('src/rename-barrel.ts')).toEqual(['renamedIn']);
+  });
+
+  it('counts a destructuring key written as a COMPUTED name', () => {
+    // The key is in its TYPE, exactly as `mod[key]` is — so it is read the same
+    // way rather than by a rule about which spellings a pattern may use.
+    expect(usesOf('src/computed-key.ts', 'COMPUTED_LIVE').length).toBeGreaterThan(0);
   });
 
   it('counts a rest element in a destructuring ASSIGNMENT', () => {

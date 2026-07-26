@@ -164,6 +164,26 @@ describe('the bare hue on normal text', () => {
     ]);
   });
 
+  it.each([
+    ['at 2xl and bold', `'text-error text-2xl font-bold'`, 0],
+    ['at 3xl', `'text-error text-3xl'`, 0],
+    ['bold but SMALL is still normal text', `'text-error text-sm font-bold'`, 1],
+    ['no size at all is normal text', `'text-error'`, 1],
+  ])('allows the bare hue on LARGE text (%s)', async (_label, cls, want) => {
+    // The bare hue clears 3:1, which WCAG 1.4.3 permits for large text just as
+    // 1.4.11 permits it for a graphical object — so reporting it there rejected
+    // a use this gate's own header names as legitimate.
+    expect(await hues(`const a = ${cls};`)).toHaveLength(want);
+  });
+
+  it('rejects a -fg token under a background IMAGE', async () => {
+    // A gradient paints OVER the colour, so the solid fill the `-fg` token was
+    // measured against is still in the cascade and no longer visible.
+    expect(
+      await hues(`const a = 'bg-error text-error-fg bg-linear-to-r from-white to-white';`),
+    ).toHaveLength(1);
+  });
+
   it('still exempts a real <Icon> element', async () => {
     expect(await hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
   });

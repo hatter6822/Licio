@@ -329,6 +329,14 @@ interface FileScan {
      * credited nothing and reported live exports dead.
      */
     rest: boolean;
+    /**
+     * Keys written as a COMPUTED name: `const { [key]: value } = mod`.
+     *
+     * Kept as nodes because the name is in the key's TYPE, which the walk
+     * cannot ask for — the same question `mod[key]` turns on, so it is answered
+     * the same way rather than by a rule about which spellings are allowed.
+     */
+    computed: NodeHandle[];
   }>;
 }
 
@@ -377,8 +385,11 @@ function scanFile(root: NodeHandle): FileScan {
 
   /** The EXPORT-side names a pattern or assignment target takes, and whether a
    *  `...rest` element sweeps up whatever those names left. */
-  const namesOfPattern = (pattern: NodeHandle): { names: string[]; rest: boolean } => {
+  const namesOfPattern = (
+    pattern: NodeHandle,
+  ): { names: string[]; rest: boolean; computed: NodeHandle[] } => {
     const names: string[] = [];
+    const computed: NodeHandle[] = [];
     let rest = false;
     pattern.forEachChild((element) => {
       // A DECLARATION's pattern holds `BindingElement`s; an ASSIGNMENT's target
@@ -402,16 +413,21 @@ function scanFile(root: NodeHandle): FileScan {
         return;
       }
       // `{ a: renamed }` binds `renamed`; the EXPORT it names is the key `a`.
-      const key = nameOf(element.propertyName ?? element.name);
+      const named = element.propertyName ?? element.name;
+      if (named?.kind === SyntaxKind.ComputedPropertyName) {
+        if (named.expression !== undefined) computed.push(named.expression);
+        return;
+      }
+      const key = nameOf(named);
       if (key !== undefined) names.push(key);
     });
-    return { names, rest };
+    return { names, rest, computed };
   };
 
   const destructure = (target: NodeHandle, source: NodeHandle): void => {
-    const { names, rest } = namesOfPattern(target);
-    if (names.length > 0 || rest) {
-      scan.destructures.push({ at: target.getStart(), source, names, rest });
+    const { names, rest, computed } = namesOfPattern(target);
+    if (names.length > 0 || rest || computed.length > 0) {
+      scan.destructures.push({ at: target.getStart(), source, names, rest, computed });
     }
   };
 
@@ -691,9 +707,16 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         // taken set is the type's whole property list rather than the names the
         // pattern happens to spell — and asking the type is the same move that
         // answered the named case, not a second mechanism beside it.
+        // A COMPUTED key names its property through its type, exactly as
+        // `mod[key]` does — so `const { [key]: value } = mod` is the same read.
+        const named = [...site.names];
+        for (const key of site.computed) {
+          const keyType = project.checker.getTypeAtLocation(key);
+          if (keyType?.isStringLiteralType() === true) named.push(String(keyType.value));
+        }
         const taken = site.rest
           ? project.checker.getPropertiesOfType(type)
-          : site.names.map((name) => project.checker.getPropertyOfType(type, name));
+          : named.map((name) => project.checker.getPropertyOfType(type, name));
         for (const property of taken) {
           if (property !== undefined) {
             creditChain(property, { file, offset: site.at }, project);

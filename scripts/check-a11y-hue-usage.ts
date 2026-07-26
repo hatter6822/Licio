@@ -25,8 +25,11 @@
 // last of those cannot enforce the invariant it claims to.  Comments are dropped
 // by the lexer, so prose naming a class never trips it.
 //
-// TWO EXEMPTIONS, both narrow:
+// THREE EXEMPTIONS, each narrow:
 //
+//   0. LARGE text — 1.4.3 permits the 3:1 colour at >= 18pt, or >= 14pt bold.
+//      The size and weight are resolved through the theme, not matched against
+//      a table of class names.
 //   1. A class that sizes a SQUARE box in the same literal — this codebase sizes
 //      ICONS that way — on an element that renders an icon.  An icon is a
 //      graphical object (1.4.11, 3:1).  Asked of what the class DECLARES, so
@@ -40,6 +43,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderTokensCss } from '../apps/web/src/design-system/css.js';
 import { type ClassString, readClassStrings } from './source-class-strings.js';
 import { type Declared, readUtilities, type UtilityFacts } from './tailwind-utilities.js';
 
@@ -106,7 +110,7 @@ interface Paint {
 function paintsOf(
   all: readonly Candidate[],
   facts: UtilityFacts,
-  property: 'color' | 'background-color',
+  property: 'color' | 'background-color' | 'background-image',
 ): Paint[] {
   const paints: Paint[] = [];
   for (const candidate of all) {
@@ -265,6 +269,14 @@ function unpairedForegrounds(
 ) {
   const inks = paintsOf(all, facts, 'color');
   const fills = paintsOf(all, facts, 'background-color');
+  // An IMAGE paints OVER the colour, so a gradient covers the solid fill the
+  // `-fg` token was measured against — `bg-error text-error-fg bg-linear-to-r
+  // from-white to-white` renders white on white while the error fill is still
+  // in the cascade underneath it.  What the image contains is not knowable
+  // here, so any active one disqualifies the pairing.
+  const images = paintsOf(all, facts, 'background-image').filter(
+    (paint) => paint.declared.value !== 'none',
+  );
   const found: Array<{ candidate: Candidate; hue: string }> = [];
   for (const ink of inks) {
     for (const colors of hues) {
@@ -278,6 +290,7 @@ function unpairedForegrounds(
           ...fills.map((fill) => [...conditionsOf(ink.declared), ...conditionsOf(fill.declared)]),
         ].some((state) => {
           if (!paintedIn(inks, state).includes(ink)) return false;
+          if (images.some((image) => activeIn(image, state))) return true;
           const showing = paintedIn(fills, state);
           return (
             showing.length === 0 ||
@@ -288,6 +301,70 @@ function unpairedForegrounds(
     }
   }
   return found;
+}
+
+/**
+ * The custom properties the design system declares.
+ *
+ * A utility resolves to `font-size: var(--licio-text-2xl)`, not to a length, so
+ * the length has to come from the same generator the theme is built from —
+ * which keeps a rescaled step correctly classified instead of pinned to a
+ * number written here.
+ */
+const THEME_VARIABLES: ReadonlyMap<string, string> = new Map(
+  [...renderTokensCss().matchAll(/(--[a-z0-9-]+)\s*:\s*([^;}]+)/g)].map((match) => [
+    match[1] ?? '',
+    (match[2] ?? '').trim(),
+  ]),
+);
+
+/** The px value of a CSS length, following `var(…)` through the theme. */
+function pixels(value: string, hop = 0): number | null {
+  const text = value.trim();
+  if (hop > 8) return null;
+  const reference = /^var\(\s*(--[a-z0-9-]+)/.exec(text);
+  if (reference?.[1] !== undefined) {
+    const resolved = THEME_VARIABLES.get(reference[1]);
+    return resolved === undefined ? null : pixels(resolved, hop + 1);
+  }
+  const rem = /^([\d.]+)rem$/.exec(text);
+  if (rem?.[1] !== undefined) return Number(rem[1]) * 16;
+  const px = /^([\d.]+)px$/.exec(text);
+  return px?.[1] === undefined ? null : Number(px[1]);
+}
+
+/** WCAG 1.4.3 large text: >= 18pt (24px), or >= 14pt (18.66px) when bold. */
+const LARGE_PX = 24;
+const LARGE_BOLD_PX = 18.66;
+const BOLD = 700;
+
+/**
+ * Whether these classes render LARGE text, which the bare hue IS allowed on.
+ *
+ * The bare hue clears 3:1, and WCAG 1.4.3 permits that for large text exactly
+ * as 1.4.11 permits it for a graphical object — so reporting `text-error
+ * text-2xl` rejected a use the token suite's own assertions allow, and the
+ * gate's own header names large text as a legitimate one.
+ *
+ * The size and weight are resolved through the theme rather than matched
+ * against a table of class names, so a rescaled `text-2xl` stays correctly
+ * classified and a variant-prefixed one is read like any other.
+ */
+function isLargeText(all: readonly Candidate[], facts: UtilityFacts): boolean {
+  let size: number | null = null;
+  let weight = 400;
+  for (const candidate of all) {
+    if (facts.orderOf(candidate.name) === undefined) continue;
+    for (const declared of facts.declarationsOf(candidate.name)) {
+      if (declared.property === 'font-size') size = pixels(declared.value) ?? size;
+      if (declared.property === 'font-weight') {
+        const parsed = Number.parseInt(declared.value, 10);
+        if (Number.isFinite(parsed)) weight = parsed;
+      }
+    }
+  }
+  if (size === null) return false;
+  return weight >= BOLD ? size >= LARGE_BOLD_PX : size >= LARGE_PX;
 }
 
 /**
@@ -419,8 +496,11 @@ export async function findBareHueTextUses(files: readonly SourceFile[]): Promise
       entry.rendered.element === ICON_ELEMENT;
     // EVERY offending class, not the first: one string can carry several, and
     // the earlier ones may be perfectly paired.
+    // The BARE hue is a 3:1 colour, which WCAG allows on a graphical object
+    // (1.4.11) and on LARGE text (1.4.3) — and forbids on normal text.
+    const exempt = isIcon || isLargeText(all, facts);
     const offenders = [
-      ...(isIcon ? [] : bareHuePaints(all, facts, hues)),
+      ...(exempt ? [] : bareHuePaints(all, facts, hues)),
       ...unpairedForegrounds(all, facts, hues),
     ];
     const match = offenders.sort((left, right) => left.candidate.at - right.candidate.at)[0];
