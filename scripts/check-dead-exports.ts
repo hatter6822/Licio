@@ -86,33 +86,6 @@ const ROOT = resolve(import.meta.dirname, '..');
 const NAMED_DECLARATION_KEYWORDS = ['function', 'class', 'enum'] as const;
 const BINDING_KEYWORDS = ['const', 'let', 'var'] as const;
 
-// `[ \t]*` rather than `\s*`: with the `m` flag a `\s*` would let the match
-// START on the preceding newline, putting every reported line number one early.
-//
-// The separator between the keyword and the name is an alternation, not plain
-// whitespace, because a GENERATOR puts a `*` there and may leave no space at
-// all: `function* gen`, `function *gen`, and `function * gen` are all valid and
-// all publish `gen`.  Requiring whitespace missed every one of them — two live
-// exports in this repo (`identifierCandidates`, `writePackChunks`) sat outside
-// the gate entirely.  `[ \t]+` alone still covers the non-generator case, and
-// `const`/`class` can never take a `*`, so the wider alternation cannot match
-// anything that is not already valid syntax.
-// `(?:const[ \t]+)?` before the keyword is for `export const enum X`: `const`
-// there is part of the ENUM declaration, not a variable binding.  Without it the
-// enum was invisible to this pattern AND the binding pass below recorded the
-// literal word `enum` as the exported name.
-const EXPORTED_VALUE_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(?:const[ \\t]+)?(${NAMED_DECLARATION_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
-  'gm',
-);
-
-/** Locates an exported binding declaration; the NAMES come from the walk below.
- *  The lookahead hands `const enum` to the pattern above instead. */
-const EXPORTED_BINDING_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(?:declare[ \\t]+)?(${BINDING_KEYWORDS.join('|')})\\b(?![ \\t]+enum\\b)`,
-  'gm',
-);
-
 /** A runaway guard: no real declarator list is anywhere near this long. */
 const MAX_DECLARATOR_TOKENS = 4096;
 
@@ -216,154 +189,172 @@ export interface ExportedValue {
   selfOccurrences: number;
 }
 
-/**
- * `export { a, b as c }` WITHOUT a `from` — a clause publishing local values.
- *
- * A re-export (`export { x } from './y.js'`) is deliberately NOT matched: it is
- * barrel plumbing, and the underlying declaration is already scanned where it
- * lives.  `export type { … }` and `type` specifiers inside a clause are skipped
- * — types are out of scope by the policy above.
- */
-const EXPORT_CLAUSE_RE = /^[ \t]*export[ \t]*\{([^}]*)\}[ \t]*(?!from)[;\s]*$/gm;
+/** `export declare …`, `export abstract class …`, `export async function …`. */
+const DECLARATION_MODIFIERS = new Set(['declare', 'abstract', 'async']);
+
+/** Keyword sets, as lookups over the token stream. */
+const NAMED_KEYWORDS: ReadonlySet<string> = new Set(NAMED_DECLARATION_KEYWORDS);
+const BINDING_KEYWORD_SET: ReadonlySet<string> = new Set(BINDING_KEYWORDS);
 
 /**
- * `export * as name from './x.js'` — a NAMESPACE re-export.
+ * Every exported value in one lexing of a source, parsed from the TOKEN STREAM.
  *
- * Unlike the plain `export * from` beside it, this publishes one named runtime
- * binding (`name`, a module-namespace object), and no declaration keyword
- * introduces it — so neither the keyword pattern nor the clause parser sees it,
- * and a dead one would slip through.  Consumers spell the name (`queue.enqueue`
- * after `import { queue } from '…'`), so the ordinary identifier scan judges it
- * once it is reported.
+ * Written against tokens rather than raw text because the text approach kept
+ * losing to valid syntax it had not anticipated — a generator's `*`, a
+ * declarator list, a `const enum`, and finally a BLOCK COMMENT in the middle of
+ * a declaration.  A comment is legal between `export` and `const`, and between
+ * a clause's braces beside a specifier; both are ordinary TypeScript that a
+ * whitespace-and-identifier pattern cannot see, and an unreferenced export
+ * hiding behind one would pass the gate.  The lexer already discards comments
+ * and already knows what a string, a template and a regex are, so parsing from
+ * its output ends that whole class of miss rather than patching one more form.
  *
- * `export * from './x.js'` stays out: it republishes names under their own
- * spelling, each already scanned at the declaration it comes from — the same
- * reasoning that excludes `export { x } from './y.js'`.
+ * `export` is taken as a declaration keyword unless it is plainly something
+ * else: a property read (`obj.export`) or an object key (`{ export: 1 }`).
  */
-const EXPORT_NAMESPACE_RE = /^[ \t]*export[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][\w$]*)[ \t]+from\b/gm;
+function parseExportedValues(
+  source: string,
+  tokens: readonly Token[],
+): Array<{ value: ExportedValue; start: number }> {
+  const out: Array<{ value: ExportedValue; start: number }> = [];
+  const identAt = (index: number): string | null => {
+    const token = tokens[index];
+    return token?.kind === 'ident' ? token.value : null;
+  };
+  const punctAt = (index: number): string | null => {
+    const token = tokens[index];
+    return token?.kind === 'punct' ? token.value : null;
+  };
+  const emit = (
+    name: string,
+    kind: string,
+    start: number,
+    selfOccurrences: number,
+    isDefault: boolean,
+  ): void => {
+    out.push({
+      value: {
+        name,
+        kind,
+        line: source.slice(0, start).split('\n').length,
+        selfOccurrences,
+        isDefault,
+      },
+      start,
+    });
+  };
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (identAt(i) !== 'export') continue;
+    const before = punctAt(i - 1);
+    if (before === '.' || before === '?.') continue; // a property read
+    if (punctAt(i + 1) === ':') continue; // an object key
+
+    let j = i + 1;
+    const isDefault = identAt(j) === 'default';
+    if (isDefault) j += 1;
+    while (DECLARATION_MODIFIERS.has(identAt(j) ?? '')) j += 1;
+
+    const keyword = identAt(j);
+    // TYPES are out of scope in every spelling — see the policy above.
+    if (keyword === 'type' || keyword === 'interface') continue;
+
+    // `const enum X`: the `const` belongs to the ENUM, not to a binding list.
+    if (keyword === 'const' && identAt(j + 1) === 'enum') {
+      const name = identAt(j + 2);
+      const at = tokens[j + 2]?.start;
+      if (name !== null && at !== undefined) emit(name, 'enum', at, 1, isDefault);
+      continue;
+    }
+
+    if (keyword !== null && NAMED_KEYWORDS.has(keyword)) {
+      // A GENERATOR puts a `*` between the keyword and the name.
+      const k = punctAt(j + 1) === '*' ? j + 2 : j + 1;
+      const name = identAt(k);
+      const at = tokens[k]?.start;
+      if (name !== null && at !== undefined) emit(name, keyword, at, 1, isDefault);
+      continue;
+    }
+
+    if (keyword !== null && BINDING_KEYWORD_SET.has(keyword)) {
+      // A declarator LIST: every binding it introduces, not just the first.
+      const slice = tokens.slice(j + 1, j + 1 + MAX_DECLARATOR_TOKENS);
+      for (const binding of declarationBindings(slice)) {
+        emit(binding.name, keyword, binding.start, 1, false);
+      }
+      continue;
+    }
+
+    if (punctAt(j) === '{') {
+      // A CLAUSE publishing local values.  A re-export (`… } from './y.js'`) is
+      // deliberately skipped: it is barrel plumbing, and the declaration it
+      // republishes is already scanned where it lives.
+      const groups: Token[][] = [[]];
+      let k = j + 1;
+      for (let guard = 0; k < tokens.length && guard < MAX_DECLARATOR_TOKENS; k += 1, guard += 1) {
+        if (punctAt(k) === '}') break;
+        if (punctAt(k) === ',') {
+          groups.push([]);
+          continue;
+        }
+        const token = tokens[k];
+        // biome-ignore lint/style/noNonNullAssertion: `groups` is never empty.
+        if (token !== undefined) groups[groups.length - 1]!.push(token);
+      }
+      i = k;
+      if (identAt(k + 1) === 'from') continue; // barrel plumbing
+      for (const group of groups) {
+        const names = group.filter((token) => token.kind === 'ident').map((token) => token.value);
+        const first = group[0];
+        if (first === undefined || names.length === 0) continue;
+        // `export { type A }` publishes a TYPE.  `type` is also a legal name, so
+        // it is the modifier only when another name follows that is not `as`.
+        if (names[0] === 'type' && names.length > 1 && names[1] !== 'as') continue;
+        const asAt = names.indexOf('as');
+        const local = names[0] ?? '';
+        const exported = asAt === -1 ? local : (names[asAt + 1] ?? '');
+        if (!/^[A-Za-z_$][\w$]*$/.test(exported) || exported === 'default') continue;
+        // An UNALIASED specifier repeats the local declaration's name, so the
+        // name occurs twice before any real use.
+        emit(exported, 'export', first.start, exported === local ? 2 : 1, false);
+      }
+      continue;
+    }
+
+    if (punctAt(j) === '*') {
+      // `export * as name from '…'` publishes ONE named runtime binding that no
+      // declaration keyword introduces.  A plain `export * from` does not: those
+      // names keep the spelling they are already scanned under.
+      if (identAt(j + 1) !== 'as' || identAt(j + 3) !== 'from') continue;
+      const name = identAt(j + 2);
+      const at = tokens[j + 2]?.start;
+      // `export * as default from '…'` is legal ES2020 and publishes `default`,
+      // whose name is module-local at every importer — out of scope.
+      if (name !== null && name !== 'default' && at !== undefined) {
+        emit(name, 'namespace', at, 1, false);
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Every exported value declared in one source file, in SOURCE ORDER.
  *
- * The four shapes are found by four separate passes, so each carries the offset
- * it was found at and the result is sorted — otherwise the report would list a
- * file's declarations grouped by shape rather than by where they are, which is
- * the order a reader needs to walk them in.
+ * INTERSECTS the two regex-preference lexings rather than unioning them.  For
+ * identifier COUNTS a mis-lex may only over-count (a false negative, safe); for
+ * DECLARATIONS the safe direction is the opposite — a name only one lexing
+ * believes in could fail a correct branch, so both must agree on it.
  */
 export function exportedValues(source: string): ExportedValue[] {
-  const found: Array<{ value: ExportedValue; start: number }> = [];
-  const out = {
-    push(value: ExportedValue, start: number): void {
-      found.push({ value, start });
-    },
-  };
-  EXPORTED_VALUE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null = EXPORTED_VALUE_RE.exec(source);
-  while (match !== null) {
-    const kind = match[2];
-    const name = match[3];
-    if (kind !== undefined && name !== undefined) {
-      out.push(
-        {
-          name,
-          kind,
-          line: source.slice(0, match.index).split('\n').length,
-          selfOccurrences: 1,
-          isDefault: match[1] !== undefined,
-        },
-        match.index,
-      );
-    }
-    match = EXPORTED_VALUE_RE.exec(source);
-  }
-
-  EXPORTED_BINDING_RE.lastIndex = 0;
-  let declaration: RegExpExecArray | null = EXPORTED_BINDING_RE.exec(source);
-  while (declaration !== null) {
-    const kind = declaration[0].trimEnd().split(/\s+/).pop() ?? 'const';
-    const from = declaration.index + declaration[0].length;
-    // INTERSECT the two regex-preference passes rather than union them.  For
-    // identifier COUNTS a mis-lex may only over-count (a false negative, safe);
-    // for DECLARATIONS the safe direction is the opposite — a name only one pass
-    // believes in could fail a correct branch, so both must agree.
-    const [lenient, strict] = [false, true].map((preferRegex) =>
-      declarationBindings(tokenize(source, preferRegex, { from })),
-    );
-    const agreed = (strict ?? []).map((entry) => entry.name);
-    for (const entry of lenient ?? []) {
-      if (!agreed.includes(entry.name)) continue;
-      out.push(
-        {
-          name: entry.name,
-          kind,
-          line: source.slice(0, entry.start).split('\n').length,
-          selfOccurrences: 1,
-          isDefault: false,
-        },
-        entry.start,
-      );
-    }
-    declaration = EXPORTED_BINDING_RE.exec(source);
-  }
-
-  EXPORT_CLAUSE_RE.lastIndex = 0;
-  let clause: RegExpExecArray | null = EXPORT_CLAUSE_RE.exec(source);
-  while (clause !== null) {
-    const body = clause[1] ?? '';
-    const line = source.slice(0, clause.index).split('\n').length;
-    // `export type { … }` publishes only types.
-    if (!/^[ \t]*export[ \t]+type\b/.test(clause[0])) {
-      for (const raw of body.split(',')) {
-        const specifier = raw.trim();
-        if (specifier.length === 0 || /^type\s/.test(specifier)) continue;
-        const parts = specifier.split(/\s+as\s+/);
-        const local = (parts[0] ?? '').trim();
-        const exported = (parts[1] ?? local).trim();
-        if (!/^[A-Za-z_$][\w$]*$/.test(exported) || exported === 'default') continue;
-        out.push(
-          {
-            name: exported,
-            kind: 'export',
-            line,
-            // An UNALIASED specifier repeats the local declaration's name, so
-            // the name occurs twice before any real use.
-            selfOccurrences: exported === local ? 2 : 1,
-            // `export { x as default }` is filtered out above, so a clause
-            // specifier that reaches here always publishes its own name.
-            isDefault: false,
-          },
-          clause.index,
-        );
-      }
-    }
-    clause = EXPORT_CLAUSE_RE.exec(source);
-  }
-
-  EXPORT_NAMESPACE_RE.lastIndex = 0;
-  let namespace: RegExpExecArray | null = EXPORT_NAMESPACE_RE.exec(source);
-  while (namespace !== null) {
-    const name = namespace[1];
-    // `export * as default from '…'` is legal ES2020 and publishes `default`,
-    // whose name is module-local at every importer — out of scope like any other
-    // default export.
-    if (name !== undefined && name !== 'default') {
-      out.push(
-        {
-          name,
-          kind: 'namespace',
-          line: source.slice(0, namespace.index).split('\n').length,
-          // The name is written ONCE, in the clause; the specifier beside it is
-          // a string literal, which the identifier scan does not count.
-          selfOccurrences: 1,
-          isDefault: false,
-        },
-        namespace.index,
-      );
-    }
-    namespace = EXPORT_NAMESPACE_RE.exec(source);
-  }
-  // Stable, so specifiers within one `export { … }` clause keep their order.
-  return found.sort((a, b) => a.start - b.start).map((entry) => entry.value);
+  const [lenient, strict] = [false, true].map((preferRegex) =>
+    parseExportedValues(source, tokenize(source, preferRegex)),
+  );
+  const agreed = new Set((strict ?? []).map((entry) => `${entry.start}:${entry.value.name}`));
+  return (lenient ?? [])
+    .filter((entry) => agreed.has(`${entry.start}:${entry.value.name}`))
+    .sort((a, b) => a.start - b.start)
+    .map((entry) => entry.value);
 }
 
 /**

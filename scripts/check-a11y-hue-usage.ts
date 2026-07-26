@@ -58,6 +58,33 @@ const BARE_HUE = /(?:^|[\s'"`{])text-(primary|success|warning|error|info)(?![\w-
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
 const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;
 
+/** The component that renders an icon here; the ONLY element `size-*` exempts. */
+const ICON_ELEMENT = 'Icon';
+
+/** How far back a JSX opening tag may sit from the className literal in it. */
+const MAX_TAG_LOOKBACK = 512;
+
+/**
+ * The JSX element a literal sits inside — the nearest `<Name` before it.
+ *
+ * `size-*` alone is NOT enough to exempt a literal: it says the element has a
+ * fixed square size, not that it is a graphical object, so
+ * `<span className="size-8 text-error">!</span>` is normal text that the size
+ * check would wave through.  Pairing the size class with the element that
+ * actually renders an icon closes that without demanding a written exemption at
+ * the five genuine `<Icon>` call sites.
+ *
+ * A literal with no element in front of it — a class map entry, a bare
+ * constant — resolves to `null` and gets no exemption, which is the right
+ * default: those carry no evidence of being non-text, so they need the reasoned
+ * marker instead.
+ */
+function enclosingElement(source: string, at: number): string | null {
+  const open = source.lastIndexOf('<', at);
+  if (open === -1 || at - open > MAX_TAG_LOOKBACK) return null;
+  return /^<\s*([A-Za-z][\w.]*)/.exec(source.slice(open, at))?.[1] ?? null;
+}
+
 /** An explicit, REASONED opt-out on a comment line.  `\S` after the colon makes
  *  the reason mandatory: a bare marker would be a silent suppression. */
 const EXEMPTION = /(?:\/\/|\/\*|^\s*\*|\{\s*\/\*).*a11y-bare-hue-ok:\s*\S/;
@@ -196,7 +223,11 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
     const lines = file.content.split('\n');
     for (const token of stringTokens(file.content)) {
       const text = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
-      if (ICON_SIZE.test(text)) continue;
+      // An ICON is a graphical object (WCAG 1.4.11, 3:1).  BOTH halves are
+      // required: the size class alone describes a box, not a glyph.
+      if (ICON_SIZE.test(text) && enclosingElement(file.content, token.start) === ICON_ELEMENT) {
+        continue;
+      }
       const match = BARE_HUE.exec(text);
       if (match === null) continue;
       // A template may span lines, so anchor on the HUE rather than the token

@@ -109,6 +109,33 @@ describe('what is NOT a violation', () => {
     expect(hues(`<Icon className="text-success size-4" />`)).toEqual([]);
   });
 
+  it('accepts an icon whose props span several lines', () => {
+    const source = [
+      '<Icon',
+      '  name="x"',
+      '  aria-hidden',
+      '  className="size-4 text-success"',
+      '/>',
+    ].join('\n');
+    expect(hues(source)).toEqual([]);
+  });
+});
+
+// `size-*` says the element has a fixed square size, NOT that it is a graphical
+// object — so exempting on the class alone waves through normal text that
+// happens to sit in a square.  The exemption is the size class AND the element
+// that actually renders an icon.
+describe('the icon exemption is scoped to the icon element', () => {
+  it('REJECTS a sized non-icon element carrying the bare hue', () => {
+    expect(hues(`<span className="size-8 text-error">!</span>`)).toEqual(['1:error']);
+    expect(hues(`<div className="size-8 text-warning">x</div>`)).toEqual(['1:warning']);
+  });
+
+  it('REJECTS a sized class map entry, which has no element at all', () => {
+    // No evidence of being non-text, so it needs the reasoned marker instead.
+    expect(hues(`const m = { a: 'size-4 text-info' };`)).toEqual(['1:info']);
+  });
+
   it('ignores a class name only NAMED in a comment', () => {
     expect(hues(`// never use text-error for body copy\nconst a = 1;`)).toEqual([]);
     expect(hues(`/* text-warning is large-text only */\nconst a = 1;`)).toEqual([]);
@@ -124,8 +151,9 @@ describe('what is NOT a violation', () => {
   });
 
   it('accepts an icon or an -on-soft pair reached through an interpolation', () => {
-    // The descent must not lose the exemptions it descends past.
-    expect(hues(`const c = \`b \${on ? 'size-4 text-success' : ''}\`;`)).toEqual([]);
+    // The descent must not lose the exemptions it descends past.  The icon case
+    // needs its element, since `size-*` alone no longer exempts anything.
+    expect(hues(`<Icon className={\`b \${on ? 'size-4 text-success' : ''}\`} />`)).toEqual([]);
     expect(hues(`const c = \`b \${on ? 'text-error-on-soft' : ''}\`;`)).toEqual([]);
   });
 

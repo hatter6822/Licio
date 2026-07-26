@@ -163,6 +163,52 @@ describe('exportedValues', () => {
     expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['const UNUSED']);
   });
 
+  // A block comment is legal between `export` and the keyword, and beside a
+  // clause specifier.  A whitespace-and-identifier pattern cannot see past one,
+  // so an unreferenced export hiding behind a comment used to pass the gate.
+  // Built through `block()` so the fixture's `*/` never closes this file's own.
+  const block = (text: string): string => `/${'*'} ${text} ${'*'}/`;
+
+  it('parses past a COMMENT between `export` and the keyword', () => {
+    expect(
+      exportedValues(`export ${block('retained API')} const orphan = 1;`).map((v) => v.name),
+    ).toEqual(['orphan']);
+    expect(exportedValues(`export ${block('x')} function orphan() {}`).map((v) => v.name)).toEqual([
+      'orphan',
+    ]);
+    expect(
+      exportedValues(`export ${block('x')} default ${block('y')} function orphan() {}`).map(
+        (v) => v.name,
+      ),
+    ).toEqual(['orphan']);
+  });
+
+  it('parses past a comment INSIDE an export clause', () => {
+    expect(
+      exportedValues(`function orphan(){}\nexport { orphan ${block('retained')} };`).map(
+        (v) => v.name,
+      ),
+    ).toEqual(['orphan']);
+    expect(
+      exportedValues(`function a(){}\nexport { a ${block('x')} as b };`).map((v) => v.name),
+    ).toEqual(['b']);
+  });
+
+  it('parses past a MULTI-LINE or line comment, which no blanking pass could', () => {
+    expect(exportedValues('export /*\n  long\n*/ const orphan = 1;').map((v) => v.name)).toEqual([
+      'orphan',
+    ]);
+    expect(exportedValues('export // why\nconst orphan = 1;').map((v) => v.name)).toEqual([
+      'orphan',
+    ]);
+  });
+
+  it('does not read a property or object key named `export` as a declaration', () => {
+    expect(exportedValues('const v = obj.export;')).toEqual([]);
+    expect(exportedValues('const o = { export: 1 };')).toEqual([]);
+    expect(exportedValues("const s = 'export const fake = 1;';")).toEqual([]);
+  });
+
   it('reads `export const enum` as an ENUM, not a variable binding', () => {
     // `const` there belongs to the enum declaration.  Without this the enum was
     // invisible AND the binding walk recorded the literal word `enum` as a name.

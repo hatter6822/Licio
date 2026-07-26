@@ -185,6 +185,44 @@ describe('extractMetaPolicies', () => {
   });
 });
 
+// A meta policy governs only what the parser reaches AFTER it — it does not
+// reach back over a script already fetched.  On the web the response header
+// covers that; the courier WebView has no header at all, so the tag's POSITION
+// is as load-bearing as its text, and matching the policy string proves nothing
+// about content parsed before it.
+describe('the delivered CSP meta must precede what it governs', () => {
+  const POLICY = contentSecurityPolicyMeta();
+  const META = `<meta http-equiv="Content-Security-Policy" content="${POLICY.replace(/"/g, '&quot;')}">`;
+  const built = (head: string): string => `<html><head>${head}</head><body></body></html>`;
+  const problems = (builtIndexHtml: string): string[] =>
+    findCspDeliveryProblems({ indexHtml: '<html><head></head></html>', builtIndexHtml });
+
+  it('accepts the tag first in <head>', () => {
+    expect(problems(built(`${META}<script src="/a.js"></script>`))).toEqual([]);
+  });
+
+  it('accepts a charset declaration ahead of it', () => {
+    expect(problems(built(`<meta charset="utf-8">${META}`))).toEqual([]);
+  });
+
+  it.each([
+    ['script', `<script src="/a.js"></script>`],
+    ['link', `<link rel="stylesheet" href="/a.css">`],
+    ['style', `<style>a{}</style>`],
+    ['base', `<base href="/">`],
+  ])('REJECTS a <%s> before it', (tag, markup) => {
+    const found = problems(built(`${markup}${META}`));
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain(`a <${tag}> precedes the CSP <meta>`);
+  });
+
+  it('REJECTS a tag moved into the body', () => {
+    const found = problems(`<html><head></head><body>${META}</body></html>`);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('AFTER </head>');
+  });
+});
+
 describe('findCspDeliveryProblems', () => {
   const injected = (): string => injectCspMeta(HEAD(''), contentSecurityPolicyMeta());
 

@@ -165,15 +165,63 @@ function parseTagAttributes(tag: string): Map<string, string> {
  * report, not a tag to overlook.
  */
 export function extractMetaPolicies(html: string): string[] {
-  const found: string[] = [];
+  return findMetaPolicies(html).map((entry) => entry.policy);
+}
+
+/** A CSP `<meta>` and where in the document it sits. */
+export interface MetaPolicy {
+  readonly policy: string;
+  /** Byte offset of the tag's `<`. */
+  readonly at: number;
+}
+
+/** {@link extractMetaPolicies}, keeping each tag's OFFSET for the ordering check. */
+export function findMetaPolicies(html: string): MetaPolicy[] {
+  const found: MetaPolicy[] = [];
   // Quoted runs are matched as units so a `>` INSIDE an attribute value cannot
   // end the tag early and hide the attributes after it.
   for (const tag of html.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
     const attributes = parseTagAttributes(tag[0]);
     if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
-    found.push(attributes.get('content') ?? '');
+    found.push({ policy: attributes.get('content') ?? '', at: tag.index });
   }
   return found;
+}
+
+/**
+ * Tags whose content a policy delivered AFTER them would never have governed.
+ *
+ * A `<meta>` policy applies only to what the parser processes once it has been
+ * seen — it does not reach back over a `<script>` already fetched or a `<base>`
+ * already applied.  On the web the response header covers that gap, but the
+ * native courier WebView has NO server headers: the meta is the whole policy
+ * there, so a build step that reordered the head would leave the courier's
+ * earliest content ungoverned while every string comparison still matched.
+ */
+const CONTROLLED_TAGS = /<\s*(script|link|style|base|iframe|object|embed|img|svg)\b/i;
+
+/** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
+function findPlacementProblem(html: string, policyAt: number): string | null {
+  const headOpen = /<\s*head\b[^>]*>/i.exec(html);
+  const headClose = /<\s*\/\s*head\s*>/i.exec(html);
+  if (headOpen === null || policyAt < headOpen.index + headOpen[0].length) {
+    return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
+  }
+  if (headClose !== null && policyAt > headClose.index) {
+    return (
+      `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits AFTER </head>. A meta policy governs ` +
+      'only what is parsed after it, and the courier WebView has no header to fall back on.'
+    );
+  }
+  const controlled = CONTROLLED_TAGS.exec(html);
+  if (controlled !== null && controlled.index < policyAt) {
+    return (
+      `${BUILT_INDEX_HTML_FILE}: a <${controlled[1]}> precedes the CSP <meta>. A meta policy ` +
+      'does not apply retroactively, so that element would load OUTSIDE the policy — and in ' +
+      'the courier WebView there is no response header behind it.'
+    );
+  }
+  return null;
 }
 
 export interface CspDelivery {
@@ -201,7 +249,8 @@ export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
 
   if (delivery.builtIndexHtml === undefined) return problems;
 
-  const built = extractMetaPolicies(delivery.builtIndexHtml);
+  const delivered = findMetaPolicies(delivery.builtIndexHtml);
+  const built = delivered.map((entry) => entry.policy);
   if (built.length === 0) {
     problems.push(
       `${BUILT_INDEX_HTML_FILE}: no <meta http-equiv="Content-Security-Policy"> — the ` +
@@ -213,6 +262,10 @@ export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
   if (built.length > 1) {
     problems.push(`${BUILT_INDEX_HTML_FILE}: ${built.length} CSP <meta> tags; expected exactly 1.`);
   }
+  // WHERE the tag sits is as load-bearing as what it says: matching the policy
+  // text proves nothing about content the parser reached before it.
+  const placement = findPlacementProblem(delivery.builtIndexHtml, delivered[0]?.at ?? 0);
+  if (placement !== null) problems.push(placement);
   const actual = parsePolicyString(built[0] ?? '');
   if (actual.join('; ') !== parsePolicyString(expected).join('; ')) {
     problems.push(
