@@ -178,7 +178,9 @@ export function signatureToBytes(sig: BbsSignature): Uint8Array {
 
 /** Parse an 80-byte wire signature (`A || e`); throws on a malformed encoding. */
 export function signatureFromBytes(bytes: Uint8Array): BbsSignature {
-  if (bytes.length !== SIGNATURE_LENGTH) throw new Error('bbs: signature must be 80 bytes');
+  if (bytes.length !== SIGNATURE_LENGTH) {
+    throw new Error(`bbs: signature must be ${SIGNATURE_LENGTH} bytes`);
+  }
   const a = G1.fromBytes(bytes.slice(0, OCTET_POINT_LENGTH));
   const e = os2ip(bytes.slice(OCTET_POINT_LENGTH, SIGNATURE_LENGTH));
   if (e <= 0n || e >= ORDER) throw new Error('bbs: signature e out of range');

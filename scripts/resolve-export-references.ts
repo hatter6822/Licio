@@ -287,6 +287,15 @@ interface FileScan {
 /** Identifier parents that PUBLISH a name rather than consume one. */
 const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind.NamespaceExport]);
 
+/** Wrappers that yield the value they wrap, so a receiver may sit behind them. */
+const TRANSPARENT_WRAPPERS = new Set<number>([
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.AsExpression,
+  SyntaxKind.SatisfiesExpression,
+  SyntaxKind.NonNullExpression,
+  SyntaxKind.TypeAssertionExpression,
+]);
+
 /** Function shapes that can receive the namespace as a `.then` callback. */
 const CALLBACK_KINDS = new Set<number>([SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
 
@@ -332,20 +341,39 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   const asPattern = (node: NodeHandle | undefined): NodeHandle | undefined =>
     node?.kind === SyntaxKind.ObjectBindingPattern ? node : undefined;
 
-  const parent = importCall.parent;
+  // Climb through wrappers that do not change the VALUE — parentheses, `as`,
+  // `satisfies`, a non-null `!`, an angle-bracket assertion — and through the
+  // one `await`.  `const { A } = (await import('M'))` is the same consumer as
+  // `const { A } = await import('M')`, and stopping at the parenthesis credited
+  // neither; for a PRIMITIVE export the type route cannot recover it either, so
+  // a correct branch failed.  Order is not fixed (`await (import(M))` is equally
+  // valid), which is why this is a loop rather than two `if`s.
+  let node = importCall;
+  let awaited = false;
+  for (let hop = 0; hop < MAX_ALIAS_HOPS; hop += 1) {
+    const parent = node.parent;
+    if (parent === undefined) return undefined;
+    if (TRANSPARENT_WRAPPERS.has(parent.kind)) {
+      node = parent;
+      continue;
+    }
+    if (parent.kind === SyntaxKind.AwaitExpression && !awaited) {
+      awaited = true;
+      node = parent;
+      continue;
+    }
+    break;
+  }
+
+  const parent = node.parent;
   // `const { A } = await import('M')` — a bare `import('M')` without `await`
   // yields a PROMISE, whose destructuring names promise members, not exports.
-  if (parent?.kind === SyntaxKind.AwaitExpression) {
-    const declaration = parent.parent;
-    return declaration?.kind === SyntaxKind.VariableDeclaration
-      ? asPattern(declaration.name)
-      : undefined;
+  if (parent?.kind === SyntaxKind.VariableDeclaration) {
+    return awaited ? asPattern(parent.name) : undefined;
   }
   // `import('M').then(({ A }) => …)`
   if (parent?.kind !== SyntaxKind.PropertyAccessExpression) return undefined;
-  const accessed = parent.name;
-  if (accessed === undefined) return undefined;
-  if (nameOf(accessed) !== 'then') return undefined;
+  if (nameOf(parent.name) !== 'then') return undefined;
   const call = parent.parent;
   if (call?.kind !== SyntaxKind.CallExpression) return undefined;
   const callback = call.arguments?.[0];

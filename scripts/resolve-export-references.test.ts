@@ -194,6 +194,30 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a receiver behind TRANSPARENT WRAPPERS ───────────────────
+  // Parentheses, `as`, `satisfies` and `!` yield the value they wrap, so the
+  // binding pattern can sit behind any of them.  Primitives throughout: a
+  // function export would survive this gap anyway, via the type route.
+  'src/wrapped.ts': [
+    'export const PAREN_LIVE = 1;',
+    'export const AS_LIVE = 2;',
+    'export const AWAIT_INSIDE = 3;',
+  ].join('\n'),
+  'src/wrapped-consumer.ts': [
+    'export async function a(): Promise<number> {',
+    "  const { PAREN_LIVE } = (await import('./wrapped.js'));",
+    '  return PAREN_LIVE;',
+    '}',
+    'export async function b(): Promise<number> {',
+    "  const { AS_LIVE } = (await import('./wrapped.js')) as typeof import('./wrapped.js');",
+    '  return AS_LIVE;',
+    '}',
+    'export async function c(): Promise<number> {',
+    "  const { AWAIT_INSIDE } = await (import('./wrapped.js'));",
+    '  return AWAIT_INSIDE;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: an ARBITRARY MODULE NAMESPACE NAME (ES2022) ──────────────
   // `export { value as "foo-bar" }` publishes a name no identifier can spell,
   // and the importer names it with a string literal.  Reading the source
@@ -385,6 +409,17 @@ describe('resolution: which sites use a binding', () => {
     // to that new local, never to the export, so this needs the specifier route.
     expect(usesOf('src/lazy.ts', 'lazilyUsed').length).toBeGreaterThan(0);
   });
+
+  it.each(['PAREN_LIVE', 'AS_LIVE', 'AWAIT_INSIDE'])(
+    'counts a dynamic import received behind a transparent wrapper (%s)',
+    (name) => {
+      // `(await import(M))`, `(await import(M)) as …`, `await (import(M))` —
+      // all the same consumer.  Stopping at the wrapper credited none of them,
+      // and a PRIMITIVE export has no origin symbol for the type route to
+      // recover, so a correct branch failed.
+      expect(usesOf('src/wrapped.ts', name).length).toBeGreaterThan(0);
+    },
+  );
 
   it('counts an ARBITRARY MODULE NAMESPACE NAME, imported by string literal', () => {
     // `export { value as "foo-bar" }` consumed as

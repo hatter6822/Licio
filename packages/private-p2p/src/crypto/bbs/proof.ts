@@ -332,14 +332,20 @@ export function proofToBytes(proof: BbsProof): Uint8Array {
   );
 }
 
-const PROOF_FLOOR = 3 * OCTET_POINT_LENGTH + 4 * OCTET_SCALAR_LENGTH; // 272
+/** `Abar || Bbar || D` — the three G1 points every proof carries. */
+const PROOF_POINTS = 3;
+/** `e^ || r1^ || r3^` — the fixed scalars, before the per-message commitments. */
+const PROOF_FIXED_SCALARS = 3;
+/** The shortest valid proof: the points, the fixed scalars, and the challenge. */
+const PROOF_FLOOR =
+  PROOF_POINTS * OCTET_POINT_LENGTH + (PROOF_FIXED_SCALARS + 1) * OCTET_SCALAR_LENGTH; // 272
 
 /** `octets_to_proof`: parse + validate (G1 non-identity points; scalars in [1, r)). */
 export function proofFromBytes(bytes: Uint8Array): BbsProof {
-  if (bytes.length < PROOF_FLOOR || (bytes.length - PROOF_FLOOR) % 32 !== 0) {
+  if (bytes.length < PROOF_FLOOR || (bytes.length - PROOF_FLOOR) % OCTET_SCALAR_LENGTH !== 0) {
     throw new Error('bbs proof: malformed length');
   }
-  const u = (bytes.length - PROOF_FLOOR) / 32;
+  const u = (bytes.length - PROOF_FLOOR) / OCTET_SCALAR_LENGTH;
   const pt = (o: number): G1Point => {
     const p = G1.fromBytes(bytes.slice(o, o + OCTET_POINT_LENGTH));
     if (p.is0()) throw new Error('bbs proof: identity point');
@@ -347,18 +353,26 @@ export function proofFromBytes(bytes: Uint8Array): BbsProof {
     return p;
   };
   const sc = (o: number): bigint => {
-    const s = os2ip(bytes.slice(o, o + 32));
+    const s = os2ip(bytes.slice(o, o + OCTET_SCALAR_LENGTH));
     if (s <= 0n || s >= ORDER) throw new Error('bbs proof: scalar out of range');
     return s;
   };
-  const aBar = pt(0);
-  const bBar = pt(OCTET_POINT_LENGTH);
-  const d = pt(2 * OCTET_POINT_LENGTH);
-  const eHat = sc(144);
-  const r1Hat = sc(176);
-  const r3Hat = sc(208);
+  // The layout is `Abar || Bbar || D || e^ || r1^ || r3^ || m^* || c`: three
+  // points, then every remaining field a scalar.  Addressed by INDEX within
+  // each run rather than by byte, so the length check above and these reads can
+  // never describe different layouts — a disagreement there does not throw, it
+  // reads one field's bytes as another.
+  const point = (index: number): number => index * OCTET_POINT_LENGTH;
+  const scalar = (index: number): number =>
+    PROOF_POINTS * OCTET_POINT_LENGTH + index * OCTET_SCALAR_LENGTH;
+  const aBar = pt(point(0));
+  const bBar = pt(point(1));
+  const d = pt(point(2));
+  const eHat = sc(scalar(0));
+  const r1Hat = sc(scalar(1));
+  const r3Hat = sc(scalar(2));
   const commitments: bigint[] = [];
-  for (let k = 0; k < u; k++) commitments.push(sc(240 + k * 32));
-  const challenge = sc(240 + u * 32);
+  for (let k = 0; k < u; k++) commitments.push(sc(scalar(PROOF_FIXED_SCALARS + k)));
+  const challenge = sc(scalar(PROOF_FIXED_SCALARS + u));
   return { aBar, bBar, d, eHat, r1Hat, r3Hat, commitments, challenge };
 }
