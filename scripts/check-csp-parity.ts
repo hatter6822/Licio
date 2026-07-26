@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { maskInertMarkup } from '../apps/web/src/dev/inject-csp-meta.js';
+import { scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -179,17 +179,15 @@ export interface MetaPolicy {
 /** {@link extractMetaPolicies}, keeping each tag's OFFSET for the ordering check. */
 export function findMetaPolicies(html: string): MetaPolicy[] {
   const found: MetaPolicy[] = [];
-  // COMMENTS are masked first: a `<meta>` written inside one is not a policy —
-  // the parser discards it — and counting it would let the gate report a
-  // document as carrying the policy when the browser sees none.  Masking keeps
-  // offsets, so `at` still points into the caller's original string.
-  const markup = maskInertMarkup(html);
-  // Quoted runs are matched as units so a `>` INSIDE an attribute value cannot
-  // end the tag early and hide the attributes after it.
-  for (const tag of markup.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
-    const attributes = parseTagAttributes(tag[0]);
+  // Real ELEMENTS, not `<meta` substrings.  A `<meta>` written inside a comment,
+  // inside a `<template>`, or serialized into an attribute value creates no
+  // element — the browser sees no policy — and counting one would let this gate
+  // report the courier as carrying a CSP it does not have.
+  for (const tag of scanTags(html)) {
+    if (tag.name !== 'meta' || tag.closing) continue;
+    const attributes = parseTagAttributes(tag.raw);
     if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
-    found.push({ policy: attributes.get('content') ?? '', at: tag.index });
+    found.push({ policy: attributes.get('content') ?? '', at: tag.at });
   }
   return found;
 }
@@ -204,29 +202,40 @@ export function findMetaPolicies(html: string): MetaPolicy[] {
  * there, so a build step that reordered the head would leave the courier's
  * earliest content ungoverned while every string comparison still matched.
  */
-const CONTROLLED_TAGS = /<\s*(script|link|style|base|iframe|object|embed|img|svg)\b/i;
+const CONTROLLED_TAGS: ReadonlySet<string> = new Set([
+  'script',
+  'link',
+  'style',
+  'base',
+  'iframe',
+  'object',
+  'embed',
+  'img',
+  'svg',
+]);
 
 /** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
-function findPlacementProblem(rawHtml: string, policyAt: number): string | null {
-  // Masked, for the same reason: a `<head>` or a `<script>` named inside a
-  // comment is prose, and treating it as markup would move the boundary this
-  // check is about.
-  const html = maskInertMarkup(rawHtml);
-  const headOpen = /<\s*head\b[^>]*>/i.exec(html);
-  const headClose = /<\s*\/\s*head\s*>/i.exec(html);
-  if (headOpen === null || policyAt < headOpen.index + headOpen[0].length) {
+function findPlacementProblem(html: string, policyAt: number): string | null {
+  // The same element walk the policy itself was found by: a `<head>` or a
+  // `<script>` named inside a comment, inside inert content, or inside an
+  // attribute value is not an element, and treating one as markup would move
+  // the very boundary this check is about.
+  const tags = scanTags(html);
+  const headOpen = tags.find((tag) => tag.name === 'head' && !tag.closing);
+  const headClose = tags.find((tag) => tag.name === 'head' && tag.closing);
+  if (headOpen === undefined || policyAt < headOpen.end) {
     return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
   }
-  if (headClose !== null && policyAt > headClose.index) {
+  if (headClose !== undefined && policyAt > headClose.at) {
     return (
       `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits AFTER </head>. A meta policy governs ` +
       'only what is parsed after it, and the courier WebView has no header to fall back on.'
     );
   }
-  const controlled = CONTROLLED_TAGS.exec(html);
-  if (controlled !== null && controlled.index < policyAt) {
+  const controlled = tags.find((tag) => !tag.closing && CONTROLLED_TAGS.has(tag.name));
+  if (controlled !== undefined && controlled.at < policyAt) {
     return (
-      `${BUILT_INDEX_HTML_FILE}: a <${controlled[1]}> precedes the CSP <meta>. A meta policy ` +
+      `${BUILT_INDEX_HTML_FILE}: a <${controlled.name}> precedes the CSP <meta>. A meta policy ` +
       'does not apply retroactively, so that element would load OUTSIDE the policy — and in ' +
       'the courier WebView there is no response header behind it.'
     );

@@ -20,20 +20,6 @@
 // Pure and DOM-free so it is directly unit-testable.
 
 /**
- * Where the tag goes: immediately after `<head>` (before any other metadata,
- * matching how a server header applies to the whole document).
- *
- * Quoted runs are matched as UNITS, so a `>` inside an attribute value —
- * `<head data-note="x > y">` is valid HTML — cannot end the tag early.  Getting
- * that wrong splices the policy into the middle of the head tag, where it is
- * not a `<meta>` at all: the courier then ships with no CSP, and the delivery
- * gate, reading the same truncated tag, agrees that everything is fine.  The
- * `<meta>` scanner in `check:csp-parity` matches quoted runs for exactly this
- * reason; the two have to agree about where a tag ends.
- */
-const HEAD_OPEN = /<head(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?>/i;
-
-/**
  * Elements whose CONTENT a parser never treats as live markup.
  *
  * `script`/`style`/`textarea`/`title` hold raw or escapable-raw text — a
@@ -57,66 +43,144 @@ const INERT_CONTENT_ELEMENTS = [
   'noscript',
 ] as const;
 
-/** Opens one of the above.  Sticky, so the scan stays linear over the document. */
-const INERT_OPEN = new RegExp(`<(${INERT_CONTENT_ELEMENTS.join('|')})\\b[^>]*>`, 'iy');
+/** The same set, as the lookup {@link scanTags} does per tag. */
+const INERT_CONTENT: ReadonlySet<string> = new Set(INERT_CONTENT_ELEMENTS);
+
+/** One tag a parser would actually create, with the text it spans. */
+export interface HtmlTag {
+  /** Lower-cased tag name (HTML names are ASCII case-insensitive). */
+  readonly name: string;
+  /** `</name>` rather than an open tag. */
+  readonly closing: boolean;
+  /** Byte offset of the `<`. */
+  readonly at: number;
+  /** Byte offset just past the `>`. */
+  readonly end: number;
+  /** The tag's own text, `<` through `>`, for attribute parsing. */
+  readonly raw: string;
+}
+
+const ASCII_LETTER = /[a-zA-Z]/;
+const SPACE = /\s/;
 
 /**
- * Blank everything a parser would NOT read as live markup, preserving length
- * and newlines: comment bodies, and the CONTENT of the inert elements above.
+ * Read the tag starting at `at`, or `null` when a `<` there is ordinary text.
  *
- * `<head>` inside a comment is not the head, and a CSP `<meta>` inside a
- * `<template>` is not a policy — but a pattern scanning raw text cannot tell.
- * Injecting into either produces a document whose only CSP is inert: no policy
- * at all, and in the courier WebView no response header to fall back on, while
- * every string comparison downstream still matches.
+ * The tag's extent is what makes this a parser rather than a pattern: a `>`
+ * inside a QUOTED ATTRIBUTE VALUE does not end the tag, and — the case a `<meta`
+ * pattern gets wrong — a `<` inside one does not start a new one.  Markup
+ * serialized into an attribute, as in
+ * `<div data-note='<meta http-equiv="Content-Security-Policy" …>'>`, creates no
+ * element at all: it is character data in a `data-note` attribute.  A scan that
+ * matched `<meta` anywhere accepted it as the delivered policy, so a courier
+ * build carrying NO CSP could pass the gate that exists to prove it carries one.
  *
- * The element TAGS stay visible — only their content is blanked — so a
- * `<script src>` still counts as content the policy must precede.
- *
- * Masking rather than deleting keeps every offset valid, so a caller can scan
- * the masked copy and splice into (or report against) the ORIGINAL.  Shared
- * with `check:csp-parity` so the injector and the gate that verifies it agree
- * on what counts as markup — two spellings of that rule is how a green gate
- * ends up describing a document nobody delivers.
+ * All three attribute-value forms are handled (WHATWG HTML §13.1.2.3), because
+ * `<meta http-equiv=Content-Security-Policy content="…">` is valid HTML a
+ * browser honours in full.
  */
-export function maskInertMarkup(html: string): string {
-  // UTF-16 units, matching `indexOf`/`slice`, so offsets stay comparable.
-  const chars = html.split('');
-  const blank = (from: number, to: number): void => {
-    for (let k = from; k < to && k < chars.length; k += 1) if (chars[k] !== '\n') chars[k] = ' ';
-  };
+function readTag(html: string, at: number): HtmlTag | null {
+  const len = html.length;
+  let i = at + 1;
+  const closing = html[i] === '/';
+  if (closing) i += 1;
+  if (!ASCII_LETTER.test(html[i] ?? '')) return null; // a `<` that is just text
+  const nameFrom = i;
+  while (i < len && !SPACE.test(html[i] ?? '') && html[i] !== '/' && html[i] !== '>') i += 1;
+  const name = html.slice(nameFrom, i).toLowerCase();
+  const done = (end: number): HtmlTag => ({ name, closing, at, end, raw: html.slice(at, end) });
+
+  while (i < len) {
+    const char = html[i] ?? '';
+    if (char === '>') return done(i + 1);
+    if (SPACE.test(char) || char === '/' || char === '=') {
+      i += 1;
+      continue;
+    }
+    // An attribute name, then optionally `=` and a value.
+    const nameStart = i;
+    while (i < len) {
+      const inner = html[i] ?? '';
+      if (SPACE.test(inner) || inner === '=' || inner === '>' || inner === '/') break;
+      i += 1;
+    }
+    if (i === nameStart) {
+      i += 1; // never stall, whatever the input
+      continue;
+    }
+    let j = i;
+    while (j < len && SPACE.test(html[j] ?? '')) j += 1;
+    if (html[j] !== '=') continue; // a valueless attribute
+    j += 1;
+    while (j < len && SPACE.test(html[j] ?? '')) j += 1;
+    const quote = html[j];
+    if (quote === '"' || quote === "'") {
+      const close = html.indexOf(quote, j + 1);
+      i = close === -1 ? len : close + 1;
+      continue;
+    }
+    let k = j;
+    while (k < len && !SPACE.test(html[k] ?? '') && html[k] !== '>') k += 1;
+    i = k;
+  }
+  // An unterminated tag runs to the end of the document, as in a parser.
+  return done(len);
+}
+
+/**
+ * Every tag a parser would create, in document order.
+ *
+ * ONE answer to "where are the real elements", shared by the injector and by
+ * `check:csp-parity` so the two agree — two spellings of that rule is how a
+ * green gate ends up describing a document nobody delivers.  Each caller then
+ * asks its own question of the result: where the `<head>` opens, which tags a
+ * policy must precede, which `<meta>` carries one.
+ *
+ * Everything a parser would NOT read as markup is stepped over: comment bodies,
+ * doctypes, and the CONTENT of the inert elements above.  The element TAGS stay
+ * in the list — only their content is skipped — so a `<script src>` still counts
+ * as content the policy must precede.
+ *
+ * Offsets index the ORIGINAL string, so a caller can splice into it (or report
+ * against it) from what this returns.
+ */
+export function scanTags(html: string): HtmlTag[] {
+  const tags: HtmlTag[] = [];
   let i = 0;
-  while (i < chars.length) {
-    if (chars[i] !== '<') {
+  while (i < html.length) {
+    if (html[i] !== '<') {
       i += 1;
       continue;
     }
     if (html.startsWith('<!--', i)) {
       const close = html.indexOf('-->', i + 4);
       // An unterminated comment runs to the end of the document, as in a parser.
-      const end = close === -1 ? chars.length : close + 3;
-      blank(i, end);
-      i = end;
+      i = close === -1 ? html.length : close + 3;
       continue;
     }
-    INERT_OPEN.lastIndex = i;
-    const open = INERT_OPEN.exec(html);
-    if (open === null) {
+    if (html.startsWith('<!', i) || html.startsWith('<?', i)) {
+      // A doctype or bogus comment: no element, and it ends at the next `>`.
+      const close = html.indexOf('>', i);
+      i = close === -1 ? html.length : close + 1;
+      continue;
+    }
+    const tag = readTag(html, i);
+    if (tag === null) {
       i += 1;
       continue;
     }
-    const name = (open[1] ?? '').toLowerCase();
-    const contentFrom = i + open[0].length;
+    tags.push(tag);
+    i = tag.end;
+    if (tag.closing || !INERT_CONTENT.has(tag.name)) continue;
     // `<template>` NESTS; the raw-text elements cannot, so their first close tag
     // ends them.  Depth-counting only the nesting case keeps this exact.
-    const end =
-      name === 'template'
-        ? endOfTemplate(html, contentFrom)
-        : indexOfClose(html, name, contentFrom);
-    blank(contentFrom, end);
-    i = Math.max(end, contentFrom);
+    const contentEnd =
+      tag.name === 'template'
+        ? endOfTemplate(html, tag.end)
+        : indexOfClose(html, tag.name, tag.end);
+    i = Math.max(contentEnd, tag.end);
   }
-  return chars.join('');
+  return tags;
 }
 
 /** Offset of `</name>` at or after `from`, or the end of the document. */
@@ -221,12 +285,12 @@ function escapeAttribute(value: string): string {
  * the guarantee assert on the OUTPUT (`check:csp-parity` reads the built file).
  */
 export function injectCspMeta(html: string, policy: string): string {
-  // Located in the MASKED copy so a `<head>` written inside a comment cannot
-  // capture the injection; spliced into the original, whose offsets it shares.
-  const match = HEAD_OPEN.exec(maskInertMarkup(html));
-  if (!match) return html;
-  const tag = `\n    <meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}" />`;
-  return (
-    html.slice(0, match.index + match[0].length) + tag + html.slice(match.index + match[0].length)
-  );
+  // The REAL `<head>`: one written inside a comment, inside a `<template>`, or
+  // serialized into an attribute value is not the head, and splicing after it
+  // yields a document whose only CSP is inert — no policy at all, and in the
+  // courier WebView no response header behind it.
+  const head = scanTags(html).find((tag) => tag.name === 'head' && !tag.closing);
+  if (head === undefined) return html;
+  const meta = `\n    <meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}" />`;
+  return html.slice(0, head.end) + meta + html.slice(head.end);
 }

@@ -14,6 +14,7 @@
 // or parse failure keeps it false (fail-closed in the OFF direction).
 
 import { PAYMENT_INTENT_DEFAULT_MAX_RETRIES } from '@licio/governance';
+import { DEFAULT_SIM_ASSET, simAssetCodeSchema } from '@licio/shared';
 import { z } from 'zod';
 import type { PwattConfigStore } from '../events/stores.js';
 
@@ -89,7 +90,10 @@ export const DEFAULT_KNOMOSIS_CONFIG: KnomosisRuntimeConfig = {
   unlinkRequestsPerDay: 5,
   unlinkCoolingOffHours: 24,
   highValueThresholdMinorUnits: '100000000', // 100 units at 6 decimals
-  simStartingAsset: 'SIM-USDC',
+  // The shared asset registry OWNS the `SIM-` vocabulary; spelling the code
+  // again here made the canonical prefix changeable in one place while this
+  // default kept minting ledger assets under the old one.
+  simStartingAsset: DEFAULT_SIM_ASSET,
   simStartingBalanceMinorUnits: '10000000000', // 10,000.000000 SIM-USDC
   simQuorumMinVoters: 3,
   simApprovalThresholdPercent: 50,
@@ -133,7 +137,9 @@ const VALIDATORS: Readonly<Record<keyof KnomosisRuntimeConfig, z.ZodType>> = {
   unlinkRequestsPerDay: z.number().int().min(1).max(1_000),
   unlinkCoolingOffHours: z.number().int().min(0).max(720),
   highValueThresholdMinorUnits: minorUnits,
-  simStartingAsset: z.string().regex(/^SIM-[A-Z0-9]{1,28}$/),
+  // The same validator the WIRE schema applies: an operator override that the
+  // gateway would then reject is not a valid config value.
+  simStartingAsset: simAssetCodeSchema,
   simStartingBalanceMinorUnits: minorUnits,
   simQuorumMinVoters: z.number().int().min(1).max(100_000),
   simApprovalThresholdPercent: z.number().int().min(1).max(100),

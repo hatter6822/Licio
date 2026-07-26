@@ -11,6 +11,7 @@
 // in the asset's minor units (never floats — SPEC §22.2 discipline).
 
 import { z } from 'zod';
+import { SIM_ASSET_PREFIX } from '../knomosis/assets.js';
 import { previewRiskLabelSchema } from '../knomosis/preview.js';
 import { knomosisSignedActionTypeSchema } from '../knomosis/typed-data.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
@@ -472,22 +473,24 @@ export type ProposalVotingState = (typeof PROPOSAL_VOTING_STATES)[number];
 export type ProposalChallengeColumnState = (typeof PROPOSAL_CHALLENGE_STATES)[number];
 export type ProposalExecutionState = (typeof PROPOSAL_EXECUTION_STATES)[number];
 
-/** The simulated asset ledger prefix — fake assets are ALWAYS SIM-* (WS-L.4.1c). */
-export const SIM_ASSET_PREFIX = 'SIM-' as const;
 /** The persistent simulation banner text (WS-L.4.1c — cannot be dismissed). */
 export const SIMULATION_LABEL = 'SIMULATED — NO REAL VALUE' as const;
 
 /**
- * The validator that MAKES the prefix above true, built FROM it.  The prefix was
- * previously spelled twice — once as the exported constant, once baked into this
- * regex three lines below — so the constant documented a rule the regex
- * independently enforced, and either could be changed without the other.  The
- * whole point of `SIM-` is that a simulated balance can never be mistaken for a
- * real asset symbol; that guarantee should have exactly one spelling.
+ * The validator that MAKES the `SIM-` prefix true, built FROM it.
+ *
+ * EXPORTED because the wire schema is not the only place that has to agree: the
+ * WS-L runtime config validates an operator-supplied `simStartingAsset` too, and
+ * spelling the pattern there independently meant a change to the canonical
+ * prefix would leave the config minting ledger assets under the old one while
+ * this schema rejected them — the exact drift deriving it from a constant was
+ * meant to prevent.  One schema, imported by both.
  */
-const simAssetSchema = z.string().regex(new RegExp(`^${SIM_ASSET_PREFIX}[A-Z0-9]{1,28}$`), {
-  message: `simulated assets must use the ${SIM_ASSET_PREFIX} prefix`,
-});
+export const simAssetCodeSchema = z
+  .string()
+  .regex(new RegExp(`^${SIM_ASSET_PREFIX}[A-Z0-9]{1,28}$`), {
+    message: `simulated assets must use the ${SIM_ASSET_PREFIX} prefix`,
+  });
 
 export const governanceProposalCreateSchema = z
   .object({
@@ -496,7 +499,7 @@ export const governanceProposalCreateSchema = z
     plain_language_summary: z.string().trim().min(1).max(2_000),
     /** Budget impact (simulated minor units); required for bounty/capped_grant. */
     requested_amount: minorUnitAmountSchema.nullable(),
-    asset: simAssetSchema.nullable(),
+    asset: simAssetCodeSchema.nullable(),
     /** Opaque recipient reference (user id / entity ref) for grants/bounties. */
     recipient_ref: z.string().min(1).max(128).nullable(),
     /** Required (non-empty) for bounty and capped_grant templates (WS-L.4.1b). */
@@ -519,7 +522,7 @@ export const governanceProposalSchema = z
     title: z.string().min(1).max(200),
     plain_language_summary: z.string().min(1).max(2_000),
     requested_amount: minorUnitAmountSchema.nullable(),
-    asset: simAssetSchema.nullable(),
+    asset: simAssetCodeSchema.nullable(),
     recipient_ref: z.string().min(1).max(128).nullable(),
     conflict_disclosures: z.string().max(2_000).nullable(),
     risk_assessment: z.string().min(1).max(2_000),
@@ -560,7 +563,7 @@ export const SIM_TREASURY_MAX_ASSETS = 16;
 
 export const simTreasuryBalanceSchema = z
   .object({
-    asset: simAssetSchema,
+    asset: simAssetCodeSchema,
     amount: minorUnitAmountSchema,
   })
   .strict();
@@ -578,7 +581,7 @@ export type SimTreasuryResponse = z.infer<typeof simTreasuryResponseSchema>;
 
 export const simTreasuryDepositRequestSchema = z
   .object({
-    asset: simAssetSchema,
+    asset: simAssetCodeSchema,
     // A deposit must move real (simulated) value — a zero deposit is rejected so it
     // cannot pad the readiness track record (WS-L.4.1c).
     amount: positiveMinorUnitAmountSchema,

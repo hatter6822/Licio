@@ -6,10 +6,24 @@
 // surfaces can never disagree about what "1.50 USDC" means.  Pure string math —
 // amounts are exact decimal strings end to end, never IEEE floats.
 
+/**
+ * The simulated asset ledger prefix — fake assets are ALWAYS SIM-* (WS-L.4.1c).
+ *
+ * Owned HERE, with the rest of the asset vocabulary, and spelled ONCE: the whole
+ * point of `SIM-` is that a simulated balance can never be mistaken for a real
+ * asset symbol, and a guarantee restated in three places is one that can be
+ * changed in two.  The wire validator (`simAssetCodeSchema`) and the runtime
+ * config's default and validator all derive from this.
+ */
+export const SIM_ASSET_PREFIX = 'SIM-' as const;
+
+/** The simulated asset the demo treasury bootstraps with (WS-L.4.1c). */
+export const DEFAULT_SIM_ASSET = `${SIM_ASSET_PREFIX}USDC` as const;
+
 /** Minor-unit decimals per accepted asset (fail-closed: absent ⇒ rejected). */
 export const KNOMOSIS_ASSET_DECIMALS: Readonly<Record<string, number>> = {
   USDC: 6,
-  'SIM-USDC': 6,
+  [DEFAULT_SIM_ASSET]: 6,
 };
 
 /**

@@ -99,6 +99,33 @@ three copies (producer, verifier, test helpers) so a change on one side would
 have left verification silently disagreeing with production; and an exported
 `toBase64Url` nothing imported while two tests copy-pasted its body.
 
+### Precision limit — the DECLARATION side was parsed, not compiled — **CLOSED**
+
+The reference side moved to the compiler above; the question "what does this file
+export?" stayed hand-parsed, first over raw text and then over a token stream.
+Each round of review found another piece of ordinary TypeScript that parser did
+not model — a generator's `*`, a declarator list, a `const enum`, a block comment
+mid-declaration, `as`/`satisfies` opening type context, a `<` comparison, a
+generic arrow's `<T,>`, a template interpolation nested inside another. Every fix
+was correct and the list had no end, because the list IS the grammar.
+
+**Done.** `resolve-export-references.ts` now enumerates exports from the module's
+own export table (`getExportsOfModule`) and collects identifiers by walking the
+AST, so declarator lists, destructuring, export aliases, type-vs-value and
+overload sets are answered by the compiler. `check-dead-exports.ts` keeps only
+policy: which exports are in scope, which files are judged, what a reasoned
+entry-point opt-out looks like, and how a finding is reported. Whole-repository
+enumeration costs about three seconds.
+
+It closed a silent coverage hole the token parser could not avoid. Telling a
+regex literal from a division needs full grammatical context, so the two
+`preferRegex` lexings disagreed on files containing `/ 1000)`-style arithmetic;
+because `exportedValues` INTERSECTED them (deliberately — inventing an export
+that does not exist fails a correct branch), every export below the divergence
+was dropped. **12 exports across 4 files** were never judged at all, among them
+every function in `apps/web/src/lib/time.ts` after its first. The new enumeration
+finds those 12 and loses none.
+
 ### Unwired guarantees deleted as vestigial — audit of the 2026-07 export sweep
 
 The sweep that removed 47 unreferenced exported values classified each as one of

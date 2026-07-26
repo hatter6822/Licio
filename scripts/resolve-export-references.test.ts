@@ -1,22 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Tests for the binding-accurate reference resolver, against a REAL TypeScript
-// program built in a temporary directory.
+// Tests for compiler-backed export enumeration and reference resolution,
+// against a REAL TypeScript program built in a temporary directory.
 //
-// A stubbed oracle would prove nothing here: the whole point of this module is
-// that it agrees with the compiler about what a name refers to, and every bug it
-// was written to fix (a same-named local counting as a consumer, a destructured
-// dynamic import binding a new local, a barrel binding skipped by full alias
-// resolution, one declaration getting different symbol ids in two projects) is
-// only observable against a real one.  So the fixtures are written to disk and
-// compiled.
+// A stubbed oracle would prove nothing here.  The whole point of this module is
+// that it agrees with the compiler about what a file exports and what a name
+// refers to, and every bug it exists to end is only observable against a real
+// one: a same-named local counting as a consumer, a destructured dynamic import
+// binding a new local, a barrel binding skipped by full alias resolution, one
+// declaration getting different symbol ids in two projects — and, on the
+// enumeration side, an entire class of TypeScript syntax a hand parser did not
+// model.  So the fixtures are written to disk and compiled.
+//
+// The ENUMERATION cases below were once unit tests of a token-stream parser.
+// They are kept, and answered by the compiler instead: the question "what does
+// this file export?" has exactly one correct answer per source text, and the
+// compiler is the artefact that knows it.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { identifierOffsets, importedNames } from './check-dead-exports.js';
-import { declarationKey, resolveExportReferences } from './resolve-export-references.js';
+import {
+  declarationKey,
+  type ExportedBinding,
+  type ReferenceSite,
+  resolveExportReferences,
+} from './resolve-export-references.js';
 
 const TSCONFIG = JSON.stringify({
   compilerOptions: {
@@ -34,8 +44,114 @@ let root: string;
 
 /** Every file the fixture project contains, repo-relative to `root`. */
 const FILES: Record<string, string> = {
-  // A declaration whose name collides with unrelated locals elsewhere — the
-  // case that motivated the whole module.
+  // ── Enumeration: every shape that publishes a named value ────────────────
+  'src/kinds.ts': [
+    'export const A = 1;',
+    'export let B = 2;',
+    'export var C = 3;',
+    'export function D(): void {}',
+    'export class E {}',
+    'export enum F {',
+    '  x = 1,',
+    '}',
+    'export async function G(): Promise<void> {}',
+    'export function* H(): Generator<number> {',
+    '  yield 1;',
+    '}',
+    'export const enum I {',
+    '  y = 1,',
+    '}',
+    // A default export publishes the binding `default`; the declaration's own
+    // name is module-local, so it is out of scope and must NOT appear.
+    'export default function unnamedByImporters(): void {}',
+    // Types are erased and deliberately out of scope.
+    'export type Ty = string;',
+    'export interface Iface {',
+    '  a: number;',
+    '}',
+  ].join('\n'),
+
+  // ── Enumeration: declarator lists and destructuring ──────────────────────
+  'src/lists.ts': [
+    'export const listOne = 1,',
+    '  listTwo = 2;',
+    'export const { patternOne, patternTwo } = { patternOne: 1, patternTwo: 2 };',
+    // The RENAMED target is the binding; the property key is not.
+    'export const { key: renamedTarget } = { key: 1 };',
+    // A default INSIDE a pattern is not a binding, and the comma in its call
+    // arguments does not separate declarators.
+    'const seed = (_a: number, _b: number): number => 1;',
+    'export const { withDefault = seed(1, 2) } = { withDefault: 3 };',
+    // A type ANNOTATION is not a binding, and the comma inside its type
+    // arguments does not separate declarators.
+    'export const annotated: Map<string, number> = new Map();',
+    // A `<` in an INITIALIZER is a comparison, not a type-argument list — the
+    // declarator after it is still a real export.
+    'export const compared = 1 < 2,',
+    '  afterComparison = 3;',
+    // `as` / `satisfies` DO open type context in an initializer.
+    "export const asserted = { a: 'x' } as const satisfies Record<'a', string>,",
+    '  afterAssertion = 4;',
+  ].join('\n'),
+
+  // ── Enumeration: a GENERIC ARROW ─────────────────────────────────────────
+  // `<T,>(…)` is type-parameter syntax, so the comma inside it separates type
+  // parameters, not declarators — and the arrow's parameter is not an export.
+  'src/generic.ts': ['export const generic = <T,>(value: T): T => value;'].join('\n'),
+
+  // ── Enumeration: REGEX vs DIVISION ───────────────────────────────────────
+  // Telling these apart needs full grammatical context.  A lexer that guessed
+  // read `/ 1000)…` as the start of a regex literal, swallowed the rest of the
+  // file, and silently dropped every export after this line.
+  'src/division.ts': [
+    'export function ratio(now: number, then: number): number {',
+    '  return Math.round((now - then) / 1000); // > 0 ⇒ in the past',
+    '}',
+    'export const AFTER_DIVISION = 1;',
+  ].join('\n'),
+
+  // ── Enumeration: comments in declaration positions ───────────────────────
+  'src/comments.ts': [
+    'export /* between */ const COMMENTED = 1;',
+    'const localForClause = 2;',
+    'export {',
+    '  // a comment inside the clause',
+    '  localForClause,',
+    '};',
+  ].join('\n'),
+
+  // ── Enumeration + reference: an EXPORT ALIAS is its own module binding ───
+  // `export { shared as obsoleteAlias }` publishes a public name that exists
+  // nowhere else.  Uses of the LOCAL `shared` inside this file are not uses of
+  // that public name, so an alias nobody imports is dead in its own right.
+  'src/alias-of-local.ts': [
+    'const shared = 1;',
+    'export function readsShared(): number {',
+    '  return shared;',
+    '}',
+    'export { shared as obsoleteAlias };',
+  ].join('\n'),
+
+  // ── Enumeration: clause plumbing vs a new public name ────────────────────
+  'src/source.ts': ['export const republished = 1;', 'export const toRename = 2;'].join('\n'),
+  'src/plumbing.ts': [
+    // One-statement republish: the same name, judged where it is declared.
+    "export { republished } from './source.js';",
+    // Two-statement spelling of the same thing.
+    "import { toRename } from './source.js';",
+    'export { toRename };',
+    // An ALIASED re-export IS a new public name.
+    "export { toRename as aliasedOut } from './source.js';",
+    // A namespace re-export publishes one runtime binding.
+    "export * as namespaceOut from './source.js';",
+    // A bare star keeps every name's own spelling, judged at its declaration.
+    "export * from './source.js';",
+    // A type-only clause publishes no value.
+    "export type { OnlyAType } from './types.js';",
+  ].join('\n'),
+  'src/types.ts': ['export type OnlyAType = string;'].join('\n'),
+
+  // ── Reference: a same-named local is NOT a consumer ──────────────────────
   'src/collide.ts': ['export const status = 1;', 'export const alsoDead = 2;'].join('\n'),
   'src/uses-collide.ts': [
     'const status = 99;',
@@ -44,19 +160,32 @@ const FILES: Record<string, string> = {
     '}',
     'export const g = status;',
   ].join('\n'),
-  // Plain live/dead.
+
+  // ── Reference: plain import ──────────────────────────────────────────────
   'src/plain.ts': ['export const LIVE = 1;', 'export const DEAD = 2;'].join('\n'),
   'src/consumer.ts': ["import { LIVE } from './plain.js';", 'export const total = LIVE + 1;'].join(
     '\n',
   ),
-  // A barrel nobody imports, plus an aliased re-export.
+
+  // ── Reference: a NESTED template interpolation is still code ─────────────
+  // The only use of `NESTED` is two interpolations deep, in this same file.  A
+  // collector that walked only the outer hole reported a live export as dead.
+  'src/nested-template.ts': [
+    'export const NESTED = 1;',
+    // This string IS the fixture's source text, so the nested interpolation —
+    // the thing under test — must reach disk literally, not be interpolated here.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: fixture source text, written to disk verbatim
+    'export const wrapper = `${`${NESTED}`}`;',
+  ].join('\n'),
+
+  // ── Reference: an unused barrel does not vouch for what it republishes ───
   'src/module.ts': ['export const orphan = 1;', 'export const viaAlias = 2;'].join('\n'),
   'src/barrel.ts': [
     "export { orphan } from './module.js';",
     "export { viaAlias as renamed } from './module.js';",
   ].join('\n'),
-  // Destructured dynamic import — binds a NEW LOCAL, so the identifier never
-  // resolves to the export.
+
+  // ── Reference: a DESTRUCTURED dynamic import binds a NEW LOCAL ───────────
   'src/lazy.ts': ['export function lazilyUsed(): number {', '  return 1;', '}'].join('\n'),
   'src/lazy-consumer.ts': [
     'export async function go(): Promise<number> {',
@@ -64,9 +193,10 @@ const FILES: Record<string, string> = {
     '  return lazilyUsed();',
     '}',
   ].join('\n'),
-  // An ALIASED re-export consumed through a destructured dynamic import: the
-  // module's export table hands back the barrel's alias, and crediting only that
-  // left the original — the declaration actually being consumed — looking dead.
+
+  // ── Reference: an ALIASED re-export consumed through a dynamic import ────
+  // The module's export table hands back the barrel's alias; crediting only
+  // that left the original — the declaration actually consumed — looking dead.
   'src/aliased.ts': ['export const VALUE = 7;'].join('\n'),
   'src/alias-barrel.ts': ["export { VALUE as ALIAS } from './aliased.js';"].join('\n'),
   'src/alias-consumer.ts': [
@@ -75,7 +205,8 @@ const FILES: Record<string, string> = {
     '  return ALIAS;',
     '}',
   ].join('\n'),
-  // Used only inside its own file.
+
+  // ── Reference: used only inside its own file ─────────────────────────────
   'src/internal.ts': [
     'export const KEPT_INSIDE = 1;',
     'export function reader(): number {',
@@ -86,6 +217,9 @@ const FILES: Record<string, string> = {
   ].join('\n'),
 };
 
+let exportsByFile: Map<string, ExportedBinding[]>;
+let usesOf: (file: string, name: string) => readonly ReferenceSite[];
+
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'licio-dead-exports-'));
   mkdirSync(join(root, 'src'), { recursive: true });
@@ -93,80 +227,145 @@ beforeAll(() => {
   for (const [path, content] of Object.entries(FILES)) {
     writeFileSync(join(root, path), `${content}\n`);
   }
+
+  const resolved = resolveExportReferences({
+    root,
+    configs: [resolve(root, 'tsconfig.json')],
+    files: Object.keys(FILES),
+  });
+  expect(resolved.uncovered).toEqual([]);
+  expect(resolved.unreadable).toEqual([]);
+
+  exportsByFile = new Map();
+  for (const binding of resolved.exports) {
+    const list = exportsByFile.get(binding.file);
+    if (list === undefined) exportsByFile.set(binding.file, [binding]);
+    else list.push(binding);
+  }
+  usesOf = (file, name) => {
+    const binding = (exportsByFile.get(file) ?? []).find((each) => each.name === name);
+    if (binding === undefined) return [];
+    return resolved.uses.get(declarationKey(file, binding.offset)) ?? [];
+  };
 });
 
 afterAll(() => {
   if (root !== undefined) rmSync(root, { recursive: true, force: true });
 });
 
-/** Resolve the fixture and report, per `file:name`, how many uses were found. */
-function resolveFixture(): Map<string, number> {
-  const files = Object.keys(FILES);
-  const declarations: Array<{ file: string; offset: number; name: string }> = [];
-  for (const [file, content] of Object.entries(FILES)) {
-    // Locate each `export const/function NAME` by hand: this test is about the
-    // RESOLVER, so it must not depend on the declaration parser's own rules.
-    for (const match of `${content}\n`.matchAll(/export (?:const|function) ([A-Za-z_$][\w$]*)/g)) {
-      const name = match[1] ?? '';
-      declarations.push({ file, offset: (match.index ?? 0) + match[0].length - name.length, name });
-    }
-    for (const match of `${content}\n`.matchAll(/export \{ \w+ as ([A-Za-z_$][\w$]*) \}/g)) {
-      const name = match[1] ?? '';
-      declarations.push({ file, offset: (match.index ?? 0) + match[0].indexOf(name), name });
-    }
-  }
-  const resolved = resolveExportReferences({
-    root,
-    configs: [resolve(root, 'tsconfig.json')],
-    files,
-    identifierOffsets: (_file, source) => identifierOffsets(source),
-    importedNames: (_file, source) => importedNames(source),
-    declarations: declarations.map(({ file, offset }) => ({ file, offset })),
-  });
-  expect(resolved.uncovered).toEqual([]);
-  const counts = new Map<string, number>();
-  for (const declaration of declarations) {
-    const uses = resolved.uses.get(declarationKey(declaration.file, declaration.offset)) ?? [];
-    counts.set(`${declaration.file}:${declaration.name}`, uses.length);
-  }
-  return counts;
-}
+/** The exported NAMES of one fixture file, in source order. */
+const namesIn = (file: string): string[] =>
+  (exportsByFile.get(file) ?? []).map((binding) => binding.name);
 
-describe('binding-accurate resolution', () => {
-  let uses: Map<string, number>;
-  beforeAll(() => {
-    uses = resolveFixture();
+describe('enumeration: what a file exports', () => {
+  it('finds every exported value kind, and no type or default', () => {
+    // `unnamedByImporters` is a default export: the binding it publishes is
+    // `default`, so every importer picks its own name and this one is under no
+    // obligation to appear anywhere.  `Ty`/`Iface` are erased at build.
+    expect(namesIn('src/kinds.ts')).toEqual(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']);
   });
 
+  it('finds EVERY binding a declarator list or pattern introduces', () => {
+    expect(namesIn('src/lists.ts')).toEqual([
+      'listOne',
+      'listTwo',
+      'patternOne',
+      'patternTwo',
+      // the RENAMED target, never the property key `key`
+      'renamedTarget',
+      // the pattern binding, never `seed`'s arguments
+      'withDefault',
+      // the annotated binding, never `string`/`number` from its type arguments
+      'annotated',
+      // a `<` comparison does not swallow the declarator that follows it
+      'compared',
+      'afterComparison',
+      'asserted',
+      'afterAssertion',
+    ]);
+  });
+
+  it('reads a GENERIC ARROW type parameter as type syntax, not a declarator', () => {
+    // `export const generic = <T,>(value: T) => value` publishes exactly one
+    // name.  Reading that comma as a declarator separator invented `value` as
+    // an export — a nonexistent dead export, which fails a correct branch.
+    expect(namesIn('src/generic.ts')).toEqual(['generic']);
+  });
+
+  it('keeps enumerating past a DIVISION that a lexer would read as a regex', () => {
+    // Telling `/` apart needs grammatical context.  Guessing wrong swallowed
+    // the rest of the file, so every export below this line went unjudged —
+    // silent, and in the repository it hid 12 real exports across 4 files.
+    expect(namesIn('src/division.ts')).toEqual(['ratio', 'AFTER_DIVISION']);
+  });
+
+  it('sees declarations behind comments in any position', () => {
+    expect(namesIn('src/comments.ts')).toEqual(['COMMENTED', 'localForClause']);
+  });
+
+  it('distinguishes clause PLUMBING from a new public name', () => {
+    // `export { republished } from` and its two-statement spelling both name a
+    // binding that is judged where it is declared; re-judging them would demand
+    // deleting a name that is genuinely in use.  An alias and a namespace
+    // binding are new public names that exist nowhere else.
+    expect(namesIn('src/plumbing.ts')).toEqual(['aliasedOut', 'namespaceOut']);
+  });
+
+  it('records the declaration LINE and NAME offset for the report', () => {
+    const [first] = exportsByFile.get('src/generic.ts') ?? [];
+    expect(first?.line).toBe(1);
+    expect(first?.kind).toBe('const');
+    // The offset points at the NAME, which is what the gate keys and reports.
+    expect(FILES['src/generic.ts']?.slice(first?.offset ?? 0, (first?.offset ?? 0) + 7)).toBe(
+      'generic',
+    );
+  });
+});
+
+describe('resolution: which sites use a binding', () => {
   it('does NOT count a same-named local, parameter or shadowed binding', () => {
     // The defect this module exists for.  `uses-collide.ts` mentions `status`
     // four times — a local, a parameter, a read of the parameter, a read of the
     // local — and none of them is this export.
-    expect(uses.get('src/collide.ts:status')).toBe(0);
-    expect(uses.get('src/collide.ts:alsoDead')).toBe(0);
+    expect(usesOf('src/collide.ts', 'status')).toHaveLength(0);
+    expect(usesOf('src/collide.ts', 'alsoDead')).toHaveLength(0);
   });
 
   it('counts a real import', () => {
-    expect(uses.get('src/plain.ts:LIVE')).toBeGreaterThan(0);
-    expect(uses.get('src/plain.ts:DEAD')).toBe(0);
+    expect(usesOf('src/plain.ts', 'LIVE').length).toBeGreaterThan(0);
+    expect(usesOf('src/plain.ts', 'DEAD')).toHaveLength(0);
+  });
+
+  it('counts a use nested inside two template interpolations', () => {
+    // `${`${NESTED}`}` — the only use of `NESTED`, and the one a collector that
+    // walked a token stream's outer hole alone never reached.
+    expect(usesOf('src/nested-template.ts', 'NESTED').length).toBeGreaterThan(0);
+  });
+
+  it('does not let an EXPORT ALIAS live on uses of the local it renames', () => {
+    // `export { shared as obsoleteAlias }` is a public name nothing imports.
+    // The internal `readsShared()` uses the LOCAL `shared`, which is a different
+    // binding — so the unused public alias must still be reported.
+    expect(namesIn('src/alias-of-local.ts')).toContain('obsoleteAlias');
+    expect(usesOf('src/alias-of-local.ts', 'obsoleteAlias')).toHaveLength(0);
   });
 
   it('counts a DESTRUCTURED dynamic import, which binds a new local', () => {
     // `const { lazilyUsed } = await import('./lazy.js')` resolves the identifier
     // to that new local, never to the export, so this needs the specifier route.
-    expect(uses.get('src/lazy.ts:lazilyUsed')).toBeGreaterThan(0);
+    expect(usesOf('src/lazy.ts', 'lazilyUsed').length).toBeGreaterThan(0);
   });
 
   it('does not let an unused BARREL vouch for what it republishes', () => {
     // `export { orphan } from './module.js'` is plumbing: publishing a name is
     // not consuming it, so `orphan` has no consumer at all.
-    expect(uses.get('src/module.ts:orphan')).toBe(0);
+    expect(usesOf('src/module.ts', 'orphan')).toHaveLength(0);
   });
 
   it('reports an ALIASED re-export separately from what it aliases', () => {
     // `renamed` is a public name that exists nowhere else, and nothing imports
     // it — so it is dead in its own right.
-    expect(uses.get('src/barrel.ts:renamed')).toBe(0);
+    expect(usesOf('src/barrel.ts', 'renamed')).toHaveLength(0);
   });
 
   it('follows the ALIAS CHAIN when crediting a name taken from a module', () => {
@@ -175,14 +374,16 @@ describe('binding-accurate resolution', () => {
     // returns the barrel's alias; without walking behind it, the alias looks
     // live and `VALUE` — the declaration genuinely being read — looks dead,
     // which is a FALSE POSITIVE that fails a correct branch.
-    expect(uses.get('src/aliased.ts:VALUE')).toBeGreaterThan(0);
-    expect(uses.get('src/alias-barrel.ts:ALIAS')).toBeGreaterThan(0);
+    expect(usesOf('src/aliased.ts', 'VALUE').length).toBeGreaterThan(0);
+    expect(usesOf('src/alias-barrel.ts', 'ALIAS').length).toBeGreaterThan(0);
   });
 
   it('counts a use from the declaring file itself', () => {
     // Internal-only, not dead: the gate reports these separately, and a helper
     // exported so its own module's test can reach it is legitimate.
-    expect(uses.get('src/internal.ts:KEPT_INSIDE')).toBeGreaterThan(0);
+    const uses = usesOf('src/internal.ts', 'KEPT_INSIDE');
+    expect(uses.length).toBeGreaterThan(0);
+    expect(uses.every((use) => use.file === 'src/internal.ts')).toBe(true);
   });
 });
 
@@ -194,9 +395,6 @@ describe('coverage is asserted, not assumed', () => {
       root,
       configs: [resolve(root, 'tsconfig.json')],
       files: ['src/plain.ts', 'outside/stray.ts'],
-      identifierOffsets: () => [],
-      importedNames: () => [],
-      declarations: [],
     });
     expect(resolved.uncovered).toEqual(['outside/stray.ts']);
   });

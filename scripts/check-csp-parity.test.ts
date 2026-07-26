@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { injectCspMeta, maskInertMarkup } from '../apps/web/src/dev/inject-csp-meta.js';
+import { injectCspMeta, scanTags } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   CSP_DIRECTIVES,
   contentSecurityPolicyHeader,
@@ -96,16 +96,84 @@ describe('injectCspMeta', () => {
     expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
   });
 
-  it('masks an UNTERMINATED comment to the end, as a parser would', () => {
-    expect(maskInertMarkup('a<!-- b <head> c').trimEnd()).toBe('a');
+  it('reads an UNTERMINATED comment to the end, as a parser would', () => {
+    expect(scanTags('a<!-- b <head> c').map((tag) => tag.name)).toEqual([]);
   });
 
-  it('preserves length and newlines so offsets stay valid', () => {
-    const html = 'a<!-- x\ny -->b';
-    const masked = maskInertMarkup(html);
-    expect(masked).toHaveLength(html.length);
-    expect(masked.split('\n')).toHaveLength(html.split('\n').length);
-    expect(masked.indexOf('b')).toBe(html.indexOf('b'));
+  it('reports offsets into the ORIGINAL string, so a splice lands correctly', () => {
+    const html = 'a<!-- x\ny --><b>c';
+    const [tag] = scanTags(html);
+    expect(tag?.name).toBe('b');
+    expect(tag?.at).toBe(html.indexOf('<b>'));
+    expect(html.slice(tag?.at ?? 0, tag?.end ?? 0)).toBe('<b>');
+  });
+});
+
+// The delivered policy is the one the PARSER creates an element for.  Markup
+// serialized into an attribute value is character data — a `data-note` string —
+// and creates no element at all, so a scan matching `<meta` anywhere accepted a
+// courier build carrying NO CSP as carrying one.  That is the exact failure the
+// gate exists to prevent, so it is worth pinning from both directions.
+describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
+  const POLICY = contentSecurityPolicyMeta();
+  const SERIALIZED = `<div data-note='<meta http-equiv="Content-Security-Policy" content="${POLICY}">'></div>`;
+
+  it('does not count a <meta> serialized into an attribute value', () => {
+    expect(extractMetaPolicies(SERIALIZED)).toEqual([]);
+  });
+
+  it('fails the delivery gate for a document whose only policy is one', () => {
+    const problems = findCspDeliveryProblems({
+      indexHtml: '<!doctype html><html><head></head><body></body></html>',
+      builtIndexHtml: `<!doctype html><html><head>${SERIALIZED}</head><body></body></html>`,
+    });
+    expect(problems.join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+  });
+
+  it('still reads the REAL tag when one follows a serialized lookalike', () => {
+    const html = `<!doctype html><html><head>${SERIALIZED}<meta http-equiv="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
+    expect(extractMetaPolicies(html)).toEqual([POLICY]);
+    expect(
+      findCspDeliveryProblems({ indexHtml: '<html><head></head></html>', builtIndexHtml: html }),
+    ).toEqual([]);
+  });
+
+  it('does not let a <script> named in an attribute value move the ordering boundary', () => {
+    // `<script>` inside a value is not an element, so it does not count as
+    // content the policy failed to precede.
+    const html =
+      `<!doctype html><html><head><meta name="x" content="<script src=y>">` +
+      `<meta http-equiv="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
+    expect(
+      findCspDeliveryProblems({ indexHtml: '<html><head></head></html>', builtIndexHtml: html }),
+    ).toEqual([]);
+  });
+
+  it('does not let a <head> named in an attribute value capture the injection', () => {
+    const html = `<html><body><div data-note="<head>"></div></body></html>`;
+    expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
+  });
+
+  it('injects after the REAL head when an attribute names one first', () => {
+    const html = `<html data-note="<head>"><head><title>t</title></head><body></body></html>`;
+    const out = injectCspMeta(html, "default-src 'self'");
+    expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
+    expect(out.indexOf('Content-Security-Policy')).toBeGreaterThan(out.indexOf('<head>'));
+  });
+
+  it('keeps a `>` inside an attribute value from ending the tag early', () => {
+    // `<head data-note="x > y">` is valid HTML; ending the tag at that `>`
+    // splices the policy into the middle of the head tag, where it is not a
+    // <meta> at all — and a gate reading the same truncated tag agrees.
+    const html = '<html><head data-note="x > y"><title>t</title></head><body></body></html>';
+    const out = injectCspMeta(html, "default-src 'self'");
+    expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
+    expect(out).toContain('<head data-note="x > y">');
+  });
+
+  it('reads an UNQUOTED attribute value, which a quote-only matcher misses', () => {
+    const html = `<meta http-equiv=Content-Security-Policy content="${POLICY}">`;
+    expect(extractMetaPolicies(html)).toEqual([POLICY]);
   });
 });
 
