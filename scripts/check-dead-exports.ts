@@ -12,12 +12,17 @@
 // prefix spelled twice.  "Nothing references it" is exactly the signal that
 // separates those from working code, which is why it is worth a gate.
 //
-// SCOPE: NAMED exported values — `const`/`let`/`var`/`function`/`class`/`enum`,
-// the local values an `export { … }` clause publishes, and the binding an
-// `export * as name from '…'` namespace re-export publishes (that last one is a
-// runtime name no declaration keyword introduces, so it needs its own pattern —
-// a plain `export * from` does NOT, since those names keep the spelling they are
-// already scanned under).
+// SCOPE: NAMED exported values, in all four shapes that publish one —
+//   • `function`/`class`/`enum`, which name themselves after the keyword
+//     (generators included: `function*` puts a `*` where a space would go);
+//   • `const`/`let`/`var`, walked as a DECLARATOR LIST rather than a single
+//     name, so `export const live = 1, other = 2` and `export const { a, b } =
+//     obj` publish every binding they introduce, not just the first;
+//   • the local values an `export { … }` clause publishes;
+//   • the binding an `export * as name from '…'` namespace re-export publishes
+//     — a runtime name no declaration keyword introduces, so it needs its own
+//     pattern.  A plain `export * from` does NOT: those names keep the spelling
+//     they are already scanned under.
 //
 // DEFAULT EXPORTS ARE OUT OF SCOPE, and not as an exemption: `export default`
 // publishes the binding `default`, so the declaration's own name is module-local
@@ -68,8 +73,18 @@ import { interpolationSpans, type Token, tokenize } from './js-sink-analyzer.js'
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** Declaration keywords whose exports carry runtime weight. */
-const VALUE_KEYWORDS = ['const', 'let', 'var', 'function', 'class', 'enum'] as const;
+/**
+ * Declaration keywords whose exports carry runtime weight, split by SHAPE.
+ *
+ * A `function`/`class`/`enum` introduces exactly one name and it follows the
+ * keyword, so a pattern reads it.  A `const`/`let`/`var` introduces a
+ * DECLARATOR LIST — `export const live = 1, other = 2`, or a destructuring
+ * pattern — and reading only the first name leaves every later binding outside
+ * the gate even though each is a named runtime export.  Those are walked over
+ * the token stream instead ({@link declarationBindings}).
+ */
+const NAMED_DECLARATION_KEYWORDS = ['function', 'class', 'enum'] as const;
+const BINDING_KEYWORDS = ['const', 'let', 'var'] as const;
 
 // `[ \t]*` rather than `\s*`: with the `m` flag a `\s*` would let the match
 // START on the preceding newline, putting every reported line number one early.
@@ -83,9 +98,93 @@ const VALUE_KEYWORDS = ['const', 'let', 'var', 'function', 'class', 'enum'] as c
 // `const`/`class` can never take a `*`, so the wider alternation cannot match
 // anything that is not already valid syntax.
 const EXPORTED_VALUE_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${VALUE_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
+  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${NAMED_DECLARATION_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
   'gm',
 );
+
+/** Locates an exported binding declaration; the NAMES come from the walk below. */
+const EXPORTED_BINDING_RE = new RegExp(
+  `^[ \\t]*export[ \\t]+(?:declare[ \\t]+)?(${BINDING_KEYWORDS.join('|')})\\b`,
+  'gm',
+);
+
+/** A runaway guard: no real declarator list is anywhere near this long. */
+const MAX_DECLARATOR_TOKENS = 4096;
+
+/**
+ * Every name a declarator list BINDS, from the tokens after its keyword.
+ *
+ * Handles the two shapes a single-name pattern cannot see — a comma list
+ * (`export const live = 1, other = 2`) and a destructuring pattern
+ * (`export const { a, b: renamed } = obj`) — while skipping what only LOOKS
+ * like a binding: a TypeScript annotation after `:`, an initializer after `=`,
+ * a property key before `:` inside a pattern, and a default value inside one.
+ *
+ * Where it is unsure it MISSES a binding rather than inventing one.  The angle
+ * counter is the case: `<`/`>` are counted while skipping an annotation so the
+ * comma in `Map<string, number>` does not read as a declarator separator, and a
+ * genuine `<` comparison in an initializer inflates it — which ends the walk
+ * early.  That direction can only produce a false NEGATIVE (a dead export goes
+ * unreported); the opposite would invent a name and fail a correct branch.
+ */
+function declarationBindings(
+  tokens: readonly Token[],
+): Array<{ readonly name: string; readonly start: number }> {
+  const names: Array<{ name: string; start: number }> = [];
+  let depth = 0; // (), [], {}
+  let angle = 0; // <> — counted only while skipping
+  let taking = true; // in a BINDING position, rather than skipping to the next
+  let patternDepth = 0; // >0 while inside this declarator's destructuring pattern
+
+  for (let i = 0; i < tokens.length && i < MAX_DECLARATOR_TOKENS; i += 1) {
+    const token = tokens[i];
+    if (token === undefined) break;
+
+    if (token.kind !== 'punct') {
+      if (token.kind !== 'ident' || !taking) continue;
+      // Inside a pattern, `key:` names a PROPERTY — the binding follows the `:`.
+      const next = tokens[i + 1];
+      if (patternDepth > 0 && next?.kind === 'punct' && next.value === ':') continue;
+      names.push({ name: token.value, start: token.start });
+      // A plain binding closes the window until the next declarator; a pattern
+      // stays open, since it introduces several.
+      if (patternDepth === 0) taking = false;
+      continue;
+    }
+
+    const punct = token.value;
+    if (punct === '(' || punct === '[' || punct === '{') {
+      depth += 1;
+      if (taking && patternDepth === 0 && punct !== '(') patternDepth = depth;
+      continue;
+    }
+    if (punct === ')' || punct === ']' || punct === '}') {
+      depth = Math.max(0, depth - 1);
+      if (patternDepth > 0 && depth < patternDepth) {
+        patternDepth = 0;
+        taking = false; // the pattern is complete; its `=` initializer follows
+      }
+      continue;
+    }
+    if (depth === 0 && punct === ';') break;
+    if (patternDepth > 0 && depth >= patternDepth) {
+      if (punct === '=')
+        taking = false; // a DEFAULT value inside the pattern
+      else if (punct === ',') taking = true;
+      continue;
+    }
+    if (depth !== 0) continue;
+    if (!taking) {
+      if (punct === '<') angle += 1;
+      else if (punct === '>') angle = Math.max(0, angle - 1);
+      else if (punct === ',' && angle === 0) taking = true;
+      continue;
+    }
+    // At a binding position, `:` opens an annotation and `=` an initializer.
+    if (punct === ':' || punct === '=') taking = false;
+  }
+  return names;
+}
 
 export interface ExportedValue {
   name: string;
@@ -138,24 +237,68 @@ const EXPORT_CLAUSE_RE = /^[ \t]*export[ \t]*\{([^}]*)\}[ \t]*(?!from)[;\s]*$/gm
  */
 const EXPORT_NAMESPACE_RE = /^[ \t]*export[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][\w$]*)[ \t]+from\b/gm;
 
-/** Every exported value declared in one source file. */
+/**
+ * Every exported value declared in one source file, in SOURCE ORDER.
+ *
+ * The four shapes are found by four separate passes, so each carries the offset
+ * it was found at and the result is sorted — otherwise the report would list a
+ * file's declarations grouped by shape rather than by where they are, which is
+ * the order a reader needs to walk them in.
+ */
 export function exportedValues(source: string): ExportedValue[] {
-  const out: ExportedValue[] = [];
+  const found: Array<{ value: ExportedValue; start: number }> = [];
+  const out = {
+    push(value: ExportedValue, start: number): void {
+      found.push({ value, start });
+    },
+  };
   EXPORTED_VALUE_RE.lastIndex = 0;
   let match: RegExpExecArray | null = EXPORTED_VALUE_RE.exec(source);
   while (match !== null) {
     const kind = match[2];
     const name = match[3];
     if (kind !== undefined && name !== undefined) {
-      out.push({
-        name,
-        kind,
-        line: source.slice(0, match.index).split('\n').length,
-        selfOccurrences: 1,
-        isDefault: match[1] !== undefined,
-      });
+      out.push(
+        {
+          name,
+          kind,
+          line: source.slice(0, match.index).split('\n').length,
+          selfOccurrences: 1,
+          isDefault: match[1] !== undefined,
+        },
+        match.index,
+      );
     }
     match = EXPORTED_VALUE_RE.exec(source);
+  }
+
+  EXPORTED_BINDING_RE.lastIndex = 0;
+  let declaration: RegExpExecArray | null = EXPORTED_BINDING_RE.exec(source);
+  while (declaration !== null) {
+    const kind = declaration[0].trimEnd().split(/\s+/).pop() ?? 'const';
+    const from = declaration.index + declaration[0].length;
+    // INTERSECT the two regex-preference passes rather than union them.  For
+    // identifier COUNTS a mis-lex may only over-count (a false negative, safe);
+    // for DECLARATIONS the safe direction is the opposite — a name only one pass
+    // believes in could fail a correct branch, so both must agree.
+    const [lenient, strict] = [false, true].map((preferRegex) =>
+      declarationBindings(tokenize(source, preferRegex, { from })),
+    );
+    const agreed = (strict ?? []).map((entry) => entry.name);
+    for (const entry of lenient ?? []) {
+      if (!agreed.includes(entry.name)) continue;
+      out.push(
+        {
+          name: entry.name,
+          kind,
+          line: source.slice(0, entry.start).split('\n').length,
+          selfOccurrences: 1,
+          isDefault: false,
+        },
+        entry.start,
+      );
+    }
+    declaration = EXPORTED_BINDING_RE.exec(source);
   }
 
   EXPORT_CLAUSE_RE.lastIndex = 0;
@@ -172,17 +315,20 @@ export function exportedValues(source: string): ExportedValue[] {
         const local = (parts[0] ?? '').trim();
         const exported = (parts[1] ?? local).trim();
         if (!/^[A-Za-z_$][\w$]*$/.test(exported) || exported === 'default') continue;
-        out.push({
-          name: exported,
-          kind: 'export',
-          line,
-          // An UNALIASED specifier repeats the local declaration's name, so the
-          // name occurs twice before any real use.
-          selfOccurrences: exported === local ? 2 : 1,
-          // `export { x as default }` is filtered out above, so a clause
-          // specifier that reaches here always publishes its own name.
-          isDefault: false,
-        });
+        out.push(
+          {
+            name: exported,
+            kind: 'export',
+            line,
+            // An UNALIASED specifier repeats the local declaration's name, so
+            // the name occurs twice before any real use.
+            selfOccurrences: exported === local ? 2 : 1,
+            // `export { x as default }` is filtered out above, so a clause
+            // specifier that reaches here always publishes its own name.
+            isDefault: false,
+          },
+          clause.index,
+        );
       }
     }
     clause = EXPORT_CLAUSE_RE.exec(source);
@@ -196,19 +342,23 @@ export function exportedValues(source: string): ExportedValue[] {
     // whose name is module-local at every importer — out of scope like any other
     // default export.
     if (name !== undefined && name !== 'default') {
-      out.push({
-        name,
-        kind: 'namespace',
-        line: source.slice(0, namespace.index).split('\n').length,
-        // The name is written ONCE, in the clause; the specifier beside it is a
-        // string literal, which the identifier scan does not count.
-        selfOccurrences: 1,
-        isDefault: false,
-      });
+      out.push(
+        {
+          name,
+          kind: 'namespace',
+          line: source.slice(0, namespace.index).split('\n').length,
+          // The name is written ONCE, in the clause; the specifier beside it is
+          // a string literal, which the identifier scan does not count.
+          selfOccurrences: 1,
+          isDefault: false,
+        },
+        namespace.index,
+      );
     }
     namespace = EXPORT_NAMESPACE_RE.exec(source);
   }
-  return out;
+  // Stable, so specifiers within one `export { … }` clause keep their order.
+  return found.sort((a, b) => a.start - b.start).map((entry) => entry.value);
 }
 
 /**

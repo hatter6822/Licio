@@ -15,6 +15,7 @@ import {
 } from '../packages/shared/src/security/csp.js';
 import {
   BUILT_INDEX_HTML_FILE,
+  decodeHtmlReferences,
   extractMetaPolicies,
   findCspDeliveryProblems,
   INDEX_HTML_FILE,
@@ -127,6 +128,60 @@ describe('extractMetaPolicies', () => {
 
   it('ignores the tag name, not just the first attribute', () => {
     expect(extractMetaPolicies(HEAD(`<metadata http-equiv=Content-Security-Policy>`))).toEqual([]);
+  });
+
+  // The HTML tokenizer decodes character references in attribute VALUES before
+  // the value reaches CSP, so a reference-spelled tag is enforced in full while
+  // a raw comparison sees a different string.
+  it('decodes a character reference in http-equiv', () => {
+    const html = HEAD(`<meta http-equiv="Content-Security-Polic&#121;" content="default-src *">`);
+    expect(extractMetaPolicies(html)).toEqual(['default-src *']);
+  });
+
+  it('decodes hex and semicolon-less numeric references', () => {
+    expect(
+      extractMetaPolicies(HEAD(`<meta http-equiv="Content-Security-Polic&#x79;" content="a">`)),
+    ).toEqual(['a']);
+    // HTML5 decodes `&#121` too (with a parse error); the gate must see what the
+    // BROWSER sees, not what the spec prefers.
+    expect(
+      extractMetaPolicies(HEAD(`<meta http-equiv="Content-Security-Polic&#121" content="a">`)),
+    ).toEqual(['a']);
+  });
+
+  it('decodes references in the CONTENT value too', () => {
+    const html = HEAD(
+      `<meta http-equiv="Content-Security-Policy" content="default-src &apos;self&apos;&semi; img-src &ast;">`,
+    );
+    expect(extractMetaPolicies(html)).toEqual(["default-src 'self'; img-src *"]);
+  });
+
+  it('leaves an unknown named reference alone rather than guessing', () => {
+    // Every named reference outside the ASCII table produces a non-ASCII
+    // character, which cannot spell a directive — so leaving it raw yields a
+    // MISMATCH the gate reports, never a policy it fails to see.
+    expect(decodeHtmlReferences('a &notareference; b')).toBe('a &notareference; b');
+    expect(decodeHtmlReferences('&ampx')).toBe('&ampx');
+  });
+
+  it('does not decode a reference in the attribute NAME', () => {
+    // The tokenizer does not decode references in names, so this really is a
+    // different attribute and the tag carries no policy.
+    expect(
+      extractMetaPolicies(HEAD(`<meta http-equi&#118;="Content-Security-Policy" content="a">`)),
+    ).toEqual([]);
+  });
+
+  it('leaves an out-of-range or surrogate code point raw', () => {
+    expect(decodeHtmlReferences('&#x110000;')).toBe('&#x110000;');
+    expect(decodeHtmlReferences('&#xD800;')).toBe('&#xD800;');
+    expect(decodeHtmlReferences('&#0;')).toBe('&#0;');
+  });
+
+  it('round-trips an ordinary policy unchanged', () => {
+    expect(decodeHtmlReferences("default-src 'self'; frame-ancestors 'none'")).toBe(
+      "default-src 'self'; frame-ancestors 'none'",
+    );
   });
 });
 

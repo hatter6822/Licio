@@ -60,6 +60,83 @@ export function parsePolicyString(policy: string): string[] {
  */
 const ATTRIBUTE = /([^\s/>=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]*)))?/g;
 
+/**
+ * The named character references that produce an ASCII character.
+ *
+ * Deliberately not the full 2231-entry HTML5 table: every OTHER named reference
+ * produces a non-ASCII character, which cannot spell any part of
+ * `Content-Security-Policy` or of a CSP directive.  One appearing inside a
+ * `content` value therefore yields a MISMATCH the gate reports, which is the
+ * fail-loud direction — never a policy it fails to see.
+ */
+const NAMED_REFERENCES: ReadonlyMap<string, string> = new Map(
+  Object.entries({
+    amp: '&',
+    apos: "'",
+    ast: '*',
+    colon: ':',
+    comma: ',',
+    dollar: '$',
+    equals: '=',
+    excl: '!',
+    grave: '`',
+    gt: '>',
+    lcub: '{',
+    lowbar: '_',
+    lpar: '(',
+    lsqb: '[',
+    lt: '<',
+    num: '#',
+    percnt: '%',
+    period: '.',
+    plus: '+',
+    quest: '?',
+    quot: '"',
+    rcub: '}',
+    rpar: ')',
+    rsqb: ']',
+    semi: ';',
+    sol: '/',
+    Tab: '\t',
+    verbar: '|',
+  }),
+);
+
+/**
+ * Decode the HTML character references in an attribute VALUE.
+ *
+ * The HTML tokenizer decodes these before the value ever reaches CSP, so
+ * `http-equiv="Content-Security-Polic&#121;"` names the same header a browser
+ * enforces in full — and a raw string comparison does not recognise it, which
+ * would let a hand-written policy sit in the source document while this gate
+ * reported it policy-free.
+ *
+ * The trailing `;` is OPTIONAL on a numeric reference: HTML5 decodes
+ * `&#121` too (with a parse error), and this gate must see what the BROWSER
+ * sees, not what the spec prefers.  It is required on a NAMED reference,
+ * matching the attribute-value rule that leaves `&ampx` literal.
+ */
+export function decodeHtmlReferences(value: string): string {
+  return value.replace(
+    /&(?:#([0-9]+);?|#[xX]([0-9a-fA-F]+);?|([a-zA-Z][a-zA-Z0-9]*);)/g,
+    (whole, decimal?: string, hex?: string, name?: string) => {
+      if (decimal !== undefined) return codePointOrRaw(Number.parseInt(decimal, 10), whole);
+      if (hex !== undefined) return codePointOrRaw(Number.parseInt(hex, 16), whole);
+      return name === undefined ? whole : (NAMED_REFERENCES.get(name) ?? whole);
+    },
+  );
+}
+
+/** A code point HTML would render, or the reference unchanged when it would not. */
+function codePointOrRaw(code: number, whole: string): string {
+  // Surrogates and out-of-range values become U+FFFD in a real parser; leaving
+  // them raw keeps this a comparison problem rather than a decoding one, and
+  // neither can spell a directive.
+  if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff) return whole;
+  if (code >= 0xd800 && code <= 0xdfff) return whole;
+  return String.fromCodePoint(code);
+}
+
 /** Attributes of a start tag, names lower-cased (HTML names are ASCII-insensitive). */
 function parseTagAttributes(tag: string): Map<string, string> {
   const attributes = new Map<string, string>();
@@ -69,7 +146,10 @@ function parseTagAttributes(tag: string): Map<string, string> {
   for (const match of body.matchAll(ATTRIBUTE)) {
     const name = match[1]?.toLowerCase();
     if (name === undefined || name === '') continue;
-    if (!attributes.has(name)) attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+    // The NAME is not entity-decoded — the tokenizer does not decode references
+    // in attribute names, so `http-equi&#118;` really is a different attribute.
+    const raw = match[2] ?? match[3] ?? match[4] ?? '';
+    if (!attributes.has(name)) attributes.set(name, decodeHtmlReferences(raw));
   }
   return attributes;
 }

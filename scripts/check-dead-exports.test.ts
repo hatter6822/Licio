@@ -101,6 +101,68 @@ describe('exportedValues', () => {
     expect(exportedValues('export { type A, b };').map((d) => d.name)).toEqual(['b']);
   });
 
+  it('finds EVERY binding a declarator list introduces', () => {
+    // One declaration can publish many names; taking only the first left the
+    // rest outside both the gate and the internal-only survey.
+    expect(exportedValues('export const live = 1, UNUSED = 2;').map((v) => v.name)).toEqual([
+      'live',
+      'UNUSED',
+    ]);
+    expect(exportedValues('export let a = 1, b = 2, c = 3;').map((v) => v.name)).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+  });
+
+  it('finds the bindings of a destructuring export', () => {
+    expect(exportedValues('export const { a, b } = obj;').map((v) => v.name)).toEqual(['a', 'b']);
+    expect(exportedValues('export const [x, , y] = arr;').map((v) => v.name)).toEqual(['x', 'y']);
+  });
+
+  it('takes the RENAMED target of a pattern, not the property key', () => {
+    expect(exportedValues('export const { a: renamed } = obj;').map((v) => v.name)).toEqual([
+      'renamed',
+    ]);
+    expect(exportedValues('export const { a: { b } } = obj;').map((v) => v.name)).toEqual(['b']);
+  });
+
+  it('ignores a DEFAULT value inside a pattern', () => {
+    expect(exportedValues('export const { a = 1, b } = obj;').map((v) => v.name)).toEqual([
+      'a',
+      'b',
+    ]);
+  });
+
+  it('does not mistake a TYPE ANNOTATION for a binding', () => {
+    // The comma inside `Map<string, number>` is not a declarator separator, and
+    // `Map`/`string`/`number` are not names this declaration binds.
+    expect(
+      exportedValues('export const parsed: Map<string, number> = new Map();').map((v) => v.name),
+    ).toEqual(['parsed']);
+    expect(exportedValues('export let a: number, b: string;').map((v) => v.name)).toEqual([
+      'a',
+      'b',
+    ]);
+  });
+
+  it('does not mistake an INITIALIZER for a binding', () => {
+    expect(exportedValues('export const f = (p, q) => p + q;').map((v) => v.name)).toEqual(['f']);
+    expect(exportedValues('export const RE = /a,b/;').map((v) => v.name)).toEqual(['RE']);
+    expect(exportedValues('export const v = f(1, 2), w = 3;').map((v) => v.name)).toEqual([
+      'v',
+      'w',
+    ]);
+  });
+
+  it('reports a later binding nothing consumes', () => {
+    const dead = findDeadExports([
+      file('src/a.ts', 'export const live = 1, UNUSED = 2;'),
+      file('src/b.ts', "import { live } from './a.js';\nuse(live);"),
+    ]);
+    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['const UNUSED']);
+  });
+
   it('finds a GENERATOR export in every spacing the grammar allows', () => {
     // `function*` puts a `*` where the scan required whitespace, so none of
     // these were seen at all — `identifierCandidates` and `writePackChunks`
