@@ -236,6 +236,18 @@ describe('what is NOT a violation', () => {
     expect(hues(`<span className="bg-warning text-warning-fg">x</span>`)).toEqual([]);
   });
 
+  it('accepts a -fg token over a solid INTERACTION variant', () => {
+    // `bg-error-hover` is a solid fill (#9B2019); white on it is correct.
+    expect(hues(`const a = 'bg-error-hover text-error-fg';`)).toEqual([]);
+    expect(hues(`const a = 'bg-primary-active text-primary-fg';`)).toEqual([]);
+  });
+
+  it('REJECTS a -fg token over the SOFT tint, which is nearly white', () => {
+    // `error-soft` is #FBE7E5 — white text on it is the same defect as white
+    // text on the canvas.  That pairing wants `-on-soft`.
+    expect(hues(`const a = 'bg-error-soft text-error-fg';`)).toEqual(['1:error']);
+  });
+
   it('REJECTS a -fg token on the canvas, where it is white on near-white', () => {
     // The live defect this found: ~20 `role="alert"` messages rendering white
     // text on the default surface, invisible in the light theme, while the gate

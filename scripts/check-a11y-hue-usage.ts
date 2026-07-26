@@ -78,9 +78,16 @@ const BARE_HUE = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)(?![\
  */
 const HUE_FG = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)-fg(?![\w-])/;
 
-/** The solid background that makes a `-fg` token legible, in any variant. */
+/**
+ * The SOLID background that makes a `-fg` token legible.
+ *
+ * `bg-<hue>` and its interaction variants (`-hover`, `-active`) are the solid
+ * fills the token is contrast-tested against.  `-soft` is deliberately NOT among
+ * them: it is a pale tint (`error-soft` is `#FBE7E5`), and white text on it is
+ * the same defect as white text on the canvas — that pairing wants `-on-soft`.
+ */
 const pairedBackground = (hue: string): RegExp =>
-  new RegExp(`(?:^|[\\s'"\`{:!])bg-${hue}(?![\\w-])`);
+  new RegExp(`(?:^|[\\s'"\`{:!])bg-${hue}(?:-hover|-active)?(?![\\w-])`);
 
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
 const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;

@@ -858,6 +858,49 @@ describe('WS-M treasury + payment intents', () => {
       expect(placed.status).toBe(200);
     });
 
+    // The `source` lands VERBATIM in the hash-chained audit and is read later as
+    // fact, so it has to be one the actor can actually speak for.  The domain's
+    // check is one bit — "has platform authority?" — under which any holder
+    // could record their own freeze as legal's, or as a machine's.
+    it.each([
+      ['legal', 'legal counsel'],
+      ['trust_safety', 'the trust-and-safety role'],
+      ['automated_monitoring', 'automated monitoring'],
+    ])('refuses a ROLE_INTEGRITY actor the "%s" source', async (source, expected) => {
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: `integrity_${source}`,
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source,
+        reason: 'attribution check',
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('source_not_authorized');
+      expect(body.error.message).toContain(expected);
+    });
+
+    it('ALLOWS the source the actor can speak for', async () => {
+      // ROLE_INTEGRITY owns the cross-room freeze surface, so
+      // `platform_security` is its own action to attribute.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_own_source',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'governance paused pending review',
+      });
+      expect(res.status).toBe(200);
+    });
+
     it('tells a platform operator to STEP UP MFA rather than that they lack authority', async () => {
       // A ROLE_SAFETY operator who ALSO stewards this room holds `restrict` —
       // the release authority — but has not verified MFA on this session.  The

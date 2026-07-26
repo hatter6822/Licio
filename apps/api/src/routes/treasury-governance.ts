@@ -53,6 +53,7 @@ import {
   checkGovernanceEligibility,
   requireGovernanceEligibility,
 } from '../governance/eligibility.js';
+import { isCounsel } from '../identity/rbac.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import { createLogger } from '../lib/logger.js';
 import {
@@ -64,6 +65,7 @@ import {
 } from '../middleware/auth.js';
 import {
   denyCapability,
+  effectiveStewardRoles,
   grantsCapability,
   isPlatformStaff,
   stewardActorOf,
@@ -459,6 +461,38 @@ export function createTreasuryGovernanceRoutes() {
               deny(
                 'source_not_authorized',
                 'A freeze is recorded as "steward" only when the room’s own steward PLACES it; lifting one is a platform action, as is any action on a room you do not steward.',
+              ),
+              403,
+            );
+          }
+          // Each PLATFORM source is a distinct attribution, and the domain's
+          // check is one bit — "does this actor have platform authority?" — so
+          // any holder could record their freeze as legal's, or as a machine's.
+          // The record is hash-chained and read later as fact, so the source has
+          // to be one the actor can actually speak for.
+          const roles = effectiveStewardRoles(auth.roles, auth.stewardRoles);
+          const sourceRequirement =
+            body.source === 'automated_monitoring'
+              ? // A TRIGGER, not a person.  This route is human-authenticated
+                // (session + step-up MFA), so nobody reaching it is automated
+                // monitoring, whatever authority they hold.
+                'automated monitoring, which never acts through this endpoint'
+              : body.source === 'legal'
+                ? isCounsel(auth.roles)
+                  ? null
+                  : 'legal counsel'
+                : body.source === 'trust_safety'
+                  ? roles.includes('ROLE_SAFETY')
+                    ? null
+                    : 'the trust-and-safety role (ROLE_SAFETY)'
+                  : // `platform_security` and `steward` are settled above: reaching
+                    // here means the actor holds the freeze or release authority.
+                    null;
+          if (sourceRequirement !== null) {
+            return c.json(
+              deny(
+                'source_not_authorized',
+                `A freeze recorded as "${body.source}" must be placed by ${sourceRequirement}.`,
               ),
               403,
             );

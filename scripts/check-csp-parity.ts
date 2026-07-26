@@ -58,8 +58,15 @@ export function parsePolicyString(policy: string): string[] {
  * than a pair of `content="…"` / `content='…'` patterns: `<meta
  * http-equiv=Content-Security-Policy content="…">` is valid HTML that a browser
  * honours in full, and a quote-only matcher does not see it at all.
+ *
+ * The whitespace class is HTML's — TAB, LF, FF, CR, SPACE — never JavaScript's
+ * `\s`.  With `\s`, `http-equiv\u00a0="…"` parses as the attribute `http-equiv`
+ * while the browser reads a DIFFERENT attribute named `http-equiv\u00a0`,
+ * recognises no CSP meta, and runs the courier with no policy while this gate
+ * reports one delivered.  Same rule as the tag reader, which is the point.
  */
-const ATTRIBUTE = /([^\s/>=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]*)))?/g;
+const ATTRIBUTE =
+  /([^\t\n\f\r />=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r "'`=<>]*)))?/g;
 
 /**
  * The named character references that produce an ASCII character.
@@ -277,7 +284,7 @@ function findHeadRange(
       return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
     }
     if (tag.closing) {
-      if (tag.name === 'head' || tag.name === 'body' || tag.name === 'html') {
+      if (HEAD_CLOSING_END_TAGS.has(tag.name)) {
         return from === undefined ? undefined : { from, to: tag.at, endedBy: tag };
       }
       continue; // `</title>`, `</style>`, … — still inside the head
@@ -294,6 +301,17 @@ function findHeadRange(
   }
   return from === undefined ? undefined : { from, to: Number.POSITIVE_INFINITY };
 }
+
+/**
+ * End tags that END the head, per the "in head" insertion mode.
+ *
+ * `</head>` pops it; `</body>`, `</html>` and — the one that reads as a typo but
+ * is in the spec — `</br>` are handled by the "anything else" entry, which pops
+ * the head and REPROCESSES the token in the body.  Every OTHER end tag there is
+ * a parse error and ignored, which is why this is a closed set rather than
+ * "any end tag".
+ */
+const HEAD_CLOSING_END_TAGS: ReadonlySet<string> = new Set(['head', 'body', 'html', 'br']);
 
 /** Only tab, LF, FF, CR and space are HTML whitespace — notably NOT `&nbsp;`. */
 const HTML_WHITESPACE_ONLY = /^[\t\n\f\r ]*$/;

@@ -249,6 +249,28 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
       expect(problems(html).join('\n')).toMatch(/outside <head>|not inside <head>/);
     });
 
+    // HTML whitespace is TAB/LF/FF/CR/SPACE — never JavaScript's `\s`, which also
+    // matches U+00A0.  `http-equiv\u00a0=` is a DIFFERENT attribute name, so the
+    // browser recognises no CSP meta at all.
+    it('does not treat U+00A0 as whitespace in an attribute name', () => {
+      const html = `<!doctype html><html><head><meta http-equiv\u00a0="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
+      expect(extractMetaPolicies(html)).toEqual([]);
+      expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+    });
+
+    it('accepts an ordinary space around the `=`, which IS HTML whitespace', () => {
+      const html = `<!doctype html><html><head><meta http-equiv ="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
+      expect(problems(html)).toEqual([]);
+    });
+
+    // `</br>` reads as a typo and is in the spec: the "in head" mode handles
+    // `</body>`, `</html>` and `</br>` by popping the head and REPROCESSING in
+    // the body.  Every other end tag there is a parse error and ignored.
+    it('treats `</br>` as closing the head', () => {
+      const html = `<!doctype html><html><head></br>${META}</head><body></body></html>`;
+      expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\//);
+    });
+
     it.each([
       ['indentation', `<!doctype html><html><head>\n  ${META}\n</head><body></body></html>`],
       // A child element's CONTENT is not a character token in the head.
