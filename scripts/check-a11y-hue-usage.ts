@@ -153,8 +153,8 @@ const MAX_INTERPOLATION_DEPTH = 8;
  * template — would otherwise pass the gate.  Each hole is re-lexed against the
  * ORIGINAL source so the offsets stay absolute and the reported line is right.
  */
-function literalGroups(source: string): Token[][] {
-  const byKey = new Map<string, Token[]>();
+function literalGroups(source: string): LiteralGroup[] {
+  const byKey = new Map<string, LiteralGroup>();
   const isLiteral = (token: Token | undefined): boolean =>
     token?.kind === 'string' || token?.kind === 'template';
   const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
@@ -177,7 +177,7 @@ function literalGroups(source: string): Token[][] {
         group.push(next);
         j += 2;
       }
-      byKey.set(group.map((each) => each.start).join(','), group);
+      byKey.set(group.map((each) => each.start).join(','), { tokens: group, preferRegex });
       if (depth < MAX_INTERPOLATION_DEPTH) {
         for (const part of group) {
           if (part.kind !== 'template') continue;
@@ -194,35 +194,18 @@ function literalGroups(source: string): Token[][] {
     }
   };
   for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
-  return [...byKey.values()].sort((a, b) => (a[0]?.start ?? 0) - (b[0]?.start ?? 0));
+  return [...byKey.values()].sort((a, b) => (a.tokens[0]?.start ?? 0) - (b.tokens[0]?.start ?? 0));
+}
+
+/** A `+`-joined run of literals, with the lexing that found it. */
+interface LiteralGroup {
+  readonly tokens: readonly Token[];
+  /** Which `preferRegex` pass produced it — needed to re-read its holes. */
+  readonly preferRegex: boolean;
 }
 
 /** A runaway guard: no real class expression concatenates this many literals. */
 const MAX_CONCAT_OPERANDS = 64;
-
-/**
- * A template literal's `${…}` holes hold EXPRESSIONS, not class text.  Blank
- * them — preserving length and newlines so reported offsets stay true — so an
- * interpolated identifier is never read as a class name.  Nothing is lost
- * because {@link stringTokens} DESCENDS into each hole and examines the literals
- * inside it separately; the lexer does not emit them on its own (a template is
- * one token), so the descent is what makes this blanking safe.
- *
- * The hole bounds come from {@link interpolationSpans} rather than a brace
- * counter, for the reason recorded there: a counter is a second, weaker lexer
- * and it mis-read the `}` inside a regex literal.
- */
-function blankInterpolations(raw: string): string {
-  const blanked = [...raw];
-  for (const preferRegex of [false, true]) {
-    for (const span of interpolationSpans(raw, 0, preferRegex)) {
-      for (let i = span.offset; i < span.offset + span.text.length && i < blanked.length; i += 1) {
-        if (blanked[i] !== '\n') blanked[i] = ' ';
-      }
-    }
-  }
-  return blanked.join('');
-}
 
 /**
  * Whether the class on `line` (1-based) carries a reasoned opt-out.
@@ -358,20 +341,74 @@ function decodeStringEscapes(raw: string): Decoded {
  * well as on a separator, so a class that begins the string still matches while
  * `my-text-error` — a different utility — still does not.
  */
-function groupContent(group: readonly Token[]): Decoded {
+function groupContent(group: LiteralGroup): Decoded {
   const units: string[] = [];
   const offsets: number[] = [];
-  for (const token of group) {
-    const raw = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
-    // Past the opening delimiter, and short of the closing one.
-    const inner = raw.slice(1, Math.max(1, raw.length - 1));
-    const decoded = decodeStringEscapes(inner);
-    for (let i = 0; i < decoded.text.length; i += 1) {
-      units.push(decoded.text[i] ?? '');
-      offsets.push(token.start + 1 + (decoded.offsets[i] ?? i));
+  const push = (value: string, at: number): void => {
+    for (let i = 0; i < value.length; i += 1) {
+      units.push(value[i] ?? '');
+      offsets.push(at);
     }
+  };
+  /** Decode `chunk` (raw source text) and append it, mapping back to `at`. */
+  const append = (chunk: string, at: number): void => {
+    const decoded = decodeStringEscapes(chunk);
+    for (let i = 0; i < decoded.text.length; i += 1) {
+      push(decoded.text[i] ?? '', at + (decoded.offsets[i] ?? i));
+    }
+  };
+
+  for (const token of group.tokens) {
+    const raw = token.value;
+    const inner = () => raw.slice(1, Math.max(1, raw.length - 1));
+    if (token.kind !== 'template') {
+      append(inner(), token.start + 1);
+      continue;
+    }
+    // A template is chunks and HOLES.  A hole whose expression is statically
+    // known is part of the class the browser receives — `` `text-${'error'}` ``
+    // renders `text-error` — so it is folded in.  One that is not becomes a
+    // single SPACE: dropping it entirely would join the chunks around it and
+    // invent a class (`text-${x}error`), which fails a correct build.
+    let cursor = 1;
+    for (const span of interpolationSpans(raw, 0, group.preferRegex)) {
+      const holeAt = Math.max(cursor, span.offset - 2); // the `${`
+      append(raw.slice(cursor, holeAt), token.start + cursor);
+      const folded = foldStaticHole(span.text, group.preferRegex);
+      if (folded === null) push(' ', token.start + holeAt);
+      else append(folded, token.start + span.offset);
+      cursor = span.offset + span.text.length + 1; // past the closing `}`
+    }
+    append(raw.slice(cursor, Math.max(cursor, raw.length - 1)), token.start + cursor);
   }
   return { text: units.join(''), offsets };
+}
+
+/**
+ * A template hole's value when it is statically known, else `null`.
+ *
+ * Only a literal, or a `+`-joined run of literals, is folded — anything else
+ * (an identifier, a call, a ternary) is a value this scan cannot know, and
+ * guessing at one would invent class names that never render.
+ */
+function foldStaticHole(hole: string, preferRegex: boolean): string | null {
+  const tokens = tokenize(hole, preferRegex).filter((token) => token.kind !== 'comment');
+  if (tokens.length === 0) return null;
+  const parts: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === undefined) return null;
+    if (token.kind !== 'string' && token.kind !== 'template') return null;
+    // A template operand with a hole of its own is not statically known here;
+    // the descent in `literalGroups` examines it separately.
+    if (token.kind === 'template' && token.value.includes('${')) return null;
+    parts.push(token.value.slice(1, Math.max(1, token.value.length - 1)));
+    const joiner = tokens[i + 1];
+    if (joiner === undefined) break;
+    if (joiner.kind !== 'punct' || joiner.value !== '+') return null;
+    i += 1;
+  }
+  return parts.join('');
 }
 
 /** Every bare-hue text use in `files` that is neither an icon nor exempted. */
@@ -381,7 +418,7 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
     const newlines = newlineIndex(file.content);
     const lines = file.content.split('\n');
     for (const group of literalGroups(file.content)) {
-      const start = group[0]?.start ?? 0;
+      const start = group.tokens[0]?.start ?? 0;
       // What the RUNTIME sees: the operands joined, delimiters dropped, escapes
       // decoded.  `'text-' + 'error'` is the class `text-error`.
       const { text, offsets } = groupContent(group);

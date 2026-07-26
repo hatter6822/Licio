@@ -121,6 +121,18 @@ export interface ResolveInput {
   readonly root?: string;
   /** tsconfigs to open.  Defaults to every tracked one. */
   readonly configs?: readonly string[];
+  /**
+   * Also enumerate UNCHANGED barrel re-exports (`export { live } from './x'`).
+   *
+   * Off for the blocking gate and on for its survey.  Publishing a name is not
+   * consuming it, so these bindings ARE judgeable and the question is worth
+   * being able to ask — but in this repository they are ~244 module-barrel
+   * entries, overwhelmingly the deliberate SSOT-surface idiom the gate's own
+   * guidance names for `@licio/shared` and `@licio/db` rather than defects.
+   * Failing CI on a convention is how a gate gets switched off, so the survey
+   * reports them and `docs/planning/audit-residuals-2026-07.md` tracks them.
+   */
+  readonly judgeRepublished?: boolean;
 }
 
 export interface ResolvedReferences {
@@ -431,6 +443,7 @@ function exportsOfFile(
   absolute: string,
   project: Project,
   text: string,
+  judgeRepublished: boolean,
 ): Array<{ binding: ExportedBinding; keys: string[]; symbol: TsSymbol }> {
   const source = project.program.getSourceFile(absolute);
   if (source === undefined) return [];
@@ -451,7 +464,11 @@ function exportsOfFile(
       const node = handle.resolve(project);
       const name = node?.name;
       if (node === undefined || name === undefined) continue;
-      if (node.kind === SyntaxKind.ExportSpecifier && isUnchangedRepublish(node, project)) {
+      if (
+        !judgeRepublished &&
+        node.kind === SyntaxKind.ExportSpecifier &&
+        isUnchangedRepublish(node, project)
+      ) {
         continue;
       }
       const offset = name.getStart();
@@ -521,6 +538,7 @@ export function findUncoveredFiles(input: ResolveInput): string[] {
  */
 export function resolveExportReferences(input: ResolveInput): ResolvedReferences {
   const root = input.root ?? ROOT;
+  const judgeRepublished = input.judgeRepublished === true;
   return withProjects(input, (ownerOf) => {
     /** `path#index` of a declaration → the sites that mention that binding. */
     const sites = new Map<string, ReferenceSite[]>();
@@ -585,7 +603,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         continue;
       }
 
-      for (const entry of exportsOfFile(file, absolute, project, text)) {
+      for (const entry of exportsOfFile(file, absolute, project, text, judgeRepublished)) {
         exports.push(entry.binding);
         declared.push(entry);
       }

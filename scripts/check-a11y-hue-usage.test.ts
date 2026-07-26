@@ -67,6 +67,35 @@ describe('the bare hue on normal text', () => {
     expect(hues(source)).toHaveLength(1);
   });
 
+  it.each([
+    ['a literal hole', `<span className={\`text-\${'error'}\`} />`],
+    ['a concatenated hole', `<span className={\`text-\${'er' + 'ror'}\`} />`],
+    ['a hole mid-class', `<span className={\`flex text-\${'warning'} p-2\`} />`],
+  ])('folds a statically known template hole (%s)', (_label, source) => {
+    // The hole's value is part of the class the browser receives; blanking it
+    // left neither scan able to reconstruct `text-error`.
+    expect(hues(source)).toHaveLength(1);
+  });
+
+  it('reports a folded hole ONCE, not once per scan', () => {
+    // The nested literal is examined both folded into its template and on its
+    // own; one rendered class is one finding.
+    expect(hues(`<span className={\`text-\${'error'}\`} />`)).toEqual(['1:error']);
+  });
+
+  it('does NOT fold a hole whose value it cannot know', () => {
+    // An identifier, a call or a ternary is a runtime value; guessing at one
+    // would invent class names that never render.
+    expect(hues(`<span className={\`text-\${hue}\`} />`)).toEqual([]);
+    expect(hues(`<span className={\`text-\${pick()}\`} />`)).toEqual([]);
+  });
+
+  it('keeps a SEPARATOR where an unknown hole was', () => {
+    // Dropping the hole entirely would join the chunks around it and invent
+    // `text-error` from `text-${x}error`, failing a correct build.
+    expect(hues(`<span className={\`text-\${hue}error\`} />`)).toEqual([]);
+  });
+
   it('does not invent a hue across a NON-concatenated boundary', () => {
     // Two unrelated arguments are not one class string.  Joining them blindly
     // would report a violation that does not exist, which fails a correct build.

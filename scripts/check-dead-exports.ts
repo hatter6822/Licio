@@ -261,11 +261,17 @@ export function isTestPath(path: string): boolean {
  * cannot be read is the quieter mirror of it: its exports would go unjudged
  * while the gate reported success over them.
  */
-function analyze(files: readonly SourceFile[]): {
+function analyze(
+  files: readonly SourceFile[],
+  judgeRepublished = false,
+): {
   exports: readonly ExportedBinding[];
   oracle: ReferenceOracle;
 } {
-  const resolved = resolveExportReferences({ files: files.map((file) => file.path) });
+  const resolved = resolveExportReferences({
+    files: files.map((file) => file.path),
+    judgeRepublished,
+  });
   if (resolved.uncovered.length > 0) {
     console.error(
       `check:dead-exports CANNOT RUN — ${resolved.uncovered.length} tracked file(s) belong to no\n` +
@@ -316,7 +322,34 @@ function main(): void {
     files.push({ path, content, isTest: isReferenceOnlyPath(path) });
   }
 
-  const { exports, oracle } = analyze(files);
+  // `--republished` widens the enumeration to UNCHANGED barrel re-exports.
+  // Publishing a name is not consuming it, so those bindings are judgeable —
+  // but they are ~244 module-barrel entries here, overwhelmingly the deliberate
+  // SSOT-surface idiom rather than defects, so they are surveyed and tracked
+  // (docs/planning/audit-residuals-2026-07.md) rather than blocking CI.
+  const republishedOnly = process.argv.includes('--republished');
+  const { exports, oracle } = analyze(files, republishedOnly);
+
+  if (republishedOnly) {
+    const stale = findDeadExports(exports, files, oracle);
+    if (stale.length > 0) {
+      console.error(`${stale.length} exported value(s) nothing references, barrels INCLUDED:`);
+      for (const entry of stale) {
+        console.error(`  - ${entry.file}:${entry.line}  ${entry.kind} ${entry.name}`);
+      }
+      console.error(
+        '\n  A barrel entry nothing imports THROUGH the barrel is unused public surface —\n' +
+          '  but most of these are module barrels publishing their schemas and constants as\n' +
+          '  the SSOT surface, the same idiom `@licio/shared` and `@licio/db` follow, whether\n' +
+          '  or not a consumer exists today. Judge each on that basis.\n' +
+          '  Not run in CI: tracked debt, not a clean baseline\n' +
+          '  (docs/planning/audit-residuals-2026-07.md).',
+      );
+      process.exit(1);
+    }
+    console.log('No exported value is unreferenced, barrels included.');
+    return;
+  }
 
   if (process.argv.includes('--internal-only')) {
     const internal = findInternalOnlyExports(exports, files, oracle);

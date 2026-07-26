@@ -388,7 +388,11 @@ write for a file the foreground agent may also touch.
   Used only inside its own file?  Drop the `export`, keep the symbol —
   `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
   the ~969 standing cases are worked through
-  (`docs/planning/audit-residuals-2026-07.md`).
+  (`docs/planning/audit-residuals-2026-07.md`).  An unchanged barrel re-export
+  (`export { live } from './x.js'`) is judgeable too — publishing a name is not
+  consuming it — but the 254 standing cases are overwhelmingly module barrels
+  publishing their SSOT surface, so they are surveyed by
+  `pnpm survey:barrel-reexports` and tracked there rather than gated.
   **BOTH SIDES COME FROM THE COMPILER** (`scripts/resolve-export-references.ts`),
   never from parsing: the export list is the module's own export table, and
   references are resolved to the module BINDING rather than matched by name — so

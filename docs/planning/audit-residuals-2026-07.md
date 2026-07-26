@@ -126,6 +126,28 @@ was dropped. **12 exports across 4 files** were never judged at all, among them
 every function in `apps/web/src/lib/time.ts` after its first. The new enumeration
 finds those 12 and loses none.
 
+### Unchanged barrel re-exports are surveyed, not gated — **tracked debt**
+
+`export { live } from './x.js'` publishes a name of the BARREL. Publishing is
+not consuming, so the binding is judgeable in its own right, and the blocking
+gate skipping it is a real blind spot: an entry nothing imports through the
+barrel is unused public surface.
+
+The enumeration now exists — `pnpm survey:barrel-reexports` (the resolver's
+`judgeRepublished`) — and reports **254** across the repository. It is NOT in
+CI, because the overwhelming majority are module barrels publishing their
+schemas and constants as the SSOT surface: 53 in `packages/lcap/src/schemas`,
+35 in `apps/web/src/offline`, 17 in `apps/web/src/update`. That is the same
+idiom the gate's own guidance names for `@licio/shared` and `@licio/db` —
+"whether or not a consumer exists today" — so failing CI on it would be failing
+on a convention, which is how a gate gets switched off rather than obeyed.
+
+**Closure target:** a per-barrel decision, not a sweep. For each module barrel,
+either (a) it is the module's public entry and consumers should import THROUGH
+it — then fix the direct imports, and the entries become live; or (b) it is
+vestigial packaging and the barrel goes. Both are per-directory judgements with
+real import-graph consequences, so they belong in their own PRs.
+
 ### Unwired guarantees deleted as vestigial — audit of the 2026-07 export sweep
 
 The sweep that removed 47 unreferenced exported values classified each as one of
