@@ -702,7 +702,7 @@ export const isNonSameOriginUrl = (arg: readonly Token[]): boolean => {
  * the one tokeniser means regex literals, strings, templates and comments are
  * all handled by the code that already gets them right.
  */
-function interpolationSpans(
+export function interpolationSpans(
   raw: string,
   base: number,
   preferRegex: boolean,
