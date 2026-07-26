@@ -226,6 +226,16 @@ const FILES: Record<string, string> = {
     ');',
   ].join('\n'),
 
+  // ── Reference: a destructuring assignment DIRECTLY from a dynamic import ─
+  'src/direct-assign.ts': ['export const DIRECT_ASSIGN = 17;'].join('\n'),
+  'src/direct-assign-consumer.ts': [
+    'export async function read(): Promise<number> {',
+    '  let DIRECT_ASSIGN: number;',
+    "  ({ DIRECT_ASSIGN } = await import('./direct-assign.js'));",
+    '  return DIRECT_ASSIGN;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: a STATIC namespace import, destructured later ────────────
   'src/static-ns.ts': [
     'export const STATIC_NS_LIVE = 13;',
@@ -482,6 +492,13 @@ describe('resolution: which sites use a binding', () => {
       expect(usesOf('src/assigned.ts', name).length).toBeGreaterThan(0);
     },
   );
+
+  it('counts a destructuring assignment DIRECTLY from a dynamic import', () => {
+    // `({ A } = await import(M))` — the assignment target is an object literal
+    // and the import is its right-hand side, so neither the declaration path
+    // nor the stored-namespace path saw it.
+    expect(usesOf('src/direct-assign.ts', 'DIRECT_ASSIGN').length).toBeGreaterThan(0);
+  });
 
   it('counts a STATIC namespace import destructured later', () => {
     // `import * as ns from 'M'; const { A } = ns` binds the namespace exactly

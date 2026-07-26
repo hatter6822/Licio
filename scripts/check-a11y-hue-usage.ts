@@ -97,7 +97,7 @@ const BARE_HUE = new RegExp(`${CLASS_BOUNDARY}text-(${HUES})${CLASS_END}`);
  * `bg-error text-error-fg` on a destructive button from a bare `text-error-fg`
  * on an alert paragraph.
  */
-const HUE_FG = new RegExp(`${CLASS_BOUNDARY}([\\w[\\]&:.-]*?)text-(${HUES})-fg${CLASS_END}`);
+const HUE_FG = new RegExp(`${CLASS_BOUNDARY}([\\w[\\]&:.-]*?)text-(${HUES})-fg${CLASS_END}`, 'g');
 
 /**
  * Whether a solid `bg-<hue>` covers the states in which this `-fg` text renders.
@@ -643,12 +643,17 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       }
       const bare = BARE_HUE.exec(text);
       // A `-fg` token is legible only over its own solid background.
-      const fg = HUE_FG.exec(text);
-      // Group 1 is the variant prefix (`hover:`, `md:`, …), group 2 the hue.
-      const unpaired =
-        fg !== null && fg[2] !== undefined && !pairedBackground(fg[2], fg[1] ?? '').test(text)
-          ? fg
-          : null;
+      // EVERY `-fg` in the string, not just the first: one class can carry
+      // several, and `bg-error text-error-fg sm:bg-canvas sm:text-warning-fg`
+      // pairs the first while the second renders white on the canvas at `sm`.
+      HUE_FG.lastIndex = 0;
+      let unpaired: RegExpExecArray | null = null;
+      for (const fg of text.matchAll(HUE_FG)) {
+        // Group 1 is the variant prefix (`hover:`, `md:`, …), group 2 the hue.
+        if (fg[2] === undefined || pairedBackground(fg[2], fg[1] ?? '').test(text)) continue;
+        unpaired = fg as RegExpExecArray;
+        break;
+      }
       const match = bare ?? unpaired;
       if (match === null) continue;
       // A template may span lines, so anchor on the HUE rather than the token

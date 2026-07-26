@@ -376,6 +376,17 @@ function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
   }
 
   const parent = node.parent;
+  // `({ A } = await import('M'))` — a destructuring ASSIGNMENT straight from the
+  // import, whose target parses as an object LITERAL.  Same consumer as the
+  // declaration form one line down, a different node kind.
+  if (
+    awaited &&
+    parent?.kind === SyntaxKind.BinaryExpression &&
+    parent.operatorToken?.kind === SyntaxKind.EqualsToken &&
+    parent.left?.kind === SyntaxKind.ObjectLiteralExpression
+  ) {
+    return parent.left;
+  }
   // `const { A } = await import('M')` destructures the namespace directly;
   // `const mod = await import('M')` STORES it, and the caller records the local
   // so a later `const { A } = mod` can be credited to the same specifier.
@@ -495,7 +506,12 @@ function scanFile(root: NodeHandle): FileScan {
       const specifier = node.arguments?.[0];
       if (specifier !== undefined && specifier.kind === SyntaxKind.StringLiteral) {
         const received = namespaceReceiver(node);
-        if (received?.kind === SyntaxKind.ObjectBindingPattern) {
+        // A DECLARATION's target is a binding pattern; an ASSIGNMENT's is an
+        // object literal.  Both destructure the namespace.
+        if (
+          received?.kind === SyntaxKind.ObjectBindingPattern ||
+          received?.kind === SyntaxKind.ObjectLiteralExpression
+        ) {
           const names = namesOfPattern(received);
           if (names.length > 0) {
             scan.imports.push({

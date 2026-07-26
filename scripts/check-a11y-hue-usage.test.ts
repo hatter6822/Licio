@@ -255,6 +255,18 @@ describe('what is NOT a violation', () => {
     expect(hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
+  it('inspects EVERY -fg in a class string, not just the first', () => {
+    // One class can carry several: `bg-error text-error-fg sm:bg-canvas
+    // sm:text-warning-fg` pairs the first while the second renders white on the
+    // canvas at `sm`.  A single `exec` saw only the paired one.
+    expect(hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-warning-fg';`)).toEqual([
+      '1:warning',
+    ]);
+    expect(hues(`const a = 'bg-error text-error-fg sm:bg-warning sm:text-warning-fg';`)).toEqual(
+      [],
+    );
+  });
+
   it('REJECTS a -fg token over the SOFT tint, which is nearly white', () => {
     // `error-soft` is #FBE7E5 — white text on it is the same defect as white
     // text on the canvas.  That pairing wants `-on-soft`.
