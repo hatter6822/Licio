@@ -261,6 +261,54 @@ interface FileScan {
 /** Identifier parents that PUBLISH a name rather than consume one. */
 const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind.NamespaceExport]);
 
+/** Function shapes that can receive the namespace as a `.then` callback. */
+const CALLBACK_KINDS = new Set<number>([SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
+
+/**
+ * The object binding pattern that destructures an `import('M')` namespace.
+ *
+ * A dynamic import's namespace reaches a pattern in exactly two ways, and both
+ * must be read here — the identifiers a pattern binds are new LOCALS, so
+ * resolving them answers with the local and M's export goes uncredited:
+ *
+ *   • by ASSIGNMENT — `const { A } = await import('M')`;
+ *   • by CALLBACK — `import('M').then(({ A }) => …)`, where the namespace is the
+ *     first parameter rather than an initializer.
+ *
+ * Reading only the first is a live false positive, not a hypothetical: this
+ * repository already writes the second (`apps/web/src/routes/__root.tsx`), and
+ * it survives today only because the export it names happens to be a FUNCTION,
+ * whose type carries the origin symbol the fallback route recovers.  A primitive
+ * export — a string or number constant, whose type carries no symbol — in that
+ * same position would be reported dead and would fail a correct branch.
+ */
+function namespaceReceiver(importCall: NodeHandle): NodeHandle | undefined {
+  const asPattern = (node: NodeHandle | undefined): NodeHandle | undefined =>
+    node?.kind === SyntaxKind.ObjectBindingPattern ? node : undefined;
+
+  const parent = importCall.parent;
+  // `const { A } = await import('M')` — a bare `import('M')` without `await`
+  // yields a PROMISE, whose destructuring names promise members, not exports.
+  if (parent?.kind === SyntaxKind.AwaitExpression) {
+    const declaration = parent.parent;
+    return declaration?.kind === SyntaxKind.VariableDeclaration
+      ? asPattern(declaration.name)
+      : undefined;
+  }
+  // `import('M').then(({ A }) => …)`
+  if (parent?.kind !== SyntaxKind.PropertyAccessExpression) return undefined;
+  const accessed = parent.name;
+  if (accessed === undefined) return undefined;
+  if (accessed.getSourceFile().text.slice(accessed.getStart(), accessed.getEnd()) !== 'then') {
+    return undefined;
+  }
+  const call = parent.parent;
+  if (call?.kind !== SyntaxKind.CallExpression) return undefined;
+  const callback = call.arguments?.[0];
+  if (callback === undefined || !CALLBACK_KINDS.has(callback.kind)) return undefined;
+  return asPattern(callback.parameters?.[0]?.name);
+}
+
 /**
  * Collect, in one walk, every identifier offset and every module-specifier site.
  *
@@ -313,26 +361,18 @@ function scanFile(root: NodeHandle, text: string): FileScan {
       node.kind === SyntaxKind.CallExpression &&
       node.expression?.kind === SyntaxKind.ImportKeyword
     ) {
-      // DYNAMIC: `const { A } = await import('M')`.  The pattern binds new
-      // LOCALS, so the identifiers resolve to those and never to M's exports.
-      const args = node.arguments;
-      const specifier = args?.[0];
+      // DYNAMIC: the pattern that destructures the module binds new LOCALS, so
+      // its identifiers resolve to those and never to M's exports.
+      const specifier = node.arguments?.[0];
       if (specifier !== undefined && specifier.kind === SyntaxKind.StringLiteral) {
-        let holder = node.parent;
-        if (holder?.kind === SyntaxKind.AwaitExpression) holder = holder.parent;
-        const pattern = holder?.name;
-        if (
-          holder?.kind === SyntaxKind.VariableDeclaration &&
-          pattern?.kind === SyntaxKind.ObjectBindingPattern
-        ) {
-          const names = namesOfPattern(pattern);
-          if (names.length > 0) {
-            scan.imports.push({
-              specifierOffset: specifier.getStart(),
-              names,
-              offset: pattern.getStart(),
-            });
-          }
+        const pattern = namespaceReceiver(node);
+        const names = pattern === undefined ? [] : namesOfPattern(pattern);
+        if (pattern !== undefined && names.length > 0) {
+          scan.imports.push({
+            specifierOffset: specifier.getStart(),
+            names,
+            offset: pattern.getStart(),
+          });
         }
       }
     }

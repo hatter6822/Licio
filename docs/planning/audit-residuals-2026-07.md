@@ -141,11 +141,22 @@ it"). Both are now fixed:
   now takes a PROFILE so the documented numbers are on the calling path rather
   than in a constant beside it.
 
-A pass over the remaining 45 found the rest correctly classified — aliases of
-live constants (`CHALLENGE_STATES`, `CHALLENGE_TYPES`), names for facts a
-library already enforces (`OCTET_POINT_LENGTH`, which the noble G1 encoder
-guarantees), and genuinely vestigial values — with two exceptions that need a
-decision rather than a restore, recorded here:
+- `OCTET_POINT_LENGTH` — the compressed-G1 WIRE width. This pass had filed it
+  under "a name for a fact a library already enforces", on the grounds that the
+  noble G1 encoder guarantees 48 bytes. That reasoning was wrong: the encoder
+  guarantees what it *writes*, while the constant is what every PARSER derives
+  its length checks, slice bounds and field offsets from — and deleting it left
+  `48` spelled at nine sites across `blind.ts`, `signature.ts` and `proof.ts`
+  while the neighbouring `OCTET_SCALAR_LENGTH` stayed centralized. That
+  asymmetry is the tell. Restored and wired through every serializer, with
+  `SIGNATURE_LENGTH` derived from the two widths; `EXPAND_LEN` (also 48, and
+  equal only by coincidence of this ciphersuite) is kept separate and is now
+  exported rather than declared twice.
+
+A pass over the remaining 44 found the rest correctly classified — aliases of
+live constants (`CHALLENGE_STATES`, `CHALLENGE_TYPES`) and genuinely vestigial
+values — with two exceptions that need a decision rather than a restore,
+recorded here:
 
 - **`REASON_CODE_REGISTRY_VERSION`.** The module is titled "the *versioned*
   reason-code registry" and `docs/invariants/README.md` says codes "validate

@@ -116,6 +116,12 @@ describe('injectCspMeta', () => {
 // gate exists to prevent, so it is worth pinning from both directions.
 describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
   const POLICY = contentSecurityPolicyMeta();
+  const META = `<meta http-equiv="Content-Security-Policy" content="${POLICY.replace(/"/g, '&quot;')}">`;
+  const problems = (builtIndexHtml: string): string[] =>
+    findCspDeliveryProblems({
+      indexHtml: '<!doctype html><html><head></head><body></body></html>',
+      builtIndexHtml,
+    });
   const SERIALIZED = `<div data-note='<meta http-equiv="Content-Security-Policy" content="${POLICY}">'></div>`;
 
   it('does not count a <meta> serialized into an attribute value', () => {
@@ -131,11 +137,13 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
   });
 
   it('still reads the REAL tag when one follows a serialized lookalike', () => {
-    const html = `<!doctype html><html><head>${SERIALIZED}<meta http-equiv="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
+    // The carrier is a `<meta name>` rather than a `<div>`: a div in the head
+    // would close it implicitly, which is a DIFFERENT (also real) problem and
+    // would mask the one under test here.
+    const carrier = `<meta name="note" content="<meta http-equiv='Content-Security-Policy' content='x'>">`;
+    const html = `<!doctype html><html><head>${carrier}<meta http-equiv="Content-Security-Policy" content="${POLICY}"></head><body></body></html>`;
     expect(extractMetaPolicies(html)).toEqual([POLICY]);
-    expect(
-      findCspDeliveryProblems({ indexHtml: '<html><head></head></html>', builtIndexHtml: html }),
-    ).toEqual([]);
+    expect(problems(html)).toEqual([]);
   });
 
   it('does not let a <script> named in an attribute value move the ordering boundary', () => {
@@ -174,6 +182,67 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
   it('reads an UNQUOTED attribute value, which a quote-only matcher misses', () => {
     const html = `<meta http-equiv=Content-Security-Policy content="${POLICY}">`;
     expect(extractMetaPolicies(html)).toEqual([POLICY]);
+  });
+
+  // The set of elements whose content is not markup is SPEC-DEFINED and closed.
+  // An earlier cut named five of them from memory, and `noframes`, `noembed`
+  // and `xmp` each let a <meta> the browser reads as TEXT pass as a delivered
+  // policy — a courier with no CSP, certified.  Every entry is asserted so the
+  // list can only shrink deliberately.
+  describe('every element whose content the parser reads as text', () => {
+    it.each([
+      'script',
+      'style',
+      'textarea',
+      'title',
+      'template',
+      'noscript',
+      'noframes',
+      'noembed',
+      'iframe',
+      'xmp',
+    ])('does not count a CSP <meta> inside <%s>', (element) => {
+      const html = `<!doctype html><html><head><${element}>${META}</${element}></head><body></body></html>`;
+      expect(extractMetaPolicies(html)).toEqual([]);
+      expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+    });
+
+    it('treats everything after <plaintext> as text, close tag or not', () => {
+      // PLAINTEXT has no exit state: the tokenizer never returns to markup.
+      expect(extractMetaPolicies(`<html><head><plaintext>${META}`)).toEqual([]);
+    });
+  });
+
+  // The head does not need a `</head>` to close — the parser closes it at the
+  // first token that is not head content, and CSP L3 §3.3 honours a <meta> only
+  // as a child of <head>.
+  describe('the head boundary the parser actually applies', () => {
+    it.each([
+      ['<body>', `<!doctype html><html><head><body>${META}</body></html>`],
+      ['<p>', `<!doctype html><html><head><p>${META}</p></html>`],
+      ['an explicit </head>', `<!doctype html><html><head></head>${META}<body></body></html>`],
+    ])('rejects a policy placed after %s', (_label, html) => {
+      expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\/|not inside <head>/);
+    });
+
+    it.each([
+      [
+        'first in head',
+        `<!doctype html><html><head>${META}<title>t</title></head><body></body></html>`,
+      ],
+      [
+        'after a <title>',
+        `<!doctype html><html><head><title>t</title>${META}</head><body></body></html>`,
+      ],
+      // `scanTags` steps over inert content, so a `<p>` inside a `<template>`
+      // is not a token that closes the head.
+      [
+        'with a <template> in the head',
+        `<!doctype html><html><head>${META}<template><p>x</p></template></head><body></body></html>`,
+      ],
+    ])('accepts a correctly placed policy %s', (_label, html) => {
+      expect(problems(html)).toEqual([]);
+    });
   });
 
   it('reads a raw-text element inside a TEMPLATE by its real tag bounds', () => {

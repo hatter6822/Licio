@@ -221,6 +221,111 @@ function isExempt(lines: readonly string[], line: number): boolean {
   return false;
 }
 
+/** A decoded literal, plus the RAW index each decoded unit came from. */
+interface Decoded {
+  readonly text: string;
+  readonly offsets: readonly number[];
+}
+
+/** The escapes that stand for one control character. */
+const SIMPLE_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ['n', '\n'],
+  ['t', '\t'],
+  ['r', '\r'],
+  ['b', '\b'],
+  ['f', '\f'],
+  ['v', '\v'],
+  ['0', '\0'],
+]);
+
+/** A code point, or the empty string when the escape does not denote one. */
+function codePoint(code: number): string {
+  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return '';
+  return String.fromCodePoint(code);
+}
+
+/**
+ * Decode a literal's JavaScript escapes, keeping a map back to raw offsets.
+ *
+ * The gate must read the class the RUNTIME sees, not the characters the source
+ * spells it with: `className={'text-error'}` renders `text-error` and puts
+ * normal text below the required contrast, while a scan of the raw token text
+ * finds nothing.  `\u`, `\u{…}` and `\x` are the forms that can spell a class
+ * name; the identity escapes (`\'`, `\\`, and any unrecognised `\c`) are decoded
+ * too, since each also changes which characters are adjacent.
+ *
+ * The offset map is what keeps the REPORT honest.  Decoding shortens the string,
+ * so a match index no longer indexes the source — and this gate reports a file
+ * and line a person has to open.  Every decoded unit records the raw index of
+ * the escape it came from, so the reported line is where the class really sits.
+ */
+function decodeStringEscapes(raw: string): Decoded {
+  if (!raw.includes('\\')) {
+    return { text: raw, offsets: Array.from({ length: raw.length }, (_, i) => i) };
+  }
+  const units: string[] = [];
+  const offsets: number[] = [];
+  const push = (value: string, at: number): void => {
+    // By UTF-16 UNIT, not code point, so the indices stay comparable with the
+    // string the regex is run against.
+    for (let k = 0; k < value.length; k += 1) {
+      units.push(value[k] ?? '');
+      offsets.push(at);
+    }
+  };
+  for (let i = 0; i < raw.length; ) {
+    const char = raw[i] ?? '';
+    if (char !== '\\') {
+      push(char, i);
+      i += 1;
+      continue;
+    }
+    const next = raw[i + 1] ?? '';
+    if (next === 'u' && raw[i + 2] === '{') {
+      const close = raw.indexOf('}', i + 3);
+      const hex = close === -1 ? '' : raw.slice(i + 3, close);
+      if (close !== -1 && /^[0-9a-fA-F]{1,6}$/.test(hex)) {
+        push(codePoint(Number.parseInt(hex, 16)), i);
+        i = close + 1;
+        continue;
+      }
+    } else if (next === 'u') {
+      const hex = raw.slice(i + 2, i + 6);
+      if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+        push(codePoint(Number.parseInt(hex, 16)), i);
+        i += 6;
+        continue;
+      }
+    } else if (next === 'x') {
+      const hex = raw.slice(i + 2, i + 4);
+      if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+        push(codePoint(Number.parseInt(hex, 16)), i);
+        i += 4;
+        continue;
+      }
+    }
+    const simple = SIMPLE_ESCAPES.get(next);
+    if (simple !== undefined) {
+      push(simple, i);
+      i += 2;
+      continue;
+    }
+    // A LINE CONTINUATION produces nothing at all — and it can therefore join
+    // `text-` to a hue across a source line break.
+    if (next === '\n') {
+      i += 2;
+      continue;
+    }
+    if (next === '\r') {
+      i += raw[i + 2] === '\n' ? 3 : 2;
+      continue;
+    }
+    push(next, i); // an identity escape: `\'`, `\"`, `` \` ``, `\\`, or any other
+    i += 2;
+  }
+  return { text: units.join(''), offsets };
+}
+
 /** Every bare-hue text use in `files` that is neither an icon nor exempted. */
 export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] {
   const findings: HueFinding[] = [];
@@ -228,7 +333,9 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
     const newlines = newlineIndex(file.content);
     const lines = file.content.split('\n');
     for (const token of stringTokens(file.content)) {
-      const text = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
+      const raw = token.kind === 'template' ? blankInterpolations(token.value) : token.value;
+      // What the RUNTIME sees: `'text-error'` is the class `text-error`.
+      const { text, offsets } = decodeStringEscapes(raw);
       // An ICON is a graphical object (WCAG 1.4.11, 3:1).  BOTH halves are
       // required: the size class alone describes a box, not a glyph.
       if (ICON_SIZE.test(text) && enclosingElement(file.content, token.start) === ICON_ELEMENT) {
@@ -238,8 +345,10 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       if (match === null) continue;
       // A template may span lines, so anchor on the HUE rather than the token
       // start: the reported line is where the class actually sits.  `+ 1` skips
-      // the delimiter the pattern consumed before `text-`.
-      const line = lineOf(newlines, token.start + match.index + 1);
+      // the delimiter the pattern consumed before `text-`, and the offset map
+      // carries that decoded index back to the source it was written at.
+      const hueAt = offsets[match.index + 1] ?? offsets[match.index] ?? match.index;
+      const line = lineOf(newlines, token.start + hueAt);
       if (isExempt(lines, line)) continue;
       findings.push({
         file: file.path,

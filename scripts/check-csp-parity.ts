@@ -214,6 +214,30 @@ const CONTROLLED_TAGS: ReadonlySet<string> = new Set([
   'svg',
 ]);
 
+/**
+ * What may appear in `<head>` without ending it (HTML tree construction, the
+ * "in head" insertion mode).
+ *
+ * The head does NOT need a `</head>` to close: the parser closes it IMPLICITLY
+ * at the first token that is not head content, so `<head><body><meta …>` puts
+ * the policy in the BODY.  CSP L3 §3.3 only honours a `<meta>` that is a child
+ * of `<head>`, so such a policy is never applied — and a check looking for a
+ * textual `</head>` sees a document that never closes its head and certifies it.
+ */
+const HEAD_CONTENT: ReadonlySet<string> = new Set([
+  'base',
+  'basefont',
+  'bgsound',
+  'link',
+  'meta',
+  'noframes',
+  'noscript',
+  'script',
+  'style',
+  'template',
+  'title',
+]);
+
 /** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
 function findPlacementProblem(html: string, policyAt: number): string | null {
   // The same element walk the policy itself was found by: a `<head>` or a
@@ -222,14 +246,26 @@ function findPlacementProblem(html: string, policyAt: number): string | null {
   // the very boundary this check is about.
   const tags = scanTags(html);
   const headOpen = tags.find((tag) => tag.name === 'head' && !tag.closing);
-  const headClose = tags.find((tag) => tag.name === 'head' && tag.closing);
   if (headOpen === undefined || policyAt < headOpen.end) {
     return `${BUILT_INDEX_HTML_FILE}: the CSP <meta> is not inside <head>.`;
   }
+  // Where the PARSER ends the head — an explicit close, or the first token that
+  // implies one.  Tags inside inert content never reach here: `scanTags` steps
+  // over it, so a `<p>` in a `<template>` does not close the head.
+  const headClose = tags.find(
+    (tag) =>
+      tag.at >= headOpen.end &&
+      (tag.closing
+        ? tag.name === 'head' || tag.name === 'html' || tag.name === 'body'
+        : !HEAD_CONTENT.has(tag.name)),
+  );
   if (headClose !== undefined && policyAt > headClose.at) {
+    const how = headClose.closing
+      ? `AFTER </${headClose.name}>`
+      : `outside <head> — the parser closes the head implicitly at <${headClose.name}>`;
     return (
-      `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits AFTER </head>. A meta policy governs ` +
-      'only what is parsed after it, and the courier WebView has no header to fall back on.'
+      `${BUILT_INDEX_HTML_FILE}: the CSP <meta> sits ${how}. A meta policy is honoured only ` +
+      'as a child of <head> (CSP L3 §3.3), and the courier WebView has no header to fall back on.'
     );
   }
   const controlled = tags.find((tag) => !tag.closing && CONTROLLED_TAGS.has(tag.name));

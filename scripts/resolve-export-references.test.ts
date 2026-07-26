@@ -194,6 +194,15 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a dynamic import destructured in a `.then` CALLBACK ───────
+  // The namespace arrives as a parameter, not an initializer.  `THEN_LIVE` is a
+  // PRIMITIVE deliberately: a function export survives this gap anyway, because
+  // its type carries the origin symbol the fallback route recovers.
+  'src/then.ts': ['export const THEN_LIVE = 5;'].join('\n'),
+  'src/then-consumer.ts': [
+    "export const pending = import('./then.js').then(({ THEN_LIVE }) => THEN_LIVE);",
+  ].join('\n'),
+
   // ── Reference: an ALIASED re-export consumed through a dynamic import ────
   // The module's export table hands back the barrel's alias; crediting only
   // that left the original — the declaration actually consumed — looking dead.
@@ -354,6 +363,15 @@ describe('resolution: which sites use a binding', () => {
     // `const { lazilyUsed } = await import('./lazy.js')` resolves the identifier
     // to that new local, never to the export, so this needs the specifier route.
     expect(usesOf('src/lazy.ts', 'lazilyUsed').length).toBeGreaterThan(0);
+  });
+
+  it('counts a dynamic import destructured in a `.then` CALLBACK', () => {
+    // `import('./then.js').then(({ THEN_LIVE }) => …)` — the namespace is a
+    // PARAMETER, so a route that looked only for `const { … } = await import()`
+    // never credited it.  This repo already writes that shape, and a PRIMITIVE
+    // export in it (no origin symbol on the type for the fallback to recover)
+    // would be reported dead — failing a correct branch.
+    expect(usesOf('src/then.ts', 'THEN_LIVE').length).toBeGreaterThan(0);
   });
 
   it('does not let an unused BARREL vouch for what it republishes', () => {

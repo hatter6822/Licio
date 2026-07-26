@@ -22,17 +22,28 @@
 /**
  * Elements whose CONTENT a parser never treats as live markup.
  *
- * `script`/`style`/`textarea`/`title` hold raw or escapable-raw text — a
- * `<meta>` written there is characters, not a tag.  `template` content IS
- * parsed, but into an INERT fragment: a CSP `<meta>` inside one has no effect
- * whatsoever, which makes it the most dangerous of the set, because it looks
- * exactly like a delivered policy to anything matching on text.
+ * This is the COMPLETE set from HTML tree construction, not a list of the ones
+ * that came to mind — an earlier cut named five, and `noframes`, `noembed` and
+ * `xmp` each let a `<meta>` that the browser reads as TEXT pass this gate as a
+ * delivered policy.  Every entry below is a start tag whose handling switches
+ * the tokenizer out of markup, so the list is closed and checkable against the
+ * spec rather than open-ended:
  *
- * `noscript` belongs with them for the case that matters here.  Its content is
- * markup only when SCRIPTING IS DISABLED; with scripting on — every browser the
- * courier runs in — the parser treats it as raw text, so a policy placed there
- * is applied by exactly the clients that need it least.  A CSP whose delivery
- * depends on the user having turned JavaScript off is not a delivered CSP.
+ *   • RAWTEXT — `style`, `xmp`, `iframe`, `noembed`, `noframes`;
+ *   • RCDATA (escapable raw text) — `textarea`, `title`;
+ *   • the script data states — `script`;
+ *   • `noscript`, which is RAWTEXT when SCRIPTING IS ENABLED — every browser the
+ *     courier runs in.  A policy placed there is applied by exactly the clients
+ *     that need it least, and a CSP whose delivery depends on the user having
+ *     turned JavaScript off is not a delivered CSP.
+ *
+ * `template` is here for a different reason: its content IS parsed, but into an
+ * INERT fragment, so a CSP `<meta>` inside one has no effect whatsoever.  That
+ * makes it the most dangerous of the set, because it looks exactly like a
+ * delivered policy to anything matching on text.
+ *
+ * `plaintext` is deliberately NOT here — it takes the rest of the document with
+ * it and so is handled separately ({@link scanTags}).
  */
 const INERT_CONTENT_ELEMENTS = [
   'script',
@@ -41,10 +52,22 @@ const INERT_CONTENT_ELEMENTS = [
   'title',
   'template',
   'noscript',
+  'noframes',
+  'noembed',
+  'iframe',
+  'xmp',
 ] as const;
 
 /** The same set, as the lookup {@link scanTags} does per tag. */
 const INERT_CONTENT: ReadonlySet<string> = new Set(INERT_CONTENT_ELEMENTS);
+
+/**
+ * `<plaintext>` switches the tokenizer to the PLAINTEXT state, which has no way
+ * back: everything after it is character data to the end of the document, close
+ * tag or not.  So it is not "an element with inert content" — it ENDS the
+ * markup, and a `<meta>` after one is text no matter how well-formed it looks.
+ */
+const PLAINTEXT = 'plaintext';
 
 /** One tag a parser would actually create, with the text it spans. */
 export interface HtmlTag {
@@ -171,6 +194,8 @@ export function scanTags(html: string): HtmlTag[] {
     }
     tags.push(tag);
     i = tag.end;
+    // PLAINTEXT has no exit state: the rest of the document is character data.
+    if (!tag.closing && tag.name === PLAINTEXT) break;
     if (tag.closing || !INERT_CONTENT.has(tag.name)) continue;
     // `<template>` NESTS; the raw-text elements cannot, so their first close tag
     // ends them.  Depth-counting only the nesting case keeps this exact.

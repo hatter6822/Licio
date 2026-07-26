@@ -19,6 +19,7 @@ import {
   concatBytes,
   createGenerators,
   DST_H2S,
+  EXPAND_LEN,
   G1,
   type G1Point,
   G2,
@@ -29,13 +30,14 @@ import {
   invScalar,
   messageToScalar,
   mod,
+  OCTET_POINT_LENGTH,
+  OCTET_SCALAR_LENGTH,
   ORDER,
   os2ip,
   P1,
   scalarBytes,
 } from './suite.js';
 
-const EXPAND_LEN = 48;
 /** Scalar multiply that tolerates a zero scalar (→ identity), unlike noble's `multiply`. */
 const mul = (p: G1Point, s: bigint): G1Point => {
   const m = mod(s);
@@ -330,7 +332,7 @@ export function proofToBytes(proof: BbsProof): Uint8Array {
   );
 }
 
-const PROOF_FLOOR = 3 * 48 + 4 * 32; // 272
+const PROOF_FLOOR = 3 * OCTET_POINT_LENGTH + 4 * OCTET_SCALAR_LENGTH; // 272
 
 /** `octets_to_proof`: parse + validate (G1 non-identity points; scalars in [1, r)). */
 export function proofFromBytes(bytes: Uint8Array): BbsProof {
@@ -339,7 +341,7 @@ export function proofFromBytes(bytes: Uint8Array): BbsProof {
   }
   const u = (bytes.length - PROOF_FLOOR) / 32;
   const pt = (o: number): G1Point => {
-    const p = G1.fromBytes(bytes.slice(o, o + 48));
+    const p = G1.fromBytes(bytes.slice(o, o + OCTET_POINT_LENGTH));
     if (p.is0()) throw new Error('bbs proof: identity point');
     p.assertValidity();
     return p;
@@ -350,8 +352,8 @@ export function proofFromBytes(bytes: Uint8Array): BbsProof {
     return s;
   };
   const aBar = pt(0);
-  const bBar = pt(48);
-  const d = pt(96);
+  const bBar = pt(OCTET_POINT_LENGTH);
+  const d = pt(2 * OCTET_POINT_LENGTH);
   const eHat = sc(144);
   const r1Hat = sc(176);
   const r3Hat = sc(208);
