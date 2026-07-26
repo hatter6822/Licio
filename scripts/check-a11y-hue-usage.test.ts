@@ -136,6 +136,34 @@ describe('the bare hue on normal text', () => {
     expect(await hues(source)).toEqual(['2:error']);
   });
 
+  it('reads a .ts source with the TypeScript grammar', async () => {
+    // `<string>x` is a type ASSERTION in a `.ts` file and malformed JSX in a
+    // `.tsx` one, so mounting every source under one extension made a legal
+    // helper parse as nothing — and a file the gate sees nothing in is a file
+    // it reports clean.
+    const findings = await findBareHueTextUses([
+      {
+        path: 'apps/web/src/helper.ts',
+        content: `export function f(): string { return <string>'text-error'; }`,
+      },
+    ]);
+    expect(findings.map((finding) => `${finding.line}:${finding.hue}`)).toEqual(['1:error']);
+  });
+
+  it('judges every source when two paths flatten alike', async () => {
+    // `foo/bar.tsx` and `foo_bar.tsx` flatten to the same name; without an
+    // injective mount the second silently replaced the first, and whatever the
+    // first contained was never judged.
+    const findings = await findBareHueTextUses([
+      { path: 'apps/web/src/foo/bar.tsx', content: `const a = 'text-error';` },
+      { path: 'apps/web/src/foo_bar.tsx', content: `const b = 'text-warning';` },
+    ]);
+    expect(findings.map((finding) => `${finding.file}:${finding.hue}`).sort()).toEqual([
+      'apps/web/src/foo/bar.tsx:error',
+      'apps/web/src/foo_bar.tsx:warning',
+    ]);
+  });
+
   it('still exempts a real <Icon> element', async () => {
     expect(await hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
   });

@@ -30,16 +30,10 @@
 // types `'a' + 'b'` as `string`, not `"ab"` — so concatenation is folded here,
 // structurally, over the AST rather than over a token stream.
 
-import { resolve } from 'node:path';
 import { type NodeHandle, SyntaxKind } from 'typescript/unstable/ast';
-import { createVirtualFileSystem } from 'typescript/unstable/fs';
-import { API } from 'typescript/unstable/sync';
+import { type Source as SourceFile, withParsedSources } from './ts-source.js';
 
-/** A source to read, named so findings can point back at it. */
-export interface SourceFile {
-  readonly path: string;
-  readonly content: string;
-}
+export type { Source as SourceFile } from './ts-source.js';
 
 /** One class string an expression renders. */
 export interface ClassString {
@@ -212,67 +206,19 @@ function render(pieces: readonly Piece[], node: NodeHandle): ClassString {
   return { text: units.join(''), offsets, start: node.getStart(), element: enclosingElement(node) };
 }
 
-/** A tsconfig wide enough to PARSE the sources, and nothing more. */
-const VIRTUAL_ROOT = '/licio-class-strings';
-const VIRTUAL_CONFIG = `${VIRTUAL_ROOT}/tsconfig.json`;
-const CONFIG_CONTENT = JSON.stringify({
-  compilerOptions: {
-    target: 'ESNext',
-    module: 'preserve',
-    moduleResolution: 'bundler',
-    jsx: 'react-jsx',
-    noEmit: true,
-    // Nothing here needs a type, so no lib or `@types` package is loaded and
-    // an unresolved import is not an error worth having.
-    types: [],
-    noResolve: true,
-    skipLibCheck: true,
-  },
-  include: ['src'],
-});
-
-/** Where a source is mounted inside the virtual project. */
-function virtualPath(path: string): string {
-  return `${VIRTUAL_ROOT}/src/${path.replace(/[^\w.-]/g, '_')}`;
-}
-
 /**
  * Every class string each source can render.
  *
- * One program for the whole batch.  Files are mounted read-only in a virtual
- * filesystem under a generated tsconfig, so this reads nothing from disk and
- * needs no relationship to the workspace's own projects.
+ * The parse comes from `ts-source`, which is also what settles which GRAMMAR
+ * each file is read with: `<string>x` is a type assertion in a `.ts` file and
+ * malformed JSX in a `.tsx` one, so a shared mount that forced one extension on
+ * every source made a legal `.ts` helper parse as nothing at all.
  */
 export function readClassStrings(files: readonly SourceFile[]): Map<string, ClassString[]> {
-  const found = new Map<string, ClassString[]>();
-  if (files.length === 0) return found;
-
-  const mounted = new Map<string, string>();
-  const mountedContent = new Map<string, string>();
-  const contents: Record<string, string> = { [VIRTUAL_CONFIG]: CONFIG_CONTENT };
-  for (const file of files) {
-    // `.tsx` for every source: JSX syntax has to parse, and a `.ts` that holds
-    // none is unaffected by allowing it.
-    const at = `${virtualPath(file.path)}.tsx`;
-    contents[at] = file.content;
-    mounted.set(at, file.path);
-    mountedContent.set(file.path, file.content);
-  }
-
-  const api = new API({ cwd: VIRTUAL_ROOT, fs: createVirtualFileSystem(contents) });
-  try {
-    const snapshot = api.updateSnapshot({ openProjects: [VIRTUAL_CONFIG] });
-    const project = snapshot.getProjects()[0];
-    if (project === undefined) {
-      throw new Error('check:a11y-hue-usage: the virtual project could not be opened');
-    }
-    for (const [at, path] of mounted) {
-      const source = project.program.getSourceFile(resolve(at));
-      if (source === undefined) {
-        throw new Error(`check:a11y-hue-usage: ${path} was not parsed; it cannot be judged`);
-      }
+  return withParsedSources(files, (parsed) => {
+    const found = new Map<string, ClassString[]>();
+    for (const { path, content, root } of parsed) {
       const strings: ClassString[] = [];
-      const content = mountedContent.get(path) ?? '';
       const visit = (node: NodeHandle): void => {
         const folded = fold(node, content);
         if (folded === null) {
@@ -285,11 +231,9 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
         // counted twice.
         for (const part of folded.unknown) part.forEachChild(visit);
       };
-      visit(source);
+      visit(root);
       found.set(path, strings);
     }
-  } finally {
-    api.close();
-  }
-  return found;
+    return found;
+  });
 }
