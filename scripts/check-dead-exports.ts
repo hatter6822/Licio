@@ -196,27 +196,42 @@ function normalizePath(path: string): string {
  * symbol it takes, so the word scan already covers it.  A BARE specifier
  * (`@licio/private-p2p`) is skipped too — a package entry point is reached
  * through its own exports, which the scan sees.
+ *
+ * Found over the TOKEN STREAM, not by regex over raw text — the same reason the
+ * identifier counts are.  A regex would let an `import(…)` written in a doc
+ * comment or a test fixture string exempt a real module from scanning, which is
+ * a way to silently disable the gate for an entire file with prose.  (This
+ * file's own header contains exactly such an example.)
  */
 export function dynamicallyImportedModules(
   files: ReadonlyArray<{ path: string; content: string }>,
 ): Set<string> {
   const modules = new Set<string>();
-  const dynamicImport = /import\s*\(\s*['"`]([^'"`]+)['"`]/g;
-  const absoluteSrc = /['"`](\/src\/[^'"`]+)['"`]/g;
   for (const file of files) {
     const dir = file.path.split('/').slice(0, -1).join('/');
-    dynamicImport.lastIndex = 0;
-    for (const match of file.content.matchAll(dynamicImport)) {
-      const specifier = match[1];
-      if (specifier === undefined || !specifier.startsWith('.')) continue;
-      modules.add(normalizePath(`${dir}/${specifier}`));
-    }
-    absoluteSrc.lastIndex = 0;
-    for (const match of file.content.matchAll(absoluteSrc)) {
-      const specifier = match[1];
-      if (specifier === undefined) continue;
-      // `/src/…` is served by the Vite dev server, so it is rooted at apps/web.
-      modules.add(normalizePath(`apps/web${specifier}`));
+    for (const preferRegex of [false, true]) {
+      const tokens = tokenize(file.content, preferRegex);
+      for (let i = 0; i < tokens.length; i += 1) {
+        const token = tokens[i];
+        if (token === undefined) continue;
+        // `import ( '…' )` — the specifier is the STRING TOKEN, so an example
+        // written in a comment or embedded in prose is not one.
+        if (token.kind === 'ident' && token.value === 'import') {
+          const open = tokens[i + 1];
+          const specifier = tokens[i + 2];
+          if (open?.value !== '(' || specifier?.kind !== 'string') continue;
+          const value = specifier.value.slice(1, -1);
+          if (value.startsWith('.')) modules.add(normalizePath(`${dir}/${value}`));
+          continue;
+        }
+        // A bare `'/src/…'` STRING CONSTANT — how a Playwright `page.evaluate`
+        // block names an in-page harness.  Served by the Vite dev server, so it
+        // is rooted at apps/web.
+        if (token.kind === 'string') {
+          const value = token.value.slice(1, -1);
+          if (value.startsWith('/src/')) modules.add(normalizePath(`apps/web${value}`));
+        }
+      }
     }
   }
   return modules;

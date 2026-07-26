@@ -143,9 +143,24 @@ function readIfPresent(relative: string): string | undefined {
 
 function main(): void {
   const read = (relative: string): string => readFileSync(resolve(ROOT, relative), 'utf-8');
-  // Present only after a web build; the static-gates job runs BEFORE one, and the
-  // build job runs this gate again once `dist` exists.
+  // `--require-build` is how the BUILD job says "a build just ran here".
+  //
+  // Without it a missing `dist/index.html` is the ordinary pre-build case and the
+  // gate reports "no build to check" — which is right for the static-gates job,
+  // and WRONG after a build: a build that silently stopped emitting the document
+  // would leave the courier with neither a policy nor an app shell, and this
+  // security gate would still print a pass.  Absence has to mean different things
+  // in the two jobs, so the caller states which one it is.
+  const requireBuild = process.argv.includes('--require-build');
   const builtIndexHtml = readIfPresent(BUILT_INDEX_HTML_FILE);
+  if (requireBuild && builtIndexHtml === undefined) {
+    console.error(
+      `check:csp-parity FAILED — ${BUILT_INDEX_HTML_FILE} is missing after a build.\n` +
+        '  The courier packages this file; without it there is no injected policy and no\n' +
+        '  app shell to apply one to.',
+    );
+    process.exit(1);
+  }
 
   const problems = findCspDeliveryProblems({ indexHtml: read(INDEX_HTML_FILE), builtIndexHtml });
   if (problems.length > 0) {
@@ -161,7 +176,7 @@ function main(): void {
 
   console.log(
     'check:csp-parity passed: one CSP definition' +
-      `${builtIndexHtml === undefined ? '; no build to check' : `, correctly injected into ${BUILT_INDEX_HTML_FILE}`}.`,
+      `${builtIndexHtml === undefined ? '; no build to check (pass --require-build after one)' : `, correctly injected into ${BUILT_INDEX_HTML_FILE}`}.`,
   );
 }
 

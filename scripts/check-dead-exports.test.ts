@@ -173,6 +173,18 @@ describe('dynamicallyImportedModules', () => {
     expect(mods.has('apps/web/src/private-p2p/e2e-room-harness')).toBe(true);
   });
 
+  it('does NOT treat an import written in PROSE as a real one', () => {
+    // A doc comment or a fixture string mentioning `import('./Lazy.js')` must not
+    // exempt a real module — that would be a way to disable the gate for a whole
+    // file with a sentence.
+    const mods = dynamicallyImportedModules([
+      f('src/a.ts', "/** e.g. import('./Lazy.js') loads it lazily. */\nconst x = 1;"),
+      f('src/b.ts', 'const doc = "import(\'./Other.js\')";'),
+    ]);
+    expect(mods.has('src/Lazy')).toBe(false);
+    expect(mods.has('src/Other')).toBe(false);
+  });
+
   it('ignores a STATIC import and a BARE package specifier', () => {
     const mods = dynamicallyImportedModules([
       f('a/b.ts', "import { x } from './helpers.js';\nawait import('@licio/private-p2p');"),
@@ -235,6 +247,14 @@ describe('findDeadExports', () => {
       file('src/Host.tsx', "const L = lazy(() => import('./Lazy.js'));"),
     ]);
     expect(dead).toEqual([]);
+  });
+
+  it('does NOT exempt a module whose only "import" is in a comment', () => {
+    const dead = findDeadExports([
+      file('src/Lazy.tsx', 'export const THING = 1;'),
+      file('src/Host.tsx', "// see import('./Lazy.js') for the lazy variant\nconst x = 1;"),
+    ]);
+    expect(dead.map((d) => d.name)).toEqual(['THING']);
   });
 
   it('does NOT exempt an unrelated file sharing the imported basename', () => {

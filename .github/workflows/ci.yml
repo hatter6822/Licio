@@ -199,11 +199,11 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # Re-run the CSP parity gate now that `dist/index.html` EXISTS: the
-      # static-gates job runs before any build and can only compare the sources,
-      # but the built html is what the courier packages and ships, and Vite
-      # transforms index.html on its way through.
-      - run: pnpm check:csp-parity
+      # Re-run the CSP gate now that `dist/index.html` EXISTS. `--require-build`
+      # makes its ABSENCE a failure here: without the flag a missing artifact is
+      # the ordinary pre-build case, so a build that silently stopped emitting the
+      # document would still pass this security gate.
+      - run: pnpm check:csp-parity --require-build
       # WS-S.10.1 — produce the SIGNED + transparency-logged update manifest over
       # the built private-mode chunk, then verify the PRODUCED artifact end-to-end
       # with the real verifier (the gate BITES on a missing/forged manifest).  A

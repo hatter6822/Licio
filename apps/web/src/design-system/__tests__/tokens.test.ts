@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { contrastRatio, roundRatio, WCAG } from '../contrast.js';
 import { renderTokensCss } from '../css.js';
@@ -290,5 +290,52 @@ describe('spacing, radius, z-index, motion, target scales (WS-B.1.1c–e)', () =
     expect(touchTarget.min).toBe('48px');
     expect(touchTarget.gap).toBe('8px');
     expect(Number.parseInt(touchTarget.min, 10)).toBeGreaterThanOrEqual(48);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// USAGE guard for the semantic text tokens.
+// ---------------------------------------------------------------------------
+//
+// The contrast assertions above pin the TOKENS; this pins how they are USED.
+// `text-<hue>` and `text-<hue>-on-soft` are different colours, and in dark mode
+// only the second clears AA for normal text — so nothing but a check like this
+// stops a call site drifting back onto the bare hue, which is exactly what had
+// happened at eighteen of them (`role="alert"` paragraphs, SLA labels).
+//
+// Scanning source text rather than exporting a class map: the map would be one
+// more thing to remember to reach for, and a call site that ignored it would
+// still compile.  This fails instead.
+describe('semantic text tokens are used at the right size (WCAG 1.4.3)', () => {
+  const WEB_SRC = resolve(import.meta.dirname, '../..');
+  /** `text-success|warning|error|info` NOT followed by `-` (so not `-on-soft`/`-fg`). */
+  const BARE_HUE = /\btext-(success|warning|error|info)\b(?!-)/;
+
+  function tsxFiles(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory() && entry.name !== 'node_modules') out.push(...tsxFiles(full));
+      else if (entry.isFile() && entry.name.endsWith('.tsx') && !entry.name.includes('.test.'))
+        out.push(full);
+    }
+    return out;
+  }
+
+  it('no NON-ICON element uses the bare hue for text', () => {
+    const offenders: string[] = [];
+    for (const file of tsxFiles(WEB_SRC)) {
+      const lines = readFileSync(file, 'utf-8').split('\n');
+      lines.forEach((line, index) => {
+        const className = /className=(?:"([^"]*)"|\{`([^`]*)`\})/.exec(line);
+        const value = className?.[1] ?? className?.[2];
+        if (value === undefined || !BARE_HUE.test(value)) return;
+        // An ICON keeps the bare hue: WCAG 1.4.11 non-text contrast is 3:1, which
+        // it meets. `size-*` is how this codebase sizes them.
+        if (/\bsize-\d/.test(value)) return;
+        offenders.push(`${file.replace(WEB_SRC, 'apps/web/src')}:${index + 1}  ${value}`);
+      });
+    }
+    expect(offenders).toEqual([]);
   });
 });
