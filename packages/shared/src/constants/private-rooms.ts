@@ -202,3 +202,22 @@ export const PRIVATE_ROOM_MIGRATION_PHASES = [
 ] as const;
 
 export type PrivateRoomMigrationPhaseId = (typeof PRIVATE_ROOM_MIGRATION_PHASES)[number]['id'];
+
+/**
+ * §15.3.1 — the bounded rendezvous poll response size, as a WIRE limit.
+ *
+ * A two-party contract: the server enforces it
+ * (`apps/api/src/private-rendezvous/service.ts`) and the peer validates against
+ * it (`apps/web/src/private-p2p/rendezvous-client.ts`), so it must have exactly
+ * ONE spelling.  Raised on the server alone, valid responses stop parsing on the
+ * client; lowered on the server alone, the client accepts more than the contract
+ * allows.  It briefly had three spellings — the constant was deleted as
+ * unreferenced while two `.max(256)` literals stayed — which is the "two
+ * spellings of a live value" case `check:dead-exports` warns about, resolved the
+ * wrong way round.
+ *
+ * It lives in `@licio/shared` rather than `@licio/private-p2p` because
+ * PRIV-API-RENDEZVOUS-1 forbids `apps/api` from importing the protocol package
+ * at all; shared is the only package BOTH planes may reach.
+ */
+export const RENDEZVOUS_MAX_RECORDS_PER_POLL = 256;

@@ -166,7 +166,11 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     '2001:db8::1',
     '::ffff:127.0.0.1',
     '::ffff:10.0.0.1',
-    '64:ff9b::a00:1',
+    // NAT64 (RFC 6052) carries the IPv4 in the LAST four bytes; a translated
+    // private address must stay blocked even though the prefix itself is not.
+    '64:ff9b::a00:1', // = 10.0.0.1
+    '64:ff9b::7f00:1', // = 127.0.0.1
+    '64:ff9b::a9fe:a9fe', // = 169.254.169.254 (cloud metadata)
     // HEX IPv4-mapped forms — the URL parser canonicalises mapped addresses to
     // hex, so these (not the dotted form) are what actually reach the gate.
     '::ffff:7f00:1', // = ::ffff:127.0.0.1 (loopback)
@@ -201,6 +205,17 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     expect(isBlockedIpv6('2001:0:808:808:0:0:80ff:fffe')).toBe(true);
     // …and a PUBLIC client (8.8.8.8 → ~ = 0xF7F7F7F7) is allowed.
     expect(isBlockedIpv6('2001:0:808:808:0:0:f7f7:f7f7')).toBe(false);
+  });
+
+  it('decodes a NAT64 translation rather than refusing the prefix', () => {
+    // On IPv6-only infrastructure a DNS64 resolver synthesises `64:ff9b::/96`
+    // for EVERY IPv4-only host, so blanket-refusing the prefix breaks ordinary
+    // public fetches (and Web Push, which shares `guardedLookup`) while blocking
+    // nothing an attacker could not reach directly.
+    expect(isBlockedIpv6('64:ff9b::808:808')).toBe(false); // = 8.8.8.8
+    // …while the private and metadata translations stay blocked.
+    expect(isBlockedIpv6('64:ff9b::a00:1')).toBe(true); // = 10.0.0.1
+    expect(isBlockedIpv6('64:ff9b::a9fe:a9fe')).toBe(true); // = 169.254.169.254
   });
 
   it('allows public IPv6 and routes families correctly', () => {

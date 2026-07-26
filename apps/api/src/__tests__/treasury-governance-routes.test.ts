@@ -910,6 +910,28 @@ describe('WS-M treasury + payment intents', () => {
       });
     });
 
+    it('refuses a cross-room actor claiming the `steward` source', async () => {
+      // The source lands VERBATIM in the hash-chained audit record, so it has to
+      // match who is acting: a platform enforcement action recorded as `steward`
+      // would durably misattribute it to the community.  The other direction is
+      // already gated by `actsWithPlatformAuthority` in the domain.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_mislabel',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not my label to claim',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'source_not_authorized',
+      );
+    });
+
     it('404s a plain member rather than leaking that the room exists', async () => {
       const fixture = await wsmFixture({ steward: false });
       const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'plain_one' });

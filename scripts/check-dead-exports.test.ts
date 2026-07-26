@@ -408,6 +408,37 @@ describe('findDeadExports', () => {
     expect(dead).toEqual([]);
   });
 
+  it('reports an unused ALIAS published by a re-export', () => {
+    // `export { live as obsolete } from` introduces a public runtime name that
+    // exists nowhere else, so skipping the whole clause let an entirely unused
+    // alias pass forever while `live` stayed busy elsewhere.
+    const dead = findDeadExports([
+      file('src/m.ts', 'export const live = 1;'),
+      file('src/barrel.ts', "export { live as obsolete } from './m.js';"),
+      file('src/c.ts', "import { live } from './m.js';\nuse(live);"),
+    ]);
+    expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['reexport obsolete']);
+  });
+
+  it('does NOT report an alias a consumer imports', () => {
+    const dead = findDeadExports([
+      file('src/m.ts', 'export const live = 1;'),
+      file('src/barrel.ts', "export { live as obsolete } from './m.js';"),
+      file('src/c.ts', "import { live } from './m.js';\nuse(live);"),
+      file('src/d.ts', "import { obsolete } from './barrel.js';\nuse(obsolete);"),
+    ]);
+    expect(dead).toEqual([]);
+  });
+
+  it('still treats an UNALIASED re-export as plumbing', () => {
+    // Same name, already scanned at its declaration — recording it again would
+    // report one dead export twice under two files.
+    expect(exportedValues("export { live } from './m.js';")).toEqual([]);
+    expect(
+      exportedValues("export { live as obsolete } from './m.js';").map((d) => [d.kind, d.name]),
+    ).toEqual([['reexport', 'obsolete']]);
+  });
+
   it('reports a value whose only "reference" is an unused BARREL', () => {
     // A barrel republishing a name is not a consumer of it.  Counting its
     // occurrence let an export be declared once, re-exported once, imported

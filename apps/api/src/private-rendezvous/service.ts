@@ -23,6 +23,7 @@
 // process-local in-memory mailbox (single-process dev).
 
 import { createDbClient } from '@licio/db';
+import { RENDEZVOUS_MAX_RECORDS_PER_POLL } from '@licio/shared';
 import IORedis from 'ioredis';
 import { DrizzleRendezvousStore } from './drizzle-store.js';
 import { RedisSignalMailbox } from './redis-signal-mailbox.js';
@@ -45,12 +46,13 @@ export interface RendezvousServiceConfig {
 }
 
 /** The §15.3.1/§15.3.2 server bounds.  `apps/api` does not depend on
- *  `@licio/private-p2p` at all (PRIV-API-RENDEZVOUS-1), so these cannot be
- *  imported from the protocol package and are AUTHORITATIVE here — this is the
- *  only place the poll cap and TTL ceiling are enforced. */
+ *  `@licio/private-p2p` at all (PRIV-API-RENDEZVOUS-1), so the TTL ceiling is
+ *  AUTHORITATIVE here.  The poll cap is NOT: it is a two-party WIRE limit the
+ *  peer validates against too, so it comes from `@licio/shared`, the only
+ *  package both planes may reach. */
 export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
-  maxRecordsPerPoll: 256,
+  maxRecordsPerPoll: RENDEZVOUS_MAX_RECORDS_PER_POLL,
   clockSkewToleranceMs: 5 * 60 * 1000,
 };
 

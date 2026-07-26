@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { injectCspMeta, maskHtmlComments } from '../apps/web/src/dev/inject-csp-meta.js';
+import { injectCspMeta, maskInertMarkup } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   CSP_DIRECTIVES,
   contentSecurityPolicyHeader,
@@ -87,15 +87,67 @@ describe('injectCspMeta', () => {
   });
 
   it('masks an UNTERMINATED comment to the end, as a parser would', () => {
-    expect(maskHtmlComments('a<!-- b <head> c').trimEnd()).toBe('a');
+    expect(maskInertMarkup('a<!-- b <head> c').trimEnd()).toBe('a');
   });
 
   it('preserves length and newlines so offsets stay valid', () => {
     const html = 'a<!-- x\ny -->b';
-    const masked = maskHtmlComments(html);
+    const masked = maskInertMarkup(html);
     expect(masked).toHaveLength(html.length);
     expect(masked.split('\n')).toHaveLength(html.split('\n').length);
     expect(masked.indexOf('b')).toBe(html.indexOf('b'));
+  });
+});
+
+describe('inert content is not markup', () => {
+  const POLICY = contentSecurityPolicyMeta();
+  const META = `<meta http-equiv="Content-Security-Policy" content="${POLICY.replace(/"/g, '&quot;')}">`;
+  const problems = (builtIndexHtml: string): string[] =>
+    findCspDeliveryProblems({ indexHtml: '<html><head></head></html>', builtIndexHtml });
+
+  // `<template>` content IS parsed, but into an inert fragment — a CSP meta
+  // there has no effect at all, while looking exactly like a delivered policy to
+  // anything matching on text.  That makes it the most dangerous of the set.
+  it('does not read a CSP <meta> inside a <template> as a policy', () => {
+    expect(extractMetaPolicies(`<html><head><template>${META}</template></head></html>`)).toEqual(
+      [],
+    );
+  });
+
+  it('REJECTS an artifact whose only policy is inside a <template>', () => {
+    const found = problems(`<html><head><template>${META}</template></head><body></body></html>`);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('no <meta http-equiv="Content-Security-Policy">');
+  });
+
+  it('handles NESTED templates', () => {
+    const html = `<html><head><template><template></template>${META}</template></head></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+  });
+
+  it('does not read a <meta> written inside <script> TEXT as a tag', () => {
+    const html = `<html><head><script>var s = '${META}';</script></head></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+  });
+
+  it('accepts a real policy that follows an inert template', () => {
+    expect(
+      problems(`<html><head><template><b></b></template>${META}</head><body></body></html>`),
+    ).toEqual([]);
+  });
+
+  it('keeps the element TAGS visible, so a <script> still trips placement', () => {
+    const found = problems(
+      `<html><head><script src="/a.js"></script>${META}</head><body></body></html>`,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('a <script> precedes the CSP <meta>');
+  });
+
+  it('does not let a <head> inside a template capture the injection', () => {
+    const html = '<html><template><head></head></template><head></head><body></body></html>';
+    const out = injectCspMeta(html, "default-src 'self'");
+    expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
   });
 });
 

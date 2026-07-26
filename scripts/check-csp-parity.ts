@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { maskHtmlComments } from '../apps/web/src/dev/inject-csp-meta.js';
+import { maskInertMarkup } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -183,7 +183,7 @@ export function findMetaPolicies(html: string): MetaPolicy[] {
   // the parser discards it — and counting it would let the gate report a
   // document as carrying the policy when the browser sees none.  Masking keeps
   // offsets, so `at` still points into the caller's original string.
-  const markup = maskHtmlComments(html);
+  const markup = maskInertMarkup(html);
   // Quoted runs are matched as units so a `>` INSIDE an attribute value cannot
   // end the tag early and hide the attributes after it.
   for (const tag of markup.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
@@ -211,7 +211,7 @@ function findPlacementProblem(rawHtml: string, policyAt: number): string | null 
   // Masked, for the same reason: a `<head>` or a `<script>` named inside a
   // comment is prose, and treating it as markup would move the boundary this
   // check is about.
-  const html = maskHtmlComments(rawHtml);
+  const html = maskInertMarkup(rawHtml);
   const headOpen = /<\s*head\b[^>]*>/i.exec(html);
   const headClose = /<\s*\/\s*head\s*>/i.exec(html);
   if (headOpen === null || policyAt < headOpen.index + headOpen[0].length) {

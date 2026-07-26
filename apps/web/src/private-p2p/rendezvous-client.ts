@@ -11,6 +11,7 @@
 // blind-id / ciphertext shapes mirror the server schemas in
 // `apps/api/src/private-rendezvous/stores.ts`; a drift would fail the parse, not leak.
 
+import { RENDEZVOUS_MAX_RECORDS_PER_POLL } from '@licio/shared';
 import { z } from 'zod';
 
 // --- the opaque wire records (mirror the server, validated on the way IN) ----------
@@ -44,8 +45,12 @@ export const wireSignalSchema = z
   .strict();
 export type WireSignal = z.infer<typeof wireSignalSchema>;
 
-const pollResponseSchema = z.object({ records: z.array(presenceRecordSchema).max(256) }).strict();
-const signalPollResponseSchema = z.object({ signals: z.array(wireSignalSchema).max(256) }).strict();
+const pollResponseSchema = z
+  .object({ records: z.array(presenceRecordSchema).max(RENDEZVOUS_MAX_RECORDS_PER_POLL) })
+  .strict();
+const signalPollResponseSchema = z
+  .object({ signals: z.array(wireSignalSchema).max(RENDEZVOUS_MAX_RECORDS_PER_POLL) })
+  .strict();
 
 /**
  * The transport the carrier drives.  `announce`/`signal` publish an opaque record;

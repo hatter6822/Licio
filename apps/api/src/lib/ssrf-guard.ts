@@ -122,7 +122,18 @@ export function isBlockedIpv6(address: string): boolean {
   if ((b0 & 0xfe) === 0xfc) return true; // fc00::/7 ULA
   if (b0 === 0xff) return true; // ff00::/8 multicast
   if (b0 === 0x20 && b1 === 0x01 && b2 === 0x0d && b3 === 0xb8) return true; // 2001:db8::/32 docs
-  if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) return true; // 64:ff9b::/96 NAT64
+
+  // NAT64 (RFC 6052) `64:ff9b::/96` — the well-known prefix a DNS64 resolver
+  // synthesises for an IPv4-only host, with the IPv4 in the LAST FOUR BYTES.
+  // Blanket-refusing it is the same mistake the transition formats below avoid:
+  // on IPv6-only infrastructure EVERY ordinary public IPv4 destination arrives
+  // this way, so refusing the prefix breaks content fetching and Web Push
+  // outright (`guardedLookup` serves both) while blocking nothing an attacker
+  // could not reach directly.  Decoded and run through the same v4 rules, a
+  // translated `10.0.0.1` stays blocked and a translated `8.8.8.8` does not.
+  if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) {
+    return isBlockedIpv4(embedded);
+  }
 
   // TRANSITION formats embed an IPv4 SOMEWHERE OTHER than the last four bytes,
   // so the IPv4-mapped/-compatible checks above cannot see it and the address

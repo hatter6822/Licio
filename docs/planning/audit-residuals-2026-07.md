@@ -68,6 +68,33 @@ surface. When the survey is empty, it exits 0 and can move into CI's lint job
 beside `check:dead-exports`; it already exits non-zero on a non-empty list, so no
 semantics change at that point.
 
+### Precision limit — references are matched by NAME, not by binding
+
+**Tracked debt — `check:dead-exports` resolves consumers by identifier spelling.**
+The corpus index sums occurrences of a name across all tracked code, so an
+unrelated local, parameter, property or method with the same spelling reads as a
+consumer. An unused `export const status` passes as soon as any file mentions an
+unrelated `status`. Common names are therefore under-covered.
+
+This is deliberate and is stated in the gate's header, but it is a real ceiling
+on recall, not a design anyone should be content with. The reason it has not
+been fixed by heuristic: every cheap tightening moves the failure direction the
+wrong way. The current analysis cannot produce a FALSE POSITIVE — it never
+demands the deletion of something in use — and that property is the only reason
+it is safe to run in CI at all. A name-scoping heuristic that guesses wrong
+fails a correct branch.
+
+**Closure target:** resolve references to the exported MODULE BINDING rather
+than the spelling — for each declaration, count only occurrences in files whose
+import graph reaches the declaring module, following `export … from` edges. The
+resolver already exists in usable form: the initial survey for this workstream
+was produced with the TypeScript LanguageService (`findReferences` per exported
+symbol), which is exact. The work is to make that fast enough for CI and to
+keep the gate dependency-free, or to accept a `typescript` devDependency for
+this one script. Until then the gate's guarantee stays "no false positives,
+imperfect recall on common names", which is the correct half to keep if only one
+is available.
+
 ## Correctness / privacy — tractable, not yet done
 
 - **DSAR omits WS-T debate-arena data** (`forum/data-rights.ts`): the account

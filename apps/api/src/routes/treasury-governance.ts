@@ -442,6 +442,21 @@ export function createTreasuryGovernanceRoutes() {
           if (!ownSteward && !mayEverAct) {
             return c.json(notFound, 404);
           }
+          // The `source` lands VERBATIM in the hash-chained audit record, so it
+          // has to match who is actually acting.  `steward` claimed by someone
+          // who does not steward this room would durably misattribute a platform
+          // enforcement action to the community — the one direction the request
+          // body could lie in, since the platform sources are already gated by
+          // `actsWithPlatformAuthority` in the domain.
+          if (body.source === 'steward' && !ownSteward) {
+            return c.json(
+              deny(
+                'source_not_authorized',
+                'Only the room’s own steward may record a freeze as "steward"; a cross-room action is a platform action.',
+              ),
+              403,
+            );
+          }
           // The room's OWN steward keeps the self-protective stop: the doctrine
           // puts `ELECTED_ROOM_STEWARD` "deliberately outside the platform
           // ROLE_* namespace", and the cross-room rule is about acting on rooms

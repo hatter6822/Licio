@@ -286,9 +286,14 @@ function parseExportedValues(
     }
 
     if (punctAt(j) === '{') {
-      // A CLAUSE publishing local values.  A re-export (`… } from './y.js'`) is
-      // deliberately skipped: it is barrel plumbing, and the declaration it
-      // republishes is already scanned where it lives.
+      // A CLAUSE publishing local values, or a RE-EXPORT (`… } from './y.js'`).
+      //
+      // An unaliased re-export is barrel plumbing: `export { live } from` names
+      // the same binding its declaration already publishes, and that is where it
+      // is scanned.  An ALIASED one is not — `export { live as obsolete } from`
+      // introduces `obsolete`, a public runtime name that exists NOWHERE else,
+      // so skipping the whole clause let an entirely unused alias pass forever
+      // while `live` stayed busy elsewhere.
       const groups: Token[][] = [[]];
       let k = j + 1;
       for (let guard = 0; k < tokens.length && guard < MAX_DECLARATOR_TOKENS; k += 1, guard += 1) {
@@ -302,7 +307,7 @@ function parseExportedValues(
         if (token !== undefined) groups[groups.length - 1]!.push(token);
       }
       i = k;
-      if (identAt(k + 1) === 'from') continue; // barrel plumbing
+      const isReexport = identAt(k + 1) === 'from';
       for (const group of groups) {
         const names = group.filter((token) => token.kind === 'ident').map((token) => token.value);
         const first = group[0];
@@ -314,6 +319,15 @@ function parseExportedValues(
         const local = names[0] ?? '';
         const exported = asAt === -1 ? local : (names[asAt + 1] ?? '');
         if (!/^[A-Za-z_$][\w$]*$/.test(exported) || exported === 'default') continue;
+        if (isReexport) {
+          // Only the ALIAS is a new name; `export { live } from` is plumbing.
+          if (exported === local) continue;
+          // A re-export clause body is excluded from the identifier count (it is
+          // not a USE — see `reexportClauseSpans`), so the alias has no
+          // self-occurrence to discount: any count at all is a real consumer.
+          emit(exported, 'reexport', first.start, 0, false);
+          continue;
+        }
         // An UNALIASED specifier repeats the local declaration's name, so the
         // name occurs twice before any real use.
         emit(exported, 'export', first.start, exported === local ? 2 : 1, false);
