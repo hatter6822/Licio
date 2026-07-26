@@ -55,9 +55,19 @@ describe('injectCspMeta', () => {
     expect(out.indexOf('Content-Security-Policy')).toBeLessThan(out.indexOf('charset'));
   });
 
-  it('handles a <head> carrying attributes', () => {
-    const out = injectCspMeta('<html><head lang="en"></head></html>', "default-src 'self'");
+  it.each([
+    ['plain', '<head>'],
+    ['an attribute', '<head lang="en">'],
+    // Valid HTML: a `>` inside a quoted value does not end the tag.  Truncating
+    // there splices the policy INTO the head tag, where it is not a `<meta>` at
+    // all — the courier ships with no CSP and the gate, reading the same
+    // truncated tag, agrees that everything is fine.
+    ['a quoted `>`', '<head data-note="x > y">'],
+    ['a single-quoted `>`', `<head data-note='a > b' lang="en">`],
+  ])('injects after a <head> carrying %s', (_label, head) => {
+    const out = injectCspMeta(`<html>${head}<title>t</title></head></html>`, "default-src 'self'");
     expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
+    expect(out.indexOf('Content-Security-Policy')).toBeGreaterThan(out.indexOf('<head'));
   });
 
   it('escapes the attribute rather than concatenating raw', () => {
@@ -142,6 +152,14 @@ describe('inert content is not markup', () => {
     );
     expect(found).toHaveLength(1);
     expect(found[0]).toContain('a <script> precedes the CSP <meta>');
+  });
+
+  it('is not ended early by a COMMENTED close tag inside the template', () => {
+    // A template's content is PARSED, so `<!-- </template> -->` is a comment and
+    // closes nothing.  Reading it as the real close ended the mask early and let
+    // a CSP meta further down the same inert template count as delivered.
+    const html = `<html><head><template><!-- </template> -->${META}</template></head></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
   });
 
   it('does not let a <head> inside a template capture the injection', () => {

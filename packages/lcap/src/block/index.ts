@@ -8,6 +8,7 @@ export {
   splitContribution,
 } from './attachment.js';
 export {
+  CHUNK_SIZE,
   type ChunkedBlock,
   type ChunkProfile,
   chunkBlock,

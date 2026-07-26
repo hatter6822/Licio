@@ -19,9 +19,19 @@
 //
 // Pure and DOM-free so it is directly unit-testable.
 
-/** Where the tag goes: immediately after `<head>` (before any other metadata,
- *  matching how a server header applies to the whole document). */
-const HEAD_OPEN = /<head(\s[^>]*)?>/i;
+/**
+ * Where the tag goes: immediately after `<head>` (before any other metadata,
+ * matching how a server header applies to the whole document).
+ *
+ * Quoted runs are matched as UNITS, so a `>` inside an attribute value —
+ * `<head data-note="x > y">` is valid HTML — cannot end the tag early.  Getting
+ * that wrong splices the policy into the middle of the head tag, where it is
+ * not a `<meta>` at all: the courier then ships with no CSP, and the delivery
+ * gate, reading the same truncated tag, agrees that everything is fine.  The
+ * `<meta>` scanner in `check:csp-parity` matches quoted runs for exactly this
+ * reason; the two have to agree about where a tag ends.
+ */
+const HEAD_OPEN = /<head(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?>/i;
 
 /**
  * Elements whose CONTENT a parser never treats as live markup.
@@ -104,16 +114,47 @@ function indexOfClose(html: string, name: string, from: number): number {
   return found === null ? html.length : from + found.index;
 }
 
-/** Offset of the `</template>` that closes the one opened before `from`. */
+/**
+ * Offset of the `</template>` that closes the one opened before `from`.
+ *
+ * Comment-aware, unlike {@link indexOfClose}, and the difference is not a
+ * refinement — it is the difference between masking the template and stopping in
+ * the middle of it.  A `<template>`'s content is PARSED, so `<!-- </template> -->`
+ * inside it is a comment and does not close anything; a raw-text element's
+ * content is not parsed, so its first `</name>` ends it whatever surrounds it.
+ * Scanning for the close with a plain pattern read the commented tag as real,
+ * ended the mask early, and left a CSP `<meta>` further down the same inert
+ * template counting as the delivered policy — with the courier applying none.
+ */
 function endOfTemplate(html: string, from: number): number {
-  const scan = /<(\/?)template\b[^>]*>/gi;
-  scan.lastIndex = from;
+  const OPEN = /<\s*template\b[^>]*>/iy;
+  const CLOSE = /<\s*\/\s*template\s*>/iy;
   let depth = 1;
-  let match: RegExpExecArray | null = scan.exec(html);
-  while (match !== null) {
-    depth += match[1] === '/' ? -1 : 1;
-    if (depth === 0) return match.index;
-    match = scan.exec(html);
+  let i = from;
+  while (i < html.length) {
+    if (html.startsWith('<!--', i)) {
+      const close = html.indexOf('-->', i + 4);
+      i = close === -1 ? html.length : close + 3;
+      continue;
+    }
+    if (html[i] !== '<') {
+      i += 1;
+      continue;
+    }
+    CLOSE.lastIndex = i;
+    if (CLOSE.exec(html) !== null) {
+      depth -= 1;
+      if (depth === 0) return i;
+      i = CLOSE.lastIndex;
+      continue;
+    }
+    OPEN.lastIndex = i;
+    if (OPEN.exec(html) !== null) {
+      depth += 1;
+      i = OPEN.lastIndex;
+      continue;
+    }
+    i += 1;
   }
   return html.length;
 }

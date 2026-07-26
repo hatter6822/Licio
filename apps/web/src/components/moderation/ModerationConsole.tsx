@@ -107,6 +107,40 @@ function isMfaRequired(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403 && error.code === 'mfa_required';
 }
 
+/** The steward holds the role but has never ENROLLED MFA.  A verification form
+ *  cannot help — there is no authenticator to read a code from — so this gets
+ *  its own notice pointing at enrolment.  The server distinguishes the two
+ *  because one code for both is a form that can never succeed. */
+/**
+ * The steward holds the role but has never enrolled MFA.  Distinct from the
+ * verification form: there is no code to enter yet, so the repair is enrolment
+ * in account security, not a challenge on this session.
+ */
+function MfaEnrollmentNotice(): React.ReactElement {
+  const t = useT();
+  return (
+    <div className="neu-raised rounded-lg p-4" role="status">
+      <h2 className="font-medium text-ink">
+        {t('console.mfaEnrollTitle', 'Set up two-factor authentication')}
+      </h2>
+      <p className="mt-1 text-sm text-ink-muted">
+        {t(
+          'console.mfaEnrollBody',
+          'Steward accounts require two-factor authentication. Enrol an authenticator in account security, then reopen the console.',
+        )}
+      </p>
+    </div>
+  );
+}
+
+function isMfaEnrollmentRequired(error: unknown): boolean {
+  return (
+    error instanceof ApiClientError &&
+    error.status === 403 &&
+    error.code === 'mfa_enrollment_required'
+  );
+}
+
 /** A TRUE authentication failure (the api client has already flipped the auth
  *  store to session-expired for it): retrying cannot succeed until the steward
  *  signs in again, so it must never render as a transient error. */
@@ -368,6 +402,7 @@ function PanelError({
   onRetry: () => void;
 }): React.ReactElement {
   const t = useT();
+  if (isMfaEnrollmentRequired(error)) return <MfaEnrollmentNotice />;
   if (isMfaRequired(error)) return <MfaVerifyNotice onVerified={onRetry} />;
   if (isForbidden(error)) return <AccessNotice />;
   if (isUnauthenticated(error)) return <SessionExpiredNotice />;

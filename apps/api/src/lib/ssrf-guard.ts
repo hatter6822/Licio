@@ -123,16 +123,23 @@ export function isBlockedIpv6(address: string): boolean {
   if (b0 === 0xff) return true; // ff00::/8 multicast
   if (b0 === 0x20 && b1 === 0x01 && b2 === 0x0d && b3 === 0xb8) return true; // 2001:db8::/32 docs
 
-  // NAT64 (RFC 6052) `64:ff9b::/96` — the well-known prefix a DNS64 resolver
-  // synthesises for an IPv4-only host, with the IPv4 in the LAST FOUR BYTES.
-  // Blanket-refusing it is the same mistake the transition formats below avoid:
-  // on IPv6-only infrastructure EVERY ordinary public IPv4 destination arrives
-  // this way, so refusing the prefix breaks content fetching and Web Push
-  // outright (`guardedLookup` serves both) while blocking nothing an attacker
-  // could not reach directly.  Decoded and run through the same v4 rules, a
-  // translated `10.0.0.1` stays blocked and a translated `8.8.8.8` does not.
+  // NAT64 (RFC 6052).  On IPv6-only infrastructure EVERY ordinary public IPv4
+  // destination arrives translated, so blanket-refusing breaks content fetching
+  // and Web Push outright (`guardedLookup` serves both) while blocking nothing
+  // an attacker could not reach directly.  Decoded instead — but ONLY at the
+  // prefix length that actually puts the IPv4 where we look for it.
+  //
+  // The WELL-KNOWN prefix is `64:ff9b::/96`: ninety-six bits, so bytes 4–11 must
+  // be zero too.  Matching on the first four bytes alone is `64:ff9b::/32`, a
+  // range 2^64 times larger in which the last four bytes are NOT the translated
+  // address — `64:ff9b:1::/48` (RFC 8215 local-use) is inside it and carries the
+  // IPv4 at a different offset entirely.  Reading the tail of one of those as
+  // the destination lets a synthesised address park a public-looking value there
+  // while the real target is private.  So: decode `/96`, and refuse anything
+  // else under `64:ff9b::/32`, whose layout this function does not know.
   if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) {
-    return isBlockedIpv4(embedded);
+    const wellKnown = bytes.slice(4, 12).every((x) => x === 0);
+    return wellKnown ? isBlockedIpv4(embedded) : true;
   }
 
   // TRANSITION formats embed an IPv4 SOMEWHERE OTHER than the last four bytes,

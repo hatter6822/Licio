@@ -163,6 +163,19 @@ describe('exportedValues', () => {
     ]);
   });
 
+  it('does not read a comma NESTED in a default as a declarator separator', () => {
+    // `{ a = f(first, phantom), b }` — that comma separates the CALL's
+    // arguments.  Reading it as the pattern's separator recorded `phantom` as
+    // an export: a nonexistent dead export, which fails a correct branch.
+    for (const source of [
+      'export const { a = f(first, phantom), b } = obj;',
+      'export const { a = [1, 2], b } = obj;',
+      'export const { a = { x: 1, y: 2 }, b } = obj;',
+    ]) {
+      expect(exportedValues(source).map((v) => v.name)).toEqual(['a', 'b']);
+    }
+  });
+
   it('does not mistake an INITIALIZER for a binding', () => {
     expect(exportedValues('export const f = (p, q) => p + q;').map((v) => v.name)).toEqual(['f']);
     expect(exportedValues('export const RE = /a,b/;').map((v) => v.name)).toEqual(['RE']);

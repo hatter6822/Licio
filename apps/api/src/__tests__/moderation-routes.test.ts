@@ -474,6 +474,40 @@ describe('POST /v1/moderation/url-verdict (WS-J.2.6b reviewer link-opening check
   });
 });
 
+describe('the console gate answers AUTHORIZATION before session step-up', () => {
+  // Asking for MFA first told a NON-steward to verify for access it can never
+  // be granted, and handed the UI a code it could only render as an
+  // authenticator form.  The console is a fixed surface, not a per-resource
+  // lookup, so answering "you hold no steward role" leaks nothing.
+  it('tells a non-steward it lacks the ROLE, not that it needs MFA', async () => {
+    const plain = await seedUser({
+      handle: `plain${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user'],
+      stewardRoles: [],
+      steward: false,
+    });
+    const res = await app().request(get('/v1/moderation/queue', plain.cookie));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('forbidden');
+  });
+
+  // ENROLMENT and VERIFICATION are different problems with different repairs:
+  // one code for both left a steward who never enrolled staring at a form
+  // asking for a code no authenticator is generating.
+  it('distinguishes MFA ENROLMENT from an unverified session', async () => {
+    const steward = await seedUser({
+      handle: `unenrolled${randomUUID().slice(0, 6)}`,
+      platformRoles: ['user', 'steward'],
+      stewardRoles: ['ROLE_SAFETY'],
+      steward: false,
+    });
+    const res = await app().request(get('/v1/moderation/queue', steward.cookie));
+    expect(res.status).toBe(403);
+    const code = ((await res.json()) as { error: { code: string } }).error.code;
+    expect(['mfa_enrollment_required', 'mfa_required']).toContain(code);
+  });
+});
+
 describe('moderation console (role-gated)', () => {
   it('forbids a non-steward and an evidence-only steward from the report queue', async () => {
     const plain = await seedUser({ handle: `p${randomUUID().slice(0, 6)}` });

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BLOCK_ROLE_PRIORITY,
   buildBlockDescriptor,
+  CHUNK_SIZE,
   CompressionBombError,
   chunkBlock,
   compress,
@@ -80,6 +81,27 @@ describe('chunking + reassembly (WS-R.3.2)', () => {
       ok: false,
       reason: 'block_cid_mismatch',
     });
+  });
+
+  it('chunks by TRANSPORT PROFILE, which is where §13.2 puts the bounds', async () => {
+    // The profile form keeps the specification's numbers on the calling path.
+    // A lossy carrier gets smaller chunks so one corrupt chunk costs one small
+    // re-fetch; a LAN gets larger ones because the round trip dominates.
+    expect(CHUNK_SIZE).toEqual({
+      unstable: 16 * 1024,
+      mobile: 32 * 1024,
+      https: 64 * 1024,
+      lan: 128 * 1024,
+    });
+    const data = new Uint8Array(CHUNK_SIZE.mobile * 2 + 7).fill(3);
+    const byProfile = await chunkBlock(data, 'mobile');
+    const bySize = await chunkBlock(data, CHUNK_SIZE.mobile);
+    expect(byProfile.chunks.length).toBe(3);
+    expect(byProfile.descriptors).toEqual(bySize.descriptors);
+    // …and the profiles are ordered, smallest carrier to largest.
+    expect(CHUNK_SIZE.unstable).toBeLessThan(CHUNK_SIZE.mobile);
+    expect(CHUNK_SIZE.mobile).toBeLessThan(CHUNK_SIZE.https);
+    expect(CHUNK_SIZE.https).toBeLessThan(CHUNK_SIZE.lan);
   });
 });
 

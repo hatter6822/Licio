@@ -218,6 +218,18 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     expect(isBlockedIpv6('64:ff9b::a9fe:a9fe')).toBe(true); // = 169.254.169.254
   });
 
+  it('decodes NAT64 only at the WELL-KNOWN /96, refusing the rest of /32', () => {
+    // `64:ff9b::/96` puts the IPv4 in the last four bytes.  Matching the first
+    // four bytes alone is `/32` — a range 2^64 times larger, containing the RFC
+    // 8215 local-use `64:ff9b:1::/48` whose layout is different, so reading the
+    // tail there lets a synthesised address park a public-looking value in it
+    // while the real destination is private.
+    expect(isBlockedIpv6('64:ff9b::808:808')).toBe(false); // /96, = 8.8.8.8
+    expect(isBlockedIpv6('64:ff9b:1::808:808')).toBe(true); // /48 local-use
+    expect(isBlockedIpv6('64:ff9b:0:1::808:808')).toBe(true); // inside /32, not /96
+    expect(isBlockedIpv6('64:ff9b::0:1:808:808')).toBe(true); // bytes 8-11 non-zero
+  });
+
   it('allows public IPv6 and routes families correctly', () => {
     expect(isBlockedIpv6('2606:4700::6810:84e5')).toBe(false);
     // A public IPv4 embedded in a mapped address is allowed (the embedded

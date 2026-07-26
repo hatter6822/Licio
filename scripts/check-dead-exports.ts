@@ -154,9 +154,17 @@ function declarationBindings(
     }
     if (depth === 0 && punct === ';') break;
     if (patternDepth > 0 && depth >= patternDepth) {
-      if (punct === '=')
-        taking = false; // a DEFAULT value inside the pattern
-      else if (punct === ',') taking = true;
+      // ONLY at the pattern's own depth.  A comma nested inside a default's
+      // initializer — `{ a = f(first, phantom), b }` — separates that call's
+      // ARGUMENTS, not the pattern's bindings, and treating it as a separator
+      // recorded `phantom` as an exported binding: a nonexistent dead export
+      // that would fail a correct branch, which is the direction this walk is
+      // built never to fail in.
+      if (depth === patternDepth) {
+        if (punct === '=')
+          taking = false; // a DEFAULT value inside the pattern
+        else if (punct === ',') taking = true;
+      }
       continue;
     }
     if (depth !== 0) continue;

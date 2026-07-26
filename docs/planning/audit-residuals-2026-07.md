@@ -99,6 +99,45 @@ three copies (producer, verifier, test helpers) so a change on one side would
 have left verification silently disagreeing with production; and an exported
 `toBase64Url` nothing imported while two tests copy-pasted its body.
 
+### Unwired guarantees deleted as vestigial — audit of the 2026-07 export sweep
+
+The sweep that removed 47 unreferenced exported values classified each as one of
+the gate's three outcomes. Two were misclassified: they were **unwired
+guarantees** (outcome 1, "wire it up") filed as vestigial (outcome 3, "delete
+it"). Both are now fixed:
+
+- `RENDEZVOUS_MAX_RECORDS_PER_POLL` — a two-party WIRE limit. Deleting it left
+  the bound spelled three times (the server config and two `.max(256)` literals
+  in the peer client). Restored to `@licio/shared`, consumed by all three.
+- `CHUNK_SIZE` — the §13.2 per-transport chunk bounds. Deleting it left
+  `ChunkProfile` a vocabulary with nothing behind it. Restored, and `chunkBlock`
+  now takes a PROFILE so the documented numbers are on the calling path rather
+  than in a constant beside it.
+
+A pass over the remaining 45 found the rest correctly classified — aliases of
+live constants (`CHALLENGE_STATES`, `CHALLENGE_TYPES`), names for facts a
+library already enforces (`OCTET_POINT_LENGTH`, which the noble G1 encoder
+guarantees), and genuinely vestigial values — with two exceptions that need a
+decision rather than a restore, recorded here:
+
+- **`REASON_CODE_REGISTRY_VERSION`.** The module is titled "the *versioned*
+  reason-code registry" and `docs/invariants/README.md` says codes "validate
+  against the versioned registry", but nothing ever read the version — deleting
+  it removed the only expression of that versioning without removing any
+  enforcement, because there was none. **Closure target:** decide whether an
+  `InvariantOutput` carries the registry version it was validated against. If
+  yes it is a schema change with wire impact and belongs in WS-H; if no, the
+  "versioned" language in the module header and the WS-H docs should say what is
+  actually guaranteed (a closed, reviewed vocabulary) instead.
+- **`SESSION_PATH_DIMENSIONS`** (`['topic','action','time','engagement']`). The
+  PathSig implementation takes a dimension COUNT, and production passes a
+  computed `preferenceDim` — so the four named axes were a specification
+  vocabulary the runtime never used. **Closure target:** decide whether the
+  session path IS those four axes (in which case the constant is the SSOT for
+  the dimension count and `buildTopicStructure` should take it) or whether the
+  dimension is genuinely data-driven, in which case the SPEC's axis list is
+  illustrative and should say so.
+
 ## Correctness / privacy — tractable, not yet done
 
 - **DSAR omits WS-T debate-arena data** (`forum/data-rights.ts`): the account
