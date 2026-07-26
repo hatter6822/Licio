@@ -23,7 +23,7 @@
 //
 // Deliberately dependency-free so the `scripts`-rooted vitest project can unit
 // test the pure core directly.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -125,14 +125,27 @@ export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
   return problems;
 }
 
+/**
+ * Read a file, or `undefined` when it is not there.
+ *
+ * ATTEMPTS the read rather than stat-ing first: a `statSync` guard followed by a
+ * `readFileSync` is a check-then-use race (CodeQL `js/file-system-race`) — the
+ * file can vanish between the two, and the guard buys nothing the error handling
+ * does not already provide.
+ */
+function readIfPresent(relative: string): string | undefined {
+  try {
+    return readFileSync(resolve(ROOT, relative), 'utf-8');
+  } catch {
+    return undefined;
+  }
+}
+
 function main(): void {
   const read = (relative: string): string => readFileSync(resolve(ROOT, relative), 'utf-8');
   // Present only after a web build; the static-gates job runs BEFORE one, and the
   // build job runs this gate again once `dist` exists.
-  const builtPath = resolve(ROOT, BUILT_INDEX_HTML_FILE);
-  const builtIndexHtml = statSync(builtPath, { throwIfNoEntry: false })?.isFile()
-    ? read(BUILT_INDEX_HTML_FILE)
-    : undefined;
+  const builtIndexHtml = readIfPresent(BUILT_INDEX_HTML_FILE);
 
   const problems = findCspDeliveryProblems({ indexHtml: read(INDEX_HTML_FILE), builtIndexHtml });
   if (problems.length > 0) {

@@ -3,7 +3,7 @@
 // Unit tests for the CSP delivery gate's pure core, plus tests that run it
 // against the REAL repository files — so the suite fails if `index.html` regrows
 // a hand-written policy, or (after a build) if the injection stops firing.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { injectCspMeta } from '../apps/web/src/dev/inject-csp-meta.js';
@@ -148,12 +148,19 @@ describe('the REAL repository', () => {
   });
 
   it('injects the shared policy into the build, when one exists', () => {
-    const builtPath = resolve(ROOT, BUILT_INDEX_HTML_FILE);
-    if (!statSync(builtPath, { throwIfNoEntry: false })?.isFile()) return; // no build here
+    // Attempt the read instead of stat-ing first: check-then-use is a file-system
+    // race (CodeQL `js/file-system-race`), and "no build in this checkout" is
+    // exactly what the failed read already tells us.
+    let builtIndexHtml: string | undefined;
+    try {
+      builtIndexHtml = readFileSync(resolve(ROOT, BUILT_INDEX_HTML_FILE), 'utf-8');
+    } catch {
+      return; // no build here
+    }
     expect(
       findCspDeliveryProblems({
         indexHtml: readFileSync(resolve(ROOT, INDEX_HTML_FILE), 'utf-8'),
-        builtIndexHtml: readFileSync(builtPath, 'utf-8'),
+        builtIndexHtml,
       }),
     ).toEqual([]);
   });
