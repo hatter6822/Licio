@@ -5,14 +5,35 @@
 // models, creating/voting/challenging proposals, delegating power, steward
 // governance actions — is reserved for KYC-verified accounts
 // (apps/api/src/governance/eligibility.ts).  This gate makes that invariant
-// STRUCTURAL: every `.post(` route in the governance route files must either
+// STRUCTURAL: every mutation route in the governance route files must either
 // invoke the eligibility guard (`requireGovernanceEligibility` middleware or
 // a handler-level `checkGovernanceEligibility` call) or carry a written
 // allowlist justification below.  A new governance mutation route cannot ship
 // unclassified, and a stale allowlist entry is itself an error (the
 // check-prod-parity allowlist discipline).
+//
+// READ FROM THE PARSE, not from the text.  This gate used to find routes with a
+// LINE-ANCHORED `/^\s*\.(post|put|patch|delete)\(/gm`, attribute a guard to a
+// route by slicing the text between two markers, and strip comments with a
+// hand-written state machine of its own.  None of that can express "is this
+// call a route registration" or "is the guard invoked INSIDE this route", so it
+// carried two compensations: a raw-count reconciliation that failed closed on
+// anything it could not classify, and — through that — a STYLE CONSTRAINT on
+// the application code, requiring every mutation registration to begin its own
+// line.  A gate that dictates how the code it reads must be formatted is a gate
+// that cannot read it.
+//
+// Parsed, all three questions are direct.  A registration is a call on a
+// receiver chain rooting at `new Hono()`, which is what separates a route from
+// `db.delete(table)`; the path is its first argument; and the guard is a call
+// somewhere INSIDE that registration's arguments — containment, so a guard in
+// one route can never be attributed to the next, and prose can never satisfy it
+// because a comment is not a node.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { SyntaxKind } from 'typescript/unstable/ast';
+import type { Project } from 'typescript/unstable/sync';
+import { type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -27,7 +48,11 @@ export const GOVERNANCE_ROUTE_FILES = [
   'apps/api/src/routes/rooms.ts',
 ] as const;
 
-const GUARD_TOKENS = ['requireGovernanceEligibility(', 'checkGovernanceEligibility('] as const;
+/** The eligibility guard, in either of the two shapes a route may use it. */
+const GUARD_NAMES: ReadonlySet<string> = new Set([
+  'requireGovernanceEligibility',
+  'checkGovernanceEligibility',
+]);
 
 /** POST routes tolerated WITHOUT the eligibility guard.  EVERY entry needs a
  *  written reason a reviewer can weigh; a stale entry fails the gate. */
@@ -161,59 +186,6 @@ export const ALLOWLIST: ReadonlyArray<{ file: string; path: string; reason: stri
   },
 ];
 
-/** Strip // and /* comments (string-literal aware) so prose never satisfies —
- *  or trips — a code token.  Same tokenizer discipline as check-prod-parity. */
-export function stripComments(source: string): string {
-  let out = '';
-  let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
-  for (let i = 0; i < source.length; i += 1) {
-    const ch = source[i] as string;
-    const next = source[i + 1];
-    if (state === 'code') {
-      if (ch === '/' && next === '/') {
-        state = 'line';
-        out += '  ';
-        i += 1;
-      } else if (ch === '/' && next === '*') {
-        state = 'block';
-        out += '  ';
-        i += 1;
-      } else {
-        if (ch === "'") state = 'single';
-        else if (ch === '"') state = 'double';
-        else if (ch === '`') state = 'template';
-        out += ch;
-      }
-    } else if (state === 'line') {
-      if (ch === '\n') {
-        state = 'code';
-        out += ch;
-      } else out += ' ';
-    } else if (state === 'block') {
-      if (ch === '*' && next === '/') {
-        state = 'code';
-        out += '  ';
-        i += 1;
-      } else out += ch === '\n' ? ch : ' ';
-    } else {
-      if (ch === '\\') {
-        out += ch + (next ?? '');
-        i += 1;
-        continue;
-      }
-      if (
-        (state === 'single' && (ch === "'" || ch === '\n')) ||
-        (state === 'double' && (ch === '"' || ch === '\n')) ||
-        (state === 'template' && ch === '`')
-      ) {
-        state = 'code';
-      }
-      out += ch;
-    }
-  }
-  return out;
-}
-
 export interface MutationRoute {
   file: string;
   method: string;
@@ -222,54 +194,219 @@ export interface MutationRoute {
 }
 
 /** The HTTP methods that MUTATE governance state — each such route must be
- *  guarded or allowlisted.  GET/HEAD are reads and are only segment boundaries. */
-const MUTATION_METHODS = new Set(['post', 'put', 'patch', 'delete']);
+ *  guarded or allowlisted.  GET/HEAD are reads and are judged nowhere. */
+const MUTATION_METHODS: ReadonlySet<string> = new Set(['post', 'put', 'patch', 'delete']);
 
-/**
- * Extract every MUTATION route (path + whether a guard token appears before the
- * next chained route method). Markers are LINE-ANCHORED — the Hono chain style
- * puts each `.post(`/`.get(` at the start of its own line, so a handler-body
- * `c.get('auth')` or `map.get(key)` can never cut a segment. A mid-line route
- * registration would evade line-anchoring, so `runGovernanceKycGate` ALSO
- * cross-checks the raw count of EVERY mutation verb (`.post(`/`.put(`/`.patch(`/
- * `.delete(` — none of which appears in a handler body in these route files)
- * against the line-anchored extraction and FAILS on any unclassifiable
- * occurrence — fail closed, not silently skipped.
- */
-export function extractMutationRoutes(file: string, source: string): MutationRoute[] {
-  const stripped = stripComments(source);
-  const methodRe = /^\s*\.(post|get|put|patch|delete|use|on|route)\(/gm;
-  const markers: Array<{ index: number; method: string }> = [];
-  for (const match of stripped.matchAll(methodRe)) {
-    markers.push({ index: match.index, method: match[1] as string });
+/** Wrappers that yield exactly the expression they wrap. */
+const TRANSPARENT: ReadonlySet<number> = new Set([
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.AsExpression,
+  SyntaxKind.SatisfiesExpression,
+  SyntaxKind.NonNullExpression,
+]);
+
+/** How far a receiver chain or a binding is followed before giving up. */
+const MAX_HOPS = 32;
+
+function unwrap(node: Syntax | undefined): Syntax | undefined {
+  let current = node;
+  for (let hop = 0; current !== undefined && TRANSPARENT.has(current.kind); hop += 1) {
+    if (hop > MAX_HOPS) return current;
+    current = current.expression;
   }
-  const routes: MutationRoute[] = [];
-  markers.forEach((marker, i) => {
-    if (!MUTATION_METHODS.has(marker.method)) return;
-    const end = markers[i + 1]?.index ?? stripped.length;
-    const segment = stripped.slice(marker.index, end);
-    const path = /['"]([^'"]+)['"]/.exec(segment)?.[1];
-    if (path === undefined) return;
-    const guarded = GUARD_TOKENS.some((token) => segment.includes(token));
-    routes.push({ file, method: marker.method, path, guarded });
-  });
-  return routes;
+  return current;
 }
 
-/** Count `.verb(` occurrences per mutation method in the comment-stripped
- *  source.  In these route files a mutation verb only ever appears as a route
- *  registration (never a handler-body method call — no `db.delete(...)` /
- *  `map.delete('k')` etc.), so a raw count that exceeds the line-anchored
- *  extraction means a registration is written mid-line where the gate cannot
- *  see it.  Reconciling EVERY verb (not just POST) closes the gap where a
- *  mid-line `.patch(`/`.delete(`/`.put(` would ship ungated with a green gate. */
-function countRawMutations(source: string): Map<string, number> {
-  const stripped = stripComments(source);
-  const counts = new Map<string, number>();
-  for (const verb of MUTATION_METHODS) {
-    counts.set(verb, (stripped.match(new RegExp(`\\.${verb}\\(`, 'g')) ?? []).length);
+/** An identifier's or property's name, escapes already resolved. */
+function nameOf(node: Syntax | undefined): string | undefined {
+  return node === undefined ? undefined : (node.text ?? node.getText());
+}
+
+/** The static string a node denotes, or undefined when it is not one. */
+function staticString(node: Syntax | undefined): string | undefined {
+  const target = unwrap(node);
+  if (target === undefined) return undefined;
+  if (
+    target.kind === SyntaxKind.StringLiteral ||
+    target.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return target.text ?? '';
   }
-  return counts;
+  return undefined;
+}
+
+/** A mutation route found in the parse, or one whose path could not be read. */
+interface FoundRoute extends MutationRoute {
+  /** Where to point when the path is unreadable and the route must fail closed. */
+  readonly line: number;
+  readonly readable: boolean;
+}
+
+/**
+ * Every mutation route a parsed file registers, with its guard resolved.
+ *
+ * A registration is a call whose receiver chain roots at `new Hono()`.  That is
+ * what separates a route from `db.delete(table)` or `map.delete(key)` without a
+ * rule about where the call may sit on its line — and it is what lets an
+ * UNREADABLE route path fail closed, since a mutation call on a router with a
+ * non-static path is a route this gate genuinely cannot classify.
+ */
+function routesIn(file: string, root: Syntax, project: Project, source: string): FoundRoute[] {
+  const lineStarts = [0];
+  for (let at = 0; at < source.length; at += 1) if (source[at] === '\n') lineStarts.push(at + 1);
+  const lineAt = (offset: number): number => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if ((lineStarts[mid] ?? 0) <= offset) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+
+  const localDeclaration = (node: Syntax): Syntax | undefined => {
+    const symbol = project.checker.getSymbolAtPosition(String(root.path), node.getStart());
+    const handle = symbol?.declarations.find(
+      (declaration) => String(declaration.path) === String(root.path),
+    );
+    return handle?.resolve(project) as unknown as Syntax | undefined;
+  };
+
+  /**
+   * Whether a receiver chain roots at `new Hono…()` — i.e. it is a ROUTER.
+   *
+   * The chain is walked WITHOUT a depth bound, because it is a finite spine of
+   * the syntax tree: `new Hono().get(…).post(…)` nests each link inside the one
+   * before it, so a file registering thirty routes makes the thirty-first
+   * receiver thirty calls deep.  Bounding that walk silently stopped
+   * recognising routes past the limit — `treasury-governance.ts` reported 11 of
+   * its 19, and the allowlist's stale-entry discipline is what exposed it.
+   *
+   * Only BINDING hops are bounded, since `const a = b; const b = a` is the one
+   * step here that can cycle.
+   */
+  const isRouter = (node: Syntax | undefined, bindings = 0): boolean => {
+    let target = unwrap(node);
+    let hops = bindings;
+    while (target !== undefined) {
+      if (target.kind === SyntaxKind.NewExpression) {
+        return (nameOf(unwrap(target.expression)) ?? '').startsWith('Hono');
+      }
+      if (
+        target.kind === SyntaxKind.CallExpression ||
+        target.kind === SyntaxKind.PropertyAccessExpression ||
+        target.kind === SyntaxKind.ElementAccessExpression
+      ) {
+        target = unwrap(target.expression);
+        continue;
+      }
+      // `const app = new Hono(); app.post(…)` — the binding says what it holds.
+      if (target.kind === SyntaxKind.Identifier) {
+        if (hops > MAX_HOPS) return false;
+        hops += 1;
+        const declaration = localDeclaration(target);
+        if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+        target = unwrap(declaration.initializer);
+        continue;
+      }
+      return false;
+    }
+    return false;
+  };
+
+  /** Whether the eligibility guard is INVOKED anywhere inside these arguments. */
+  const guardedBy = (args: readonly Syntax[]): boolean => {
+    for (const argument of args) {
+      for (const node of walk(argument)) {
+        if (node.kind !== SyntaxKind.CallExpression) continue;
+        const callee = unwrap(node.expression);
+        if (callee === undefined) continue;
+        const called =
+          callee.kind === SyntaxKind.Identifier
+            ? nameOf(callee)
+            : callee.kind === SyntaxKind.PropertyAccessExpression
+              ? nameOf(callee.name)
+              : undefined;
+        if (called !== undefined && GUARD_NAMES.has(called)) return true;
+      }
+    }
+    return false;
+  };
+
+  const found: FoundRoute[] = [];
+  for (const node of walk(root)) {
+    if (node.kind !== SyntaxKind.CallExpression) continue;
+    const callee = unwrap(node.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      continue;
+    }
+    const called =
+      callee.kind === SyntaxKind.PropertyAccessExpression
+        ? nameOf(callee.name)
+        : staticString(callee.argumentExpression);
+    if (called === undefined) continue;
+    if (!isRouter(callee.expression)) continue;
+
+    const args = [...(node.arguments ?? [])];
+    // `.post(path, …)`, and `.on(METHOD, path, …)` / `.on([METHODS], path, …)`,
+    // which registers exactly the same route by another name.
+    const viaOn = called === 'on';
+    if (!viaOn && !MUTATION_METHODS.has(called)) continue;
+    const methods = viaOn ? onMethods(args[0]) : [called];
+    const pathArgument = viaOn ? args[1] : args[0];
+    const mutations = methods.filter((method) => MUTATION_METHODS.has(method));
+    if (mutations.length === 0) continue;
+
+    const path = staticString(pathArgument);
+    const guarded = guardedBy(viaOn ? args.slice(2) : args.slice(1));
+    for (const method of mutations) {
+      found.push({
+        file,
+        method,
+        path: path ?? '<non-static path>',
+        guarded,
+        line: lineAt(node.getStart()),
+        readable: path !== undefined,
+      });
+    }
+  }
+  return found;
+}
+
+/** The methods an `.on(…)` registration covers, lower-cased. */
+function onMethods(node: Syntax | undefined): string[] {
+  const single = staticString(node);
+  if (single !== undefined) return [single.toLowerCase()];
+  const target = unwrap(node);
+  if (target?.kind !== SyntaxKind.ArrayLiteralExpression) return [];
+  const methods: string[] = [];
+  target.forEachChild((element) => {
+    const value = staticString(element);
+    if (value !== undefined) methods.push(value.toLowerCase());
+  });
+  return methods;
+}
+
+/** Parse each source once and extract its mutation routes. */
+function routesFor(sources: readonly Source[]): Map<string, FoundRoute[]> {
+  return withParsedSources(sources, (parsed, project) => {
+    const byFile = new Map<string, FoundRoute[]>();
+    for (const { path, content, root } of parsed) {
+      byFile.set(path, routesIn(path, root, project, content));
+    }
+    return byFile;
+  });
+}
+
+/** Every MUTATION route one file registers, with its guard resolved. */
+export function extractMutationRoutes(file: string, source: string): MutationRoute[] {
+  return (routesFor([{ path: file, content: source }]).get(file) ?? []).map(
+    ({ line: _line, readable: _readable, ...route }) => route,
+  );
 }
 
 export function runGovernanceKycGate(
@@ -277,25 +414,25 @@ export function runGovernanceKycGate(
 ): string[] {
   const issues: string[] = [];
   const usedAllowlist = new Set<number>();
+  // One parse for the whole route tree.
+  const byFile = routesFor(
+    GOVERNANCE_ROUTE_FILES.map((file) => ({ path: file, content: read(file) })),
+  );
   for (const file of GOVERNANCE_ROUTE_FILES) {
-    const source = read(file);
-    const routes = extractMutationRoutes(file, source);
-    // Fail-closed style guard: for EVERY mutation verb, each `.verb(` in the
-    // file must be a line-anchored route we extracted. A mid-line registration
-    // (any non-chain-style verb) would otherwise ship ungated with a green gate.
-    const rawCounts = countRawMutations(source);
-    for (const verb of MUTATION_METHODS) {
-      const raw = rawCounts.get(verb) ?? 0;
-      const extracted = routes.filter((r) => r.method === verb).length;
-      if (raw !== extracted) {
-        issues.push(
-          `${file}: found ${raw} \`.${verb}(\` occurrence(s) but classified ${extracted} — a ` +
-            `${verb.toUpperCase()} route is not at line-start (the required Hono chain style), so ` +
-            'the gate cannot see it. Put each mutation registration at the start of its own line.',
-        );
-      }
-    }
+    const routes = byFile.get(file) ?? [];
     for (const route of routes) {
+      // A mutation registered on a router with a path this gate cannot read is
+      // a route it cannot classify, so it fails CLOSED — the only place that
+      // discipline is still needed, now that finding the route no longer
+      // depends on how the file is formatted.
+      if (!route.readable) {
+        issues.push(
+          `${file}:${route.line}: ${route.method.toUpperCase()} route path is not a static ` +
+            'string, so it cannot be matched against the guard or the allowlist. Register the ' +
+            'route with a literal path.',
+        );
+        continue;
+      }
       if (route.guarded) continue;
       const allowIndex = ALLOWLIST.findIndex(
         (entry) => entry.file === file && entry.path === route.path,

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Unit coverage for the governance KYC gate: segmentation is line-anchored
-// (handler-body `c.get(...)` never truncates a segment), unguarded routes
-// fail, allowlisted routes pass, stale allowlist entries fail, and the LIVE
-// tree passes.
+// Unit coverage for the governance KYC gate.  Routes come from the PARSE, so a
+// registration is found wherever it sits, the guard is attributed by
+// CONTAINMENT rather than by text proximity, and the only fail-closed case left
+// is a route path the gate genuinely cannot read.
 import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
@@ -69,6 +69,47 @@ export function createRoutes() {
 }
 `;
 
+const viaOn = `
+export function createRoutes() {
+  return new Hono().on('POST', '/rooms/:roomId/on/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
+const dynamicPath = `
+export function createRoutes() {
+  return new Hono().post(buildPath('vote'), authMiddleware(), (c) => c.json({}));
+}
+`;
+
+const notARoute = `
+export function createRoutes() {
+  return new Hono()
+    .post('/rooms/:roomId/thing/vote', requireGovernanceEligibility(), async (c) => {
+      await db.delete(rows);
+      cache.delete('key');
+      return c.json({ ok: true });
+    });
+}
+`;
+
+/** A guard on the FIRST route must not vouch for the second. */
+const guardLeak = `
+export function createRoutes() {
+  return new Hono()
+    .post('/rooms/:roomId/a/vote', requireGovernanceEligibility(), (c) => c.json({}))
+    .post('/rooms/:roomId/b/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
+/** A chain longer than any bounded receiver walk would follow. */
+const longChain = `
+export function createRoutes() {
+  return new Hono()
+${Array.from({ length: 40 }, (_, i) => `    .get('/read/${i}', (c) => c.json({}))`).join('\n')}
+    .post('/rooms/:roomId/last/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
 describe('extractMutationRoutes', () => {
   it('keeps a segment intact across handler-body c.get(...) calls', () => {
     const routes = extractMutationRoutes('f.ts', guarded);
@@ -103,24 +144,58 @@ describe('runGovernanceKycGate', () => {
     expect(issues.some((issue) => issue.includes('stale ALLOWLIST'))).toBe(true);
   });
 
-  it('FAILS CLOSED on a mid-line `.post(` the line-anchored scan cannot see', () => {
+  it.each([
+    ['a mid-line POST', midLinePost, 'POST /rooms/:roomId/sneaky/vote'],
+    ['a mid-line DELETE', midLineDelete, 'DELETE /rooms/:roomId/sneaky/:id'],
+    ['an `.on(METHOD, …)` registration', viaOn, 'POST /rooms/:roomId/on/vote'],
+  ])('classifies %s rather than rejecting how it is written', (_label, source, expected) => {
+    // These used to be reported as "not at line-start" — a formatting complaint
+    // standing in for the real finding, because the scan could not see the
+    // route at all.  `.on('POST', …)` was invisible to BOTH the extraction and
+    // the raw-count cross-check, so it could ship ungated with a green gate.
     const issues = runGovernanceKycGate((relPath) =>
-      relPath === GOVERNANCE_ROUTE_FILES[0] ? midLinePost : 'export const nothing = 1;',
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? source : 'export const nothing = 1;',
     );
-    // The raw-count cross-check catches the unclassifiable occurrence.
-    expect(issues.some((issue) => issue.includes('not at line-start'))).toBe(true);
+    expect(issues.some((issue) => issue.includes(expected))).toBe(true);
+    expect(issues.some((issue) => issue.includes('line-start'))).toBe(false);
   });
 
-  it('FAILS CLOSED on a mid-line non-POST mutation too (the per-verb cross-check)', () => {
-    // Before the cross-check covered every verb, a mid-line `.delete(`/`.patch(`
-    // evaded BOTH the line-anchored extraction and the POST-only raw count —
-    // shipping ungated with a green gate.
+  it('FAILS CLOSED on a route path it cannot read', () => {
+    // The one place the discipline is still needed: a mutation registered on a
+    // router with a computed path cannot be matched to a guard or an allowlist.
     const issues = runGovernanceKycGate((relPath) =>
-      relPath === GOVERNANCE_ROUTE_FILES[0] ? midLineDelete : 'export const nothing = 1;',
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? dynamicPath : 'export const nothing = 1;',
     );
-    expect(
-      issues.some((issue) => issue.includes('not at line-start') && issue.includes('`.delete(')),
-    ).toBe(true);
+    expect(issues.some((issue) => issue.includes('not a static'))).toBe(true);
+  });
+
+  it('does not take a non-router `.delete(` for a route', () => {
+    // `db.delete(rows)` and `cache.delete('key')` are ordinary calls; only a
+    // receiver chain rooting at `new Hono()` registers a route.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? notARoute : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.startsWith(GOVERNANCE_ROUTE_FILES[0]))).toBe(false);
+  });
+
+  it("does not let one route's guard vouch for the next", () => {
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? guardLeak : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/b/vote'))).toBe(true);
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/a/vote'))).toBe(false);
+  });
+
+  it('sees a route at the END of a long chain', () => {
+    // A Hono chain nests each link inside the one before it, so the receiver of
+    // the forty-first registration is forty calls deep.  Bounding that walk
+    // silently stopped recognising routes past the limit — the live tree
+    // reported 11 of treasury-governance.ts's 19, and only the allowlist's
+    // stale-entry discipline exposed it.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? longChain : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/last/vote'))).toBe(true);
   });
 
   it('flags an unguarded non-POST governance mutation (DELETE)', () => {
