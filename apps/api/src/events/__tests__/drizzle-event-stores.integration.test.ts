@@ -80,7 +80,7 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
     await migrate(drizzle(migrationClient), { migrationsFolder: migrationsFolder() });
     await migrationClient.end();
 
-    db = createDbClient(itUrl.href);
+    db = createDbClient(itUrl.href, { onNotice: 'discard' });
     events = new DrizzleEventStore(db);
     aggregates = new DrizzleAttentionAggregateStore(db);
     windows = new DrizzleAggregationWindowStore(db);

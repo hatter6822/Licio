@@ -244,7 +244,7 @@ describe.skipIf(!DB_URL)(
     beforeAll(async () => {
       const { createDbClient, migrationsFolder } = await import('@licio/db');
       const { migrate } = await import('drizzle-orm/postgres-js/migrator');
-      db = createDbClient(DB_URL as string);
+      db = createDbClient(DB_URL as string, { onNotice: 'discard' });
       await migrate(db, { migrationsFolder: migrationsFolder() });
     });
 
@@ -529,7 +529,7 @@ describe.skipIf(!STORE_DB_URL)(
     beforeAll(async () => {
       const { createDbClient, migrationsFolder } = await import('@licio/db');
       const { migrate } = await import('drizzle-orm/postgres-js/migrator');
-      db = createDbClient(STORE_DB_URL as string);
+      db = createDbClient(STORE_DB_URL as string, { onNotice: 'discard' });
       await migrate(db, { migrationsFolder: migrationsFolder() });
     });
 

@@ -254,7 +254,7 @@ describe.skipIf(!DB_URL)('Drizzle Web Vitals stores (live Postgres)', () => {
     const { DrizzleWebVitalAggregateStore, DrizzleWebVitalSampleStore } = await import(
       '../telemetry/drizzle-telemetry-stores.js'
     );
-    const db = createDbClient(DB_URL as string);
+    const db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     const samples = new DrizzleWebVitalSampleStore(db);
     const aggregates = new DrizzleWebVitalAggregateStore(db);

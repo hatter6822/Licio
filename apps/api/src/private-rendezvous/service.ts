@@ -25,6 +25,8 @@
 import { createDbClient } from '@licio/db';
 import { RENDEZVOUS_MAX_RECORDS_PER_POLL } from '@licio/shared';
 import IORedis from 'ioredis';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
 import { DrizzleRendezvousStore } from './drizzle-store.js';
 import { RedisSignalMailbox } from './redis-signal-mailbox.js';
 import {
@@ -220,8 +222,19 @@ function buildStore(): RendezvousStore {
   // TTL.  Without Redis (a bare dev boot with only Postgres) the mailbox
   // stays process-local.
   const redisUrl = process.env['REDIS_URL'];
+  // `onNotice` for the same reason the API boot and the LCAP client pass one:
+  // the db wrapper ALWAYS installs its own handler, so omitting the sink does
+  // not fall back to postgres.js's `console.log` default — it DISCARDS every
+  // notice, warnings included, from this store.
+  const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
   return new DrizzleRendezvousStore(
-    createDbClient(dbUrl),
+    createDbClient(dbUrl, {
+      onNotice: (notice) =>
+        logger[pgNoticeLogLevel(notice.severity)](
+          { pgNotice: notice },
+          'postgres notice (rendezvous)',
+        ),
+    }),
     redisUrl
       ? new RedisSignalMailbox(new IORedis(redisUrl, { maxRetriesPerRequest: 3 }))
       : undefined,

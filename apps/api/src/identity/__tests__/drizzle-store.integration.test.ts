@@ -60,7 +60,7 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     await migrate(drizzle(migrationClient), { migrationsFolder: migrationsFolder() });
     await migrationClient.end();
 
-    db = createDbClient(itUrl.href);
+    db = createDbClient(itUrl.href, { onNotice: 'discard' });
     store = new DrizzleIdentityStore(db);
     audit = new DrizzleAuditStore(db);
   }, 30_000);

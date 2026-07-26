@@ -74,7 +74,7 @@ describe.skipIf(!ENABLED)('WS-F performance + recall (gated: DATABASE_URL + RUN_
   const urls: string[] = [];
 
   beforeAll(async () => {
-    db = createDbClient(process.env['DATABASE_URL'] as string);
+    db = createDbClient(process.env['DATABASE_URL'] as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     stories = new DrizzleStoryStore(db);
     embeddings = new DrizzleEmbeddingStore(db);

@@ -105,7 +105,7 @@ describe.skipIf(!DB_URL)('WS-I ranking Drizzle adapters (live Postgres)', () => 
   const requestIds: string[] = [];
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     features = new DrizzleFeatureStore(db);
     decisions = new DrizzleDecisionLogStore(db);
@@ -308,7 +308,7 @@ describe.skipIf(!DB_URL)('WS-I serving-path reads on the WS-E/WS-F Drizzle adapt
   const gweiTargetIds: string[] = [];
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     invariantStore = new DrizzleInvariantOutputStore(db);
     safetyStore = new DrizzleItemSafetyStateStore(db);

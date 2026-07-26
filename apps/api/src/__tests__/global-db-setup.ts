@@ -30,7 +30,7 @@ export async function setup(): Promise<void> {
   // No gated DB env → the integration suites skip (`describe.skipIf(!DB_URL)`);
   // there is nothing to migrate and no race to prevent.
   if (url === undefined || url === '') return;
-  const db = createDbClient(url);
+  const db = createDbClient(url, { onNotice: 'discard' });
   const client = (db as unknown as { $client: RawClient }).$client;
   try {
     // The key is a numeric literal (never user input) — safe to interpolate.

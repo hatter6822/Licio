@@ -72,7 +72,7 @@ describe.skipIf(!DB_URL)('WS-J moderation Drizzle adapters (live Postgres)', () 
   }
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     cases = new DrizzleModerationCaseStore(db);
     reports = new DrizzleModerationReportStore(db);

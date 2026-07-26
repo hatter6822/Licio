@@ -53,7 +53,7 @@ describe.skipIf(!DB_URL)('WS-K ai-governance Drizzle adapters (live Postgres)', 
   };
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     stores = createDrizzleAiGovernanceStores(db);
     await clearAll(); // the ai_* tables belong to this suite alone

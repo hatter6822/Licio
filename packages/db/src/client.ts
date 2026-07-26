@@ -23,25 +23,31 @@ export interface PostgresNotice {
 
 export interface DbClientOptions {
   /**
-   * Receives every Postgres NOTICE, projected to {@link PostgresNotice}.
+   * Where every Postgres NOTICE goes, projected to {@link PostgresNotice}.
    *
-   * Supplying one is how a consumer routes notices into ITS logger (the API
-   * boot passes a pino sink).  Omitting it DISCARDS them — which is the point:
-   * postgres.js's own default for an unset `onnotice` is
+   * REQUIRED, and `'discard'` is a real answer rather than a missing one.  This
+   * package always sets postgres.js's `onnotice` — its unset default is
    * `console.log(parseError(x))`, an unstructured write of the WHOLE notice
-   * object straight to stdout.  That bypasses pino (and therefore its redaction
-   * paths) in the server, and floods the vitest output with raw notice objects
-   * whenever the migration chain replays.  `onnotice` is therefore ALWAYS set
-   * below, never left to the library default.
+   * object straight to stdout, bypassing pino and its redaction paths — so
+   * omitting a sink here never fell back to the library, it DROPPED the notice.
+   * That is the right behaviour for a test and the wrong one for a server, and
+   * as an optional field it was indistinguishable from having thought about it:
+   * two production clients (WS-R LCAP, WS-S rendezvous) silently discarded
+   * every `WARNING` until review found them one at a time.
+   *
+   * Making the field mandatory moves that from a convention to a compiler
+   * obligation — a new call site cannot be written without deciding, and
+   * `'discard'` is greppable in a way that an absent option is not.
    */
-  readonly onNotice?: (notice: PostgresNotice) => void;
+  readonly onNotice: ((notice: PostgresNotice) => void) | 'discard';
 }
 
-export function createDbClient(connectionString: string, options: DbClientOptions = {}) {
+export function createDbClient(connectionString: string, options: DbClientOptions) {
   const { onNotice } = options;
   const client = postgres(connectionString, {
     onnotice: (notice) => {
-      onNotice?.({
+      if (onNotice === 'discard') return;
+      onNotice({
         severity: notice['severity'] ?? 'NOTICE',
         code: notice['code'] ?? '',
         message: notice['message'] ?? '',

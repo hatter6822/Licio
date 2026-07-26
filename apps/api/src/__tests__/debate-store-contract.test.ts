@@ -1006,7 +1006,7 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
   let roomId: string;
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     stories = new DrizzleStoryStore(db);
     contributions = new DrizzleContributionStore(db);

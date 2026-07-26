@@ -34,12 +34,12 @@ function resolveOnNotice(db: ReturnType<typeof createDbClient>): (notice: unknow
 describe('createDbClient — Postgres NOTICE handling', () => {
   it('always installs an onnotice handler, so postgres.js never falls back to console.log', () => {
     // No options at all: the DEFAULT must still displace the library fallback.
-    const db = createDbClient(OFFLINE_DSN);
+    const db = createDbClient(OFFLINE_DSN, { onNotice: 'discard' });
     expect(() => resolveOnNotice(db)).not.toThrow();
   });
 
   it('discards notices when no sink is supplied', () => {
-    const db = createDbClient(OFFLINE_DSN);
+    const db = createDbClient(OFFLINE_DSN, { onNotice: 'discard' });
     const onnotice = resolveOnNotice(db);
     // The default sink must be a silent no-op, not a throw and not a write.
     expect(() =>
@@ -118,14 +118,18 @@ describe.skipIf(!DB_URL)('pingDatabase (live Postgres)', () => {
   });
 
   it('resolves against a reachable database', async () => {
-    const db = track(createDbClient(DB_URL as string));
+    const db = track(createDbClient(DB_URL as string, { onNotice: 'discard' }));
     await expect(pingDatabase(db)).resolves.toBeUndefined();
   });
 
   it('REJECTS against an unreachable one (the probe can actually fail)', async () => {
     // Port 1 has no listener: the connection attempt fails rather than hanging,
     // so readiness flips instead of silently reporting healthy.
-    const db = track(createDbClient('postgres://licio:licio@127.0.0.1:1/licio_probe_unreachable'));
+    const db = track(
+      createDbClient('postgres://licio:licio@127.0.0.1:1/licio_probe_unreachable', {
+        onNotice: 'discard',
+      }),
+    );
     await expect(pingDatabase(db)).rejects.toThrow();
   });
 });

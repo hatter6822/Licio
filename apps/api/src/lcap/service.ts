@@ -47,7 +47,7 @@ let publishAudit: PublishAuditStore | undefined;
  * ONE Postgres client for every singleton in this module.
  *
  * Each getter below is an independent lazy singleton, and each used to call
- * `createDbClient(dbUrl)` for itself — six clients, and postgres.js gives each
+ * `createDbClient(dbUrl, { onNotice: 'discard' })` for itself — six clients, and postgres.js gives each
  * its own pool of up to `max` (default 10) connections.  Six pools against the
  * same database, per API process, multiplied by the replica count, against a
  * server whose `max_connections` defaults to 100: the connection budget is the

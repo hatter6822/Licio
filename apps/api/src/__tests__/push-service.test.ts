@@ -72,7 +72,7 @@ describe.skipIf(!DB_URL)('DrizzlePushStateStore (live Postgres)', () => {
     const { migrate } = await import('drizzle-orm/postgres-js/migrator');
     const { eq } = await import('drizzle-orm');
     const { DrizzlePushStateStore } = await import('../lib/drizzle-push-store.js');
-    const db = createDbClient(DB_URL as string);
+    const db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     const store = new DrizzlePushStateStore(db);
     await store.clear();
