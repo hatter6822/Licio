@@ -97,14 +97,19 @@ const BINDING_KEYWORDS = ['const', 'let', 'var'] as const;
 // the gate entirely.  `[ \t]+` alone still covers the non-generator case, and
 // `const`/`class` can never take a `*`, so the wider alternation cannot match
 // anything that is not already valid syntax.
+// `(?:const[ \t]+)?` before the keyword is for `export const enum X`: `const`
+// there is part of the ENUM declaration, not a variable binding.  Without it the
+// enum was invisible to this pattern AND the binding pass below recorded the
+// literal word `enum` as the exported name.
 const EXPORTED_VALUE_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(${NAMED_DECLARATION_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
+  `^[ \\t]*export[ \\t]+(default[ \\t]+)?(?:declare[ \\t]+)?(?:abstract[ \\t]+)?(?:async[ \\t]+)?(?:const[ \\t]+)?(${NAMED_DECLARATION_KEYWORDS.join('|')})(?:[ \\t]*\\*[ \\t]*|[ \\t]+)([A-Za-z_$][\\w$]*)`,
   'gm',
 );
 
-/** Locates an exported binding declaration; the NAMES come from the walk below. */
+/** Locates an exported binding declaration; the NAMES come from the walk below.
+ *  The lookahead hands `const enum` to the pattern above instead. */
 const EXPORTED_BINDING_RE = new RegExp(
-  `^[ \\t]*export[ \\t]+(?:declare[ \\t]+)?(${BINDING_KEYWORDS.join('|')})\\b`,
+  `^[ \\t]*export[ \\t]+(?:declare[ \\t]+)?(${BINDING_KEYWORDS.join('|')})\\b(?![ \\t]+enum\\b)`,
   'gm',
 );
 
@@ -444,12 +449,23 @@ function* scannableDeclarations(
 ): Generator<{ file: SourceFile; declaration: ExportedValue }> {
   for (const file of files) {
     if (file.isTest) continue;
+    // AGGREGATE by name within the file before yielding.  A TypeScript OVERLOAD
+    // SET is several declarations of one name — every signature plus the
+    // implementation — and each writes the name once.  Compared individually,
+    // three declarations of an unused `orphan` give a corpus total of three
+    // against a baseline of one apiece, so the export looks referenced by its
+    // own signatures.  Summing the footprint makes the comparison honest, and
+    // the set is reported once, at its FIRST declaration.
+    const byName = new Map<string, ExportedValue>();
     for (const declaration of exportedValues(file.content)) {
       // A default export's name is module-local (see `ExportedValue.isDefault`),
       // so its occurrence count carries no information either way.
       if (declaration.isDefault) continue;
-      yield { file, declaration };
+      const seen = byName.get(declaration.name);
+      if (seen === undefined) byName.set(declaration.name, { ...declaration });
+      else seen.selfOccurrences += declaration.selfOccurrences;
     }
+    for (const declaration of byName.values()) yield { file, declaration };
   }
 }
 

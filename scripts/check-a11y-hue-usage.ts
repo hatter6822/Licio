@@ -98,30 +98,59 @@ function lineOf(newlineOffsets: readonly number[], offset: number): number {
   return low + 1;
 }
 
+/** Nesting depth of `${…}` holes this walk descends into. */
+const MAX_INTERPOLATION_DEPTH = 8;
+
 /**
- * Union the string-ish tokens from BOTH regex-preference passes.
+ * Union the string-ish tokens from BOTH regex-preference passes, DESCENDING
+ * into template interpolations.
  *
  * The lexer has one undecidable case (`/` opening a regex vs. dividing), and a
  * wrong guess shifts every token after it.  Taking the union means a literal
  * that EITHER pass reads as a string is examined — the fail-closed direction for
  * a gate whose job is to notice class names.
+ *
+ * The descent is load-bearing, not thoroughness: a template is ONE token, so
+ * the nested literal in
+ *
+ *   className={`base ${bad ? 'text-error' : ''}`}
+ *
+ * is not emitted separately, and {@link blankInterpolations} then erases its only
+ * occurrence before the pattern runs.  That form — a computed class inside a
+ * template — would otherwise pass the gate.  Each hole is re-lexed against the
+ * ORIGINAL source so the offsets stay absolute and the reported line is right.
  */
 function stringTokens(source: string): Token[] {
   const byStart = new Map<number, Token>();
-  for (const preferRegex of [false, true]) {
-    for (const token of tokenize(source, preferRegex)) {
-      if (token.kind === 'string' || token.kind === 'template') byStart.set(token.start, token);
+  const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
+    for (const token of tokens) {
+      if (token.kind === 'string') {
+        byStart.set(token.start, token);
+        continue;
+      }
+      if (token.kind !== 'template') continue;
+      byStart.set(token.start, token);
+      if (depth >= MAX_INTERPOLATION_DEPTH) continue;
+      for (const span of interpolationSpans(token.value, token.start, preferRegex)) {
+        visit(
+          tokenize(source, preferRegex, { from: span.offset, stopAtUnmatchedBrace: true }),
+          preferRegex,
+          depth + 1,
+        );
+      }
     }
-  }
+  };
+  for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
   return [...byStart.values()].sort((a, b) => a.start - b.start);
 }
 
 /**
  * A template literal's `${…}` holes hold EXPRESSIONS, not class text.  Blank
  * them — preserving length and newlines so reported offsets stay true — so an
- * interpolated identifier is never read as a class name.  Nothing is lost: a
- * class name spliced through a hole is a string literal in its own right, and
- * the lexer emits it as its own token.
+ * interpolated identifier is never read as a class name.  Nothing is lost
+ * because {@link stringTokens} DESCENDS into each hole and examines the literals
+ * inside it separately; the lexer does not emit them on its own (a template is
+ * one token), so the descent is what makes this blanking safe.
  *
  * The hole bounds come from {@link interpolationSpans} rather than a brace
  * counter, for the reason recorded there: a counter is a second, weaker lexer

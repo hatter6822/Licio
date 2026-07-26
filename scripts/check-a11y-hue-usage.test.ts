@@ -62,6 +62,24 @@ describe('the bare hue on normal text', () => {
     expect(hues(source)).toEqual(['3:error']);
   });
 
+  // A template is ONE token, so a literal inside a `${…}` hole is not emitted
+  // separately and the hole-blanking erased its only occurrence — letting the
+  // most ordinary computed-class form through.  The scan descends into holes.
+  it('flags a hue in a string literal INSIDE a template interpolation', () => {
+    const source = `<p className={\`text-sm \${blocked ? 'text-error' : ''}\`} />`;
+    expect(hues(source)).toEqual(['1:error']);
+  });
+
+  it('descends into a NESTED template interpolation', () => {
+    const source = `const c = \`a \${cond ? \`b \${on ? 'text-warning' : ''}\` : ''}\`;`;
+    expect(hues(source)).toEqual(['1:warning']);
+  });
+
+  it('reports the line the nested literal sits on, not the template start', () => {
+    const source = ['const c = `', '  base', `  \${bad ? 'text-error' : ''}`, '`;'].join('\n');
+    expect(hues(source)).toEqual(['3:error']);
+  });
+
   it('flags every hue in the family', () => {
     expect(hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
       '1:success',
@@ -103,6 +121,12 @@ describe('what is NOT a violation', () => {
     // Written as an escaped template so the backticks and `${` belong to the
     // FIXTURE's source text rather than to this file's own string.
     expect(hues(`const c = \`text-sm \${textError}\`;`)).toEqual([]);
+  });
+
+  it('accepts an icon or an -on-soft pair reached through an interpolation', () => {
+    // The descent must not lose the exemptions it descends past.
+    expect(hues(`const c = \`b \${on ? 'size-4 text-success' : ''}\`;`)).toEqual([]);
+    expect(hues(`const c = \`b \${on ? 'text-error-on-soft' : ''}\`;`)).toEqual([]);
   });
 
   it('does not confuse a hue-prefixed longer word', () => {

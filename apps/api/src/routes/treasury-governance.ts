@@ -473,12 +473,17 @@ export function createTreasuryGovernanceRoutes() {
             source: body.source,
             reason: body.reason,
             actorUserId: auth.userId,
-            // Reaching here cross-room means the capability gate passed, so this
-            // actor IS acting with platform authority for this operation —
-            // including the unfreeze and non-`steward` source rules the domain
-            // enforces.  A ROLE_INTEGRITY holder who is not also ROLE_SAFETY
-            // would otherwise clear the gate and then be refused by the domain.
-            isPlatformStaff: staff || !ownSteward,
+            // LIFTING is `restrict` and nothing else.  Clearing the cross-room
+            // gate must not imply it: `ROLE_INTEGRITY` owns the freeze surface
+            // and holds no `restrict`, so an integrity analyst can halt any room
+            // while a safety/legal operator is still required to release it —
+            // which is the whole content of the domain's asymmetry.
+            isPlatformStaff: staff,
+            // ATTRIBUTION is the separate question.  A cross-room actor who
+            // cleared the capability gate is exercising platform authority, so
+            // their freeze may carry a platform source; labelling it `steward`
+            // would misattribute it in the tamper-evident audit record.
+            actsWithPlatformAuthority: staff || !ownSteward,
           });
           if ('code' in result) return tgError(c, result);
           return c.json({ freeze_state: result.profile.freezeState });

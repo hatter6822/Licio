@@ -163,6 +163,19 @@ describe('exportedValues', () => {
     expect(dead.map((d) => `${d.kind} ${d.name}`)).toEqual(['const UNUSED']);
   });
 
+  it('reads `export const enum` as an ENUM, not a variable binding', () => {
+    // `const` there belongs to the enum declaration.  Without this the enum was
+    // invisible AND the binding walk recorded the literal word `enum` as a name.
+    expect(exportedValues('export const enum Orphan { A }').map((v) => [v.kind, v.name])).toEqual([
+      ['enum', 'Orphan'],
+    ]);
+    expect(exportedValues('export declare const enum D { A }').map((v) => v.name)).toEqual(['D']);
+    // …while an ordinary binding whose name merely starts with `enum` is not.
+    expect(exportedValues('export const enumLike = 1;').map((v) => [v.kind, v.name])).toEqual([
+      ['const', 'enumLike'],
+    ]);
+  });
+
   it('finds a GENERATOR export in every spacing the grammar allows', () => {
     // `function*` puts a `*` where the scan required whitespace, so none of
     // these were seen at all — `identifierCandidates` and `writePackChunks`
@@ -347,6 +360,40 @@ describe('findDeadExports', () => {
       file('src/host.ts', "import { queue } from './index.js';\nqueue.enqueue();"),
     ]);
     expect(dead).toEqual([]);
+  });
+
+  it('reports an OVERLOAD SET nothing consumes', () => {
+    // Every signature plus the implementation writes the name once, so compared
+    // one at a time the set looks referenced BY ITSELF: three declarations give
+    // a corpus total of three against a baseline of one apiece.  The footprint
+    // is summed per file+name, and the set is reported once.
+    const overloads = [
+      'export function orphan(a: string): void;',
+      'export function orphan(a: number): void;',
+      'export function orphan(a: unknown): void {}',
+    ].join('\n');
+    expect(findDeadExports([file('src/a.ts', overloads)]).map((d) => d.name)).toEqual(['orphan']);
+  });
+
+  it('does NOT report an overload set that IS consumed', () => {
+    const overloads = [
+      'export function used(a: string): void;',
+      'export function used(a: unknown): void {}',
+    ].join('\n');
+    expect(
+      findDeadExports([
+        file('src/a.ts', overloads),
+        file('src/b.ts', "import { used } from './a.js';\nused('x');"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('reports a dead `const enum`', () => {
+    expect(
+      findDeadExports([file('src/a.ts', 'export const enum Orphan { A }')]).map(
+        (d) => `${d.kind} ${d.name}`,
+      ),
+    ).toEqual(['enum Orphan']);
   });
 
   it('sees a symbol reached through the NAMESPACE object of a dynamic import', () => {
