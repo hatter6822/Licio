@@ -167,6 +167,18 @@ describe('inert content is not markup', () => {
     expect(found[0]).toContain('a <script> precedes the CSP <meta>');
   });
 
+  it.each([
+    ['a comment', '<!-- </template> -->'],
+    ['script raw text', '<script>"</template>"</script>'],
+    ['style raw text', '<style>/* </template> */</style>'],
+  ])('is not ended early by a close tag inside %s', (_label, decoy) => {
+    // A close tag written as text is not a close tag.  Each of these ended the
+    // mask early and left a CSP meta further down the same INERT template
+    // counting as the delivered policy, with the courier applying none.
+    const html = `<html><head><template>${decoy}${META}</template></head></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+  });
+
   it('is not ended early by a COMMENTED close tag inside the template', () => {
     // A template's content is PARSED, so `<!-- </template> -->` is a comment and
     // closes nothing.  Reading it as the real close ended the mask early and let

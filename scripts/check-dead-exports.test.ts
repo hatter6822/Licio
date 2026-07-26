@@ -163,6 +163,42 @@ describe('exportedValues', () => {
     ]);
   });
 
+  it('reads `<` in an INITIALIZER as a comparison, not a type argument', () => {
+    // `export const live = left < right, other = 2` counted the `<` as an
+    // unclosed type-argument list, swallowed the declarator comma, and never
+    // recorded `other` — an unreferenced export passing the gate.  Angles are
+    // type syntax only inside a `:` annotation.
+    expect(
+      exportedValues('export const live = left < right, orphan = 2;').map((v) => v.name),
+    ).toEqual(['live', 'orphan']);
+    expect(exportedValues('export const a = x > y, b = 2;').map((v) => v.name)).toEqual(['a', 'b']);
+    expect(exportedValues('export const f = (p, q) => p < q, g = 3;').map((v) => v.name)).toEqual([
+      'f',
+      'g',
+    ]);
+    // …while an ANNOTATION's angles still hide their commas.
+    expect(
+      exportedValues('export const m: Map<string, Set<number>> = new Map(), n = 1;').map(
+        (v) => v.name,
+      ),
+    ).toEqual(['m', 'n']);
+  });
+
+  it('treats `as` / `satisfies` as opening TYPE context in an initializer', () => {
+    // `as const satisfies Record<keyof K, string>` puts type syntax INSIDE an
+    // initializer, so the comma in `Record<…>` is not a declarator separator.
+    // Missing this recorded `string` as an exported binding — caught by the
+    // gate refusing to run when the parser and the compiler disagree.
+    expect(
+      exportedValues('export const L = { a: 1 } as const satisfies Record<keyof K, string>;').map(
+        (v) => v.name,
+      ),
+    ).toEqual(['L']);
+    expect(
+      exportedValues('export const x = y as Map<string, number>, z = 1;').map((v) => v.name),
+    ).toEqual(['x', 'z']);
+  });
+
   it('does not read a comma NESTED in a default as a declarator separator', () => {
     // `{ a = f(first, phantom), b }` — that comma separates the CALL's
     // arguments.  Reading it as the pattern's separator recorded `phantom` as

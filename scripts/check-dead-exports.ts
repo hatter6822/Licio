@@ -118,8 +118,9 @@ function declarationBindings(
 ): Array<{ readonly name: string; readonly start: number }> {
   const names: Array<{ name: string; start: number }> = [];
   let depth = 0; // (), [], {}
-  let angle = 0; // <> — counted only while skipping
+  let angle = 0; // <> — counted only inside a TYPE ANNOTATION (see below)
   let taking = true; // in a BINDING position, rather than skipping to the next
+  let annotating = false; // skipping a `:` annotation rather than an `=` initializer
   let patternDepth = 0; // >0 while inside this declarator's destructuring pattern
 
   for (let i = 0; i < tokens.length && i < MAX_DECLARATOR_TOKENS; i += 1) {
@@ -127,7 +128,18 @@ function declarationBindings(
     if (token === undefined) break;
 
     if (token.kind !== 'punct') {
-      if (token.kind !== 'ident' || !taking) continue;
+      if (token.kind !== 'ident') continue;
+      if (!taking) {
+        // `as` and `satisfies` open TYPE context inside an initializer, so the
+        // angles after them are type arguments after all:
+        //   `export const L = { … } as const satisfies Record<keyof K, string>;`
+        // Without this the `,` inside `Record<…>` read as a declarator
+        // separator and `string` was recorded as an exported binding — caught
+        // by the gate's own refusal to run when the parser and the compiler
+        // disagree about what a file exports, which is what that check is for.
+        if (token.value === 'as' || token.value === 'satisfies') annotating = true;
+        continue;
+      }
       // Inside a pattern, `key:` names a PROPERTY — the binding follows the `:`.
       const next = tokens[i + 1];
       if (patternDepth > 0 && next?.kind === 'punct' && next.value === ':') continue;
@@ -169,12 +181,25 @@ function declarationBindings(
     }
     if (depth !== 0) continue;
     if (!taking) {
-      if (punct === '<') angle += 1;
-      else if (punct === '>') angle = Math.max(0, angle - 1);
-      else if (punct === ',' && angle === 0) taking = true;
+      // Angles are TYPE syntax only inside an ANNOTATION.  In an initializer a
+      // `<` is a comparison: `export const live = left < right, other = 2`
+      // counted it as an unclosed type-argument list, swallowed the declarator
+      // comma, and never recorded `other` — an unreferenced export passing the
+      // gate.  Which kind of skip this is has to be read HERE, because the
+      // binding above has already closed `taking` by the time the `:` or `=`
+      // arrives.
+      if (angle === 0 && punct === ':') annotating = true;
+      else if (angle === 0 && punct === '=') annotating = false;
+      else if (annotating && punct === '<') angle += 1;
+      else if (annotating && punct === '>') angle = Math.max(0, angle - 1);
+      else if (punct === ',' && angle === 0) {
+        taking = true;
+        annotating = false;
+      }
       continue;
     }
-    // At a binding position, `:` opens an annotation and `=` an initializer.
+    // At a binding position, `:` and `=` both end it; the skip branch above
+    // then reads which one it was.
     if (punct === ':' || punct === '=') taking = false;
   }
   return names;

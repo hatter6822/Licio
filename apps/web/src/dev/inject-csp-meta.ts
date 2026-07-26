@@ -127,17 +127,46 @@ function indexOfClose(html: string, name: string, from: number): number {
   return found === null ? html.length : from + found.index;
 }
 
+/** Raw-text and escapable-raw-text elements: their content is never markup. */
+const RAW_TEXT_ELEMENTS = ['script', 'style', 'textarea', 'title', 'noscript'] as const;
+const RAW_TEXT_OPEN = new RegExp(`<\\s*(${RAW_TEXT_ELEMENTS.join('|')})\\b[^>]*>`, 'iy');
+
+/**
+ * Past any run starting at `i` that a parser does not read as markup — a
+ * comment, or a raw-text element together with its content.  Returns `i`
+ * unchanged when markup does start there.
+ *
+ * ONE place that answers "is this a tag or is it text", used by every scan that
+ * needs to know.  Three separate scans each learned that question the hard way —
+ * a `<meta>` inside a comment, a `</template>` inside a comment, and now a
+ * `</template>` inside `<script>` raw text — because each modelled the contexts
+ * it happened to think of.  A close tag written as a STRING in script text is
+ * not a close tag, and no amount of pattern-tightening around `</template>`
+ * would have found that; knowing the contexts is the whole job.
+ */
+function skipNonMarkup(html: string, i: number): number {
+  if (html.startsWith('<!--', i)) {
+    const close = html.indexOf('-->', i + 4);
+    return close === -1 ? html.length : close + 3;
+  }
+  RAW_TEXT_OPEN.lastIndex = i;
+  const open = RAW_TEXT_OPEN.exec(html);
+  if (open === null) return i;
+  const name = (open[1] ?? '').toLowerCase();
+  const contentFrom = i + open[0].length;
+  const close = new RegExp(`</${name}\\s*>`, 'i').exec(html.slice(contentFrom));
+  return close === null ? html.length : contentFrom + close.index + close[0].length;
+}
+
 /**
  * Offset of the `</template>` that closes the one opened before `from`.
  *
- * Comment-aware, unlike {@link indexOfClose}, and the difference is not a
- * refinement — it is the difference between masking the template and stopping in
- * the middle of it.  A `<template>`'s content is PARSED, so `<!-- </template> -->`
- * inside it is a comment and does not close anything; a raw-text element's
- * content is not parsed, so its first `</name>` ends it whatever surrounds it.
- * Scanning for the close with a plain pattern read the commented tag as real,
- * ended the mask early, and left a CSP `<meta>` further down the same inert
- * template counting as the delivered policy — with the courier applying none.
+ * A `<template>`'s content IS parsed, so nested comments and raw-text elements
+ * follow the ordinary rules inside it — `<!-- </template> -->` is a comment and
+ * `<script>"</template>"</script>` is a string, and neither closes anything.
+ * Both are skipped through {@link skipNonMarkup} before depth is touched.
+ * Stopping at either left a CSP `<meta>` further down the same inert template
+ * counting as the delivered policy, with the courier applying none.
  */
 function endOfTemplate(html: string, from: number): number {
   const OPEN = /<\s*template\b[^>]*>/iy;
@@ -145,9 +174,9 @@ function endOfTemplate(html: string, from: number): number {
   let depth = 1;
   let i = from;
   while (i < html.length) {
-    if (html.startsWith('<!--', i)) {
-      const close = html.indexOf('-->', i + 4);
-      i = close === -1 ? html.length : close + 3;
+    const skipped = skipNonMarkup(html, i);
+    if (skipped !== i) {
+      i = skipped;
       continue;
     }
     if (html[i] !== '<') {
