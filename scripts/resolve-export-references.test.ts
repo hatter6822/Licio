@@ -226,6 +226,19 @@ const FILES: Record<string, string> = {
     ');',
   ].join('\n'),
 
+  // ── Reference: a STATIC namespace import, destructured later ────────────
+  'src/static-ns.ts': [
+    'export const STATIC_NS_LIVE = 13;',
+    'export const STATIC_NS_DEAD = 14;',
+  ].join('\n'),
+  'src/static-ns-consumer.ts': [
+    "import * as ns from './static-ns.js';",
+    'export function read(): number {',
+    '  const { STATIC_NS_LIVE } = ns;',
+    '  return STATIC_NS_LIVE;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: the namespace STORED, then destructured a statement later ─
   'src/stored.ts': ['export const STORED_LIVE = 11;'].join('\n'),
   'src/stored-consumer.ts': [
@@ -444,6 +457,19 @@ describe('resolution: which sites use a binding', () => {
     // ARGUMENT too: `.then((({ A }) => …))` is the same consumer as
     // `.then(({ A }) => …)`.
     expect(usesOf('src/wrapped-callback.ts', 'CALLBACK_LIVE').length).toBeGreaterThan(0);
+  });
+
+  it('counts a STATIC namespace import destructured later', () => {
+    // `import * as ns from 'M'; const { A } = ns` binds the namespace exactly
+    // as a stored dynamic import does, and a PRIMITIVE export has no origin
+    // symbol for the type route to recover.
+    expect(usesOf('src/static-ns.ts', 'STATIC_NS_LIVE').length).toBeGreaterThan(0);
+  });
+
+  it('does not OVER-credit the rest of a destructured namespace', () => {
+    // Only the names the pattern actually binds are consumed; a sibling export
+    // of the same module stays dead.
+    expect(usesOf('src/static-ns.ts', 'STATIC_NS_DEAD')).toHaveLength(0);
   });
 
   it('counts a namespace STORED in a local and destructured later', () => {

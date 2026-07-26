@@ -266,6 +266,21 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
     // `</br>` reads as a typo and is in the spec: the "in head" mode handles
     // `</body>`, `</html>` and `</br>` by popping the head and REPROCESSING in
     // the body.  Every other end tag there is a parse error and ignored.
+    // The tokenizer keeps `=`, `"`, `'`, `` ` `` and `<` INSIDE an unquoted
+    // value (parse errors, but part of the value), so only whitespace and `>`
+    // end one.  Stopping at the `=` splits one attribute into two and invents
+    // an `http-equiv` the browser never creates.
+    it('keeps an `=` inside an unquoted attribute value', () => {
+      const html = `<!doctype html><html><head><meta data=x=http-equiv=Content-Security-Policy content="${POLICY}"></head><body></body></html>`;
+      expect(extractMetaPolicies(html)).toEqual([]);
+      expect(problems(html).join('\n')).toContain('no <meta http-equiv="Content-Security-Policy">');
+    });
+
+    it('keeps the FIRST value of a duplicated attribute, as the tokenizer does', () => {
+      const html = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${POLICY}" content="x"></head><body></body></html>`;
+      expect(problems(html)).toEqual([]);
+    });
+
     it('treats `</br>` as closing the head', () => {
       const html = `<!doctype html><html><head></br>${META}</head><body></body></html>`;
       expect(problems(html).join('\n')).toMatch(/outside <head>|AFTER <\//);

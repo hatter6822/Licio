@@ -69,6 +69,12 @@ const INERT_CONTENT: ReadonlySet<string> = new Set(INERT_CONTENT_ELEMENTS);
  */
 const PLAINTEXT = 'plaintext';
 
+/** One attribute as the tokenizer produced it: a lower-cased name, a raw value. */
+export interface HtmlAttribute {
+  readonly name: string;
+  readonly value: string;
+}
+
 /** One tag a parser would actually create, with the text it spans. */
 export interface HtmlTag {
   readonly kind: 'tag';
@@ -80,18 +86,21 @@ export interface HtmlTag {
   readonly at: number;
   /** Byte offset just past the `>`. */
   readonly end: number;
-  /** The tag's own text, `<` through `>`, for attribute parsing. */
+  /** The tag's own text, `<` through `>`. */
   readonly raw: string;
   /**
-   * Offset WITHIN `raw` where the attributes begin — just past the tag name.
+   * The attributes as the TOKENIZER produced them, in source order.
    *
-   * Published because the reader already knows it: a consumer that re-derives
-   * it with its own `^<[a-zA-Z][^\s/>]*` pattern is a second spelling of the
-   * name rule, and this file has now had that rule disagree with itself three
-   * times (character tokens, tag names, attribute names).  One reader, one
-   * answer.
+   * Names are lower-cased (HTML names are ASCII case-insensitive); values are
+   * RAW — character references are the consumer's to decode, since the
+   * tokenizer decodes them per context.
+   *
+   * Published because the reader already computes them: a consumer with its own
+   * attribute pattern is a second spelling of one rule, and in this file that
+   * rule has disagreed with itself four times — character tokens, tag names,
+   * attribute names, and unquoted values.  One reader, one answer.
    */
-  readonly attributesAt: number;
+  readonly attributes: readonly HtmlAttribute[];
 }
 
 const ASCII_LETTER = /[a-zA-Z]/;
@@ -131,7 +140,7 @@ function readTag(html: string, at: number): HtmlTag | null {
   const nameFrom = i;
   while (i < len && !SPACE.test(html[i] ?? '') && html[i] !== '/' && html[i] !== '>') i += 1;
   const name = html.slice(nameFrom, i).toLowerCase();
-  const attributesAt = i - at;
+  const attributes: HtmlAttribute[] = [];
   const done = (end: number): HtmlTag => ({
     kind: 'tag',
     name,
@@ -139,7 +148,7 @@ function readTag(html: string, at: number): HtmlTag | null {
     at,
     end,
     raw: html.slice(at, end),
-    attributesAt,
+    attributes,
   });
 
   while (i < len) {
@@ -160,19 +169,33 @@ function readTag(html: string, at: number): HtmlTag | null {
       i += 1; // never stall, whatever the input
       continue;
     }
+    const attributeName = html.slice(nameStart, i).toLowerCase();
     let j = i;
     while (j < len && SPACE.test(html[j] ?? '')) j += 1;
-    if (html[j] !== '=') continue; // a valueless attribute
+    if (html[j] !== '=') {
+      attributes.push({ name: attributeName, value: '' }); // a valueless attribute
+      continue;
+    }
     j += 1;
     while (j < len && SPACE.test(html[j] ?? '')) j += 1;
     const quote = html[j];
     if (quote === '"' || quote === "'") {
       const close = html.indexOf(quote, j + 1);
+      attributes.push({
+        name: attributeName,
+        value: html.slice(j + 1, close === -1 ? len : close),
+      });
       i = close === -1 ? len : close + 1;
       continue;
     }
+    // UNQUOTED: `=`, `"`, `'`, `` ` `` and `<` are parse errors but are KEPT IN
+    // THE VALUE, so only whitespace and `>` end it.  Stopping at the `=` in
+    // `data=x=http-equiv=…` splits one attribute into two and invents an
+    // `http-equiv` the browser never creates — a policy the gate reads and the
+    // WebView does not apply.
     let k = j;
     while (k < len && !SPACE.test(html[k] ?? '') && html[k] !== '>') k += 1;
+    attributes.push({ name: attributeName, value: html.slice(j, k) });
     i = k;
   }
   // An unterminated tag runs to the end of the document, as in a parser.

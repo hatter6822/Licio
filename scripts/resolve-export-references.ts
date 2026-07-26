@@ -450,6 +450,18 @@ function scanFile(root: NodeHandle): FileScan {
       // STATIC: `import { A, B as c } from 'M'` — the export side precedes `as`.
       const specifier = node.moduleSpecifier;
       const named = node.importClause?.namedBindings;
+      // `import * as mod from 'M'` — the namespace is bound to a local, and a
+      // later `const { A } = mod` destructures it exactly as a stored dynamic
+      // import does.  Recorded in the SAME map, so the two spellings of "this
+      // local holds a module" are answered by one lookup rather than two rules.
+      if (specifier !== undefined && named?.kind === SyntaxKind.NamespaceImport) {
+        const local = nameOf(named.name);
+        if (local !== undefined) {
+          const seen = namespaceLocals.get(local);
+          if (seen === undefined) namespaceLocals.set(local, [specifier.getStart()]);
+          else seen.push(specifier.getStart());
+        }
+      }
       if (specifier !== undefined && named?.kind === SyntaxKind.NamedImports) {
         const names: string[] = [];
         named.forEachChild((element) => {

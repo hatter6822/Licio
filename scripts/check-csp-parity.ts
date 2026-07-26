@@ -52,23 +52,6 @@ export function parsePolicyString(policy: string): string[] {
 }
 
 /**
- * One HTML attribute: a name, then optionally `=` and a value in any of the
- * three forms the parser accepts — double-quoted, single-quoted, or UNQUOTED
- * (WHATWG HTML §13.1.2.3).  The unquoted form is why this is a parser rather
- * than a pair of `content="…"` / `content='…'` patterns: `<meta
- * http-equiv=Content-Security-Policy content="…">` is valid HTML that a browser
- * honours in full, and a quote-only matcher does not see it at all.
- *
- * The whitespace class is HTML's — TAB, LF, FF, CR, SPACE — never JavaScript's
- * `\s`.  With `\s`, `http-equiv\u00a0="…"` parses as the attribute `http-equiv`
- * while the browser reads a DIFFERENT attribute named `http-equiv\u00a0`,
- * recognises no CSP meta, and runs the courier with no policy while this gate
- * reports one delivered.  Same rule as the tag reader, which is the point.
- */
-const ATTRIBUTE =
-  /([^\t\n\f\r />=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r "'`=<>]*)))?/g;
-
-/**
  * The named character references that produce an ASCII character.
  *
  * Deliberately not the full 2231-entry HTML5 table: every OTHER named reference
@@ -145,20 +128,26 @@ function codePointOrRaw(code: number, whole: string): string {
   return String.fromCodePoint(code);
 }
 
-/** Attributes of a start tag, names lower-cased (HTML names are ASCII-insensitive). */
+/**
+ * The tag's attributes as CSP would see them: first spelling wins, values
+ * decoded.
+ *
+ * The PARSING is the reader's — this file no longer has an attribute pattern of
+ * its own, which is what let it split `data=x=http-equiv=…` into two attributes
+ * and read an `http-equiv` the browser never creates.  What remains here is the
+ * gate's own semantics: a DUPLICATE attribute keeps its first value (the
+ * tokenizer discards later ones), and values are entity-decoded because the
+ * tokenizer decodes them before CSP ever sees them.  Names are NOT decoded —
+ * the tokenizer does not decode references in a name, so `http-equi&#118;` is
+ * genuinely a different attribute.
+ */
 function parseTagAttributes(tag: HtmlTag): Map<string, string> {
   const attributes = new Map<string, string>();
-  // Where the READER says the name ended.  Re-deriving it here with a second
-  // pattern is how the name rule came to disagree with itself; the tag knows.
-  const body = tag.raw.slice(tag.attributesAt);
-  ATTRIBUTE.lastIndex = 0;
-  for (const match of body.matchAll(ATTRIBUTE)) {
-    const name = match[1]?.toLowerCase();
-    if (name === undefined || name === '') continue;
-    // The NAME is not entity-decoded — the tokenizer does not decode references
-    // in attribute names, so `http-equi&#118;` really is a different attribute.
-    const raw = match[2] ?? match[3] ?? match[4] ?? '';
-    if (!attributes.has(name)) attributes.set(name, decodeHtmlReferences(raw));
+  for (const attribute of tag.attributes) {
+    if (attribute.name === '') continue;
+    if (!attributes.has(attribute.name)) {
+      attributes.set(attribute.name, decodeHtmlReferences(attribute.value));
+    }
   }
   return attributes;
 }
