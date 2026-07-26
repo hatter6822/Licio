@@ -813,14 +813,26 @@ export function isReferenceOnlyPath(path: string): boolean {
   return isTestPath(path) || isGeneratedPath(path);
 }
 
-/** Test-ish paths: their own exports are not scanned (references still count). */
+/**
+ * Test-ish paths: their own exports are not scanned (references still count).
+ *
+ * Every pattern is ANCHORED to a directory boundary or a whole file name.  An
+ * unanchored `-fixtures` matched anywhere in the path, so
+ * `packages/governance/src/schemas/law-pack-fixtures.ts` — production schemas
+ * exported from `@licio/governance` and consumed by the treasury readiness and
+ * law-pack routes — was classified test-only and never judged.  A gate that
+ * silently exempts production files by filename is worse than no gate on them,
+ * because the coverage it claims is not the coverage it has.
+ */
 export function isTestPath(path: string): boolean {
   return (
     /(?:^|\/)__tests__\//.test(path) ||
     /\.(test|spec)\.tsx?$/.test(path) ||
     /(?:^|\/)e2e\//.test(path) ||
     /(?:^|\/)test\//.test(path) ||
-    /test-helpers|test-vectors|-fixtures|(?:^|\/)fixtures\//.test(path)
+    /(?:^|\/)test-vectors\//.test(path) ||
+    /(?:^|\/)fixtures\//.test(path) ||
+    /(?:^|\/)[\w.-]*test-helpers\.tsx?$/.test(path)
   );
 }
 

@@ -433,16 +433,29 @@ describe('isTestPath', () => {
     'apps/web/e2e/x.spec.ts',
     'apps/web/src/test/setup.ts',
     'packages/lcap/src/test-vectors/x.ts',
+    'packages/shared/src/update/test-helpers.ts',
   ])('treats %s as test-ish', (path) => {
     expect(isTestPath(path)).toBe(true);
   });
 
-  it.each(['apps/api/src/routes/auth.ts', 'packages/shared/src/schemas/common.ts'])(
-    'treats %s as source',
-    (path) => {
-      expect(isTestPath(path)).toBe(false);
-    },
-  );
+  // Every pattern is ANCHORED.  An unanchored `-fixtures` matched anywhere in
+  // the path, so production schemas exported from `@licio/governance` and
+  // consumed by the treasury routes were classified test-only and never judged.
+  // A gate that silently exempts production files by filename is worse than no
+  // gate on them: the coverage it claims is not the coverage it has.
+  it.each([
+    'packages/governance/src/schemas/law-pack-fixtures.ts',
+    'apps/api/src/simulator/link-fixtures.ts',
+    'apps/api/src/routes/auth.ts',
+    'packages/shared/src/schemas/common.ts',
+  ])('treats %s as SOURCE, to be judged', (path) => {
+    expect(isTestPath(path)).toBe(false);
+  });
+
+  it('still exempts a fixture that lives in a test directory', () => {
+    expect(isTestPath('apps/api/src/__tests__/lcap-fixtures.ts')).toBe(true);
+    expect(isTestPath('packages/shared/src/__tests__/event-fixtures.ts')).toBe(true);
+  });
 });
 
 describe('the REAL repository', () => {
