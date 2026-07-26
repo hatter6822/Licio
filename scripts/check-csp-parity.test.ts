@@ -175,6 +175,20 @@ describe('a tag inside an ATTRIBUTE VALUE is not a tag', () => {
     const html = `<meta http-equiv=Content-Security-Policy content="${POLICY}">`;
     expect(extractMetaPolicies(html)).toEqual([POLICY]);
   });
+
+  it('reads a raw-text element inside a TEMPLATE by its real tag bounds', () => {
+    // The last place this file spelled tag bounds twice.  A `[^>]*>` open-tag
+    // pattern ends `<script data-x="a></script>b">` at the `>` inside the value,
+    // so the `</script>` search then matches the one in that same value: the
+    // skip stops early, the string `"</template>"` in the script body is read as
+    // a real close tag, the template ends there — and the `<meta>` still inside
+    // that inert template counts as the delivered policy, with the courier
+    // applying none.
+    const html =
+      `<template><script data-x="a></script>b">var s = "</template>";</script>` +
+      `<meta http-equiv="Content-Security-Policy" content="${POLICY}"></template>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+  });
 });
 
 describe('inert content is not markup', () => {

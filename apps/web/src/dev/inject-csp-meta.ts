@@ -191,9 +191,17 @@ function indexOfClose(html: string, name: string, from: number): number {
   return found === null ? html.length : from + found.index;
 }
 
-/** Raw-text and escapable-raw-text elements: their content is never markup. */
-const RAW_TEXT_ELEMENTS = ['script', 'style', 'textarea', 'title', 'noscript'] as const;
-const RAW_TEXT_OPEN = new RegExp(`<\\s*(${RAW_TEXT_ELEMENTS.join('|')})\\b[^>]*>`, 'iy');
+/**
+ * Raw-text and escapable-raw-text elements: their content is never markup.
+ *
+ * DERIVED from the inert set rather than listed again, by the one rule that
+ * separates them: `<template>`'s content IS parsed (into an inert fragment), so
+ * it nests and needs depth counting; every other inert element holds text, which
+ * cannot nest and ends at its first close tag.
+ */
+const RAW_TEXT: ReadonlySet<string> = new Set(
+  INERT_CONTENT_ELEMENTS.filter((name) => name !== 'template'),
+);
 
 /**
  * Past any run starting at `i` that a parser does not read as markup — a
@@ -201,25 +209,28 @@ const RAW_TEXT_OPEN = new RegExp(`<\\s*(${RAW_TEXT_ELEMENTS.join('|')})\\b[^>]*>
  * unchanged when markup does start there.
  *
  * ONE place that answers "is this a tag or is it text", used by every scan that
- * needs to know.  Three separate scans each learned that question the hard way —
- * a `<meta>` inside a comment, a `</template>` inside a comment, and now a
- * `</template>` inside `<script>` raw text — because each modelled the contexts
- * it happened to think of.  A close tag written as a STRING in script text is
- * not a close tag, and no amount of pattern-tightening around `</template>`
- * would have found that; knowing the contexts is the whole job.
+ * needs to know.  Four separate scans each learned that question the hard way —
+ * a `<meta>` inside a comment, a `</template>` inside a comment, a `</template>`
+ * inside `<script>` raw text, and a whole `<meta>` inside an ATTRIBUTE VALUE —
+ * because each modelled the contexts it happened to think of.  A close tag
+ * written as a STRING in script text is not a close tag, and no amount of
+ * pattern-tightening around `</template>` would have found that; knowing the
+ * contexts is the whole job.
+ *
+ * The open tag is read by {@link readTag} for that reason: a hand-rolled
+ * `[^>]*>` here ended `<script data-x="a>b">` at the `>` INSIDE the value and
+ * began scanning for content from the middle of an attribute — the same defect,
+ * one layer down, in the last place this file still spelled tag bounds twice.
  */
 function skipNonMarkup(html: string, i: number): number {
   if (html.startsWith('<!--', i)) {
     const close = html.indexOf('-->', i + 4);
     return close === -1 ? html.length : close + 3;
   }
-  RAW_TEXT_OPEN.lastIndex = i;
-  const open = RAW_TEXT_OPEN.exec(html);
-  if (open === null) return i;
-  const name = (open[1] ?? '').toLowerCase();
-  const contentFrom = i + open[0].length;
-  const close = new RegExp(`</${name}\\s*>`, 'i').exec(html.slice(contentFrom));
-  return close === null ? html.length : contentFrom + close.index + close[0].length;
+  const tag = readTag(html, i);
+  if (tag === null || tag.closing || !RAW_TEXT.has(tag.name)) return i;
+  const close = new RegExp(`</${tag.name}\\s*>`, 'i').exec(html.slice(tag.end));
+  return close === null ? html.length : tag.end + close.index + close[0].length;
 }
 
 /**
@@ -233,8 +244,6 @@ function skipNonMarkup(html: string, i: number): number {
  * counting as the delivered policy, with the courier applying none.
  */
 function endOfTemplate(html: string, from: number): number {
-  const OPEN = /<\s*template\b[^>]*>/iy;
-  const CLOSE = /<\s*\/\s*template\s*>/iy;
   let depth = 1;
   let i = from;
   while (i < html.length) {
@@ -247,20 +256,21 @@ function endOfTemplate(html: string, from: number): number {
       i += 1;
       continue;
     }
-    CLOSE.lastIndex = i;
-    if (CLOSE.exec(html) !== null) {
-      depth -= 1;
-      if (depth === 0) return i;
-      i = CLOSE.lastIndex;
+    const tag = readTag(html, i);
+    if (tag === null) {
+      i += 1;
       continue;
     }
-    OPEN.lastIndex = i;
-    if (OPEN.exec(html) !== null) {
-      depth += 1;
-      i = OPEN.lastIndex;
-      continue;
+    if (tag.name === 'template') {
+      if (!tag.closing) depth += 1;
+      else {
+        depth -= 1;
+        if (depth === 0) return i;
+      }
     }
-    i += 1;
+    // Past the WHOLE tag: a `<` inside one of its attribute values starts
+    // nothing, so re-entering the tag body could only find a phantom.
+    i = tag.end;
   }
   return html.length;
 }
