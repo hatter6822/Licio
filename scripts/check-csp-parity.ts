@@ -21,8 +21,17 @@
 // per CSP L3 §8.1), which is a confusing way to enforce something that already
 // has one definition.
 //
-// Deliberately dependency-free so the `scripts`-rooted vitest project can unit
-// test the pure core directly.
+// The HTML questions — where the head is, whether a `<meta>` is a CHILD of it,
+// what its attributes decode to — are answered by parse5, through
+// `inject-csp-meta`.  This file was dependency-free while it scanned by hand,
+// and that scanner disagreed with the tokenizer in eight places review had to
+// find one at a time; the reasoning is in `inject-csp-meta`'s header.  What the
+// note was protecting still holds: the core is PURE and the `scripts`-rooted
+// vitest project exercises it directly, on strings, with no build required.
+//
+// What stays here is the gate's own judgement rather than the parser's: which
+// tags a policy must precede, how a delivered policy is compared to the shared
+// source, and which directives a `<meta>` silently ignores.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

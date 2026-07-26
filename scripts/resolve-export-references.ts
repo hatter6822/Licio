@@ -433,6 +433,16 @@ function scanFile(root: NodeHandle): FileScan {
   /** `const { A } = mod` sites, resolved after the whole file is walked, since
    *  the binding they read may be declared anywhere in it. */
   const deferredDestructures: Array<{ pattern: NodeHandle; from: NodeHandle }> = [];
+  /**
+   * `const alias = original` — an identifier copied from another identifier.
+   *
+   * A namespace keeps its provenance across such a hop, so
+   * `import * as original from 'M'; const alias = original; const { A } = alias`
+   * names M's export exactly as the un-aliased form does.  Collected during the
+   * walk and followed afterwards, because the alias may be written before the
+   * binding it copies.
+   */
+  const aliasEdges: Array<{ to: string; from: string }> = [];
 
   const namesOfPattern = (pattern: NodeHandle): string[] => {
     const names: string[] = [];
@@ -534,6 +544,15 @@ function scanFile(root: NodeHandle): FileScan {
       }
     } else if (
       node.kind === SyntaxKind.VariableDeclaration &&
+      node.name?.kind === SyntaxKind.Identifier &&
+      unwrap(node.initializer)?.kind === SyntaxKind.Identifier
+    ) {
+      // `const alias = original` — carry any namespace provenance across it.
+      const to = nameOf(node.name);
+      const from = nameOf(unwrap(node.initializer));
+      if (to !== undefined && from !== undefined && to !== from) aliasEdges.push({ to, from });
+    } else if (
+      node.kind === SyntaxKind.VariableDeclaration &&
       node.name?.kind === SyntaxKind.ObjectBindingPattern
     ) {
       // `const { A } = mod`, where `mod` holds a namespace — and `= (mod)` or
@@ -560,6 +579,22 @@ function scanFile(root: NodeHandle): FileScan {
   };
 
   visit(root);
+  // Follow alias edges to a fixed point, so a chain of copies still resolves.
+  // Bounded by the edge count: each pass must add at least one binding or stop.
+  for (let pass = 0; pass < aliasEdges.length; pass += 1) {
+    let grew = false;
+    for (const edge of aliasEdges) {
+      const source = namespaceLocals.get(edge.from);
+      if (source === undefined) continue;
+      const existing = namespaceLocals.get(edge.to) ?? [];
+      const merged = [...new Set([...existing, ...source])];
+      if (merged.length !== existing.length) {
+        namespaceLocals.set(edge.to, merged);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+  }
   for (const { pattern, from } of deferredDestructures) {
     const local = nameOf(from);
     if (local === undefined) continue;

@@ -114,10 +114,22 @@ const HUE_FG = new RegExp(`${CLASS_BOUNDARY}([\\w[\\]&:.-]*?)text-(${HUES})-fg${
  * an unconditional fill covers every state the text can render in, including
  * the prefixed ones.
  */
-const pairedBackground = (hue: string, variant: string): RegExp =>
-  new RegExp(
-    `${BACKGROUND_BOUNDARY}(?:${escapeVariant(variant)})?bg-${hue}(?:-hover|-active)?${CLASS_END}`,
-  );
+function pairedBackground(text: string, hue: string, variant: string): boolean {
+  const isSolid = new RegExp(`^bg-${hue}(?:-hover|-active)?$`);
+  if (variant !== '') {
+    // Whatever background the class sets AT this state is the one in force
+    // there.  `bg-error text-error-fg sm:bg-canvas sm:text-error-fg` is white on
+    // the canvas at `sm`: the unconditional fill is REPLACED, not inherited.
+    const atState = [
+      ...text.matchAll(
+        new RegExp(`${BACKGROUND_BOUNDARY}${escapeVariant(variant)}(bg-[\\w-]+)`, 'g'),
+      ),
+    ];
+    if (atState.length > 0) return atState.some((match) => isSolid.test(match[1] ?? ''));
+  }
+  // Otherwise an UNCONDITIONAL solid fill covers every state the text renders in.
+  return new RegExp(`${BACKGROUND_BOUNDARY}bg-${hue}(?:-hover|-active)?${CLASS_END}`).test(text);
+}
 
 /**
  * Like {@link CLASS_BOUNDARY} but WITHOUT `:`, for matching a background.
@@ -636,12 +648,17 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       // What the RUNTIME sees: the operands joined, delimiters dropped, escapes
       // decoded.  `'text-' + 'error'` is the class `text-error`.
       const { text, offsets } = groupContent(group);
-      // An ICON is a graphical object (WCAG 1.4.11, 3:1).  BOTH halves are
-      // required: the size class alone describes a box, not a glyph.
-      if (ICON_SIZE.test(text) && enclosingElement(file.content, start) === ICON_ELEMENT) {
-        continue;
-      }
-      const bare = BARE_HUE.exec(text);
+      // An ICON is a graphical object (WCAG 1.4.11, 3:1), which is why the BARE
+      // hue is allowed on one.  BOTH halves are required: the size class alone
+      // describes a box, not a glyph.
+      //
+      // It does NOT excuse a `-fg` token.  That one is white and is tested only
+      // against its matching SOLID background, so `<Icon className="size-4
+      // text-error-fg" />` on the canvas is near-invisible whether or not the
+      // glyph counts as graphical — 1.4.11 asks for 3:1 against the ADJACENT
+      // colour, and white on near-white clears nothing.
+      const isIcon = ICON_SIZE.test(text) && enclosingElement(file.content, start) === ICON_ELEMENT;
+      const bare = isIcon ? null : BARE_HUE.exec(text);
       // A `-fg` token is legible only over its own solid background.
       // EVERY `-fg` in the string, not just the first: one class can carry
       // several, and `bg-error text-error-fg sm:bg-canvas sm:text-warning-fg`
@@ -650,7 +667,7 @@ export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] 
       let unpaired: RegExpExecArray | null = null;
       for (const fg of text.matchAll(HUE_FG)) {
         // Group 1 is the variant prefix (`hover:`, `md:`, …), group 2 the hue.
-        if (fg[2] === undefined || pairedBackground(fg[2], fg[1] ?? '').test(text)) continue;
+        if (fg[2] === undefined || pairedBackground(text, fg[2], fg[1] ?? '')) continue;
         unpaired = fg as RegExpExecArray;
         break;
       }

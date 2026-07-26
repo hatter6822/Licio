@@ -267,6 +267,25 @@ describe('what is NOT a violation', () => {
     );
   });
 
+  it('rejects a -fg whose state REPLACES the qualifying background', () => {
+    // `sm:bg-canvas` overrides the unconditional `bg-error` at `sm`, where the
+    // text is still white — the fill is replaced, not inherited.
+    expect(hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-error-fg';`)).toEqual([
+      '1:error',
+    ]);
+    expect(hues(`const a = 'bg-error text-error-fg sm:bg-error sm:text-error-fg';`)).toEqual([]);
+    expect(hues(`const a = 'bg-error text-error-fg sm:text-error-fg';`)).toEqual([]);
+  });
+
+  it('does not let the ICON exemption waive a -fg token', () => {
+    // The bare hue is fine on a graphical object (1.4.11, 3:1).  `-fg` is white
+    // and tested only against its solid fill, so on the canvas the glyph is
+    // near-invisible whether or not it counts as graphical.
+    expect(hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
+    expect(hues(`<Icon className="size-4 text-error-fg" />`)).toEqual(['1:error']);
+    expect(hues(`<Icon className="size-4 bg-error text-error-fg" />`)).toEqual([]);
+  });
+
   it('REJECTS a -fg token over the SOFT tint, which is nearly white', () => {
     // `error-soft` is #FBE7E5 — white text on it is the same defect as white
     // text on the canvas.  That pairing wants `-on-soft`.

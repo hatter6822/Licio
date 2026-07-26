@@ -236,6 +236,23 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: namespace provenance across an identifier ALIAS ──────────
+  'src/aliased-ns.ts': ['export const VIA_ALIAS = 18;', 'export const VIA_CHAIN = 19;'].join('\n'),
+  'src/aliased-ns-consumer.ts': [
+    "import * as original from './aliased-ns.js';",
+    'export function one(): number {',
+    '  const alias = original;',
+    '  const { VIA_ALIAS } = alias;',
+    '  return VIA_ALIAS;',
+    '}',
+    'export function two(): number {',
+    '  const first = original;',
+    '  const second = first;',
+    '  const { VIA_CHAIN } = second;',
+    '  return VIA_CHAIN;',
+    '}',
+  ].join('\n'),
+
   // ── Reference: a STATIC namespace import, destructured later ────────────
   'src/static-ns.ts': [
     'export const STATIC_NS_LIVE = 13;',
@@ -499,6 +516,15 @@ describe('resolution: which sites use a binding', () => {
     // nor the stored-namespace path saw it.
     expect(usesOf('src/direct-assign.ts', 'DIRECT_ASSIGN').length).toBeGreaterThan(0);
   });
+
+  it.each(['VIA_ALIAS', 'VIA_CHAIN'])(
+    'carries namespace provenance across an identifier alias (%s)',
+    (name) => {
+      // `const alias = original` keeps the namespace, and so does a chain of
+      // them — the destructure a statement later still names M's export.
+      expect(usesOf('src/aliased-ns.ts', name).length).toBeGreaterThan(0);
+    },
+  );
 
   it('counts a STATIC namespace import destructured later', () => {
     // `import * as ns from 'M'; const { A } = ns` binds the namespace exactly
