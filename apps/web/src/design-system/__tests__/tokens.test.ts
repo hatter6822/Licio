@@ -135,11 +135,32 @@ describe.each(modes)('colour mode: %s', (mode) => {
     }
   });
 
-  it('semantic on-soft text is also ≥ 4.5:1 directly on the canvas (toneTextClasses)', () => {
+  it('semantic on-soft text is also ≥ 4.5:1 directly on the canvas', () => {
     for (const hue of hues) {
       expect(ratio(mode, `${hue}-on-soft`, 'bg-default')).toBeGreaterThanOrEqual(
         WCAG.AA_NORMAL_TEXT,
       );
+    }
+  });
+
+  // The BOUNDARY between the two semantic text tokens, pinned so it cannot be
+  // rediscovered the hard way.  `text-<hue>` is the SOLID fill colour: it clears
+  // 3:1 (AA large text, and WCAG 1.4.11 non-text) but in dark mode it is only
+  // ~3.0–3.4:1 on the canvas, so it is NOT a normal-size text colour there.
+  // `-on-soft` is (9–13:1 in dark mode).  Fifteen call sites had drifted onto the
+  // bare token for `role="alert"` paragraphs and SLA labels — normal-size text in
+  // a colour verified only for large text.
+  it('the BARE hue is a large-text/non-text colour only — never normal text', () => {
+    for (const hue of hues) {
+      expect(ratio(mode, hue, 'bg-default')).toBeGreaterThanOrEqual(WCAG.AA_LARGE_TEXT);
+    }
+    if (mode.startsWith('dark')) {
+      // Stated as a FACT about the palette, not an aspiration: if a future token
+      // change lifted these to 4.5:1 the assertion fails and this comment (and
+      // the `-on-soft`-for-text rule it justifies) gets revisited deliberately.
+      for (const hue of hues) {
+        expect(ratio(mode, hue, 'bg-default')).toBeLessThan(WCAG.AA_NORMAL_TEXT);
+      }
     }
   });
 });

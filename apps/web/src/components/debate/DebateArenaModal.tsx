@@ -312,7 +312,7 @@ function ArgumentCard({
                   <span className="min-w-0 flex-1 break-all text-ink-muted">{url}</span>
                   <button
                     type="button"
-                    className="shrink-0 rounded px-1 text-sm text-ink-muted hover:text-error"
+                    className="shrink-0 rounded px-1 text-sm text-ink-muted hover:text-error-on-soft"
                     onClick={() => setSources((prev) => prev.filter((s) => s !== url))}
                     aria-label={t('debate.removeSource', 'Remove {url}', { url })}
                   >
@@ -352,7 +352,7 @@ function ArgumentCard({
             </Button>
           </div>
           {error ? (
-            <p role="alert" className="text-sm text-error">
+            <p role="alert" className="text-sm text-error-on-soft">
               {error}
             </p>
           ) : null}
@@ -557,7 +557,7 @@ function PartyExitControl({
         </Button>
       )}
       {mutation.isError ? (
-        <p role="alert" className="text-sm text-error">
+        <p role="alert" className="text-sm text-error-on-soft">
           {t(
             'debate.closeRejected',
             'This debate can no longer be changed — the material may already be locked in.',

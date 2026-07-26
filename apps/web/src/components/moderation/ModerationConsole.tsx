@@ -86,8 +86,8 @@ const MODIFY_ACTION_OPTIONS: ReadonlyArray<{ value: ConsoleAction; label: string
 
 const slaTone: Record<string, string> = {
   ok: 'text-ink-muted',
-  approaching: 'text-warning',
-  breached: 'text-error font-semibold',
+  approaching: 'text-warning-on-soft',
+  breached: 'text-error-on-soft font-semibold',
 };
 
 function isForbidden(error: unknown): boolean {
@@ -148,7 +148,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
 
   if (state === 'malicious') {
     return (
-      <span role="status" className="font-semibold text-error">
+      <span role="status" className="font-semibold text-error-on-soft">
         {t('console.linkMalicious', 'Blocked: this link resolves to a known malicious site.')}{' '}
         <span className="font-normal text-ink-muted line-through">{url}</span>
       </span>
@@ -170,7 +170,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
         </span>
       ) : null}
       {state === 'unavailable' ? (
-        <span role="status" className="ml-1 text-warning">
+        <span role="status" className="ml-1 text-warning-on-soft">
           {t('console.linkUnverified', 'Could not verify this link.')}{' '}
           <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
             {t('console.linkOpenAnyway', 'Open anyway')}
@@ -295,7 +295,7 @@ function MfaVerifyNotice({ onVerified }: { onVerified: () => void }): React.Reac
         disabled={busy}
       />
       {failed ? (
-        <p role="alert" className="text-error">
+        <p role="alert" className="text-error-on-soft">
           {t('console.mfaFailed', 'That code was not accepted. Try again.')}
         </p>
       ) : null}
@@ -482,7 +482,7 @@ function CaseReviewDialog({
         <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
       ) : null}
       {review.isError ? (
-        <p role="alert" className="text-error">
+        <p role="alert" className="text-error-on-soft">
           {isForbidden(review.error)
             ? t('console.caseForbidden', 'Your role cannot open this case for review.')
             : isUnauthenticated(review.error)
@@ -595,7 +595,7 @@ function CaseReviewDialog({
 
           {data.side_by_side ? (
             <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
-              <h3 className="text-xs font-semibold uppercase text-warning">
+              <h3 className="text-xs font-semibold uppercase text-warning-on-soft">
                 {t('console.editedAfter', 'Edited after the report')}
               </h3>
               <div className="mt-1 grid grid-cols-2 gap-2">
@@ -1056,7 +1056,7 @@ function AppealReviewDialog({
         <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
       ) : null}
       {review.isError ? (
-        <p className="text-error">
+        <p className="text-error-on-soft">
           {isUnauthenticated(review.error)
             ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
             : t('console.appealReviewError', 'Could not load this appeal for review.')}
@@ -1115,7 +1115,7 @@ function AppealReviewDialog({
 
           {data.side_by_side ? (
             <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
-              <h3 className="text-xs font-semibold uppercase text-warning">
+              <h3 className="text-xs font-semibold uppercase text-warning-on-soft">
                 {t('console.editedAfter', 'Edited after the report')}
               </h3>
               <div className="mt-1 grid grid-cols-2 gap-2">
