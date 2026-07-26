@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { injectCspMeta } from '../apps/web/src/dev/inject-csp-meta.js';
+import { injectCspMeta, maskHtmlComments } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   CSP_DIRECTIVES,
   contentSecurityPolicyHeader,
@@ -68,6 +68,51 @@ describe('injectCspMeta', () => {
   it('returns the document unchanged when there is no <head> to inject into', () => {
     const html = '<html><body></body></html>';
     expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
+  });
+
+  // `<head>` inside a comment is not the head — the parser discards the whole
+  // comment.  Injecting into one produces a document whose ONLY policy sits in a
+  // comment: no CSP at all, and in the courier no header to fall back on, while
+  // every string comparison downstream still matches.
+  it('injects into the REAL head, not a commented one', () => {
+    const html = `<!doctype html><html><!-- docs: <head> --><head><title>t</title></head><body></body></html>`;
+    const out = injectCspMeta(html, "default-src 'self'");
+    expect(out.indexOf('Content-Security-Policy')).toBeGreaterThan(out.indexOf('<head>'));
+    expect(extractMetaPolicies(out)).toEqual(["default-src 'self'"]);
+  });
+
+  it('leaves a document alone when its only <head> is inside a comment', () => {
+    const html = '<html><!-- <head> --><body></body></html>';
+    expect(injectCspMeta(html, "default-src 'self'")).toBe(html);
+  });
+
+  it('masks an UNTERMINATED comment to the end, as a parser would', () => {
+    expect(maskHtmlComments('a<!-- b <head> c').trimEnd()).toBe('a');
+  });
+
+  it('preserves length and newlines so offsets stay valid', () => {
+    const html = 'a<!-- x\ny -->b';
+    const masked = maskHtmlComments(html);
+    expect(masked).toHaveLength(html.length);
+    expect(masked.split('\n')).toHaveLength(html.split('\n').length);
+    expect(masked.indexOf('b')).toBe(html.indexOf('b'));
+  });
+});
+
+describe('a commented tag is not markup', () => {
+  it('does not read a CSP <meta> inside a comment as a policy', () => {
+    const html = `<html><head><!-- <meta http-equiv="Content-Security-Policy" content="x"> --></head></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+  });
+
+  it('does not let a <script> NAMED in a comment trip the placement check', () => {
+    const policy = contentSecurityPolicyMeta();
+    const meta = `<meta http-equiv="Content-Security-Policy" content="${policy.replace(/"/g, '&quot;')}">`;
+    const problems = findCspDeliveryProblems({
+      indexHtml: '<html><head></head></html>',
+      builtIndexHtml: `<html><head><!-- see <script src="x"> -->${meta}</head><body></body></html>`,
+    });
+    expect(problems).toEqual([]);
   });
 });
 

@@ -80,6 +80,24 @@ describe('the bare hue on normal text', () => {
     expect(hues(source)).toEqual(['3:error']);
   });
 
+  // A Tailwind VARIANT puts a `:` (or a `!`) directly before the class, and the
+  // colour is still normal text in that state — a state a user is very likely to
+  // be reading in — so the contrast obligation is identical.
+  it.each([
+    'hover:text-error',
+    'md:text-warning',
+    'dark:text-info',
+    'group-hover:text-error',
+    '[&:focus]:text-error',
+    '!text-error',
+  ])('flags the variant-prefixed %s', (className) => {
+    expect(hues(`<span className="${className}">x</span>`)).toHaveLength(1);
+  });
+
+  it('leaves a variant-prefixed -on-soft pair alone', () => {
+    expect(hues(`<span className="hover:text-error-on-soft">x</span>`)).toEqual([]);
+  });
+
   it('flags every hue in the family', () => {
     expect(hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
       '1:success',

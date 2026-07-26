@@ -23,6 +23,39 @@
  *  matching how a server header applies to the whole document). */
 const HEAD_OPEN = /<head(\s[^>]*)?>/i;
 
+/**
+ * Blank the CONTENT of every HTML comment, preserving length and newlines.
+ *
+ * `<head>` inside a comment is NOT the head — the parser discards the whole
+ * comment — but a pattern scanning raw text cannot tell, and would inject the
+ * policy into it.  The result is a document whose only CSP sits in a comment:
+ * no policy at all, and in the courier WebView no response header to fall back
+ * on, while every string comparison downstream still matches.
+ *
+ * Masking rather than deleting keeps every offset valid, so a caller can scan
+ * the masked copy and splice into (or report against) the ORIGINAL.  Shared
+ * with `check:csp-parity` so the injector and the gate that verifies it agree
+ * on what counts as markup — two spellings of that rule is how a green gate
+ * ends up describing a document nobody delivers.
+ */
+export function maskHtmlComments(html: string): string {
+  // UTF-16 units, matching `indexOf`/`slice`, so offsets stay comparable.
+  const chars = html.split('');
+  let i = 0;
+  while (i < chars.length) {
+    if (!html.startsWith('<!--', i)) {
+      i += 1;
+      continue;
+    }
+    const close = html.indexOf('-->', i + 4);
+    // An unterminated comment runs to the end of the document, as in a parser.
+    const end = close === -1 ? chars.length : close + 3;
+    for (let k = i; k < end; k += 1) if (chars[k] !== '\n') chars[k] = ' ';
+    i = end;
+  }
+  return chars.join('');
+}
+
 /** Escape a policy for a double-quoted HTML attribute.  The directive set is
  *  first-party and quote-free, but building markup by concatenation without
  *  escaping is the habit that eventually produces an injection. */
@@ -43,7 +76,9 @@ function escapeAttribute(value: string): string {
  * the guarantee assert on the OUTPUT (`check:csp-parity` reads the built file).
  */
 export function injectCspMeta(html: string, policy: string): string {
-  const match = HEAD_OPEN.exec(html);
+  // Located in the MASKED copy so a `<head>` written inside a comment cannot
+  // capture the injection; spliced into the original, whose offsets it shares.
+  const match = HEAD_OPEN.exec(maskHtmlComments(html));
   if (!match) return html;
   const tag = `\n    <meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}" />`;
   return (

@@ -42,16 +42,16 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
 
 ## Export hygiene — the internal-only sweep
 
-**Tracked debt — 894 exported values used only inside their declaring file.**
+**Tracked debt — 939 exported values used only inside their declaring file.**
 `check:dead-exports` reports an exported value nothing references *anywhere*.
 The narrower question — "is the `export` keyword buying anything?" — is
 implemented in the same script (`findInternalOnlyExports`, surfaced by
 `pnpm survey:internal-exports`) but is **not** in CI, because the answer today
-is 894 declarations and they are not one defect repeated:
+is 939 declarations and they are not one defect repeated:
 
 | Share | Category | Is the export deliberate? |
 |-------|----------|---------------------------|
-| 314   | `packages/shared` | Yes — the workspace IS the schema/constant/type SSOT surface; a leaf schema is publishable whether or not a consumer composes it today. |
+| ~330  | `packages/shared` | Yes — the workspace IS the schema/constant/type SSOT surface; a leaf schema is publishable whether or not a consumer composes it today. |
 | 120   | `packages/db` | Yes — Drizzle's idiom exports every table and `pgEnum`; the schema surface is the artifact. |
 | 56    | `Drizzle*` / `InMemory*` store adapters | Yes — `check:prod-parity` matches adapters **by their exported name**; un-exporting one hides it from that gate. |
 | ~390  | `apps/api`, `apps/web`, remaining packages | Mostly no — doctrine constants, helper functions, and lease/window values that could drop the keyword. |

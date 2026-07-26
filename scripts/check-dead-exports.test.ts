@@ -408,6 +408,36 @@ describe('findDeadExports', () => {
     expect(dead).toEqual([]);
   });
 
+  it('reports a value whose only "reference" is an unused BARREL', () => {
+    // A barrel republishing a name is not a consumer of it.  Counting its
+    // occurrence let an export be declared once, re-exported once, imported
+    // nowhere — and still pass, because its own barrel vouched for it.
+    const dead = findDeadExports([
+      file('src/module.ts', 'export const orphan = 1;'),
+      file('src/barrel.ts', "export { orphan } from './module.js';"),
+    ]);
+    expect(dead.map((d) => d.name)).toEqual(['orphan']);
+  });
+
+  it('does NOT report one a consumer reaches THROUGH the barrel', () => {
+    const dead = findDeadExports([
+      file('src/module.ts', 'export const orphan = 1;'),
+      file('src/barrel.ts', "export { orphan } from './module.js';"),
+      file('src/consumer.ts', "import { orphan } from './barrel.js';\nuse(orphan);"),
+    ]);
+    expect(dead).toEqual([]);
+  });
+
+  it('still counts an IMPORT as a reference', () => {
+    // Only re-export plumbing is discounted; an unused import is a lint error,
+    // so an import genuinely implies a use.
+    const dead = findDeadExports([
+      file('src/module.ts', 'export const orphan = 1;'),
+      file('src/consumer.ts', "import { orphan } from './module.js';\nuse(orphan);"),
+    ]);
+    expect(dead).toEqual([]);
+  });
+
   it('reports an OVERLOAD SET nothing consumes', () => {
     // Every signature plus the implementation writes the name once, so compared
     // one at a time the set looks referenced BY ITSELF: three declarations give

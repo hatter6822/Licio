@@ -26,6 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { maskHtmlComments } from '../apps/web/src/dev/inject-csp-meta.js';
 import {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
@@ -178,9 +179,14 @@ export interface MetaPolicy {
 /** {@link extractMetaPolicies}, keeping each tag's OFFSET for the ordering check. */
 export function findMetaPolicies(html: string): MetaPolicy[] {
   const found: MetaPolicy[] = [];
+  // COMMENTS are masked first: a `<meta>` written inside one is not a policy —
+  // the parser discards it — and counting it would let the gate report a
+  // document as carrying the policy when the browser sees none.  Masking keeps
+  // offsets, so `at` still points into the caller's original string.
+  const markup = maskHtmlComments(html);
   // Quoted runs are matched as units so a `>` INSIDE an attribute value cannot
   // end the tag early and hide the attributes after it.
-  for (const tag of html.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
+  for (const tag of markup.matchAll(/<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
     const attributes = parseTagAttributes(tag[0]);
     if (attributes.get('http-equiv')?.toLowerCase() !== 'content-security-policy') continue;
     found.push({ policy: attributes.get('content') ?? '', at: tag.index });
@@ -201,7 +207,11 @@ export function findMetaPolicies(html: string): MetaPolicy[] {
 const CONTROLLED_TAGS = /<\s*(script|link|style|base|iframe|object|embed|img|svg)\b/i;
 
 /** Where the CSP meta must sit: inside `<head>`, ahead of anything it governs. */
-function findPlacementProblem(html: string, policyAt: number): string | null {
+function findPlacementProblem(rawHtml: string, policyAt: number): string | null {
+  // Masked, for the same reason: a `<head>` or a `<script>` named inside a
+  // comment is prose, and treating it as markup would move the boundary this
+  // check is about.
+  const html = maskHtmlComments(rawHtml);
   const headOpen = /<\s*head\b[^>]*>/i.exec(html);
   const headClose = /<\s*\/\s*head\s*>/i.exec(html);
   if (headOpen === null || policyAt < headOpen.index + headOpen[0].length) {

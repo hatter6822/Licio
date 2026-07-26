@@ -52,8 +52,14 @@ export const WEB_SRC = 'apps/web/src';
  * enforcing four fifths of an invariant the palette states about five.  The
  * BottomNav "Submit" tab is the precedent — it was `text-primary` at ~3.3:1 on
  * the dark canvas, and it is not a different defect from `text-error` at 3.35.
+ *
+ * `:` and `!` join the delimiters so a VARIANT-prefixed class is matched too:
+ * `hover:text-error`, `md:text-warning`, `dark:text-info`,
+ * `group-hover:text-error`, `[&:focus]:text-error`, `!text-error`.  The colour
+ * is still rendered as normal text in that state — a state a user is very
+ * likely to be reading in — so the contrast obligation is identical.
  */
-const BARE_HUE = /(?:^|[\s'"`{])text-(primary|success|warning|error|info)(?![\w-])/;
+const BARE_HUE = /(?:^|[\s'"`{:!])text-(primary|success|warning|error|info)(?![\w-])/;
 
 /** How this codebase sizes an icon — a graphical object, 3:1 under 1.4.11. */
 const ICON_SIZE = /(?:^|[\s'"`{])size-\d/;

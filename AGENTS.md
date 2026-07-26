@@ -387,7 +387,7 @@ write for a file the foreground agent may also touch.
     3. genuinely **vestigial** — delete it.
   Used only inside its own file?  Drop the `export`, keep the symbol —
   `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
-  the ~894 standing cases are worked through
+  the ~939 standing cases are worked through
   (`docs/planning/audit-residuals-2026-07.md`).
   **`export default` is out of scope**, and not as an exemption: it publishes the
   binding `default`, so the declaration's own name is module-local and every

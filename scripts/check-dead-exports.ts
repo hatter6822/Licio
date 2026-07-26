@@ -358,6 +358,39 @@ export function exportedValues(source: string): ExportedValue[] {
 }
 
 /**
+ * The `{ … }` bodies of `export { … } from '…'` RE-EXPORT clauses.
+ *
+ * A barrel republishing a name is not a consumer of it.  Counting the barrel's
+ * occurrence as a reference meant an export could be dead — declared once,
+ * re-exported once, imported nowhere — and still pass, because its own barrel
+ * vouched for it.  `export * from` needs no span: it names nothing.
+ */
+function reexportClauseSpans(tokens: readonly Token[]): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token?.kind !== 'ident' || token.value !== 'export') continue;
+    let j = i + 1;
+    const next = tokens[j];
+    if (next?.kind === 'ident' && next.value === 'type') j += 1;
+    const open = tokens[j];
+    if (open?.kind !== 'punct' || open.value !== '{') continue;
+    let k = j + 1;
+    for (let guard = 0; k < tokens.length && guard < MAX_DECLARATOR_TOKENS; k += 1, guard += 1) {
+      const inner = tokens[k];
+      if (inner?.kind === 'punct' && inner.value === '}') break;
+    }
+    const close = tokens[k];
+    const after = tokens[k + 1];
+    if (close !== undefined && after?.kind === 'ident' && after.value === 'from') {
+      spans.push([open.start, close.end]);
+    }
+    i = k;
+  }
+  return spans;
+}
+
+/**
  * Every IDENTIFIER occurrence in one source, as code — comments, strings, regex
  * literals and template TEXT excluded, template INTERPOLATIONS included.
  *
@@ -375,12 +408,23 @@ export function exportedValues(source: string): ExportedValue[] {
 export function identifierCounts(source: string): Map<string, number> {
   const best = new Map<string, number>();
   for (const preferRegex of [false, true]) {
+    const top = tokenize(source, preferRegex);
+    // A RE-EXPORT is plumbing, not a use.  `export { orphan } from './x.js'` in
+    // a barrel nobody imports would otherwise keep `orphan` "referenced" by the
+    // barrel alone, and a dead export could hide behind one indefinitely — the
+    // same reasoning that already excludes re-export clauses from being counted
+    // as DECLARATIONS.  A real consumer still spells the name where it imports
+    // it, so a live symbol is unaffected.
+    const plumbing = reexportClauseSpans(top);
+    const isPlumbing = (offset: number): boolean =>
+      plumbing.some(([start, end]) => offset >= start && offset < end);
     const pass = new Map<string, number>();
     const add = (name: string): void => pass.set(name, (pass.get(name) ?? 0) + 1);
     const walk = (tokens: readonly Token[]): void => {
       for (const token of tokens) {
-        if (token.kind === 'ident') add(token.value);
-        else if (token.kind === 'template' && token.value.includes('${')) {
+        if (token.kind === 'ident') {
+          if (!isPlumbing(token.start)) add(token.value);
+        } else if (token.kind === 'template' && token.value.includes('${')) {
           // Only the `${…}` bodies are code; the literal chunks between them are
           // prose and stay excluded.
           for (const span of interpolationSpans(token.value, 0, preferRegex)) {
@@ -389,7 +433,7 @@ export function identifierCounts(source: string): Map<string, number> {
         }
       }
     };
-    walk(tokenize(source, preferRegex));
+    walk(top);
     for (const [name, count] of pass) best.set(name, Math.max(best.get(name) ?? 0, count));
   }
   return best;
