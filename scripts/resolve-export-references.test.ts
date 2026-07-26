@@ -373,6 +373,23 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: from TYPE space only ──────────────────────────────────────
+  // Neither of these survives compilation, and both are still references: the
+  // declaration has to exist for the type to exist, so losing it is a compile
+  // error rather than a cleanup.  See the test that pins this.
+  'src/erased-source.ts': [
+    'export class TypeOnlyClass {',
+    '  readonly tag = 1;',
+    '}',
+    "export const KEPT_BY_TYPEOF = ['a', 'b'] as const;",
+  ].join('\n'),
+  'src/erased-consumer.ts': [
+    "import type { TypeOnlyClass } from './erased-source.js';",
+    "import { KEPT_BY_TYPEOF } from './erased-source.js';",
+    'export type Held = TypeOnlyClass;',
+    'export type Letter = (typeof KEPT_BY_TYPEOF)[number];',
+  ].join('\n'),
+
   // ── Reference: used only inside its own file ─────────────────────────────
   'src/internal.ts': [
     'export const KEPT_INSIDE = 1;',
@@ -593,6 +610,29 @@ describe('resolution: which sites use a binding', () => {
       // rest binding copies every property the names left behind, and asking for
       // its own local name found no property, so the sweep credited nothing.
       expect(usesOf('src/rest-source.ts', name).length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(['TypeOnlyClass', 'KEPT_BY_TYPEOF'])(
+    'counts a value that only TYPE space names (%s)',
+    (name) => {
+      // Deliberate, and measured.  Review asked for the opposite — that a value
+      // reached only through `import type` or a type position be reported dead,
+      // since neither survives compilation.
+      //
+      // The two are not separable: a type-only import whose name is never USED
+      // is an unused import, so whatever it names is credited by the type
+      // position that uses it, and skipping the import specifier alone changes
+      // nothing.  Skipping type positions too was tried against this repository
+      // and reported 49 exports dead — `INTERACTION_KINDS` behind
+      // `(typeof INTERACTION_KINDS)[number]`, `eligibilityDecisionSchema` behind
+      // `z.infer<typeof …>`, and 47 more of the same shape.
+      //
+      // None of the gate's three remediations fits those: deleting one is a
+      // compile error, and there is nothing to wire up or to dedupe.  A
+      // declaration that its dependents cannot survive losing is referenced,
+      // whether or not the reference survives to runtime.
+      expect(usesOf('src/erased-source.ts', name).length).toBeGreaterThan(0);
     },
   );
 

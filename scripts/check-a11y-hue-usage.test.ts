@@ -21,12 +21,12 @@ import {
 
 const ROOT = resolve(import.meta.dirname, '..');
 const file = (content: string, path = 'apps/web/src/x.tsx'): SourceFile[] => [{ path, content }];
-const hues = (content: string): string[] =>
-  findBareHueTextUses(file(content)).map((finding) => `${finding.line}:${finding.hue}`);
+const hues = async (content: string): Promise<string[]> =>
+  (await findBareHueTextUses(file(content))).map((finding) => `${finding.line}:${finding.hue}`);
 
 describe('the bare hue on normal text', () => {
-  it('flags a plain className literal', () => {
-    expect(hues(`<p className="text-sm text-error">no</p>`)).toEqual(['1:error']);
+  it('flags a plain className literal', async () => {
+    expect(await hues(`<p className="text-sm text-error">no</p>`)).toEqual(['1:error']);
   });
 
   // The gate must read the class the RUNTIME sees.  A scan of the raw token
@@ -39,21 +39,21 @@ describe('the bare hue on normal text', () => {
     ['an \\x escape', String.raw`<span className={'text-\x65rror'} />`],
     // `\e` is a NonEscapeCharacter: it produces a plain `e`.
     ['an identity escape', String.raw`<span className={'text-\error'} />`],
-  ])('flags a hue spelled with %s', (_label, source) => {
-    expect(hues(source)).toEqual(['1:error']);
+  ])('flags a hue spelled with %s', async (_label, source) => {
+    expect(await hues(source)).toEqual(['1:error']);
   });
 
-  it('reports the SOURCE line for an escaped hue, not the decoded offset', () => {
+  it('reports the SOURCE line for an escaped hue, not the decoded offset', async () => {
     // Decoding shortens the string, so a decoded match index no longer indexes
     // the file; the offset map is what keeps the reported line openable.
     const source = ['const a = 1;', '', String.raw`const c = 'text-\u0065rror';`].join('\n');
-    expect(hues(source)).toEqual(['3:error']);
+    expect(await hues(source)).toEqual(['3:error']);
   });
 
-  it('does not let a LINE CONTINUATION hide a hue split across lines', () => {
+  it('does not let a LINE CONTINUATION hide a hue split across lines', async () => {
     // `\<newline>` produces nothing, so these two source lines are one class.
     const source = ['const c = "text-\\', 'error";'].join('\n');
-    expect(hues(source)).toEqual(['1:error']);
+    expect(await hues(source)).toEqual(['1:error']);
   });
 
   it.each([
@@ -61,100 +61,100 @@ describe('the bare hue on normal text', () => {
     ['three literals', `<span className={'te' + 'xt-' + 'error'} />`],
     ['a template operand', '<span className={`text-` + `error`} />'],
     ['a joined suffix', `<span className={'flex text-' + 'warning'} />`],
-  ])('folds a class built by static concatenation (%s)', (_label, source) => {
+  ])('folds a class built by static concatenation (%s)', async (_label, source) => {
     // The browser receives the JOINED string; examining the operands separately
     // finds neither the complete utility nor a violation.
-    expect(hues(source)).toHaveLength(1);
+    expect(await hues(source)).toHaveLength(1);
   });
 
   it.each([
     ['a literal hole', `<span className={\`text-\${'error'}\`} />`],
     ['a concatenated hole', `<span className={\`text-\${'er' + 'ror'}\`} />`],
     ['a hole mid-class', `<span className={\`flex text-\${'warning'} p-2\`} />`],
-  ])('folds a statically known template hole (%s)', (_label, source) => {
+  ])('folds a statically known template hole (%s)', async (_label, source) => {
     // The hole's value is part of the class the browser receives; blanking it
     // left neither scan able to reconstruct `text-error`.
-    expect(hues(source)).toHaveLength(1);
+    expect(await hues(source)).toHaveLength(1);
   });
 
-  it('reports a folded hole ONCE, not once per scan', () => {
+  it('reports a folded hole ONCE, not once per scan', async () => {
     // The nested literal is examined both folded into its template and on its
     // own; one rendered class is one finding.
-    expect(hues(`<span className={\`text-\${'error'}\`} />`)).toEqual(['1:error']);
+    expect(await hues(`<span className={\`text-\${'error'}\`} />`)).toEqual(['1:error']);
   });
 
   it.each([
     ['parentheses', "('error')"],
     ['an as-const', "('error' as const)"],
     ['nested parens around a concat', "(('er') + ('ror'))"],
-  ])('folds a static hole wrapped in %s', (_label, expr) => {
+  ])('folds a static hole wrapped in %s', async (_label, expr) => {
     // `(…)`, `as` and `satisfies` yield the value they wrap, so including them
     // in the run made an otherwise static hole read as unknown.
-    expect(hues(`<span className={\`text-\${${expr}}\`} />`)).toHaveLength(1);
+    expect(await hues(`<span className={\`text-\${${expr}}\`} />`)).toHaveLength(1);
   });
 
-  it('does NOT fold a hole whose value it cannot know', () => {
+  it('does NOT fold a hole whose value it cannot know', async () => {
     // An identifier, a call or a ternary is a runtime value; guessing at one
     // would invent class names that never render.
-    expect(hues(`<span className={\`text-\${hue}\`} />`)).toEqual([]);
-    expect(hues(`<span className={\`text-\${pick()}\`} />`)).toEqual([]);
+    expect(await hues(`<span className={\`text-\${hue}\`} />`)).toEqual([]);
+    expect(await hues(`<span className={\`text-\${pick()}\`} />`)).toEqual([]);
   });
 
-  it('keeps a SEPARATOR where an unknown hole was', () => {
+  it('keeps a SEPARATOR where an unknown hole was', async () => {
     // Dropping the hole entirely would join the chunks around it and invent
     // `text-error` from `text-${x}error`, failing a correct build.
-    expect(hues(`<span className={\`text-\${hue}error\`} />`)).toEqual([]);
+    expect(await hues(`<span className={\`text-\${hue}error\`} />`)).toEqual([]);
   });
 
   it.each([
     ['a grouped operand', `<span className={('text-') + 'error'} />`],
     ['an as-const operand', `<span className={('text-' as const) + 'error'} />`],
     ['a grouped whole', `<span className={('text-' + 'error')} />`],
-  ])('folds a concatenation through %s', (_label, source) => {
-    expect(hues(source)).toHaveLength(1);
+  ])('folds a concatenation through %s', async (_label, source) => {
+    expect(await hues(source)).toHaveLength(1);
   });
 
-  it('does NOT fold across a CALL, which renders something else entirely', () => {
+  it('does NOT fold across a CALL, which renders something else entirely', async () => {
     // `f('text-') + 'error'` is one token different from `('text-') + 'error'`
     // and renders nothing like it.  Folding it would invent a class that never
     // exists — a false positive that fails a correct build — so a `(` directly
     // after an identifier, `)` or `]` ends the run.
-    expect(hues(`<span className={f('text-') + 'error'} />`)).toEqual([]);
-    expect(hues(`<span className={xs['text-'] + 'error'} />`)).toEqual([]);
+    expect(await hues(`<span className={f('text-') + 'error'} />`)).toEqual([]);
+    expect(await hues(`<span className={xs['text-'] + 'error'} />`)).toEqual([]);
   });
 
-  it('folds a nested static hole', () => {
-    expect(hues(`<span className={\`text-\${\`\${'error'}\`}\`} />`)).toHaveLength(1);
+  it('folds a nested static hole', async () => {
+    expect(await hues(`<span className={\`text-\${\`\${'error'}\`}\`} />`)).toHaveLength(1);
   });
 
-  it('does NOT fold a nested hole with a runtime inner value', () => {
-    expect(hues(`<span className={\`text-\${\`\${hue}\`}\`} />`)).toEqual([]);
+  it('does NOT fold a nested hole with a runtime inner value', async () => {
+    expect(await hues(`<span className={\`text-\${\`\${hue}\`}\`} />`)).toEqual([]);
   });
 
-  it('does not invent a hue across a NON-concatenated boundary', () => {
+  it('does not invent a hue across a NON-concatenated boundary', async () => {
     // Two unrelated arguments are not one class string.  Joining them blindly
     // would report a violation that does not exist, which fails a correct build.
-    expect(hues(`<p className={cn('text-', 'error')} />`)).toEqual([]);
-    expect(hues(`const a = 'text-'; const b = 'error';`)).toEqual([]);
+    expect(await hues(`<p className={cn('text-', 'error')} />`)).toEqual([]);
+    expect(await hues(`const a = 'text-'; const b = 'error';`)).toEqual([]);
   });
 
-  it('flags a hue inside a cn(...) argument', () => {
+  it('flags a hue inside a cn(...) argument', async () => {
     expect(
-      hues(`<p className={cn('text-sm', blocked ? 'text-error' : 'text-ink-muted')} />`),
+      await hues(`<p className={cn('text-sm', blocked ? 'text-error' : 'text-ink-muted')} />`),
     ).toEqual(['1:error']);
   });
 
-  it('flags a hue held in a module-level class map', () => {
+  it('flags a hue held in a module-level class map', async () => {
     const source = [
       `const META = {`,
       `  under_debate: { chip: 'border-warning/50 text-warning' },`,
       `  incorrect: { chip: 'border-error/60 text-error' },`,
       `};`,
     ].join('\n');
-    expect(hues(source)).toEqual(['2:warning', '3:error']);
+    expect(await hues(source)).toEqual(['2:warning', '3:error']);
   });
 
-  it('flags a hue in a multi-line ternary, on the line the class sits on', () => {
+  it('flags a hue in a multi-line ternary, on the line the class sits on', async () => {
     const source = [
       `const tone =`,
       `  outcome === 'ok'`,
@@ -163,30 +163,30 @@ describe('the bare hue on normal text', () => {
       `      ? 'text-warning'`,
       `      : 'text-error';`,
     ].join('\n');
-    expect(hues(source)).toEqual(['5:warning', '6:error']);
+    expect(await hues(source)).toEqual(['5:warning', '6:error']);
   });
 
-  it('flags a hue in a template literal, and reports its own line', () => {
+  it('flags a hue in a template literal, and reports its own line', async () => {
     const source = ['const c = `', '  text-sm', '  text-error', '`;'].join('\n');
-    expect(hues(source)).toEqual(['3:error']);
+    expect(await hues(source)).toEqual(['3:error']);
   });
 
   // A template is ONE token, so a literal inside a `${…}` hole is not emitted
   // separately and the hole-blanking erased its only occurrence — letting the
   // most ordinary computed-class form through.  The scan descends into holes.
-  it('flags a hue in a string literal INSIDE a template interpolation', () => {
+  it('flags a hue in a string literal INSIDE a template interpolation', async () => {
     const source = `<p className={\`text-sm \${blocked ? 'text-error' : ''}\`} />`;
-    expect(hues(source)).toEqual(['1:error']);
+    expect(await hues(source)).toEqual(['1:error']);
   });
 
-  it('descends into a NESTED template interpolation', () => {
+  it('descends into a NESTED template interpolation', async () => {
     const source = `const c = \`a \${cond ? \`b \${on ? 'text-warning' : ''}\` : ''}\`;`;
-    expect(hues(source)).toEqual(['1:warning']);
+    expect(await hues(source)).toEqual(['1:warning']);
   });
 
-  it('reports the line the nested literal sits on, not the template start', () => {
+  it('reports the line the nested literal sits on, not the template start', async () => {
     const source = ['const c = `', '  base', `  \${bad ? 'text-error' : ''}`, '`;'].join('\n');
-    expect(hues(source)).toEqual(['3:error']);
+    expect(await hues(source)).toEqual(['3:error']);
   });
 
   // A Tailwind VARIANT puts a `:` (or a `!`) directly before the class, and the
@@ -199,47 +199,47 @@ describe('the bare hue on normal text', () => {
     'group-hover:text-error',
     '[&:focus]:text-error',
     '!text-error',
-  ])('flags the variant-prefixed %s', (className) => {
-    expect(hues(`<span className="${className}">x</span>`)).toHaveLength(1);
+  ])('flags the variant-prefixed %s', async (className) => {
+    expect(await hues(`<span className="${className}">x</span>`)).toHaveLength(1);
   });
 
-  it('leaves a variant-prefixed -on-soft pair alone', () => {
-    expect(hues(`<span className="hover:text-error-on-soft">x</span>`)).toEqual([]);
+  it('leaves a variant-prefixed -on-soft pair alone', async () => {
+    expect(await hues(`<span className="hover:text-error-on-soft">x</span>`)).toEqual([]);
   });
 
-  it('flags every hue in the family', () => {
-    expect(hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
+  it('flags every hue in the family', async () => {
+    expect(await hues(`const a = 'text-success text-warning text-error text-info';`)).toEqual([
       '1:success',
     ]);
     for (const hue of ['primary', 'success', 'warning', 'error', 'info']) {
-      expect(hues(`const a = 'text-${hue}';`)).toEqual([`1:${hue}`]);
+      expect(await hues(`const a = 'text-${hue}';`)).toEqual([`1:${hue}`]);
     }
   });
 });
 
 describe('what is NOT a violation', () => {
-  it('accepts the -on-soft pair', () => {
-    expect(hues(`<p className="text-sm text-error-on-soft">ok</p>`)).toEqual([]);
+  it('accepts the -on-soft pair', async () => {
+    expect(await hues(`<p className="text-sm text-error-on-soft">ok</p>`)).toEqual([]);
   });
 
-  it('accepts every other suffixed token in the family', () => {
+  it('accepts every other suffixed token in the family', async () => {
     // `-fg` is NOT among them: it is white, contrast-tested only against the
     // SOLID `bg-<hue>`, so it has its own pairing rule below.
     for (const suffix of ['-on-soft', '-soft', '-strong']) {
-      expect(hues(`const a = 'text-warning${suffix}';`)).toEqual([]);
+      expect(await hues(`const a = 'text-warning${suffix}';`)).toEqual([]);
     }
   });
 
-  it('accepts a -fg token PAIRED with its own solid background', () => {
+  it('accepts a -fg token PAIRED with its own solid background', async () => {
     // What the token is for: a destructive button's label on `bg-error`.
-    expect(hues(`const a = 'border border-error-hover bg-error text-error-fg';`)).toEqual([]);
-    expect(hues(`<span className="bg-warning text-warning-fg">x</span>`)).toEqual([]);
+    expect(await hues(`const a = 'border border-error-hover bg-error text-error-fg';`)).toEqual([]);
+    expect(await hues(`<span className="bg-warning text-warning-fg">x</span>`)).toEqual([]);
   });
 
-  it('accepts a -fg token over a solid INTERACTION variant', () => {
+  it('accepts a -fg token over a solid INTERACTION variant', async () => {
     // `bg-error-hover` is a solid fill (#9B2019); white on it is correct.
-    expect(hues(`const a = 'bg-error-hover text-error-fg';`)).toEqual([]);
-    expect(hues(`const a = 'bg-primary-active text-primary-fg';`)).toEqual([]);
+    expect(await hues(`const a = 'bg-error-hover text-error-fg';`)).toEqual([]);
+    expect(await hues(`const a = 'bg-primary-active text-primary-fg';`)).toEqual([]);
   });
 
   it.each([
@@ -248,14 +248,14 @@ describe('what is NOT a violation', () => {
     ['an unconditional background under variant text', `'bg-error hover:text-error-fg'`, 0],
     ['an arbitrary variant on both', `'[&:focus]:bg-error [&:focus]:text-error-fg'`, 0],
     ['an important-modified background', `'!bg-error text-error-fg'`, 0],
-  ])('matches the VARIANT of a -fg token and its background (%s)', (_label, cls, want) => {
+  ])('matches the VARIANT of a -fg token and its background (%s)', async (_label, cls, want) => {
     // Co-occurrence is not pairing: `hover:bg-error text-error-fg` paints the
     // background only on hover while the text is white always, so at rest it is
     // white on the canvas.  An UNCONDITIONAL background covers every state.
-    expect(hues(`const a = ${cls};`)).toHaveLength(want);
+    expect(await hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
-  it('inspects EVERY -fg in a class string, not just the first', () => {
+  it('inspects EVERY -fg in a class string, not just the first', async () => {
     // One class can carry several: `bg-error text-error-fg sm:bg-canvas
     // sm:text-warning-fg` pairs the first while the second renders white on the
     // canvas at `sm`.  A single `exec` saw only the paired one.
@@ -264,17 +264,18 @@ describe('what is NOT a violation', () => {
     // `text-error-fg` carries no variant, so it survives into `sm` where the
     // canvas has replaced the fill — but `sm:text-warning-fg` outranks it there,
     // so it is not the ink that renders.
-    expect(hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-warning-fg';`)).toEqual([
-      '1:warning',
-    ]);
-    // With both inks scoped to `sm` neither outranks the other, so the class
-    // string does not say which renders and both are reported — earliest first.
-    expect(hues(`const a = 'bg-error sm:bg-canvas sm:text-error-fg sm:text-warning-fg';`)).toEqual([
-      '1:error',
-    ]);
-    expect(hues(`const a = 'bg-error text-error-fg sm:bg-warning sm:text-warning-fg';`)).toEqual(
-      [],
-    );
+    expect(
+      await hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-warning-fg';`),
+    ).toEqual(['1:warning']);
+    // Scoping both inks to `sm` does not make them tie: they are equally
+    // specific, so stylesheet order decides, and Tailwind emits `text-warning-fg`
+    // after `text-error-fg`.  Only the ink that actually renders is judged.
+    expect(
+      await hues(`const a = 'bg-error sm:bg-canvas sm:text-error-fg sm:text-warning-fg';`),
+    ).toEqual(['1:warning']);
+    expect(
+      await hues(`const a = 'bg-error text-error-fg sm:bg-warning sm:text-warning-fg';`),
+    ).toEqual([]);
   });
 
   it.each([
@@ -287,93 +288,113 @@ describe('what is NOT a violation', () => {
     ],
     ['a hover fill replacing an unconditional one', `'hover:bg-canvas bg-error text-error-fg'`, 1],
     ['a responsive fill that KEEPS the hue', `'bg-error text-error-fg sm:bg-error-hover'`, 0],
-    // Importance outranks every specificity, whichever way the class is spelled.
-    ['a v4 important canvas over a solid fill', `'bg-canvas! bg-error text-error-fg'`, 1],
-    ['the dead v3 important spelling', `'!bg-canvas bg-error text-error-fg'`, 1],
+    // Importance outranks every specificity, in BOTH of Tailwind's spellings —
+    // v4 moved the marker to the end and still honours the leading form.
+    ['a trailing-! canvas over a solid fill', `'bg-canvas! bg-error text-error-fg'`, 1],
+    ['a leading-! canvas over a solid fill', `'!bg-canvas bg-error text-error-fg'`, 1],
     ['an important SOLID fill', `'bg-error! text-error-fg'`, 0],
-    // Tailwind sorts its own output, so two tied fills leave the winner unsaid.
-    ['two unconditional fills, winner unstated', `'bg-canvas bg-error text-error-fg'`, 1],
-    // Breakpoints are ordered: the wider media block is emitted later and wins.
+    // Equally specific fills are decided by stylesheet ORDER — which is
+    // Tailwind's to state, and which a `className` attribute does not.
+    ['two unconditional fills, canvas written first', `'bg-canvas bg-error text-error-fg'`, 0],
+    [
+      // The SAME pair the other way round, and the same answer: Tailwind emits
+      // `bg-error` after `bg-canvas` whichever order they are written in, so the
+      // attribute's order changes nothing.  Reading it as "last one wins" is the
+      // mistake this pair exists to catch.
+      'the same two fills, written the other way round',
+      `'bg-error bg-canvas text-error-fg'`,
+      0,
+    ],
     ['an ordinary responsive override', `'sm:bg-canvas md:bg-error md:text-error-fg'`, 0],
     ['a responsive override to a NON-solid fill', `'sm:bg-error md:bg-canvas sm:text-error-fg'`, 1],
-    // `bg-` is equally the prefix of utilities that paint nothing at all.
+    // `bg-` is equally the prefix of utilities that paint no colour at all, and
+    // a colour can be set with no `text-`/`bg-` prefix whatsoever.
     ['a background POSITION beside a solid fill', `'bg-error bg-center text-error-fg'`, 0],
-    ['a default-palette step', `'bg-error bg-red-500 text-error-fg'`, 1],
-    // An ARBITRARY VALUE holds characters that otherwise end a class or a
-    // variant, so the parse has to stay inside `[…]` before it splits on them.
+    ['a default-palette step, emitted after the token', `'bg-error bg-red-500 text-error-fg'`, 1],
+    ['an arbitrary PROPERTY setting the bare hue', `'[color:var(--licio-error)]'`, 1],
+    ['the CSS-variable shorthand for the same fill', `'bg-(--licio-error) text-error-fg'`, 0],
+    // An ARBITRARY VALUE holds characters that end a class elsewhere, and
+    // Tailwind emits arbitrary utilities BEFORE the theme's own.
     [
-      'a TYPED arbitrary fill, whose value holds a colon',
+      'a TYPED arbitrary fill, made important so it wins',
       `'bg-error text-error-fg bg-[color:white]!'`,
       1,
     ],
+    ['an arbitrary fill the token outranks', `'bg-error text-error-fg bg-[rgb(255,0,0)]'`, 0],
     [
-      'an arbitrary fill holding parentheses and commas',
-      `'bg-error text-error-fg bg-[rgb(255,0,0)]'`,
-      1,
-    ],
-    [
-      'an arbitrary VARIANT holding both',
+      'an arbitrary VARIANT, which is a condition not a fill',
       `'[@media(min-width:100px)]:bg-canvas bg-error text-error-fg'`,
       1,
     ],
     ['an arbitrary ink over its solid fill', `'bg-error text-[color:white]'`, 0],
     ['an arbitrary SIZE, which paints nothing', `'bg-error text-error-fg w-[calc(100%-1rem)]'`, 0],
-  ])('resolves the painted fill (%s)', (_label, cls, want) => {
-    expect(hues(`const a = ${cls};`)).toHaveLength(want);
+    // An opacity modifier keeps the HUE and loses the colour: what renders is a
+    // blend, so it is never the flat value anything was measured against.
+    ['the bare hue at reduced opacity', `'text-error/50'`, 1],
+    ['a -fg token at reduced opacity', `'bg-error text-error-fg/50'`, 1],
+    ['a translucent fill under white text', `'bg-error/50 text-error-fg'`, 1],
+  ])('resolves the painted fill (%s)', async (_label, cls, want) => {
+    expect(await hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
-  it('reads a background as ACTIVE wherever its conditions still hold', () => {
+  it('reads a background as ACTIVE wherever its conditions still hold', async () => {
     // `sm:bg-canvas` is in force at `sm:hover` — `sm` still holds there.  An
     // exact-prefix match found no `sm:hover:` background, fell back to the
     // unconditional `bg-error`, and called white-on-canvas paired.  Written for
     // a finding that arrived AFTER the cascade model replaced that matching,
     // and passed with no rule added for it.
-    expect(hues(`const a = 'bg-error sm:bg-canvas sm:hover:text-error-fg';`)).toEqual(['1:error']);
-    expect(hues(`const a = 'bg-error sm:bg-error sm:hover:text-error-fg';`)).toEqual([]);
-  });
-
-  it('rejects a -fg whose state REPLACES the qualifying background', () => {
-    // `sm:bg-canvas` overrides the unconditional `bg-error` at `sm`, where the
-    // text is still white — the fill is replaced, not inherited.
-    expect(hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-error-fg';`)).toEqual([
+    expect(await hues(`const a = 'bg-error sm:bg-canvas sm:hover:text-error-fg';`)).toEqual([
       '1:error',
     ]);
-    expect(hues(`const a = 'bg-error text-error-fg sm:bg-error sm:text-error-fg';`)).toEqual([]);
-    expect(hues(`const a = 'bg-error text-error-fg sm:text-error-fg';`)).toEqual([]);
+    expect(await hues(`const a = 'bg-error sm:bg-error sm:hover:text-error-fg';`)).toEqual([]);
   });
 
-  it('does not let the ICON exemption waive a -fg token', () => {
+  it('rejects a -fg whose state REPLACES the qualifying background', async () => {
+    // `sm:bg-canvas` overrides the unconditional `bg-error` at `sm`, where the
+    // text is still white — the fill is replaced, not inherited.
+    expect(await hues(`const a = 'bg-error text-error-fg sm:bg-canvas sm:text-error-fg';`)).toEqual(
+      ['1:error'],
+    );
+    expect(await hues(`const a = 'bg-error text-error-fg sm:bg-error sm:text-error-fg';`)).toEqual(
+      [],
+    );
+    expect(await hues(`const a = 'bg-error text-error-fg sm:text-error-fg';`)).toEqual([]);
+  });
+
+  it('does not let the ICON exemption waive a -fg token', async () => {
     // The bare hue is fine on a graphical object (1.4.11, 3:1).  `-fg` is white
     // and tested only against its solid fill, so on the canvas the glyph is
     // near-invisible whether or not it counts as graphical.
-    expect(hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
-    expect(hues(`<Icon className="size-4 text-error-fg" />`)).toEqual(['1:error']);
-    expect(hues(`<Icon className="size-4 bg-error text-error-fg" />`)).toEqual([]);
+    expect(await hues(`<Icon className="size-4 text-error" />`)).toEqual([]);
+    expect(await hues(`<Icon className="size-4 text-error-fg" />`)).toEqual(['1:error']);
+    expect(await hues(`<Icon className="size-4 bg-error text-error-fg" />`)).toEqual([]);
   });
 
-  it('REJECTS a -fg token over the SOFT tint, which is nearly white', () => {
+  it('REJECTS a -fg token over the SOFT tint, which is nearly white', async () => {
     // `error-soft` is #FBE7E5 — white text on it is the same defect as white
     // text on the canvas.  That pairing wants `-on-soft`.
-    expect(hues(`const a = 'bg-error-soft text-error-fg';`)).toEqual(['1:error']);
+    expect(await hues(`const a = 'bg-error-soft text-error-fg';`)).toEqual(['1:error']);
   });
 
-  it('REJECTS a -fg token on the canvas, where it is white on near-white', () => {
+  it('REJECTS a -fg token on the canvas, where it is white on near-white', async () => {
     // The live defect this found: ~20 `role="alert"` messages rendering white
     // text on the default surface, invisible in the light theme, while the gate
     // reported that every hue on normal text used the `-on-soft` pair.
-    expect(hues(`<p role="alert" className="text-sm text-error-fg">x</p>`)).toEqual(['1:error']);
-    expect(hues(`const a = 'text-warning-fg';`)).toEqual(['1:warning']);
+    expect(await hues(`<p role="alert" className="text-sm text-error-fg">x</p>`)).toEqual([
+      '1:error',
+    ]);
+    expect(await hues(`const a = 'text-warning-fg';`)).toEqual(['1:warning']);
   });
 
-  it('accepts an icon, which is a graphical object at 3:1 (WCAG 1.4.11)', () => {
-    expect(hues(`<Icon className="size-4 shrink-0 text-success" />`)).toEqual([]);
+  it('accepts an icon, which is a graphical object at 3:1 (WCAG 1.4.11)', async () => {
+    expect(await hues(`<Icon className="size-4 shrink-0 text-success" />`)).toEqual([]);
   });
 
-  it('accepts an icon whether the size comes before or after the hue', () => {
-    expect(hues(`<Icon className="text-success size-4" />`)).toEqual([]);
+  it('accepts an icon whether the size comes before or after the hue', async () => {
+    expect(await hues(`<Icon className="text-success size-4" />`)).toEqual([]);
   });
 
-  it('accepts an icon whose props span several lines', () => {
+  it('accepts an icon whose props span several lines', async () => {
     const source = [
       '<Icon',
       '  name="x"',
@@ -381,7 +402,7 @@ describe('what is NOT a violation', () => {
       '  className="size-4 text-success"',
       '/>',
     ].join('\n');
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 });
 
@@ -390,124 +411,126 @@ describe('what is NOT a violation', () => {
 // happens to sit in a square.  The exemption is the size class AND the element
 // that actually renders an icon.
 describe('the icon exemption is scoped to the icon element', () => {
-  it('REJECTS a sized non-icon element carrying the bare hue', () => {
-    expect(hues(`<span className="size-8 text-error">!</span>`)).toEqual(['1:error']);
-    expect(hues(`<div className="size-8 text-warning">x</div>`)).toEqual(['1:warning']);
+  it('REJECTS a sized non-icon element carrying the bare hue', async () => {
+    expect(await hues(`<span className="size-8 text-error">!</span>`)).toEqual(['1:error']);
+    expect(await hues(`<div className="size-8 text-warning">x</div>`)).toEqual(['1:warning']);
   });
 
-  it('REJECTS a sized class map entry, which has no element at all', () => {
+  it('REJECTS a sized class map entry, which has no element at all', async () => {
     // No evidence of being non-text, so it needs the reasoned marker instead.
-    expect(hues(`const m = { a: 'size-4 text-info' };`)).toEqual(['1:info']);
+    expect(await hues(`const m = { a: 'size-4 text-info' };`)).toEqual(['1:info']);
   });
 
-  it('ignores a class name only NAMED in a comment', () => {
-    expect(hues(`// never use text-error for body copy\nconst a = 1;`)).toEqual([]);
-    expect(hues(`/* text-warning is large-text only */\nconst a = 1;`)).toEqual([]);
+  it('ignores a class name only NAMED in a comment', async () => {
+    expect(await hues(`// never use text-error for body copy\nconst a = 1;`)).toEqual([]);
+    expect(await hues(`/* text-warning is large-text only */\nconst a = 1;`)).toEqual([]);
   });
 
-  it('ignores an interpolation hole, whose contents are an expression', () => {
+  it('ignores an interpolation hole, whose contents are an expression', async () => {
     // `textError` is an identifier, not class text; a class spliced through a
     // hole is a literal of its own and is caught as that literal instead.
     //
     // Written as an escaped template so the backticks and `${` belong to the
     // FIXTURE's source text rather than to this file's own string.
-    expect(hues(`const c = \`text-sm \${textError}\`;`)).toEqual([]);
+    expect(await hues(`const c = \`text-sm \${textError}\`;`)).toEqual([]);
   });
 
-  it('accepts an icon or an -on-soft pair reached through an interpolation', () => {
+  it('accepts an icon or an -on-soft pair reached through an interpolation', async () => {
     // The descent must not lose the exemptions it descends past.  The icon case
     // needs its element, since `size-*` alone no longer exempts anything.
-    expect(hues(`<Icon className={\`b \${on ? 'size-4 text-success' : ''}\`} />`)).toEqual([]);
-    expect(hues(`const c = \`b \${on ? 'text-error-on-soft' : ''}\`;`)).toEqual([]);
+    expect(await hues(`<Icon className={\`b \${on ? 'size-4 text-success' : ''}\`} />`)).toEqual(
+      [],
+    );
+    expect(await hues(`const c = \`b \${on ? 'text-error-on-soft' : ''}\`;`)).toEqual([]);
   });
 
-  it('does not confuse a hue-prefixed longer word', () => {
-    expect(hues(`const a = 'text-errors text-successful';`)).toEqual([]);
+  it('does not confuse a hue-prefixed longer word', async () => {
+    expect(await hues(`const a = 'text-errors text-successful';`)).toEqual([]);
   });
 
-  it('does not read a regex literal containing quotes as a string', () => {
+  it('does not read a regex literal containing quotes as a string', async () => {
     // The repo's own lexer trap: a naive scanner treats the quote inside the
     // character class as opening a string and swallows the code after it.
     const source = [`const q = /['"\`]/;`, `const c = 'text-error';`].join('\n');
-    expect(hues(source)).toEqual(['2:error']);
+    expect(await hues(source)).toEqual(['2:error']);
   });
 });
 
 describe('the reasoned exemption', () => {
-  it('accepts a marker on the same line', () => {
+  it('accepts a marker on the same line', async () => {
     const source = `const c = 'text-warning'; // a11y-bare-hue-ok: bar fill, not text`;
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 
-  it('accepts a marker anywhere in the comment block directly above', () => {
+  it('accepts a marker anywhere in the comment block directly above', async () => {
     const source = [
       `// a11y-bare-hue-ok: this colours the <progress> FILL, so WCAG 1.4.11`,
       `// (3:1) applies rather than 1.4.3, and the bare hue clears it.  The`,
       `// value is also stated in words below the bar.`,
       `const c = 'text-warning';`,
     ].join('\n');
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 
-  it('accepts a marker inside a JSX comment', () => {
+  it('accepts a marker inside a JSX comment', async () => {
     const source = [`{/* a11y-bare-hue-ok: svg stroke */}`, `<p className="text-error" />`].join(
       '\n',
     );
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 
-  it('accepts a marker inside a block comment', () => {
+  it('accepts a marker inside a block comment', async () => {
     const source = [
       `/**`,
       ` * a11y-bare-hue-ok: chart series colour.`,
       ` */`,
       `const c = 'text-info';`,
     ].join('\n');
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 
-  it('REJECTS a marker with no reason', () => {
-    expect(hues([`// a11y-bare-hue-ok:`, `const c = 'text-error';`].join('\n'))).toEqual([
+  it('REJECTS a marker with no reason', async () => {
+    expect(await hues([`// a11y-bare-hue-ok:`, `const c = 'text-error';`].join('\n'))).toEqual([
       '2:error',
     ]);
   });
 
-  it('REJECTS a marker separated from the class by real code', () => {
+  it('REJECTS a marker separated from the class by real code', async () => {
     // One exemption must never cover the next line's mistake.
     const source = [
       `// a11y-bare-hue-ok: bar fill`,
       `const bar = 'text-warning';`,
       `const label = 'text-error';`,
     ].join('\n');
-    expect(hues(source)).toEqual(['3:error']);
+    expect(await hues(source)).toEqual(['3:error']);
   });
 
-  it('lets a blank line sit between the comment block and the class', () => {
+  it('lets a blank line sit between the comment block and the class', async () => {
     const source = [`// a11y-bare-hue-ok: bar fill`, ``, `const c = 'text-warning';`].join('\n');
-    expect(hues(source)).toEqual([]);
+    expect(await hues(source)).toEqual([]);
   });
 });
 
 describe('the scanned file set', () => {
-  it('takes web source, in both extensions', () => {
+  it('takes web source, in both extensions', async () => {
     expect(isScannedPath(`${WEB_SRC}/components/x.tsx`)).toBe(true);
     expect(isScannedPath(`${WEB_SRC}/lib/api.ts`)).toBe(true);
   });
 
-  it('leaves out tests, which name classes in assertions', () => {
+  it('leaves out tests, which name classes in assertions', async () => {
     expect(isScannedPath(`${WEB_SRC}/components/x.test.tsx`)).toBe(false);
     expect(isScannedPath(`${WEB_SRC}/e2e/x.spec.ts`)).toBe(false);
     expect(isScannedPath(`${WEB_SRC}/design-system/__tests__/tokens.test.ts`)).toBe(false);
   });
 
-  it('leaves out other workspaces and non-source files', () => {
+  it('leaves out other workspaces and non-source files', async () => {
     expect(isScannedPath('apps/api/src/routes/x.ts')).toBe(false);
     expect(isScannedPath(`${WEB_SRC}/styles/index.css`)).toBe(false);
   });
 });
 
 describe('the real web source', () => {
-  it('uses the -on-soft pair for every semantic hue on normal text', () => {
+  it('uses the -on-soft pair for every semantic hue on normal text', async () => {
     const tracked = execFileSync('git', ['ls-files', WEB_SRC], {
       cwd: ROOT,
       encoding: 'utf-8',
@@ -521,6 +544,6 @@ describe('the real web source', () => {
       path,
       content: readFileSync(resolve(ROOT, path), 'utf-8'),
     }));
-    expect(findBareHueTextUses(files).map((f) => `${f.file}:${f.line}`)).toEqual([]);
+    expect((await findBareHueTextUses(files)).map((f) => `${f.file}:${f.line}`)).toEqual([]);
   });
 });

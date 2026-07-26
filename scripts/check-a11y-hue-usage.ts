@@ -27,8 +27,10 @@
 //
 // TWO EXEMPTIONS, both narrow:
 //
-//   1. `size-<n>` in the same literal — this codebase sizes ICONS that way, and
-//      an icon is a graphical object (1.4.11, 3:1).
+//   1. A class that sizes a SQUARE box in the same literal — this codebase sizes
+//      ICONS that way — on an element that renders an icon.  An icon is a
+//      graphical object (1.4.11, 3:1).  Asked of what the class DECLARES, so
+//      `md:size-4` counts and a `w-4` that merely looks similar does not.
 //   2. An explicit `a11y-bare-hue-ok: <reason>` comment on the offending line or
 //      the three lines above it, for a non-text use the lexer cannot recognise
 //      (a `<progress>` fill, an SVG stroke).  The reason is REQUIRED — an
@@ -38,369 +40,268 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { renderTokensCss } from '../apps/web/src/design-system/css.js';
-import { breakpoints } from '../apps/web/src/design-system/tokens.js';
 import { interpolationSpans, type Token, tokenize } from './js-sink-analyzer.js';
+import { type Declared, readUtilities, type UtilityFacts } from './tailwind-utilities.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 export const WEB_SRC = 'apps/web/src';
 
-/**
- * Where a class STARTS in a string, and where it ends.
- *
- * Spelled ONCE because four patterns need it — the bare hue, the `-fg` token,
- * its paired background, and the icon size — and they had three spellings
- * between them: `ICON_SIZE` omitted `:` and `!`, so a variant-prefixed
- * `md:size-4` did not read as a size and an icon carrying one lost its
- * exemption.  A rule that four patterns each restate is a rule that disagrees
- * with itself the first time one of them is edited.
- *
- * The separators include `:` and `!` so a VARIANT-prefixed class matches:
- * `hover:text-error`, `md:text-warning`, `[&:focus]:text-error`, `!text-error`.
- * The colour is still rendered as normal text in that state — a state a user is
- * very likely to be reading in — so the contrast obligation is identical.
- */
-// PAIRING IS A CASCADE QUESTION, not a text-matching one.
+// PAIRING IS A CASCADE QUESTION, and the classes are TAILWIND'S to read.
 //
 // `text-<hue>-fg` is `#FFFFFF`, and the token suite contrast-tests it against
 // the SOLID `bg-<hue>` alone — so it is legible exactly where that fill is
-// painted, and nowhere else.  Deciding that means knowing which background is
-// in force where the text renders, which four regexes searching for token names
-// could not express.  Each round found the next state they got wrong: a
-// hover-only background under always-white text, an `sm:` background replacing
-// an unconditional one, and an `sm:` background still in force at `sm:hover`.
+// painted, and nowhere else.  Deciding that needs two things: what each class
+// paints, and which paint wins where the text renders.
 //
-// Modelling the utilities fixed the parse, but the FIRST cut still asked the
-// question once — at the foreground's own state — and a foreground is active in
-// every state that includes its conditions.  `bg-error text-error-fg
-// sm:bg-canvas` is the whole class of misses: read at the empty state the pair
-// is perfect, and at `sm` the canvas is under white text.  So each foreground is
-// checked in every state it survives into, one per background's conditions,
-// which is provably enough — if some state paints a bad fill, the state formed
-// from that fill's own conditions paints it too.
+// Both were answered here by hand, and both produced a finding a round: a
+// hover-only background under always-white text; an `sm:` background replacing
+// an unconditional one; an `sm:` background still in force at `sm:hover`; a
+// foreground read at one state when it renders in many; the cascade read on
+// backgrounds but not on inks; `!important` in one of its two spellings; an
+// opacity modifier; a colon inside an arbitrary value.  Every fix was right and
+// the next one was always there, because the list was never a list of bugs — it
+// was Tailwind's grammar and the CSS cascade, restated badly.
 //
-// Nor does the class attribute decide WHICH background wins: Tailwind sorts its
-// output, so within one attribute order carries no cascade meaning at all.  What
-// does decide it is CSS's own priority — `!important` first, then conditions,
-// since extra conditions mean a later media block, a pseudo-class, or both.
-// Where that leaves two backgrounds genuinely tied, the honest answer is that
-// the class string does not say, so BOTH have to be solid.
+// So `tailwind-utilities` asks Tailwind instead, and the questions dissolve:
+// `bg-center` paints no colour, `[color:red]` paints one with no `text-` prefix,
+// `bg-(--licio-error)` is the error fill, `bg-error/50` is a BLEND of it and so
+// is not the flat colour anything was measured against, and both `!bg-canvas`
+// and `bg-canvas!` are `!important`.  What is left here is the POLICY — which
+// colours may carry normal text — expressed against resolved values rather than
+// against the spelling of a class.
 
 /** The five semantic hues, spelled once for every rule that names them. */
-const HUES: ReadonlySet<string> = new Set(['primary', 'success', 'warning', 'error', 'info']);
+const HUES: readonly string[] = ['primary', 'success', 'warning', 'error', 'info'];
 
-/**
- * One utility as Tailwind reads it: its VARIANT conditions and the utility name.
- *
- * A class is `variant:variant:utility`, with an optional importance marker.
- * Splitting on whitespace and then on `:` — both OUTSIDE any `[…]` value — is
- * the whole parse, and it replaces four regexes that each embedded their own
- * idea of where a class starts, what a variant prefix looks like and how one
- * ends.  Those regexes could ask "is this token present" but not "is this
- * background IN FORCE where that text renders", which is the question the
- * pairing rule actually turns on.
- */
-interface Utility {
-  /** The conditions, in source order: `sm:hover:` → `['sm', 'hover']`. */
-  readonly variants: readonly string[];
-  /** The utility itself, importance stripped: `sm:hover:bg-error!` → `bg-error`. */
+/** One class token in a string, and where it sits. */
+interface Candidate {
   readonly name: string;
-  /** Whether it carries the important marker, which outranks everything. */
-  readonly important: boolean;
-  /** Index of the utility's first character within the class string. */
   readonly at: number;
 }
 
 /**
- * Tailwind's important marker, in BOTH of its spellings.
+ * The class tokens in a string.
  *
- * v4 moved it to the end (`bg-canvas!`); the v3 leading form (`!bg-canvas`) is
- * no longer a utility and renders nothing.  Reading either as important is the
- * safe direction for a gate: a class string carrying the dead v3 form is broken
- * whichever way it is read, and treating it as inert would hide that.
+ * Whitespace is the ONLY separator, because it is the only one a `class`
+ * attribute has — and it is also what an unknown template hole folds to.  What
+ * counts as a utility is not decided here at all: anything Tailwind does not
+ * recognise simply paints nothing.
  */
-const IMPORTANT = /^!|!$/;
+function candidates(text: string): Candidate[] {
+  const found: Candidate[] = [];
+  for (const match of text.matchAll(/\S+/g)) {
+    found.push({ name: match[0], at: match.index ?? 0 });
+  }
+  return found;
+}
 
-/**
- * Characters that END a utility — but only outside an arbitrary value.
- *
- * Whitespace separates classes; the rest are the JavaScript punctuation a class
- * string can sit against once the folding layer has joined its operands.
- */
-const CLASS_BREAK: ReadonlySet<string> = new Set([
-  ' ',
-  '\t',
-  '\n',
-  '\r',
-  '\f',
-  "'",
-  '"',
-  '`',
-  '{',
-  '}',
-  '(',
-  ')',
-  ',',
-  ';',
-]);
+/** A colour a class paints, with everything needed to place it in the cascade. */
+interface Paint {
+  readonly candidate: Candidate;
+  readonly declared: Declared;
+  readonly order: bigint;
+}
 
-/**
- * The utility spans in a class string, bracket-aware.
- *
- * An ARBITRARY VALUE is written `[…]` and may contain any of the characters that
- * otherwise end a class: `bg-[rgb(255,0,0)]` holds parentheses and commas, and
- * `[@media(min-width:100px)]:bg-canvas` holds them in a VARIANT.  Ending the
- * span at the first `(` cut those into fragments, and a background reduced to a
- * fragment stops taking part in the cascade — which is the direction that hides
- * a defect rather than inventing one.
- */
-function classSpans(text: string): Array<{ start: number; end: number }> {
-  const spans: Array<{ start: number; end: number }> = [];
-  let depth = 0;
-  let start = -1;
-  for (let index = 0; index <= text.length; index += 1) {
-    const character = text[index];
-    const inValue = depth > 0;
-    if (character === '[') depth += 1;
-    else if (character === ']') depth = Math.max(0, depth - 1);
-    if (character === undefined || (!inValue && CLASS_BREAK.has(character))) {
-      if (start !== -1) spans.push({ start, end: index });
-      start = -1;
-    } else if (start === -1) {
-      start = index;
+/** Every paint of one property among `all`, in the class's own order. */
+function paintsOf(
+  all: readonly Candidate[],
+  facts: UtilityFacts,
+  property: 'color' | 'background-color',
+): Paint[] {
+  const paints: Paint[] = [];
+  for (const candidate of all) {
+    const order = facts.orderOf(candidate.name);
+    if (order === undefined) continue;
+    for (const declared of facts.declarationsOf(candidate.name)) {
+      if (declared.property !== property) continue;
+      paints.push({ candidate, declared, order });
     }
   }
-  return spans;
+  return paints;
+}
+
+/** Everything that must hold for a declaration to render. */
+function conditionsOf(declared: Declared): string[] {
+  return declared.demand === '' ? [...declared.atRules] : [...declared.atRules, declared.demand];
+}
+
+/** Whether every condition of `paint` holds in `state`. */
+function activeIn(paint: Paint, state: readonly string[]): boolean {
+  return conditionsOf(paint.declared).every((condition) => state.includes(condition));
 }
 
 /**
- * Split on the separators Tailwind reads as separators — those OUTSIDE `[…]`.
+ * Whether `contender` is painted over `other` wherever both apply.
  *
- * `:` divides a variant from what it qualifies, and an arbitrary value may
- * contain one of its own: `bg-[color:white]` is a single utility, and
- * `[&:focus]:bg-error` is a single variant on one.  Splitting on every `:` read
- * the first as a variant `bg-[color` qualifying a utility `white]` — no utility
- * at all, so an important arbitrary fill dropped out of the cascade silently.
+ * The CSS cascade, with every input coming from Tailwind rather than from the
+ * spelling of a class: `!important` first, then SPECIFICITY, then order.
+ *
+ * Specificity lives entirely in the selector — an at-rule adds none — so a
+ * declaration that demands something of the selector outranks one that demands
+ * nothing, and two that make the SAME demand (including none at all) are equally
+ * specific.  Between those the cascade consults stylesheet order, which is
+ * exactly what Tailwind's own class order reports: `sm:bg-canvas md:bg-error` is
+ * decided, not tied, and so is `bg-canvas bg-error`.  A `className` attribute's
+ * order is consulted nowhere, because it means nothing.
+ *
+ * Two DIFFERENT selector demands (`:hover` against `:focus`) would be settled by
+ * counting specificity, which these facts do not carry; neither outranks, so
+ * both stay candidates and both have to be legible.
  */
-function splitOutsideValues(token: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let index = 0; index < token.length; index += 1) {
-    const character = token[index];
-    if (character === '[') depth += 1;
-    else if (character === ']') depth = Math.max(0, depth - 1);
-    else if (character === ':' && depth === 0) {
-      parts.push(token.slice(start, index));
-      start = index + 1;
-    }
-  }
-  parts.push(token.slice(start));
-  return parts;
+function outranks(contender: Paint, other: Paint): boolean {
+  const mine = contender.declared;
+  const theirs = other.declared;
+  if (mine.important !== theirs.important) return mine.important;
+  if (mine.demand !== theirs.demand) return theirs.demand === '';
+  return contender.order > other.order;
 }
 
-/** Split a class string into utilities, keeping each one's offset. */
-function utilities(text: string): Utility[] {
-  const found: Utility[] = [];
-  for (const span of classSpans(text)) {
-    const token = text.slice(span.start, span.end);
-    const parts = splitOutsideValues(token);
-    const raw = parts.pop() ?? '';
-    const name = raw.replace(/^!/, '').replace(/!$/, '');
-    if (name === '') continue;
-    found.push({
-      variants: parts,
-      name,
-      important: IMPORTANT.test(raw),
-      at: span.start + token.length - raw.length,
-    });
+/** The paints that could be the one showing in `state`. */
+function paintedIn(paints: readonly Paint[], state: readonly string[]): Paint[] {
+  const active = paints.filter((paint) => activeIn(paint, state));
+  return active.filter((one) => !active.some((other) => outranks(other, one)));
+}
+
+/**
+ * The value a reference class paints — `text-error` → `var(--licio-error)`.
+ *
+ * This is how a hue is RECOGNISED: not by the spelling of a class, but by the
+ * colour it resolves to, so every other spelling of the same colour is caught
+ * with it.  A missing answer means the theme no longer defines the token the
+ * whole policy is about, which is a reason to stop rather than to report clean.
+ */
+function referenceValue(facts: UtilityFacts, candidate: string, property: string): string {
+  const declared = facts
+    .declarationsOf(candidate)
+    .filter((entry) => entry.property === property && conditionsOf(entry).length === 0);
+  const value = declared[declared.length - 1]?.value;
+  if (value === undefined) {
+    throw new Error(
+      `check:a11y-hue-usage: Tailwind resolves no ${property} for "${candidate}"; the ` +
+        'semantic hue tokens this gate is about are not in the design system.',
+    );
+  }
+  return value;
+}
+
+/** The reference colours of one hue, as the design system resolves them. */
+interface HueColors {
+  readonly hue: string;
+  /** `text-<hue>` — 3:1, never normal text. */
+  readonly bare: string;
+  /** `text-<hue>-fg` — white, measured against the solid fills alone. */
+  readonly foreground: string;
+  /** The fills `-fg` was measured on. */
+  readonly solid: readonly string[];
+}
+
+function hueColors(facts: UtilityFacts): HueColors[] {
+  return HUES.map((hue) => ({
+    hue,
+    bare: referenceValue(facts, `text-${hue}`, 'color'),
+    foreground: referenceValue(facts, `text-${hue}-fg`, 'color'),
+    solid: [`bg-${hue}`, `bg-${hue}-hover`, `bg-${hue}-active`]
+      .filter((fill) => facts.orderOf(fill) !== undefined)
+      .map((fill) => referenceValue(facts, fill, 'background-color')),
+  }));
+}
+
+/**
+ * Every class name a hue's reference colour needs to be judged through.
+ *
+ * Included in the batch so `referenceValue` has them, whether or not the source
+ * happens to use them.
+ */
+function hueReferenceCandidates(): string[] {
+  return HUES.flatMap((hue) => [
+    `text-${hue}`,
+    `text-${hue}-fg`,
+    `bg-${hue}`,
+    `bg-${hue}-hover`,
+    `bg-${hue}-active`,
+  ]);
+}
+
+/**
+ * Whether a painted colour IS the reference one, rather than derived from it.
+ *
+ * An opacity modifier compiles to `color-mix(… var(--licio-error) 50%, …)`:
+ * still that hue, no longer that colour.  So `mentions` is what identifies a
+ * hue — every spelling that lands on the token, blended or not — while an exact
+ * match is what identifies the flat colour the contrast suite measured.
+ */
+function mentions(value: string, reference: string): boolean {
+  return value === reference || value.includes(reference);
+}
+
+/** The bare-hue inks in `all` — the 3:1 colour carrying normal text. */
+function bareHuePaints(all: readonly Candidate[], facts: UtilityFacts, hues: readonly HueColors[]) {
+  const found: Array<{ candidate: Candidate; hue: string }> = [];
+  for (const paint of paintsOf(all, facts, 'color')) {
+    for (const colors of hues) {
+      if (!mentions(paint.declared.value, colors.bare)) continue;
+      found.push({ candidate: paint.candidate, hue: colors.hue });
+    }
   }
   return found;
 }
 
 /**
- * Whether a utility's conditions all hold wherever `state` holds.
+ * The `-fg` inks that do not render on the fill they were measured against.
  *
- * An UNCONDITIONAL utility is active everywhere; `sm:bg-canvas` is active at
- * `sm:hover` because `sm` still holds there.  Requiring the prefixes to be
- * EQUAL missed exactly that: `bg-error sm:bg-canvas sm:hover:text-error-fg`
- * found no `sm:hover:` background, fell back to the unconditional `bg-error`,
- * and called white-on-canvas paired.
+ * `-fg` is `#FFFFFF` and was contrast-tested on the SOLID `bg-<hue>` alone, so
+ * it is legible exactly where that fill is showing — and it shows in every state
+ * its own conditions survive into, not only the one they name.  Each such state
+ * is tried, one per background, which is provably enough: if some reachable
+ * state shows a bad fill, so does the state built from that fill's conditions.
+ *
+ * The cascade governs the INK the same way, so a state only counts where this
+ * ink is still one of the colours that could be showing.
  */
-function activeIn(utility: Utility, state: readonly string[]): boolean {
-  return utility.variants.every((variant) => state.includes(variant));
-}
-
-/** The solid fills a `-fg` token is contrast-tested against. */
-function isSolidFill(name: string, hue: string): boolean {
-  return name === `bg-${hue}` || name === `bg-${hue}-hover` || name === `bg-${hue}-active`;
-}
-
-/**
- * Every colour Tailwind builds a `bg-*` utility from here, read from the SSOT
- * that GENERATES the theme rather than from a list kept alongside it.
- */
-const themeColors: ReadonlySet<string> = new Set(
-  [...renderTokensCss().matchAll(/--color-([a-z0-9-]+)\s*:/g)].map((match) => match[1] ?? ''),
-);
-
-// A colour set that came back empty — a renamed custom property, a generator
-// that stopped emitting the block — would make every `-fg` look unbacked and
-// bury the real findings under noise.  Fail on the spot instead.
-for (const hue of HUES) {
-  if (!themeColors.has(hue)) {
-    throw new Error(
-      `check:a11y-hue-usage: the generated theme declares no --color-${hue}; the pairing ` +
-        'rule cannot name the fills it judges.',
-    );
+function unpairedForegrounds(
+  all: readonly Candidate[],
+  facts: UtilityFacts,
+  hues: readonly HueColors[],
+) {
+  const inks = paintsOf(all, facts, 'color');
+  const fills = paintsOf(all, facts, 'background-color');
+  const found: Array<{ candidate: Candidate; hue: string }> = [];
+  for (const ink of inks) {
+    for (const colors of hues) {
+      if (!mentions(ink.declared.value, colors.foreground)) continue;
+      // A BLENDED `-fg` is no longer the colour that was measured, wherever it
+      // lands — so it needs no state to be wrong in.
+      const broken =
+        ink.declared.value !== colors.foreground ||
+        [
+          conditionsOf(ink.declared),
+          ...fills.map((fill) => [...conditionsOf(ink.declared), ...conditionsOf(fill.declared)]),
+        ].some((state) => {
+          if (!paintedIn(inks, state).includes(ink)) return false;
+          const showing = paintedIn(fills, state);
+          return (
+            showing.length === 0 ||
+            !showing.every((fill) => colors.solid.includes(fill.declared.value))
+          );
+        });
+      if (broken) found.push({ candidate: ink.candidate, hue: colors.hue });
+    }
   }
-}
-
-/** Colour keywords CSS supplies itself, which no theme has to declare. */
-const CSS_COLOR_KEYWORDS: ReadonlySet<string> = new Set([
-  'transparent',
-  'current',
-  'inherit',
-  'black',
-  'white',
-]);
-
-/**
- * Whether a utility SETS a colour on `property` (`bg` fills, `text` inks).
- *
- * Both prefixes are shared with utilities that set no colour at all — `bg-` with
- * size, position, repeat, origin, clip and blend; `text-` with the size, align
- * and wrap scales — and under a rule that requires every candidate to be the
- * right colour, one `bg-center` or `text-sm` in the string would fail a correct
- * build.  Four things are colours: a name the theme declares, a keyword CSS
- * supplies, and anything Tailwind resolves on its own — a default-palette step
- * (`red-500`) or an arbitrary value (`[#fff]`).  Those last two are colours this
- * design system never issued, so they can never be the solid hue, which is the
- * reading that reports them rather than waving them through.
- */
-function isColorUtility(name: string, property: 'bg' | 'text'): boolean {
-  const prefix = `${property}-`;
-  if (!name.startsWith(prefix)) return false;
-  const colour = name.slice(prefix.length);
-  return (
-    themeColors.has(colour) ||
-    CSS_COLOR_KEYWORDS.has(colour) ||
-    /-\d{2,3}$/.test(colour) ||
-    colour.startsWith('[')
-  );
+  return found;
 }
 
 /**
- * The breakpoints, in the order Tailwind emits their media blocks — read from
- * the token SSOT, so a new one participates without being named again here.
- * Index 0 is "unprefixed", which every media block is emitted after.
+ * Whether a class sizes a square box — how this codebase sizes ICONS.
+ *
+ * Asked of the DECLARATIONS rather than the name, so `md:size-4` counts and a
+ * `w-4` that only looks similar does not.
  */
-const BREAKPOINT_ORDER: readonly string[] = ['', ...Object.keys(breakpoints)];
-
-/** The widest breakpoint a utility waits for; 0 when it waits for none. */
-function breakpointRank(variants: readonly string[]): number {
-  let rank = 0;
-  for (const variant of variants) {
-    rank = Math.max(rank, BREAKPOINT_ORDER.indexOf(variant));
-  }
-  return rank;
+function isSquareSize(facts: UtilityFacts, candidate: string): boolean {
+  const declared = facts.declarationsOf(candidate);
+  const width = declared.find((entry) => entry.property === 'width')?.value;
+  const height = declared.find((entry) => entry.property === 'height')?.value;
+  return width !== undefined && width === height;
 }
-
-/** The conditions that are NOT a breakpoint: pseudo-classes, `dark`, arbitrary. */
-function selectorVariants(variants: readonly string[]): string[] {
-  return variants.filter((variant) => !BREAKPOINT_ORDER.includes(variant));
-}
-
-/**
- * Whether `contender` is painted over `other` wherever both are active.
- *
- * The class attribute does NOT decide this: Tailwind sorts its own output, so
- * the order two utilities appear in a `className` carries no cascade meaning.
- * What decides it is CSS, along two independent axes — a selector condition
- * (`hover`, `dark`, an arbitrary variant) adds specificity, and a breakpoint
- * moves the rule into a later media block.  A utility wins when it is at least
- * as far along BOTH and strictly further along one; `sm:bg-a md:bg-b` is the
- * ordinary responsive override that a set-inclusion test alone would call a tie.
- *
- * Importance precedes both, since `!important` outranks any specificity.
- */
-function outranks(contender: Utility, other: Utility): boolean {
-  if (contender.important !== other.important) return contender.important;
-  const selectors = selectorVariants(contender.variants);
-  const rivals = selectorVariants(other.variants);
-  if (!rivals.every((variant) => selectors.includes(variant))) return false;
-  const reach = breakpointRank(contender.variants);
-  const rivalReach = breakpointRank(other.variants);
-  if (reach < rivalReach) return false;
-  return selectors.length > rivals.length || reach > rivalReach;
-}
-
-/**
- * The backgrounds that could be the one painted in `state`.
- *
- * Usually exactly one.  Two that neither outranks — identical conditions, or
- * conditions that simply do not compare — leave the winner unstated by the class
- * string, so both are returned rather than guessed between.
- */
-function paintedIn(backgrounds: readonly Utility[], state: readonly string[]): Utility[] {
-  const active = backgrounds.filter((background) => activeIn(background, state));
-  return active.filter((one) => !active.some((other) => outranks(other, one)));
-}
-
-/**
- * The `text-<hue>-fg` utilities whose background does NOT hold where they render.
- *
- * `-fg` is `#FFFFFF` and the token suite contrast-tests it against the SOLID
- * `bg-<hue>` alone, so it is legible exactly where that fill is in force — and
- * it renders in EVERY state its own conditions survive into, not just the one
- * they name.  `bg-error text-error-fg sm:bg-canvas` is the pair that reads
- * perfectly at the empty state and puts white on the canvas at `sm`.
- *
- * So each state is tried: the foreground's own, and its own widened by each
- * background's conditions.  That is provably every state worth trying — if some
- * reachable state paints a bad fill, the state built from that fill's own
- * conditions paints it too, because narrowing to those conditions can only
- * remove rivals that were already losing to it.
- *
- * The cascade governs the TEXT colour the same way, and a rule applied to one
- * side only reports the wrong half: in `bg-error text-error-fg sm:bg-warning
- * sm:text-warning-fg` the error token is not painted at `sm` at all, because the
- * warning token outranks it there.  So a state counts only where this foreground
- * is still one of the possible inks.
- *
- * `bg-<hue>-soft` is deliberately not solid: it is a pale tint (`error-soft` is
- * `#FBE7E5`) where white is the same defect as on the canvas.
- */
-function unpairedForegrounds(all: readonly Utility[]): Utility[] {
-  const backgrounds = all.filter((utility) => isColorUtility(utility.name, 'bg'));
-  const inks = all.filter((utility) => isColorUtility(utility.name, 'text'));
-  const unpaired: Utility[] = [];
-  for (const utility of all) {
-    const hue = /^text-(\w+)-fg$/.exec(utility.name)?.[1];
-    if (hue === undefined || !HUES.has(hue)) continue;
-    const states = [
-      utility.variants,
-      ...backgrounds.map((background) => [...utility.variants, ...background.variants]),
-    ];
-    const broken = states.some((state) => {
-      if (!paintedIn(inks, state).includes(utility)) return false;
-      const painted = paintedIn(backgrounds, state);
-      return painted.length === 0 || !painted.every((fill) => isSolidFill(fill.name, hue));
-    });
-    if (broken) unpaired.push(utility);
-  }
-  return unpaired;
-}
-
-/** The BARE `text-<hue>` utilities — no suffix, so not `-on-soft` or `-fg`. */
-function bareHues(all: readonly Utility[]): Utility[] {
-  return all.filter((utility) => {
-    const hue = /^text-(\w+)$/.exec(utility.name)?.[1];
-    return hue !== undefined && HUES.has(hue);
-  });
-}
-
-const ICON_SIZE = /^size-\d/;
 
 /** The component that renders an icon here; the ONLY element `size-*` exempts. */
 const ICON_ELEMENT = 'Icon';
@@ -889,49 +790,82 @@ function foldStaticHole(hole: string, preferRegex: boolean, depth = 0): string |
   return parts.join('');
 }
 
-/** Every bare-hue text use in `files` that is neither an icon nor exempted. */
-export function findBareHueTextUses(files: readonly SourceFile[]): HueFinding[] {
-  const findings: HueFinding[] = [];
+/** One folded class string, and where its characters came from. */
+interface Scanned {
+  readonly file: SourceFile;
+  readonly start: number;
+  readonly text: string;
+  readonly offsets: readonly number[];
+  readonly all: readonly Candidate[];
+}
+
+/** Fold every literal group in `files` into the class strings it renders. */
+function scan(files: readonly SourceFile[]): Scanned[] {
+  const scanned: Scanned[] = [];
   for (const file of files) {
-    const newlines = newlineIndex(file.content);
-    const lines = file.content.split('\n');
     for (const group of literalGroups(file.content)) {
-      const start = group.tokens[0]?.start ?? 0;
       // What the RUNTIME sees: the operands joined, delimiters dropped, escapes
       // decoded.  `'text-' + 'error'` is the class `text-error`.
       const { text, offsets } = groupContent(group);
-      // An ICON is a graphical object (WCAG 1.4.11, 3:1), which is why the BARE
-      // hue is allowed on one.  BOTH halves are required: the size class alone
-      // describes a box, not a glyph.
-      //
-      // It does NOT excuse a `-fg` token.  That one is white and is tested only
-      // against its matching SOLID background, so `<Icon className="size-4
-      // text-error-fg" />` on the canvas is near-invisible whether or not the
-      // glyph counts as graphical — 1.4.11 asks for 3:1 against the ADJACENT
-      // colour, and white on near-white clears nothing.
-      const all = utilities(text);
-      // A size class is a UTILITY, wherever it sits in the string — matching it
-      // against the raw text made its position load-bearing.
-      const isIcon =
-        all.some((utility) => ICON_SIZE.test(utility.name)) &&
-        enclosingElement(file.content, start) === ICON_ELEMENT;
-      // EVERY offending utility, not the first: one class can carry several,
-      // and the earlier ones may be perfectly paired.
-      const offenders = [...(isIcon ? [] : bareHues(all)), ...unpairedForegrounds(all)];
-      const match = offenders.sort((left, right) => left.at - right.at)[0];
-      if (match === undefined) continue;
-      // A template may span lines, so anchor on the UTILITY rather than the
-      // token start: the reported line is where the class actually sits, and
-      // the offset map carries that folded index back to the source.
-      const line = lineOf(newlines, offsets[match.at] ?? start);
-      if (isExempt(lines, line)) continue;
-      findings.push({
-        file: file.path,
-        line,
-        hue: /^text-(\w+)/.exec(match.name)?.[1] ?? '',
-        source: (lines[line - 1] ?? '').trim(),
-      });
+      const all = candidates(text);
+      if (all.length === 0) continue;
+      scanned.push({ file, start: group.tokens[0]?.start ?? 0, text, offsets, all });
     }
+  }
+  return scanned;
+}
+
+/**
+ * Every bare-hue text use in `files` that is neither an icon nor exempted.
+ *
+ * Asynchronous because the design system is: every class here is resolved by
+ * Tailwind, in ONE batch for the whole run, so no part of its grammar has to be
+ * anticipated by this file.
+ */
+export async function findBareHueTextUses(files: readonly SourceFile[]): Promise<HueFinding[]> {
+  const scanned = scan(files);
+  const facts = await readUtilities([
+    ...hueReferenceCandidates(),
+    ...scanned.flatMap((entry) => entry.all.map((candidate) => candidate.name)),
+  ]);
+  const hues = hueColors(facts);
+
+  const findings: HueFinding[] = [];
+  for (const entry of scanned) {
+    const { file, all } = entry;
+    // An ICON is a graphical object (WCAG 1.4.11, 3:1), which is why the BARE
+    // hue is allowed on one.  BOTH halves are required: a square size describes
+    // a box, not a glyph.
+    //
+    // It does NOT excuse a `-fg` token.  That one is white and is tested only
+    // against its matching SOLID background, so `<Icon className="size-4
+    // text-error-fg" />` on the canvas is near-invisible whether or not the
+    // glyph counts as graphical — 1.4.11 asks for 3:1 against the ADJACENT
+    // colour, and white on near-white clears nothing.
+    const isIcon =
+      all.some((candidate) => isSquareSize(facts, candidate.name)) &&
+      enclosingElement(file.content, entry.start) === ICON_ELEMENT;
+    // EVERY offending class, not the first: one string can carry several, and
+    // the earlier ones may be perfectly paired.
+    const offenders = [
+      ...(isIcon ? [] : bareHuePaints(all, facts, hues)),
+      ...unpairedForegrounds(all, facts, hues),
+    ];
+    const match = offenders.sort((left, right) => left.candidate.at - right.candidate.at)[0];
+    if (match === undefined) continue;
+    // A template may span lines, so anchor on the CLASS rather than the token
+    // start: the reported line is where it actually sits, and the offset map
+    // carries that folded index back to the source.
+    const newlines = newlineIndex(file.content);
+    const line = lineOf(newlines, entry.offsets[match.candidate.at] ?? entry.start);
+    const lines = file.content.split('\n');
+    if (isExempt(lines, line)) continue;
+    findings.push({
+      file: file.path,
+      line,
+      hue: match.hue,
+      source: (lines[line - 1] ?? '').trim(),
+    });
   }
   return findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }
@@ -943,7 +877,7 @@ export function isScannedPath(path: string): boolean {
   return !/\.(?:test|spec)\.tsx?$/.test(path) && !path.includes('/__tests__/');
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const tracked = execFileSync('git', ['ls-files', WEB_SRC], {
     cwd: ROOT,
     encoding: 'utf-8',
@@ -961,7 +895,7 @@ function main(): void {
     }
   }
 
-  const findings = findBareHueTextUses(files);
+  const findings = await findBareHueTextUses(files);
   if (findings.length > 0) {
     console.error(
       `check:a11y-hue-usage FAILED — ${findings.length} bare semantic hue(s) on normal text:`,
@@ -986,5 +920,8 @@ function main(): void {
 
 // Run as a CLI only; importing for tests must not trigger the scan.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main();
+  main().catch((error: unknown) => {
+    console.error('check:a11y-hue-usage FAILED to run:', error);
+    process.exit(1);
+  });
 }
