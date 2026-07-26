@@ -466,18 +466,49 @@ function groupContent(group: LiteralGroup): Decoded {
     // renders `text-error` — so it is folded in.  One that is not becomes a
     // single SPACE: dropping it entirely would join the chunks around it and
     // invent a class (`text-${x}error`), which fails a correct build.
-    let cursor = 1;
-    for (const span of interpolationSpans(raw, 0, group.preferRegex)) {
-      const holeAt = Math.max(cursor, span.offset - 2); // the `${`
-      append(raw.slice(cursor, holeAt), token.start + cursor);
-      const folded = foldStaticHole(span.text, group.preferRegex);
-      if (folded === null) push(' ', token.start + holeAt);
-      else append(folded, token.start + span.offset);
-      cursor = span.offset + span.text.length + 1; // past the closing `}`
+    for (const piece of templatePieces(raw, group.preferRegex)) {
+      if (piece.kind === 'chunk') {
+        append(piece.text, token.start + piece.at);
+        continue;
+      }
+      const folded = foldStaticHole(piece.text, group.preferRegex);
+      // An unknown hole becomes a single SPACE: dropping it would join the
+      // chunks around it and invent a class.
+      if (folded === null) push(' ', token.start + piece.at);
+      else append(folded, token.start + piece.at);
     }
-    append(raw.slice(cursor, Math.max(cursor, raw.length - 1)), token.start + cursor);
   }
   return { text: units.join(''), offsets };
+}
+
+/** A literal run of a template, or one `${…}` hole, with its offset in `raw`. */
+interface TemplatePiece {
+  readonly kind: 'chunk' | 'hole';
+  /** For a chunk, its source text; for a hole, the EXPRESSION between the braces. */
+  readonly text: string;
+  /** Offset within `raw`: a chunk's first character, or a hole's `${`. */
+  readonly at: number;
+}
+
+/**
+ * Split a template (backticks included) into its chunks and holes.
+ *
+ * ONE walk, because two consumers want the same split for different reasons —
+ * building the class string with offsets, and folding a nested template to a
+ * plain value.  They had the same hole-bounds arithmetic written out twice, and
+ * an off-by-one fixed in one of them would have silently not been fixed in the
+ * other.  What differs between the callers is only what an UNKNOWN hole means,
+ * so that is all they decide.
+ */
+function* templatePieces(raw: string, preferRegex: boolean): Generator<TemplatePiece> {
+  let cursor = 1; // past the opening backtick
+  for (const span of interpolationSpans(raw, 0, preferRegex)) {
+    const holeAt = Math.max(cursor, span.offset - 2); // the `${`
+    yield { kind: 'chunk', text: raw.slice(cursor, holeAt), at: cursor };
+    yield { kind: 'hole', text: span.text, at: holeAt };
+    cursor = span.offset + span.text.length + 1; // past the closing `}`
+  }
+  yield { kind: 'chunk', text: raw.slice(cursor, Math.max(cursor, raw.length - 1)), at: cursor };
 }
 
 /**
@@ -489,16 +520,16 @@ function groupContent(group: LiteralGroup): Decoded {
 function foldStaticTemplate(raw: string, preferRegex: boolean, depth: number): string | null {
   if (depth > MAX_INTERPOLATION_DEPTH) return null;
   let out = '';
-  let cursor = 1;
-  for (const span of interpolationSpans(raw, 0, preferRegex)) {
-    const holeAt = Math.max(cursor, span.offset - 2);
-    out += raw.slice(cursor, holeAt);
-    const folded = foldStaticHole(span.text, preferRegex, depth + 1);
-    if (folded === null) return null;
+  for (const piece of templatePieces(raw, preferRegex)) {
+    if (piece.kind === 'chunk') {
+      out += piece.text;
+      continue;
+    }
+    const folded = foldStaticHole(piece.text, preferRegex, depth + 1);
+    if (folded === null) return null; // one unknown hole and the whole is unknown
     out += folded;
-    cursor = span.offset + span.text.length + 1;
   }
-  return out + raw.slice(cursor, Math.max(cursor, raw.length - 1));
+  return out;
 }
 
 /**
