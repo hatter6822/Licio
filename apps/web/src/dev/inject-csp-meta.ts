@@ -41,8 +41,21 @@ const HEAD_OPEN = /<head(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?>/i;
  * parsed, but into an INERT fragment: a CSP `<meta>` inside one has no effect
  * whatsoever, which makes it the most dangerous of the set, because it looks
  * exactly like a delivered policy to anything matching on text.
+ *
+ * `noscript` belongs with them for the case that matters here.  Its content is
+ * markup only when SCRIPTING IS DISABLED; with scripting on — every browser the
+ * courier runs in — the parser treats it as raw text, so a policy placed there
+ * is applied by exactly the clients that need it least.  A CSP whose delivery
+ * depends on the user having turned JavaScript off is not a delivered CSP.
  */
-const INERT_CONTENT_ELEMENTS = ['script', 'style', 'textarea', 'title', 'template'] as const;
+const INERT_CONTENT_ELEMENTS = [
+  'script',
+  'style',
+  'textarea',
+  'title',
+  'template',
+  'noscript',
+] as const;
 
 /** Opens one of the above.  Sticky, so the scan stays linear over the document. */
 const INERT_OPEN = new RegExp(`<(${INERT_CONTENT_ELEMENTS.join('|')})\\b[^>]*>`, 'iy');

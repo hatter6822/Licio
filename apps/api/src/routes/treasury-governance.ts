@@ -448,11 +448,17 @@ export function createTreasuryGovernanceRoutes() {
           // enforcement action to the community — the one direction the request
           // body could lie in, since the platform sources are already gated by
           // `actsWithPlatformAuthority` in the domain.
-          if (body.source === 'steward' && !ownSteward) {
+          // LIFTING is platform-only whoever asks (`setGovernanceFreeze` enforces
+          // `restrict`), so `steward` is never a truthful source for it — not
+          // even from an actor who genuinely stewards this room and also holds
+          // platform staff, whose release is exercising the PLATFORM authority.
+          // Keying only on `ownSteward` let that actor record a platform-only
+          // release as community-initiated in the hash-chained audit.
+          if (body.source === 'steward' && (clearingAHold || !ownSteward)) {
             return c.json(
               deny(
                 'source_not_authorized',
-                'Only the room’s own steward may record a freeze as "steward"; a cross-room action is a platform action.',
+                'A freeze is recorded as "steward" only when the room’s own steward PLACES it; lifting one is a platform action, as is any action on a room you do not steward.',
               ),
               403,
             );

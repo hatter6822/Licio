@@ -932,6 +932,28 @@ describe('WS-M treasury + payment intents', () => {
       );
     });
 
+    it('refuses `steward` attribution on an UNFREEZE, even from the room steward', async () => {
+      // Lifting is platform-only whoever asks, so `steward` is never a truthful
+      // source for it — not even from an actor who genuinely stewards the room
+      // and also holds platform staff, whose release exercises the PLATFORM
+      // authority.  The source lands verbatim in the hash-chained audit.
+      const fixture = await wsmFixture(); // every user stewards the room here
+      const staff = await seedUserWithSession(fixture.identity, {
+        handle: 'steward_and_staff',
+        admin: true,
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not a community action',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'source_not_authorized',
+      );
+    });
+
     it('404s a plain member rather than leaking that the room exists', async () => {
       const fixture = await wsmFixture({ steward: false });
       const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'plain_one' });

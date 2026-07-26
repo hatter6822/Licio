@@ -135,6 +135,19 @@ describe('inert content is not markup', () => {
     expect(extractMetaPolicies(html)).toEqual([]);
   });
 
+  it('does not accept a policy inside <noscript>', () => {
+    // `noscript` content is markup only when SCRIPTING IS DISABLED.  With
+    // scripting on — every browser the courier runs in — the parser treats it as
+    // raw text, so a policy there is applied by exactly the clients that need it
+    // least.  A CSP whose delivery depends on JavaScript being off is not
+    // delivered.
+    const html = `<html><head><noscript>${META}</noscript></head><body></body></html>`;
+    expect(extractMetaPolicies(html)).toEqual([]);
+    const found = problems(html);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('no <meta http-equiv="Content-Security-Policy">');
+  });
+
   it('does not read a <meta> written inside <script> TEXT as a tag', () => {
     const html = `<html><head><script>var s = '${META}';</script></head></html>`;
     expect(extractMetaPolicies(html)).toEqual([]);

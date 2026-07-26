@@ -64,6 +64,17 @@ const FILES: Record<string, string> = {
     '  return lazilyUsed();',
     '}',
   ].join('\n'),
+  // An ALIASED re-export consumed through a destructured dynamic import: the
+  // module's export table hands back the barrel's alias, and crediting only that
+  // left the original — the declaration actually being consumed — looking dead.
+  'src/aliased.ts': ['export const VALUE = 7;'].join('\n'),
+  'src/alias-barrel.ts': ["export { VALUE as ALIAS } from './aliased.js';"].join('\n'),
+  'src/alias-consumer.ts': [
+    'export async function readIt(): Promise<number> {',
+    "  const { ALIAS } = await import('./alias-barrel.js');",
+    '  return ALIAS;',
+    '}',
+  ].join('\n'),
   // Used only inside its own file.
   'src/internal.ts': [
     'export const KEPT_INSIDE = 1;',
@@ -156,6 +167,16 @@ describe('binding-accurate resolution', () => {
     // `renamed` is a public name that exists nowhere else, and nothing imports
     // it — so it is dead in its own right.
     expect(uses.get('src/barrel.ts:renamed')).toBe(0);
+  });
+
+  it('follows the ALIAS CHAIN when crediting a name taken from a module', () => {
+    // `export { VALUE as ALIAS } from './aliased.js'` consumed as
+    // `const { ALIAS } = await import('./alias-barrel.js')`.  The export table
+    // returns the barrel's alias; without walking behind it, the alias looks
+    // live and `VALUE` — the declaration genuinely being read — looks dead,
+    // which is a FALSE POSITIVE that fails a correct branch.
+    expect(uses.get('src/aliased.ts:VALUE')).toBeGreaterThan(0);
+    expect(uses.get('src/alias-barrel.ts:ALIAS')).toBeGreaterThan(0);
   });
 
   it('counts a use from the declaring file itself', () => {
