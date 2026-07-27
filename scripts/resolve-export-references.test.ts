@@ -231,6 +231,7 @@ const FILES: Record<string, string> = {
     "import * as probedNs from './probed-ns.js';",
     'export const present = typeof probedNs;',
     'export function check(): void { void probedNs; if (!probedNs) return; }',
+    'export function ready(): boolean { return probedNs && present ? true : false; }',
   ].join('\n'),
 
   // ── Reference: a NESTED template interpolation is still code ─────────────

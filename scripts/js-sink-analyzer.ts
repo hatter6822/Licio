@@ -39,6 +39,28 @@
 // small, it is keyed on SYMBOLS rather than on names, and the copy-on-write
 // behaviour the old table needed a rule for now falls out — `g.zzz` and
 // `self.zzz` are different keys because `g` and `self` are different symbols.
+//
+// ONE RULE ABOUT WHICH RESOLVER TO USE, learned three times in one day.
+//
+// `reaches` answers an OPEN question — what values can this expression be —
+// and its callers are the gates, at the leaves.  `flowsInto` is its STEP
+// function, and the questions asked from inside a step are CLOSED: is this
+// receiver the global `Proxy`?  which property access does this callee denote?
+// what string does this name hold?
+//
+// Answering a closed question by running the open search makes the step
+// function depend on the search's own closure.  Each of those three did it, and
+// each cost the same way: a repository scan that took 25 seconds took more than
+// ten minutes, and the URL scan stopped terminating altogether.  Measured, not
+// guessed — the sink scan is linear at ~18ms/file and was never the problem.
+//
+// So a closed question gets a dedicated walk: `globalsBehind`, `accessesBehind`,
+// and the URL scan's own `held`.  They are memoised, linear, and follow exactly
+// what can rename the thing they are about — a binding, a reassignment, an
+// import, a parameter's call sites, a function's returns, a container slot, a
+// selection between any of those.  That is the SAME coverage the open search
+// has for these shapes, computed once instead of re-explored per call; the
+// mistake to avoid is not "a second walk", it is a second walk that knows LESS.
 
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
@@ -298,7 +320,11 @@ interface CodePosition {
 }
 
 /** The static leading text of a string expression, or `null` when unknown. */
-function staticPrefix(node: Syntax | undefined, hop = 0): string | null {
+function staticPrefix(
+  node: Syntax | undefined,
+  hop = 0,
+  held?: (node: Syntax) => readonly Syntax[],
+): string | null {
   const target = unwrap(node);
   if (target === undefined || hop > MAX_HOPS) return null;
   if (
@@ -314,10 +340,21 @@ function staticPrefix(node: Syntax | undefined, hop = 0): string | null {
     target.kind === SyntaxKind.BinaryExpression &&
     target.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
-    const left = staticPrefix(target.left, hop + 1);
+    const left = staticPrefix(target.left, hop + 1, held);
     if (left === null) return null;
-    const right = staticPrefix(target.right, hop + 1);
+    const right = staticPrefix(target.right, hop + 1, held);
     return right === null ? left : left + right;
+  }
+  // A NAME holding the text folds to what it holds, when the caller can say:
+  // `const scheme = 'javascript'; scheme + ':alert(1)'` navigates exactly as
+  // the spelled literal does, and reading syntax alone saw two halves of
+  // nothing.
+  if (held !== undefined && target.kind === SyntaxKind.Identifier) {
+    for (const value of held(target)) {
+      if (value.getStart() === target.getStart()) continue;
+      const folded = staticPrefix(value, hop + 1, held);
+      if (folded !== null) return folded;
+    }
   }
   return null;
 }
@@ -783,28 +820,157 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * asks about every call, so it would re-enter this function — hence the
    * in-progress guard rather than a weaker resolver.
    */
-  const resolving = new Set<string>();
-  const accessesBehind = (node: Syntax | undefined): Syntax[] => {
-    if (node === undefined) return [];
-    const key = `${node.getStart()}:${node.getEnd()}`;
-    if (resolving.has(key)) return [];
-    resolving.add(key);
-    try {
-      return nodesFrom(node).filter(
-        (each) =>
-          each.kind === SyntaxKind.PropertyAccessExpression ||
-          each.kind === SyntaxKind.ElementAccessExpression,
-      );
-    } finally {
-      resolving.delete(key);
+  const accessCache = new Map<string, Syntax[]>();
+  const accessesBehind = (node: Syntax | undefined, hop = 0): Syntax[] => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return [];
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    const cached = accessCache.get(key);
+    if (cached !== undefined) return cached;
+    const found: Syntax[] = [];
+    accessCache.set(key, found); // cycle guard: a chain returning here sees it empty
+    const add = (from: Syntax | undefined): void => {
+      for (const each of accessesBehind(from, hop + 1)) found.push(each);
+    };
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      found.push(target);
+      // …and whatever the slot HOLDS, which may itself be a helper:
+      // `const o = { a: Object.assign }; o.a(node, { innerHTML: p })`.
+      const name = propertyName(target);
+      const base = target.expression;
+      if (name !== undefined && base !== undefined) add(heldAt(base, name, hop + 1));
+      return found;
     }
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      add(target.whenTrue);
+      add(target.whenFalse);
+      return found;
+    }
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      add(target.left);
+      add(target.right);
+      return found;
+    }
+    // A CALL yields what the function it names returns.
+    if (target.kind === SyntaxKind.CallExpression) {
+      for (const fn of accessCallees(target, hop)) {
+        for (const returned of returnsOf(fn)) add(returned);
+      }
+      return found;
+    }
+    if (target.kind !== SyntaxKind.Identifier || isGlobalBinding(target)) return found;
+    const receiver = receiverKey(target);
+    for (const assigned of receiver === undefined ? [] : (rebound.get(receiver) ?? []))
+      add(assigned);
+    const declaration = localDeclaration(target);
+    if (declaration === undefined) return found;
+    if (IMPORT_BINDINGS.has(declaration.kind)) {
+      for (const value of aliasedValues(target)) {
+        if (value.kind === 'node') add(value.node);
+      }
+      return found;
+    }
+    // A PARAMETER is bound by its call sites.
+    if (declaration.kind === SyntaxKind.Parameter) {
+      for (const supplied of argumentsAt(declaration)) add(supplied);
+      add(declaration.initializer);
+      return found;
+    }
+    add(declaration.initializer);
+    return found;
   };
 
-  /** Whether an expression is the named global (and nothing local). */
-  const isGlobalNamed = (node: Syntax | undefined, name: string): boolean => {
+  /** The FUNCTIONS a callee expression can be, for the return hop above. */
+  const accessCallees = (call: Syntax, hop: number): Syntax[] => {
+    const callee = unwrap(call.expression);
+    if (callee === undefined || hop > MAX_HOPS) return [];
+    if (isFunction(callee)) return [callee];
+    if (callee.kind !== SyntaxKind.Identifier || isGlobalBinding(callee)) return [];
+    const declaration = localDeclaration(callee);
+    if (declaration === undefined) return [];
+    if (isFunction(declaration)) return [declaration];
+    const bound = unwrap(declaration.initializer);
+    return bound !== undefined && isFunction(bound) ? [bound] : [];
+  };
+
+  /**
+   * Whether an expression IS the named global, however it was reached.
+   *
+   * `Reflect`, `Object` and `Proxy` are values too — `const P = Proxy; new
+   * P(eval, {})` constructs the same proxy — so comparing the identifier's TEXT
+   * left every receiver aliasable even after the helpers themselves were
+   * resolved.  Guarded like the other resolutions here, because the relation
+   * asks this question while answering one.
+   */
+  const isGlobalNamed = (node: Syntax | undefined, name: string): boolean =>
+    globalsBehind(node).has(name);
+
+  /**
+   * The GLOBALS an expression can denote, following binding chains.
+   *
+   * A narrower question than "what values can this be", and deliberately
+   * answered by its own memoised walk rather than by the general relation.
+   * This is called from INSIDE `flowsInto` — for every call, to ask whether the
+   * receiver is `Reflect`, `Object` or `Proxy` — so routing it through the full
+   * search made the step function depend on the search's own closure, and a
+   * repository scan went from 25 seconds to over ten minutes.
+   *
+   * It follows exactly what can rename a global: a binding, a reassignment, an
+   * import, a selection between two of them, and the transparent wrappers.
+   * That is what `const P = Proxy; new P(eval, {})` needs, and it stays linear.
+   */
+  const globalsCache = new Map<string, Set<string>>();
+  const globalsBehind = (node: Syntax | undefined, hop = 0): Set<string> => {
     const target = unwrap(node);
-    if (target === undefined || target.kind !== SyntaxKind.Identifier) return false;
-    return nameOf(target) === name && isGlobalBinding(target);
+    if (target === undefined || hop > MAX_HOPS) return new Set();
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    const cached = globalsCache.get(key);
+    if (cached !== undefined) return cached;
+    const found = new Set<string>();
+    globalsCache.set(key, found); // cycle guard: a chain that returns here sees it empty
+    if (target.kind === SyntaxKind.Identifier) {
+      if (isGlobalBinding(target)) {
+        found.add(nameOf(target));
+        return found;
+      }
+      const receiver = receiverKey(target);
+      for (const assigned of receiver === undefined ? [] : (rebound.get(receiver) ?? [])) {
+        for (const each of globalsBehind(assigned, hop + 1)) found.add(each);
+      }
+      const declaration = localDeclaration(target);
+      if (declaration !== undefined && IMPORT_BINDINGS.has(declaration.kind)) {
+        for (const value of aliasedValues(target)) {
+          if (value.kind === 'global') found.add(value.name);
+          else if (value.kind === 'node') {
+            for (const each of globalsBehind(value.node, hop + 1)) found.add(each);
+          }
+        }
+        return found;
+      }
+      for (const each of globalsBehind(declaration?.initializer, hop + 1)) found.add(each);
+      return found;
+    }
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      for (const side of [target.whenTrue, target.whenFalse]) {
+        for (const each of globalsBehind(side, hop + 1)) found.add(each);
+      }
+      return found;
+    }
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      for (const side of [target.left, target.right]) {
+        for (const each of globalsBehind(side, hop + 1)) found.add(each);
+      }
+    }
+    return found;
   };
 
   /** What an imported name is bound to, followed through the module edge. */
@@ -1163,8 +1329,23 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     return step;
   };
 
+  /**
+   * `reaches`, memoised on the starting expression.
+   *
+   * `flowsInto` was already cached, but the SEARCH was not, so every question
+   * asked of an expression re-walked its whole graph.  That was affordable
+   * while the callers were few; once receiver identity became a resolved
+   * question too — asked from inside the relation, for every call — the same
+   * subgraphs were re-explored combinatorially and a repository scan went from
+   * 25 seconds to over ten minutes.
+   */
+  const reachCache = new Map<string, Value[]>();
+
   const reaches = (node: Syntax | undefined): Value[] => {
     if (node === undefined) return [];
+    const from = `${node.getStart()}:${node.getEnd()}`;
+    const cached = reachCache.get(from);
+    if (cached !== undefined) return cached;
     const seen = new Set<string>();
     const found: Value[] = [];
     const queue: Value[] = [nodeValue(node)];
@@ -1186,6 +1367,10 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       found.push(value);
       queue.push(...stepsFrom(value, key));
     }
+    // A search made WHILE the call-site map is being built is deliberately
+    // partial — parameter edges are empty by construction there — so it must
+    // not be kept as the answer for that expression.
+    if (!buildingCallSites) reachCache.set(from, found);
     return found;
   };
 
@@ -1497,9 +1682,41 @@ function isJavascriptUrl(value: string): boolean {
 
 /** Every `javascript:` URL literal in each source. */
 export function findJavascriptUrlsIn(sources: readonly Source[]): Map<string, SinkFinding[]> {
-  return withParsedSources(sources, (parsed) => {
+  return withParsedSources(sources, (parsed, project) => {
     const byPath = new Map<string, SinkFinding[]>();
     for (const { path, content, root } of parsed) {
+      const here = String(root.path);
+      /**
+       * What a NAME holds, for folding a scheme.
+       *
+       * The narrow question this scan asks — `const scheme = 'javascript';
+       * scheme + ':alert(1)'` navigates as the literal does — answered by
+       * following the binding, memoised.
+       *
+       * NOT the value relation.  Asking the general machine here built a
+       * call-site map this scan never consults and ran a whole-program search
+       * for every identifier in every string concatenation in the repository,
+       * which took the scan from milliseconds to never finishing.  The general
+       * relation is for the general question; this one has one hop and a name.
+       */
+      const boundTo = new Map<number, readonly Syntax[]>();
+      const held = (name: Syntax): readonly Syntax[] => {
+        const at = name.getStart();
+        const cached = boundTo.get(at);
+        if (cached !== undefined) return cached;
+        boundTo.set(at, []); // cycle guard while this one resolves
+        const declaration = project.checker
+          .getSymbolAtPosition(here, at)
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        const initializer =
+          declaration?.kind === SyntaxKind.VariableDeclaration
+            ? declaration.initializer
+            : undefined;
+        const found = initializer === undefined ? [] : [initializer];
+        boundTo.set(at, found);
+        return found;
+      };
       const newlines = newlineIndex(content);
       const found: SinkFinding[] = [];
       const seen = new Set<number>();
@@ -1518,7 +1735,7 @@ export function findJavascriptUrlsIn(sources: readonly Source[]): Map<string, Si
         ) {
           continue;
         }
-        const prefix = staticPrefix(node);
+        const prefix = staticPrefix(node, 0, held);
         if (prefix === null || !isJavascriptUrl(prefix)) continue;
         const line = lineAt(newlines, node.getStart());
         // A folded concatenation and the literal inside it are one URL.

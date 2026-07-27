@@ -198,6 +198,14 @@ export interface MutationRoute {
 const MUTATION_METHODS: ReadonlySet<string> = new Set(['post', 'put', 'patch', 'delete']);
 
 /** Wrappers that yield exactly the expression they wrap. */
+/** Functions whose `return` belongs to THEM, not to the branch they sit in. */
+const NESTED_FUNCTION: ReadonlySet<number> = new Set([
+  SyntaxKind.ArrowFunction,
+  SyntaxKind.FunctionExpression,
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.MethodDeclaration,
+]);
+
 /** Equality operators, whose polarity depends on what is on the other side. */
 const EQUALITY: ReadonlySet<number> = new Set([
   SyntaxKind.EqualsEqualsEqualsToken,
@@ -457,12 +465,20 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   /** Whether a statement or expression contains a RETURN or a THROW. */
   const refusesWithin = (node: Syntax | undefined): boolean => {
     if (node === undefined) return false;
-    for (const each of walk(node)) {
+    // PRUNED at a nested function: `if (denial) { const f = () => { return 1; } }`
+    // declares a callback and exits nothing, so a flat walk read a branch that
+    // falls straight through as a refusal.
+    let refuses = false;
+    const visit = (each: Syntax): void => {
+      if (refuses || NESTED_FUNCTION.has(each.kind)) return;
       if (each.kind === SyntaxKind.ReturnStatement || each.kind === SyntaxKind.ThrowStatement) {
-        return true;
+        refuses = true;
+        return;
       }
-    }
-    return false;
+      each.forEachChild(visit);
+    };
+    visit(node);
+    return refuses;
   };
 
   /**

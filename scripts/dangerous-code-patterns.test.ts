@@ -1041,6 +1041,19 @@ describe('the same sweep, over the helpers themselves', () => {
   });
 
   it.each([
+    ['an aliased Proxy constructor', 'const P = Proxy; const p = new P(eval, {}); p(payload)'],
+    ['an aliased Reflect receiver', 'const R = Reflect; R.apply(eval, null, ["x"])'],
+  ])('catches %s', (_label, code) => {
+    // The RECEIVER is a value too, so resolving the helper while comparing the
+    // receiver's text left every one of them aliasable.
+    expect(fires(code)).toBe(true);
+  });
+
+  it('catches an aliased Object receiver on a markup write', () => {
+    expect(dom('const O = Object; O.assign(node, { innerHTML: p })')).toBe(true);
+  });
+
+  it.each([
     ['a harmless setter alias', 'Object.defineProperties(node, { textContent: { value: p } })'],
   ])('does not flag %s', (_label, code) => {
     expect(dom(code)).toBe(false);

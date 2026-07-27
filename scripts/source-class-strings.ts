@@ -261,18 +261,38 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
     const found = new Map<string, ClassString[]>();
     for (const { path, content, root } of parsed) {
       const here = String(root.path);
-      /** Whether a callee is the repository's class-list helper. */
-      const joins = (callee: Syntax): boolean => {
-        const symbol = project.checker.getSymbolAtPosition(here, callee.getStart());
-        if (symbol === undefined) return false;
-        let resolved = symbol;
-        try {
-          resolved = project.checker.getAliasedSymbol(symbol) ?? symbol;
-        } catch {
-          // Not an alias; the local symbol is already the declaration.
+      // Which callees are the class-list helper, resolved in ONE round trip.
+      //
+      // Asked per call site, this cost a checker request for every call in the
+      // file and pushed the whole-tree scan past its budget — the same cost
+      // model that once made a repository-wide sink scan take three minutes.
+      // `getSymbolAtPosition` takes an ARRAY, so the question is asked once.
+      const calleeAt: number[] = [];
+      const collect = (node: Syntax): void => {
+        if (node.kind === SyntaxKind.CallExpression && node.expression !== undefined) {
+          calleeAt.push(node.expression.getStart());
         }
-        return resolved.declarations.some((each) => String(each.path).endsWith(CLASS_LIST_HELPER));
+        node.forEachChild(collect);
       };
+      collect(root);
+      const helperCalls = new Set<number>();
+      if (calleeAt.length > 0) {
+        project.checker.getSymbolAtPosition(here, calleeAt).forEach((symbol, index) => {
+          const at = calleeAt[index];
+          if (symbol === undefined || at === undefined) return;
+          let resolved = symbol;
+          try {
+            resolved = project.checker.getAliasedSymbol(symbol) ?? symbol;
+          } catch {
+            // Not an alias; the local symbol is already the declaration.
+          }
+          if (resolved.declarations.some((each) => String(each.path).endsWith(CLASS_LIST_HELPER))) {
+            helperCalls.add(at);
+          }
+        });
+      }
+      /** Whether a callee is the repository's class-list helper. */
+      const joins = (callee: Syntax): boolean => helperCalls.has(callee.getStart());
       const strings: ClassString[] = [];
       const visit = (node: Syntax): void => {
         const folded = fold(node, content, joins);

@@ -200,6 +200,14 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
     expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
   });
 
+  it('rejects a branch whose only return is inside a nested callback', () => {
+    // `if (denial) { const f = () => { return 1; }; }` declares a callback and
+    // exits nothing, so a flat walk read a branch that falls straight through
+    // as a refusal.
+    const guard = 'if (denial) { const f = () => { return 1; }; log(f); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
   it('rejects a verdict that is bound and never consulted', () => {
     const src = `
 const app = new Hono();

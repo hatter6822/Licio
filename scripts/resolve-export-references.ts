@@ -382,6 +382,13 @@ const NON_CONSUMING = new Set<number>([
   SyntaxKind.PrefixUnaryExpression,
 ]);
 
+/** Operators that COMPOSE a truthiness test without reading the operands. */
+const LOGICAL = new Set<number>([
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.BarBarToken,
+  SyntaxKind.QuestionQuestionToken,
+]);
+
 /** Positions that only ask whether a value is THERE. */
 const CONDITION_OF = new Set<number>([
   SyntaxKind.IfStatement,
@@ -457,9 +464,25 @@ function isNamespaceEscape(node: Syntax): boolean {
   // observe that the namespace exists without reading anything out of it, so
   // crediting every export for them would let a genuinely dead value pass.
   if (NON_CONSUMING.has(parent.kind)) return false;
-  if (CONDITION_OF.has(parent.kind)) {
-    const condition = parent.expression ?? parent.condition;
-    if (condition?.getStart() === at) return false;
+  // A logical operand is climbed through before the condition test, because
+  // `if (mod && ready)` asks the same question as `if (mod)` — only whether it
+  // is there — and stopping at the `&&` credited the whole export set again.
+  let above: Syntax = node;
+  let owner: Syntax | undefined = parent;
+  while (
+    owner !== undefined &&
+    ((owner.kind === SyntaxKind.BinaryExpression && LOGICAL.has(owner.operatorToken?.kind ?? -1)) ||
+      owner.kind === SyntaxKind.ParenthesizedExpression)
+  ) {
+    above = owner;
+    owner = owner.parent;
+  }
+  if (owner !== undefined) {
+    if (NON_CONSUMING.has(owner.kind)) return false;
+    if (CONDITION_OF.has(owner.kind)) {
+      const condition = owner.expression ?? owner.condition;
+      if (condition?.getStart() === above.getStart()) return false;
+    }
   }
 
   // Not SELECTING: the receiver of `mod.NAME` / `mod[key]` reads one export,

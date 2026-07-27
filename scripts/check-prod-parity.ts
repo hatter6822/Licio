@@ -205,6 +205,17 @@ function declarationOf(node: Syntax, project: Project, file: string): Syntax | u
     if (handle === undefined) return undefined;
     const declaration = handle.resolve(project) as unknown as Syntax | undefined;
     if (declaration === undefined) return undefined;
+    // `const Store = InMemoryThing` names the same class in one more hop, so
+    // the local alias is followed exactly as the import alias is — the fix that
+    // only crossed module edges left the in-file spelling open.
+    if (declaration.kind === SyntaxKind.VariableDeclaration) {
+      const initializer = declaration.initializer;
+      if (initializer?.kind !== SyntaxKind.Identifier) return declaration;
+      const next = project.checker.getSymbolAtPosition(file, initializer.getStart());
+      if (next === undefined) return declaration;
+      resolved = next;
+      continue;
+    }
     if (!IMPORTED_BINDING.has(declaration.kind)) return declaration;
     try {
       const next = project.checker.getAliasedSymbol(resolved);

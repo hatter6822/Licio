@@ -157,6 +157,29 @@ describe('leg 2 — env-key validation (the LCAP_IPFS failure shape)', () => {
   });
 });
 
+describe('an adapter constructed under another NAME', () => {
+  it.each([
+    [
+      'an import alias',
+      "import { InMemoryThing as Store } from './s.js';\nexport const s = new Store();",
+    ],
+    [
+      'a local alias',
+      "import { InMemoryThing } from './s.js';\nconst Store = InMemoryThing;\nexport const s = new Store();",
+    ],
+  ])('still demands a production counterpart through %s', (_label, boot) => {
+    // The spelling at the call site is not the class; coverage looks for the
+    // declared name, so an alias meant nothing was demanded of it and
+    // production could silently keep process-local state.
+    const tree = files({
+      's.ts':
+        'export interface Port { get(): void }\nexport class InMemoryThing implements Port { get() {} }',
+      'boot.ts': boot,
+    });
+    expect(checkAdapterCoverage(tree, new Set(['boot.ts']), {}).length).toBeGreaterThan(0);
+  });
+});
+
 describe('reading the environment INDIRECTLY', () => {
   const schemaKeys = new Set(['DATABASE_URL', 'REDIS_URL']);
 
