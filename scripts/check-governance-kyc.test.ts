@@ -134,6 +134,46 @@ describe('extractMutationRoutes', () => {
   });
 });
 
+describe('the ways Hono registers a route', () => {
+  // All three reach the same handler, so all three are governance mutations.
+  // `.all` answers every method and was skipped entirely, which let an
+  // unguarded participation endpoint pass a fail-closed gate.
+  it.each([
+    [
+      '.all covers every mutation method',
+      `export const r = new Hono().all('/rooms/:id/vote', authMiddleware(), (c) => c.json({}));`,
+      ['all:/rooms/:id/vote:open'],
+    ],
+    [
+      '.all is guarded like any other',
+      `export const r = new Hono().all('/rooms/:id/vote', requireGovernanceEligibility(), (c) => c.json({}));`,
+      ['all:/rooms/:id/vote:guarded'],
+    ],
+    [
+      '.on takes an ARRAY of methods',
+      `export const r = new Hono().on(['POST','PUT'], '/rooms/:id/vote', (c) => c.json({}));`,
+      ['post:/rooms/:id/vote:open', 'put:/rooms/:id/vote:open'],
+    ],
+    [
+      '.on takes an ARRAY of paths',
+      `export const r = new Hono().on('POST', ['/a/vote','/b/vote'], (c) => c.json({}));`,
+      ['post:/a/vote:open', 'post:/b/vote:open'],
+    ],
+    [
+      '.get is a read, not a mutation',
+      `export const r = new Hono().get('/x', (c) => c.json({}));`,
+      [],
+    ],
+    ['.use is middleware, not a route', `export const r = new Hono().use('/x', mw());`, []],
+  ])('%s', (_label, source, expected) => {
+    expect(
+      extractMutationRoutes('f.ts', source).map(
+        (route) => `${route.method}:${route.path}:${route.guarded ? 'guarded' : 'open'}`,
+      ),
+    ).toEqual(expected);
+  });
+});
+
 describe('runGovernanceKycGate', () => {
   it('fails on an unguarded, un-allowlisted governance POST', () => {
     const issues = runGovernanceKycGate((relPath) =>

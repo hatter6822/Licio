@@ -352,43 +352,49 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     if (!isRouter(callee.expression)) continue;
 
     const args = [...(node.arguments ?? [])];
-    // `.post(path, …)`, and `.on(METHOD, path, …)` / `.on([METHODS], path, …)`,
-    // which registers exactly the same route by another name.
+    // The THREE ways Hono registers a route, all of which reach the same
+    // handler: the method shorthand, `.on(METHOD(S), PATH(S), …)`, and `.all`,
+    // which answers every method — so it is a governance mutation route just as
+    // surely as `.post` is, and skipping it let one ship unguarded.
     const viaOn = called === 'on';
-    if (!viaOn && !MUTATION_METHODS.has(called)) continue;
-    const methods = viaOn ? onMethods(args[0]) : [called];
+    const viaAll = called === 'all';
+    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) continue;
+    const methods = viaOn ? staticStrings(args[0]).map((m) => m.toLowerCase()) : [called];
     const pathArgument = viaOn ? args[1] : args[0];
-    const mutations = methods.filter((method) => MUTATION_METHODS.has(method));
+    // `.all` covers every mutation; it is reported under its own name rather
+    // than four times over, and the allowlist matches on path regardless.
+    const mutations = viaAll ? ['all'] : methods.filter((method) => MUTATION_METHODS.has(method));
     if (mutations.length === 0) continue;
 
-    const path = staticString(pathArgument);
+    // `.on` accepts an ARRAY of paths, each registering the same handler.
+    const paths = staticStrings(pathArgument);
     const guarded = guardedBy(viaOn ? args.slice(2) : args.slice(1));
+    const line = lineAt(node.getStart());
     for (const method of mutations) {
-      found.push({
-        file,
-        method,
-        path: path ?? '<non-static path>',
-        guarded,
-        line: lineAt(node.getStart()),
-        readable: path !== undefined,
-      });
+      if (paths.length === 0) {
+        found.push({ file, method, path: '<non-static path>', guarded, line, readable: false });
+        continue;
+      }
+      for (const path of paths) {
+        found.push({ file, method, path, guarded, line, readable: true });
+      }
     }
   }
   return found;
 }
 
-/** The methods an `.on(…)` registration covers, lower-cased. */
-function onMethods(node: Syntax | undefined): string[] {
+/** A static string, or every static string of an array literal. */
+function staticStrings(node: Syntax | undefined): string[] {
   const single = staticString(node);
-  if (single !== undefined) return [single.toLowerCase()];
+  if (single !== undefined) return [single];
   const target = unwrap(node);
   if (target?.kind !== SyntaxKind.ArrayLiteralExpression) return [];
-  const methods: string[] = [];
+  const values: string[] = [];
   target.forEachChild((element) => {
     const value = staticString(element);
-    if (value !== undefined) methods.push(value.toLowerCase());
+    if (value !== undefined) values.push(value);
   });
-  return methods;
+  return values;
 }
 
 /** Parse each source once and extract its mutation routes. */
