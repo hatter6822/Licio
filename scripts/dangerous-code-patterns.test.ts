@@ -1171,8 +1171,23 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
   });
 
   it.each([
+    // The global reached through a PROPERTY of the global object.  The
+    // declaration-name exclusion was skipping this, so the rule had a hole in
+    // exactly the shape it exists to close.
+    ['globalThis.eval', 'const f = globalThis.eval;'],
+    ['window.Function', 'const f = window.Function;'],
+    ["self['eval']", 'const f = self["eval"];'],
+    ['an aliased global object', 'const g = globalThis; const f = g.eval;'],
+  ])('catches %s', (_label, code) => {
+    expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
     // Erased at build; runs nothing.
     ['a type annotation', 'export function run(fn: Function): void { fn(); }'],
+    // The receiver is resolved, so a property on an unrelated object is not
+    // the global.
+    ['a property named eval on some object', 'const o = { eval: 1 }; export const v = o.eval;'],
     // Not the global.
     ['a property named eval', 'const o = { eval: 1 }; export const v = o.eval;'],
     ['a local that shadows it', 'export function f(eval: string) { return eval; }'],

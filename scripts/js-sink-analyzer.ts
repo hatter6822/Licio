@@ -1950,12 +1950,55 @@ export function findGlobalReferencesIn(
       const here = String(root.path);
       const newlines = newlineIndex(content);
       const found: SinkFinding[] = [];
+      /**
+       * Whether an expression is a spelling of the GLOBAL OBJECT.
+       *
+       * One bounded hop through a binding, which is all `const g = globalThis`
+       * needs — and all it can need, since the alias itself has to name a
+       * global receiver to exist.
+       */
+      const isGlobalObject = (node: Syntax | undefined, hop = 0): boolean => {
+        if (node?.kind !== SyntaxKind.Identifier || hop > 4) return false;
+        const declaration = project.checker
+          .getSymbolAtPosition(here, node.getStart())
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        if (declaration === undefined) {
+          return GLOBAL_RECEIVERS.has(node.text ?? node.getText());
+        }
+        if (declaration.kind !== SyntaxKind.VariableDeclaration) return false;
+        return isGlobalObject(declaration.initializer, hop + 1);
+      };
+
       for (const node of walk(root)) {
+        // `globalThis.eval` and `self['eval']` name the global through a
+        // PROPERTY, where the identifier is the property half — which the
+        // declaration-name exclusion below was skipping, so the rule had a hole
+        // in exactly the shape it exists to close.  The receiver is resolved
+        // one hop, so `o.eval` on an unrelated object is still not the global.
+        if (
+          node.kind === SyntaxKind.PropertyAccessExpression ||
+          node.kind === SyntaxKind.ElementAccessExpression
+        ) {
+          const named =
+            node.kind === SyntaxKind.PropertyAccessExpression
+              ? node.name === undefined
+                ? undefined
+                : (node.name.text ?? node.name.getText())
+              : (node.argumentExpression?.text ?? undefined);
+          if (named !== undefined && forbidden.has(named) && isGlobalObject(node.expression)) {
+            found.push({
+              label: `reference to the forbidden global \`${named}\``,
+              line: lineAt(newlines, node.getStart()),
+              text: content.slice(node.getStart(), node.getEnd()),
+            });
+          }
+          continue;
+        }
         if (node.kind !== SyntaxKind.Identifier) continue;
         const name = node.text ?? node.getText();
         if (!forbidden.has(name)) continue;
-        // A NAME being declared, or the property half of `a.b`, is not a
-        // reference to the global.
+        // A NAME being declared is not a reference to the global.
         if (node.parent?.name?.getStart() === node.getStart()) continue;
         // A TYPE position is erased at build and runs nothing.  The range is
         // the compiler's own, so a new type node kind needs no entry here.
