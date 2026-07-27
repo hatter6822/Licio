@@ -2018,22 +2018,52 @@ export function findGlobalReferencesIn(
       };
 
       /**
-       * The value a binding PATTERN destructures.
+       * The value a destructuring CONTAINER takes its properties from.
        *
-       * A declaration or a parameter holds its source outright.  A NESTED
-       * pattern selects from the property its own element took, so
-       * `const { a: { ['eval']: r } } = { a: globalThis }` reaches the global
-       * by the same route the flat spelling does — and when the descent finds
-       * no such property, the element's DEFAULT is what binds, which is the
-       * source in `const { a: { ['eval']: r } = globalThis } = o`.
+       * The two containers are the same act written twice.  A binding pattern
+       * gets its source from the declaration or parameter that owns it; an
+       * object literal used as an assignment TARGET gets it from the right of
+       * the `=`.  Either can NEST, and a nested container selects from the
+       * property its own element took — so `{ a: { ['eval']: r } } = { a:
+       * globalThis }` reaches the global by the route the flat spelling does,
+       * in both spellings.  Handling only the declaration half left the
+       * assignment half open, which is the same defect one form over.
+       *
+       * When the descent finds no such property, a binding element's DEFAULT is
+       * what binds, which is the source in `const { a: { ['eval']: r } =
+       * globalThis } = o`.
+       *
+       * An object literal that is NOT an assignment target has no source: `const
+       * o = { ['eval']: 1 }` builds a record, and its key selects nothing.
        */
-      const patternSource = (pattern: Syntax | undefined, hop = 0): Syntax | undefined => {
-        const owner = pattern?.parent;
-        if (owner === undefined || hop > 8) return undefined;
+      const selectionSource = (container: Syntax | undefined, hop = 0): Syntax | undefined => {
+        const owner = container?.parent;
+        if (container === undefined || owner === undefined || hop > MAX_HOPS) return undefined;
+
+        /** One level out: the key this container was reached by, descended. */
+        const throughKey = (element: Syntax, named: Syntax | undefined): Syntax | undefined => {
+          const key = selectedKey(named);
+          if (key === undefined) return undefined;
+          return propertyOf(selectionSource(element.parent, hop + 1), key);
+        };
+
+        if (container.kind === SyntaxKind.ObjectLiteralExpression) {
+          if (
+            owner.kind === SyntaxKind.BinaryExpression &&
+            owner.operatorToken?.kind === SyntaxKind.EqualsToken &&
+            unwrap(owner.left)?.getStart() === container.getStart()
+          ) {
+            return owner.right;
+          }
+          // A literal nested inside an assignment target is itself a target.
+          if (owner.kind === SyntaxKind.PropertyAssignment) return throughKey(owner, owner.name);
+          return undefined;
+        }
+
+        // A binding pattern: owned by a declaration, a parameter, or — nested —
+        // by the binding element that selected it.
         if (owner.kind !== SyntaxKind.BindingElement) return owner.initializer;
-        const key = selectedKey(owner.propertyName ?? owner.name);
-        const outer = key === undefined ? undefined : patternSource(owner.parent, hop + 1);
-        return (key === undefined ? undefined : propertyOf(outer, key)) ?? owner.initializer;
+        return throughKey(owner, owner.propertyName ?? owner.name) ?? owner.initializer;
       };
 
       /**
@@ -2054,37 +2084,22 @@ export function findGlobalReferencesIn(
        */
       const destructuredGlobal = (node: Syntax): string | undefined => {
         let named: Syntax | undefined;
-        let source: Syntax | undefined;
         if (node.kind === SyntaxKind.BindingElement) {
           named = node.propertyName ?? node.name;
           // A PLAIN identifier key is already reported as a bare reference
           // below; claiming it here too would say it twice.
           if (named?.kind === SyntaxKind.Identifier) return undefined;
-          source = patternSource(node.parent);
         } else if (
           node.kind === SyntaxKind.PropertyAssignment ||
           node.kind === SyntaxKind.ShorthandPropertyAssignment
         ) {
-          const literal = node.parent;
-          const assignment = literal?.parent;
-          // Only an assignment TARGET destructures; `{ eval: run }` as a value
-          // builds a record, and its key is not a selection from anything.
-          if (
-            literal?.kind !== SyntaxKind.ObjectLiteralExpression ||
-            assignment?.kind !== SyntaxKind.BinaryExpression ||
-            assignment.operatorToken?.kind !== SyntaxKind.EqualsToken ||
-            unwrap(assignment.left)?.getStart() !== literal.getStart()
-          ) {
-            return undefined;
-          }
           named = node.name;
-          source = assignment.right;
         } else {
           return undefined;
         }
         const key = selectedKey(named);
         if (key === undefined || !forbidden.has(key)) return undefined;
-        return isGlobalObject(source) ? key : undefined;
+        return isGlobalObject(selectionSource(node.parent)) ? key : undefined;
       };
 
       for (const node of walk(root)) {

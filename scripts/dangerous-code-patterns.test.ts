@@ -1240,6 +1240,15 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       'a nested pattern two deep',
       "const { a: { b: { ['eval']: r } } } = { a: { b: globalThis } };",
     ],
+    // A nested ASSIGNMENT target is the same selection as a nested pattern: the
+    // inner literal's parent is a PropertyAssignment rather than the `=`, so
+    // reading only the direct left-hand side walked past all three of these.
+    ['a nested assignment target', "let r; ({ a: { ['eval']: r } } = { a: globalThis });"],
+    ['a nested assignment with a plain key', 'let r; ({ a: { eval: r } } = { a: globalThis });'],
+    [
+      'a nested assignment two deep',
+      "let r; ({ a: { b: { ['eval']: r } } } = { a: { b: globalThis } });",
+    ],
     ['a nested element default', "const { a: { ['eval']: r } = globalThis } = o;"],
   ])('catches a destructure through %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
