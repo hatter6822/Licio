@@ -190,6 +190,22 @@ function childrenOf(node: Syntax): Syntax[] {
   return children;
 }
 
+/**
+ * A value a resolution can arrive at: an expression, or a GLOBAL by name.
+ *
+ * Globals are named rather than pointed at because they have no declaration in
+ * the file — `eval` IS its name here, and that is what a spec matches.
+ */
+type Value =
+  | { readonly kind: 'node'; readonly node: Syntax }
+  | { readonly kind: 'global'; readonly name: string };
+
+const nodeValue = (node: Syntax): Value => ({ kind: 'node', node });
+const globalValue = (name: string): Value => ({ kind: 'global', name });
+
+/** A ceiling on one resolution, so a pathological graph cannot run away. */
+const MAX_VALUES = 512;
+
 /** Where a sink's code argument starts, and whether it arrives inside an array. */
 interface CodePosition {
   readonly index: number;
@@ -486,6 +502,28 @@ function analyser(root: Syntax, project: Project, source: string) {
   };
 
   /**
+   * What a declaration binds, as a VALUE.
+   *
+   * A destructure from the global object names a GLOBAL rather than pointing at
+   * an expression — `const { eval: e } = globalThis` binds `e` to the global
+   * `eval`, which has no node in this file — so the binding edge has to be able
+   * to yield either.  Returning only a node silently dropped that whole family.
+   */
+  const boundValues = (declaration: Syntax | undefined): Value[] => {
+    if (declaration === undefined) return [];
+    if (declaration.kind === SyntaxKind.BindingElement) {
+      const pattern = declaration.parent;
+      const from = pattern?.parent?.initializer;
+      const key = pattern === undefined ? undefined : bindingKey(declaration, pattern);
+      if (from === undefined || key === undefined) return [];
+      if (isGlobalReceiver(from)) return [globalValue(key)];
+      const held = heldAt(from, key, 0);
+      return held === undefined ? [] : [nodeValue(held)];
+    }
+    return declaration.initializer === undefined ? [] : [nodeValue(declaration.initializer)];
+  };
+
+  /**
    * The container LITERAL an expression denotes, however it is reached.
    *
    * A container holds containers — `const h = [[eval]]` and `const o = { list:
@@ -577,101 +615,60 @@ function analyser(root: Syntax, project: Project, source: string) {
   };
 
   /**
-   * Every expression a node could evaluate to.
+   * ONE STEP of value flow: everything that can supply this value.
    *
-   * SELECTION and BINDING are the two ways a value arrives somewhere other than
-   * where it was written, and both must be followed or the thing at the end of
-   * them is invisible: `(eval || fallback)(x)` invokes `eval` because it is
-   * truthy, and `const code = 'alert(1)'; setTimeout(code, 0)` compiles a string
-   * the argument's own syntax does not show.
+   * This is the whole model, and it is one relation on purpose.  It replaced
+   * three overlapping walkers — one for selection and bindings, one for sink
+   * names, one for containers — which is why every review round found another
+   * mechanism modelled in one of them and missing from the others: a `||` the
+   * name walker knew and the string test did not, a function RETURN the sink
+   * walker knew and the value walker did not, a container alias the write side
+   * knew and the read side did not.  Enumerating dataflow mechanisms three
+   * times over is the same mistake as enumerating spellings, one level up.
    *
-   * One resolver rather than a rule per predicate, because the sink walk, the
-   * string test and the URL test all ask the same question of the same shapes —
-   * and answering it in only one of them is how the other two went stale.
+   * An EDGE means "this value IS that value".  Construction is deliberately not
+   * an edge: `a + b` and a template make a NEW value out of their parts, so the
+   * predicates that care about strings read those shapes structurally instead.
    */
-  const valuesOf = (node: Syntax | undefined, hop = 0, seen = new Set<string>()): Syntax[] => {
-    const target = unwrap(node);
-    if (target === undefined || hop > MAX_HOPS) return [];
-    // Keyed on the full RANGE: a binary expression starts where its left operand
-    // does, so a start offset alone is not an identity and the operand that
-    // matters would be skipped as already-seen.
-    const at = `${target.getStart()}:${target.getEnd()}`;
-    if (seen.has(at)) return [];
-    seen.add(at);
+  const flowsInto = (value: Value): Value[] => {
+    if (value.kind === 'global') return [];
+    const target = value.node;
 
-    if (target.kind === SyntaxKind.ConditionalExpression) {
-      return [
-        ...valuesOf(target.whenTrue, hop + 1, seen),
-        ...valuesOf(target.whenFalse, hop + 1, seen),
-      ];
+    // Wrappers that yield exactly what they wrap.
+    if (TRANSPARENT.has(target.kind) || target.kind === SyntaxKind.AwaitExpression) {
+      return target.expression === undefined ? [] : [nodeValue(target.expression)];
     }
-    // `||`, `&&` and `??` all SELECT one operand; either may be the one that runs.
-    if (
-      target.kind === SyntaxKind.BinaryExpression &&
-      SELECTORS.has(target.operatorToken?.kind ?? -1)
-    ) {
-      return [...valuesOf(target.left, hop + 1, seen), ...valuesOf(target.right, hop + 1, seen)];
-    }
-    if (target.kind === SyntaxKind.Identifier && !isGlobalBinding(target)) {
-      const from: Syntax[] = [];
-      const key = receiverKey(target);
-      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
-        from.push(...valuesOf(assigned, hop + 1, seen));
-      }
-      const declaration = localDeclaration(target);
-      if (declaration?.kind === SyntaxKind.VariableDeclaration) {
-        from.push(...valuesOf(declaration.initializer, hop + 1, seen));
-      }
-      // The name itself stays a candidate: it may BE the thing (a parameter, an
-      // import), and dropping it would lose every sink reached through one.
-      return [target, ...from];
-    }
-    return [target];
-  };
 
-  /**
-   * The GLOBAL NAME an expression evaluates to, if any.
-   *
-   * EVERY name, not the first: a selection runs one of its operands and only
-   * the caller knows which names are sinks, so `(ready && eval)(x)` must offer
-   * both rather than stopping at the first global it can name.
-   *
-   * Names rather than specs, so one walk serves every spec set and
-   * `globalThis.whatever` resolves without knowing which names the caller cares
-   * about.
-   */
-  const sinkNames = (node: Syntax | undefined, hop = 0): string[] => {
-    const target = unwrap(node);
-    if (target === undefined || hop > MAX_HOPS) return [];
-
-    if (target.kind === SyntaxKind.Identifier) {
-      if (isGlobalBinding(target)) return [nameOf(target)];
-      // A later assignment reaches this name just as an initializer does, and
-      // either can be the one that makes it a sink.
-      const names: string[] = [];
-      const key = receiverKey(target);
-      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
-        names.push(...sinkNames(assigned, hop + 1));
+    if (target.kind === SyntaxKind.BinaryExpression) {
+      const operator = target.operatorToken?.kind ?? -1;
+      // `(0, eval)` yields its right operand; `||`/`&&`/`??` yield either.
+      if (operator === SyntaxKind.CommaToken) {
+        return target.right === undefined ? [] : [nodeValue(target.right)];
       }
-      const declaration = localDeclaration(target);
-      if (declaration?.kind === SyntaxKind.VariableDeclaration) {
-        names.push(...sinkNames(declaration.initializer, hop + 1));
-      }
-      if (names.length > 0) return names;
-      if (declaration?.kind === SyntaxKind.BindingElement) {
-        // `const { eval: e } = globalThis` names a property off the global; and
-        // `const [F] = [Function]` names one off a container by POSITION.  Both
-        // are the same act, so both are read through the same lookup.
-        const pattern = declaration.parent;
-        const from = pattern?.parent?.initializer;
-        if (pattern === undefined || from === undefined) return [];
-        const name = bindingKey(declaration, pattern);
-        if (name === undefined) return [];
-        if (isGlobalReceiver(from)) return [name];
-        const held = heldAt(from, name, hop);
-        return held === undefined ? [] : sinkNames(held, hop + 1);
+      if (SELECTORS.has(operator)) {
+        return [target.left, target.right]
+          .filter((side): side is Syntax => side !== undefined)
+          .map(nodeValue);
       }
       return [];
+    }
+
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      return [target.whenTrue, target.whenFalse]
+        .filter((side): side is Syntax => side !== undefined)
+        .map(nodeValue);
+    }
+
+    if (target.kind === SyntaxKind.Identifier) {
+      if (isGlobalBinding(target)) return [globalValue(nameOf(target))];
+      const from: Value[] = [];
+      // A later assignment reaches a name just as its initializer does.
+      const key = receiverKey(target);
+      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
+        from.push(nodeValue(assigned));
+      }
+      from.push(...boundValues(localDeclaration(target)));
+      return from;
     }
 
     if (
@@ -682,38 +679,59 @@ function analyser(root: Syntax, project: Project, source: string) {
       const base = target.expression;
       if (name === undefined || base === undefined) return [];
       // What was WRITTEN into this slot wins over what the receiver is.
-      const held = heldAt(base, name, hop);
-      if (held !== undefined) return sinkNames(held, hop + 1);
-      if (isGlobalReceiver(base)) return [name];
+      const held = heldAt(base, name, 0);
+      if (held !== undefined) return [nodeValue(held)];
+      if (isGlobalReceiver(base)) return [globalValue(name)];
       // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
-      if (INVOKERS.has(name)) return sinkNames(base, hop + 1);
-      if (name === 'constructor') return ['Function'];
+      if (INVOKERS.has(name)) return [nodeValue(base)];
+      if (name === 'constructor') return [globalValue('Function')];
       return [];
     }
 
     if (target.kind === SyntaxKind.CallExpression) {
-      // `Reflect.apply(F, …)` / `Reflect.construct(F, …)` invoke their FIRST
-      // argument, so the sink is whatever that argument resolves to.
+      // `Reflect.apply(F, …)` invokes its first argument; any other call yields
+      // whatever the function it names RETURNS.
       const invoked = reflectTarget(target);
-      if (invoked !== undefined) return sinkNames(invoked, hop + 1);
-      // A local function RETURNING a sink hands it to the caller:
-      // `const get = () => eval; get()(payload)` runs the global.
-      return returnedBy(target.expression, hop).flatMap((value) => sinkNames(value, hop + 1));
+      if (invoked !== undefined) return [nodeValue(invoked)];
+      return returnedBy(target.expression, 0).map(nodeValue);
     }
 
-    // A SELECTION runs one of its operands, and either may be the sink:
-    // `(eval || fallback)(x)` invokes `eval` because it is truthy.
-    if (target.kind === SyntaxKind.ConditionalExpression) {
-      return [...sinkNames(target.whenTrue, hop + 1), ...sinkNames(target.whenFalse, hop + 1)];
-    }
-    if (
-      target.kind === SyntaxKind.BinaryExpression &&
-      SELECTORS.has(target.operatorToken?.kind ?? -1)
-    ) {
-      return [...sinkNames(target.left, hop + 1), ...sinkNames(target.right, hop + 1)];
-    }
     return [];
   };
+
+  /**
+   * Every value an expression can hold, following the relation to exhaustion.
+   *
+   * One search serves every question asked of an expression — which globals it
+   * can be, whether it can be a string, what URL prefix it can carry — so those
+   * answers cannot drift apart the way three separate walkers did.
+   */
+  const reaches = (node: Syntax | undefined): Value[] => {
+    if (node === undefined) return [];
+    const seen = new Set<string>();
+    const found: Value[] = [];
+    const queue: Value[] = [nodeValue(node)];
+    while (queue.length > 0 && found.length < MAX_VALUES) {
+      const value = queue.shift() as Value;
+      const key =
+        value.kind === 'global'
+          ? `g:${value.name}`
+          : `n:${value.node.getStart()}:${value.node.getEnd()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push(value);
+      queue.push(...flowsInto(value));
+    }
+    return found;
+  };
+
+  /** The GLOBAL NAMES an expression can hold — what a sink spec matches. */
+  const sinkNames = (node: Syntax | undefined): string[] =>
+    reaches(node).flatMap((value) => (value.kind === 'global' ? [value.name] : []));
+
+  /** The EXPRESSIONS an expression can hold — what the value predicates read. */
+  const nodesFrom = (node: Syntax | undefined): Syntax[] =>
+    reaches(node).flatMap((value) => (value.kind === 'node' ? [value.node] : []));
 
   /**
    * The expressions a called function can RETURN, when it is a local one.
@@ -813,7 +831,7 @@ function analyser(root: Syntax, project: Project, source: string) {
     propertyName,
     reflectTarget,
     reflectPosition,
-    valuesOf,
+    nodesFrom,
     finding,
   };
 }
@@ -894,7 +912,7 @@ function invocationsIn(
         // Each argument is judged over everything it could BE, not over the
         // syntax written at the call: `setTimeout(code, 0)` compiles a string
         // when `code` holds one.
-        if (!args.some((arg) => spec.codeArgument?.(read.valuesOf(arg)) === true)) continue;
+        if (!args.some((arg) => spec.codeArgument?.(read.nodesFrom(arg)) === true)) continue;
       }
       const entry = read.finding(node, spec.label);
       found.set(`${entry.line}:${entry.label}:${entry.text}`, entry);
