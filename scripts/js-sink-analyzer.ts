@@ -1167,6 +1167,25 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       ) {
         continue;
       }
+      // `arr.forEach(fn => …)` hands each ELEMENT to the callback, so its
+      // first parameter is bound by the receiver rather than by an argument at
+      // the same index.  Without this a sink stored in a collection reached the
+      // callback untracked.
+      const iterated = iterationSource(node);
+      if (iterated !== undefined) {
+        const callback = unwrap(argumentsOf(node)[0]);
+        if (callback !== undefined && isFunction(callback)) {
+          const parameter = childrenOf(callback).find(
+            (child) => child.kind === SyntaxKind.Parameter,
+          );
+          if (parameter !== undefined) {
+            const key = parameterKey(parameter);
+            for (const element of elementsOf(iterated)) {
+              argumentsForParameter.set(key, [...(argumentsForParameter.get(key) ?? []), element]);
+            }
+          }
+        }
+      }
       const args = callArguments(node);
       if (args.length === 0) continue;
       // WHERE the called function is written differs by spelling: a tagged
@@ -1191,6 +1210,43 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     }
     buildingCallSites = false;
     callSitesReady = true;
+  };
+
+  /**
+   * Methods that hand each ELEMENT of their receiver to a callback.
+   *
+   * A closed set of platform APIs, named for the same reason the reflective
+   * setters are: no parse answers "does this iterate", and the list does not
+   * grow with the language the way a spelling list would.
+   */
+  const ITERATORS: ReadonlySet<string> = new Set([
+    'forEach',
+    'map',
+    'filter',
+    'find',
+    'findLast',
+    'some',
+    'every',
+    'flatMap',
+  ]);
+
+  /** The collection an iteration call walks, when it is one. */
+  const iterationSource = (call: Syntax): Syntax | undefined => {
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
+    if (!ITERATORS.has(propertyName(callee) ?? '')) return undefined;
+    return callee.expression;
+  };
+
+  /** The elements an array-valued expression holds. */
+  const elementsOf = (node: Syntax): Syntax[] => {
+    const literal = containerOf(node, 0);
+    return literal?.kind === SyntaxKind.ArrayLiteralExpression ? childrenOf(literal) : [];
   };
 
   /** The arguments that can arrive at a parameter, across every call site. */
@@ -1362,9 +1418,23 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
         const written = argumentsOf(target)[0];
         if (written !== undefined) return [nodeValue(written)];
       }
+      const callee = unwrap(target.expression);
+      // `m.get('run')` reads the slot `m.set('run', …)` filled.
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'get' &&
+        callee.expression !== undefined
+      ) {
+        const key = argumentsOf(target)[0];
+        const named = key === undefined ? null : staticPrefix(key);
+        if (named !== null) {
+          const held = heldValues(callee.expression, named, 0);
+          if (held.length > 0) return held.map(nodeValue);
+        }
+      }
       // `it.next()` yields the iterator's own values, so the call is
       // transparent to the thing being iterated.
-      const callee = unwrap(target.expression);
       if (
         (callee?.kind === SyntaxKind.PropertyAccessExpression ||
           callee?.kind === SyntaxKind.ElementAccessExpression) &&
@@ -1679,7 +1749,13 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       if (method === 'defineProperties') {
         // A descriptor map: each member's own `value` is what lands in the slot.
         for (const each of members(args[1])) {
-          const inner = each.value === undefined ? undefined : members(each.value)[0]?.value;
+          // The descriptor's `value` BY NAME, not by position: a descriptor
+          // that writes `enumerable` or `writable` first put another member at
+          // index 0, and reading that one silently took the wrong expression.
+          const inner =
+            each.value === undefined
+              ? undefined
+              : members(each.value).find((field) => field.property === 'value')?.value;
           writes.push(
             inner === undefined
               ? { at: each.at, property: each.property, on: target }
@@ -1736,6 +1812,25 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
   const collectReflectiveWrites = (): void => {
     for (const node of walk(root)) {
       if (node.kind !== SyntaxKind.CallExpression) continue;
+      // `m.set('run', eval)` fills a slot exactly as `o.run = eval` does; the
+      // standard collection API is a container with a different spelling, and
+      // reading only property syntax let a sink cross it untouched.
+      const callee = unwrap(node.expression);
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'set' &&
+        callee.expression !== undefined
+      ) {
+        const args = argumentsOf(node);
+        const key = args[0] === undefined ? null : staticPrefix(args[0]);
+        const value = args[1];
+        const holder = receiverKey(callee.expression);
+        if (key !== null && value !== undefined && holder !== undefined) {
+          const slot = `${holder} ${key}`;
+          written.set(slot, [...(written.get(slot) ?? []), value]);
+        }
+      }
       for (const write of reflectiveWrites(node)) {
         if (write.value === undefined) continue;
         const key = receiverKey(write.on);

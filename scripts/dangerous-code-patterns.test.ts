@@ -1024,6 +1024,32 @@ describe('sinks that are not written as sinks', () => {
   });
 
   it.each([
+    // A `Map` is a container with a different spelling; reading only property
+    // syntax let a sink cross the standard collection API untouched.
+    ['a Map slot', "const m = new Map(); m.set('run', eval); m.get('run')(payload)"],
+    // An iteration method hands each ELEMENT to the callback, so the
+    // callback's first parameter is bound by the receiver, not by an argument
+    // at the same index.
+    ['an element handed to forEach', 'const arr = [eval]; arr.forEach((fn) => fn(payload))'],
+    ['an element handed to map', 'const arr = [eval]; arr.map((fn) => fn(payload))'],
+    // The descriptor's `value` BY NAME: a field written before it put another
+    // member at index 0, and reading that one took the wrong expression.
+    [
+      'a descriptor with a field before value',
+      'Object.defineProperties(o, { run: { writable: true, value: eval } }); o.run(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a harmless Map slot', "const m = new Map(); m.set('run', safe); m.get('run')(payload)"],
+    ['a Map read at another key', "const m = new Map(); m.set('a', eval); m.get('b')(payload)"],
+    ['a harmless element iterated', 'const arr = [handler]; arr.forEach((fn) => fn(payload))'],
+    [
+      'a descriptor with no value field',
+      'Object.defineProperties(o, { run: { get: g } }); o.run(payload)',
+    ],
     ['a harmless fluent assign', 'Object.assign({}, { run: safe }).run(payload);'],
     ['a harmless borrowed invoker', 'Function.prototype.call.call(handler, null, payload)'],
   ])('does not flag %s', (_label, code) => {
