@@ -32,10 +32,20 @@ describe('the shared CSP source', () => {
 
   it('serializes the meta as the header MINUS exactly the §3.3-ignored directives', () => {
     const meta = parsePolicyString(contentSecurityPolicyMeta());
-    const dropped = CSP_DIRECTIVES.filter((d) => !meta.includes(d)).map(
-      (d) => d.split(/\s+/)[0] ?? '',
+    const nameOf = (directive: string): string => directive.split(/\s+/)[0] ?? '';
+    const dropped = CSP_DIRECTIVES.filter((d) => !meta.includes(d)).map(nameOf);
+    // Exactly the ineligible directives the header ACTUALLY USES.  The list is
+    // deliberately wider than today's policy — it exists so that adding one to
+    // the header cannot silently ship an inert copy in the meta form — so the
+    // property is that every ineligible directive present is dropped and
+    // nothing else is, not that the list and the policy have the same length.
+    const ineligibleInHeader = CSP_DIRECTIVES.map(nameOf).filter((name) =>
+      META_INELIGIBLE_DIRECTIVES.includes(name),
     );
-    expect(dropped.sort()).toEqual([...META_INELIGIBLE_DIRECTIVES].sort());
+    expect(dropped.sort()).toEqual([...ineligibleInHeader].sort());
+    for (const name of META_INELIGIBLE_DIRECTIVES) {
+      expect(meta).not.toContain(name);
+    }
   });
 
   it('never admits an unsafe script source', () => {

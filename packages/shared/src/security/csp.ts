@@ -53,14 +53,21 @@ export const CSP_DIRECTIVES: readonly string[] = [
 /**
  * Directives a `<meta http-equiv>` cannot carry.
  *
- * Per CSP Level 3 §3.3 the user agent IGNORES `frame-ancestors`, `report-uri`
- * and `report-to` in a meta element.  Emitting them there would read as
- * protection that is not in force, so the meta form drops them — and only them.
+ * Per CSP Level 3 §3.3 the user agent IGNORES `frame-ancestors`, `report-uri`,
+ * `report-to` and `sandbox` in a meta element.  Emitting one there would read
+ * as protection that is not in force, so the meta form drops them — and only
+ * them.
+ *
+ * `sandbox` is listed even though the header policy does not use one today:
+ * the list exists so that adding a directive to the header cannot silently
+ * ship an INERT copy of it in the meta form, and a list that only covers
+ * today's directives fails at exactly the moment it is needed.
  */
 export const META_INELIGIBLE_DIRECTIVES: readonly string[] = [
   'frame-ancestors',
   'report-uri',
   'report-to',
+  'sandbox',
 ];
 
 /** The directive name of a full directive (`script-src 'self'` → `script-src`). */

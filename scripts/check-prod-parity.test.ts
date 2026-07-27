@@ -325,7 +325,15 @@ describe('leg 3 — production-adapter purity (the upload-bytes failure shape)',
     ].join('\n');
     const adapters = collectAdapters(files({ 'a/wide.ts': source }), /^(?:InMemory|Memory)\w*/);
     expect(adapters).toEqual([
-      { className: 'InMemoryWide', interfaces: ['Store', 'Other'], file: 'a/wide.ts' },
+      {
+        className: 'InMemoryWide',
+        interfaces: ['Store', 'Other'],
+        // Matching is by declaration IDENTITY, since two modules may each
+        // declare a `Store` and those are different contracts.  Neither is
+        // declared here, so both fall back to the name.
+        interfaceKeys: ['name:Store', 'name:Other'],
+        file: 'a/wide.ts',
+      },
     ]);
   });
 });

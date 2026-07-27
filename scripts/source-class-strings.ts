@@ -31,6 +31,7 @@
 // structurally, over the AST rather than over a token stream.
 
 import { SyntaxKind } from 'typescript/unstable/ast';
+import type { Symbol as TsSymbol } from 'typescript/unstable/sync';
 import { type Source as SourceFile, type Syntax, withParsedSources } from './ts-source.js';
 
 export type { Source as SourceFile } from './ts-source.js';
@@ -265,16 +266,24 @@ function contributed(
   joins?: (callee: Syntax) => boolean,
   held?: (name: Syntax) => readonly Syntax[],
 ): Fold | null {
-  // ONLY the logical operators, whose operand either contributes or does not
-  // — so unioning them is exact.  A TERNARY'S branches are mutually EXCLUSIVE
-  // and are handled as alternatives instead: unioning `cond ? 'bg-error' :
-  // 'text-error-fg'` made the white foreground look paired with a solid fill
-  // that is never present in the same state.
+  // WHICH operand can actually be the rendered value.
+  //
+  // `a && b` renders `b` and nothing else — `a` is the CONDITION, never a
+  // class, so unioning both invented a `bg-error` in `cn(bg && 'text-error-fg')`
+  // that never renders and made the white foreground look paired.
+  //
+  // `a || b` and `a ?? b` yield EITHER operand, so both are possible values.
+  //
+  // A TERNARY'S branches are mutually exclusive and are alternatives rather
+  // than a union, handled by `foldEach`.
+  if (node.kind !== SyntaxKind.BinaryExpression) return null;
+  const operator = node.operatorToken?.kind ?? -1;
   const sides =
-    node.kind === SyntaxKind.BinaryExpression &&
-    CONDITIONAL_OPERATORS.has(node.operatorToken?.kind ?? -1)
-      ? [node.left, node.right]
-      : [];
+    operator === SyntaxKind.AmpersandAmpersandToken
+      ? [node.right]
+      : CONDITIONAL_OPERATORS.has(operator)
+        ? [node.left, node.right]
+        : [];
   if (sides.length === 0) return null;
   const pieces: Piece[] = [];
   const unknown: Syntax[] = [];
@@ -345,7 +354,17 @@ function foldEach(
       inner?.kind === SyntaxKind.ConditionalExpression
         ? [inner.whenTrue, inner.whenFalse]
             .filter((side): side is Syntax => side !== undefined)
-            .flatMap((side) => foldEach(side, source, joins, held))
+            .flatMap((side) => {
+              const folded = foldEach(side, source, joins, held);
+              // A branch that does NOT fold is still a branch.  Dropping it
+              // lost the alternative entirely, so `cn(on ? String('text-error')
+              // : 'text-sm')` produced only the readable side and the other was
+              // never traversed either.  Kept as UNKNOWN, which is what makes
+              // it walked again.
+              return folded.length > 0
+                ? folded
+                : [{ pieces: [unknownPiece(side)], unknown: [side] }];
+            })
         : [
             fold(argument, source, joins, held) ?? contributed(argument, source, joins, held),
           ].filter((each): each is Fold => each !== null);
@@ -438,18 +457,37 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
       collect(root);
       const helperCalls = new Set<number>();
       if (calleeAt.length > 0) {
-        project.checker.getSymbolAtPosition(here, calleeAt).forEach((symbol, index) => {
-          const at = calleeAt[index];
-          if (symbol === undefined || at === undefined) return;
-          let resolved = symbol;
+        /** Whether a symbol IS the composer, through import and local aliases. */
+        const isComposer = (from: TsSymbol | undefined, hop = 0): boolean => {
+          if (from === undefined || hop > 8) return false;
+          let resolved = from;
           try {
-            resolved = project.checker.getAliasedSymbol(symbol) ?? symbol;
+            resolved = project.checker.getAliasedSymbol(from) ?? from;
           } catch {
             // Not an alias; the local symbol is already the declaration.
           }
           if (resolved.declarations.some((each) => String(each.path).endsWith(CLASS_LIST_HELPER))) {
-            helperCalls.add(at);
+            return true;
           }
+          // `const join = cn` names the same function one hop on, and the
+          // callee then resolves to the local rather than to `lib/cn.ts`.
+          const declaration = resolved.declarations[0]?.resolve(project) as unknown as
+            | Syntax
+            | undefined;
+          const initializer =
+            declaration?.kind === SyntaxKind.VariableDeclaration
+              ? bare(declaration.initializer)
+              : undefined;
+          if (initializer?.kind !== SyntaxKind.Identifier) return false;
+          return isComposer(
+            project.checker.getSymbolAtPosition(here, initializer.getStart()),
+            hop + 1,
+          );
+        };
+        project.checker.getSymbolAtPosition(here, calleeAt).forEach((symbol, index) => {
+          const at = calleeAt[index];
+          if (symbol === undefined || at === undefined) return;
+          if (isComposer(symbol)) helperCalls.add(at);
         });
       }
       /** Whether a callee is the repository's class-list helper. */
@@ -489,10 +527,20 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
           return;
         }
         for (const each of alternatives) strings.push(render(each.pieces, node));
-        // Only the parts this fold could NOT read are walked again, so a class
-        // buried in a call argument is still found and a folded one is not
-        // counted twice.
-        for (const part of folded.unknown) part.forEachChild(visit);
+        // Only the parts these folds could NOT read are walked again, so a
+        // class buried in a call argument is still found and a folded one is
+        // not counted twice.  EVERY alternative's unknown parts, not just the
+        // first: an unfoldable branch is often the only one, and walking one
+        // alternative left it unread.
+        const walked = new Set<number>();
+        for (const each of alternatives) {
+          for (const part of each.unknown) {
+            const at = part.getStart();
+            if (walked.has(at)) continue;
+            walked.add(at);
+            part.forEachChild(visit);
+          }
+        }
       };
       visit(root);
       found.set(path, strings);

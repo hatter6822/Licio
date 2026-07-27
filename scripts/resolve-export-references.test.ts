@@ -225,6 +225,14 @@ const FILES: Record<string, string> = {
     'export const size: [Held] extends [never] ? 0 : 1 = 1;',
   ].join('\n'),
 
+  // ── Reference: a namespace held in a PARAMETER ───────────────────────────
+  'src/param-ns.ts': ['export const PARAM_A = 1;', 'export const PARAM_B = 2;'].join('\n'),
+  'src/param-reader.ts': [
+    "import * as paramNs from './param-ns.js';",
+    'function consume(ns: typeof paramNs): string[] { return Object.keys(ns); }',
+    'export const out = consume(paramNs);',
+  ].join('\n'),
+
   // ── Reference: a namespace merely EVALUATED consumes nothing ─────────────
   'src/probed-ns.ts': ['export const PROBED_DEAD = 1;'].join('\n'),
   'src/probes-ns.ts': [
@@ -663,6 +671,15 @@ describe('resolution: which sites use a binding', () => {
     // never fail — and asked the checker for the type of a node that is not an
     // expression, which ends the process rather than answering.
     expect(usesOf('src/typed-ns.ts', 'TYPED_DEAD')).toHaveLength(0);
+  });
+
+  it('credits a namespace consumed through a typed PARAMETER', () => {
+    // `consume(ns: typeof mod)` reads the namespace inside the helper, and
+    // restricting the type question to variables meant a helper typed to
+    // receive one consumed nothing.
+    for (const name of ['PARAM_A', 'PARAM_B']) {
+      expect(usesOf('src/param-ns.ts', name).length).toBeGreaterThan(0);
+    }
   });
 
   it('does not credit exports for a namespace only PROBED', () => {

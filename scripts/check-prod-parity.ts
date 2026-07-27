@@ -257,6 +257,15 @@ const PRODUCTION_PREFIX = /^(?:Drizzle|Redis|Postgres|S3|Ses|Http)\w*/;
 export interface AdapterInfo {
   className: string;
   interfaces: string[];
+  /**
+   * The same interfaces as DECLARATION IDENTITIES.
+   *
+   * Two modules may each declare a `Store`, and they are different contracts.
+   * Matching by name treated an in-memory adapter of one as covered by a
+   * production adapter of the other — the exact confusion this gate exists to
+   * prevent.  The name is kept for the message; the identity does the matching.
+   */
+  interfaceKeys: string[];
   file: string;
 }
 
@@ -268,30 +277,45 @@ export interface AdapterInfo {
  * and a multi-line `implements` list, an `extends X implements Y`, or a type
  * argument containing `{` cannot break it.
  */
-function adaptersIn(parsed: readonly ParsedSource[], prefix: RegExp): AdapterInfo[] {
+function adaptersIn(
+  parsed: readonly ParsedSource[],
+  prefix: RegExp,
+  project: Project,
+): AdapterInfo[] {
   const out: AdapterInfo[] = [];
   for (const { path, root } of parsed) {
+    const here = String(root.path);
     for (const node of walk(root)) {
       if (node.kind !== SyntaxKind.ClassDeclaration) continue;
       const className = nameOf(node.name);
       if (className === undefined || !prefix.test(className)) continue;
       const interfaces: string[] = [];
+      const interfaceKeys: string[] = [];
       for (const clause of childrenOf(node)) {
         if (clause.kind !== SyntaxKind.HeritageClause) continue;
         if (clause.token !== SyntaxKind.ImplementsKeyword) continue;
         for (const implemented of childrenOf(clause)) {
-          const name = nameOf(implemented.expression);
-          if (name !== undefined) interfaces.push(name);
+          const named = implemented.expression;
+          const name = nameOf(named);
+          if (name === undefined || named === undefined) continue;
+          interfaces.push(name);
+          // The DECLARATION the name resolves to, so two same-named interfaces
+          // in different modules are two contracts.  Followed through the
+          // IMPORT: an imported interface resolves to the specifier in THIS
+          // file, so two files importing the same contract would otherwise get
+          // two identities — which is the same confusion in the other
+          // direction.  An unresolvable one falls back to the name.
+          interfaceKeys.push(interfaceIdentity(named, project, here) ?? `name:${name}`);
         }
       }
-      if (interfaces.length > 0) out.push({ className, interfaces, file: path });
+      if (interfaces.length > 0) out.push({ className, interfaces, interfaceKeys, file: path });
     }
   }
   return out;
 }
 
 export function collectAdapters(files: Map<string, string>, prefix: RegExp): AdapterInfo[] {
-  return adaptersIn(parseAll(files), prefix);
+  return withParsed(files, (parsed, project) => adaptersIn(parsed, prefix, project));
 }
 
 /** Every class NEWED anywhere in these sources. */
@@ -403,14 +427,14 @@ function coverageIn(
   allowlist: Record<string, string> = ADAPTER_ALLOWLIST,
 ): string[] {
   const issues: string[] = [];
-  const inMemory = adaptersIn(parsed, IN_MEMORY_PREFIX);
-  const production = adaptersIn(parsed, PRODUCTION_PREFIX);
+  const inMemory = adaptersIn(parsed, IN_MEMORY_PREFIX, project);
+  const production = adaptersIn(parsed, PRODUCTION_PREFIX, project);
   const constructed = constructedIn(parsed, project);
 
   // interface → production adapter class names.
   const productionByInterface = new Map<string, string[]>();
   for (const adapter of production) {
-    for (const iface of adapter.interfaces) {
+    for (const iface of adapter.interfaceKeys) {
       const list = productionByInterface.get(iface) ?? [];
       list.push(adapter.className);
       productionByInterface.set(iface, list);
@@ -434,7 +458,7 @@ function coverageIn(
       usedAllowlist.add(adapter.className);
       continue;
     }
-    const covered = adapter.interfaces.some((iface) =>
+    const covered = adapter.interfaceKeys.some((iface) =>
       (productionByInterface.get(iface) ?? []).some((name) => instantiatedInClosure.has(name)),
     );
     if (!covered) {
@@ -471,6 +495,33 @@ export function checkEnvKeys(
 }
 
 /** The `process.env` keys a source reads, in either access spelling. */
+/**
+ * A stable identity for an interface reference, across the modules that use it.
+ *
+ * `path#index` of the ORIGINAL declaration, so the same contract imported into
+ * two files is one identity and two same-named contracts are two.
+ */
+function interfaceIdentity(node: Syntax, project: Project, file: string): string | undefined {
+  let symbol = project.checker.getSymbolAtPosition(file, node.getStart());
+  if (symbol === undefined) return undefined;
+  for (let hop = 0; hop < 8; hop += 1) {
+    const handle = symbol.declarations[0];
+    if (handle === undefined) return undefined;
+    const declaration = handle.resolve(project) as unknown as Syntax | undefined;
+    if (declaration === undefined || !IMPORTED_BINDING.has(declaration.kind)) {
+      return `${String(handle.path)}#${handle.index}`;
+    }
+    try {
+      const next = project.checker.getAliasedSymbol(symbol);
+      if (next === undefined) return `${String(handle.path)}#${handle.index}`;
+      symbol = next;
+    } catch {
+      return `${String(handle.path)}#${handle.index}`;
+    }
+  }
+  return undefined;
+}
+
 /** A string a NAME holds, followed one hop through its binding. */
 function constantString(
   node: Syntax | undefined,

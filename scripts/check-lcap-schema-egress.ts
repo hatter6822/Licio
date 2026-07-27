@@ -149,6 +149,19 @@ function namedWords(root: Syntax): Set<string> {
     // Every chunk of a template counts too: a field name can be spelled in one
     // (`\`prefix ipAddress ${x}\``), and reading only the hole-free form would
     // have LOST a case the whole-text search it replaces already covered.
+    // A COMPOSED name is the name the schema actually declares.
+    if (
+      node.kind === SyntaxKind.BinaryExpression &&
+      node.operatorToken?.kind === SyntaxKind.PlusToken
+    ) {
+      const folded = staticConcat(node);
+      if (folded !== null) {
+        for (const word of folded.split(/[^A-Za-z0-9_]+/)) {
+          if (word !== '') words.add(word);
+        }
+      }
+      continue;
+    }
     if (
       node.kind !== SyntaxKind.Identifier &&
       node.kind !== SyntaxKind.PrivateIdentifier &&
@@ -165,6 +178,38 @@ function namedWords(root: Syntax): Set<string> {
     }
   }
   return words;
+}
+
+/**
+ * A string built from static pieces, folded.
+ *
+ * `['ip_' + 'address']` names the field `ip_address` at runtime, and splitting
+ * each literal into words on its own recorded `ip_` and `address` — neither of
+ * which is the forbidden token.  The concatenation is where the name actually
+ * comes from, so it is folded before the words are taken.
+ */
+function staticConcat(node: Syntax, hop = 0): string | null {
+  if (hop > 16) return null;
+  if (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return node.text ?? '';
+  }
+  if (node.kind === SyntaxKind.ParenthesizedExpression || node.kind === SyntaxKind.AsExpression) {
+    return node.expression === undefined ? null : staticConcat(node.expression, hop + 1);
+  }
+  if (
+    node.kind === SyntaxKind.BinaryExpression &&
+    node.operatorToken?.kind === SyntaxKind.PlusToken &&
+    node.left !== undefined &&
+    node.right !== undefined
+  ) {
+    const left = staticConcat(node.left, hop + 1);
+    const right = staticConcat(node.right, hop + 1);
+    return left === null || right === null ? null : left + right;
+  }
+  return null;
 }
 
 /** The forbidden-field violations a source's named words imply. */

@@ -389,6 +389,9 @@ const LOGICAL = new Set<number>([
   SyntaxKind.QuestionQuestionToken,
 ]);
 
+/** Declarations that BIND a value a namespace can be held in. */
+const HOLDS_A_VALUE = new Set<number>([SyntaxKind.VariableDeclaration, SyntaxKind.Parameter]);
+
 /** Positions that only ask whether a value is THERE. */
 const CONDITION_OF = new Set<number>([
   SyntaxKind.IfStatement,
@@ -892,15 +895,17 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
             }
             return;
           }
-          // Or a LOCAL holds it: `const alias = mod; consume(alias)`, and every
-          // hop the value took — an assignment, an `await`, an `as` — is in the
-          // TYPE, which is the same move that answers destructuring.  Asked
-          // only of bindings, both because that is where the question arises
+          // Or a BINDING holds it: `const alias = mod; consume(alias)`, and
+          // every hop the value took — an assignment, an `await`, an `as` — is
+          // in the TYPE, the same move that answers destructuring.  A PARAMETER
+          // is such a binding: `consume(ns: typeof import('./m.js'))` reads the
+          // namespace inside the helper, and restricting this to variables
+          // meant a helper typed to receive one consumed nothing.
+          //
+          // Asked only of bindings, because that is where the question arises
           // and because asking it of every escaping name walks the checker into
           // shapes it panics on.
-          if (!module.declarations.some((each) => each.kind === SyntaxKind.VariableDeclaration)) {
-            return;
-          }
+          if (!module.declarations.some((each) => HOLDS_A_VALUE.has(each.kind))) return;
           const type = project.checker.getTypeAtLocation(asNode(escaped));
           if (type?.getSymbol()?.declarations.some(isModule) !== true) return;
           for (const property of project.checker.getPropertiesOfType(type)) {
