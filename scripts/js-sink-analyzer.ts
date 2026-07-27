@@ -371,7 +371,11 @@ function staticPrefix(
  * `lint:security`.  Concatenation folds only when BOTH sides fold, and a
  * template with holes folds to nothing.
  */
-function staticText(node: Syntax | undefined, hop = 0): string | null {
+function staticText(
+  node: Syntax | undefined,
+  hop = 0,
+  bound?: (identifier: Syntax) => Syntax | undefined,
+): string | null {
   const target = unwrap(node);
   if (target === undefined || hop > MAX_HOPS) return null;
   if (
@@ -384,10 +388,19 @@ function staticText(node: Syntax | undefined, hop = 0): string | null {
     target.kind === SyntaxKind.BinaryExpression &&
     target.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
-    const left = staticText(target.left, hop + 1);
+    const left = staticText(target.left, hop + 1, bound);
     if (left === null) return null;
-    const right = staticText(target.right, hop + 1);
+    const right = staticText(target.right, hop + 1, bound);
     return right === null ? null : left + right;
+  }
+  // A `const` holding the text folds to what it holds: `const a = 'ev', b =
+  // 'al'; globalThis[a + b]` names `eval` as surely as the spelled literal
+  // does, and the checker widens `a + b` to `string` so the type cannot settle
+  // it.  Only an immutable binding is followed — a `let` may hold something
+  // else by the time the key is read, and folding it would invent a key.
+  if (bound !== undefined && target.kind === SyntaxKind.Identifier) {
+    const held = bound(target);
+    if (held !== undefined) return staticText(held, hop + 1, bound);
   }
   return null;
 }
@@ -414,7 +427,33 @@ function staticKeyOf(argument: Syntax | undefined, project: Project): string | u
   // `node['inner' + 'HTML']` names the same property as the plain spelling —
   // but only when the WHOLE key folds, which is what separates it from a
   // scheme prefix.
-  return staticText(argument) ?? undefined;
+  return staticText(argument, 0, (identifier) => constantValue(identifier, project)) ?? undefined;
+}
+
+/**
+ * What an immutable local binding holds, or undefined when it is not one.
+ *
+ * `const` only: a `let` can hold something else by the time the key is read, so
+ * folding it would invent a property name the code never selects.
+ */
+function constantValue(identifier: Syntax, project: Project): Syntax | undefined {
+  const path = String(identifier.getSourceFile?.()?.path ?? '');
+  if (path === '') return undefined;
+  const declaration = project.checker
+    .getSymbolAtPosition(path, identifier.getStart())
+    ?.declarations.find((each) => String(each.path) === path)
+    ?.resolve(project) as unknown as Syntax | undefined;
+  if (declaration?.kind !== SyntaxKind.VariableDeclaration) return undefined;
+  // The declaration LIST carries the keyword; `const` is the only one whose
+  // binding cannot be rebound.
+  let owner: Syntax | undefined = declaration.parent;
+  for (let hop = 0; owner !== undefined && hop <= MAX_HOPS; hop += 1) {
+    if (owner.kind === SyntaxKind.VariableDeclarationList) {
+      return /^const\b/.test(owner.getText()) ? declaration.initializer : undefined;
+    }
+    owner = owner.parent;
+  }
+  return undefined;
 }
 
 /**
@@ -2041,9 +2080,16 @@ export function findGlobalReferencesIn(
 
       /** What an object literal holds at `key`, or undefined when it holds no
        *  such property — or is not a literal to look inside at all. */
-      const propertyOf = (object: Syntax | undefined, key: string): Syntax | undefined => {
+      const propertyOf = (object: Syntax | undefined, key: string, hop = 0): Syntax | undefined => {
         const target = unwrap(object);
-        if (target?.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+        if (target === undefined || hop > MAX_HOPS) return undefined;
+        // `const obj = { a: globalThis }; const { a: { ['eval']: r } } = obj`
+        // reaches the global through a NAME, so requiring an inline literal
+        // here stopped the descent one hop short of it.
+        if (target.kind === SyntaxKind.Identifier) {
+          return propertyOf(constantValue(target, project), key, hop + 1);
+        }
+        if (target.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
         for (const member of childrenOf(target)) {
           if (selectedKey(member.name) !== key) continue;
           if (member.kind === SyntaxKind.PropertyAssignment) return member.initializer;
@@ -2156,12 +2202,17 @@ export function findGlobalReferencesIn(
           node.kind === SyntaxKind.PropertyAccessExpression ||
           node.kind === SyntaxKind.ElementAccessExpression
         ) {
+          // The computed half is read with the SAME resolver the destructure
+          // branch uses.  Taking `argumentExpression.text` saw only a bare
+          // literal, so `globalThis['ev' + 'al']` — a fully static key naming
+          // the global, with no invocation for the sink scan to report either —
+          // passed the rule the file's whole premise rests on.
           const named =
             node.kind === SyntaxKind.PropertyAccessExpression
               ? node.name === undefined
                 ? undefined
                 : (node.name.text ?? node.name.getText())
-              : (node.argumentExpression?.text ?? undefined);
+              : staticKeyOf(node.argumentExpression, project);
           if (named !== undefined && forbidden.has(named) && isGlobalObject(node.expression)) {
             found.push({
               label: `reference to the forbidden global \`${named}\``,

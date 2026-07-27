@@ -552,6 +552,10 @@ describe('aliased sinks', () => {
       "function f({ ['eval']: r } = globalThis) { r(payload) }",
     ],
     ['a computed key off a container', "const o = { run: eval }; const { ['run']: r } = o; r('x')"],
+    // A `const` holding the text folds to what it holds: the checker widens
+    // `a + b` to `string`, so the key's TYPE cannot settle it and the fold has
+    // to follow the binding.
+    ['a key composed from const bindings', "const a = 'ev', b = 'al'; globalThis[a + b]('x')"],
   ])('catches %s', (_label, code) => {
     expect(fires(code)).toBe(true);
   });
@@ -1208,6 +1212,19 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     ['window.Function', 'const f = window.Function;'],
     ["self['eval']", 'const f = self["eval"];'],
     ['an aliased global object', 'const g = globalThis; const f = g.eval;'],
+    // A COMPOSED element key on the global object.  The property branch read
+    // `argumentExpression.text`, which sees only a bare literal — so a fully
+    // static key naming the global, with no invocation for the sink scan to
+    // report either, passed the rule this file's premise rests on.
+    ["globalThis['ev' + 'al'] as a value", "export const e = globalThis['ev' + 'al'];"],
+    [
+      'a key composed from const bindings',
+      "const a = 'ev', b = 'al'; export const e = globalThis[a + b];",
+    ],
+    [
+      'a nested destructure through a bound object',
+      "const obj = { a: globalThis }; const { a: { ['eval']: r } } = obj;",
+    ],
   ])('catches %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
   });
@@ -1277,6 +1294,12 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     ],
     ['the same shape as an element access', "globalThis['eval' + String('Safe')](payload);"],
     ['a template key with a hole', `const { [\`eval${'$'}{suffix}\`]: run } = globalThis;`],
+    // Only an IMMUTABLE binding folds: a `let` may hold something else by the
+    // time the key is read, so folding it would invent a property name.
+    [
+      'a key composed from a reassignable binding',
+      "let a = 'ev'; a = 'zz'; const e = globalThis[a + 'al'];",
+    ],
     // The SOURCE is resolved, exactly as a property receiver is, so a computed
     // key off an unrelated record is not the global.
     ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],
