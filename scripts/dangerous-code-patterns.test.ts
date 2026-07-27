@@ -526,6 +526,36 @@ describe('aliased sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  // A COMPUTED key in a binding pattern selects the same property the plain
+  // spelling does — `const { ['eval']: run }` and `const { eval: run }` bind
+  // the same value — but the key was read as SOURCE TEXT, giving `['eval']`, a
+  // property no object has.  The binding resolved to nothing, so `run(payload)`
+  // reached no sink.  The key is resolved the way `o['eval']` already was, so
+  // every spelling of it arrives at one answer.
+  it.each([
+    ['a computed string key', "const { ['eval']: run } = globalThis; run(payload)"],
+    ['a computed template key', 'const { [`eval`]: run } = globalThis; run(payload)'],
+    ['a string-literal key', "const { 'eval': run } = globalThis; run(payload)"],
+    [
+      'a computed key held in a const',
+      "const k = 'eval'; const { [k]: r } = globalThis; r(payload)",
+    ],
+    ['a COMPOSED computed key', "const { ['ev' + 'al']: r } = globalThis; r(payload)"],
+    ['the constructor through a computed key', "const { ['Function']: F } = globalThis; F('x')()"],
+    ['a computed key off `self`', "const { ['eval']: r } = self; r(payload)"],
+    [
+      'a computed key off an aliased global',
+      "const g = globalThis; const { ['eval']: r } = g; r(p)",
+    ],
+    [
+      'a computed key in a parameter default',
+      "function f({ ['eval']: r } = globalThis) { r(payload) }",
+    ],
+    ['a computed key off a container', "const o = { run: eval }; const { ['run']: r } = o; r('x')"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
   // Round 17: PARENTHESES around the thing being bound. `(Function)` is
   // `Function`, and a sequence expression `(0, Function)` evaluates to its last
   // operand — the scan loop already knew this about a reference in CALL
@@ -1180,6 +1210,60 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     ['an aliased global object', 'const g = globalThis; const f = g.eval;'],
   ])('catches %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  // A DESTRUCTURE selects the same property `globalThis.eval` selects, but the
+  // name reaches the source in neither of the two shapes the rule read.  A
+  // COMPUTED key spells it in a string literal, which is not an identifier and
+  // not a property access; an assignment target spells it in a key the
+  // declaration-name exclusion skips.  Both left a file whose only mention of
+  // the global was inside a string, which is the one outcome this rule exists
+  // to make impossible.
+  it.each([
+    ['a computed string key', "const { ['eval']: run } = globalThis;"],
+    ['a computed template key', 'const { [`eval`]: run } = globalThis;'],
+    ['a string-literal key', "const { 'eval': run } = globalThis;"],
+    ['a computed key held in a const', "const k = 'eval'; const { [k]: run } = globalThis;"],
+    ['a COMPOSED computed key', "const { ['ev' + 'al']: run } = globalThis;"],
+    ['the constructor through a computed key', "const { ['Function']: F } = globalThis;"],
+    ['a computed key off `self`', "const { ['eval']: run } = self;"],
+    ['a computed key off an aliased global', "const g = globalThis; const { ['eval']: r } = g;"],
+    ['a computed key in a parameter default', "function f({ ['eval']: r } = globalThis) { r(); }"],
+    // A destructuring ASSIGNMENT is the same selection without a declaration.
+    ['an assignment target', 'let run; ({ eval: run } = globalThis);'],
+    ['a computed assignment target', "let run; ({ ['eval']: run } = globalThis);"],
+    ['a string-key assignment target', "let run; ({ 'eval': run } = globalThis);"],
+    // A NESTED pattern selects from the property its own element took, so it
+    // reaches the global by the same route the flat spelling does.
+    ['a nested pattern over a literal', "const { a: { ['eval']: r } } = { a: globalThis };"],
+    [
+      'a nested pattern two deep',
+      "const { a: { b: { ['eval']: r } } } = { a: { b: globalThis } };",
+    ],
+    ['a nested element default', "const { a: { ['eval']: r } = globalThis } = o;"],
+  ])('catches a destructure through %s', (_label, code) => {
+    expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['a computed string key', "const { ['eval']: run } = globalThis;"],
+    ['a plain key', 'const { eval: run } = globalThis;'],
+    ['an assignment target', 'let run; ({ eval: run } = globalThis);'],
+  ])('reports %s exactly once', (_label, code) => {
+    // Two branches can see the same selection, and a rule that reports one
+    // reference twice reads as two violations to whoever has to clear it.
+    expect(refs(code)).toBe(1);
+  });
+
+  it.each([
+    // The SOURCE is resolved, exactly as a property receiver is, so a computed
+    // key off an unrelated record is not the global.
+    ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],
+    // A record being BUILT is not a selection from anything.
+    ['a computed key in an object literal VALUE', "export const o = { ['eval']: 1 };"],
+    ['a harmless key off the global object', "const { ['toString']: t } = globalThis;"],
+  ])('does not flag %s', (_label, code) => {
+    expect(refs(code)).toBe(0);
   });
 
   it.each([

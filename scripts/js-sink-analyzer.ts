@@ -360,6 +360,29 @@ function staticPrefix(
 }
 
 /**
+ * The static property name a KEY expression denotes, whatever spelling reaches
+ * it.
+ *
+ * `o.run`, `o['run']`, `o[key]` after `const key = 'run'`, and the computed
+ * binding `const { ['run']: r } = o` all select the same property; the key's
+ * TYPE settles every one of them, so no rule is needed per form.  It lives at
+ * module scope because the forbidden-global rule asks the same question of the
+ * same kind of node as the value-flow analyzer does, and answering it twice is
+ * how one of the two ends up not covering a spelling.
+ */
+function staticKeyOf(argument: Syntax | undefined, project: Project): string | undefined {
+  if (argument === undefined) return undefined;
+  const type = project.checker.getTypeAtLocation(asNode(argument));
+  if (type?.isStringLiteralType() === true) return String(type.value);
+  if (type?.isNumberLiteralType() === true) return String(type.value);
+  // A literal the checker did not narrow (a `.js` source has no `as const`).
+  if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
+  // A key the checker did not narrow, including a COMPOSED one:
+  // `node['inner' + 'HTML']` names the same property as the plain spelling.
+  return staticPrefix(argument) ?? undefined;
+}
+
+/**
  * The code argument is a STRING — the implicit-eval timer form.
  *
  * An INTERPOLATED template counts: a template with holes is still a string the
@@ -493,16 +516,7 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       return node.name === undefined ? undefined : nameOf(node.name);
     }
     if (node.kind !== SyntaxKind.ElementAccessExpression) return undefined;
-    const argument = node.argumentExpression;
-    if (argument === undefined) return undefined;
-    const type = project.checker.getTypeAtLocation(asNode(argument));
-    if (type?.isStringLiteralType() === true) return String(type.value);
-    if (type?.isNumberLiteralType() === true) return String(type.value);
-    // A literal the checker did not narrow (a `.js` source has no `as const`).
-    if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
-    // A key the checker did not narrow, including a COMPOSED one:
-    // `node['inner' + 'HTML']` names the same property as the plain spelling.
-    return staticPrefix(argument) ?? undefined;
+    return staticKeyOf(node.argumentExpression, project);
   };
 
   /**
@@ -628,6 +642,13 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
   /**
    * The key a binding element takes from its source — a NAME in an object
    * pattern, a POSITION in an array one.
+   *
+   * A COMPUTED key is resolved exactly as `o[key]` is, because it selects
+   * exactly the same property: `const { ['eval']: run } = globalThis` and
+   * `const { eval: run } = globalThis` bind the same value.  Reading the
+   * computed form's text instead gave the key `['eval']` — a property no object
+   * has — so the binding resolved to nothing and `run(payload)` reached no
+   * sink, in a file that mentions the global only inside a string.
    */
   const bindingKey = (element: Syntax, pattern: Syntax): string | undefined => {
     if (pattern.kind === SyntaxKind.ArrayBindingPattern) {
@@ -635,7 +656,11 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       return at < 0 ? undefined : String(at);
     }
     const named = (element.propertyName ?? element.name) as Syntax | undefined;
-    return named === undefined ? undefined : nameOf(named);
+    if (named === undefined) return undefined;
+    if (named.kind === SyntaxKind.ComputedPropertyName) {
+      return staticKeyOf(named.expression, project);
+    }
+    return nameOf(named);
   };
 
   /**
@@ -1970,7 +1995,108 @@ export function findGlobalReferencesIn(
         return isGlobalObject(declaration.initializer, hop + 1);
       };
 
+      /** The key a destructuring element selects, however it is spelled. */
+      const selectedKey = (named: Syntax | undefined): string | undefined => {
+        if (named === undefined) return undefined;
+        if (named.kind === SyntaxKind.ComputedPropertyName) {
+          return staticKeyOf(named.expression, project);
+        }
+        return named.text ?? named.getText();
+      };
+
+      /** What an object literal holds at `key`, or undefined when it holds no
+       *  such property — or is not a literal to look inside at all. */
+      const propertyOf = (object: Syntax | undefined, key: string): Syntax | undefined => {
+        const target = unwrap(object);
+        if (target?.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+        for (const member of childrenOf(target)) {
+          if (selectedKey(member.name) !== key) continue;
+          if (member.kind === SyntaxKind.PropertyAssignment) return member.initializer;
+          if (member.kind === SyntaxKind.ShorthandPropertyAssignment) return member.name;
+        }
+        return undefined;
+      };
+
+      /**
+       * The value a binding PATTERN destructures.
+       *
+       * A declaration or a parameter holds its source outright.  A NESTED
+       * pattern selects from the property its own element took, so
+       * `const { a: { ['eval']: r } } = { a: globalThis }` reaches the global
+       * by the same route the flat spelling does — and when the descent finds
+       * no such property, the element's DEFAULT is what binds, which is the
+       * source in `const { a: { ['eval']: r } = globalThis } = o`.
+       */
+      const patternSource = (pattern: Syntax | undefined, hop = 0): Syntax | undefined => {
+        const owner = pattern?.parent;
+        if (owner === undefined || hop > 8) return undefined;
+        if (owner.kind !== SyntaxKind.BindingElement) return owner.initializer;
+        const key = selectedKey(owner.propertyName ?? owner.name);
+        const outer = key === undefined ? undefined : patternSource(owner.parent, hop + 1);
+        return (key === undefined ? undefined : propertyOf(outer, key)) ?? owner.initializer;
+      };
+
+      /**
+       * The forbidden global a DESTRUCTURE selects off the global object.
+       *
+       * A destructure names the property it takes, and `const { ['eval']: run
+       * } = globalThis` selects exactly what `globalThis.eval` selects — but it
+       * spells the name in a string literal, which is neither an identifier nor
+       * a property access, so both branches below walked past it and the file
+       * mentioned the global nowhere a reader could see.  A destructuring
+       * ASSIGNMENT, `({ eval: run } = globalThis)`, spells it in a key the
+       * declaration-name exclusion skips, and was invisible for the other
+       * reason.
+       *
+       * The SOURCE must still be the global object, so a key off an unrelated
+       * record is not a reference to the global — the same discipline the
+       * property branch applies to its receiver.
+       */
+      const destructuredGlobal = (node: Syntax): string | undefined => {
+        let named: Syntax | undefined;
+        let source: Syntax | undefined;
+        if (node.kind === SyntaxKind.BindingElement) {
+          named = node.propertyName ?? node.name;
+          // A PLAIN identifier key is already reported as a bare reference
+          // below; claiming it here too would say it twice.
+          if (named?.kind === SyntaxKind.Identifier) return undefined;
+          source = patternSource(node.parent);
+        } else if (
+          node.kind === SyntaxKind.PropertyAssignment ||
+          node.kind === SyntaxKind.ShorthandPropertyAssignment
+        ) {
+          const literal = node.parent;
+          const assignment = literal?.parent;
+          // Only an assignment TARGET destructures; `{ eval: run }` as a value
+          // builds a record, and its key is not a selection from anything.
+          if (
+            literal?.kind !== SyntaxKind.ObjectLiteralExpression ||
+            assignment?.kind !== SyntaxKind.BinaryExpression ||
+            assignment.operatorToken?.kind !== SyntaxKind.EqualsToken ||
+            unwrap(assignment.left)?.getStart() !== literal.getStart()
+          ) {
+            return undefined;
+          }
+          named = node.name;
+          source = assignment.right;
+        } else {
+          return undefined;
+        }
+        const key = selectedKey(named);
+        if (key === undefined || !forbidden.has(key)) return undefined;
+        return isGlobalObject(source) ? key : undefined;
+      };
+
       for (const node of walk(root)) {
+        const selected = destructuredGlobal(node);
+        if (selected !== undefined) {
+          found.push({
+            label: `reference to the forbidden global \`${selected}\``,
+            line: lineAt(newlines, node.getStart()),
+            text: content.slice(node.getStart(), node.getEnd()),
+          });
+          continue;
+        }
         // `globalThis.eval` and `self['eval']` name the global through a
         // PROPERTY, where the identifier is the property half — which the
         // declaration-name exclusion below was skipping, so the rule had a hole
