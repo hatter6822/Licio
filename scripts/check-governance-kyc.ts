@@ -587,9 +587,16 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
           node = parent;
           continue;
         }
-        // Logical composition keeps the verdict in play; anything else (an
-        // ordering, an arithmetic operator) does not describe eligibility.
+        // Composition carries the verdict only when EVERY truthy denial still
+        // reaches the refusal.  `denial || x` and `denial ?? x` are truthy
+        // whenever `denial` is, so they do.  `denial && x` is not: with `x`
+        // false an ineligible member walks past a branch that looks like a
+        // guard, so this refuses unless the other operand is literally `true`.
         if (!COMPOSITION.has(operator)) return undefined;
+        if (operator === SyntaxKind.AmpersandAmpersandToken) {
+          const alwaysTrue = unwrap(other)?.kind === SyntaxKind.TrueKeyword;
+          if (!alwaysTrue) return undefined;
+        }
         node = parent;
         continue;
       }

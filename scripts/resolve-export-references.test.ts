@@ -225,6 +225,14 @@ const FILES: Record<string, string> = {
     'export const size: [Held] extends [never] ? 0 : 1 = 1;',
   ].join('\n'),
 
+  // ── Reference: a namespace merely EVALUATED consumes nothing ─────────────
+  'src/probed-ns.ts': ['export const PROBED_DEAD = 1;'].join('\n'),
+  'src/probes-ns.ts': [
+    "import * as probedNs from './probed-ns.js';",
+    'export const present = typeof probedNs;',
+    'export function check(): void { void probedNs; if (!probedNs) return; }',
+  ].join('\n'),
+
   // ── Reference: a NESTED template interpolation is still code ─────────────
   // The only use of `NESTED` is two interpolations deep, in this same file.  A
   // collector that walked only the outer hole reported a live export as dead.
@@ -654,6 +662,13 @@ describe('resolution: which sites use a binding', () => {
     // never fail — and asked the checker for the type of a node that is not an
     // expression, which ends the process rather than answering.
     expect(usesOf('src/typed-ns.ts', 'TYPED_DEAD')).toHaveLength(0);
+  });
+
+  it('does not credit exports for a namespace only PROBED', () => {
+    // `void mod`, `typeof mod` and `!mod` observe that it is there without
+    // reading anything out of it, so crediting the whole export set for one
+    // would make the gate accept a genuinely dead value.
+    expect(usesOf('src/probed-ns.ts', 'PROBED_DEAD')).toHaveLength(0);
   });
 
   it('still reports the members a SINGLE known key does not read', () => {

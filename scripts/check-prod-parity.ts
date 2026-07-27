@@ -41,6 +41,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
+import type { Project } from 'typescript/unstable/sync';
 import {
   lineAt,
   newlineIndex,
@@ -175,6 +176,55 @@ function parseAll(files: Map<string, string>): ParsedSource[] {
   );
 }
 
+/**
+ * Parse and run `body` WITH the project still open.
+ *
+ * `parseAll` hands the trees back after the project is torn down, which is
+ * enough for a purely syntactic leg and useless to one that has to resolve a
+ * name.  Two legs do: an adapter reached through an import alias and an
+ * environment read reached through a binding are both invisible to a scan that
+ * compares the spelling at the use site.
+ */
+function withParsed<T>(
+  files: Map<string, string>,
+  body: (parsed: readonly ParsedSource[], project: Project) => T,
+): T {
+  return withParsedSources(
+    [...files].map(([path, content]) => ({ path, content })),
+    body,
+  );
+}
+
+/** The declaration a name binds to, followed through import aliases. */
+function declarationOf(node: Syntax, project: Project, file: string): Syntax | undefined {
+  const symbol = project.checker.getSymbolAtPosition(file, node.getStart());
+  if (symbol === undefined) return undefined;
+  let resolved = symbol;
+  for (let hop = 0; hop < 8; hop += 1) {
+    const handle = resolved.declarations[0];
+    if (handle === undefined) return undefined;
+    const declaration = handle.resolve(project) as unknown as Syntax | undefined;
+    if (declaration === undefined) return undefined;
+    if (!IMPORTED_BINDING.has(declaration.kind)) return declaration;
+    try {
+      const next = project.checker.getAliasedSymbol(resolved);
+      if (next === undefined) return declaration;
+      resolved = next;
+    } catch {
+      return declaration;
+    }
+  }
+  return undefined;
+}
+
+/** Bindings that name something declared in another module. */
+const IMPORTED_BINDING: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.ImportSpecifier,
+  SyntaxKind.ImportClause,
+  SyntaxKind.NamespaceImport,
+  SyntaxKind.ImportEqualsDeclaration,
+]);
+
 // ---------------------------------------------------------------------------
 // Leg 1 — adapter coverage.
 // ---------------------------------------------------------------------------
@@ -223,13 +273,26 @@ export function collectAdapters(files: Map<string, string>, prefix: RegExp): Ada
 }
 
 /** Every class NEWED anywhere in these sources. */
-function constructedIn(parsed: readonly ParsedSource[]): Map<string, Set<string>> {
+function constructedIn(
+  parsed: readonly ParsedSource[],
+  project: Project,
+): Map<string, Set<string>> {
   const byFile = new Map<string, Set<string>>();
   for (const { path, root } of parsed) {
     const names = new Set<string>();
+    const here = String(root.path);
     for (const node of walk(root)) {
       if (node.kind !== SyntaxKind.NewExpression) continue;
-      const name = nameOf(node.expression);
+      const callee = node.expression;
+      if (callee === undefined) continue;
+      // The SPELLING at the call site is not the class: `import { InMemoryX as
+      // Store } from './s.js'; new Store()` records `Store`, while coverage
+      // looks for `InMemoryX` — so an in-memory adapter constructed under an
+      // alias had no counterpart demanded of it, and production could silently
+      // keep process-local state.
+      const declared = declarationOf(callee, project, here);
+      const name =
+        declared?.kind === SyntaxKind.ClassDeclaration ? nameOf(declared.name) : nameOf(callee);
       if (name !== undefined) names.add(name);
     }
     byFile.set(path, names);
@@ -308,18 +371,19 @@ export function checkAdapterCoverage(
   closure: Set<string>,
   allowlist: Record<string, string> = ADAPTER_ALLOWLIST,
 ): string[] {
-  return coverageIn(parseAll(files), closure, allowlist);
+  return withParsed(files, (parsed, project) => coverageIn(parsed, project, closure, allowlist));
 }
 
 function coverageIn(
   parsed: readonly ParsedSource[],
+  project: Project,
   closure: Set<string>,
   allowlist: Record<string, string> = ADAPTER_ALLOWLIST,
 ): string[] {
   const issues: string[] = [];
   const inMemory = adaptersIn(parsed, IN_MEMORY_PREFIX);
   const production = adaptersIn(parsed, PRODUCTION_PREFIX);
-  const constructed = constructedIn(parsed);
+  const constructed = constructedIn(parsed, project);
 
   // interface → production adapter class names.
   const productionByInterface = new Map<string, string[]>();
@@ -381,20 +445,42 @@ export function checkEnvKeys(
   schemaKeys: ReadonlySet<string>,
   allowlist: Record<string, string> = ENV_ALLOWLIST,
 ): string[] {
-  return envKeysIn(parseAll(files), schemaKeys, allowlist);
+  return withParsed(files, (parsed, project) => envKeysIn(parsed, project, schemaKeys, allowlist));
 }
 
 /** The `process.env` keys a source reads, in either access spelling. */
-function envKeysOf(root: Syntax): string[] {
+/** Whether an expression IS `process.env`, however it was reached. */
+function isProcessEnv(node: Syntax | undefined, project: Project, file: string, hop = 0): boolean {
+  if (node === undefined || hop > 8) return false;
+  if (node.kind === SyntaxKind.PropertyAccessExpression) {
+    return nameOf(node.expression) === 'process' && nameOf(node.name) === 'env';
+  }
+  if (node.kind !== SyntaxKind.Identifier) return false;
+  // `const env = process.env; env.KEY` reads the environment exactly as the
+  // spelled form does; comparing the receiver's SYNTAX saw only the latter.
+  const declaration = declarationOf(node, project, file);
+  if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+  return isProcessEnv(declaration.initializer, project, file, hop + 1);
+}
+
+function envKeysOf(root: Syntax, project: Project): string[] {
   const keys: string[] = [];
+  const here = String(root.path);
   for (const node of walk(root)) {
+    // `const { KEY } = process.env` names the key in a BINDING PATTERN rather
+    // than in a property access, and reads it just the same.
+    if (node.kind === SyntaxKind.BindingElement) {
+      const pattern = node.parent;
+      if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) continue;
+      if (!isProcessEnv(pattern.parent?.initializer, project, here)) continue;
+      const key = nameOf((node.propertyName ?? node.name) as Syntax);
+      if (key !== undefined) keys.push(key);
+      continue;
+    }
     const isProperty = node.kind === SyntaxKind.PropertyAccessExpression;
     const isElement = node.kind === SyntaxKind.ElementAccessExpression;
     if (!isProperty && !isElement) continue;
-    // The RECEIVER must be `process.env` — nothing else named `env` counts.
-    const receiver = node.expression;
-    if (receiver?.kind !== SyntaxKind.PropertyAccessExpression) continue;
-    if (nameOf(receiver.expression) !== 'process' || nameOf(receiver.name) !== 'env') continue;
+    if (!isProcessEnv(node.expression, project, here)) continue;
     const key = isProperty ? nameOf(node.name) : staticString(node.argumentExpression);
     if (key !== undefined) keys.push(key);
   }
@@ -403,13 +489,14 @@ function envKeysOf(root: Syntax): string[] {
 
 function envKeysIn(
   parsed: readonly ParsedSource[],
+  project: Project,
   schemaKeys: ReadonlySet<string>,
   allowlist: Record<string, string> = ENV_ALLOWLIST,
 ): string[] {
   const issues: string[] = [];
   const usedAllowlist = new Set<string>();
   for (const { path: file, root } of parsed) {
-    for (const key of envKeysOf(root)) {
+    for (const key of envKeysOf(root, project)) {
       if (schemaKeys.has(key)) continue;
       if (allowlist[key] !== undefined) {
         usedAllowlist.add(key);
@@ -560,9 +647,23 @@ export function parseServerEnvSchemaKeys(source: string): Set<string> {
     for (const node of walk(root)) {
       if (node.kind !== SyntaxKind.VariableDeclaration) continue;
       if (nameOf(node.name) !== 'serverEnvSchema') continue;
-      for (const call of walk(node)) {
-        if (call.kind !== SyntaxKind.ObjectLiteralExpression) continue;
-        for (const member of childrenOf(call)) {
+      for (const literal of walk(node)) {
+        if (literal.kind !== SyntaxKind.ObjectLiteralExpression) continue;
+        // TOP-LEVEL literals only.  Walking every one beneath the declaration
+        // read a NESTED validator's fields as environment keys, so
+        // `CONFIG: z.object({ UNVALIDATED: z.string() })` added `UNVALIDATED`
+        // to the validated set — after which `process.env.UNVALIDATED` passed
+        // the gate despite never being parsed from the environment.
+        let nested = false;
+        for (let above = literal.parent; above !== undefined; above = above.parent) {
+          if (above.getStart() === node.getStart()) break;
+          if (above.kind === SyntaxKind.ObjectLiteralExpression) {
+            nested = true;
+            break;
+          }
+        }
+        if (nested) continue;
+        for (const member of childrenOf(literal)) {
           const key = nameOf(member.name);
           if (key !== undefined && /^[A-Z][A-Z0-9_]*$/.test(key)) found.add(key);
         }

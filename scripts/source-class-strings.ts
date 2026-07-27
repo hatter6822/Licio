@@ -52,6 +52,16 @@ export interface ClassString {
   readonly element: string | null;
 }
 
+/**
+ * The module whose export composes class lists.
+ *
+ * Named as a FILE rather than as an identifier so a local helper that happens
+ * to be called `cn` is not mistaken for it, and so a renamed import still
+ * resolves — the callee is followed to its declaration, not compared by
+ * spelling.
+ */
+const CLASS_LIST_HELPER = 'lib/cn.ts';
+
 /** A literal run and where it starts; the unit offsets are reported at. */
 interface Piece {
   readonly text: string;
@@ -109,7 +119,7 @@ function literalPiece(node: Syntax, source: string): Piece {
 }
 
 /** What `node` renders, or `null` when nothing about it is known. */
-function fold(node: Syntax, source: string): Fold | null {
+function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean): Fold | null {
   if (
     node.kind === SyntaxKind.StringLiteral ||
     node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
@@ -120,7 +130,7 @@ function fold(node: Syntax, source: string): Fold | null {
   }
 
   if (TRANSPARENT.has(node.kind)) {
-    return node.expression === undefined ? null : fold(node.expression, source);
+    return node.expression === undefined ? null : fold(node.expression, source, joins);
   }
 
   if (node.kind === SyntaxKind.TemplateExpression) {
@@ -131,7 +141,7 @@ function fold(node: Syntax, source: string): Fold | null {
     node.forEachChild((child) => {
       if (child.kind !== SyntaxKind.TemplateSpan) return;
       const expression = child.expression;
-      const inner = expression === undefined ? null : fold(expression, source);
+      const inner = expression === undefined ? null : fold(expression, source, joins);
       if (inner === null) {
         if (expression !== undefined) {
           pieces.push(unknownPiece(expression));
@@ -151,8 +161,8 @@ function fold(node: Syntax, source: string): Fold | null {
     node.kind === SyntaxKind.BinaryExpression &&
     node.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
-    const left = node.left === undefined ? null : fold(node.left, source);
-    const right = node.right === undefined ? null : fold(node.right, source);
+    const left = node.left === undefined ? null : fold(node.left, source, joins);
+    const right = node.right === undefined ? null : fold(node.right, source, joins);
     // Neither side says anything: this is not a class string, and descending
     // normally lets each operand be judged on its own.
     if (left === null && right === null) return null;
@@ -173,6 +183,38 @@ function fold(node: Syntax, source: string): Fold | null {
       unknown.push(...folded.unknown);
     }
     return { pieces, unknown };
+  }
+
+  // A CLASS-LIST HELPER composes its arguments onto one element, so the classes
+  // it is given all render together.  Folding each argument on its own judged a
+  // foreground without the background beside it — `cn('bg-error',
+  // 'text-error-fg')` reported a bare hue on the canvas although the two always
+  // paint the same element.
+  //
+  // Which calls compose is decided by the CALLER, which resolves the callee to
+  // this repository's own helper rather than matching a name: a local function
+  // that happens to be called `cn` composes nothing.
+  if (node.kind === SyntaxKind.CallExpression && node.expression !== undefined) {
+    if (joins?.(node.expression) !== true) return null;
+    const pieces: Piece[] = [];
+    const unknown: Syntax[] = [];
+    let first = true;
+    for (const argument of node.arguments ?? []) {
+      // The runtime joins with a SPACE, which is what separates class tokens.
+      // A synthetic separator: it exists in the rendered text but nowhere in
+      // the source, so it anchors on the argument and places no character.
+      if (!first) pieces.push({ text: ' ', at: argument.getStart(), verbatimAt: null });
+      first = false;
+      const inner = fold(argument, source, joins);
+      if (inner === null) {
+        pieces.push(unknownPiece(argument));
+        unknown.push(argument);
+        continue;
+      }
+      pieces.push(...inner.pieces);
+      unknown.push(...inner.unknown);
+    }
+    return pieces.length === 0 ? null : { pieces, unknown };
   }
 
   return null;
@@ -215,12 +257,25 @@ function render(pieces: readonly Piece[], node: Syntax): ClassString {
  * every source made a legal `.ts` helper parse as nothing at all.
  */
 export function readClassStrings(files: readonly SourceFile[]): Map<string, ClassString[]> {
-  return withParsedSources(files, (parsed) => {
+  return withParsedSources(files, (parsed, project) => {
     const found = new Map<string, ClassString[]>();
     for (const { path, content, root } of parsed) {
+      const here = String(root.path);
+      /** Whether a callee is the repository's class-list helper. */
+      const joins = (callee: Syntax): boolean => {
+        const symbol = project.checker.getSymbolAtPosition(here, callee.getStart());
+        if (symbol === undefined) return false;
+        let resolved = symbol;
+        try {
+          resolved = project.checker.getAliasedSymbol(symbol) ?? symbol;
+        } catch {
+          // Not an alias; the local symbol is already the declaration.
+        }
+        return resolved.declarations.some((each) => String(each.path).endsWith(CLASS_LIST_HELPER));
+      };
       const strings: ClassString[] = [];
       const visit = (node: Syntax): void => {
-        const folded = fold(node, content);
+        const folded = fold(node, content, joins);
         if (folded === null) {
           node.forEachChild(visit);
           return;

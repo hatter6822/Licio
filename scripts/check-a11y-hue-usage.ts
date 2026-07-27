@@ -137,20 +137,62 @@ function minimumWidth(condition: string): number | null {
 }
 
 /**
+ * The pseudo-class segments of a selector demand, at the TOP level.
+ *
+ * `:hover:focus` is two demands written as one string; `:is(:where(.group):hover
+ * *)` is a single one whose colons are nested, so the split respects
+ * parentheses rather than cutting on every `:`.
+ */
+function selectorParts(demand: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const character of demand) {
+    if (character === '(') depth += 1;
+    if (character === ')') depth -= 1;
+    if (character === ':' && depth === 0) {
+      if (current !== '') parts.push(current);
+      current = ':';
+      continue;
+    }
+    current += character;
+  }
+  if (current !== '') parts.push(current);
+  return parts;
+}
+
+/**
  * Whether one condition is satisfied somewhere in `state`.
  *
- * Media queries IMPLY one another: at `md` the `sm` minimum width is also true,
- * so `sm:bg-error md:text-error-fg` is a valid pairing.  Treating at-rules as
- * independent labels required the exact `sm` string to appear in a state seeded
- * from `md`, and rejected ordinary responsive classes.
+ * Conditions IMPLY one another, in two ways, and treating them as independent
+ * labels rejected ordinary compliant classes both times.
+ *
+ * Media queries: at `md` the `sm` minimum width is also true, so
+ * `sm:bg-error md:text-error-fg` is a valid pairing.
+ *
+ * Compound selectors: `:hover:focus` is two demands written as one string, and
+ * whenever it renders `:hover` is true as well — so
+ * `hover:bg-error hover:focus:text-error-fg` is a solid fill under the
+ * foreground, and requiring the exact `:hover` string to appear in a state
+ * seeded from `:hover:focus` called it a bare hue on the canvas.  The same
+ * subset test covers `group-`/`peer-` states, whose demand is one nested
+ * `:is(…)` segment that a naive split on `:` would have torn apart.
  */
 function holds(condition: string, state: readonly string[]): boolean {
   if (state.includes(condition)) return true;
   const needed = minimumWidth(condition);
-  if (needed === null) return false;
+  if (needed !== null) {
+    return state.some((each) => {
+      const has = minimumWidth(each);
+      return has !== null && has >= needed;
+    });
+  }
+  const wanted = selectorParts(condition);
+  if (wanted.length === 0) return false;
   return state.some((each) => {
-    const has = minimumWidth(each);
-    return has !== null && has >= needed;
+    if (minimumWidth(each) !== null) return false;
+    const present = new Set(selectorParts(each));
+    return wanted.every((part) => present.has(part));
   });
 }
 

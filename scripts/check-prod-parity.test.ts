@@ -12,6 +12,7 @@ import {
   checkEnvKeys,
   collectAdapters,
   collectApiSourceFiles,
+  parseServerEnvSchemaKeys,
   runProdParityGate,
 } from './check-prod-parity.js';
 
@@ -153,6 +154,50 @@ describe('leg 2 — env-key validation (the LCAP_IPFS failure shape)', () => {
     expect(stale.some((issue) => issue.includes("stale ENV_ALLOWLIST entry 'GONE_FLAG'"))).toBe(
       true,
     );
+  });
+});
+
+describe('reading the environment INDIRECTLY', () => {
+  const schemaKeys = new Set(['DATABASE_URL', 'REDIS_URL']);
+
+  it.each([
+    ['a destructured read', 'const { UNVALIDATED } = process.env;\nexport const a = UNVALIDATED;'],
+    ['a renamed destructure', 'const { UNVALIDATED: u } = process.env;\nexport const a = u;'],
+    ['an aliased environment', 'const env = process.env;\nexport const b = env.UNVALIDATED;'],
+    [
+      'an alias of an alias',
+      'const e = process.env;\nconst f = e;\nexport const b = f.UNVALIDATED;',
+    ],
+  ])('BITES on %s', (_label, content) => {
+    // The receiver is resolved rather than spelled: comparing the syntax at the
+    // use site saw only `process.env.KEY`, so anything held in a binding first
+    // consumed a key the schema never validated.
+    const issues = checkEnvKeys(files({ 'x.ts': content }), schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
+  });
+
+  it('does not flag an unrelated object that happens to be called env', () => {
+    const tree = files({
+      'x.ts': 'const env = { SOMETHING: 1 };\nexport const a = env.SOMETHING;',
+    });
+    expect(checkEnvKeys(tree, schemaKeys, {})).toEqual([]);
+  });
+
+  it("reads only TOP-LEVEL schema fields, not a nested validator's", () => {
+    // A nested `z.object({ … })` describes the SHAPE of one variable, not more
+    // environment keys; counting its fields marked them validated, after which
+    // reading them passed the gate despite never being parsed.
+    const schema = [
+      'export const serverEnvSchema = z.object({',
+      '  ONE: z.string(), TWO: z.string(), THREE: z.string(), FOUR: z.string(),',
+      '  FIVE: z.string(), SIX: z.string(), SEVEN: z.string(), EIGHT: z.string(),',
+      '  NINE: z.string(), TEN: z.string(), ELEVEN: z.string(),',
+      '  CONFIG: z.object({ NESTED_ONLY: z.string() }),',
+      '});',
+    ].join('\n');
+    const keys = parseServerEnvSchemaKeys(schema);
+    expect(keys.has('CONFIG')).toBe(true);
+    expect(keys.has('NESTED_ONLY')).toBe(false);
   });
 });
 

@@ -369,6 +369,28 @@ const BINDING_PARENTS = new Set<number>([
 ]);
 
 /**
+ * Parents that EVALUATE a value without reading anything out of it.
+ *
+ * `void mod` discards it, `typeof mod` and `!mod` reduce it to a tag or a
+ * boolean, and a condition only asks whether it is there.  None of them is a
+ * consumer, and crediting a module's whole export set for one would make the
+ * gate accept a dead value.
+ */
+const NON_CONSUMING = new Set<number>([
+  SyntaxKind.VoidExpression,
+  SyntaxKind.TypeOfExpression,
+  SyntaxKind.PrefixUnaryExpression,
+]);
+
+/** Positions that only ask whether a value is THERE. */
+const CONDITION_OF = new Set<number>([
+  SyntaxKind.IfStatement,
+  SyntaxKind.ConditionalExpression,
+  SyntaxKind.WhileStatement,
+  SyntaxKind.DoStatement,
+]);
+
+/**
  * Whether an identifier hands a VALUE over whole.
  *
  * Stated positively, and that is the correction.  It was written as "any
@@ -429,6 +451,15 @@ function isNamespaceEscape(node: Syntax): boolean {
     (parent.right?.getStart() === at || parent.left?.getStart() === at)
   ) {
     return false;
+  }
+
+  // Not merely EVALUATED.  `void mod`, `typeof mod`, `!mod` and `if (mod)`
+  // observe that the namespace exists without reading anything out of it, so
+  // crediting every export for them would let a genuinely dead value pass.
+  if (NON_CONSUMING.has(parent.kind)) return false;
+  if (CONDITION_OF.has(parent.kind)) {
+    const condition = parent.expression ?? parent.condition;
+    if (condition?.getStart() === at) return false;
   }
 
   // Not SELECTING: the receiver of `mod.NAME` / `mod[key]` reads one export,

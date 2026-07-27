@@ -184,6 +184,22 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
     expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
   });
 
+  it.each([
+    ['&& with another condition', 'if (denial && shouldEnforce) return c.json(denial, 403);'],
+  ])('rejects %s — a truthy denial need not reach the refusal', (_label, guard) => {
+    // With `shouldEnforce` false an ineligible member walks past a branch that
+    // looks exactly like a guard.  `||` and `??` DO carry the implication —
+    // both are truthy whenever the denial is — so only `&&` refuses here.
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['|| with another condition', 'if (denial || alsoBlocked) return c.json(denial, 403);'],
+    ['&& with a literal true', 'if (denial && true) return c.json(denial, 403);'],
+  ])('accepts %s', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
   it('rejects a verdict that is bound and never consulted', () => {
     const src = `
 const app = new Hono();

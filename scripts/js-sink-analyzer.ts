@@ -326,6 +326,24 @@ function isStringLike(node: Syntax | undefined): boolean {
   ) {
     return isStringLike(target.left) || isStringLike(target.right);
   }
+  // COERCIONS produce a string the host compiles just the same:
+  // `setTimeout(String(payload), 0)` and `setInterval(x.toString(), 0)` are
+  // implicit eval, and recognising only literal syntax read them as clean.
+  // The receiver is not resolved here on purpose — anything's `.toString()`
+  // returns a string, so the method name alone settles it.
+  if (target.kind === SyntaxKind.CallExpression) {
+    const callee = unwrap(target.expression);
+    if (callee?.kind === SyntaxKind.Identifier && (callee.text ?? callee.getText()) === 'String') {
+      return true;
+    }
+    if (
+      callee?.kind === SyntaxKind.PropertyAccessExpression &&
+      callee.name !== undefined &&
+      (callee.name.text ?? callee.name.getText()) === 'toString'
+    ) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -719,17 +737,41 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * dotted spelling rather than a second case.
    */
   const reflectTarget = (call: Syntax): Syntax | undefined => {
-    const callee = unwrap(call.expression);
-    if (
-      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
-      callee?.kind !== SyntaxKind.ElementAccessExpression
-    ) {
-      return undefined;
-    }
+    const callee = accessBehind(call.expression, 0);
+    if (callee === undefined) return undefined;
     if (!isGlobalNamed(callee.expression, 'Reflect')) return undefined;
     const method = propertyName(callee);
     if (method === undefined || !REFLECT_INVOKERS.has(method)) return undefined;
     return argumentsOf(call)[0];
+  };
+
+  /**
+   * The property ACCESS an expression denotes, through any bindings.
+   *
+   * `Reflect.construct` is a value like any other, so copying it into a local
+   * (`const c = Reflect.construct; c(Function, ['x'])`) invokes the same helper
+   * — and matching the ACCESS SYNTAX at the call saw only the spelled form.
+   *
+   * Resolved with the binding walk rather than the full relation on purpose:
+   * the relation asks this function about every call, so consulting it here
+   * would not terminate.
+   */
+  const accessBehind = (node: Syntax | undefined, hop: number): Syntax | undefined => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return undefined;
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      return target;
+    }
+    if (target.kind !== SyntaxKind.Identifier || isGlobalBinding(target)) return undefined;
+    const key = receiverKey(target);
+    for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
+      const found = accessBehind(assigned, hop + 1);
+      if (found !== undefined) return found;
+    }
+    return accessBehind(boundValue(localDeclaration(target), hop), hop + 1);
   };
 
   /** Whether an expression is the named global (and nothing local). */
@@ -1027,6 +1069,13 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       // whatever the function it names RETURNS.
       const invoked = reflectTarget(target);
       if (invoked !== undefined) return [nodeValue(invoked)];
+      // `new Proxy(eval, {})` IS `eval` for every purpose that matters here: a
+      // call on the proxy runs the target unless a handler trap says otherwise,
+      // and a wrapper is the cheapest way to launder a forbidden global.
+      if (isGlobalNamed(target.expression, 'Proxy')) {
+        const wrapped = argumentsOf(target)[0];
+        return wrapped === undefined ? [] : [nodeValue(wrapped)];
+      }
       return target.expression === undefined ? [] : [resultValue(nodeValue(target.expression))];
     }
 
@@ -1191,13 +1240,11 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * setter", and the set is closed and small.
    */
   const reflectiveWrites = (call: Syntax): Array<{ at: Syntax; property: string; on: Syntax }> => {
-    const callee = unwrap(call.expression);
-    if (
-      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
-      callee?.kind !== SyntaxKind.ElementAccessExpression
-    ) {
-      return [];
-    }
+    // Resolved through bindings, like the invocation helpers: `const assign =
+    // Object.assign; assign(node, { innerHTML: payload })` reaches the same
+    // setter, and a copy is the cheapest way past a scan that matches syntax.
+    const callee = accessBehind(call.expression, 0);
+    if (callee === undefined) return [];
     const method = propertyName(callee);
     if (method === undefined) return [];
     const args = argumentsOf(call);

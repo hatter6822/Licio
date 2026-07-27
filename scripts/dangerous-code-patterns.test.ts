@@ -957,6 +957,39 @@ describe('sinks that are not written as sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  it.each([
+    ['a copied Reflect.construct', "const c = Reflect.construct; c(Function, ['return 1'])()"],
+    ['a copied Reflect.apply', "const a = Reflect.apply; a(eval, null, ['x'])"],
+    ['a Proxy over a sink', 'const p = new Proxy(eval, {}); p(payload)'],
+    ['a Proxy over a sink, aliased', 'const p = new Proxy(eval, {}); const q = p; q(payload)'],
+  ])('catches %s', (_label, code) => {
+    // A reflective helper and a proxy are VALUES: copying one does not change
+    // what it invokes, and matching the access syntax at the call saw only the
+    // spelled form.
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['String() coercion', 'setTimeout(String(payload), 0)'],
+    ['a .toString() call', 'setInterval(payload.toString(), 0)'],
+    ['a coercion held in a binding', 'const code = String(payload); setTimeout(code, 0)'],
+  ])('catches an implicit-eval timer through %s', (_label, code) => {
+    // The host compiles whatever string it is handed; recognising only literal
+    // syntax read an explicit coercion as clean.
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a function argument', 'setTimeout(fn, 0)'],
+    ['the String constructor itself', 'setTimeout(String, 0)'],
+  ])('does not flag a timer given %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+
+  it('does not flag a Proxy over something harmless', () => {
+    expect(fires('const p = new Proxy(handler, {}); p(payload)')).toBe(false);
+  });
+
   it('does not flag a class extending something else', () => {
     expect(fires("class F extends Base {}; new F('x')()")).toBe(false);
   });
@@ -1006,6 +1039,22 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
     // The browser runs the SAME setter for each of these, so recognising only
     // an assignment TARGET left the most direct XSS write three synonyms.
     expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'an aliased Object.assign',
+      'const assign = Object.assign; assign(node, { innerHTML: payload })',
+    ],
+    ['an aliased Reflect.set', "const set = Reflect.set; set(node, 'outerHTML', payload)"],
+  ])('catches a markup write through %s', (_label, code) => {
+    // The setter is a value like any other: copying it does not change which
+    // property it writes.
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag an aliased setter writing something harmless', () => {
+    expect(dom('const assign = Object.assign; assign(node, { textContent: payload })')).toBe(false);
   });
 
   it('does not flag an unrelated property written reflectively', () => {
