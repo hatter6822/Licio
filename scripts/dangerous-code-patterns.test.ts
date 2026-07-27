@@ -1008,6 +1008,28 @@ describe('sinks that are not written as sinks', () => {
     expect(fires(code)).toBe(true);
   });
 
+  it.each([
+    // A SPREAD contributes the members of what it spreads; it has no `name`,
+    // so the member walk skipped it entirely.
+    ['a spread source', 'const o = {}; Object.assign(o, { ...{ run: eval } }); o.run(payload);'],
+    // `Object.assign` RETURNS its target, so the fluent form reads the slot off
+    // the call — a container that is never bound to anything.
+    ['the fluent form', 'Object.assign({}, { run: eval }).run(payload);'],
+    // `f.call(thisArg, …)` invokes `f`; when `f` IS `Function.prototype.call`,
+    // it invokes its FIRST ARGUMENT instead.
+    ['a borrowed Function.prototype.call', 'Function.prototype.call.call(eval, null, payload)'],
+    ['a borrowed Function.prototype.apply', 'Function.prototype.apply.call(eval, null, [payload])'],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a harmless fluent assign', 'Object.assign({}, { run: safe }).run(payload);'],
+    ['a harmless borrowed invoker', 'Function.prototype.call.call(handler, null, payload)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+
   it('does not flag a container whose every write is harmless', () => {
     expect(
       fires('const o = {}; o.run = safe; Object.assign(o, { run: other }); o.run(payload);'),
@@ -1152,6 +1174,14 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
 
   it('does not flag an aliased setter writing something harmless', () => {
     expect(dom('const assign = Object.assign; assign(node, { textContent: payload })')).toBe(false);
+  });
+
+  it('catches a markup write through a SPREAD source', () => {
+    expect(dom('Object.assign(node, { ...{ innerHTML: payload } })')).toBe(true);
+  });
+
+  it('does not flag a harmless property spread in', () => {
+    expect(dom('Object.assign(node, { ...{ textContent: payload } })')).toBe(false);
   });
 
   it('does not flag an unrelated property written reflectively', () => {

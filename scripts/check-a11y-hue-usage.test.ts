@@ -572,6 +572,25 @@ describe('the icon exemption is scoped to the icon element', () => {
   });
 });
 
+describe('a class assembled through a CONSTANT', () => {
+  it('reconstructs an interpolated bare hue', async () => {
+    // `const hue = 'error'` with `` `text-${hue}` `` renders `text-error`.
+    // Folding the interpolation as unknown meant the token was never
+    // reconstructed, so the gate saw no class where one was about to carry
+    // normal text.
+    // Built, so a literal `${` never appears inside a plain string here.
+    const hole = `$${'{'}hue}`;
+    const source = ["const hue = 'error';", `const c = \`text-${hole}\`;`].join('\n');
+    expect(await hues(source)).toEqual(['2:error']);
+  });
+
+  it('accepts the PAIRED spelling assembled the same way', async () => {
+    const hole = `$${'{'}hue}`;
+    const source = ["const hue = 'error';", `const c = \`text-${hole}-on-soft\`;`].join('\n');
+    expect(await hues(source)).toEqual([]);
+  });
+});
+
 describe('the reasoned exemption', () => {
   it('accepts a marker on the same line', async () => {
     const source = `const c = 'text-warning'; // a11y-bare-hue-ok: bar fill, not text`;

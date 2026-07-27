@@ -119,7 +119,12 @@ function literalPiece(node: Syntax, source: string): Piece {
 }
 
 /** What `node` renders, or `null` when nothing about it is known. */
-function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean): Fold | null {
+function fold(
+  node: Syntax,
+  source: string,
+  joins?: (callee: Syntax) => boolean,
+  held?: (name: Syntax) => readonly Syntax[],
+): Fold | null {
   if (
     node.kind === SyntaxKind.StringLiteral ||
     node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
@@ -130,7 +135,7 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
   }
 
   if (TRANSPARENT.has(node.kind)) {
-    return node.expression === undefined ? null : fold(node.expression, source, joins);
+    return node.expression === undefined ? null : fold(node.expression, source, joins, held);
   }
 
   if (node.kind === SyntaxKind.TemplateExpression) {
@@ -141,7 +146,7 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
     node.forEachChild((child) => {
       if (child.kind !== SyntaxKind.TemplateSpan) return;
       const expression = child.expression;
-      const inner = expression === undefined ? null : fold(expression, source, joins);
+      const inner = expression === undefined ? null : fold(expression, source, joins, held);
       if (inner === null) {
         if (expression !== undefined) {
           pieces.push(unknownPiece(expression));
@@ -161,8 +166,8 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
     node.kind === SyntaxKind.BinaryExpression &&
     node.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
-    const left = node.left === undefined ? null : fold(node.left, source, joins);
-    const right = node.right === undefined ? null : fold(node.right, source, joins);
+    const left = node.left === undefined ? null : fold(node.left, source, joins, held);
+    const right = node.right === undefined ? null : fold(node.right, source, joins, held);
     // Neither side says anything: this is not a class string, and descending
     // normally lets each operand be judged on its own.
     if (left === null && right === null) return null;
@@ -183,6 +188,19 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
       unknown.push(...folded.unknown);
     }
     return { pieces, unknown };
+  }
+
+  // A NAME folds to the class string it holds: `const hue = 'error'` with
+  // `` `text-${hue}` `` renders `text-error`, and treating the interpolation as
+  // unknown left the token never reconstructed — so the gate saw nothing where
+  // a bare semantic hue was about to carry normal text.
+  if (node.kind === SyntaxKind.Identifier && held !== undefined) {
+    for (const value of held(node)) {
+      if (value.getStart() === node.getStart()) continue;
+      const folded = fold(value, source, joins, held);
+      if (folded !== null) return folded;
+    }
+    return null;
   }
 
   // A CLASS-LIST HELPER composes its arguments onto one element, so the classes
@@ -210,7 +228,8 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
       // && 'text-error-fg')` always paints the foreground over that background.
       // Folding the argument as unknown and scanning its literal separately
       // judged the foreground with no background beside it.
-      const inner = fold(argument, source, joins) ?? contributed(argument, source, joins);
+      const inner =
+        fold(argument, source, joins, held) ?? contributed(argument, source, joins, held);
       if (inner === null) {
         pieces.push(unknownPiece(argument));
         unknown.push(argument);
@@ -238,6 +257,7 @@ function contributed(
   node: Syntax,
   source: string,
   joins?: (callee: Syntax) => boolean,
+  held?: (name: Syntax) => readonly Syntax[],
 ): Fold | null {
   const sides =
     node.kind === SyntaxKind.ConditionalExpression
@@ -252,7 +272,7 @@ function contributed(
   let any = false;
   for (const side of sides) {
     if (side === undefined) continue;
-    const folded = fold(side, source, joins) ?? contributed(side, source, joins);
+    const folded = fold(side, source, joins, held) ?? contributed(side, source, joins, held);
     if (folded === null) continue;
     if (any) pieces.push({ text: ' ', at: side.getStart(), verbatimAt: null });
     any = true;
@@ -342,9 +362,35 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
       }
       /** Whether a callee is the repository's class-list helper. */
       const joins = (callee: Syntax): boolean => helperCalls.has(callee.getStart());
+
+      /**
+       * What a NAME holds, for folding an interpolated class string.
+       *
+       * One hop through the binding, memoised — the narrow question, not the
+       * general value relation, which would run a whole-program search for
+       * every identifier in every template in the repository.
+       */
+      const bound = new Map<number, readonly Syntax[]>();
+      const held = (name: Syntax): readonly Syntax[] => {
+        const at = name.getStart();
+        const cached = bound.get(at);
+        if (cached !== undefined) return cached;
+        bound.set(at, []); // cycle guard while this one resolves
+        const declaration = project.checker
+          .getSymbolAtPosition(here, at)
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        const initializer =
+          declaration?.kind === SyntaxKind.VariableDeclaration
+            ? declaration.initializer
+            : undefined;
+        const found = initializer === undefined ? [] : [initializer];
+        bound.set(at, found);
+        return found;
+      };
       const strings: ClassString[] = [];
       const visit = (node: Syntax): void => {
-        const folded = fold(node, content, joins);
+        const folded = fold(node, content, joins, held);
         if (folded === null) {
           node.forEachChild(visit);
           return;

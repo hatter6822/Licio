@@ -8,6 +8,16 @@ const LOCKFILE_PATH = resolve(ROOT, 'pnpm-lock.yaml');
 const ALLOWED_HOSTS = new Set(['registry.npmjs.org']);
 
 /**
+ * A Subresource-Integrity value: an algorithm, then a BASE64 digest.
+ *
+ * The length is checked because the shortest algorithm pnpm emits is SHA-256,
+ * whose base64 form is 44 characters — anything shorter is not a digest that
+ * algorithm could have produced.
+ */
+const VALID_INTEGRITY =
+  /integrity:\s*sha(?:256|384|512)-[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])/;
+
+/**
  * The `packages:` section's entry and integrity counts.
  *
  * Scoped by section rather than matched across the whole file: top-level keys
@@ -15,7 +25,7 @@ const ALLOWED_HOSTS = new Set(['registry.npmjs.org']);
  * and `snapshots:` — which repeats every package WITHOUT a resolution — cannot
  * inflate the denominator.
  */
-function countPackagesSection(content: string): { entries: number; integrity: number } {
+export function countPackagesSection(content: string): { entries: number; integrity: number } {
   let entries = 0;
   let integrity = 0;
   let inside = false;
@@ -26,7 +36,11 @@ function countPackagesSection(content: string): { entries: number; integrity: nu
     }
     if (!inside) continue;
     if (/^ {2}\S/.test(line)) entries += 1;
-    if (/integrity:\s*sha\d+-/.test(line)) integrity += 1;
+    // A DIGEST, not just the algorithm prefix.  Matching `sha512-` alone
+    // accepted `integrity: sha512-` and `sha512-not!base64` as hashes, so a
+    // lockfile with every digest emptied still reported full coverage — the
+    // exact failure this check exists to notice.
+    if (VALID_INTEGRITY.test(line)) integrity += 1;
   }
   return { entries, integrity };
 }

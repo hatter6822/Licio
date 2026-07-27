@@ -524,9 +524,18 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    */
   const receiverKey = (base: Syntax, hop = 0): string | undefined => {
     const target = unwrap(base);
-    if (target === undefined || target.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) {
-      return undefined;
+    if (target === undefined || hop > MAX_HOPS) return undefined;
+    // A LITERAL is its own identity — it needs no name to be written into.
+    // `Object.assign({}, { run: eval }).run(p)` fills a container that is never
+    // bound to anything, and a key that required an identifier could not
+    // record the write at all.
+    if (
+      target.kind === SyntaxKind.ObjectLiteralExpression ||
+      target.kind === SyntaxKind.ArrayLiteralExpression
+    ) {
+      return `literal:${target.getStart()}:${target.getEnd()}`;
     }
+    if (target.kind !== SyntaxKind.Identifier) return undefined;
     const declaration = symbolAt(target)?.declarations.find((each) => inBatch(each.path));
     if (declaration === undefined) {
       const name = nameOf(target);
@@ -686,9 +695,21 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * than reading one level and stopping, which is the caveat that becomes the
    * next bypass.
    */
+  const containerCache = new Map<string, Syntax | undefined>();
   const containerOf = (node: Syntax | undefined, hop: number): Syntax | undefined => {
     const target = unwrap(node);
     if (target === undefined || hop > MAX_HOPS) return undefined;
+    // Memoised: `heldValues`, `members` and the fluent-target resolution all
+    // ask this, and the relation asks them per property access.
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    if (containerCache.has(key)) return containerCache.get(key);
+    containerCache.set(key, undefined); // cycle guard while this one resolves
+    const found = containerFrom(target, hop);
+    containerCache.set(key, found);
+    return found;
+  };
+
+  const containerFrom = (target: Syntax, hop: number): Syntax | undefined => {
     if (
       target.kind === SyntaxKind.ObjectLiteralExpression ||
       target.kind === SyntaxKind.ArrayLiteralExpression
@@ -709,6 +730,11 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     }
     if (target.kind === SyntaxKind.NewExpression) {
       return containerOf(target.expression, hop + 1);
+    }
+    // A reflective setter RETURNS its target, so the fluent form denotes the
+    // same container the write landed in.
+    if (target.kind === SyntaxKind.CallExpression && reflectiveWrites(target).length > 0) {
+      return containerOf(argumentsOf(target)[0], hop + 1);
     }
     if (
       target.kind === SyntaxKind.PropertyAccessExpression ||
@@ -732,6 +758,16 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     const assigned = key === undefined ? [] : (written.get(`${key} ${name}`) ?? []);
     if (assigned.length > 0) return assigned;
     if (hop > MAX_HOPS) return [];
+    // The write may have been keyed to the CONTAINER rather than to the
+    // expression naming it: `Object.assign({}, { run: eval }).run(p)` records
+    // against the anonymous literal, and the read arrives through the call
+    // that returned it.
+    const literal = containerOf(base, hop);
+    const holderKey = literal === undefined ? undefined : receiverKey(literal);
+    if (holderKey !== undefined && holderKey !== key) {
+      const viaHolder = written.get(`${holderKey} ${name}`) ?? [];
+      if (viaHolder.length > 0) return viaHolder;
+    }
     // `Proxy.revocable(target, handler)` hands back `{ proxy, revoke }`, and
     // its `proxy` IS the target — the only container in this file that is
     // built by a call rather than written as a literal, so nothing else could
@@ -749,7 +785,6 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     }
     // `const o = { run: eval }`, `const h = [eval]`, and the nested forms —
     // reached through the binding rather than through a table beside the scan.
-    const literal = containerOf(base, hop);
     if (literal === undefined) return [];
     if (literal.kind === SyntaxKind.ObjectLiteralExpression) {
       for (const member of childrenOf(literal)) {
@@ -808,7 +843,42 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * Read through `propertyName`, so `Reflect['apply']` is the same call as the
    * dotted spelling rather than a second case.
    */
+  /**
+   * `Function.prototype.call.call(eval, …)` — a BORROWED invoker.
+   *
+   * `f.call(thisArg, …)` invokes `f`; when `f` IS `Function.prototype.call` (or
+   * `.apply`), invoking it with `this = args[0]` invokes THAT.  Following the
+   * immediate base stopped at the borrowed method and never saw the callable
+   * handed to it.
+   */
+  const borrowedTarget = (call: Syntax): Syntax | undefined => {
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
+    if (!INVOKERS.has(propertyName(callee) ?? '')) return undefined;
+    for (const inner of accessesBehind(callee.expression)) {
+      if (!INVOKERS.has(propertyName(inner) ?? '')) continue;
+      // The receiver of the borrowed method is `Function.prototype`.
+      const owner = unwrap(inner.expression);
+      if (owner === undefined) continue;
+      const onPrototype =
+        (owner.kind === SyntaxKind.PropertyAccessExpression ||
+          owner.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(owner) === 'prototype' &&
+        isGlobalNamed(owner.expression, 'Function');
+      if (!onPrototype) continue;
+      return argumentsOf(call)[0];
+    }
+    return undefined;
+  };
+
   const reflectTarget = (call: Syntax): Syntax | undefined => {
+    const borrowed = borrowedTarget(call);
+    if (borrowed !== undefined) return borrowed;
     for (const callee of accessesBehind(call.expression)) {
       if (!isGlobalNamed(callee.expression, 'Reflect')) continue;
       const method = propertyName(callee);
@@ -1284,6 +1354,14 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       // whatever the function it names RETURNS.
       const invoked = reflectTarget(target);
       if (invoked !== undefined) return [nodeValue(invoked)];
+      // `Object.assign(o, …)` and `Object.defineProperty(o, …)` RETURN their
+      // target, so the fluent form `Object.assign({}, { run: eval }).run(p)`
+      // reads the slot off the call itself.  The generic result edge follows a
+      // function's declared returns and these are the platform's, not ours.
+      if (reflectiveWrites(target).length > 0) {
+        const written = argumentsOf(target)[0];
+        if (written !== undefined) return [nodeValue(written)];
+      }
       // `it.next()` yields the iterator's own values, so the call is
       // transparent to the thing being iterated.
       const callee = unwrap(target.expression);
@@ -1512,7 +1590,25 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * which is why they are named here: no parse answers "does this invoke a
    * setter", and the set is closed and small.
    */
+  const writeCache = new Map<
+    string,
+    Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }>
+  >();
   const reflectiveWrites = (
+    call: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
+    // Memoised: the relation asks this of EVERY call, so recomputing it is the
+    // per-step cost the rule above exists to avoid.
+    const key = `${call.getStart()}:${call.getEnd()}`;
+    const cached = writeCache.get(key);
+    if (cached !== undefined) return cached;
+    writeCache.set(key, []); // cycle guard while this one resolves
+    const found = reflectiveWritesOf(call);
+    writeCache.set(key, found);
+    return found;
+  };
+
+  const reflectiveWritesOf = (
     call: Syntax,
   ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
     // Resolved through the relation, like the invocation helpers: `const
@@ -1542,11 +1638,19 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     /** Every statically-named member of an object literal. */
     const members = (
       source: Syntax | undefined,
+      hop = 0,
     ): Array<{ at: Syntax; property: string; value?: Syntax }> => {
-      const literal = unwrap(source);
+      const literal = containerOf(source, hop);
       if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) return [];
       const named: Array<{ at: Syntax; property: string; value?: Syntax }> = [];
       for (const member of childrenOf(literal)) {
+        // A SPREAD contributes the members of whatever it spreads, so
+        // `{ ...{ innerHTML: payload } }` writes the same property the direct
+        // form does — and a spread has no `name`, so it was skipped entirely.
+        if (member.kind === SyntaxKind.SpreadAssignment) {
+          if (hop < MAX_HOPS) named.push(...members(member.expression, hop + 1));
+          continue;
+        }
         if (member.name === undefined) continue;
         const property =
           member.name.kind === SyntaxKind.ComputedPropertyName
