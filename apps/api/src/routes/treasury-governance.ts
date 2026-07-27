@@ -531,7 +531,14 @@ export function createTreasuryGovernanceRoutes() {
           // Only the MFA denial is surfaced: a genuine capability shortfall is
           // the domain's answer to give, and reporting it here would change who
           // is refused rather than only what they are told.
-          if (clearingAHold) {
+          //
+          // And only to an actor the step-up can actually HELP.  `denyCapability`
+          // reports `mfa_required` before it looks at the role, so a steward who
+          // holds no `restrict` would be sent to verify MFA and then refused
+          // again with `platform_review_required` — a recoverable code offered
+          // for something verifying cannot recover.  `grantsCapability` is the
+          // role question on its own, so it answers "would MFA be enough".
+          if (clearingAHold && grantsCapability(actor, 'restrict')) {
             const stepUp = denyCapability(actor, 'restrict');
             if (stepUp?.code === 'mfa_required') {
               return c.json(deny(stepUp.code, stepUp.message), 403);

@@ -43,6 +43,7 @@ export interface Syntax {
   readonly name?: Syntax;
   readonly propertyName?: Syntax;
   readonly initializer?: Syntax;
+  readonly body?: Syntax;
   readonly argumentExpression?: Syntax;
   readonly operatorToken?: { readonly kind: SyntaxKind };
   readonly left?: Syntax;

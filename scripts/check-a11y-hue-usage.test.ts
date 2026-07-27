@@ -187,6 +187,22 @@ describe('the bare hue on normal text', () => {
     expect(await hues(`const a = ${cls};`)).toHaveLength(want);
   });
 
+  it.each([
+    ['a wider breakpoint implies a narrower one', `'sm:bg-error md:text-error-fg'`, 0],
+    ['the narrower does NOT imply the wider', `'md:bg-error sm:text-error-fg'`, 1],
+    ['an unconditional fill under a responsive ink', `'bg-error md:text-error-fg'`, 0],
+    [
+      'a replacement still in force at the wider one',
+      `'bg-error sm:bg-canvas md:text-error-fg'`,
+      1,
+    ],
+  ])('respects media-query implication (%s)', async (_label, cls, want) => {
+    // At `md` the `sm` minimum width is also true.  Treating at-rules as
+    // independent labels demanded the exact `sm` string in a state seeded from
+    // `md`, and rejected ordinary responsive classes.
+    expect(await hues(`const a = ${cls};`)).toHaveLength(want);
+  });
+
   it('lets an important bg-none override a gradient', async () => {
     // `none` is a declaration like any other, so it belongs IN the image
     // cascade — filtering it out left the gradient looking active and rejected

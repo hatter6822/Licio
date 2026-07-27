@@ -129,9 +129,34 @@ function conditionsOf(declared: Declared): string[] {
   return declared.demand === '' ? [...declared.atRules] : [...declared.atRules, declared.demand];
 }
 
+/** The minimum width an at-rule demands, in px, or null when it demands none. */
+function minimumWidth(condition: string): number | null {
+  const match = /\(\s*width\s*>=\s*([\d.]+)(px|rem)\s*\)/.exec(condition);
+  if (match?.[1] === undefined) return null;
+  return match[2] === 'rem' ? Number(match[1]) * 16 : Number(match[1]);
+}
+
+/**
+ * Whether one condition is satisfied somewhere in `state`.
+ *
+ * Media queries IMPLY one another: at `md` the `sm` minimum width is also true,
+ * so `sm:bg-error md:text-error-fg` is a valid pairing.  Treating at-rules as
+ * independent labels required the exact `sm` string to appear in a state seeded
+ * from `md`, and rejected ordinary responsive classes.
+ */
+function holds(condition: string, state: readonly string[]): boolean {
+  if (state.includes(condition)) return true;
+  const needed = minimumWidth(condition);
+  if (needed === null) return false;
+  return state.some((each) => {
+    const has = minimumWidth(each);
+    return has !== null && has >= needed;
+  });
+}
+
 /** Whether every condition of `paint` holds in `state`. */
 function activeIn(paint: Paint, state: readonly string[]): boolean {
-  return conditionsOf(paint.declared).every((condition) => state.includes(condition));
+  return conditionsOf(paint.declared).every((condition) => holds(condition, state));
 }
 
 /**

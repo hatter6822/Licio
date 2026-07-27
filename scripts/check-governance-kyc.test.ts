@@ -200,6 +200,33 @@ describe('runGovernanceKycGate', () => {
     expect(issues.some((issue) => issue.includes('line-start'))).toBe(false);
   });
 
+  it.each([
+    [
+      'a discarded result',
+      'async (c) => { void checkGovernanceEligibility(c.get("auth").userId); return c.json({}); }',
+    ],
+    [
+      'a bare awaited statement',
+      'async (c) => { await checkGovernanceEligibility(c.get("auth").userId); return c.json({}); }',
+    ],
+  ])('does not accept a guard whose verdict is ignored (%s)', (_label, handler) => {
+    // Calling the guard is not enforcing it: an ineligible account is refused
+    // by nothing here, yet the name-only test certified the route.
+    const source = `export const r = new Hono().post('/rooms/:id/vote', ${handler});`;
+    expect(extractMutationRoutes('f.ts', source)[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['middleware', 'requireGovernanceEligibility(), (c) => c.json({})'],
+    [
+      'a consumed handler-level result',
+      'async (c) => { const d = await checkGovernanceEligibility(c.get("auth").userId); if (d) return c.json({}, 403); return c.json({}); }',
+    ],
+  ])('accepts a guard that is heeded (%s)', (_label, handler) => {
+    const source = `export const r = new Hono().post('/rooms/:id/vote', ${handler});`;
+    expect(extractMutationRoutes('f.ts', source)[0]?.guarded).toBe(true);
+  });
+
   it('FAILS CLOSED on a method list it cannot fully read', () => {
     // `.on(['GET', mutation], …)` yielded only `GET`, so the registration
     // classified as a read and was skipped — letting an unguarded POST through

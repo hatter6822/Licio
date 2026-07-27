@@ -315,7 +315,31 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
-  /** Whether the eligibility guard is INVOKED anywhere inside these arguments. */
+  /**
+   * Whether a call's RESULT is used for anything.
+   *
+   * A guard whose verdict is discarded refuses nobody: `void
+   * checkGovernanceEligibility(id)` and a bare `await checkGovernanceEligibility(id);`
+   * statement both call the helper and both let an ineligible account through.
+   * Middleware is unaffected — `requireGovernanceEligibility()` sits in an
+   * argument list, so its result is consumed by the registration itself.
+   */
+  const resultIsUsed = (call: Syntax): boolean => {
+    let node: Syntax | undefined = call;
+    for (let hop = 0; hop < MAX_HOPS && node?.parent !== undefined; hop += 1) {
+      const parent: Syntax = node.parent;
+      if (parent.kind === SyntaxKind.VoidExpression) return false;
+      if (parent.kind === SyntaxKind.ExpressionStatement) return false;
+      if (parent.kind === SyntaxKind.AwaitExpression || TRANSPARENT.has(parent.kind)) {
+        node = parent;
+        continue;
+      }
+      return true;
+    }
+    return true;
+  };
+
+  /** Whether the eligibility guard is INVOKED — and heeded — in these arguments. */
   const guardedBy = (args: readonly Syntax[]): boolean => {
     for (const argument of args) {
       for (const node of walk(argument)) {
@@ -328,7 +352,9 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
             : callee.kind === SyntaxKind.PropertyAccessExpression
               ? nameOf(callee.name)
               : undefined;
-        if (called !== undefined && GUARD_NAMES.has(called)) return true;
+        if (called === undefined || !GUARD_NAMES.has(called)) continue;
+        // Calling the guard is not enforcing it.
+        if (resultIsUsed(node)) return true;
       }
     }
     return false;

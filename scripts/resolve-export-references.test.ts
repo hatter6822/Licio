@@ -408,6 +408,16 @@ const FILES: Record<string, string> = {
     '}',
   ].join('\n'),
 
+  // ── Reference: a whole namespace SPREAD ──────────────────────────────────
+  // `{ ...mod }` reads every enumerable export, the mirror of `const { ...rest }
+  // = mod` on the other side of the assignment.  PRIMITIVES, so only the
+  // property list can recover them.
+  'src/spread-source.ts': ['export const SPREAD_A = 1;', 'export const SPREAD_B = 2;'].join('\n'),
+  'src/spread-consumer.ts': [
+    "import * as everything from './spread-source.js';",
+    'export const copy = { ...everything };',
+  ].join('\n'),
+
   // ── Reference: from TYPE space only ──────────────────────────────────────
   // Neither of these survives compilation, and both are still references: the
   // declaration has to exist for the type to exist, so losing it is a compile
@@ -686,6 +696,12 @@ describe('resolution: which sites use a binding', () => {
     // public name that exists nowhere else — the export specifier carries no
     // `propertyName`, so only the alias TARGET's name reveals the rename.
     expect(namesIn('src/rename-barrel.ts')).toEqual(['renamedIn']);
+  });
+
+  it.each(['SPREAD_A', 'SPREAD_B'])('counts an export read by a namespace SPREAD (%s)', (name) => {
+    // The identifier scan credited the namespace itself and none of what the
+    // spread copies out of it, so `check:dead-exports` rejected valid code.
+    expect(usesOf('src/spread-source.ts', name).length).toBeGreaterThan(0);
   });
 
   it('counts a destructuring key written as a COMPUTED name', () => {

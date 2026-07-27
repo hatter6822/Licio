@@ -838,6 +838,35 @@ describe('a DOM sink written or invoked indirectly', () => {
   });
 });
 
+describe('a sink handed back by a local function', () => {
+  it.each([
+    ['an arrow returning eval', 'const get = () => eval; get()(payload)'],
+    ['a function returning Function', 'function get() { return Function; } get()("x")()'],
+    ['an arrow returning a timer', "const g = () => setTimeout; g()('evil()', 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag a function returning something else', () => {
+    expect(fires('const get = () => handler; get()(payload)')).toBe(false);
+  });
+});
+
+describe('a receiver-specific DOM sink reached through an ALIAS', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    ['one alias', 'const doc = document; doc.write(payload)'],
+    ['an alias of an alias', 'const a = document; const b = a; b.write(payload)'],
+  ])('catches document.write through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag an unrelated receiver', () => {
+    expect(dom('const obj = other; obj.write(payload)')).toBe(false);
+  });
+});
+
 describe('the assembled sink sets', () => {
   it('SOURCE and BUILT agree on every sink form', () => {
     const forms = [

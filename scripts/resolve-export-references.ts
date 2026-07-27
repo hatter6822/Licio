@@ -381,7 +381,7 @@ function elementAccessExport(node: NodeHandle, project: Project): TsSymbol | und
  * so the walk only has to say WHERE to ask.
  */
 function scanFile(root: NodeHandle): FileScan {
-  const scan: FileScan = { offsets: [], imports: [], destructures: [], accesses: [] };
+  const scan: FileScan = { offsets: [], imports: [], destructures: [], accesses: [], spreads: [] };
 
   /** The EXPORT-side names a pattern or assignment target takes, and whether a
    *  `...rest` element sweeps up whatever those names left. */
@@ -437,6 +437,13 @@ function scanFile(root: NodeHandle): FileScan {
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
         scan.offsets.push(node.getStart());
       }
+    } else if (
+      node.kind === SyntaxKind.SpreadAssignment ||
+      node.kind === SyntaxKind.SpreadElement
+    ) {
+      // `{ ...mod }` reads every export of `mod`, exactly as `const { ...rest }
+      // = mod` does on the other side of the assignment.
+      if (node.expression !== undefined) scan.spreads.push(node.expression);
     } else if (node.kind === SyntaxKind.ElementAccessExpression) {
       // `mod['LIVE']` names an export with a STRING rather than an identifier,
       // and so does `mod[key]` where `key` is a literal-typed constant.  Which
@@ -691,6 +698,15 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         const property = elementAccessExport(access, project);
         if (property !== undefined) {
           creditChain(property, { file, offset: access.getStart() }, project);
+        }
+      }
+
+      // A SPREAD of a namespace reads every export it holds.
+      for (const spread of scan.spreads) {
+        const type = project.checker.getTypeAtLocation(spread);
+        if (type === undefined) continue;
+        for (const property of project.checker.getPropertiesOfType(type)) {
+          creditChain(property, { file, offset: spread.getStart() }, project);
         }
       }
 

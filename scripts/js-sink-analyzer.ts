@@ -695,7 +695,10 @@ function analyser(root: Syntax, project: Project, source: string) {
       // `Reflect.apply(F, …)` / `Reflect.construct(F, …)` invoke their FIRST
       // argument, so the sink is whatever that argument resolves to.
       const invoked = reflectTarget(target);
-      return invoked === undefined ? [] : sinkNames(invoked, hop + 1);
+      if (invoked !== undefined) return sinkNames(invoked, hop + 1);
+      // A local function RETURNING a sink hands it to the caller:
+      // `const get = () => eval; get()(payload)` runs the global.
+      return returnedBy(target.expression, hop).flatMap((value) => sinkNames(value, hop + 1));
     }
 
     // A SELECTION runs one of its operands, and either may be the sink:
@@ -713,6 +716,44 @@ function analyser(root: Syntax, project: Project, source: string) {
   };
 
   /**
+   * The expressions a called function can RETURN, when it is a local one.
+   *
+   * `const get = () => eval` hands the global to whoever calls `get()`, so a
+   * callee that is itself a call is not automatically clean — the value it
+   * yields has to be resolved too.  Both body forms count: an arrow's
+   * expression body, and every `return` in a block.
+   */
+  const returnedBy = (callee: Syntax | undefined, hop: number): Syntax[] => {
+    const target = unwrap(callee);
+    if (target === undefined || hop > MAX_HOPS) return [];
+    let fn: Syntax | undefined;
+    if (target.kind === SyntaxKind.Identifier && !isGlobalBinding(target)) {
+      const declaration = localDeclaration(target);
+      if (declaration?.kind === SyntaxKind.FunctionDeclaration) fn = declaration;
+      else fn = unwrap(boundValue(declaration, hop));
+    } else {
+      fn = target;
+    }
+    if (
+      fn?.kind !== SyntaxKind.ArrowFunction &&
+      fn?.kind !== SyntaxKind.FunctionExpression &&
+      fn?.kind !== SyntaxKind.FunctionDeclaration
+    ) {
+      return [];
+    }
+    const body = fn.body;
+    if (body === undefined) return [];
+    if (body.kind !== SyntaxKind.Block) return [body];
+    const returned: Syntax[] = [];
+    for (const node of walk(body)) {
+      if (node.kind === SyntaxKind.ReturnStatement && node.expression !== undefined) {
+        returned.push(node.expression);
+      }
+    }
+    return returned;
+  };
+
+  /**
    * Where the CODE argument sits for the way this sink was reached.
    *
    * `f(code)` is index 0; `f.call(thisArg, code)` and `f.bind(thisArg, code)`
@@ -723,10 +764,9 @@ function analyser(root: Syntax, project: Project, source: string) {
   const codePosition = (callee: Syntax): CodePosition => {
     const target = unwrap(callee);
     if (target === undefined) return { index: 0, inArray: false };
-    if (target.kind === SyntaxKind.CallExpression) {
-      const method = unwrap(target.expression)?.name?.getText() ?? '';
-      return method === 'construct' ? { index: 1, inArray: true } : { index: 2, inArray: true };
-    }
+    // A CALL-shaped callee is an ordinary invocation of whatever it returned —
+    // `const g = () => setTimeout; g()('evil()', 0)` passes its code first.
+    // `Reflect` has its own position rule and never reaches here.
     if (
       target.kind === SyntaxKind.PropertyAccessExpression ||
       target.kind === SyntaxKind.ElementAccessExpression
@@ -989,8 +1029,11 @@ function memberUsesIn(
         if (spec.property !== name) continue;
         if (spec.form === 'call' ? !called : !assigned) continue;
         if (spec.receiver !== undefined) {
+          // The receiver is resolved, not spelled: `const doc = document;
+          // doc.write(p)` reaches the same absolutely-forbidden method, and
+          // comparing identifier TEXT saw only the literal name.
           const base = node.expression;
-          if (base?.kind !== SyntaxKind.Identifier || base.getText() !== spec.receiver) continue;
+          if (base === undefined || !read.sinkNames(base).includes(spec.receiver)) continue;
         }
         const entry = read.finding(node, spec.label);
         found.set(`${entry.line}:${entry.label}`, entry);
