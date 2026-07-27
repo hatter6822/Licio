@@ -556,6 +556,15 @@ describe('aliased sinks', () => {
     // `a + b` to `string`, so the key's TYPE cannot settle it and the fold has
     // to follow the binding.
     ['a key composed from const bindings', "const a = 'ev', b = 'al'; globalThis[a + b]('x')"],
+    // …including constants bound through a PATTERN rather than a plain `const`.
+    [
+      'a key composed from DESTRUCTURED constants',
+      "const { a, b } = { a: 'ev', b: 'al' }; globalThis[a + b]('x')",
+    ],
+    [
+      'a key composed from an array destructure',
+      "const [a, b] = ['ev', 'al']; globalThis[a + b]('x')",
+    ],
   ])('catches %s', (_label, code) => {
     expect(fires(code)).toBe(true);
   });
@@ -1262,6 +1271,16 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     // inner literal's parent is a PropertyAssignment rather than the `=`, so
     // reading only the direct left-hand side walked past all three of these.
     ['a nested assignment target', "let r; ({ a: { ['eval']: r } } = { a: globalThis });"],
+    // A destructure nests object and ARRAY containers freely; reading an array
+    // element as a property selected nothing at all.
+    ['an array pattern', "const [{ ['eval']: r }] = [globalThis];"],
+    ['an array inside an object', "const { a: [{ ['eval']: r }] } = { a: [globalThis] };"],
+    ['an array assignment target', "let r; ([{ ['eval']: r }] = [globalThis]);"],
+    // A SHORTHAND has no separate key node, so the bare-identifier branch
+    // suppressed it as a name being declared and every later use resolved to
+    // the local — the global was named nowhere at all.
+    ['a shorthand binding', 'const { Function } = globalThis; export const stash = { Function };'],
+    ['a shorthand binding of eval', 'const { eval } = globalThis; export const stash = { eval };'],
     ['a nested assignment with a plain key', 'let r; ({ a: { eval: r } } = { a: globalThis });'],
     [
       'a nested assignment two deep',
