@@ -33,7 +33,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
-import { type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
+import { asNode, type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -198,6 +198,21 @@ export interface MutationRoute {
 const MUTATION_METHODS: ReadonlySet<string> = new Set(['post', 'put', 'patch', 'delete']);
 
 /** Wrappers that yield exactly the expression they wrap. */
+/** Equality operators, whose polarity depends on what is on the other side. */
+const EQUALITY: ReadonlySet<number> = new Set([
+  SyntaxKind.EqualsEqualsEqualsToken,
+  SyntaxKind.EqualsEqualsToken,
+  SyntaxKind.ExclamationEqualsEqualsToken,
+  SyntaxKind.ExclamationEqualsToken,
+]);
+
+/** Operators that COMPOSE tests, keeping the verdict's polarity in play. */
+const COMPOSITION: ReadonlySet<number> = new Set([
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.BarBarToken,
+  SyntaxKind.QuestionQuestionToken,
+]);
+
 const TRANSPARENT: ReadonlySet<number> = new Set([
   SyntaxKind.ParenthesizedExpression,
   SyntaxKind.AsExpression,
@@ -465,14 +480,32 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
-  /** `null`, `undefined`, or `void 0` — what an ELIGIBLE verdict is. */
-  const isNullish = (node: Syntax | undefined): boolean => {
+  /**
+   * `null`, `undefined`, or anything whose TYPE is one of them.
+   *
+   * Reading the syntax alone saw `denial === null` and missed
+   * `const eligible: typeof denial = null; denial === eligible`, which is the
+   * same test through a binding — so the comparison was treated as an ordinary
+   * one and the polarity came out backwards.  The checker knows what the
+   * binding holds, so it is asked.
+   */
+  const isNullish = (node: Syntax | undefined, hop = 0): boolean => {
     const target = unwrap(node);
-    if (target === undefined) return false;
+    if (target === undefined || hop > MAX_HOPS) return false;
     if (target.kind === SyntaxKind.NullKeyword || target.kind === SyntaxKind.VoidExpression) {
       return true;
     }
-    return target.kind === SyntaxKind.Identifier && nameOf(target) === 'undefined';
+    if (target.kind !== SyntaxKind.Identifier) return false;
+    if (nameOf(target) === 'undefined') return true;
+    const type = project.checker.getTypeAtLocation(asNode(target));
+    const intrinsic = type?.isIntrinsicType() === true ? type.intrinsicName : undefined;
+    if (intrinsic === 'null' || intrinsic === 'undefined') return true;
+    // The DECLARED type can be wider than what the binding holds — `const
+    // eligible: typeof denial = null` is annotated with the verdict's type and
+    // is still nothing — so the initializer settles it when the type does not.
+    const declaration = localDeclaration(target);
+    if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+    return isNullish(declaration.initializer, hop + 1);
   };
 
   /**
@@ -536,23 +569,27 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         continue;
       }
       if (parent.kind === SyntaxKind.BinaryExpression) {
-        const operator = parent.operatorToken?.kind;
+        const operator = parent.operatorToken?.kind ?? -1;
         const other = parent.left?.getStart() === node.getStart() ? parent.right : parent.left;
-        // Comparing AGAINST nothing is the same test spelled as an equality:
-        // `denial === null` holds for the eligible, `!== null` for the denied.
-        if (isNullish(other)) {
+        if (EQUALITY.has(operator)) {
+          // Comparing AGAINST nothing is the same test spelled as an equality:
+          // `denial === null` holds for the eligible, `!== null` for the denied.
+          // Against anything ELSE the polarity is not knowable — `denial === x`
+          // says nothing about eligibility — so this refuses to guess rather
+          // than propagating a polarity it has not established.
+          if (!isNullish(other)) return undefined;
           if (
             operator === SyntaxKind.EqualsEqualsEqualsToken ||
             operator === SyntaxKind.EqualsEqualsToken
           ) {
             truthy = !truthy;
-          } else if (
-            operator !== SyntaxKind.ExclamationEqualsEqualsToken &&
-            operator !== SyntaxKind.ExclamationEqualsToken
-          ) {
-            return undefined;
           }
+          node = parent;
+          continue;
         }
+        // Logical composition keeps the verdict in play; anything else (an
+        // ordering, an arithmetic operator) does not describe eligibility.
+        if (!COMPOSITION.has(operator)) return undefined;
         node = parent;
         continue;
       }

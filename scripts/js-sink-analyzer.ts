@@ -760,6 +760,23 @@ function analyser(root: Syntax, project: Project, source: string) {
       const holder = unwrap(node);
       return holder?.kind === SyntaxKind.ArrayLiteralExpression ? childrenOf(holder) : [];
     };
+    // A TAG is called with the strings object first and each SUBSTITUTION
+    // after it, so `` invoke`x${eval}y` `` puts the sink in parameter 1.  The
+    // ordinary argument list is empty for a tagged template, which left every
+    // substitution disconnected from the parameter it binds.
+    if (call.kind === SyntaxKind.TaggedTemplateExpression) {
+      const template = childrenOf(call)[1];
+      if (template === undefined) return [];
+      const substitutions: Syntax[] = [];
+      for (const span of childrenOf(template)) {
+        if (span.kind !== SyntaxKind.TemplateSpan) continue;
+        const value = childrenOf(span)[0];
+        if (value !== undefined) substitutions.push(value);
+      }
+      // Index 0 stands for the strings object; the template node is a harmless
+      // placeholder that resolves to no sink.
+      return [template, ...substitutions];
+    }
     const args = argumentsOf(call);
     if (reflectTarget(call) !== undefined) {
       const method = propertyName(unwrap(call.expression) as Syntax) ?? '';

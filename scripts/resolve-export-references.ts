@@ -319,14 +319,7 @@ interface FileScan {
    * reported live exports dead.  So the question is inverted: a namespace that
    * is not being INDEXED has escaped, and everything in it is read.
    */
-  readonly escapes: number[];
-  /**
-   * Object-spread sources: `{ ...mod }` reads every export it holds.
-   *
-   * This member was USED and never declared — the interface simply omitted it,
-   * and nothing noticed because `scripts/` was outside every tsconfig.
-   */
-  readonly spreads: Syntax[];
+  readonly escapes: Syntax[];
   /**
    * Object destructuring sites: the names taken, and the node whose TYPE says
    * what they were taken FROM.
@@ -376,26 +369,70 @@ const BINDING_PARENTS = new Set<number>([
 ]);
 
 /**
- * Whether an identifier uses a value WITHOUT selecting a member from it.
+ * Whether an identifier hands a VALUE over whole.
  *
- * Being the receiver of `mod.NAME` or `mod[key]` selects one export and is
- * credited by name.  Anything else — an argument, a return, an initializer, a
- * `for…in` subject — hands the whole object over, and whoever received it can
- * read every property without ever writing one down.
+ * Stated positively, and that is the correction.  It was written as "any
+ * identifier that is not a member selection and not a binding", and a rule
+ * defined by two exclusions admits everything nobody thought to exclude.  In
+ * one file that was 334 property NAMES (`mod.LIVE` — the `LIVE`), 63 type
+ * references, 60 parameter declarations, 44 interface members and every
+ * declaration's own name.
+ *
+ * The type layer is the part that mattered.  `let x: typeof mod` resolves to
+ * the MODULE symbol, so it would have credited the whole export set and
+ * retired this gate for that module — a silent one, in the direction a gate
+ * must never fail.  It also asked the checker for the type of nodes that are
+ * not expressions, which it answers with a process-ending panic
+ * (`checker.TypeData is *checker.TypeReference, not *checker.TupleType` —
+ * `TupleType` being a type node, from inside the very range excluded below).
+ * The crash was the honest half of the defect; the over-crediting was not
+ * going to announce itself.
  */
 function isNamespaceEscape(node: Syntax): boolean {
   const parent = node.parent;
   if (parent === undefined) return false;
-  if (BINDING_PARENTS.has(parent.kind)) return false;
   const at = node.getStart();
-  // Being BOUND is not escaping.  `const { A } = ns` takes exactly what the
-  // pattern spells and the destructuring route already credits it from the
-  // pattern's type; `const alias = ns` hands the namespace to a local this same
-  // analysis goes on to read.  Treating either as an escape credited every
-  // sibling export and would have retired the gate for that module.
+
+  // Not in a TYPE.  The range is the compiler's own — `FirstTypeNode` through
+  // `LastTypeNode` — rather than a list of type node kinds that would need a
+  // new entry every time the grammar grows one.
+  for (let above: Syntax | undefined = parent; above !== undefined; above = above.parent) {
+    if (above.kind >= SyntaxKind.FirstTypeNode && above.kind <= SyntaxKind.LastTypeNode) {
+      return false;
+    }
+  }
+
+  // Not a NAME.  A declaration's own name, and the property half of `a.b` or
+  // `{ b: … }`, sit in the parent's `name` — so one test covers a variable, a
+  // parameter, a function, an interface member and a property access alike.
+  // `{ mod }` is the exception that proves it: shorthand puts the VALUE there.
+  if (parent.kind !== SyntaxKind.ShorthandPropertyAssignment && parent.name?.getStart() === at) {
+    return false;
+  }
+
+  // Not import/export plumbing: publishing a name is not consuming the value.
+  if (BINDING_PARENTS.has(parent.kind)) return false;
+
+  // Not BOUND.  `const { A } = ns` takes exactly what the pattern spells and
+  // the destructuring route credits it from the pattern's type; `const alias =
+  // ns` and `alias = ns` hand the namespace to a local this same analysis goes
+  // on to read.  Treating any of them as an escape credited every sibling
+  // export.
   if (parent.kind === SyntaxKind.VariableDeclaration && parent.initializer?.getStart() === at) {
     return false;
   }
+  // BOTH SIDES of an assignment: the right is the value being bound, and the
+  // left is a LOCATION being written rather than an object being handed over.
+  if (
+    parent.kind === SyntaxKind.BinaryExpression &&
+    parent.operatorToken?.kind === SyntaxKind.EqualsToken &&
+    (parent.right?.getStart() === at || parent.left?.getStart() === at)
+  ) {
+    return false;
+  }
+
+  // Not SELECTING: the receiver of `mod.NAME` / `mod[key]` reads one export,
+  // and that one is credited by name.
   const selecting =
     (parent.kind === SyntaxKind.PropertyAccessExpression ||
       parent.kind === SyntaxKind.ElementAccessExpression) &&
@@ -461,7 +498,6 @@ function scanFile(root: Syntax): FileScan {
     imports: [],
     destructures: [],
     accesses: [],
-    spreads: [],
     escapes: [],
   };
 
@@ -519,14 +555,7 @@ function scanFile(root: Syntax): FileScan {
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
         scan.offsets.push(node.getStart());
       }
-      if (isNamespaceEscape(node)) scan.escapes.push(node.getStart());
-    } else if (
-      node.kind === SyntaxKind.SpreadAssignment ||
-      node.kind === SyntaxKind.SpreadElement
-    ) {
-      // `{ ...mod }` reads every export of `mod`, exactly as `const { ...rest }
-      // = mod` does on the other side of the assignment.
-      if (node.expression !== undefined) scan.spreads.push(node.expression);
+      if (isNamespaceEscape(node)) scan.escapes.push(node);
     } else if (node.kind === SyntaxKind.ElementAccessExpression) {
       // `mod['LIVE']` names an export with a STRING rather than an identifier,
       // and so does `mod[key]` where `key` is a literal-typed constant.  Which
@@ -784,28 +813,46 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
       }
 
       // A NAMESPACE that escaped without being indexed: every export is read,
-      // because whoever holds the object can read any of them.  Resolved
-      // through the MODULE symbol rather than the type, which is the same route
-      // the import path takes and costs one batched symbol lookup.
+      // because whoever holds the object can read any of them.
+      //
+      // Asked of the TYPE, which is the same move that answers destructuring —
+      // and for the same reason.  `import * as mod`, `const alias = mod`,
+      // `let a; a = mod`, an `await`, an `as`: the type is the module namespace
+      // through every one of those hops, so none of them needs a rule.  A
+      // spread (`{ ...mod }`) is just an escape too, and its separate case is
+      // gone with them.
       if (scan.escapes.length > 0) {
-        project.checker.getSymbolAtPosition(absolute, scan.escapes).forEach((symbol, index) => {
-          const offset = scan.escapes[index];
-          if (symbol === undefined || offset === undefined) return;
+        const at = scan.escapes.map((each) => each.getStart());
+        project.checker.getSymbolAtPosition(absolute, at).forEach((symbol, index) => {
+          const escaped = scan.escapes[index];
+          const offset = at[index];
+          if (symbol === undefined || escaped === undefined || offset === undefined) return;
           const module = aliasTarget(symbol, project) ?? symbol;
-          if (!module.declarations.some((each) => each.kind === SyntaxKind.SourceFile)) return;
-          for (const property of project.checker.getExportsOfModule(module)) {
+          const isModule = (each: { kind: SyntaxKind }): boolean =>
+            each.kind === SyntaxKind.SourceFile;
+          // The name IS the module: `import * as mod; consume(mod)`.  One
+          // batched symbol lookup answers this, which is most sites.
+          if (module.declarations.some(isModule)) {
+            for (const property of project.checker.getExportsOfModule(module)) {
+              creditChain(property, { file, offset }, project);
+            }
+            return;
+          }
+          // Or a LOCAL holds it: `const alias = mod; consume(alias)`, and every
+          // hop the value took — an assignment, an `await`, an `as` — is in the
+          // TYPE, which is the same move that answers destructuring.  Asked
+          // only of bindings, both because that is where the question arises
+          // and because asking it of every escaping name walks the checker into
+          // shapes it panics on.
+          if (!module.declarations.some((each) => each.kind === SyntaxKind.VariableDeclaration)) {
+            return;
+          }
+          const type = project.checker.getTypeAtLocation(asNode(escaped));
+          if (type?.getSymbol()?.declarations.some(isModule) !== true) return;
+          for (const property of project.checker.getPropertiesOfType(type)) {
             creditChain(property, { file, offset }, project);
           }
         });
-      }
-
-      // A SPREAD of a namespace reads every export it holds.
-      for (const spread of scan.spreads) {
-        const type = project.checker.getTypeAtLocation(asNode(spread));
-        if (type === undefined) continue;
-        for (const property of project.checker.getPropertiesOfType(type)) {
-          creditChain(property, { file, offset: spread.getStart() }, project);
-        }
       }
 
       // DESTRUCTURING, answered by the TYPE of what is destructured.  The

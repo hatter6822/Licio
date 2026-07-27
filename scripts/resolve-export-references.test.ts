@@ -196,6 +196,35 @@ const FILES: Record<string, string> = {
     "export const one = singleKey['READ'];",
   ].join('\n'),
 
+  // ── Reference: a namespace reached through a LOCAL ───────────────────────
+  'src/held-ns.ts': ['export const HELD_A = 1;', 'export const HELD_B = 2;'].join('\n'),
+  'src/holds-ns.ts': [
+    "import * as heldNs from './held-ns.js';",
+    'const held = heldNs;',
+    'export const shipped = consume(held);',
+    'declare function consume(value: unknown): number;',
+  ].join('\n'),
+  // The counterpart: a namespace ASSIGNED to a local, then INDEXED, reads only
+  // what it indexes — or "credit the module whenever a local touches it" would
+  // retire the gate for that module.
+  'src/assigned-ns.ts': ['export const ASSIGNED_READ = 1;', 'export const ASSIGNED_DEAD = 2;'].join(
+    '\n',
+  ),
+  'src/assigns-ns.ts': [
+    "import * as assignedNs from './assigned-ns.js';",
+    'let held: typeof assignedNs;',
+    'held = assignedNs;',
+    'export const one = held.ASSIGNED_READ;',
+  ].join('\n'),
+  // A name in a TYPE position is not a use of the value.  `typeof mod` resolves
+  // to the module symbol, so admitting it credited every export at once.
+  'src/typed-ns.ts': ['export const TYPED_DEAD = 1;'].join('\n'),
+  'src/types-ns.ts': [
+    "import type * as typedNs from './typed-ns.js';",
+    'export type Held = typeof typedNs;',
+    'export const size: [Held] extends [never] ? 0 : 1 = 1;',
+  ].join('\n'),
+
   // ── Reference: a NESTED template interpolation is still code ─────────────
   // The only use of `NESTED` is two interpolations deep, in this same file.  A
   // collector that walked only the outer hole reported a live export as dead.
@@ -601,6 +630,30 @@ describe('resolution: which sites use a binding', () => {
     for (const name of names) {
       expect(usesOf(file, name).length).toBeGreaterThan(0);
     }
+  });
+
+  it('credits every export of a namespace held in a LOCAL', () => {
+    // `const held = ns; consume(held)` hands the object over exactly as
+    // `consume(ns)` does; the identifier resolves to the local, so the symbol
+    // route alone could not see it and the TYPE is what knows.
+    for (const name of ['HELD_A', 'HELD_B']) {
+      expect(usesOf('src/held-ns.ts', name).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('credits only what an ASSIGNED namespace is indexed for', () => {
+    // Binding is not escaping, however it is spelled — so the sibling stays
+    // dead and the gate stays falsifiable.
+    expect(usesOf('src/assigned-ns.ts', 'ASSIGNED_READ').length).toBeGreaterThan(0);
+    expect(usesOf('src/assigned-ns.ts', 'ASSIGNED_DEAD')).toHaveLength(0);
+  });
+
+  it('does not credit a namespace named in a TYPE position', () => {
+    // `typeof mod` resolves to the MODULE symbol.  Reading it as a value use
+    // credited the whole export set — silently, in the direction a gate must
+    // never fail — and asked the checker for the type of a node that is not an
+    // expression, which ends the process rather than answering.
+    expect(usesOf('src/typed-ns.ts', 'TYPED_DEAD')).toHaveLength(0);
   });
 
   it('still reports the members a SINGLE known key does not read', () => {
