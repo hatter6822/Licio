@@ -173,14 +173,39 @@ describe('tsconfig project references', () => {
   });
 
   it('resolves every reference and every `extends` to a file that exists', () => {
+    // `extends` follows the COMPILER's rule, which appends `.json` to an
+    // extensionless relative path — so `"extends": "./base"` with `base.json`
+    // beside it is valid, and an exact filesystem check would reject a config
+    // `tsc` accepts.  A `references` path is held to the stricter rule this
+    // file exists to enforce, and is checked exactly.
+    const resolvesFrom = (path: string, specifier: string, appendJson: boolean): boolean => {
+      const from = dirname(resolve(ROOT, path));
+      const target = resolve(from, specifier);
+      if (existsSync(target)) return true;
+      return appendJson && !specifier.endsWith('.json') && existsSync(`${target}.json`);
+    };
     const offenders = configs.flatMap(({ path, extends: bases, references }) =>
-      [...bases, ...references]
+      [
+        ...bases.map((each) => ({ each, appendJson: true })),
+        ...references.map((each) => ({ each, appendJson: false })),
+      ]
         // A bare specifier resolves through node_modules, which is not this
         // assertion's business; only relative paths are checked here.
-        .filter((each) => each.startsWith('.'))
-        .filter((each) => !existsSync(resolve(dirname(resolve(ROOT, path)), each)))
-        .map((each) => `${path}: "${each}" resolves to no file`),
+        .filter(({ each }) => each.startsWith('.'))
+        .filter(({ each, appendJson }) => !resolvesFrom(path, each, appendJson))
+        .map(({ each }) => `${path}: "${each}" resolves to no file`),
     );
     expect(offenders).toEqual([]);
+  });
+
+  it('accepts an extensionless `extends`, as the compiler does', () => {
+    // `tsconfig.base.json` exists at the repository root, so `./tsconfig.base`
+    // is a valid extensionless base that an exact check would have rejected.
+    expect(
+      readConfigs([{ path: 'tsconfig.json', text: '{ "extends": "./tsconfig.base" }' }])[0]
+        ?.extends,
+    ).toEqual(['./tsconfig.base']);
+    expect(existsSync(resolve(ROOT, 'tsconfig.base.json'))).toBe(true);
+    expect(existsSync(resolve(ROOT, 'tsconfig.base'))).toBe(false);
   });
 });
