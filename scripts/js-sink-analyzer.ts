@@ -1134,8 +1134,12 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     // by the precision — `f()()` reaches it as a `result` of a `result`.
     const visit = (node: Syntax): void => {
       if (isFunction(node)) return;
-      if (node.kind === SyntaxKind.ReturnStatement) {
+      // A GENERATOR hands values out by yielding, so a yield is a return for
+      // this purpose: `function* g() { yield eval }` gives the global to
+      // whoever reads the iterator.
+      if (node.kind === SyntaxKind.ReturnStatement || node.kind === SyntaxKind.YieldExpression) {
         if (node.expression !== undefined) returned.push(node.expression);
+        if (node.kind === SyntaxKind.YieldExpression) return;
         return;
       }
       for (const child of childrenOf(node)) visit(child);
@@ -1247,6 +1251,10 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
       if (INVOKERS.has(name)) from.push(nodeValue(base));
       if (name === 'constructor') from.push(globalValue('Function'));
+      // `it.value` carries what the iterator produced, so it is transparent to
+      // its source — the other half of the generator boundary, with `.next()`
+      // below.
+      if (name === 'value') from.push(nodeValue(base));
       // The access ALSO denotes the method itself, whoever the receiver turns
       // out to be — which is what survives being copied into a local.  Emitted
       // alongside the rest rather than instead of it, and harmless when the
@@ -1261,6 +1269,17 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       // whatever the function it names RETURNS.
       const invoked = reflectTarget(target);
       if (invoked !== undefined) return [nodeValue(invoked)];
+      // `it.next()` yields the iterator's own values, so the call is
+      // transparent to the thing being iterated.
+      const callee = unwrap(target.expression);
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'next' &&
+        callee.expression !== undefined
+      ) {
+        return [nodeValue(callee.expression)];
+      }
       // `new Proxy(eval, {})` IS `eval` for every purpose that matters here: a
       // call on the proxy runs the target unless a handler trap says otherwise,
       // and a wrapper is the cheapest way to launder a forbidden global.

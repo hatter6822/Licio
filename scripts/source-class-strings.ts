@@ -205,7 +205,12 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
       // the source, so it anchors on the argument and places no character.
       if (!first) pieces.push({ text: ' ', at: argument.getStart(), verbatimAt: null });
       first = false;
-      const inner = fold(argument, source, joins);
+      // A CONDITIONAL argument still renders ON THIS ELEMENT when it renders at
+      // all, so its classes belong in the composed set: `cn('bg-error', enabled
+      // && 'text-error-fg')` always paints the foreground over that background.
+      // Folding the argument as unknown and scanning its literal separately
+      // judged the foreground with no background beside it.
+      const inner = fold(argument, source, joins) ?? contributed(argument, source, joins);
       if (inner === null) {
         pieces.push(unknownPiece(argument));
         unknown.push(argument);
@@ -219,6 +224,50 @@ function fold(node: Syntax, source: string, joins?: (callee: Syntax) => boolean)
 
   return null;
 }
+
+/**
+ * What a CONDITIONAL class-list argument can contribute.
+ *
+ * `enabled && 'x'` contributes `x` or nothing; `cond ? 'x' : 'y'` contributes
+ * one of the two.  Either way every class named here renders on the same
+ * element as its siblings, which is the only thing the pairing question asks —
+ * so both sides are folded in, and a side that says nothing is dropped rather
+ * than making the whole argument unknown.
+ */
+function contributed(
+  node: Syntax,
+  source: string,
+  joins?: (callee: Syntax) => boolean,
+): Fold | null {
+  const sides =
+    node.kind === SyntaxKind.ConditionalExpression
+      ? [node.whenTrue, node.whenFalse]
+      : node.kind === SyntaxKind.BinaryExpression &&
+          CONDITIONAL_OPERATORS.has(node.operatorToken?.kind ?? -1)
+        ? [node.left, node.right]
+        : [];
+  if (sides.length === 0) return null;
+  const pieces: Piece[] = [];
+  const unknown: Syntax[] = [];
+  let any = false;
+  for (const side of sides) {
+    if (side === undefined) continue;
+    const folded = fold(side, source, joins) ?? contributed(side, source, joins);
+    if (folded === null) continue;
+    if (any) pieces.push({ text: ' ', at: side.getStart(), verbatimAt: null });
+    any = true;
+    pieces.push(...folded.pieces);
+    unknown.push(...folded.unknown);
+  }
+  return any ? { pieces, unknown } : null;
+}
+
+/** Operators whose operands may or may not contribute their classes. */
+const CONDITIONAL_OPERATORS: ReadonlySet<number> = new Set([
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.BarBarToken,
+  SyntaxKind.QuestionQuestionToken,
+]);
 
 /** The JSX element an expression sits inside, from the tree. */
 function enclosingElement(node: Syntax): string | null {

@@ -633,8 +633,31 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * refusal, installed in the chain.  A handler-level `checkGovernanceEligibility`
    * RETURNS a verdict, and calling it decides nothing on its own.
    */
+  /** The FUNCTION a route argument denotes, when it is passed by name. */
+  const bodyBehind = (argument: Syntax): Syntax | undefined => {
+    const target = unwrap(argument);
+    if (target?.kind !== SyntaxKind.Identifier) return undefined;
+    const declaration = localDeclaration(target);
+    if (declaration === undefined) return undefined;
+    if (
+      declaration.kind === SyntaxKind.FunctionDeclaration ||
+      declaration.kind === SyntaxKind.ArrowFunction ||
+      declaration.kind === SyntaxKind.FunctionExpression
+    ) {
+      return declaration;
+    }
+    const bound = unwrap(declaration.initializer);
+    return bound?.kind === SyntaxKind.ArrowFunction || bound?.kind === SyntaxKind.FunctionExpression
+      ? bound
+      : undefined;
+  };
+
   const guardedBy = (args: readonly Syntax[]): boolean => {
-    for (const argument of args) {
+    for (const spelled of args) {
+      // A handler passed BY NAME is the same handler: `app.post(path, handler)`
+      // with the guard inside `handler` is guarded, and walking only the
+      // identifier saw an empty body and blocked correct code.
+      const argument = bodyBehind(spelled) ?? spelled;
       for (const node of walk(argument)) {
         if (node.kind !== SyntaxKind.CallExpression) continue;
         const callee = unwrap(node.expression);
@@ -820,10 +843,113 @@ export function extractMutationRoutes(file: string, source: string): MutationRou
   );
 }
 
+/**
+ * The file every API route module is mounted from.
+ *
+ * The corpus is derived from HERE rather than assumed, because the gate's
+ * guarantee is about governance participation wherever it lives — and a fixed
+ * list of four files quietly stops being that the moment a fifth module is
+ * mounted.
+ */
+const MOUNT_FILE = 'apps/api/src/routes/v1.ts';
+
+/**
+ * Mounted route modules that carry NO governance-participation surface.
+ *
+ * Every mounted module must appear here or in `GOVERNANCE_ROUTE_FILES`: a
+ * module in neither is one the gate has never looked at, and reporting success
+ * over it is exactly the silent gap this list closes.  Adding a governance
+ * surface to one of these means moving it, which is a visible act in review.
+ *
+ * A stale entry fails the gate, like every other allowlist here.
+ */
+export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
+  'apps/api/src/routes/auth.ts':
+    'sign-in and session lifecycle; participation is not governed here',
+  'apps/api/src/routes/privacy.ts': 'consent and data-rights self-service, never a governance vote',
+  'apps/api/src/routes/events.ts': 'attention aggregate ingest — bucketed signal, no participation',
+  'apps/api/src/routes/stories.ts': 'content submission and reading',
+  'apps/api/src/routes/ingestion-admin.ts': 'platform ingestion operations (staff capability)',
+  'apps/api/src/routes/invariants-public.ts': 'read-only invariant reporting',
+  'apps/api/src/routes/invariants-admin.ts': 'platform invariant operations (staff capability)',
+  'apps/api/src/routes/ranking-admin.ts': 'platform ranking operations (staff capability)',
+  'apps/api/src/routes/forum.ts':
+    'contributions and comments — content participation, never KYC-gated',
+  'apps/api/src/routes/trust-safety.ts':
+    'reports and appeals; a safety report is not a governance act',
+  'apps/api/src/routes/moderation-console.ts':
+    'platform enforcement console (staff capability + MFA)',
+  'apps/api/src/routes/ai-governance-public.ts': 'model transparency reads',
+  'apps/api/src/routes/ai-governance-admin.ts': 'platform model operations (staff capability)',
+  'apps/api/src/routes/model-hub.ts': 'proxied huggingface.co metadata reads, no room state',
+  'apps/api/src/routes/wallet.ts': 'wallet linking; holding a wallet is not participating',
+  'apps/api/src/routes/knomosis.ts': 'finality gateway — submits what governance already decided',
+  'apps/api/src/routes/compliance.ts': 'lawful-access and SAR handling under counsel authority',
+};
+
+/** Route modules mounted into the API, from the mount file itself. */
+export function mountedRouteModules(source: string): string[] {
+  return withParsedSources([{ path: MOUNT_FILE, content: source }], (parsed) => {
+    const root = parsed[0]?.root;
+    if (root === undefined) return [];
+    // `import { createX } from './x.js'` → the module `createX` comes from,
+    // read off the import rather than guessed from the factory's name.
+    const from = new Map<string, string>();
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.ImportDeclaration) continue;
+      const specifier = staticString(node.moduleSpecifier);
+      if (specifier === undefined || !specifier.startsWith('.')) continue;
+      const file = `apps/api/src/routes/${specifier.replace(/^\.\//, '').replace(/\.js$/, '.ts')}`;
+      for (const named of walk(node)) {
+        if (named.kind !== SyntaxKind.ImportSpecifier) continue;
+        const local = named.name === undefined ? undefined : nameOf(named.name);
+        if (local !== undefined && local !== '') from.set(local, file);
+      }
+    }
+    const mounted = new Set<string>();
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.CallExpression) continue;
+      const callee = unwrap(node.expression);
+      if (callee?.kind !== SyntaxKind.PropertyAccessExpression) continue;
+      if (callee.name === undefined || nameOf(callee.name) !== 'route') continue;
+      for (const argument of node.arguments ?? []) {
+        const inner = unwrap(argument);
+        if (inner?.kind !== SyntaxKind.CallExpression) continue;
+        const factory = unwrap(inner.expression);
+        if (factory?.kind !== SyntaxKind.Identifier) continue;
+        const named = nameOf(factory);
+        const file = named === undefined ? undefined : from.get(named);
+        if (file !== undefined) mounted.add(file);
+      }
+    }
+    return [...mounted].sort();
+  });
+}
+
 export function runGovernanceKycGate(
   read: (relPath: string) => string = (relPath) => readFileSync(resolve(ROOT, relPath), 'utf-8'),
 ): string[] {
   const issues: string[] = [];
+  // EVERY mounted module must be classified.  One that is neither scanned nor
+  // declared non-governance is a surface the gate has never read, and a fixed
+  // list of four files cannot notice a fifth being mounted.
+  const scanned = new Set<string>(GOVERNANCE_ROUTE_FILES);
+  const mounted = mountedRouteModules(read(MOUNT_FILE));
+  for (const file of mounted) {
+    if (scanned.has(file) || NON_GOVERNANCE_ROUTES[file] !== undefined) continue;
+    issues.push(
+      `${file} is mounted into the API but is CLASSIFIED NOWHERE. Add it to ` +
+        'GOVERNANCE_ROUTE_FILES if it carries a governance-participation surface, or to ' +
+        'NON_GOVERNANCE_ROUTES with a written reason it does not.',
+    );
+  }
+  for (const file of Object.keys(NON_GOVERNANCE_ROUTES)) {
+    if (!mounted.includes(file)) {
+      issues.push(
+        `stale NON_GOVERNANCE_ROUTES entry '${file}': it is not mounted into the API — remove it.`,
+      );
+    }
+  }
   const usedAllowlist = new Set<number>();
   // One parse for the whole route tree.
   const byFile = routesFor(

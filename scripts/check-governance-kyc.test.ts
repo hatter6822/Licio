@@ -4,12 +4,18 @@
 // registration is found wherever it sits, the guard is attributed by
 // CONTAINMENT rather than by text proximity, and the only fail-closed case left
 // is a route path the gate genuinely cannot read.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
+  mountedRouteModules,
+  NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
 } from './check-governance-kyc.js';
+
+const ROOT = resolve(import.meta.dirname, '..');
 
 const guarded = `
 export function createRoutes() {
@@ -250,6 +256,59 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
   return c.json(await castVote(roomId));
 });`;
     expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+});
+
+describe('a handler passed BY NAME', () => {
+  it('reads the function the identifier denotes', () => {
+    // Walking only the identifier saw an empty body, so a correctly guarded
+    // route was reported unguarded — a gate blocking valid code.
+    const src = `
+const app = new Hono();
+async function handler(c) {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+}
+app.post('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+
+  it('still reports a named handler with NO guard', () => {
+    const src = `
+const app = new Hono();
+async function handler(c) { return c.json(await castVote()); }
+app.post('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+});
+
+describe('every mounted route module is CLASSIFIED', () => {
+  it('bites when a module is mounted and classified nowhere', () => {
+    const mount = readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8')
+      .replace(
+        'import { createAuthRoutes }',
+        "import { createBrandNewRoutes } from './brand-new.js';\nimport { createAuthRoutes }",
+      )
+      .replace(
+        ".route('/auth', createAuthRoutes())",
+        ".route('/brand', createBrandNewRoutes())\n      .route('/auth', createAuthRoutes())",
+      );
+    const issues = runGovernanceKycGate((rel) =>
+      rel === 'apps/api/src/routes/v1.ts' ? mount : readFileSync(resolve(ROOT, rel), 'utf-8'),
+    );
+    // A fixed list of four files cannot notice a fifth being mounted, which is
+    // the gap between what this gate claimed and what it checked.
+    expect(issues.some((issue) => issue.includes('CLASSIFIED NOWHERE'))).toBe(true);
+  });
+
+  it('classifies every module the live mount graph carries', () => {
+    const mounted = mountedRouteModules(
+      readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8'),
+    );
+    expect(mounted.length).toBeGreaterThan(15);
+    const classified = new Set([...GOVERNANCE_ROUTE_FILES, ...Object.keys(NON_GOVERNANCE_ROUTES)]);
+    expect(mounted.filter((each) => !classified.has(each))).toEqual([]);
   });
 });
 

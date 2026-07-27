@@ -1036,6 +1036,10 @@ describe('the same sweep, over the helpers themselves', () => {
     ['JSON.stringify', 'setTimeout(JSON.stringify(payload), 0)'],
     ['toLocaleString', 'setTimeout(payload.toLocaleString(), 0)'],
     ['a joined array', "setTimeout(parts.join(''), 0)"],
+    // A generator hands values out by YIELDING; the iterator protocol carries
+    // them back through `.next().value`.
+    ['a yielded sink', 'function* g() { yield eval; } g().next().value(payload)'],
+    ['an async generator', 'async function* g() { yield eval; } (await g().next()).value(payload)'],
   ])('catches %s', (_label, code) => {
     expect(fires(code)).toBe(true);
   });
