@@ -170,6 +170,20 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
     expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
   });
 
+  it.each([
+    ['a swapped returned ternary', 'return denial ? c.json(await castVote()) : c.json({}, 403);'],
+    ['a negated swapped ternary', 'return !denial ? c.json({}, 403) : c.json(await castVote());'],
+  ])('rejects %s — the verdict only SELECTED between two other values', (_label, guard) => {
+    // The polarity rule reaches an `if`, but a returned ternary hands back one
+    // of two expressions and which of them refuses is not something a
+    // structural gate can read.  Letting the "returning the verdict refuses"
+    // rule vouch for it accepted a route that admitted exactly the members it
+    // should have turned away — the original defect, one position along.  So an
+    // ambiguous spelling is rejected and the clear `if (denial) return …` form
+    // is what passes.
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
   it('rejects a verdict that is bound and never consulted', () => {
     const src = `
 const app = new Hono();

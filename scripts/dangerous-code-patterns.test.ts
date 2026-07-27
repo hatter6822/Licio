@@ -907,6 +907,46 @@ describe('sinks reached through indirection review found open', () => {
   });
 });
 
+describe('every position the value relation governs', () => {
+  // Written by sweeping the rules rather than waiting for the next review
+  // round.  The previous two rounds were each "one more place the relation
+  // stopped", so once "a sink is a value" and "a call yields a value" were the
+  // rules, the question became WHERE ELSE those hold — and six of these were
+  // still open when asked.
+  it.each([
+    // A tagged template invokes its tag, so it is a call in every respect.
+    ['a sink returned to a tagged template', 'const t = () => eval; t`x`(payload)'],
+    // The invoker spellings deliver arguments one place along, or inside an
+    // array — so a wrapper's parameters lined up against the `thisArg`.
+    ['a sink passed via .call', 'function invoke(fn) { fn(payload); } invoke.call(null, eval)'],
+    ['a sink passed via .apply', 'function invoke(fn) { fn(payload); } invoke.apply(null, [eval])'],
+    [
+      'a sink passed via Reflect.apply',
+      'function invoke(fn) { fn(payload); } Reflect.apply(invoke, null, [eval])',
+    ],
+    // A getter runs on READ, so the property access already IS the value.
+    ['a sink behind a getter', 'const o = { get run() { return eval; } }; o.run(payload)'],
+    // A class instance is a container like an object literal is.
+    ['a sink returned by a class method', 'class C { m() { return eval; } } new C().m()(payload)'],
+    ['a sink held in a class property', 'class C { run = eval; } new C().run(payload)'],
+    ['a sink behind a class getter', 'class C { get run() { return eval; } } new C().run(payload)'],
+    ['a sink as a default parameter', 'function invoke(fn = eval) { fn(payload); } invoke()'],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'a harmless value via .call',
+      'function invoke(fn) { fn(payload); } invoke.call(null, handler)',
+    ],
+    ['a harmless getter', 'const o = { get run() { return handler; } }; o.run(payload)'],
+    ['a harmless class method', 'class C { m() { return handler; } } new C().m()(payload)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
 describe('a receiver-specific DOM sink reached through an ALIAS', () => {
   const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
 
@@ -926,6 +966,19 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
     // A member sink is a VALUE, so copying it out of the receiver does not
     // shed its identity.  Matching the access syntax and its parent meant one
     // `const` hid the most explicitly forbidden call in the project.
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    // Built rather than written out: a literal `${` inside a plain string is
+    // an interpolation this file does not intend, which is what `tpl` exists
+    // for elsewhere here.
+    ['through a tagged template', `document.write\`<b>$${'{'}payload}</b>\``],
+    ['through an optional call', 'document.write?.(payload)'],
+    ['passed into a wrapper', 'function w(f) { f(payload); } w(document.write)'],
+    ['returned by a local function', 'function g() { return document.write; } g()(payload)'],
+    ['held in an array', 'const a = [document.write]; a[0](payload)'],
+  ])('catches document.write %s', (_label, code) => {
     expect(dom(code)).toBe(true);
   });
 

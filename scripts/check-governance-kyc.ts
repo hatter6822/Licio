@@ -472,13 +472,22 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   const controlsARefusal = (use: Syntax): boolean => {
     let node: Syntax = use;
     let truthy = true;
+    // Whether the verdict has been consumed as a CONDITION on the way up.
+    // `return denial ?? next()` hands the denial itself back; `return denial ?
+    // a : b` hands back one of two OTHER values, and which of them refuses is
+    // not something this can read.  Without the distinction the return rule
+    // vouched for `denial ? castVote() : json({}, 403)` — a route that refuses
+    // exactly the members it should admit, which is the same defect polarity
+    // was added to catch, one position along.
+    let asCondition = false;
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const parent = node.parent;
       if (parent === undefined) return false;
       if (parent.kind === SyntaxKind.ReturnStatement || parent.kind === SyntaxKind.ThrowStatement) {
         // Handing the verdict itself back refuses whoever it denies — but only
-        // if what is handed back IS the denial, not its negation.
-        return truthy;
+        // if what is handed back IS the denial, not its negation, and not a
+        // value it merely selected between.
+        return truthy && !asCondition;
       }
       if (parent.kind === SyntaxKind.IfStatement) {
         // Only the CONDITION decides anything; the verdict appearing inside a
@@ -489,6 +498,9 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       if (parent.kind === SyntaxKind.ConditionalExpression) {
         if (parent.condition?.getStart() !== node.getStart()) return false;
         if (refusesWithin(truthy ? parent.whenTrue : parent.whenFalse)) return true;
+        // The ternary's VALUE still tracks the verdict, so an enclosing `if`
+        // can still be judged — but the return rule no longer can.
+        asCondition = true;
         node = parent;
         continue;
       }

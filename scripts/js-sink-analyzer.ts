@@ -607,7 +607,19 @@ function analyser(root: Syntax, project: Project, source: string) {
       return target;
     }
     if (target.kind === SyntaxKind.Identifier) {
-      return containerOf(boundValue(localDeclaration(target), hop), hop + 1);
+      const declaration = localDeclaration(target);
+      // A class NAME denotes the class; `new C()` denotes an instance of it.
+      // Either way its members are what a property read finds.
+      if (
+        declaration?.kind === SyntaxKind.ClassDeclaration ||
+        declaration?.kind === SyntaxKind.ClassExpression
+      ) {
+        return declaration;
+      }
+      return containerOf(boundValue(declaration, hop), hop + 1);
+    }
+    if (target.kind === SyntaxKind.NewExpression) {
+      return containerOf(target.expression, hop + 1);
     }
     if (
       target.kind === SyntaxKind.PropertyAccessExpression ||
@@ -640,6 +652,14 @@ function analyser(root: Syntax, project: Project, source: string) {
             ? staticPrefix(member.name.expression)
             : nameOf(member.name);
         if (memberName !== name) continue;
+        // A getter has no initializer; the MEMBER is the value, and the
+        // relation reads its returns.  A method likewise IS the function.
+        if (
+          member.kind === SyntaxKind.GetAccessor ||
+          member.kind === SyntaxKind.MethodDeclaration
+        ) {
+          return member;
+        }
         return member.kind === SyntaxKind.ShorthandPropertyAssignment
           ? member.name
           : member.initializer;
@@ -649,6 +669,24 @@ function analyser(root: Syntax, project: Project, source: string) {
     if (literal.kind === SyntaxKind.ArrayLiteralExpression) {
       const index = Number(name);
       return Number.isInteger(index) ? childrenOf(literal)[index] : undefined;
+    }
+    if (
+      literal.kind === SyntaxKind.ClassDeclaration ||
+      literal.kind === SyntaxKind.ClassExpression
+    ) {
+      // A method IS the function it declares; a property carries its
+      // initializer; a getter is read through the relation as its returns.
+      for (const member of childrenOf(literal)) {
+        if (member.name === undefined || nameOf(member.name) !== name) continue;
+        if (
+          member.kind === SyntaxKind.MethodDeclaration ||
+          member.kind === SyntaxKind.GetAccessor
+        ) {
+          return member;
+        }
+        if (member.kind === SyntaxKind.PropertyDeclaration) return member.initializer;
+      }
+      return undefined;
     }
     return undefined;
   };
@@ -712,16 +750,60 @@ function analyser(root: Syntax, project: Project, source: string) {
   const parameterKey = (parameter: Syntax): string =>
     `${parameter.getStart()}:${parameter.getEnd()}`;
 
+  /**
+   * The arguments a call actually passes to the FUNCTION, whatever invoked it.
+   *
+   * `f(a)`, `f.call(this, a)`, `f.apply(this, [a])` and `Reflect.apply(f, this,
+   * [a])` all deliver `a` as the first parameter, and the receiver resolution
+   * already treats them as calls of `f` — so reading the raw argument list
+   * lined a wrapper's parameters up against a `thisArg`, and the sink one place
+   * along went unseen.
+   */
+  const callArguments = (call: Syntax): Syntax[] => {
+    const unwrapArray = (node: Syntax | undefined): Syntax[] => {
+      const holder = unwrap(node);
+      return holder?.kind === SyntaxKind.ArrayLiteralExpression ? childrenOf(holder) : [];
+    };
+    const args = argumentsOf(call);
+    if (reflectTarget(call) !== undefined) {
+      const method = propertyName(unwrap(call.expression) as Syntax) ?? '';
+      // `construct` takes its array one earlier than `apply` does.
+      return unwrapArray(args[method === 'construct' ? 1 : 2]);
+    }
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind === SyntaxKind.PropertyAccessExpression ||
+      callee?.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      const method = propertyName(callee);
+      if (method === 'apply') return unwrapArray(args[1]);
+      if (method === 'call' || method === 'bind') return args.slice(1);
+    }
+    return args;
+  };
+
   const buildCallSites = (): void => {
     if (callSitesReady || buildingCallSites) return;
     buildingCallSites = true;
     for (const node of walk(root)) {
-      if (node.kind !== SyntaxKind.CallExpression && node.kind !== SyntaxKind.NewExpression) {
+      if (
+        node.kind !== SyntaxKind.CallExpression &&
+        node.kind !== SyntaxKind.NewExpression &&
+        node.kind !== SyntaxKind.TaggedTemplateExpression
+      ) {
         continue;
       }
-      const args = argumentsOf(node);
+      const args = callArguments(node);
       if (args.length === 0) continue;
-      for (const callee of nodesFrom(node.expression)) {
+      // WHERE the called function is written differs by spelling: a tagged
+      // template puts it in the tag, and `Reflect.apply` in its first argument
+      // rather than in the callee.  The relation already resolves all three;
+      // reading only `expression` here left the reflective form unmapped.
+      const invokedFn =
+        node.kind === SyntaxKind.TaggedTemplateExpression
+          ? node.tag
+          : (reflectTarget(node) ?? node.expression);
+      for (const callee of nodesFrom(invokedFn)) {
         if (!isFunction(callee)) continue;
         childrenOf(callee)
           .filter((child) => child.kind === SyntaxKind.Parameter)
@@ -882,6 +964,17 @@ function analyser(root: Syntax, project: Project, source: string) {
       if (invoked !== undefined) return [nodeValue(invoked)];
       return target.expression === undefined ? [] : [resultValue(nodeValue(target.expression))];
     }
+
+    // `` tag`text` `` INVOKES its tag, so its value is what the tag returns —
+    // the same edge a call has, and the tag is where the callee sits.
+    if (target.kind === SyntaxKind.TaggedTemplateExpression) {
+      return target.tag === undefined ? [] : [resultValue(nodeValue(target.tag))];
+    }
+
+    // A GETTER runs on READ, so `o.run` already IS what the accessor returns —
+    // no call needed.  Reached here because `heldAt` hands back the accessor
+    // itself when a container member is one.
+    if (target.kind === SyntaxKind.GetAccessor) return returnsOf(target).map(nodeValue);
 
     return [];
   };
@@ -1215,8 +1308,17 @@ function memberUsesIn(
       // first.  The wrapper spellings — `document.write.call(…)`,
       // `Reflect.apply(document.write, …)` — need no case of their own either,
       // since the relation already resolves both to the same member value.
-      if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
-        const invoked = read.reflectTarget(node) ?? node.expression;
+      if (
+        node.kind === SyntaxKind.CallExpression ||
+        node.kind === SyntaxKind.NewExpression ||
+        node.kind === SyntaxKind.TaggedTemplateExpression
+      ) {
+        // `` document.write`<b>${p}</b>` `` invokes the method exactly as the
+        // parenthesised call does — the tag is where the callee sits.
+        const invoked =
+          node.kind === SyntaxKind.TaggedTemplateExpression
+            ? node.tag
+            : (read.reflectTarget(node) ?? node.expression);
         for (const member of read.memberSinks(invoked)) {
           for (const spec of callSpecs) {
             if (spec.property === member.property) report(member.access, spec);
