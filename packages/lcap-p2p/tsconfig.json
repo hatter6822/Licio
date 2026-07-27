@@ -8,5 +8,5 @@
     "lib": ["ES2022", "DOM"]
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../shared" }, { "path": "../lcap" }]
+  "references": [{ "path": "../shared/tsconfig.json" }, { "path": "../lcap/tsconfig.json" }]
 }

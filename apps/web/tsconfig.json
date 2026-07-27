@@ -25,12 +25,12 @@
   },
   "include": ["src/**/*"],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/invariants" },
-    { "path": "../../packages/ai-governance" },
-    { "path": "../../packages/lcap" },
-    { "path": "../../packages/lcap-p2p" },
-    { "path": "../../packages/private-p2p" },
-    { "path": "../api" }
+    { "path": "../../packages/shared/tsconfig.json" },
+    { "path": "../../packages/invariants/tsconfig.json" },
+    { "path": "../../packages/ai-governance/tsconfig.json" },
+    { "path": "../../packages/lcap/tsconfig.json" },
+    { "path": "../../packages/lcap-p2p/tsconfig.json" },
+    { "path": "../../packages/private-p2p/tsconfig.json" },
+    { "path": "../api/tsconfig.json" }
   ]
 }
