@@ -63,32 +63,59 @@ function isAlgorithmLengthDigest(line: string): boolean {
 }
 
 /**
- * The `packages:` section's entry and integrity counts.
+ * How many `packages:` entries there are, and how many carry their OWN digest.
  *
  * Scoped by section rather than matched across the whole file: top-level keys
  * sit at column 0 and entries at two spaces, so the boundary is unambiguous,
  * and `snapshots:` — which repeats every package WITHOUT a resolution — cannot
  * inflate the denominator.
+ *
+ * Counted PER ENTRY, and only on the entry's own `resolution:` line.  Two
+ * running totals compared at the end can be equal while a package is
+ * uncovered: one entry carrying a real digest plus any second `integrity:`
+ * anywhere in its subtree — a `peerDependenciesMeta` block, a nested field —
+ * balanced out the next entry having `resolution: {}` and nothing else, and
+ * the gate reported full coverage over a package with no hash at all.  An
+ * entry can now contribute at most one, and only from the line that actually
+ * pins the tarball.
  */
 export function countPackagesSection(content: string): { entries: number; integrity: number } {
   let entries = 0;
   let integrity = 0;
   let inside = false;
+  let open = false;
+  let covered = false;
+  const close = (): void => {
+    if (open && covered) integrity += 1;
+    open = false;
+    covered = false;
+  };
   for (const line of content.split('\n')) {
     if (/^[A-Za-z]/.test(line)) {
+      close();
       inside = line.startsWith('packages:');
       continue;
     }
     if (!inside) continue;
-    if (/^ {2}\S/.test(line)) entries += 1;
-    // A DIGEST OF THE DECLARED ALGORITHM, not just the algorithm prefix and
-    // not merely something long enough.  Matching `sha512-` alone accepted
-    // `integrity: sha512-` and `sha512-not!base64` as hashes, and a shared
-    // 40-character minimum then accepted a digest a third of SHA-512's size —
-    // so a lockfile with every digest emptied or truncated still reported full
-    // coverage, the exact failure this check exists to notice.
-    if (isAlgorithmLengthDigest(line)) integrity += 1;
+    if (/^ {2}\S/.test(line)) {
+      close();
+      entries += 1;
+      open = true;
+      continue;
+    }
+    // A DIGEST OF THE DECLARED ALGORITHM, on the RESOLUTION this entry pins —
+    // not just the algorithm prefix, not merely something long enough, and not
+    // some other `integrity:` further down the same entry.  Matching `sha512-`
+    // alone accepted `integrity: sha512-` and `sha512-not!base64` as hashes,
+    // and a shared 40-character minimum then accepted a digest a third of
+    // SHA-512's size — so a lockfile with every digest emptied or truncated
+    // still reported full coverage, the exact failure this check exists to
+    // notice.
+    if (open && !covered && line.includes('resolution:') && isAlgorithmLengthDigest(line)) {
+      covered = true;
+    }
   }
+  close();
   return { entries, integrity };
 }
 

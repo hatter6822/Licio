@@ -100,6 +100,31 @@ describe('counting the packages section', () => {
     expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
   });
 
+  it('does not let one entry"s extra digest cover for another entry"s missing one', () => {
+    // Two running totals compared at the end can be EQUAL while a package is
+    // uncovered: a second `integrity:` anywhere in the first entry's subtree
+    // balanced out the second entry having no hash at all, and the gate
+    // reported full coverage over it.
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        `    resolution: {integrity: sha512-${digest('a')}}`,
+        '    peerDependenciesMeta:',
+        `      x: {integrity: sha512-${digest('b')}}`,
+        '  b@2.0.0:',
+        '    resolution: {}',
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
+  });
+
+  it('counts a digest only on the resolution the entry pins', () => {
+    const content = lockfile(
+      ['  a@1.0.0:', '    resolution: {}', `    somethingElse: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
   it('reads the REAL lockfile as fully covered', async () => {
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
