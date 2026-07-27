@@ -8,14 +8,59 @@ const LOCKFILE_PATH = resolve(ROOT, 'pnpm-lock.yaml');
 const ALLOWED_HOSTS = new Set(['registry.npmjs.org']);
 
 /**
+ * Digest size, in bytes, of every SRI algorithm this gate accepts as coverage.
+ *
+ * SHA-1 and MD5 are deliberately absent: a lockfile pinned with a broken hash
+ * is not integrity-covered, so it must not be counted as such.
+ */
+const DIGEST_BYTES = new Map<string, number>([
+  ['sha256', 32],
+  ['sha384', 48],
+  ['sha512', 64],
+]);
+
+/**
  * A Subresource-Integrity value: an algorithm, then a BASE64 digest.
  *
- * The length is checked because the shortest algorithm pnpm emits is SHA-256,
- * whose base64 form is 44 characters — anything shorter is not a digest that
- * algorithm could have produced.
+ * Matched permissively on purpose — the digest is VALIDATED against the
+ * declared algorithm in {@link isAlgorithmLengthDigest}, not by this pattern.
+ * The trailing lookahead keeps an over-long digest from being accepted on the
+ * strength of a prefix.
  */
-const VALID_INTEGRITY =
-  /integrity:\s*sha(?:256|384|512)-[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])/;
+const INTEGRITY_VALUE = /integrity:\s*(sha[0-9]+)-([A-Za-z0-9+/]*={0,2})(?![A-Za-z0-9+/=])/;
+
+/**
+ * True when the line carries a digest of exactly the length its own algorithm
+ * produces.
+ *
+ * A single shared minimum length cannot express this: 40 base64 characters is
+ * short of every one of the three (44 / 64 / 88 characters), so `sha512-` +
+ * 40 `A`s — a digest a third of the required size, and one no SHA-512 could
+ * ever have produced — satisfied it. The decoded byte count is the property
+ * that actually matters, so it is the property checked.
+ *
+ * The round-trip pins the encoding as well as the size. Node's base64 decoder
+ * is LENIENT: it skips characters outside the alphabet and tolerates
+ * non-canonical padding bits, so `Buffer.from()` alone would silently accept a
+ * malformed payload and report a plausible byte count for it. Re-encoding and
+ * comparing rejects anything that is not the exact canonical encoding of those
+ * bytes.
+ */
+function isAlgorithmLengthDigest(line: string): boolean {
+  const match = INTEGRITY_VALUE.exec(line);
+  if (!match) return false;
+
+  const [, algorithm, encoded] = match;
+  if (algorithm === undefined || encoded === undefined) return false;
+
+  const expectedBytes = DIGEST_BYTES.get(algorithm);
+  if (expectedBytes === undefined) return false;
+
+  const decoded = Buffer.from(encoded, 'base64');
+  if (decoded.toString('base64') !== encoded) return false;
+
+  return decoded.byteLength === expectedBytes;
+}
 
 /**
  * The `packages:` section's entry and integrity counts.
@@ -36,11 +81,13 @@ export function countPackagesSection(content: string): { entries: number; integr
     }
     if (!inside) continue;
     if (/^ {2}\S/.test(line)) entries += 1;
-    // A DIGEST, not just the algorithm prefix.  Matching `sha512-` alone
-    // accepted `integrity: sha512-` and `sha512-not!base64` as hashes, so a
-    // lockfile with every digest emptied still reported full coverage — the
-    // exact failure this check exists to notice.
-    if (VALID_INTEGRITY.test(line)) integrity += 1;
+    // A DIGEST OF THE DECLARED ALGORITHM, not just the algorithm prefix and
+    // not merely something long enough.  Matching `sha512-` alone accepted
+    // `integrity: sha512-` and `sha512-not!base64` as hashes, and a shared
+    // 40-character minimum then accepted a digest a third of SHA-512's size —
+    // so a lockfile with every digest emptied or truncated still reported full
+    // coverage, the exact failure this check exists to notice.
+    if (isAlgorithmLengthDigest(line)) integrity += 1;
   }
   return { entries, integrity };
 }
