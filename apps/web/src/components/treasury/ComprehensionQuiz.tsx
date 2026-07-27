@@ -133,7 +133,7 @@ export function ComprehensionQuiz({
             {/* A wrong answer explains itself: the graded response carries the
                 correct choice and the reason, so the check teaches. */}
             {correction ? (
-              <div role="alert" className="mt-2 text-sm text-error-fg">
+              <div role="alert" className="mt-2 text-sm text-error-on-soft">
                 <p>
                   {t('room.comprehension.correct', 'Correct answer:')}{' '}
                   {question.choices[correction.correct_choice] ?? ''}
@@ -165,7 +165,7 @@ export function ComprehensionQuiz({
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

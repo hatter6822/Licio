@@ -128,8 +128,32 @@ export interface FreezeInput {
   /** SAFE status text — shown to members verbatim (§29.7). */
   reason: string;
   actorUserId: string | null;
-  /** Resolved by the route (platform security/legal/T&S roles). */
+  /**
+   * Platform staff — the WS-J `restrict` capability (ROLE_SAFETY and above).
+   *
+   * The ONLY authority that LIFTS a hold.  Deliberately narrow: the asymmetry
+   * above is worth exactly as much as the set of accounts that can release, so
+   * holding a cross-room FREEZE capability must not imply it.  `ROLE_INTEGRITY`
+   * owns the cross-room freeze surface and holds no `restrict`, so an integrity
+   * analyst can halt any room and a safety/legal operator is still required to
+   * let it go.
+   */
   isPlatformStaff: boolean;
+  /**
+   * Whether the actor may attribute this action to a PLATFORM source
+   * (`platform_security` / `legal` / `trust_safety` / `automated_monitoring`)
+   * rather than `steward`.
+   *
+   * A SEPARATE question from lifting, and conflating the two is what let a
+   * cross-room capability imply release authority.  Platform staff always may;
+   * so does a `ROLE_INTEGRITY` holder exercising the doctrine cross-room freeze,
+   * whose action IS a platform action even though they hold no `restrict` — and
+   * labelling it `steward` would misattribute it in the audit record.
+   *
+   * Defaults to {@link isPlatformStaff}: a caller that has not thought about the
+   * distinction gets the narrow answer.
+   */
+  actsWithPlatformAuthority?: boolean;
 }
 
 /**
@@ -145,7 +169,7 @@ export async function setGovernanceFreeze(
   if (input.action === 'unfreeze' && !input.isPlatformStaff) {
     return tgErr(403, 'platform_review_required', 'Only platform staff can lift a freeze.');
   }
-  if (input.source !== 'steward' && !input.isPlatformStaff) {
+  if (input.source !== 'steward' && !(input.actsWithPlatformAuthority ?? input.isPlatformStaff)) {
     return tgErr(403, 'source_not_authorized', 'This freeze source requires platform staff.');
   }
   await ensureProfile(deps, input.roomId);

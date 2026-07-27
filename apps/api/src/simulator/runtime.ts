@@ -41,7 +41,6 @@ import {
   OFFLINE_SYNC_ACCEPTANCE,
 } from '../events/ingest.js';
 import type { EventPipelineServices } from '../events/services.js';
-import { getEventPipelineServices } from '../events/services.js';
 import { createContribution } from '../forum/contributions.js';
 import {
   type DebateDeps,
@@ -53,26 +52,20 @@ import {
 import { buildDebateDeps } from '../forum/debate-scheduler.js';
 import { joinRoom } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
-import { getForumServices } from '../forum/services.js';
 import { toContributionPublic } from '../forum/threads.js';
-import { getGovernanceService } from '../governance/services.js';
 import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
-import { getIdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
-import { getIngestionServices } from '../ingestion/services.js';
 import { submitStory } from '../ingestion/submission.js';
 import { runBatchTier } from '../invariants/scheduler.js';
 import type { InvariantPlatformServices } from '../invariants/services.js';
-import { getInvariantServices } from '../invariants/services.js';
 import { submitReport } from '../moderation/reports.js';
 import type { ModerationServices } from '../moderation/services.js';
-import { getModerationServices } from '../moderation/services.js';
 import { windowStartMs } from '../pwatt/aggregation.js';
 import { runTriggeredPwattWindow } from '../pwatt/scoring.js';
 import { serveFeed } from '../ranking/service.js';
 import type { RankingServices } from '../ranking/services.js';
-import { getRankingServices, refreshStoryFeatures } from '../ranking/services.js';
+import { refreshStoryFeatures } from '../ranking/services.js';
 import type { DomainId } from './content.js';
 import { DOMAIN_IDS } from './content.js';
 import {
@@ -144,21 +137,6 @@ export interface SimulatorServiceGraph {
   readonly ranking: RankingServices;
   readonly moderation: ModerationServices;
   readonly governance: SimulatorGovernanceReader;
-}
-
-/** Resolve the boot-installed singletons. Throws if called before boot wiring
- *  (the same fail-fast contract as every get*Services()). */
-export function resolveServiceGraph(): SimulatorServiceGraph {
-  return {
-    identity: getIdentityServices(),
-    events: getEventPipelineServices(),
-    ingestion: getIngestionServices(),
-    forum: getForumServices(),
-    invariants: getInvariantServices(),
-    ranking: getRankingServices(),
-    moderation: getModerationServices(),
-    governance: getGovernanceService(),
-  };
 }
 
 interface PersonaState {

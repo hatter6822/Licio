@@ -15,6 +15,7 @@ import {
   type UpdateManifest,
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { toBase64Url } from './bundle-digest.js';
 import type { UpdateChannelConfig } from './config.js';
 import { resetPrivateBundleGate } from './gate.js';
 import { deviceHasPrivateRooms, gatedApplyUpdate } from './install-sw-pinning.js';
@@ -22,12 +23,6 @@ import { deviceHasPrivateRooms, gatedApplyUpdate } from './install-sw-pinning.js
 const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
 const BUNDLE_BYTES = new TextEncoder().encode('the running private-mode chunk bytes');
 const BUNDLE_URL = '/assets/private-p2p-deadbeef.js';
-
-function toBase64Url(bytes: Uint8Array): string {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
 
 async function genKeyPair() {
   const pair = (await crypto.subtle.generateKey('Ed25519', false, [

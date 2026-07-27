@@ -37,8 +37,6 @@ export const REASON_CODES = [
 
 export type ReasonCode = (typeof REASON_CODES)[number];
 
-export const REASON_CODE_REGISTRY_VERSION = 1;
-
 const REASON_CODE_SET: ReadonlySet<string> = new Set(REASON_CODES);
 
 export function isReasonCode(value: string): value is ReasonCode {
@@ -64,9 +62,4 @@ const FALLBACK_CODES: ReadonlySet<ReasonCode> = new Set([
 
 export function fallbackUsedFrom(codes: readonly string[]): boolean {
   return codes.some((code) => isReasonCode(code) && FALLBACK_CODES.has(code));
-}
-
-/** Degraded = any reason code at all (an unqualified output carries none). */
-export function degradedFrom(codes: readonly string[]): boolean {
-  return codes.length > 0;
 }

@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILT_CODE_SINKS,
   findDynamicCodeSinks,
+  findForbiddenGlobalReferencesIn,
   stripComments,
 } from './dangerous-code-patterns.js';
 
@@ -186,6 +187,26 @@ export function runUpdateChannelGate(read: (relPath: string) => string): UpdateG
       // a marker named in a comment to not count as wiring.)
       const seen = new Set<string>();
       for (const { label } of findDynamicCodeSinks(raw, BUILT_CODE_SINKS)) seen.add(label);
+      // The service worker is FIRST-PARTY, so the bounded rule applies to it:
+      // `eval` and `Function` may not be mentioned at all, which catches every
+      // laundering route without modelling any of them.  Its own doctrine
+      // comments say the words and are discarded by the parser, so prose about
+      // the rule never trips it.
+      //
+      // NOT applied to the built BUNDLES, and the reason is data rather than
+      // caution: two of 117 dist chunks mention `Function` — DOMPurify's
+      // `instanceof Function` checks, and a vendored CSP feature-detect that
+      // calls `Function('')` expecting it to throw.  The rule's premise is zero
+      // first-party mentions; over third-party output it is simply false, and a
+      // gate asserting it there would fail on correct code.  What governs those
+      // is the CSP the artifact ships under, which is why that feature-detect
+      // throws in production and why `check:csp-parity` asserts the policy on
+      // the built artifact.
+      for (const { label } of findForbiddenGlobalReferencesIn([{ path: file, content: raw }]).get(
+        file,
+      ) ?? []) {
+        seen.add(label);
+      }
       for (const label of seen) violations.push({ file, detail: `sw ${label}` });
       for (const { pattern, detail } of SW_FORBIDDEN) {
         if (pattern.test(code)) violations.push({ file, detail });

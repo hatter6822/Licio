@@ -23,11 +23,6 @@ export const AI_RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
 export type AiRiskLevel = (typeof AI_RISK_LEVELS)[number];
 export const aiRiskLevelSchema = z.enum(AI_RISK_LEVELS);
 
-/** Numeric severity of a risk level (low=0 … critical=3). */
-export function riskLevelSeverity(level: AiRiskLevel): number {
-  return AI_RISK_LEVELS.indexOf(level);
-}
-
 /**
  * Human-oversight levels (WS-K.1.1c). `none` for low-risk automation, `review`
  * (steward review queue) for medium, `approval` (human must approve before

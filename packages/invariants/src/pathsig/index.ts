@@ -128,9 +128,6 @@ export function signedArea(sig: TruncatedSignature, i: number, j: number): numbe
 // Session paths and health classification (WS-H.7.6b)
 // ---------------------------------------------------------------------------
 
-/** Path dimensions (fixed order). */
-export const SESSION_PATH_DIMENSIONS = ['topic', 'action', 'time', 'engagement'] as const;
-
 export const SESSION_ACTION_KINDS = [
   'read',
   'open_source',

@@ -59,7 +59,7 @@ export function NoticeInbox(): React.ReactElement {
             <div className="flex items-start justify-between gap-2">
               <h2 className="font-medium text-ink">{notice.title}</h2>
               {notice.read_at === null ? (
-                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary-on-soft">
                   {t('notices.new', 'New')}
                 </span>
               ) : null}

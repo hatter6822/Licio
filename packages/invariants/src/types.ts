@@ -48,20 +48,6 @@ export const INVARIANT_TARGET_TYPES = [
 ] as const;
 export type InvariantTargetType = (typeof INVARIANT_TARGET_TYPES)[number];
 
-/**
- * Semver `{major, minor, patch}` struct.
- *
- * @deprecated The emitted/persisted shapes carry `version` as the semver
- * *text* (`string`) — see {@link InvariantOutput}, {@link InvariantOutputEnvelope},
- * and the runner/card schema. This struct is retained only for a parser that
- * splits that text; do not add it to any output row.
- */
-export interface InvariantVersion {
-  major: number;
-  minor: number;
-  patch: number;
-}
-
 /** A computation target. */
 export interface InvariantTarget {
   targetType: InvariantTargetType;

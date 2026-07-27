@@ -161,7 +161,7 @@ describe.skipIf(!DB_URL)('Drizzle notification + settings stores (live Postgres)
     const { defaultPersonalizationSettings, defaultPrivacySettings } = await import(
       '@licio/shared'
     );
-    const db = createDbClient(DB_URL as string);
+    const db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
     const store = new DrizzleReplyNotificationStore(db);
     const settings = new DrizzleUserSettingsStore(db);

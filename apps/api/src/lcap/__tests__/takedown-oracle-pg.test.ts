@@ -43,7 +43,7 @@ describe.skipIf(!DB_URL)('Gate-19 — DrizzleTakedownOracle over live Postgres',
   const blockCid = (label: string): string => `lcapb_test_${label}_${nonce}`;
 
   beforeAll(async () => {
-    db = createDbClient(DB_URL as string);
+    db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
   });
 
@@ -139,7 +139,7 @@ describe.skipIf(!DB_URL)(
     let db: Db;
 
     beforeAll(async () => {
-      db = createDbClient(DB_URL as string);
+      db = createDbClient(DB_URL as string, { onNotice: 'discard' });
       await migrate(db, { migrationsFolder: migrationsFolder() });
     });
     afterAll(async () => {
@@ -182,7 +182,7 @@ describe.skipIf(!DB_URL)(
     };
 
     beforeAll(async () => {
-      db = createDbClient(DB_URL as string);
+      db = createDbClient(DB_URL as string, { onNotice: 'discard' });
       await migrate(db, { migrationsFolder: migrationsFolder() });
     });
     afterAll(async () => {

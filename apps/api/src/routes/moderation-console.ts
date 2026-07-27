@@ -158,11 +158,25 @@ export function createModerationConsoleRoutes() {
   const requireConsole: MiddlewareHandler<AuthEnv> = async (c, next) => {
     const auth = getAuth(c);
     if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
-    if (!auth.mfaActive || !auth.mfaVerified) {
-      return c.json(deny('mfa_required', 'Verify MFA to use the moderation console'), 403);
-    }
+    // AUTHORIZATION FIRST, then the session step-up.  The console is a fixed
+    // surface rather than a per-resource lookup, so answering "you hold no
+    // steward role" leaks nothing — while asking for MFA first told a
+    // NON-STEWARD to verify for access they can never be granted, and handed
+    // the UI a code it could only render as an authenticator form.
     if (!isStewardActor(actorOf(auth))) {
       return c.json(deny('forbidden', 'Steward role required'), 403);
+    }
+    // ENROLMENT and VERIFICATION are different problems with different repairs,
+    // and one code for both left a steward who has never enrolled staring at a
+    // form asking for a code no authenticator is generating.
+    if (!auth.mfaActive) {
+      return c.json(
+        deny('mfa_enrollment_required', 'Enrol MFA to use the moderation console'),
+        403,
+      );
+    }
+    if (!auth.mfaVerified) {
+      return c.json(deny('mfa_required', 'Verify MFA to use the moderation console'), 403);
     }
     await next();
     return;

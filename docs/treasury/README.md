@@ -123,7 +123,7 @@ WS-J `restrict` capability:
 | `POST/GET governance/charter` | publish (steward) / history |
 | `POST governance/law-packs/wsm` + `…/validate` + `…/:id/adopt` + `…/history` | register (publish-immutable) / dry-run / pre-enablement adoption (upgrades go through a `law_pack_upgrade` proposal) / history |
 | `POST governance/attestations` | readiness attestations (external audit = platform) |
-| `POST governance/freeze` / `pause` | stewards freeze, ONLY platform unfreezes; per-operation pauses |
+| `POST governance/freeze` / `pause` | a room's OWN steward freezes it; acting on a room you do NOT steward is the cross-room capability (`ROLE_INTEGRITY`, + counsel co-approval on `treasury` scope); ONLY platform unfreezes; per-operation pauses |
 | `POST rooms/:id/treasury` + `GET …/dashboard` | real-asset treasury creation (steward) + reconciled dashboard |
 | `POST/GET treasury/payment-intents(+/:id)` + `POST …/advance` | the WS-M.3.1 intent machine (advance: preflight/quote/signed/retry; quote returns the fee) |
 | `GET treasury/grants` + review/milestones/clawback | grants (clawback = platform) |
@@ -194,9 +194,35 @@ a non-`ordinary` mode) plus the room header:
 7. **Hash-chained audit.** Every governance action appends to the per-room
    chain; `GET governance/audit-chain` recomputes the whole chain (tamper,
    deletion-gap, and fork evidence) on demand — member-visible.
-8. **Platform-moderation supremacy.** Stewards can freeze; only the platform
-   legal floor (WS-J `restrict` capability) unfreezes, resolves legal/capture
-   challenges, attests external audits, and claws back grants.
+8. **Platform-moderation supremacy.** A room's OWN steward can freeze it — the
+   self-protective stop; `ELECTED_ROOM_STEWARD` sits deliberately outside the
+   platform `ROLE_*` namespace (STEWARD_ROLES.md).  Freezing a room you do NOT
+   steward is the platform CROSS-ROOM capability and carries the doctrine
+   requirements: `ROLE_INTEGRITY` + verified MFA.  `isPlatformStaff` alone is the
+   WS-J `restrict` capability, i.e. ROLE_SAFETY, which is NOT sufficient.  Only
+   the platform legal floor unfreezes, resolves legal/capture challenges, attests
+   external audits, and claws back grants.
+
+   **Tracked debt — counsel co-approval for a cross-room `treasury` freeze.**
+   WS-A.1.2c requires it, and the capability set + the `denyCapability` gate that
+   consults it both exist, so that path is currently REFUSED
+   (`co_approval_required`) — fail-closed, which is the doctrine's own posture:
+   if you cannot produce the co-approval, you cannot take the action.  Operators
+   are not stranded, because a cross-room `room`-scope freeze is available and
+   CASCADES onto the treasury.
+
+   What is missing is proof of *consent*.  An earlier cut accepted a
+   `co_approver_user_id` in the request and verified that the named account holds
+   `compliance.counsel.approve` — but that proves the account exists, not that its
+   owner reviewed or agreed to this freeze: any `ROLE_INTEGRITY` caller who knows
+   a counsel user's id could name them, and the tamper-evident audit would then
+   record an approval nobody gave.  That is worse than no control, so it was
+   removed rather than shipped.
+
+   **Closure target:** an authenticated approval bound to (room, scope, reason),
+   single-use and short-lived — counsel POSTs an approval having seen the reason,
+   the freeze consumes it.  Needs an approval store (in-memory + Drizzle, per
+   `check:prod-parity`) and a migration.  Until then the refusal above stands.
 9. **No pay-to-rank.** The treasury tables live in the isolated `knomosis`
    schema (soft room refs, `packages/db/src/isolation.ts` allowlist); nothing
    here feeds ranking.

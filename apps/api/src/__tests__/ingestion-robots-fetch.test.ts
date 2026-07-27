@@ -166,7 +166,11 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     '2001:db8::1',
     '::ffff:127.0.0.1',
     '::ffff:10.0.0.1',
-    '64:ff9b::a00:1',
+    // NAT64 (RFC 6052) carries the IPv4 in the LAST four bytes; a translated
+    // private address must stay blocked even though the prefix itself is not.
+    '64:ff9b::a00:1', // = 10.0.0.1
+    '64:ff9b::7f00:1', // = 127.0.0.1
+    '64:ff9b::a9fe:a9fe', // = 169.254.169.254 (cloud metadata)
     // HEX IPv4-mapped forms — the URL parser canonicalises mapped addresses to
     // hex, so these (not the dotted form) are what actually reach the gate.
     '::ffff:7f00:1', // = ::ffff:127.0.0.1 (loopback)
@@ -177,8 +181,53 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     // Deprecated IPv4-compatible (`::/96`) forms still route in some stacks.
     '::7f00:1', // = ::127.0.0.1
     '::a9fe:a9fe', // = ::169.254.169.254
+    // TRANSITION formats carry the IPv4 somewhere OTHER than the last four
+    // bytes, so the mapped/compatible decoders above cannot see it and the
+    // address otherwise reaches the v6 range tests looking like ordinary global
+    // unicast. 6to4 (2002::/16) holds it in bytes 2–5 …
+    '2002:7f00:0001::', // = 6to4(127.0.0.1)
+    '2002:a00:0001::', // = 6to4(10.0.0.1)
+    '2002:a9fe:a9fe::', // = 6to4(169.254.169.254) — the cloud metadata endpoint
+    '2002:c0a8:0101::', // = 6to4(192.168.1.1)
+    // … and Teredo (2001:0000::/32) holds the SERVER in bytes 4–7.
+    '2001:0:7f00:1::', // Teredo server = 127.0.0.1
+    '2001:0:a9fe:a9fe::', // Teredo server = 169.254.169.254
   ])('blocks IPv6 %s', (address) => {
     expect(isBlockedIpv6(address)).toBe(true);
+  });
+
+  it('decodes the obfuscated Teredo CLIENT address (one’s complement)', () => {
+    // Bits 96–127 hold ~clientIPv4. Both fixtures pair a PUBLIC server (8.8.8.8
+    // in bytes 4–7) with the client under test, so ONLY the client decoding can
+    // decide the verdict — a fixture with a zero server would be blocked by the
+    // server rule (0.0.0.0/8) and prove nothing about the client path.
+    // ~127.0.0.1 = 0x80FFFFFE.
+    expect(isBlockedIpv6('2001:0:808:808:0:0:80ff:fffe')).toBe(true);
+    // …and a PUBLIC client (8.8.8.8 → ~ = 0xF7F7F7F7) is allowed.
+    expect(isBlockedIpv6('2001:0:808:808:0:0:f7f7:f7f7')).toBe(false);
+  });
+
+  it('decodes a NAT64 translation rather than refusing the prefix', () => {
+    // On IPv6-only infrastructure a DNS64 resolver synthesises `64:ff9b::/96`
+    // for EVERY IPv4-only host, so blanket-refusing the prefix breaks ordinary
+    // public fetches (and Web Push, which shares `guardedLookup`) while blocking
+    // nothing an attacker could not reach directly.
+    expect(isBlockedIpv6('64:ff9b::808:808')).toBe(false); // = 8.8.8.8
+    // …while the private and metadata translations stay blocked.
+    expect(isBlockedIpv6('64:ff9b::a00:1')).toBe(true); // = 10.0.0.1
+    expect(isBlockedIpv6('64:ff9b::a9fe:a9fe')).toBe(true); // = 169.254.169.254
+  });
+
+  it('decodes NAT64 only at the WELL-KNOWN /96, refusing the rest of /32', () => {
+    // `64:ff9b::/96` puts the IPv4 in the last four bytes.  Matching the first
+    // four bytes alone is `/32` — a range 2^64 times larger, containing the RFC
+    // 8215 local-use `64:ff9b:1::/48` whose layout is different, so reading the
+    // tail there lets a synthesised address park a public-looking value in it
+    // while the real destination is private.
+    expect(isBlockedIpv6('64:ff9b::808:808')).toBe(false); // /96, = 8.8.8.8
+    expect(isBlockedIpv6('64:ff9b:1::808:808')).toBe(true); // /48 local-use
+    expect(isBlockedIpv6('64:ff9b:0:1::808:808')).toBe(true); // inside /32, not /96
+    expect(isBlockedIpv6('64:ff9b::0:1:808:808')).toBe(true); // bytes 8-11 non-zero
   });
 
   it('allows public IPv6 and routes families correctly', () => {
@@ -187,10 +236,23 @@ describe('SSRF address gate (WS-F.1.4e)', () => {
     // address is what is checked, not the mapping).
     expect(isBlockedIpv6('::ffff:8.8.8.8')).toBe(false);
     expect(isBlockedIpv6('::ffff:808:808')).toBe(false); // = ::ffff:8.8.8.8 (hex)
+    // The transition prefixes are decoded, NOT blanket-blocked: a 6to4 address
+    // wrapping a PUBLIC IPv4 stays reachable, and an ordinary 2001::/16 global
+    // address is not mistaken for Teredo (which is 2001:0000::/32 specifically).
+    expect(isBlockedIpv6('2002:808:808::')).toBe(false); // = 6to4(8.8.8.8)
+    expect(isBlockedIpv6('2001:4860:4860::8888')).toBe(false); // Google public DNS
     expect(isBlockedAddress('127.0.0.1', 4)).toBe(true);
     expect(isBlockedAddress('::1', 6)).toBe(true);
     // An unparseable IPv6 fails closed.
     expect(isBlockedIpv6('not:an:address')).toBe(true);
+  });
+
+  it('blocks the 6to4 relay anycast prefix on the IPv4 side (RFC 7526)', () => {
+    expect(isBlockedIpv4('192.88.99.1')).toBe(true);
+    expect(isBlockedIpv4('192.88.99.255')).toBe(true);
+    // Neighbouring 192.88/16 space is NOT the withdrawn /24 and stays reachable.
+    expect(isBlockedIpv4('192.88.98.1')).toBe(false);
+    expect(isBlockedIpv4('192.88.100.1')).toBe(false);
   });
 
   it('treats malformed IPv4 as blocked (fail closed)', () => {

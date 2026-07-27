@@ -124,7 +124,7 @@ export function LensManager({ roomId }: LensManagerProps): React.ReactElement {
           Add lens
         </Button>
         {create.isError ? (
-          <p role="alert" className="text-error text-sm">
+          <p role="alert" className="text-error-on-soft text-sm">
             {create.error instanceof ApiClientError
               ? create.error.message
               : 'The lens could not be added. Please try again.'}

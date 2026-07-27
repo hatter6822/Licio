@@ -4,791 +4,149 @@
 //
 // Postgres does NOT reject an identifier longer than `NAMEDATALEN - 1` (63
 // bytes by default) — it silently TRUNCATES it and emits only a NOTICE, which
-// scrolls past in migrate output. That is benign until two DIFFERENT intended
+// scrolls past in migrate output.  That is benign until two DIFFERENT intended
 // names agree on their first 63 bytes: they then truncate to the SAME stored
 // name, and either the second CREATE fails with a duplicate-object error at
 // migrate time, or a later `DROP CONSTRAINT` / `ALTER … RENAME` silently
-// targets whichever one exists. Five Drizzle-derived foreign-key names were
-// already landing truncated (renamed by migration 0097); this gate is what
-// stops the class from coming back.
+// targets whichever one exists.  Five Drizzle-derived foreign-key names were
+// already landing truncated (renamed by migration 0097).
 //
-// It scans the HAND-AUTHORED migration SQL — the only place an identifier
-// actually reaches the server, since `db:generate` is never run on this repo
-// (CLAUDE.md) — and fails on any quoted identifier over the limit. The
-// companion gated integration test (`packages/db/src/__tests__`) asserts the
-// same property over the MIGRATED DATABASE, which additionally covers names
-// Drizzle derives rather than spells out.
+// TWO CHECKS, and the division between them is the point.
 //
-// Deliberately dependency-free so the `scripts`-rooted vitest project can unit
-// test the pure core directly.
+//   • THIS gate reads the hand-authored migration SQL with the REAL POSTGRES
+//     PARSER (`libpg-query`, the server's own grammar compiled to WASM).  It
+//     needs no database, so it catches a name in the Lint job before anything
+//     is applied.
+//   • The migration harness (`packages/db/src/__tests__`) listens for
+//     Postgres's own `identifier … will be truncated` NOTICE while applying the
+//     whole chain.  That is AUTHORITATIVE, and it covers the two routes no
+//     static read can: a name DERIVED by Drizzle rather than spelled out, and
+//     one composed at runtime inside `EXECUTE format(…)`.
+//
+// That division is why this file is short.  It used to hand-write a SQL lexer —
+// quoted bodies with `""` escapes, `U&"…"` with `UESCAPE`, `E'…'`, dollar
+// quoting, which `$tag$` spans are PROCEDURAL versus data, and an interpreter
+// for `EXECUTE`, `format()` and `||` concatenation so it could reconstruct
+// dynamically-built names.  Roughly ten commits added one more case each:
+// "decode `""` in SQL identifiers", "handle `E''` and UTF-8 clipping", "three
+// SQL lexer gaps", "expand EXECUTE format()", "classify SQL bodies by
+// LANGUAGE".  The lexing is now the parser's, and the dynamic construction is
+// answered exactly by Postgres itself rather than approximately here.
+//
+// HOW A TRUNCATION IS VISIBLE HERE.  The parser is the server's, so it applies
+// the server's limit: an over-long identifier comes back ALREADY TRUNCATED, and
+// the original length is not recoverable from the tree.  That is not a defect,
+// it is the same normalisation the gate exists to detect — so the gate reads the
+// SIGNATURE instead of the length.
+//
+// A truncated ASCII name is EXACTLY 63 bytes, always; a multi-byte one is
+// clipped to a character boundary, so it lands between 60 and 63.  Every
+// truncation therefore shows up in that band, and nothing outside it can be one
+// — the test is sound, and a name inside it is either genuinely that long or was
+// cut, which the parser cannot tell apart.  So the gate asks for the genuine
+// ones to be DECLARED, and the migration harness settles the rest by listening
+// to Postgres.
+//
+// WHAT COUNTS AS AN IDENTIFIER.  Every string in the parse tree, except the
+// three things that are legitimately long and are not names: literal CONSTANTS,
+// procedural BODIES, and COMMENT prose.  Over-collecting is deliberate and
+// safe, because the only thing reported is a string OVER the limit and no SQL
+// keyword or enum tag is anywhere near 63 bytes — so this needs no list of the
+// DDL forms that can name something, and cannot have a gap in one.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'libpg-query';
+import {
+  isHistoricallyExempt,
+  migrationTag,
+  PG_MAX_IDENTIFIER_BYTES,
+} from '../packages/db/src/identifier-limits.js';
 
-/** Postgres `NAMEDATALEN - 1`: the longest identifier stored without truncation. */
-export const PG_MAX_IDENTIFIER_BYTES = 63;
+export { PG_MAX_IDENTIFIER_BYTES } from '../packages/db/src/identifier-limits.js';
 
 /**
- * Keywords immediately after which a dollar-quoted span is PROCEDURAL CODE
- * rather than a data value: `DO $$ … $$` and `CREATE FUNCTION … AS $$ … $$`.
- */
-const PROCEDURAL_BEFORE_DOLLAR: ReadonlySet<string> = new Set(['do', 'as']);
-
-/**
- * Does the token history immediately before a `$tag$` mark it as procedural?
+ * Node keys whose STRING payload is prose or data, never a name.
  *
- * `recent` holds the last three tokens, oldest first. The adjacent case covers
- * `DO $$` and `AS $$`, but `DO` also takes an optional language clause —
- * `DO LANGUAGE plpgsql $$ … $$` is valid and puts `plpgsql` next to the
- * delimiter, so an adjacency-only test read the body as DATA and skipped it
- * whole. That is the dangerous direction: the gate goes BLIND to real DDL
- * rather than merely noisy, which is how an over-long name would reach
- * Postgres and be truncated with the gate still green.
+ * `A_Const` is a literal constant; `CommentStmt.comment` is prose.  A
+ * procedural body arrives as the argument of a `DefElem` named `as` (a function
+ * body) — plpgsql text, which this gate does not read and the harness covers.
  */
-function isProceduralContext(recent: readonly string[]): boolean {
-  const last = recent[recent.length - 1] ?? '';
-  if (PROCEDURAL_BEFORE_DOLLAR.has(last)) return true;
-  // `DO LANGUAGE <lang> $$`
-  return recent[recent.length - 3] === 'do' && recent[recent.length - 2] === 'language';
-}
+const BODY_DEFNAMES: ReadonlySet<string> = new Set(['as', 'body']);
+
+/** A parse-tree node, as the parser hands it back. */
+type TreeNode = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
 /**
- * Read a `"…"` body starting just after the opening quote, honouring the `""`
- * escape. Returns the raw body and the offset just past the closing quote, or
- * `null` when unterminated.
- */
-function parseQuotedBody(sql: string, start: number): { body: string; end: number } | null {
-  let body = '';
-  let i = start;
-  while (i < sql.length) {
-    if (sql[i] === '"') {
-      if (sql[i + 1] === '"') {
-        body += '"';
-        i += 2;
-      } else return { body, end: i + 1 };
-    } else {
-      body += sql[i];
-      i += 1;
-    }
-  }
-  return null;
-}
-
-/**
- * Read the optional `UESCAPE '<char>'` clause that may follow a `U&"…"`
- * literal and redefine its escape character. Returns the character in force
- * (default `\`) and the offset just past the clause.
- */
-function readUescape(sql: string, start: number): { char: string; end: number } {
-  const m = /^\s*UESCAPE\s*'(.)'/i.exec(sql.slice(start));
-  if (!m?.[1]) return { char: '\\', end: start };
-  return { char: m[1], end: start + m[0].length };
-}
-
-/**
- * Decode the escapes inside a `U&"…"` body: `EE` is a literal escape
- * character, `EXXXX` a UTF-16 code unit, and `E+XXXXXX` a code point.
+ * Every identifier one migration's SQL names.
  *
- * The 4-hex form is decoded with `fromCharCode` rather than `fromCodePoint` so
- * that a surrogate PAIR written as two escapes combines into one character, as
- * Postgres treats it — decoding each half independently would count three
- * bytes per lone surrogate and inflate the measurement.
+ * The walk carries two exclusions down with it rather than testing field names
+ * on the way out, so a constant nested inside an expression and a body nested
+ * inside a `DO` are both skipped wherever they appear.
  */
-function decodeUnicodeEscapes(body: string, escapeChar: string): string {
-  let out = '';
-  let i = 0;
-  while (i < body.length) {
-    if (body[i] !== escapeChar) {
-      out += body[i];
-      i += 1;
-      continue;
+export async function identifiersIn(sql: string): Promise<string[]> {
+  const tree = (await parse(sql)) as { stmts?: unknown };
+  const found: string[] = [];
+
+  const walk = (node: TreeNode, inConstant: boolean, inBody: boolean): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const each of node) walk(each as TreeNode, inConstant, inBody);
+      return;
     }
-    if (body[i + 1] === escapeChar) {
-      out += escapeChar;
-      i += 2;
-      continue;
-    }
-    if (body[i + 1] === '+') {
-      const hex = body.slice(i + 2, i + 8);
-      if (/^[0-9A-Fa-f]{6}$/.test(hex)) {
-        out += String.fromCodePoint(Number.parseInt(hex, 16));
-        i += 8;
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string') {
+        // `CommentStmt.comment` is the only prose field; everything else that
+        // survives the two flags is a name.
+        if (!inConstant && !inBody && key !== 'comment') found.push(value);
         continue;
       }
+      const defname =
+        key === 'DefElem' && value !== null && typeof value === 'object'
+          ? String((value as Record<string, unknown>)['defname'] ?? '')
+          : '';
+      walk(
+        value as TreeNode,
+        inConstant || key === 'A_Const',
+        inBody || BODY_DEFNAMES.has(defname),
+      );
     }
-    const hex = body.slice(i + 1, i + 5);
-    if (/^[0-9A-Fa-f]{4}$/.test(hex)) {
-      out += String.fromCharCode(Number.parseInt(hex, 16));
-      i += 5;
-      continue;
-    }
-    // Not a well-formed escape: Postgres would reject the literal outright, so
-    // keep the character and let the length check see it rather than guessing.
-    out += body[i];
-    i += 1;
-  }
-  return out;
-}
-
-/**
- * Decode a Postgres ESCAPE STRING (`E'…'`) body. Unlike an ordinary literal,
- * backslash sequences here are interpreted by the server, so the identifier it
- * actually creates can be far longer than the text as written — a 64-character
- * name spelled as 64 `\x61` escapes is 256 bytes of source and 64 bytes of
- * identifier. Measuring the undecoded text scans short `x61` fragments and
- * reports nothing.
- */
-function decodeEscapeString(body: string): string {
-  let out = '';
-  let i = 0;
-  const SIMPLE: Record<string, string> = {
-    n: '\n',
-    t: '\t',
-    r: '\r',
-    b: '\b',
-    f: '\f',
-    v: '\v',
-    '\\': '\\',
-    "'": "'",
-    '"': '"',
   };
-  while (i < body.length) {
-    if (body[i] !== '\\') {
-      out += body[i];
-      i += 1;
-      continue;
-    }
-    const next = body[i + 1] ?? '';
-    // \xHH — one or two hex digits.
-    const hex = /^x([0-9A-Fa-f]{1,2})/.exec(body.slice(i + 1));
-    if (hex?.[1]) {
-      out += String.fromCharCode(Number.parseInt(hex[1], 16));
-      i += 1 + hex[0].length;
-      continue;
-    }
-    // \uXXXX and \UXXXXXXXX.
-    const uni = /^(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/.exec(body.slice(i + 1));
-    if (uni?.[1]) {
-      out += String.fromCodePoint(Number.parseInt(uni[1].slice(1), 16));
-      i += 1 + uni[0].length;
-      continue;
-    }
-    // \ooo — one to three OCTAL digits.
-    const oct = /^([0-7]{1,3})/.exec(body.slice(i + 1));
-    if (oct?.[1]) {
-      out += String.fromCharCode(Number.parseInt(oct[1], 8));
-      i += 1 + oct[0].length;
-      continue;
-    }
-    if (SIMPLE[next] !== undefined) {
-      out += SIMPLE[next];
-      i += 2;
-      continue;
-    }
-    // Any other escaped character stands for itself.
-    out += next;
-    i += 2;
-  }
-  return out;
+
+  walk((tree.stmts ?? []) as TreeNode, false, false);
+  return found;
 }
 
 /**
- * Does a string literal plausibly hold SQL rather than data?
+ * Names that genuinely sit at the limit, and are therefore NOT truncations.
  *
- * Used only for the `AS '…'` function-body form. `CREATE FUNCTION … AS 'obj',
- * 'symbol'` names a C object file and link symbol — plain data that would be
- * reported as an over-long identifier if a path ran past the limit. Requiring
- * a statement keyword keeps the legacy plpgsql body scanned without turning
- * every `AS` literal into SQL.
+ * The parser cannot distinguish these from a cut name, so they are declared
+ * once.  Each is scoped to the migrations it appears in, and an entry that
+ * stops matching is itself an error — the same discipline the other allowlists
+ * in `scripts/` keep.
  */
-function looksLikeSql(text: string): boolean {
-  return /\b(?:begin|create|alter|drop|select|insert|update|delete|execute|table|with|values)\b/i.test(
-    text,
-  );
-}
-
-/**
- * Languages whose function body is NOT SQL — it names an object file and a
- * link symbol, so an over-long path there is data, not an identifier.
- */
-const NON_SQL_LANGUAGES: ReadonlySet<string> = new Set(['c', 'internal']);
-
-/**
- * Is the function body delimited around `[bodyStart, bodyEnd)` procedural code?
- *
- * Decided by the statement's `LANGUAGE` clause where there is one, which is
- * what Postgres itself uses — a keyword allowlist over the body cannot be
- * complete (`AS $$ TABLE t; $$ LANGUAGE SQL` is a valid body whose only verb
- * is `TABLE`), and getting it wrong in that direction makes the gate BLIND.
- * The clause may sit on either side of the body, so both are searched, and
- * only the nearest one within the statement counts.
- *
- * With no clause at all, fall back to inspecting the body: that is the legacy
- * `DO '…'` / `EXECUTE '…'` case, where there is no language to read.
- */
-function isProceduralBody(sql: string, bodyStart: number, bodyEnd: number, body: string): boolean {
-  // Look forward from the end of the body to the statement terminator.
-  const after = sql.slice(bodyEnd, sql.indexOf(';', bodyEnd) + 1 || undefined);
-  const forward = /\bLANGUAGE\s+"?([A-Za-z_][A-Za-z0-9_]*)"?/i.exec(after);
-  if (forward?.[1]) return !NON_SQL_LANGUAGES.has(forward[1].toLowerCase());
-  // …then backward, to the start of this statement.
-  const statementStart = sql.lastIndexOf(';', bodyStart) + 1;
-  const before = sql.slice(statementStart, bodyStart);
-  const backward = /\bLANGUAGE\s+"?([A-Za-z_][A-Za-z0-9_]*)"?/i.exec(before);
-  if (backward?.[1]) return !NON_SQL_LANGUAGES.has(backward[1].toLowerCase());
-  return looksLikeSql(body);
-}
-
-/**
- * Read a single-quoted literal at `i` (optionally `E`-prefixed), returning its
- * decoded value and the offset just past it.
- */
-function readSqlLiteral(sql: string, i: number): { value: string; end: number } | null {
-  let j = i;
-  let escaped = false;
-  if (/^[EeBbXx]$/.test(sql[j] ?? '') && sql[j + 1] === "'") {
-    escaped = /^[Ee]$/.test(sql[j] as string);
-    j += 1;
-  }
-  if (sql[j] !== "'") return null;
-  j += 1;
-  let literal = '';
-  while (j < sql.length) {
-    if (escaped && sql[j] === '\\' && j + 1 < sql.length) {
-      literal += sql.slice(j, j + 2);
-      j += 2;
-      continue;
-    }
-    if (sql[j] === "'") {
-      if (sql[j + 1] === "'") {
-        literal += "'";
-        j += 2;
-      } else {
-        j += 1;
-        return { value: escaped ? decodeEscapeString(literal) : literal, end: j };
-      }
-    } else {
-      literal += sql[j];
-      j += 1;
-    }
-  }
-  return null; // unterminated
-}
-
-/**
- * Read a dotted name starting with the bare word `head` at `i`, returning its
- * final component, the components before it, and the offset of the `(` that
- * follows (whitespace skipped), if any.
- *
- * `pg_catalog . format (…)` is all legal spacing for one call.
- */
-function readQualifiedName(
-  sql: string,
-  i: number,
-  head: string,
-): { name: string; qualifiers: string[]; open: number } {
-  const parts = [head];
-  let end = i + head.length;
-  for (;;) {
-    const next = /^\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)/.exec(sql.slice(end));
-    if (!next?.[1]) break;
-    parts.push(next[1]);
-    end += next[0].length;
-  }
-  while (end < sql.length && /\s/.test(sql[end] as string)) end += 1;
-  return { name: parts[parts.length - 1] as string, qualifiers: parts.slice(0, -1), open: end };
-}
-
-/**
- * Expand a statically-known `format(…)` call into the statement it produces.
- *
- * `EXECUTE format('CREATE INDEX %I ON t(c)', '<name>')` runs real DDL, and the
- * identifier arrives through the `%I` placeholder — so neither the format
- * string nor the argument is an identifier on its own, and scanning them
- * separately finds nothing.
- *
- * `%I` and `%s` take their argument's value; `%L` becomes a SHORT placeholder
- * literal, because a value substituted there is data and its length must not
- * be reported as an identifier. A non-literal argument becomes a short
- * placeholder for the same reason.
- */
-function expandFormatCall(sql: string, open: number): { text: string; end: number } | null {
-  const args: Array<string | null> = [];
-  let i = open + 1;
-  let depth = 0;
-  let current: string | null = null;
-  let sawAny = false;
-  while (i < sql.length) {
-    const c = sql[i] as string;
-    if (c === "'" || (/^[EeBbXx]$/.test(c) && sql[i + 1] === "'")) {
-      const literal = readSqlLiteral(sql, i);
-      if (!literal) return null;
-      // An ARGUMENT may itself be a `||` chain — `format('… %I', 'aaa' ||
-      // 'bbb')` builds one identifier out of two literals, and taking only the
-      // last would measure a fragment. Folded with the same helper `EXECUTE`
-      // uses, so a name split across operands is measured whole.
-      const folded = foldConcatenation(sql, literal.end, literal.value);
-      if (depth === 0) current = folded.text;
-      sawAny = true;
-      i = folded.end;
-      continue;
-    }
-    if (c === '(') depth += 1;
-    else if (c === ')') {
-      if (depth === 0) {
-        if (sawAny) args.push(current);
-        return { text: substituteFormat(args), end: i + 1 };
-      }
-      depth -= 1;
-    } else if (c === ',' && depth === 0) {
-      args.push(current);
-      current = null;
-      sawAny = true;
-    } else if (!/\s/.test(c) && depth === 0 && current === null) {
-      sawAny = true; // a non-literal operand: value not statically known
-    }
-    i += 1;
-  }
-  return null;
-}
-
-/**
- * Substitute `format()` arguments into its template.
- *
- * A conversion is PostgreSQL's full `%[position$][flags][width]type`, not just
- * `%` followed by the type character: `format('CREATE INDEX %1$I ON t(c)', n)`
- * names its argument positionally, and `%-10s` carries a flag and a width.
- * Reading only the character after `%` mis-reads the position digits as the
- * type, drops the argument, and hides an over-long identifier that PostgreSQL
- * would go on to create and silently truncate.
- */
-function substituteFormat(args: ReadonlyArray<string | null>): string {
-  const template = args[0];
-  if (typeof template !== 'string') return '';
-  let out = '';
-  let next = 1;
-  let i = 0;
-  while (i < template.length) {
-    const ch = template[i] as string;
-    if (ch !== '%') {
-      out += ch;
-      i += 1;
-      continue;
-    }
-
-    let k = i + 1;
-    // `position$` — an explicit 1-based index into the arguments AFTER the
-    // template, which is exactly this array's own indexing.
-    let position: number | null = null;
-    const positionDigits = /^\d+/.exec(template.slice(k));
-    if (positionDigits && template[k + positionDigits[0].length] === '$') {
-      position = Number(positionDigits[0]);
-      k += positionDigits[0].length + 1;
-    }
-    // flags — only `-` (left-justify) is defined.
-    while (template[k] === '-') k += 1;
-    // width — literal digits, or `*` taking the width from an argument (which
-    // consumes one, shifting every later sequential conversion), or `*n$`.
-    if (template[k] === '*') {
-      k += 1;
-      const widthDigits = /^\d+/.exec(template.slice(k));
-      if (widthDigits && template[k + widthDigits[0].length] === '$')
-        k += widthDigits[0].length + 1;
-      else next += 1;
-    } else {
-      while (/^\d$/.test(template[k] ?? '')) k += 1;
-    }
-
-    const kind = template[k];
-    i = k + 1;
-    if (kind === undefined || kind === '%') {
-      out += '%';
-      continue;
-    }
-    const value = position === null ? args[next] : args[position];
-    if (position === null) next += 1;
-    if (kind === 'I') out += typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : 'x';
-    else if (kind === 's') out += typeof value === 'string' ? value : 'x';
-    // `%L` yields DATA — a short placeholder, so its length is never measured
-    // as an identifier.
-    else if (kind === 'L') out += "'v'";
-    else out += 'x';
-  }
-  return out;
-}
-
-/**
- * Fold a `||` chain of STRING LITERALS that follows an already-read literal,
- * returning the concatenated text and the offset just past the chain.
- *
- * Only literal operands are folded. A variable operand (`… || quote_ident(n)`)
- * is not statically known, so the chain stops there — the fragments already
- * gathered are still scanned, which is what surfaces an over-long name written
- * as its own literal.
- */
-function foldConcatenation(sql: string, from: number, head: string): { text: string; end: number } {
-  const n = sql.length;
-  let text = head;
-  let k = from;
-  for (;;) {
-    let j = k;
-    while (j < n && /\s/.test(sql[j] as string)) j += 1;
-    if (sql.slice(j, j + 2) !== '||') break;
-    j += 2;
-    while (j < n && /\s/.test(sql[j] as string)) j += 1;
-    const operand = readConcatOperand(sql, j);
-    if (!operand) break; // not a literal: the value is not static
-    text += operand.value;
-    k = operand.end;
-  }
-  return { text, end: k };
-}
-
-/**
- * Read ONE concatenation operand: a single-quoted literal (optionally
- * `E`-prefixed) or a DOLLAR-QUOTED span.
- *
- * Both spellings are literals PostgreSQL concatenates identically, and dynamic
- * SQL uses the dollar-quoted one precisely when the statement contains quotes
- * — so a folder that read only `'…'` dropped every later operand of
- * `EXECUTE $a$CREATE INDEX $a$ || $b$<name>$b$`, discarding the identifier.
- */
-function readConcatOperand(sql: string, at: number): { value: string; end: number } | null {
-  const dollar = /^\$(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF]*)?\$/.exec(sql.slice(at));
-  if (dollar) {
-    const tag = dollar[0];
-    const close = sql.indexOf(tag, at + tag.length);
-    if (close === -1) return null; // unterminated: not statically known
-    return { value: sql.slice(at + tag.length, close), end: close + tag.length };
-  }
-  const literal = readSqlLiteral(sql, at);
-  return literal ? { value: literal.value, end: literal.end } : null;
-}
-
-/**
- * Split SQL into the spans that can hold an identifier, discarding the spans
- * that cannot: `--` line comments, `/* … *\/` block comments (nesting, which
- * Postgres allows), `'…'` string literals (with the `''` escape), and
- * dollar-quoted VALUE literals.
- *
- * Scanning rather than regex-replacing because the constructs interleave: a
- * string can contain `--`, a comment can contain an apostrophe, and a
- * sequential set of replaces gets both wrong.
- *
- * Dollar quoting is CONTEXT-DEPENDENT and both readings are needed. After `DO`
- * or `AS` the body is procedural code — migration 0097's `DO $$ … $$` block
- * contains real DDL whose identifiers must be measured — so only the
- * delimiters are skipped. Everywhere else `$$…$$` is just a string literal
- * (`INSERT … VALUES ($$text$$)`), and tokenising that as SQL would report the
- * prose inside it as an over-long identifier and fail a perfectly valid
- * migration. Treating every dollar-quoted span as code makes the gate reject
- * correct input; treating every one as data would blind it to 0097's DDL.
- *
- * Yields `{ text, quoted }` runs: `quoted` marks a `"…"` delimited identifier,
- * which may legally contain characters a bare identifier may not.
- */
-export function* identifierCandidates(sql: string): Generator<{ text: string; quoted: boolean }> {
-  let i = 0;
-  const n = sql.length;
-  // The last three bare tokens seen, lower-cased, oldest first — enough to
-  // recognise `DO LANGUAGE <lang> $$` as well as the adjacent `DO`/`AS` forms.
-  let recent: string[] = [];
-  // The tag of the PROCEDURAL body currently open, if any. Its matching close
-  // is a delimiter to skip, not the start of a new literal (the token before it
-  // is `END`, which would otherwise read as data).
-  let openProceduralTag: string | null = null;
-  // Set by an `E`/`e` prefix: the NEXT single-quoted literal is an escape
-  // string and its backslash sequences must be decoded before it is measured.
-  let pendingEscapeString = false;
-  while (i < n) {
-    const two = sql.slice(i, i + 2);
-    // -- line comment
-    if (two === '--') {
-      const nl = sql.indexOf('\n', i);
-      i = nl === -1 ? n : nl;
-      continue;
-    }
-    // /* block comment */ (Postgres nests these)
-    if (two === '/*') {
-      let depth = 1;
-      i += 2;
-      while (i < n && depth > 0) {
-        const t = sql.slice(i, i + 2);
-        if (t === '/*') {
-          depth += 1;
-          i += 2;
-        } else if (t === '*/') {
-          depth -= 1;
-          i += 2;
-        } else i += 1;
-      }
-      continue;
-    }
-    // 'string literal' — '' is an escaped quote, not a terminator
-    if (sql[i] === "'") {
-      const literalStart = i;
-      i += 1;
-      let literal = '';
-      while (i < n) {
-        // In an ESCAPE string a backslash escapes the NEXT character, so `\'`
-        // is an apostrophe inside the literal, not its terminator. Ending the
-        // scan there truncated the statement and hid everything after it.
-        if (pendingEscapeString && sql[i] === '\\' && i + 1 < n) {
-          literal += sql.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        if (sql[i] === "'") {
-          if (sql[i + 1] === "'") {
-            literal += "'";
-            i += 2;
-          } else {
-            i += 1;
-            break;
-          }
-        } else {
-          literal += sql[i];
-          i += 1;
-        }
-      }
-      // The `''` escapes are already collapsed above; an ESCAPE string needs
-      // its backslash sequences decoded too, since that is what the server
-      // parses.
-      let decoded = pendingEscapeString ? decodeEscapeString(literal) : literal;
-      pendingEscapeString = false;
-      const previous = recent[recent.length - 1];
-      // PL/pgSQL's EXECUTE takes any string EXPRESSION, and the common dynamic
-      // -SQL idiom composes one: `EXECUTE 'CREATE INDEX ' || name || ' ON t'`.
-      // Scanning only the literal adjacent to `EXECUTE` saw a fragment, so an
-      // over-long name in a later fragment went unreported. Fold the statically
-      // known `||` operands into one statement before scanning.
-      if (previous === 'execute') {
-        const folded = foldConcatenation(sql, i, decoded);
-        decoded = folded.text;
-        i = folded.end;
-      }
-      // A literal that is the argument of PL/pgSQL's `EXECUTE` is not data —
-      // Postgres runs it as SQL, so an over-long name inside it truncates
-      // exactly like one written out.
-      //
-      // The same is true of the LEGACY function-body form,
-      // `CREATE FUNCTION … AS 'BEGIN … END' LANGUAGE plpgsql`: the body is
-      // procedural code, exactly as in the dollar-quoted spelling that is
-      // already scanned. It carries the `looksLikeSql` guard because `AS` also
-      // introduces the C-language `AS 'objfile', 'symbol'` form, which is data.
-      // `DO '…'` is the string spelling of a procedural body, exactly as
-      // `DO $$…$$` is the dollar-quoted one, and Postgres executes it during
-      // the migration.
-      if (
-        previous === 'execute' ||
-        ((previous === 'as' || previous === 'do') &&
-          isProceduralBody(sql, literalStart, i, decoded))
-      ) {
-        yield* identifierCandidates(decoded);
-      }
-      recent = [];
-      continue;
-    }
-    // $tag$ … $tag$ — data literal or procedural body, per the context above.
-    // The TAG follows unquoted-identifier rules, so it may contain digits after
-    // its first character (`$q1$`, `$version_2$`). A letters-only class failed
-    // to recognise those as delimiters at all, so the quoted prose between them
-    // was tokenised as SQL and reported as an over-long identifier.
-    const dollar = /^\$(?:[A-Za-z_-￿][A-Za-z0-9_-￿]*)?\$/.exec(sql.slice(i));
-    if (dollar) {
-      const tag = dollar[0];
-      if (openProceduralTag === tag) {
-        // Closing delimiter of the procedural body: skip the delimiter only.
-        openProceduralTag = null;
-        i += tag.length;
-        continue;
-      }
-      if (openProceduralTag === null && isProceduralContext(recent)) {
-        // `DO $$` / `AS $$` / `DO LANGUAGE … $$`: the body is code, so scan it
-        // — but only if it LOOKS like SQL. `CREATE FUNCTION … AS $$$libdir/x$$
-        // LANGUAGE C` puts an object-file path here, and reporting a long path
-        // as an over-long identifier would fail a valid migration. The
-        // single-quoted form already carried this guard; applying it here too
-        // makes the two spellings agree.
-        const close = sql.indexOf(tag, i + tag.length);
-        const bodyStart = i + tag.length;
-        const bodyEnd = close === -1 ? n : close;
-        const body = sql.slice(bodyStart, bodyEnd);
-        if (isProceduralBody(sql, bodyStart, bodyEnd + tag.length, body)) {
-          openProceduralTag = tag;
-          i += tag.length;
-          continue;
-        }
-      }
-      // A value literal (including one nested inside a procedural body): skip
-      // the ENTIRE span. An unterminated literal consumes the rest rather than
-      // spilling its prose into the identifier stream.
-      const close = sql.indexOf(tag, i + tag.length);
-      const bodyEnd = close === -1 ? n : close;
-      // …unless it is the argument of `EXECUTE`, in which case the span is
-      // SQL the server runs — the dollar-quoted counterpart of the string
-      // case above, and the form used precisely when the dynamic statement
-      // contains quotes.
-      if (recent[recent.length - 1] === 'execute') {
-        // The statement may be COMPOSED, and the dollar-quoted spelling is the
-        // one used when it contains quotes. Folded with the same helper the
-        // single-quoted path uses, so a name in a later operand is measured.
-        const folded = foldConcatenation(
-          sql,
-          close === -1 ? n : close + tag.length,
-          sql.slice(i + tag.length, bodyEnd),
-        );
-        yield* identifierCandidates(folded.text);
-        i = folded.end;
-        recent = [];
-        continue;
-      }
-      i = close === -1 ? n : close + tag.length;
-      recent = [];
-      continue;
-    }
-    // U&"…" — a Unicode-escaped identifier. Postgres stores the DECODED name,
-    // so measuring the escape notation over-counts by up to 6x and would reject
-    // a migration whose real identifier is far inside the limit.
-    const uAmp = /^[Uu]&"/.exec(sql.slice(i));
-    if (uAmp) {
-      const parsed = parseQuotedBody(sql, i + uAmp[0].length);
-      if (parsed === null) return; // unterminated: stop rather than mis-parse
-      const uescape = readUescape(sql, parsed.end);
-      yield { text: decodeUnicodeEscapes(parsed.body, uescape.char), quoted: true };
-      i = uescape.end;
-      recent = [];
-      continue;
-    }
-    // "quoted identifier" — `""` is an ESCAPED quote inside the name, not a
-    // terminator. Stopping at the first quote would split a single 64-byte
-    // identifier into two sub-limit halves, and both would pass. The DECODED
-    // name is what Postgres stores and therefore what must be measured.
-    if (sql[i] === '"') {
-      i += 1;
-      let decoded = '';
-      let closed = false;
-      while (i < n) {
-        if (sql[i] === '"') {
-          if (sql[i + 1] === '"') {
-            decoded += '"';
-            i += 2;
-          } else {
-            i += 1;
-            closed = true;
-            break;
-          }
-        } else {
-          decoded += sql[i];
-          i += 1;
-        }
-      }
-      if (!closed) return; // unterminated: stop rather than mis-parse the rest
-      yield { text: decoded, quoted: true };
-      continue;
-    }
-    // Bare identifier / keyword token. Postgres's unquoted-identifier set is
-    // NOT ASCII-only: any character with the high bit set is a valid letter, so
-    // `é…` is one identifier the server truncates like any other. An
-    // ASCII-only class silently skipped the leading `é` and measured only the
-    // shorter suffix, letting a 64-byte name through.
-    const bare = /^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*/.exec(sql.slice(i));
-    if (bare) {
-      // `$` is legal INSIDE a bare identifier, so `END$$` would otherwise be
-      // consumed whole and the dollar-quote delimiter never seen \u2014 leaving a
-      // procedural body open for the rest of the file. Stop the token at a
-      // `$$`, which can only be a delimiter.
-      const dd = bare[0].indexOf('$$');
-      const text = dd > 0 ? bare[0].slice(0, dd) : bare[0];
-      // A single-letter STRING PREFIX is part of the literal's syntax, not a
-      // token of its own: `E'…'` (escape), `B'…'` (bit), `X'…'` (hex). Pushing
-      // it onto the history would displace the `EXECUTE` that precedes it, so
-      // `EXECUTE E'CREATE INDEX …'` would read as an ordinary data literal and
-      // the dynamic DDL inside would go unscanned.
-      // `EXECUTE format('…', …)` builds the statement, so expand it rather
-      // than discarding both the template and its arguments as data.
-      //
-      // A SCHEMA-QUALIFIED name is ONE name: `pg_catalog.format` IS `format`,
-      // and PL/pgSQL accepts it. Reading the qualifier as a token of its own
-      // pushed it onto the history, displacing the `EXECUTE` that decides
-      // whether this is dynamic DDL — so the call was discarded as data and
-      // the gate went blind to the identifier inside it. The qualified path is
-      // therefore consumed whole, and its function is its LAST component.
-      const qualified = readQualifiedName(sql, i, text);
-      if (
-        qualified.name.toLowerCase() === 'format' &&
-        recent[recent.length - 1] === 'execute' &&
-        sql[qualified.open] === '('
-      ) {
-        const expanded = expandFormatCall(sql, qualified.open);
-        if (expanded) {
-          // Each component is an identifier in its own right and carries its
-          // own 63-byte limit, so the qualifiers are still measured.
-          for (const part of qualified.qualifiers) yield { text: part, quoted: false };
-          yield* identifierCandidates(expanded.text);
-          i = expanded.end;
-          recent = [];
-          continue;
-        }
-      }
-      if (/^[EeBbXx]$/.test(text) && sql[i + text.length] === "'") {
-        // `E'…'` additionally makes the NEXT literal an escape string, whose
-        // backslash sequences the server decodes before parsing.
-        pendingEscapeString = /^[Ee]$/.test(text);
-        i += text.length;
-        continue;
-      }
-      recent.push(text.toLowerCase());
-      if (recent.length > 3) recent.shift();
-      yield { text, quoted: false };
-      i += text.length;
-      continue;
-    }
-    i += 1;
-  }
-}
-
-/**
- * Over-long identifiers in migrations that are ALREADY APPLIED and therefore
- * immutable history. Migration 0097 renames what these created, so the live
- * schema carries the short names; the SQL text cannot be edited without
- * diverging from every database that has already run it.
- *
- * Each exemption is SCOPED TO THE FILES that already contain it: the migration
- * that originally created the name, plus 0097 itself (which must spell the old
- * name to rename it). A name-only exemption would be a permanent licence to
- * reuse these five names — a NEW migration spelling one would inherit the pass
- * and be truncated exactly as before, which is the very defect this gate
- * exists to catch. Immutable history is the reason to exempt; it does not
- * extend to files that have not been written yet.
- *
- * This list is CLOSED. Do not add to it: a new over-long identifier is a bug to
- * fix in the migration being written, not a precedent to extend.
- */
-const RENAME_MIGRATION = '0097_constraint_name_truncation.sql';
-
-const HISTORICAL_EXEMPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+export const LEGITIMATE_LIMIT_NAMES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   [
-    'debate_arenas_challenger_contribution_id_contributions_contribution_id_fk',
-    new Set(['0056_ws_t_debate_arena.sql', RENAME_MIGRATION]),
-  ],
-  [
-    'debate_arenas_target_contribution_id_contributions_contribution_id_fk',
-    new Set(['0056_ws_t_debate_arena.sql', RENAME_MIGRATION]),
-  ],
-  [
-    'steward_governance_vote_election_id_steward_election_election_id_fk',
-    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
-  ],
-  [
-    'room_governance_prompt_model_id_room_governance_model_model_id_fk',
-    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
-  ],
-  [
-    'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_fk',
-    new Set(['0035_ws_u_ai_governed_rooms.sql', RENAME_MIGRATION]),
+    'model_ratification_ballot_vote_id_model_ratification_vote_id_fk',
+    new Set(['0037_ws_u_model_ratification']),
   ],
 ]);
+
+/** The narrowest a UTF-8 clip to a character boundary can leave a cut name. */
+const NARROWEST_CLIP_BYTES = PG_MAX_IDENTIFIER_BYTES - 3;
+
+/**
+ * Whether an identifier's length is the SIGNATURE of a possible truncation.
+ *
+ * Exactly at the limit for ASCII; down to a character boundary below it when
+ * multi-byte, since Postgres clips rather than splitting a UTF-8 sequence.
+ */
+function isAtTruncationSignature(identifier: string): boolean {
+  const bytes = Buffer.byteLength(identifier, 'utf8');
+  if (bytes === PG_MAX_IDENTIFIER_BYTES) return true;
+  const multiByte = bytes !== identifier.length;
+  return multiByte && bytes >= NARROWEST_CLIP_BYTES;
+}
 
 export interface IdentifierViolation {
   file: string;
@@ -797,41 +155,31 @@ export interface IdentifierViolation {
 }
 
 /**
- * Find identifiers Postgres would truncate in one migration's SQL. Pure.
- *
- * Scans BOTH `"quoted"` and bare identifiers. The bare case matters because
- * migrations here are hand-authored: `CREATE INDEX a…64_bytes ON t (c)` is
- * valid SQL that Postgres truncates just as silently, and — unlike the quoted
- * case — the catalog backstop can never recover it after the fact, because the
- * server stores only the 63-byte result. The static scan is the ONLY general
- * protection against it, so it has to see unquoted names.
- *
- * Scanning every bare token (not just DDL name positions) is safe precisely
- * because the only thing reported is a token OVER the limit: no SQL keyword is
- * anywhere near 63 bytes, so a bare token that long is an identifier by
- * construction. That avoids enumerating every DDL form — `CREATE INDEX`,
- * `ADD CONSTRAINT`, `CREATE TRIGGER`, `RENAME CONSTRAINT … TO …` — and the
- * inevitable gap in that list.
+ * Identifiers Postgres would truncate in one migration's SQL.
  *
  * Length is measured in BYTES, not characters: `NAMEDATALEN` bounds the byte
  * length, so a multi-byte identifier truncates sooner than its character count
- * suggests (and truncation can even split a UTF-8 sequence).
+ * suggests — and truncation can even split a UTF-8 sequence.
  */
-export function findOverlongIdentifiers(filename: string, sql: string): IdentifierViolation[] {
+export async function findOverlongIdentifiers(
+  filename: string,
+  sql: string,
+): Promise<IdentifierViolation[]> {
   const violations: IdentifierViolation[] = [];
   const seen = new Set<string>();
-  for (const { text } of identifierCandidates(sql)) {
-    if (seen.has(text)) continue;
-    seen.add(text);
-    const bytes = Buffer.byteLength(text, 'utf8');
-    if (bytes > PG_MAX_IDENTIFIER_BYTES && !HISTORICAL_EXEMPTIONS.get(text)?.has(filename)) {
-      violations.push({ file: filename, identifier: text, bytes });
-    }
+  const tag = migrationTag(filename);
+  for (const identifier of await identifiersIn(sql)) {
+    if (seen.has(identifier)) continue;
+    seen.add(identifier);
+    if (!isAtTruncationSignature(identifier)) continue;
+    if (isHistoricallyExempt(identifier, filename)) continue;
+    if (LEGITIMATE_LIMIT_NAMES.get(identifier)?.has(tag) === true) continue;
+    violations.push({ file: filename, identifier, bytes: Buffer.byteLength(identifier, 'utf8') });
   }
   return violations;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const root = resolve(import.meta.dirname, '..');
   const dir = resolve(root, 'packages/db/drizzle');
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
@@ -840,35 +188,52 @@ function main(): void {
   }
 
   const violations: IdentifierViolation[] = [];
-  let scanned = 0;
-  for (const name of readdirSync(dir)
-    .filter((n) => n.endsWith('.sql'))
-    .sort()) {
-    scanned += 1;
-    violations.push(...findOverlongIdentifiers(name, readFileSync(join(dir, name), 'utf-8')));
+  const names = readdirSync(dir)
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+  for (const name of names) {
+    // A migration that does not PARSE is one this gate cannot judge, and
+    // reporting it clean would be the silent failure the gate exists to stop.
+    try {
+      violations.push(
+        ...(await findOverlongIdentifiers(name, readFileSync(join(dir, name), 'utf-8'))),
+      );
+    } catch (error) {
+      console.error(`SQL identifier check FAILED — ${name} did not parse:\n  ${String(error)}`);
+      process.exit(1);
+    }
   }
 
   if (violations.length > 0) {
-    console.error('SQL identifier check FAILED — Postgres would TRUNCATE these to 63 bytes:');
-    for (const v of violations) {
-      console.error(`  - ${v.file}: "${v.identifier}" (${v.bytes} bytes)`);
-      console.error(`      truncates to "${v.identifier.slice(0, PG_MAX_IDENTIFIER_BYTES)}"`);
+    console.error(
+      `SQL identifier check FAILED — these sit at Postgres's ${PG_MAX_IDENTIFIER_BYTES}-byte limit,` +
+        ' so each is either exactly that long or was TRUNCATED from something longer:',
+    );
+    for (const violation of violations) {
+      console.error(`  - ${violation.file}: "${violation.identifier}" (${violation.bytes} bytes)`);
     }
     console.error(
-      '\n  Give the object an EXPLICIT short name. For a Drizzle foreign key that means the\n' +
+      '\n  Give the object an EXPLICIT shorter name. For a Drizzle foreign key that means the\n' +
         '  table-level `foreignKey({ columns, foreignColumns, name })` form — inline\n' +
         '  `.references()` cannot name a constraint, so it derives\n' +
-        '  `<table>_<column>_<fktable>_<fkcolumn>_fk`, which overflows easily.',
+        '  `<table>_<column>_<fktable>_<fkcolumn>_fk`, which overflows easily.\n' +
+        '\n  If the name is GENUINELY within the limit, declare it in LEGITIMATE_LIMIT_NAMES\n' +
+        "  (scripts/check-sql-identifiers.ts). The parser applies the server's own limit, so\n" +
+        '  it cannot tell a name that is exactly 63 bytes from one it just cut — the migration\n' +
+        "  harness settles that authoritatively by listening for Postgres's truncation NOTICE.",
     );
     process.exit(1);
   }
 
   console.log(
-    `SQL identifier check passed: ${scanned} migrations, no identifier over ${PG_MAX_IDENTIFIER_BYTES} bytes.`,
+    `SQL identifier check passed: ${names.length} migrations parsed, no undeclared identifier at the ${PG_MAX_IDENTIFIER_BYTES}-byte limit.`,
   );
 }
 
 // Run as a CLI only; importing for tests must not trigger the scan.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main();
+  main().catch((error: unknown) => {
+    console.error('SQL identifier check FAILED to run:', error);
+    process.exit(1);
+  });
 }

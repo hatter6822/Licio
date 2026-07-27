@@ -10,9 +10,10 @@ import {
   checkAdapterCoverage,
   checkAdapterPurity,
   checkEnvKeys,
+  collectAdapters,
   collectApiSourceFiles,
+  parseServerEnvSchemaKeys,
   runProdParityGate,
-  stripComments,
 } from './check-prod-parity.js';
 
 const files = (entries: Record<string, string>): Map<string, string> =>
@@ -156,6 +157,94 @@ describe('leg 2 — env-key validation (the LCAP_IPFS failure shape)', () => {
   });
 });
 
+describe('an adapter constructed under another NAME', () => {
+  it.each([
+    [
+      'an import alias',
+      "import { InMemoryThing as Store } from './s.js';\nexport const s = new Store();",
+    ],
+    [
+      'a local alias',
+      "import { InMemoryThing } from './s.js';\nconst Store = InMemoryThing;\nexport const s = new Store();",
+    ],
+  ])('still demands a production counterpart through %s', (_label, boot) => {
+    // The spelling at the call site is not the class; coverage looks for the
+    // declared name, so an alias meant nothing was demanded of it and
+    // production could silently keep process-local state.
+    const tree = files({
+      's.ts':
+        'export interface Port { get(): void }\nexport class InMemoryThing implements Port { get() {} }',
+      'boot.ts': boot,
+    });
+    expect(checkAdapterCoverage(tree, new Set(['boot.ts']), {}).length).toBeGreaterThan(0);
+  });
+});
+
+describe('reading the environment INDIRECTLY', () => {
+  const schemaKeys = new Set(['DATABASE_URL', 'REDIS_URL']);
+
+  it.each([
+    ['a destructured read', 'const { UNVALIDATED } = process.env;\nexport const a = UNVALIDATED;'],
+    ['a renamed destructure', 'const { UNVALIDATED: u } = process.env;\nexport const a = u;'],
+    ['an aliased environment', 'const env = process.env;\nexport const b = env.UNVALIDATED;'],
+    [
+      'an alias of an alias',
+      'const e = process.env;\nconst f = e;\nexport const b = f.UNVALIDATED;',
+    ],
+  ])('BITES on %s', (_label, content) => {
+    // The receiver is resolved rather than spelled: comparing the syntax at the
+    // use site saw only `process.env.KEY`, so anything held in a binding first
+    // consumed a key the schema never validated.
+    const issues = checkEnvKeys(files({ 'x.ts': content }), schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
+  });
+
+  it.each([
+    [
+      'a const-asserted key',
+      "const KEY = 'UNVALIDATED' as const;\nexport const a = process.env[KEY];",
+    ],
+    ['a plain constant key', "const KEY = 'UNVALIDATED';\nexport const a = process.env[KEY];"],
+  ])('BITES on %s', (_label, content) => {
+    // `'KEY' as const` is the same string as `'KEY'`: the wrapper changes the
+    // TYPE and nothing about the value.
+    const issues = checkEnvKeys(files({ 'x.ts': content }), schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
+  });
+
+  it('FAILS CLOSED on a key it cannot read', () => {
+    // `process.env[pick()]` cannot be matched against the schema, and passing
+    // it silently is the one failure a fail-closed check must not have.
+    const tree = files({ 'x.ts': 'const key = pick();\nexport const a = process.env[key];' });
+    const issues = checkEnvKeys(tree, schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('cannot read'))).toBe(true);
+  });
+
+  it('does not flag an unrelated object that happens to be called env', () => {
+    const tree = files({
+      'x.ts': 'const env = { SOMETHING: 1 };\nexport const a = env.SOMETHING;',
+    });
+    expect(checkEnvKeys(tree, schemaKeys, {})).toEqual([]);
+  });
+
+  it("reads only TOP-LEVEL schema fields, not a nested validator's", () => {
+    // A nested `z.object({ … })` describes the SHAPE of one variable, not more
+    // environment keys; counting its fields marked them validated, after which
+    // reading them passed the gate despite never being parsed.
+    const schema = [
+      'export const serverEnvSchema = z.object({',
+      '  ONE: z.string(), TWO: z.string(), THREE: z.string(), FOUR: z.string(),',
+      '  FIVE: z.string(), SIX: z.string(), SEVEN: z.string(), EIGHT: z.string(),',
+      '  NINE: z.string(), TEN: z.string(), ELEVEN: z.string(),',
+      '  CONFIG: z.object({ NESTED_ONLY: z.string() }),',
+      '});',
+    ].join('\n');
+    const keys = parseServerEnvSchemaKeys(schema);
+    expect(keys.has('CONFIG')).toBe(true);
+    expect(keys.has('NESTED_ONLY')).toBe(false);
+  });
+});
+
 describe('leg 3 — production-adapter purity (the upload-bytes failure shape)', () => {
   it('BITES on a Map field inside a Drizzle adapter', () => {
     const tree = files({
@@ -207,36 +296,53 @@ describe('leg 3 — production-adapter purity (the upload-bytes failure shape)',
   });
 
   it('never trips on comments', () => {
-    const source = stripComments('// readonly #x = new Map<string, string>();\nconst y = 1;');
+    // RAW source, no pre-stripping: the gate reads the parse, so a comment is
+    // not a node and cannot be mistaken for state.
+    const source = '// readonly #x = new Map<string, string>();\nconst y = 1;';
     expect(checkAdapterPurity(files({ 'a/drizzle-a.ts': source }), [])).toEqual([]);
   });
-});
 
-describe('stripComments (tokenizer)', () => {
-  it('strips line + block comments while preserving newlines (line numbers hold)', () => {
-    const stripped = stripComments('a; // gone\n/* also\ngone */ b;');
-    expect(stripped).not.toContain('gone');
-    expect(stripped).toContain('a;');
-    expect(stripped).toContain('b;');
-    // Newlines survive so leg-3 finding line numbers stay accurate.
-    expect(stripped.split('\n')).toHaveLength(3);
-    expect(stripped.split('\n')[2]).toContain('b;');
+  it('scopes to a class BODY without counting braces', () => {
+    // The old scope tracker counted `{` and `}` per line, so a brace inside a
+    // string or template shifted the depth and could end the class region
+    // early — carrying the scan out of the production adapter, or leaving it
+    // inside one it had already left.
+    const source = [
+      'export class DrizzleThing implements Store {',
+      `  readonly label = \`a } brace \${"in {a} template"}\`;`,
+      '  readonly #cache = new Map<string, string>();',
+      '}',
+      'export class InMemoryThing implements Store {',
+      '  readonly #fine = new Map<string, string>();',
+      '}',
+    ].join('\n');
+    const issues = checkAdapterPurity(files({ 'a/thing.ts': source }), []);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain('a/thing.ts:3');
   });
 
-  it('respects string and template literals (no mangling of // inside strings)', () => {
-    expect(stripComments("const u = 'https://x/y'; // tail")).toBe(
-      "const u = 'https://x/y';        ",
-    );
-    expect(stripComments('const s = "a // not a comment";')).toBe(
-      'const s = "a // not a comment";',
-    );
-    expect(stripComments('const t = `block /* kept */ inside`;')).toBe(
-      'const t = `block /* kept */ inside`;',
-    );
-  });
-
-  it('honours escapes so an escaped quote cannot desynchronize the states', () => {
-    expect(stripComments("const q = 'it\\'s'; // gone")).toBe("const q = 'it\\'s';        ");
+  it('reads a multi-line implements clause', () => {
+    // Generic arguments and a wrapped clause both broke a single-line regex.
+    const source = [
+      'export class InMemoryWide',
+      '  implements Store<Map<string, number>>, Other',
+      '{',
+      '  readonly #x = 1;',
+      '}',
+      'const made = new InMemoryWide();',
+    ].join('\n');
+    const adapters = collectAdapters(files({ 'a/wide.ts': source }), /^(?:InMemory|Memory)\w*/);
+    expect(adapters).toEqual([
+      {
+        className: 'InMemoryWide',
+        interfaces: ['Store', 'Other'],
+        // Matching is by declaration IDENTITY, since two modules may each
+        // declare a `Store` and those are different contracts.  Neither is
+        // declared here, so both fall back to the name.
+        interfaceKeys: ['name:Store', 'name:Other'],
+        file: 'a/wide.ts',
+      },
+    ]);
   });
 });
 

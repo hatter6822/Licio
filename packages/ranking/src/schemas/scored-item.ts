@@ -124,5 +124,3 @@ export const scoredItemSchema = z
   })
   .strict();
 export type ScoredItem = z.infer<typeof scoredItemSchema>;
-
-export const scoredItemsSchema = z.array(scoredItemSchema);

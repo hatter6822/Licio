@@ -40,16 +40,6 @@ export interface ExperienceMetrics {
   safetyState: number;
 }
 
-export const EXPERIENCE_METRIC_KEYS = [
-  'sourceDiversity',
-  'topicDiversity',
-  'evidenceAccess',
-  'discussionDepth',
-  'viewpointGeometry',
-  'novelty',
-  'safetyState',
-] as const satisfies readonly (keyof ExperienceMetrics)[];
-
 /** Effective number exp(H) of a weighted key distribution. */
 function effectiveNumber(weightsByKey: Map<string, number>): number {
   let total = 0;

@@ -23,7 +23,10 @@
 // process-local in-memory mailbox (single-process dev).
 
 import { createDbClient } from '@licio/db';
+import { RENDEZVOUS_MAX_RECORDS_PER_POLL } from '@licio/shared';
 import IORedis from 'ioredis';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
 import { DrizzleRendezvousStore } from './drizzle-store.js';
 import { RedisSignalMailbox } from './redis-signal-mailbox.js';
 import {
@@ -44,12 +47,14 @@ export interface RendezvousServiceConfig {
   readonly clockSkewToleranceMs: number;
 }
 
-/** Mirrors the §15.3.2 client bounds (`@licio/private-p2p` RENDEZVOUS_MAX_TTL_MS /
- *  RENDEZVOUS_MAX_RECORDS_PER_POLL); defined here so the server stays free of the
- *  client plane's package. */
+/** The §15.3.1/§15.3.2 server bounds.  `apps/api` does not depend on
+ *  `@licio/private-p2p` at all (PRIV-API-RENDEZVOUS-1), so the TTL ceiling is
+ *  AUTHORITATIVE here.  The poll cap is NOT: it is a two-party WIRE limit the
+ *  peer validates against too, so it comes from `@licio/shared`, the only
+ *  package both planes may reach. */
 export const DEFAULT_RENDEZVOUS_CONFIG: RendezvousServiceConfig = {
   maxTtlMs: 30 * 60 * 1000,
-  maxRecordsPerPoll: 256,
+  maxRecordsPerPoll: RENDEZVOUS_MAX_RECORDS_PER_POLL,
   clockSkewToleranceMs: 5 * 60 * 1000,
 };
 
@@ -217,8 +222,19 @@ function buildStore(): RendezvousStore {
   // TTL.  Without Redis (a bare dev boot with only Postgres) the mailbox
   // stays process-local.
   const redisUrl = process.env['REDIS_URL'];
+  // `onNotice` for the same reason the API boot and the LCAP client pass one:
+  // the db wrapper ALWAYS installs its own handler, so omitting the sink does
+  // not fall back to postgres.js's `console.log` default — it DISCARDS every
+  // notice, warnings included, from this store.
+  const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
   return new DrizzleRendezvousStore(
-    createDbClient(dbUrl),
+    createDbClient(dbUrl, {
+      onNotice: (notice) =>
+        logger[pgNoticeLogLevel(notice.severity)](
+          { pgNotice: notice },
+          'postgres notice (rendezvous)',
+        ),
+    }),
     redisUrl
       ? new RedisSignalMailbox(new IORedis(redisUrl, { maxRetriesPerRequest: 3 }))
       : undefined,

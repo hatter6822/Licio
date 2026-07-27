@@ -40,6 +40,180 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
   than the room-key surface, per its tests) — do NOT add an
   `isUpdateChannelConfigured` fast-path without a maintainer security decision.
 
+## Export hygiene — the internal-only sweep
+
+**Tracked debt — 967 exported values used only inside their declaring file.**
+`check:dead-exports` reports an exported value nothing references *anywhere*.
+The narrower question — "is the `export` keyword buying anything?" — is
+implemented in the same script (`findInternalOnlyExports`, surfaced by
+`pnpm survey:internal-exports`) but is **not** in CI, because the answer today
+is 967 declarations and they are not one defect repeated:
+
+| Share | Category | Is the export deliberate? |
+|-------|----------|---------------------------|
+| ~330  | `packages/shared` | Yes — the workspace IS the schema/constant/type SSOT surface; a leaf schema is publishable whether or not a consumer composes it today. |
+| 120   | `packages/db` | Yes — Drizzle's idiom exports every table and `pgEnum`; the schema surface is the artifact. |
+| 56    | `Drizzle*` / `InMemory*` store adapters | Yes — `check:prod-parity` matches adapters **by their exported name**; un-exporting one hides it from that gate. |
+| ~390  | `apps/api`, `apps/web`, remaining packages | Mostly no — doctrine constants, helper functions, and lease/window values that could drop the keyword. |
+| 13    | `scripts/` | Mostly no. |
+
+So the sweep needs per-site judgement, not a codemod, and lands as its own work
+rather than riding along with the gate change that measured it.
+
+**Closure target:** clear the ~390 + 13 residue workspace by workspace (each a
+coherent slice that passes `pnpm typecheck` / `lint` / `test`), then decide the
+three deliberate categories explicitly — either carve them out in the survey by
+the same rules `check:prod-parity` already uses, or accept them as published
+surface. When the survey is empty, it exits 0 and can move into CI's lint job
+beside `check:dead-exports`; it already exits non-zero on a non-empty list, so no
+semantics change at that point.
+
+### Precision limit — references are matched by NAME, not by binding — **CLOSED**
+
+`check:dead-exports` used to resolve consumers by identifier spelling, so an
+unrelated local, parameter, property or method with the same name read as a
+consumer: an unused `export const status` passed as soon as any file mentioned
+an unrelated `status`. This was recorded here as tracked debt, with the closure
+target "resolve references to the exported MODULE BINDING via the TypeScript
+LanguageService".
+
+**Done.** `scripts/resolve-export-references.ts` resolves every identifier in
+the corpus through the TypeScript 7 API (`typescript/unstable/sync`), keyed by
+DECLARATION SITE rather than symbol id — the same file can belong to two
+projects, and each program mints its own symbol for one declaration. Four
+consumption forms are covered: direct identifier resolution, alias chains
+through barrels, names taken via a module specifier (static or dynamic), and
+destructured bindings (whose type carries the origin symbol). The gate refuses
+to run if any tracked file falls outside every tsconfig, since an unseen file
+would make what only it consumes look dead.
+
+Retired with it: the overload-set aggregation, the `selfOccurrences` baseline,
+and the rule excluding barrel occurrences — binding resolution answers all three
+directly. What it cannot see is a module fetched by URL at runtime; the two
+Playwright `/src` harnesses carry a `dead-exports-entry: <reason>` comment.
+
+Turning it on found two real defects the name-matching gate had never been able
+to see, both of them the "two spellings of a live value" case the gate warns
+about: `LOG_LEAF_DOMAIN`, the transparency-log domain separator, existed as
+three copies (producer, verifier, test helpers) so a change on one side would
+have left verification silently disagreeing with production; and an exported
+`toBase64Url` nothing imported while two tests copy-pasted its body.
+
+### Precision limit — the DECLARATION side was parsed, not compiled — **CLOSED**
+
+The reference side moved to the compiler above; the question "what does this file
+export?" stayed hand-parsed, first over raw text and then over a token stream.
+Each round of review found another piece of ordinary TypeScript that parser did
+not model — a generator's `*`, a declarator list, a `const enum`, a block comment
+mid-declaration, `as`/`satisfies` opening type context, a `<` comparison, a
+generic arrow's `<T,>`, a template interpolation nested inside another. Every fix
+was correct and the list had no end, because the list IS the grammar.
+
+**Done.** `resolve-export-references.ts` now enumerates exports from the module's
+own export table (`getExportsOfModule`) and collects identifiers by walking the
+AST, so declarator lists, destructuring, export aliases, type-vs-value and
+overload sets are answered by the compiler. `check-dead-exports.ts` keeps only
+policy: which exports are in scope, which files are judged, what a reasoned
+entry-point opt-out looks like, and how a finding is reported. Whole-repository
+enumeration costs about three seconds.
+
+It closed a silent coverage hole the token parser could not avoid. Telling a
+regex literal from a division needs full grammatical context, so the two
+`preferRegex` lexings disagreed on files containing `/ 1000)`-style arithmetic;
+because `exportedValues` INTERSECTED them (deliberately — inventing an export
+that does not exist fails a correct branch), every export below the divergence
+was dropped. **12 exports across 4 files** were never judged at all, among them
+every function in `apps/web/src/lib/time.ts` after its first. The new enumeration
+finds those 12 and loses none.
+
+### Unchanged barrel re-exports are surveyed, not gated — **tracked debt**
+
+`export { live } from './x.js'` publishes a name of the BARREL. Publishing is
+not consuming, so the binding is judgeable in its own right, and the blocking
+gate skipping it is a real blind spot: an entry nothing imports through the
+barrel is unused public surface.
+
+The enumeration now exists — `pnpm survey:barrel-reexports` (the resolver's
+`judgeRepublished`) — and reports **254** across the repository. It is NOT in
+CI, because the overwhelming majority are module barrels publishing their
+schemas and constants as the SSOT surface: 53 in `packages/lcap/src/schemas`,
+35 in `apps/web/src/offline`, 17 in `apps/web/src/update`. That is the same
+idiom the gate's own guidance names for `@licio/shared` and `@licio/db` —
+"whether or not a consumer exists today" — so failing CI on it would be failing
+on a convention, which is how a gate gets switched off rather than obeyed.
+
+**Closure target:** a per-barrel decision, not a sweep. For each module barrel,
+either (a) it is the module's public entry and consumers should import THROUGH
+it — then fix the direct imports, and the entries become live; or (b) it is
+vestigial packaging and the barrel goes. Both are per-directory judgements with
+real import-graph consequences, so they belong in their own PRs.
+
+### Unwired guarantees deleted as vestigial — audit of the 2026-07 export sweep
+
+The sweep that removed 47 unreferenced exported values classified each as one of
+the gate's three outcomes. Two were misclassified: they were **unwired
+guarantees** (outcome 1, "wire it up") filed as vestigial (outcome 3, "delete
+it"). Both are now fixed:
+
+- `RENDEZVOUS_MAX_RECORDS_PER_POLL` — a two-party WIRE limit. Deleting it left
+  the bound spelled three times (the server config and two `.max(256)` literals
+  in the peer client). Restored to `@licio/shared`, consumed by all three.
+- `CHUNK_SIZE` — the §13.2 per-transport chunk bounds. Deleting it left
+  `ChunkProfile` a vocabulary with nothing behind it. Restored, and `chunkBlock`
+  now takes a PROFILE so the documented numbers are on the calling path rather
+  than in a constant beside it.
+
+- `OCTET_POINT_LENGTH` — the compressed-G1 WIRE width. This pass had filed it
+  under "a name for a fact a library already enforces", on the grounds that the
+  noble G1 encoder guarantees 48 bytes. That reasoning was wrong: the encoder
+  guarantees what it *writes*, while the constant is what every PARSER derives
+  its length checks, slice bounds and field offsets from — and deleting it left
+  `48` spelled at nine sites across `blind.ts`, `signature.ts` and `proof.ts`
+  while the neighbouring `OCTET_SCALAR_LENGTH` stayed centralized. That
+  asymmetry is the tell. Restored and wired through every serializer, with
+  `SIGNATURE_LENGTH` derived from the two widths; `EXPAND_LEN` (also 48, and
+  equal only by coincidence of this ciphersuite) is kept separate and is now
+  exported rather than declared twice.
+
+- `paymentIntentResponseSchema` — the single-intent response ENVELOPE. Filed as
+  vestigial because nothing imported it; in fact the same wire contract was
+  recreated inline at `apps/web/src/lib/treasury-api.ts` as
+  `z.object({ intent: paymentIntentSchema }).strict()`, so this was outcome 2
+  ("two spellings of a live value"), not outcome 3. A change to the envelope
+  would have updated the server while that TanStack Query boundary went on
+  validating the old shape — a zod boundary describing an obsolete contract
+  fails closed on correct data. Restored and imported at the call site. Its
+  sibling `paymentIntentListResponseSchema` is NOT restored: nothing spells that
+  shape anywhere, so it was genuinely vestigial.
+
+The two misclassifications above share a shape worth naming: both were judged by
+asking "does anything import this?" when the question the gate actually poses is
+"is this the only spelling of the thing?" An unreferenced export sitting beside
+a hand-copied duplicate is the strongest evidence of outcome 2, not of outcome 3.
+
+A pass over the remaining 43 found the rest correctly classified — aliases of
+live constants (`CHALLENGE_STATES`, `CHALLENGE_TYPES`) and genuinely vestigial
+values — with two exceptions that need a decision rather than a restore,
+recorded here:
+
+- **`REASON_CODE_REGISTRY_VERSION`.** The module is titled "the *versioned*
+  reason-code registry" and `docs/invariants/README.md` says codes "validate
+  against the versioned registry", but nothing ever read the version — deleting
+  it removed the only expression of that versioning without removing any
+  enforcement, because there was none. **Closure target:** decide whether an
+  `InvariantOutput` carries the registry version it was validated against. If
+  yes it is a schema change with wire impact and belongs in WS-H; if no, the
+  "versioned" language in the module header and the WS-H docs should say what is
+  actually guaranteed (a closed, reviewed vocabulary) instead.
+- **`SESSION_PATH_DIMENSIONS`** (`['topic','action','time','engagement']`). The
+  PathSig implementation takes a dimension COUNT, and production passes a
+  computed `preferenceDim` — so the four named axes were a specification
+  vocabulary the runtime never used. **Closure target:** decide whether the
+  session path IS those four axes (in which case the constant is the SSOT for
+  the dimension count and `buildTopicStructure` should take it) or whether the
+  dimension is genuinely data-driven, in which case the SPEC's axis list is
+  illustrative and should say so.
+
 ## Correctness / privacy — tractable, not yet done
 
 - **DSAR omits WS-T debate-arena data** (`forum/data-rights.ts`): the account

@@ -135,11 +135,32 @@ describe.each(modes)('colour mode: %s', (mode) => {
     }
   });
 
-  it('semantic on-soft text is also ≥ 4.5:1 directly on the canvas (toneTextClasses)', () => {
+  it('semantic on-soft text is also ≥ 4.5:1 directly on the canvas', () => {
     for (const hue of hues) {
       expect(ratio(mode, `${hue}-on-soft`, 'bg-default')).toBeGreaterThanOrEqual(
         WCAG.AA_NORMAL_TEXT,
       );
+    }
+  });
+
+  // The BOUNDARY between the two semantic text tokens, pinned so it cannot be
+  // rediscovered the hard way.  `text-<hue>` is the SOLID fill colour: it clears
+  // 3:1 (AA large text, and WCAG 1.4.11 non-text) but in dark mode it is only
+  // ~3.0–3.4:1 on the canvas, so it is NOT a normal-size text colour there.
+  // `-on-soft` is (9–13:1 in dark mode).  Fifteen call sites had drifted onto the
+  // bare token for `role="alert"` paragraphs and SLA labels — normal-size text in
+  // a colour verified only for large text.
+  it('the BARE hue is a large-text/non-text colour only — never normal text', () => {
+    for (const hue of hues) {
+      expect(ratio(mode, hue, 'bg-default')).toBeGreaterThanOrEqual(WCAG.AA_LARGE_TEXT);
+    }
+    if (mode.startsWith('dark')) {
+      // Stated as a FACT about the palette, not an aspiration: if a future token
+      // change lifted these to 4.5:1 the assertion fails and this comment (and
+      // the `-on-soft`-for-text rule it justifies) gets revisited deliberately.
+      for (const hue of hues) {
+        expect(ratio(mode, hue, 'bg-default')).toBeLessThan(WCAG.AA_NORMAL_TEXT);
+      }
     }
   });
 });
@@ -271,3 +292,22 @@ describe('spacing, radius, z-index, motion, target scales (WS-B.1.1c–e)', () =
     expect(Number.parseInt(touchTarget.min, 10)).toBeGreaterThanOrEqual(48);
   });
 });
+
+// ---------------------------------------------------------------------------
+// USAGE of the semantic text tokens — enforced elsewhere, deliberately.
+// ---------------------------------------------------------------------------
+//
+// The assertions above pin the TOKENS: `-on-soft` clears 4.5:1 for normal text
+// and the bare hue clears only 3:1 in dark mode, so the bare hue is a large-text
+// / non-text colour.  Nothing in the type system separates two class strings
+// that both compile, so the USAGE half needs its own enforcement — and it lives
+// in `scripts/check-a11y-hue-usage.ts` (`pnpm check:a11y-hue-usage`, CI's lint
+// job), not here.
+//
+// It began as a same-file regex over `className="…"`, which could not see the
+// `cn(...)` arguments, class maps and ternaries the class actually reaches the
+// DOM through — seven live violations sat inside its blind spot.  Seeing them
+// takes the repo's JS lexer (`scripts/js-sink-analyzer.ts`), which is script
+// tooling: importing it from a web unit test would drag `scripts/` into this
+// workspace's compilation.  The gate has its own fixture suite in
+// `scripts/check-a11y-hue-usage.test.ts`.

@@ -8,7 +8,6 @@
 // the affected records surface as `conflicting` in trust projection.
 
 import { CONTROL_PRIORITY, type LcapPriority } from '../priority.js';
-import { encodeWithSchema } from '../schemas/codec.js';
 import { type ForkEvidenceV2, forkEvidenceV2Schema } from '../schemas/records.js';
 
 /** Fork evidence always schedules at P0 / lane C0. */
@@ -72,9 +71,4 @@ export function buildDeviceForkEvidence(params: BuildDeviceForkEvidenceParams): 
       : {}),
     ...(params.observedContext !== undefined ? { observed_context: params.observedContext } : {}),
   });
-}
-
-/** Encode fork evidence to its deterministic LDC body. */
-export function encodeForkEvidence(evidence: ForkEvidenceV2): Uint8Array {
-  return encodeWithSchema(forkEvidenceV2Schema, evidence);
 }

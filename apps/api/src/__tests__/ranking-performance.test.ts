@@ -183,7 +183,7 @@ describe.skipIf(!PERF || !DB_URL)(
     const baseMs = Date.now() - LOG_N * 1_000;
 
     beforeAll(async () => {
-      db = createDbClient(DB_URL as string);
+      db = createDbClient(DB_URL as string, { onNotice: 'discard' });
       await migrate(db, { migrationsFolder: migrationsFolder() });
       decisions = new DrizzleDecisionLogStore(db);
       const { rankingDecisionLogs } = await import('@licio/db');

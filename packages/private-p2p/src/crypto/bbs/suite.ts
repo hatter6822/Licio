@@ -22,8 +22,26 @@ export type G2Point = InstanceType<typeof G2>;
 /** The BLS12-381 subgroup order (the scalar field modulus `r`). */
 export const ORDER: bigint = bls.fields.Fr.ORDER;
 export const OCTET_SCALAR_LENGTH = 32;
-export const OCTET_POINT_LENGTH = 48; // G1 compressed; G2 is 96
-const EXPAND_LEN = 48;
+/**
+ * The compressed G1 point width (`point_to_octets_E1`) — the WIRE width of
+ * every point in a signature, commitment or proof.
+ *
+ * Named for the same reason as the scalar width beside it: every serializer and
+ * parser derives its length checks, slice bounds and field offsets from these
+ * two, so a change lands everywhere at once.  Spelling it `48` at each site
+ * meant a future encoding correction could update some parsers and leave others
+ * reading the next field's bytes as a point — a silent cryptographic
+ * misalignment rather than a parse error.
+ *
+ * NOT interchangeable with {@link EXPAND_LEN}, which is also 48: that is
+ * `expand_message_xmd`'s output length, and the two are equal only by
+ * coincidence of this ciphersuite.
+ */
+export const OCTET_POINT_LENGTH = 48;
+/** `expand_len` for BLS12-381-SHA-256 — enough output that `mod r` is unbiased. */
+export const EXPAND_LEN = 48;
+/** The wire width of a signature (`A || e`), composed of the two widths above. */
+export const SIGNATURE_LENGTH = OCTET_POINT_LENGTH + OCTET_SCALAR_LENGTH;
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
@@ -110,11 +128,6 @@ export const interfaceDsts = (apiId: string): InterfaceDsts => dstsFor(apiId);
  *  Single-arg by design so it is safe as an `Array.map` callback. */
 export function messageToScalar(message: Uint8Array): bigint {
   return hashToScalar(message, BASE_DSTS.mapMsg);
-}
-
-/** `messages_to_scalars` for an arbitrary interface (the blind interface, blind.ts). */
-export function messageToScalarWith(message: Uint8Array, mapDst: Uint8Array): bigint {
-  return hashToScalar(message, mapDst);
 }
 
 /**

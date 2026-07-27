@@ -92,7 +92,14 @@ embedding provider — the DEFAULT provider is lexical (n-gram-correlated), so
 the genuine semantic benefit is realized only with a semantic `EMBEDDING_URL`
 provider; the seam is provider-agnostic. Lineage groups union confirmed
 syndication edges and shared outermost publisher ownership; evidence groups
-come from claim/evidence `independence_group_id`. The WS-E
+come from claim/evidence `independence_group_id`. Both union-find structures
+carry **path compression**, and the per-root member counts that decide whether
+a group exists (≥ 2 members) are tallied ONCE after the last union rather than
+re-derived per story — a near-duplicate cluster or a syndication chain is a
+degenerate parent chain, which is precisely what makes an uncompressed
+find-per-element quadratic in the batch. Compression never moves a root, so
+every derived `nd-…`/`src-…` group id is unchanged and the invariant services'
+replay determinism is untouched. The WS-E
 `hooks.redundancy` seam is closed from the latest stored marginal gains
 (synchronous cached read, background refresh).
 

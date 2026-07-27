@@ -45,4 +45,13 @@ export const policyProjectTest: ProjectTest = {
   name: 'policy',
   include: ['**/*.test.ts'],
   environment: 'node',
+  // These are WHOLE-TREE scans, not unit tests: several of them hand every
+  // tracked source in the repository to the TypeScript compiler and ask it
+  // about each one — 1302 files for `check:dead-exports`, 453 for the a11y
+  // gate.  Vitest's 5s default is a budget for a unit test, and on a loaded CI
+  // runner with coverage instrumentation attached it is the scan's own runtime,
+  // so the suite failed on the clock rather than on an assertion.  The gates
+  // themselves are timed separately in CI; this bound only has to be far enough
+  // above the work that a slow machine is not a failure.
+  testTimeout: 120_000,
 };

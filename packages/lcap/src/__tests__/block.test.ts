@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BLOCK_ROLE_PRIORITY,
   buildBlockDescriptor,
+  CHUNK_SIZE,
   CompressionBombError,
   chunkBlock,
   compress,
@@ -81,6 +82,27 @@ describe('chunking + reassembly (WS-R.3.2)', () => {
       reason: 'block_cid_mismatch',
     });
   });
+
+  it('chunks by TRANSPORT PROFILE, which is where §13.2 puts the bounds', async () => {
+    // The profile form keeps the specification's numbers on the calling path.
+    // A lossy carrier gets smaller chunks so one corrupt chunk costs one small
+    // re-fetch; a LAN gets larger ones because the round trip dominates.
+    expect(CHUNK_SIZE).toEqual({
+      unstable: 16 * 1024,
+      mobile: 32 * 1024,
+      https: 64 * 1024,
+      lan: 128 * 1024,
+    });
+    const data = new Uint8Array(CHUNK_SIZE.mobile * 2 + 7).fill(3);
+    const byProfile = await chunkBlock(data, 'mobile');
+    const bySize = await chunkBlock(data, CHUNK_SIZE.mobile);
+    expect(byProfile.chunks.length).toBe(3);
+    expect(byProfile.descriptors).toEqual(bySize.descriptors);
+    // …and the profiles are ordered, smallest carrier to largest.
+    expect(CHUNK_SIZE.unstable).toBeLessThan(CHUNK_SIZE.mobile);
+    expect(CHUNK_SIZE.mobile).toBeLessThan(CHUNK_SIZE.https);
+    expect(CHUNK_SIZE.https).toBeLessThan(CHUNK_SIZE.lan);
+  });
 });
 
 describe('attachment laziness (WS-R.3.3)', () => {
@@ -125,5 +147,46 @@ describe('compression + bomb caps (WS-R.3.4)', () => {
     await expect(
       decompress(compressed, 'gzip', { maxUncompressedBytes: 1 << 30, maxExpansionRatio: 2 }),
     ).rejects.toBeInstanceOf(CompressionBombError);
+  });
+
+  // `compress` pumps its input concurrently so the transform cannot deadlock on
+  // a full buffer.  That pump must be SETTLED, not floated: a bare
+  // `write().then(close)` rejects with no handler when the stream errors, and
+  // Node's default `--unhandled-rejections=throw` turns that into a process
+  // abort — the API server dying on a corrupt block rather than failing the one
+  // request.  `decompress` has always guarded its identical pump; this pins the
+  // two as symmetric.
+  it('surfaces a stream failure to the caller, never as an unhandled rejection', async () => {
+    const realCompressionStream = globalThis.CompressionStream;
+    const failure = new Error('compression transform failed');
+    // A stream whose writer AND reader both reject — the shape a transform in an
+    // errored state presents to both sides.
+    class FailingCompressionStream {
+      readonly writable = {
+        getWriter: () => ({
+          write: () => Promise.reject(failure),
+          close: () => Promise.reject(failure),
+        }),
+      };
+      readonly readable = {
+        getReader: () => ({ read: () => Promise.reject(failure) }),
+      };
+    }
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', record);
+    (globalThis as { CompressionStream: unknown }).CompressionStream = FailingCompressionStream;
+    try {
+      await expect(compress(bytes(64), 'gzip')).rejects.toThrow('compression transform failed');
+      // Node flags an unhandled rejection on a later turn of the loop, so give it
+      // one before asserting none was raised.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      (globalThis as { CompressionStream: unknown }).CompressionStream = realCompressionStream;
+      process.off('unhandledRejection', record);
+    }
+    expect(unhandled).toEqual([]);
   });
 });

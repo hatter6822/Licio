@@ -87,11 +87,24 @@ export async function assembleMeriCandidates(
   if (stories.length === 0) return [];
 
   // Near-duplicate union-find over signature candidates.
+  //
+  // PATH COMPRESSION is what keeps this near-linear.  `union` re-parents one
+  // root onto the other with no rank/size heuristic, so a near-duplicate cluster
+  // of k stories — the ordinary case, not a pathological one — builds a chain of
+  // length k, and an uncompressed `find` then walks it every single time.  The
+  // root is unchanged by compression (only the path to it shortens), so every
+  // derived group id stays byte-identical and the replay determinism the
+  // invariant services depend on is untouched.
   const parent = new Map<string, string>();
   const find = (x: string): string => {
     let root = x;
     while (parent.get(root) !== undefined && parent.get(root) !== root) {
       root = parent.get(root) ?? root;
+    }
+    for (let node = x; node !== root; ) {
+      const next = parent.get(node) ?? root;
+      parent.set(node, root);
+      node = next;
     }
     return root;
   };
@@ -142,20 +155,36 @@ export async function assembleMeriCandidates(
       if (inSet.has(match.targetId)) union(story.storyId, match.targetId);
     }
   }
+  // Member counts per root, tallied ONCE now that every union is settled (the
+  // last one is the semantic pass just above).  The previous form re-scanned the
+  // whole story list inside the lookup — and the lookup runs once per story — so
+  // building the candidate list was quadratic in the batch on top of the
+  // union-find walk it performed per element.
+  const nearDupMembers = new Map<string, number>();
+  for (const story of stories) {
+    const root = find(story.storyId);
+    nearDupMembers.set(root, (nearDupMembers.get(root) ?? 0) + 1);
+  }
   const nearDupGroupOf = (storyId: string): string | null => {
     const root = find(storyId);
     // A group exists only when ≥ 2 members share the root.
-    const members = stories.filter((s) => find(s.storyId) === root);
-    return members.length >= 2 ? `nd-${root}` : null;
+    return (nearDupMembers.get(root) ?? 0) >= 2 ? `nd-${root}` : null;
   };
 
   // Source lineage: connected components over confirmed syndication edges
   // and shared outermost publisher lineage.
   const sourceParent = new Map<string, string>();
+  // Same path compression as the near-duplicate structure above: a syndication
+  // chain (wire → aggregator → aggregator …) is exactly the degenerate shape.
   const sourceFind = (x: string): string => {
     let root = x;
     while (sourceParent.get(root) !== undefined && sourceParent.get(root) !== root) {
       root = sourceParent.get(root) ?? root;
+    }
+    for (let node = x; node !== root; ) {
+      const next = sourceParent.get(node) ?? root;
+      sourceParent.set(node, root);
+      node = next;
     }
     return root;
   };
@@ -197,11 +226,18 @@ export async function assembleMeriCandidates(
       if (first && current) sourceUnion(first, current);
     }
   }
+  // Tallied once, for the same reason as the near-duplicate counts above; every
+  // source union (edges + shared-owner joins) is settled by this point.
+  const lineageMembers = new Map<string, number>();
+  for (const story of stories) {
+    if (!story.sourceId) continue;
+    const root = sourceFind(story.sourceId);
+    lineageMembers.set(root, (lineageMembers.get(root) ?? 0) + 1);
+  }
   const lineageGroupOf = (story: StoryRecord): string | null => {
     if (!story.sourceId) return null;
     const root = sourceFind(story.sourceId);
-    const members = stories.filter((s) => s.sourceId && sourceFind(s.sourceId) === root);
-    return members.length >= 2 ? `src-${root}` : null;
+    return (lineageMembers.get(root) ?? 0) >= 2 ? `src-${root}` : null;
   };
 
   // Claim groups from claim independence grouping; evidence groups from the

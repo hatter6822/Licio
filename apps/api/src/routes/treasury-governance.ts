@@ -53,6 +53,7 @@ import {
   checkGovernanceEligibility,
   requireGovernanceEligibility,
 } from '../governance/eligibility.js';
+import { isCounsel } from '../identity/rbac.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import { createLogger } from '../lib/logger.js';
 import {
@@ -62,7 +63,13 @@ import {
   requireAuth,
   requireVerifiedAccount,
 } from '../middleware/auth.js';
-import { isPlatformStaff } from '../moderation/authz.js';
+import {
+  denyCapability,
+  effectiveStewardRoles,
+  grantsCapability,
+  isPlatformStaff,
+  stewardActorOf,
+} from '../moderation/authz.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { createCharterVersion } from '../treasury/charter.js';
 import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
@@ -399,8 +406,143 @@ export function createTreasuryGovernanceRoutes() {
           if ((await services.rooms.roomGovernance(roomId)) === null) {
             return c.json(notFound, 404);
           }
-          if (!staff && !(await services.rooms.isSteward(roomId, auth.userId))) {
+          const ownSteward = await services.rooms.isSteward(roomId, auth.userId);
+          const actor = stewardActorOf(auth);
+          // PLACING a cross-room hold is the narrow doctrine capability, and the
+          // route's own `scope` maps 1:1 onto the two names STEWARD_ROLES.md
+          // uses: "`ROLE_INTEGRITY` owns the cross-room surface and can
+          // `room-governance-freeze` / `treasury-freeze` any room's agent",
+          // treasury scope additionally requiring counsel co-approval
+          // (WS-A.1.2c).
+          const holdCapability =
+            body.scope === 'treasury' ? 'treasury-freeze' : 'room-governance-freeze';
+          const clearingAHold = body.action === 'unfreeze';
+          // LIFTING a hold is a DIFFERENT and BROADER authority, and keying both
+          // on `holdCapability` is how this route went wrong: the domain's rule
+          // is "stewards may FREEZE but only platform staff may UNFREEZE — a
+          // compromised steward account can stop the bleeding but can never
+          // unlock a platform freeze", and platform staff is the `restrict`
+          // capability (ROLE_SAFETY).  The two grants are DISJOINT in the
+          // doctrine — ROLE_SAFETY holds `restrict` and neither freeze;
+          // ROLE_INTEGRITY holds both freezes and not `restrict` — so an
+          // unfreeze must accept either, or one of the two roles is locked out
+          // of an action the domain grants it.
+          const accepted = clearingAHold
+            ? ([holdCapability, 'restrict'] as const)
+            : ([holdCapability] as const);
+          // EXISTENCE, action-INDEPENDENT and on ROLE grants alone: "could this
+          // actor ever act on this room here?"  Anyone else gets 404, so the
+          // endpoint is not a room-enumeration oracle.  It cannot be
+          // `denyCapability` — that checks MFA FIRST, so a plain member with a
+          // stale session would get `mfa_required`, and a 403 confirms the room
+          // exists.  Nor `isPlatformStaff`, whose MFA gate would 404 a real
+          // operator who merely needs to step up; the ROLE half of it is what
+          // belongs here, alongside the freeze grant, because platform staff DO
+          // have business on this endpoint (they lift holds).
+          const mayEverAct =
+            grantsCapability(actor, holdCapability) || grantsCapability(actor, 'restrict');
+          if (!ownSteward && !mayEverAct) {
             return c.json(notFound, 404);
+          }
+          // The `source` lands VERBATIM in the hash-chained audit record, so it
+          // has to match who is actually acting.  `steward` claimed by someone
+          // who does not steward this room would durably misattribute a platform
+          // enforcement action to the community — the one direction the request
+          // body could lie in, since the platform sources are already gated by
+          // `actsWithPlatformAuthority` in the domain.
+          // LIFTING is platform-only whoever asks (`setGovernanceFreeze` enforces
+          // `restrict`), so `steward` is never a truthful source for it — not
+          // even from an actor who genuinely stewards this room and also holds
+          // platform staff, whose release is exercising the PLATFORM authority.
+          // Keying only on `ownSteward` let that actor record a platform-only
+          // release as community-initiated in the hash-chained audit.
+          if (body.source === 'steward' && (clearingAHold || !ownSteward)) {
+            return c.json(
+              deny(
+                'source_not_authorized',
+                'A freeze is recorded as "steward" only when the room’s own steward PLACES it; lifting one is a platform action, as is any action on a room you do not steward.',
+              ),
+              403,
+            );
+          }
+          // Each PLATFORM source is a distinct attribution, and the domain's
+          // check is one bit — "does this actor have platform authority?" — so
+          // any holder could record their freeze as legal's, or as a machine's.
+          // The record is hash-chained and read later as fact, so the source has
+          // to be one the actor can actually speak for.
+          const roles = effectiveStewardRoles(auth.roles, auth.stewardRoles);
+          const sourceRequirement =
+            body.source === 'automated_monitoring'
+              ? // A TRIGGER, not a person.  This route is human-authenticated
+                // (session + step-up MFA), so nobody reaching it is automated
+                // monitoring, whatever authority they hold.
+                'automated monitoring, which never acts through this endpoint'
+              : body.source === 'legal'
+                ? isCounsel(auth.roles)
+                  ? null
+                  : 'legal counsel'
+                : body.source === 'trust_safety'
+                  ? roles.includes('ROLE_SAFETY')
+                    ? null
+                    : 'the trust-and-safety role (ROLE_SAFETY)'
+                  : // `platform_security` and `steward` are settled above: reaching
+                    // here means the actor holds the freeze or release authority.
+                    null;
+          if (sourceRequirement !== null) {
+            return c.json(
+              deny(
+                'source_not_authorized',
+                `A freeze recorded as "${body.source}" must be placed by ${sourceRequirement}.`,
+              ),
+              403,
+            );
+          }
+          // The room's OWN steward keeps the self-protective stop: the doctrine
+          // puts `ELECTED_ROOM_STEWARD` "deliberately outside the platform
+          // ROLE_* namespace", and the cross-room rule is about acting on rooms
+          // you do not steward.  Unfreeze still requires platform staff either
+          // way (enforced in `setGovernanceFreeze`), so a room can stop its own
+          // bleeding but never release itself.
+          if (!ownSteward) {
+            const denials = accepted.map((capability) => denyCapability(actor, capability));
+            // Doctrine attaches counsel co-approval to PLACING a treasury hold,
+            // not to clearing one, and demanding it on the way out could strand a
+            // room whose counsel is unavailable.
+            const allowed = denials.some(
+              (denial) =>
+                denial === null || (clearingAHold && denial.code === 'co_approval_required'),
+            );
+            if (!allowed) {
+              // Report the ACTIONABLE denial when there is one: an operator whose
+              // session merely needs an MFA step-up should be told that, not
+              // handed a capability refusal from the other accepted capability.
+              const denial =
+                denials.find((entry) => entry?.code === 'mfa_required') ?? denials[0] ?? null;
+              if (denial) return c.json(deny(denial.code, denial.message), 403);
+            }
+          }
+          // An UNFREEZE is `restrict` whoever asks — the room's own steward
+          // included — so the `ownSteward` bypass above must not hide an MFA
+          // STEP-UP behind the domain's `platform_review_required`.  A
+          // ROLE_SAFETY operator who also stewards this room and has not
+          // verified MFA holds the authority and is told they do not, with a
+          // code the step-up path cannot act on.
+          //
+          // Only the MFA denial is surfaced: a genuine capability shortfall is
+          // the domain's answer to give, and reporting it here would change who
+          // is refused rather than only what they are told.
+          //
+          // And only to an actor the step-up can actually HELP.  `denyCapability`
+          // reports `mfa_required` before it looks at the role, so a steward who
+          // holds no `restrict` would be sent to verify MFA and then refused
+          // again with `platform_review_required` — a recoverable code offered
+          // for something verifying cannot recover.  `grantsCapability` is the
+          // role question on its own, so it answers "would MFA be enough".
+          if (clearingAHold && grantsCapability(actor, 'restrict')) {
+            const stepUp = denyCapability(actor, 'restrict');
+            if (stepUp?.code === 'mfa_required') {
+              return c.json(deny(stepUp.code, stepUp.message), 403);
+            }
           }
           const result = await setGovernanceFreeze(services, {
             roomId,
@@ -409,7 +551,17 @@ export function createTreasuryGovernanceRoutes() {
             source: body.source,
             reason: body.reason,
             actorUserId: auth.userId,
+            // LIFTING is `restrict` and nothing else.  Clearing the cross-room
+            // gate must not imply it: `ROLE_INTEGRITY` owns the freeze surface
+            // and holds no `restrict`, so an integrity analyst can halt any room
+            // while a safety/legal operator is still required to release it —
+            // which is the whole content of the domain's asymmetry.
             isPlatformStaff: staff,
+            // ATTRIBUTION is the separate question.  A cross-room actor who
+            // cleared the capability gate is exercising platform authority, so
+            // their freeze may carry a platform source; labelling it `steward`
+            // would misattribute it in the tamper-evident audit record.
+            actsWithPlatformAuthority: staff || !ownSteward,
           });
           if ('code' in result) return tgError(c, result);
           return c.json({ freeze_state: result.profile.freezeState });

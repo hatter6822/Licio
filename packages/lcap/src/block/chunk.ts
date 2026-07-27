@@ -10,9 +10,19 @@ import { bytesEqual } from '../checkpoint/merkle.js';
 import { cidFor, sha256 } from '../cid/index.js';
 import type { ChunkDescriptorV2 } from '../schemas/records.js';
 
-/** Recommended fixed chunk sizes per transport profile (§13.2). */
+/** Transport profiles the §13.2 chunk bounds are defined for. */
 export type ChunkProfile = 'unstable' | 'mobile' | 'https' | 'lan';
 
+/**
+ * The §13.2 fixed chunk size per transport profile.
+ *
+ * Smaller chunks on a lossy carrier so one corrupt chunk costs one small
+ * re-fetch; larger on a LAN where the round trip dominates.  This mapping IS
+ * the specification's numbers — it was briefly deleted as unreferenced, which
+ * left `ChunkProfile` a vocabulary with nothing behind it and the documented
+ * bounds implemented nowhere.  `chunkBlock` now takes a profile, so naming one
+ * is the ordinary way to chunk and the numbers cannot drift out of use again.
+ */
 export const CHUNK_SIZE: Readonly<Record<ChunkProfile, number>> = {
   unstable: 16 * 1024,
   mobile: 32 * 1024,
@@ -26,8 +36,20 @@ export interface ChunkedBlock {
   readonly descriptors: readonly ChunkDescriptorV2[];
 }
 
-/** Split a block's bytes into fixed-size chunks with per-chunk descriptors. */
-export async function chunkBlock(bytes: Uint8Array, chunkSize: number): Promise<ChunkedBlock> {
+/**
+ * Split a block's bytes into fixed-size chunks with per-chunk descriptors.
+ *
+ * Takes a transport PROFILE (§13.2) or an explicit byte size.  The profile form
+ * is the one to reach for: it keeps the specification's bounds on the calling
+ * path rather than in a constant beside it.  An explicit size stays available
+ * for a carrier that negotiates its own, and for tests exercising the boundary
+ * arithmetic at sizes a profile would never produce.
+ */
+export async function chunkBlock(
+  bytes: Uint8Array,
+  size: number | ChunkProfile,
+): Promise<ChunkedBlock> {
+  const chunkSize = typeof size === 'number' ? size : CHUNK_SIZE[size];
   if (chunkSize <= 0) throw new Error('chunk size must be positive');
   const parentBlockCid = await cidFor('block', bytes);
   const chunks: Uint8Array[] = [];

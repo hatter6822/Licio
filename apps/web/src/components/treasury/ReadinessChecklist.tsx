@@ -183,7 +183,7 @@ export function ReadinessChecklist({
             </Button>
           </div>
           {transitionError ? (
-            <div role="alert" className="text-sm text-error-fg">
+            <div role="alert" className="text-sm text-error-on-soft">
               <p>{transitionError.message}</p>
               {transitionError.unmet.length > 0 ? (
                 <ul className="mt-1 list-disc pl-5">

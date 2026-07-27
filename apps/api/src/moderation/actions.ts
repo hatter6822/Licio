@@ -23,7 +23,12 @@ import {
   type StewardCapability,
 } from '@licio/shared';
 import { writeAudit } from './audit.js';
-import { denyCapability, isIntegrityActor, type StewardActor } from './authz.js';
+import {
+  type CapabilityDenial,
+  denyCapability,
+  isIntegrityActor,
+  type StewardActor,
+} from './authz.js';
 import { createActionNotice } from './notices.js';
 import type { AccountActionState, ContentVisibilityState } from './ports.js';
 import type { ModerationServices } from './services.js';
@@ -33,7 +38,10 @@ export type ActionOutcome =
   | { ok: true; response: ModerationActionResponse }
   | {
       ok: false;
-      code: 'insufficient_capability' | 'mfa_required';
+      // Derived from the denial type rather than re-listed: these codes are
+      // decided in ONE place (`denyCapability`), and a hand-copied union goes
+      // stale the moment a gate is added there.
+      code: CapabilityDenial['code'];
       message: string;
       requiredRole?: string;
     }
@@ -419,7 +427,7 @@ export type RevertOutcome =
   | { ok: true; response: RevertActionResponse }
   | {
       ok: false;
-      code: 'not_found' | 'not_reversible' | 'insufficient_capability' | 'mfa_required';
+      code: 'not_found' | 'not_reversible' | CapabilityDenial['code'];
       message: string;
     };
 

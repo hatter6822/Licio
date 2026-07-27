@@ -50,15 +50,28 @@ export async function compress(
 ): Promise<Uint8Array> {
   const stream = new CompressionStream(algorithm);
   const writer = stream.writable.getWriter();
-  void writer.write(toBufferSource(bytes)).then(() => writer.close());
+  // Pump input concurrently so the transform never deadlocks on a full buffer —
+  // and settle the pump the same way `decompress` does.  A FLOATING
+  // `write().then(close)` rejects unhandled whenever the stream errors (or the
+  // readable side is torn down), which Node's default `--unhandled-rejections=
+  // throw` turns into a process abort; `.catch` + the `finally` await make the
+  // failure land on the caller's `reader.read()` instead, where it belongs.
+  const pump = writer
+    .write(toBufferSource(bytes))
+    .then(() => writer.close())
+    .catch(() => undefined);
   const reader = stream.readable.getReader();
   const parts: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    parts.push(value);
-    total += value.length;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      total += value.length;
+    }
+  } finally {
+    await pump;
   }
   return concat(parts, total);
 }

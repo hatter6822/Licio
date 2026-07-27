@@ -47,9 +47,12 @@ import {
   invScalar,
   messageToScalar,
   mod,
+  OCTET_POINT_LENGTH,
+  OCTET_SCALAR_LENGTH,
   ORDER,
   os2ip,
   P1,
+  SIGNATURE_LENGTH,
   scalarBytes,
 } from './suite.js';
 
@@ -110,19 +113,26 @@ function serializeCommit(c: G1Point, ch: bigint, zMsgs: readonly bigint[], zS: b
 
 /** Parse + structurally validate a commitment-with-proof for `m` committed messages. */
 function deserializeCommit(bytes: Uint8Array, m: number): ParsedCommit {
-  if (bytes.length !== 48 + 32 * (m + 2)) throw new Error('blind: malformed commitment length');
-  const c = G1.fromBytes(bytes.slice(0, 48));
+  if (bytes.length !== OCTET_POINT_LENGTH + OCTET_SCALAR_LENGTH * (m + 2))
+    throw new Error('blind: malformed commitment length');
+  const c = G1.fromBytes(bytes.slice(0, OCTET_POINT_LENGTH));
   if (c.is0()) throw new Error('blind: identity commitment');
   c.assertValidity();
   const sc = (o: number): bigint => {
-    const s = os2ip(bytes.slice(o, o + 32));
+    const s = os2ip(bytes.slice(o, o + OCTET_SCALAR_LENGTH));
     if (s <= 0n || s >= ORDER) throw new Error('blind: scalar out of range');
     return s;
   };
-  const ch = sc(48);
+  const ch = sc(OCTET_POINT_LENGTH);
+  // Past `c || ch`.  Spelled from the two wire widths rather than as `80`, so
+  // the length check above and these field offsets can never describe different
+  // layouts — that disagreement would not throw, it would parse the next
+  // field's bytes as a scalar.  Deliberately NOT `SIGNATURE_LENGTH`, which is
+  // the same number for an unrelated reason.
+  const zBase = OCTET_POINT_LENGTH + OCTET_SCALAR_LENGTH;
   const zMsgs: bigint[] = [];
-  for (let i = 0; i < m; i++) zMsgs.push(sc(80 + i * 32));
-  const zS = sc(80 + m * 32);
+  for (let i = 0; i < m; i++) zMsgs.push(sc(zBase + i * OCTET_SCALAR_LENGTH));
+  const zS = sc(zBase + m * OCTET_SCALAR_LENGTH);
   return { c, ch, zMsgs, zS };
 }
 
@@ -231,8 +241,8 @@ export function verifyBlindCredential(
 ): boolean {
   const layout = credentialLayout(pk, committedScalars.length, knownMessages, header);
   const sig: BbsSignature = {
-    a: G1.fromBytes(signatureBytes.slice(0, 48)),
-    e: os2ip(signatureBytes.slice(48, 80)),
+    a: G1.fromBytes(signatureBytes.slice(0, OCTET_POINT_LENGTH)),
+    e: os2ip(signatureBytes.slice(OCTET_POINT_LENGTH, SIGNATURE_LENGTH)),
   };
   const scalars = credentialScalars(knownMessages, committedScalars, secretProverBlind);
   return bbsVerifyScalars(pk, sig, layout.q1, layout.msgGens, scalars, header);

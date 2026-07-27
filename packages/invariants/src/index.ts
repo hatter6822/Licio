@@ -26,6 +26,5 @@ export type {
   InvariantTarget,
   InvariantTargetType,
   InvariantTimeWindow,
-  InvariantVersion,
 } from './types.js';
 export { INVARIANT_TARGET_TYPES, INVARIANT_TYPE_NAMES, InvariantType } from './types.js';

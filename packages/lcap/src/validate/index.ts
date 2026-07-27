@@ -2,7 +2,6 @@
 export {
   maxPositive,
   type PositiveState,
-  positiveRank,
   type TrustState,
 } from './states.js';
 export {

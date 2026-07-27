@@ -1,25 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { contentSecurityPolicyHeader } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { getCanonicalAppOrigin } from './cors.js';
 
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self'",
-  "style-src 'self'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self'",
-  "worker-src 'self'",
-  "manifest-src 'self'",
-  "frame-ancestors 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  'trusted-types default dompurify licio-ugc',
-  "require-trusted-types-for 'script'",
-  'report-uri /api/security/csp-report',
-  'report-to csp-endpoint',
-].join('; ');
+// The directives themselves live in `@licio/shared` (`security/csp.ts`), because
+// the SAME policy must also reach the `vite preview` header and the `<meta>` the
+// web build injects for the native courier WebView — and three hand-copied lists
+// meant tightening this one silently left the courier on the weakest policy.
+const CSP = contentSecurityPolicyHeader();
 
 const REPORT_PATH = '/api/security/csp-report';
 const REPORTING_ENDPOINTS = `csp-endpoint="${REPORT_PATH}"`;

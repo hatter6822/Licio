@@ -367,8 +367,17 @@ These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
   story therefore waits on a decision about surfacing the submitter, not on
   client polish.
 - **SPEC enhancements beyond the §-DoD** (not claimed complete): the two-person
-  co-approval rule for the highest-severity actions; escalation AUTO-routing to a
-  senior queue (today `escalate` sets the case status and seniors pull it);
+  co-approval rule for the highest-severity actions — the GATE exists
+  (`denyCapability` consults `CO_APPROVAL_CAPABILITIES` and requires a DISTINCT
+  approver holding `compliance.counsel.approve`), and because no path can yet
+  PROVE that approver consented, the one capability in that set
+  (`treasury-freeze`, cross-room) is refused outright rather than waved through;
+  the missing piece is an authenticated, single-use approval bound to the action
+  (closure target in `docs/treasury/README.md`), after which the set can widen to
+  other high-severity actions such as a permanent `ban` (senior-gated today, not
+  co-approved); escalation
+  AUTO-routing to a senior queue (today `escalate` sets the case status and
+  seniors pull it);
   room-report room-steward-layer-first routing; and the on-call paging PROVIDER
   (a WS-O binding — alerts log today).
 

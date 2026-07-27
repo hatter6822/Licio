@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Unit coverage for the governance KYC gate: segmentation is line-anchored
-// (handler-body `c.get(...)` never truncates a segment), unguarded routes
-// fail, allowlisted routes pass, stale allowlist entries fail, and the LIVE
-// tree passes.
+// Unit coverage for the governance KYC gate.  Routes come from the PARSE, so a
+// registration is found wherever it sits, the guard is attributed by
+// CONTAINMENT rather than by text proximity, and the only fail-closed case left
+// is a route path the gate genuinely cannot read.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
+  mountedRouteModules,
+  NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
 } from './check-governance-kyc.js';
+
+const ROOT = resolve(import.meta.dirname, '..');
 
 const guarded = `
 export function createRoutes() {
@@ -69,6 +75,47 @@ export function createRoutes() {
 }
 `;
 
+const viaOn = `
+export function createRoutes() {
+  return new Hono().on('POST', '/rooms/:roomId/on/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
+const dynamicPath = `
+export function createRoutes() {
+  return new Hono().post(buildPath('vote'), authMiddleware(), (c) => c.json({}));
+}
+`;
+
+const notARoute = `
+export function createRoutes() {
+  return new Hono()
+    .post('/rooms/:roomId/thing/vote', requireGovernanceEligibility(), async (c) => {
+      await db.delete(rows);
+      cache.delete('key');
+      return c.json({ ok: true });
+    });
+}
+`;
+
+/** A guard on the FIRST route must not vouch for the second. */
+const guardLeak = `
+export function createRoutes() {
+  return new Hono()
+    .post('/rooms/:roomId/a/vote', requireGovernanceEligibility(), (c) => c.json({}))
+    .post('/rooms/:roomId/b/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
+/** A chain longer than any bounded receiver walk would follow. */
+const longChain = `
+export function createRoutes() {
+  return new Hono()
+${Array.from({ length: 40 }, (_, i) => `    .get('/read/${i}', (c) => c.json({}))`).join('\n')}
+    .post('/rooms/:roomId/last/vote', authMiddleware(), (c) => c.json({}));
+}
+`;
+
 describe('extractMutationRoutes', () => {
   it('keeps a segment intact across handler-body c.get(...) calls', () => {
     const routes = extractMutationRoutes('f.ts', guarded);
@@ -93,6 +140,319 @@ describe('extractMutationRoutes', () => {
   });
 });
 
+describe('the POLARITY of the eligibility verdict', () => {
+  // `checkGovernanceEligibility` resolves to `null` for an ELIGIBLE member and
+  // a denial for an ineligible one, so "some branch returns" is not the
+  // property — the branch that returns has to be the DENIAL'S.  Reading the
+  // shape without the polarity accepted a route that refused everybody who was
+  // allowed and let everybody who was not straight through.
+  const route = (guard: string): string => `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  ${guard}
+  return c.json(await castVote());
+});`;
+
+  it.each([
+    ['if (denial) return', 'if (denial) return c.json(denial, 403);'],
+    ['if (denial !== null) return', 'if (denial !== null) return c.json(denial, 403);'],
+    ['if (denial != null) throw', 'if (denial != null) throw new HTTPException(403);'],
+    ['a ternary on the verdict', 'if (denial ? true : false) return c.json(denial, 403);'],
+    ['returning the verdict itself', 'if (true) return denial ?? c.json(await castVote());'],
+  ])('accepts %s — the DENIED are refused', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
+  it.each([
+    ['if (!denial) return', 'if (!denial) return c.json({}, 403);'],
+    ['if (denial === null) return', 'if (denial === null) return c.json({}, 403);'],
+    ['if (denial == null) return', 'if (denial == null) return c.json({}, 403);'],
+    [
+      'refusing in the ELSE of a truthy test',
+      'if (denial) { log(denial); } else { return c.json({}, 403); }',
+    ],
+  ])('rejects %s — it refuses the ELIGIBLE', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['a swapped returned ternary', 'return denial ? c.json(await castVote()) : c.json({}, 403);'],
+    ['a negated swapped ternary', 'return !denial ? c.json({}, 403) : c.json(await castVote());'],
+  ])('rejects %s — the verdict only SELECTED between two other values', (_label, guard) => {
+    // The polarity rule reaches an `if`, but a returned ternary hands back one
+    // of two expressions and which of them refuses is not something a
+    // structural gate can read.  Letting the "returning the verdict refuses"
+    // rule vouch for it accepted a route that admitted exactly the members it
+    // should have turned away — the original defect, one position along.  So an
+    // ambiguous spelling is rejected and the clear `if (denial) return …` form
+    // is what passes.
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['&& with another condition', 'if (denial && shouldEnforce) return c.json(denial, 403);'],
+  ])('rejects %s — a truthy denial need not reach the refusal', (_label, guard) => {
+    // With `shouldEnforce` false an ineligible member walks past a branch that
+    // looks exactly like a guard.  `||` and `??` DO carry the implication —
+    // both are truthy whenever the denial is — so only `&&` refuses here.
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['|| with another condition', 'if (denial || alsoBlocked) return c.json(denial, 403);'],
+    ['&& with a literal true', 'if (denial && true) return c.json(denial, 403);'],
+  ])('accepts %s', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
+  it('rejects a branch that exits only on SOME paths', () => {
+    // `if (denial) { if (shouldEnforce) return … }` refuses only when the inner
+    // condition holds, so the presence of a return in the branch proves
+    // nothing — the refusal has to dominate.
+    const guard = 'if (denial) { if (shouldEnforce) return c.json(denial, 403); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it('accepts a branch where BOTH paths exit', () => {
+    const guard =
+      'if (denial) { if (x) return c.json(denial, 403); else throw new HTTPException(403); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
+  it('rejects a branch whose only return is inside a nested callback', () => {
+    // `if (denial) { const f = () => { return 1; }; }` declares a callback and
+    // exits nothing, so a flat walk read a branch that falls straight through
+    // as a refusal.
+    const guard = 'if (denial) { const f = () => { return 1; }; log(f); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it('rejects a verdict that is bound and never consulted', () => {
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const ignored = await checkGovernanceEligibility(c.get('userId'));
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+});
+
+describe('WHERE the refusal sits', () => {
+  it('rejects a refusal that comes after the mutation', () => {
+    // The verdict is checked, with the right polarity, in the right branch —
+    // and the vote is already persisted when the ineligible member is turned
+    // away.  A guard that refuses nothing that has not already happened is not
+    // a guard, so existence was never the whole property.
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  await castVote();
+  if (denial) return c.json(denial, 403);
+  return c.json({ ok: true });
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('accepts synchronous reads before the refusal', () => {
+    // The decidable form of "the refusal dominates the mutations" is that
+    // nothing else is AWAITED in between.  Real handlers read the auth context
+    // and the validated params first, and none of that is asynchronous.
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const auth = requireAuth(c);
+  const roomId = c.req.valid('param').roomId;
+  const denial = await checkGovernanceEligibility(auth.userId);
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote(roomId));
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+});
+
+describe('the guard is resolved, not matched by name', () => {
+  it('rejects a LOCAL function that merely shares the name', () => {
+    // A fail-closed gate satisfied by any function called
+    // `checkGovernanceEligibility` is satisfied by one that returns nothing.
+    const src = `
+const app = new Hono();
+function checkGovernanceEligibility(id) { return null; }
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('rejects a same-named guard imported from ANOTHER module', () => {
+    // Accepting any import meant `from './fake.js'` certified a route as
+    // guarded.  The import's SOURCE is what makes it the guard.
+    const src = `
+import { checkGovernanceEligibility } from './fake.js';
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('accepts the IMPORTED guard, which is how every real route uses it', () => {
+    // An import specifier is a declaration in the file too, so the test is
+    // what KIND it is — not merely whether one exists.
+    const src = `
+import { checkGovernanceEligibility } from '../governance/eligibility.js';
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+});
+
+describe('a handler passed BY NAME', () => {
+  it('reads the function the identifier denotes', () => {
+    // Walking only the identifier saw an empty body, so a correctly guarded
+    // route was reported unguarded — a gate blocking valid code.
+    const src = `
+const app = new Hono();
+async function handler(c) {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+}
+app.post('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+
+  it('still reports a named handler with NO guard', () => {
+    const src = `
+const app = new Hono();
+async function handler(c) { return c.json(await castVote()); }
+app.post('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+});
+
+describe('every mounted route module is CLASSIFIED', () => {
+  it('bites when a module is mounted and classified nowhere', () => {
+    const mount = readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8')
+      .replace(
+        'import { createAuthRoutes }',
+        "import { createBrandNewRoutes } from './brand-new.js';\nimport { createAuthRoutes }",
+      )
+      .replace(
+        ".route('/auth', createAuthRoutes())",
+        ".route('/brand', createBrandNewRoutes())\n      .route('/auth', createAuthRoutes())",
+      );
+    const issues = runGovernanceKycGate((rel) =>
+      rel === 'apps/api/src/routes/v1.ts' ? mount : readFileSync(resolve(ROOT, rel), 'utf-8'),
+    );
+    // A fixed list of four files cannot notice a fifth being mounted, which is
+    // the gap between what this gate claimed and what it checked.
+    expect(issues.some((issue) => issue.includes('CLASSIFIED NOWHERE'))).toBe(true);
+  });
+
+  it('classifies every module the live mount graph carries', () => {
+    const mounted = mountedRouteModules(
+      readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8'),
+    );
+    expect(mounted.length).toBeGreaterThan(15);
+    const classified = new Set([...GOVERNANCE_ROUTE_FILES, ...Object.keys(NON_GOVERNANCE_ROUTES)]);
+    expect(mounted.filter((each) => !classified.has(each))).toEqual([]);
+  });
+});
+
+describe('a receiver the gate cannot classify', () => {
+  // Skipping an unrecognised receiver DROPPED the registration, and a dropped
+  // route is worse than an unguarded one: the gate reported success over an
+  // endpoint it never looked at.
+  it('follows a router built by a local factory', () => {
+    const src = `
+function makeRouter() { return new Hono(); }
+const app = makeRouter();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('reports a route on an IMPORTED receiver rather than dropping it', () => {
+    const src = `
+import { app } from './router.js';
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('reports a COMPUTED path on an imported router rather than dropping it', () => {
+    // Neither the receiver nor the path is readable, which is exactly when
+    // dropping is worst: the same computed path on a local Hono router already
+    // failed closed, so this form was the one way to disappear entirely.  A
+    // registration that hands over a HANDLER is one whatever its path says.
+    const src = `
+import { app } from './router.js';
+const path = buildPath();
+app.post(path, async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src).length).toBeGreaterThan(0);
+  });
+
+  it('still skips an ambient global — `Promise.all` is not a route', () => {
+    // Asked of the checker, not of a list of global names: every declaration of
+    // `Promise` is in a `lib.*.d.ts`, and nothing declared there is a router.
+    const src = `
+const app = new Hono();
+app.get('/x', async (c) => c.json(await Promise.all([one(), two()])));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
+describe('the ways Hono registers a route', () => {
+  // All three reach the same handler, so all three are governance mutations.
+  // `.all` answers every method and was skipped entirely, which let an
+  // unguarded participation endpoint pass a fail-closed gate.
+  it.each([
+    [
+      '.all covers every mutation method',
+      `export const r = new Hono().all('/rooms/:id/vote', authMiddleware(), (c) => c.json({}));`,
+      ['all:/rooms/:id/vote:open'],
+    ],
+    [
+      '.all is guarded like any other',
+      `export const r = new Hono().all('/rooms/:id/vote', requireGovernanceEligibility(), (c) => c.json({}));`,
+      ['all:/rooms/:id/vote:guarded'],
+    ],
+    [
+      '.on takes an ARRAY of methods',
+      `export const r = new Hono().on(['POST','PUT'], '/rooms/:id/vote', (c) => c.json({}));`,
+      ['post:/rooms/:id/vote:open', 'put:/rooms/:id/vote:open'],
+    ],
+    [
+      '.on takes an ARRAY of paths',
+      `export const r = new Hono().on('POST', ['/a/vote','/b/vote'], (c) => c.json({}));`,
+      ['post:/a/vote:open', 'post:/b/vote:open'],
+    ],
+    [
+      '.get is a read, not a mutation',
+      `export const r = new Hono().get('/x', (c) => c.json({}));`,
+      [],
+    ],
+    ['.use is middleware, not a route', `export const r = new Hono().use('/x', mw());`, []],
+  ])('%s', (_label, source, expected) => {
+    expect(
+      extractMutationRoutes('f.ts', source).map(
+        (route) => `${route.method}:${route.path}:${route.guarded ? 'guarded' : 'open'}`,
+      ),
+    ).toEqual(expected);
+  });
+});
+
 describe('runGovernanceKycGate', () => {
   it('fails on an unguarded, un-allowlisted governance POST', () => {
     const issues = runGovernanceKycGate((relPath) =>
@@ -103,24 +463,107 @@ describe('runGovernanceKycGate', () => {
     expect(issues.some((issue) => issue.includes('stale ALLOWLIST'))).toBe(true);
   });
 
-  it('FAILS CLOSED on a mid-line `.post(` the line-anchored scan cannot see', () => {
+  it.each([
+    ['a mid-line POST', midLinePost, 'POST /rooms/:roomId/sneaky/vote'],
+    ['a mid-line DELETE', midLineDelete, 'DELETE /rooms/:roomId/sneaky/:id'],
+    ['an `.on(METHOD, …)` registration', viaOn, 'POST /rooms/:roomId/on/vote'],
+  ])('classifies %s rather than rejecting how it is written', (_label, source, expected) => {
+    // These used to be reported as "not at line-start" — a formatting complaint
+    // standing in for the real finding, because the scan could not see the
+    // route at all.  `.on('POST', …)` was invisible to BOTH the extraction and
+    // the raw-count cross-check, so it could ship ungated with a green gate.
     const issues = runGovernanceKycGate((relPath) =>
-      relPath === GOVERNANCE_ROUTE_FILES[0] ? midLinePost : 'export const nothing = 1;',
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? source : 'export const nothing = 1;',
     );
-    // The raw-count cross-check catches the unclassifiable occurrence.
-    expect(issues.some((issue) => issue.includes('not at line-start'))).toBe(true);
+    expect(issues.some((issue) => issue.includes(expected))).toBe(true);
+    expect(issues.some((issue) => issue.includes('line-start'))).toBe(false);
   });
 
-  it('FAILS CLOSED on a mid-line non-POST mutation too (the per-verb cross-check)', () => {
-    // Before the cross-check covered every verb, a mid-line `.delete(`/`.patch(`
-    // evaded BOTH the line-anchored extraction and the POST-only raw count —
-    // shipping ungated with a green gate.
+  it.each([
+    [
+      'a discarded result',
+      'async (c) => { void checkGovernanceEligibility(c.get("auth").userId); return c.json({}); }',
+    ],
+    [
+      'a bare awaited statement',
+      'async (c) => { await checkGovernanceEligibility(c.get("auth").userId); return c.json({}); }',
+    ],
+  ])('does not accept a guard whose verdict is ignored (%s)', (_label, handler) => {
+    // Calling the guard is not enforcing it: an ineligible account is refused
+    // by nothing here, yet the name-only test certified the route.
+    const source = `export const r = new Hono().post('/rooms/:id/vote', ${handler});`;
+    expect(extractMutationRoutes('f.ts', source)[0]?.guarded).toBe(false);
+  });
+
+  it.each([
+    ['middleware', 'requireGovernanceEligibility(), (c) => c.json({})'],
+    [
+      'a consumed handler-level result',
+      'async (c) => { const d = await checkGovernanceEligibility(c.get("auth").userId); if (d) return c.json({}, 403); return c.json({}); }',
+    ],
+  ])('accepts a guard that is heeded (%s)', (_label, handler) => {
+    const source = `export const r = new Hono().post('/rooms/:id/vote', ${handler});`;
+    expect(extractMutationRoutes('f.ts', source)[0]?.guarded).toBe(true);
+  });
+
+  it('FAILS CLOSED on a method list it cannot fully read', () => {
+    // `.on(['GET', mutation], …)` yielded only `GET`, so the registration
+    // classified as a read and was skipped — letting an unguarded POST through
+    // a gate whose whole point is failing closed.
+    const partial = [
+      "const mutation = 'POST' as const;",
+      "export const r = new Hono().on(['GET', mutation], '/rooms/:id/governance/vote', (c) => c.json({}));",
+    ].join('\n');
     const issues = runGovernanceKycGate((relPath) =>
-      relPath === GOVERNANCE_ROUTE_FILES[0] ? midLineDelete : 'export const nothing = 1;',
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? partial : 'export const nothing = 1;',
     );
-    expect(
-      issues.some((issue) => issue.includes('not at line-start') && issue.includes('`.delete(')),
-    ).toBe(true);
+    expect(issues.some((issue) => issue.includes('could not be read'))).toBe(true);
+  });
+
+  it('still skips a registration that is only READS', () => {
+    const reads = `export const r = new Hono().on(['GET','HEAD'], '/rooms/:id/read', (c) => c.json({}));`;
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? reads : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.startsWith(GOVERNANCE_ROUTE_FILES[0]))).toBe(false);
+  });
+
+  it('FAILS CLOSED on a route path it cannot read', () => {
+    // The one place the discipline is still needed: a mutation registered on a
+    // router with a computed path cannot be matched to a guard or an allowlist.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? dynamicPath : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('not a static'))).toBe(true);
+  });
+
+  it('does not take a non-router `.delete(` for a route', () => {
+    // `db.delete(rows)` and `cache.delete('key')` are ordinary calls; only a
+    // receiver chain rooting at `new Hono()` registers a route.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? notARoute : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.startsWith(GOVERNANCE_ROUTE_FILES[0]))).toBe(false);
+  });
+
+  it("does not let one route's guard vouch for the next", () => {
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? guardLeak : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/b/vote'))).toBe(true);
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/a/vote'))).toBe(false);
+  });
+
+  it('sees a route at the END of a long chain', () => {
+    // A Hono chain nests each link inside the one before it, so the receiver of
+    // the forty-first registration is forty calls deep.  Bounding that walk
+    // silently stopped recognising routes past the limit — the live tree
+    // reported 11 of treasury-governance.ts's 19, and only the allowlist's
+    // stale-entry discipline exposed it.
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? longChain : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('POST /rooms/:roomId/last/vote'))).toBe(true);
   });
 
   it('flags an unguarded non-POST governance mutation (DELETE)', () => {

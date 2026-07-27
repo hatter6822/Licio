@@ -210,8 +210,37 @@ never weighs down the app bundle.
 The suite has been executed in Chromium (14/14 passing). The dark-mode axe run
 caught a real bug — the prominent BottomNav "Submit" tab used `text-primary`
 (~3.3:1 on the dark canvas); it now uses `text-primary-on-soft` (≥4.5:1 in both
-modes), guarded by a unit test. To run e2e against a pre-provisioned browser
-when the managed download is unavailable, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+modes). To run e2e against a pre-provisioned browser when the managed download is
+unavailable, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+
+### The bare hue is never normal text (`pnpm check:a11y-hue-usage`)
+
+`text-<hue>` and `text-<hue>-on-soft` are DIFFERENT colours, and the BottomNav
+bug above is the general case rather than a one-off. `tokens.test.ts` pins both
+sides of the boundary for all five hues (`primary`/`success`/`warning`/`error`/
+`info`): `-on-soft` clears 4.5:1 on the canvas AND on its soft background, while
+the bare token clears 3:1 but — asserted as a fact about the palette, in dark
+mode — stays *below* 4.5:1. So the bare token is a LARGE-text (1.4.3) and
+NON-TEXT (1.4.11) colour, never normal text.
+
+Nothing in the type system separates two class strings that both compile, so the
+usage half is a static gate: `scripts/check-a11y-hue-usage.ts` lexes every string
+literal and template chunk in `apps/web/src/**` — `cn(...)` arguments, class
+maps, ternaries and module constants included, since that is how a class name
+usually reaches the DOM here. Two exemptions:
+
+1. **`size-<n>` in the same literal** — how this codebase sizes icons, and an
+   icon is a graphical object (1.4.11, 3:1).
+2. **`a11y-bare-hue-ok: <reason>`** in a comment on the line or in the comment
+   block directly above it, for a non-text use the lexer cannot recognise. The
+   reason is REQUIRED and the marker cannot reach past a line of real code. Three
+   uses today: the `<progress>` fill in `NotificationBudget`, and the
+   `aria-hidden` radio indicators in `RadioGroup` and `OperationalModeSelector`
+   (a ring plus a `bg-current` dot).
+
+An earlier cut of this guard matched `className="…"` on one line and missed
+sixteen live violations across both categories — dispute chips, safety-surface
+links, an alert paragraph — which is why it lexes rather than pattern-matches.
 
 ### Biome a11y rule deferral
 

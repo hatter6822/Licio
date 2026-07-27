@@ -68,8 +68,23 @@ pnpm lint:lockfile                  # lockfile integrity
 pnpm audit:advisories               # dependency advisories (npm BULK endpoint; classic `pnpm audit` is retired)
 pnpm check:deps                     # dependency budgets      · check:workspace-deps — boundary enforcement
 pnpm check:policy                   # doctrine documents      · check:prod-parity — dev↔prod adapter/env parity
-pnpm check:sql-identifiers          # no migration identifier over Postgres's 63-byte limit
-                                    #   (over-long names TRUNCATE silently and can collide)
+pnpm check:csp-parity               # index.html carries NO hand-written CSP, and (after a web build)
+                                    #   dist/index.html carries exactly the injected shared policy — the
+                                    #   courier WebView's only policy, and the one delivery point the
+                                    #   compiler cannot check
+pnpm check:dead-exports             # no exported VALUE is referenced nowhere (NAMED exports only —
+                                    #   types and `export default` are out of scope; see "Unreferenced
+                                    #   exports" under Key conventions).  survey:internal-exports is the
+                                    #   narrower, NOT-in-CI report of exports confined to their own file
+pnpm check:a11y-hue-usage           # `text-<hue>` (3:1 in dark mode) is never used for NORMAL text —
+                                    #   only `text-<hue>-on-soft` clears WCAG 1.4.3 AA there
+pnpm check:sql-identifiers          # no migration identifier AT Postgres's 63-byte limit, read with
+                                    #   the server's own parser (over-long names TRUNCATE silently and
+                                    #   can collide).  The parser applies the limit too, so a cut name
+                                    #   is indistinguishable from a genuine 63 — declare the genuine
+                                    #   ones; the gated migration harness settles it authoritatively by
+                                    #   listening for Postgres's own truncation NOTICE, which also
+                                    #   covers Drizzle-derived and `EXECUTE format()` names
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation
@@ -132,8 +147,12 @@ After any source change, also run the gates relevant to what you touched
 above): `lint:security`, `check:deps`, and `check:workspace-deps` on any
 change; `check:no-applause` / `check:no-raw-egress` when touching
 components, routes, or the signals layer; `check:governance-kyc` when
-touching governance-participation routes; `check:update-channel` when
-touching the private-mode update path; and — after a production build
+touching governance-participation routes; `check:csp-parity` when touching
+the CSP or its injection plugin; `check:dead-exports` when removing a call site
+(the last caller going away is what turns an export dead);
+`check:a11y-hue-usage` when touching component class names;
+`check:update-channel` when touching the private-mode update path; and — after
+a production build
 (`pnpm --filter web build`) — `check:sw`.  CI runs all of the above on
 every PR.
 
@@ -357,6 +376,58 @@ write for a file the foreground agent may also touch.
   reach the client.  No wallet seed phrases or private keys in logs
   (pino redaction enforced).
 
+- **Unreferenced exports (enforced by `check:dead-exports`).**  An exported
+  **value** — any binding of a `const`/`let`/`var` declarator list (destructuring
+  included), a `function`/`class`/`enum`, a name published by an `export { … }`
+  clause, or the binding of an `export * as name from '…'` — that nothing
+  references is a gate failure, not a style note: it is compiled, bundled, and read by the next
+  person as though it were the way to do the thing.  When one appears, decide
+  which of three it is before acting:
+    1. an **unwired guarantee** — a doctrine constant, a limit, or a client call
+       that SHOULD be consulted somewhere.  Wire it up (the
+       implement-the-improvement rule below); the unreferenced symbol is the
+       evidence of a missing gate, not the defect.
+    2. one of **two spellings of a live value** — make the exported, documented
+       one the single source and delete the duplicate literal, never the reverse.
+    3. genuinely **vestigial** — delete it.
+  Used only inside its own file?  Drop the `export`, keep the symbol —
+  `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
+  the ~969 standing cases are worked through
+  (`docs/planning/audit-residuals-2026-07.md`).  An unchanged barrel re-export
+  (`export { live } from './x.js'`) is judgeable too — publishing a name is not
+  consuming it — but the 254 standing cases are overwhelmingly module barrels
+  publishing their SSOT surface, so they are surveyed by
+  `pnpm survey:barrel-reexports` and tracked there rather than gated.
+  **BOTH SIDES COME FROM THE COMPILER** (`scripts/resolve-export-references.ts`),
+  never from parsing: the export list is the module's own export table, and
+  references are resolved to the module BINDING rather than matched by name — so
+  an unrelated local, parameter or property that happens to share a spelling is
+  not a consumer, and no export shape needs a pattern of its own.  The gate
+  REFUSES to run if any tracked file falls outside every tsconfig, or if a
+  module's export table cannot be read, since either would let it report success
+  over code it never judged.  The one thing resolution cannot see is a module fetched by URL at
+  runtime (the Playwright `/src` harnesses); those carry a
+  `dead-exports-entry: <reason>` comment.
+  **`export default` is out of scope**, and not as an exemption: it publishes the
+  binding `default`, so the declaration's own name is module-local and every
+  importer picks its own — the name is under no obligation to appear anywhere
+  else.  Named exports of a DYNAMICALLY imported module ARE in scope: `mod.foo()`
+  and `const { foo } = await import(…)` both spell the name.
+  **Types are deliberately out of scope.**  A `type`/`interface` is erased at
+  build, and nearly every unreferenced one here is a mechanical projection of a
+  value that IS live (`z.infer<typeof xSchema>`, `typeof table.$inferSelect`,
+  `(typeof CONST)[number]`).  Those are uniform by construction — every table
+  having a `Row` type is worth more than pruning the few nothing imports yet.
+
+- **Pino is the ONLY server logging path.**  Redaction is worth exactly
+  as much as the share of output that passes through it, so a `console.*`
+  write — or a LIBRARY that logs on its behalf — is a hole in it, not a
+  style issue.  `@licio/db` therefore always passes `onnotice` to
+  postgres.js (whose unset default is `console.log` of the whole notice
+  object, `detail`/`internal_query` included) and projects a notice to
+  severity/code/message before any consumer sees it.  A dependency that
+  logs for you needs the same treatment.
+
 - **SPDX header** for new source files:
   `// SPDX-License-Identifier: AGPL-3.0-or-later`
 
@@ -456,7 +527,7 @@ write code here.
 | Layer | Mechanism | Enforced by | Key file(s) |
 |-------|-----------|-------------|-------------|
 | Content | Trusted Types + DOMPurify | CSP `require-trusted-types-for 'script'` | `security/trusted-types.ts` |
-| Network | Strict CSP, CORS, HSTS | `security-headers.ts` middleware | `middleware/security-headers.ts` |
+| Network | Strict CSP, CORS, HSTS | `security-headers.ts` middleware + `check:csp-parity` | `middleware/security-headers.ts` |
 | Session | HttpOnly `__Host-` cookies, serialized CSRF | `csrf.ts` middleware + `api.ts` client | `middleware/csrf.ts`, `lib/api.ts` |
 | Data | AES-256-GCM draft encryption (non-extractable key) | `draft-crypto.ts` + zod on every boundary | `offline/draft-crypto.ts` |
 | Privacy | assertNoRawEgress + bucketed aggregates only | `check:no-raw-egress` CI gate | `signals/privacy.ts` |
@@ -465,11 +536,24 @@ write code here.
 
 Working rules that follow from it:
 
-- **CSP has no `'unsafe-inline'`/`'unsafe-eval'` and `connect-src 'self'`** —
-  the browser NEVER talks to a third party; anything external (e.g. the
-  huggingface.co model-hub metadata) is proxied through the BFF.  The same
-  policy ships as a `<meta>` tag in `index.html`: redundant on the web,
-  load-bearing in the native courier WebView (no server headers there).
+- **CSP: ONE definition, three delivery points.**  The directives live in
+  `packages/shared/src/security/csp.ts` and nowhere else.  They reach the
+  browser three ways — the `apps/api` response header, the `vite preview`
+  header, and a `<meta http-equiv>` — and all three derive from that module:
+  the two TypeScript consumers import it (the Vite config by RELATIVE path;
+  a bare `@licio/shared` specifier is externalised by Vite's config loader,
+  which then cannot resolve the package's `.js`-suffixed TS source), and
+  `apps/web/index.html` carries NO policy — the `licio:inject-csp-meta`
+  plugin injects the meta form at build time.  The meta form is the header
+  minus `frame-ancestors`/`report-uri`/`report-to`, which CSP L3 §3.3
+  ignores in a meta element.  That `<meta>` is redundant on the web and
+  LOAD-BEARING in the native courier WebView (no server headers there), so
+  `check:csp-parity` asserts on the BUILT artifact — the one delivery point
+  no compiler can check, where a plugin that quietly stops firing would ship
+  a courier with no policy at all.  The policy itself has no
+  `'unsafe-inline'`/`'unsafe-eval'` and `connect-src 'self'`: the browser
+  NEVER talks to a third party; anything external (e.g. the huggingface.co
+  model-hub metadata) is proxied through the BFF.
 - **Trusted Types**: three named policies (`default`, `dompurify`,
   `licio-ugc`); the default policy validates script URLs by ORIGIN
   comparison, and `licio-ugc`'s `createScriptURL` throws unconditionally.
@@ -718,8 +802,8 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈8800 pass without
-the gated integration env; ≈9100 with live Postgres/Redis — the gated env
+**Test counts.**  `pnpm test` is the canonical query (≈9200 pass without
+the gated integration env; ≈9500 with live Postgres/Redis — the gated env
 also drops the skip count from ≈270 to ≈10, the residual being the
 `RUN_PERF` benchmarks).  Only monotonic growth is enforced — exact numbers
 drift, so the per-suite breakdown lives in each `docs/*/README.md`, not

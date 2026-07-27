@@ -86,13 +86,6 @@ export interface IdentityChainContext {
   readonly eventBytes?: number;
 }
 
-/** Extract just the CID-addressable missing dependencies (the §16.11 wants). */
-export function missingCids(missing: readonly MissingDependency[]): string[] {
-  const cids: string[] = [];
-  for (const dep of missing) if (dep.kind === 'capability') cids.push(dep.cid);
-  return cids;
-}
-
 /** Validate the §18.3 steps 6-11 authority chain for a contribution event. */
 export async function validateIdentityChain(
   record: ContributionEventRecordV2,

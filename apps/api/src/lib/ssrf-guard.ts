@@ -9,8 +9,12 @@
 //
 // Blocked address space: loopback, RFC 1918 + CGNAT private ranges,
 // link-local (incl. the 169.254.169.254 cloud metadata endpoint), multicast,
-// reserved, unspecified, IPv6 ULA/link-local, and IPv4-mapped IPv6 forms of
-// all of the above. The `lookup` gate is the only rebinding-safe place to
+// reserved, unspecified, IPv6 ULA/link-local, and EVERY IPv6 form that embeds
+// an IPv4 — mapped (`::ffff:0:0/96`), compatible (`::/96`), NAT64
+// (`64:ff9b::/96`), 6to4 (`2002::/16`) and Teredo (`2001:0000::/32`) — each
+// decoded back to its IPv4 and classified by the same v4 rules, because an
+// embedded address that skips those rules is a private target wearing a
+// global-unicast costume. The `lookup` gate is the only rebinding-safe place to
 // validate a hostname: every name resolution passes through the validator, so
 // a DNS answer that changes between "check" and "connect" cannot smuggle a
 // private address (TOCTOU/DNS-rebinding defense).
@@ -36,6 +40,11 @@ export function isBlockedIpv4(address: string): boolean {
   if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
   if (a === 198 && b === 51) return true; // 198.51.100/24 doc
   if (a === 203 && b === 0) return true; // 203.0.113/24 doc
+  // 192.88.99.0/24 — the 6to4 RELAY anycast (RFC 7526 deprecated it and
+  // withdrew the assignment). Dialing it hands the request to whatever relay a
+  // route happens to point at, which is the same "somewhere other than the host
+  // named" problem the ranges above exist to prevent.
+  if (a === 192 && b === 88 && (parts[2] as number) === 99) return true;
   if (a >= 224) return true; // multicast + reserved + broadcast
   return false;
 }
@@ -113,7 +122,50 @@ export function isBlockedIpv6(address: string): boolean {
   if ((b0 & 0xfe) === 0xfc) return true; // fc00::/7 ULA
   if (b0 === 0xff) return true; // ff00::/8 multicast
   if (b0 === 0x20 && b1 === 0x01 && b2 === 0x0d && b3 === 0xb8) return true; // 2001:db8::/32 docs
-  if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) return true; // 64:ff9b::/96 NAT64
+
+  // NAT64 (RFC 6052).  On IPv6-only infrastructure EVERY ordinary public IPv4
+  // destination arrives translated, so blanket-refusing breaks content fetching
+  // and Web Push outright (`guardedLookup` serves both) while blocking nothing
+  // an attacker could not reach directly.  Decoded instead — but ONLY at the
+  // prefix length that actually puts the IPv4 where we look for it.
+  //
+  // The WELL-KNOWN prefix is `64:ff9b::/96`: ninety-six bits, so bytes 4–11 must
+  // be zero too.  Matching on the first four bytes alone is `64:ff9b::/32`, a
+  // range 2^64 times larger in which the last four bytes are NOT the translated
+  // address — `64:ff9b:1::/48` (RFC 8215 local-use) is inside it and carries the
+  // IPv4 at a different offset entirely.  Reading the tail of one of those as
+  // the destination lets a synthesised address park a public-looking value there
+  // while the real target is private.  So: decode `/96`, and refuse anything
+  // else under `64:ff9b::/32`, whose layout this function does not know.
+  if (b0 === 0x00 && b1 === 0x64 && b2 === 0xff && b3 === 0x9b) {
+    const wellKnown = bytes.slice(4, 12).every((x) => x === 0);
+    return wellKnown ? isBlockedIpv4(embedded) : true;
+  }
+
+  // TRANSITION formats embed an IPv4 SOMEWHERE OTHER than the last four bytes,
+  // so the IPv4-mapped/-compatible checks above cannot see it and the address
+  // reaches the v6 range tests, none of which match. Left unhandled,
+  // `2002:a9fe:a9fe::` is a perfectly ordinary-looking global-unicast address
+  // that decodes to 169.254.169.254 — the cloud metadata endpoint this module's
+  // header promises to block.
+  //
+  // Each is DECODED and run through the SAME v4 rules rather than blanket-
+  // refused: the prefix is not itself the danger, the address inside it is, and
+  // a 6to4 wrapper around a public IPv4 is a legitimate (if deprecated) way to
+  // reach that host. Blanket-refusing would also drift from the v4 policy the
+  // moment a range is added there.
+  if (b0 === 0x20 && b1 === 0x02) {
+    // 6to4 (RFC 3056, deprecated by RFC 7526): 2002:V4V4:V4V4::/48.
+    return isBlockedIpv4(`${bytes[2]}.${bytes[3]}.${bytes[4]}.${bytes[5]}`);
+  }
+  if (b0 === 0x20 && b1 === 0x01 && b2 === 0x00 && b3 === 0x00) {
+    // Teredo (RFC 4380): 2001:0000::/32, server IPv4 in bits 32–63 and the
+    // CLIENT IPv4 in bits 96–127 obfuscated by a one's complement. Both are
+    // dial-able targets, so both are classified.
+    const server = `${bytes[4]}.${bytes[5]}.${bytes[6]}.${bytes[7]}`;
+    const client = [12, 13, 14, 15].map((i) => ((bytes[i] as number) ^ 0xff) & 0xff).join('.');
+    return isBlockedIpv4(server) || isBlockedIpv4(client);
+  }
   return false;
 }
 

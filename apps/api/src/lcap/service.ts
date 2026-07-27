@@ -8,6 +8,8 @@
 // `LCAP_NETWORK_ID`.
 
 import { createDbClient } from '@licio/db';
+import { createLogger } from '../lib/logger.js';
+import { pgNoticeLogLevel } from '../lib/pg-notices.js';
 import { DrizzleLcapServerStore } from './drizzle-store.js';
 import {
   DrizzlePublishAuditStore,
@@ -41,9 +43,45 @@ let provenance: BlockProvenanceStore | undefined;
 let reviewStore: BlockPublishReviewStore | undefined;
 let publishAudit: PublishAuditStore | undefined;
 
+/**
+ * ONE Postgres client for every singleton in this module.
+ *
+ * Each getter below is an independent lazy singleton, and each used to call
+ * `createDbClient(dbUrl, { onNotice: 'discard' })` for itself — six clients, and postgres.js gives each
+ * its own pool of up to `max` (default 10) connections.  Six pools against the
+ * same database, per API process, multiplied by the replica count, against a
+ * server whose `max_connections` defaults to 100: the connection budget is the
+ * scarce resource here, and none of these singletons needs isolation from the
+ * others.  They are all process-wide, all built from the same `DATABASE_URL`,
+ * and all long-lived, so they share one client.
+ *
+ * Memoized on the URL rather than on first call so a changed `DATABASE_URL`
+ * (only a test does that) yields a client for the URL actually asked for
+ * instead of silently reusing the old one.
+ */
+let sharedDb: { url: string; client: ReturnType<typeof createDbClient> } | undefined;
+
+function dbClientFor(dbUrl: string): ReturnType<typeof createDbClient> {
+  if (sharedDb?.url !== dbUrl) {
+    // `onNotice` is passed for the same reason the main boot passes one: the db
+    // wrapper ALWAYS installs its own `onnotice` (never postgres.js's
+    // `console.log` default), so omitting the sink does not fall back to
+    // anything — it DISCARDS every notice from every LCAP store.
+    const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
+    sharedDb = {
+      url: dbUrl,
+      client: createDbClient(dbUrl, {
+        onNotice: (notice) =>
+          logger[pgNoticeLogLevel(notice.severity)]({ pgNotice: notice }, 'postgres notice (lcap)'),
+      }),
+    };
+  }
+  return sharedDb.client;
+}
+
 function buildStore(): LcapServerStore {
   const dbUrl = process.env['DATABASE_URL'];
-  return dbUrl ? new DrizzleLcapServerStore(createDbClient(dbUrl)) : new InMemoryLcapServerStore();
+  return dbUrl ? new DrizzleLcapServerStore(dbClientFor(dbUrl)) : new InMemoryLcapServerStore();
 }
 
 /** The shared ingestion server (created lazily on first use). */
@@ -85,7 +123,7 @@ export function getLcapPublicPublisher(): LcapPublicPublisher | undefined {
     publisher = null; // cache the "not configured" decision (memoized like the server)
     return undefined;
   }
-  const db = createDbClient(dbUrl);
+  const db = dbClientFor(dbUrl);
   publisher = new LcapPublicPublisher({
     gatewayUrl,
     pinningUrl,
@@ -95,11 +133,6 @@ export function getLcapPublicPublisher(): LcapPublicPublisher | undefined {
     reviewStore: getLcapBlockPublishReviewStore(),
   });
   return publisher;
-}
-
-/** Replace the publisher singleton (tests / an explicit binding). */
-export function setLcapPublicPublisher(next: LcapPublicPublisher | undefined): void {
-  publisher = next ?? null;
 }
 
 let eligibility: PublishEligibilityResolver | undefined | null;
@@ -118,7 +151,7 @@ export function getPublishEligibilityResolver(): PublishEligibilityResolver | un
     eligibility = null;
     return undefined;
   }
-  eligibility = drizzlePublishEligibility(createDbClient(dbUrl));
+  eligibility = drizzlePublishEligibility(dbClientFor(dbUrl));
   return eligibility;
 }
 
@@ -137,15 +170,10 @@ export function getLcapBlockProvenanceStore(): BlockProvenanceStore {
   if (!provenance) {
     const dbUrl = process.env['DATABASE_URL'];
     provenance = dbUrl
-      ? new DrizzleBlockProvenanceStore(createDbClient(dbUrl))
+      ? new DrizzleBlockProvenanceStore(dbClientFor(dbUrl))
       : new InMemoryBlockProvenanceStore();
   }
   return provenance;
-}
-
-/** Replace the provenance store (tests / an explicit binding). */
-export function setLcapBlockProvenanceStore(next: BlockProvenanceStore): void {
-  provenance = next;
 }
 
 /**
@@ -158,15 +186,10 @@ export function getLcapBlockPublishReviewStore(): BlockPublishReviewStore {
   if (!reviewStore) {
     const dbUrl = process.env['DATABASE_URL'];
     reviewStore = dbUrl
-      ? new DrizzleBlockPublishReviewStore(createDbClient(dbUrl))
+      ? new DrizzleBlockPublishReviewStore(dbClientFor(dbUrl))
       : new InMemoryBlockPublishReviewStore();
   }
   return reviewStore;
-}
-
-/** Replace the review store (tests / an explicit binding). */
-export function setLcapBlockPublishReviewStore(next: BlockPublishReviewStore): void {
-  reviewStore = next;
 }
 
 /**
@@ -179,13 +202,8 @@ export function getLcapPublishAuditStore(): PublishAuditStore {
   if (!publishAudit) {
     const dbUrl = process.env['DATABASE_URL'];
     publishAudit = dbUrl
-      ? new DrizzlePublishAuditStore(createDbClient(dbUrl))
+      ? new DrizzlePublishAuditStore(dbClientFor(dbUrl))
       : new InMemoryPublishAuditStore();
   }
   return publishAudit;
-}
-
-/** Replace the publish-audit store (tests / an explicit binding). */
-export function setLcapPublishAuditStore(next: PublishAuditStore): void {
-  publishAudit = next;
 }

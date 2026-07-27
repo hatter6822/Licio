@@ -39,7 +39,6 @@ export const aiProvenanceLabelSchema = z.enum(AI_PROVENANCE_LABELS);
 /** The revision actions a human can take on an AI artifact. */
 export const AI_LABEL_ACTIONS = ['user_edit', 'steward_confirm', 'steward_correct'] as const;
 export type AiLabelAction = (typeof AI_LABEL_ACTIONS)[number];
-export const aiLabelActionSchema = z.enum(AI_LABEL_ACTIONS);
 
 /**
  * Authority rank on the provenance ladder. Origin labels are rank 0, a user

@@ -25,7 +25,7 @@ export function SupportContact(): React.ReactElement {
       {isError ? (
         <p className="text-ink-muted">
           {t('support.fallback', 'Email')}{' '}
-          <a className="text-primary underline" href="mailto:safety@licio.app">
+          <a className="text-primary-on-soft underline" href="mailto:safety@licio.app">
             safety@licio.app
           </a>
         </p>
@@ -34,14 +34,14 @@ export function SupportContact(): React.ReactElement {
         <div className="flex flex-col gap-4">
           <div className="rounded-lg border border-line bg-canvas p-4">
             <h2 className="mb-1 font-medium text-ink">{t('support.safetyTeam', 'Safety team')}</h2>
-            <a className="text-primary underline" href={`mailto:${data.safety_email}`}>
+            <a className="text-primary-on-soft underline" href={`mailto:${data.safety_email}`}>
               {data.safety_email}
             </a>
           </div>
           <div className="rounded-lg border border-line bg-canvas p-4">
             <h2 className="mb-1 font-medium text-ink">{t('support.helpCenter', 'Help centre')}</h2>
             <a
-              className="text-primary underline"
+              className="text-primary-on-soft underline"
               href={data.help_center_url}
               target="_blank"
               rel="noopener noreferrer"
@@ -61,13 +61,16 @@ export function SupportContact(): React.ReactElement {
                     <p className="text-sm text-ink-muted">{resource.description}</p>
                     <div className="mt-1 flex flex-wrap gap-3 text-sm">
                       {resource.phone ? (
-                        <a className="text-primary underline" href={`tel:${resource.phone}`}>
+                        <a
+                          className="text-primary-on-soft underline"
+                          href={`tel:${resource.phone}`}
+                        >
                           {resource.phone}
                         </a>
                       ) : null}
                       {resource.url ? (
                         <a
-                          className="text-primary underline"
+                          className="text-primary-on-soft underline"
                           href={resource.url}
                           target="_blank"
                           rel="noopener noreferrer"

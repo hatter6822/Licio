@@ -65,6 +65,26 @@ export function evaluateTreasuryAction(
       reason: 'The treasury action amount must be a finite, non-negative decimal.',
     };
   }
+  // EVERY decimal the arithmetic below touches gets the same guard, not just the
+  // action's own amount.  `decSum`/`decCompare` THROW on a value outside the
+  // decimal domain, so an unparseable history amount or law-pack bound would
+  // escape as an exception rather than the typed verdict this function promises
+  // — the caller's transition would fail on an unrelated error path instead of a
+  // `Verdict`.  The timestamp guard below already covers history for exactly
+  // this reason; amounts get the symmetric treatment.
+  const comparedAmounts: ReadonlyArray<number | string> = [
+    ...history.map((h) => h.amount),
+    ...bounds.caps.flatMap((c) => [c.perActionMax, c.perWindowMax]),
+    bounds.materialThreshold,
+  ];
+  if (!comparedAmounts.every((value) => isValidDecimal(value))) {
+    return {
+      accepted: false,
+      code: 'invalid_amount',
+      reason:
+        'Every treasury amount (history entries and law-pack bounds) must be a finite decimal.',
+    };
+  }
 
   // Self-guard every timestamp the same fail-closed way: `Date.parse` returns NaN
   // for a malformed instant, and every NaN comparison in the window/interval/
@@ -209,6 +229,34 @@ export function checkInvestmentBands(
   allocation: readonly TargetAllocation[],
   policy: InvestmentPolicy,
 ): Verdict {
+  // A NON-FINITE fraction has to die here, before it reaches any comparison.
+  // Every comparison against NaN is false, so a NaN fraction passes BOTH band
+  // bounds AND the grand-total guard below — the function would return
+  // `accepted: true` carrying an `investment_bands passed` proof for an
+  // allocation that satisfies no band at all.  That is the same vacuous-pass
+  // failure `evaluateTreasuryAction` rejects `action.amount` for; the bands are
+  // a machine-checkable proof and must fail closed on an uncheckable input.
+  for (const a of allocation) {
+    if (!Number.isFinite(a.fraction)) {
+      return {
+        accepted: false,
+        code: 'investment_band_violated',
+        reason: `Asset ${a.asset} has a non-finite allocation fraction.`,
+      };
+    }
+  }
+  // The BAND EDGES are the other half of every comparison and fail exactly the
+  // same way: a NaN `maxFraction` makes `total > max + EPSILON` false, so the
+  // band admits any allocation.  An uncheckable policy cannot yield a proof.
+  for (const band of policy.allocationBands) {
+    if (!Number.isFinite(band.minFraction) || !Number.isFinite(band.maxFraction)) {
+      return {
+        accepted: false,
+        code: 'investment_band_violated',
+        reason: `Asset ${band.asset} has a non-finite policy band.`,
+      };
+    }
+  }
   // Aggregate the proposed entries per asset (duplicates sum), rejecting any asset
   // the policy does not define a band for.
   const totals = new Map<string, number>();

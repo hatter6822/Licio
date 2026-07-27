@@ -384,10 +384,16 @@ export const paymentIntentCreateRequestSchema = z
   .strict();
 export type PaymentIntentCreateRequest = z.infer<typeof paymentIntentCreateRequestSchema>;
 
+/**
+ * The single-intent response ENVELOPE.
+ *
+ * Exported because the web client validates this exact shape at its TanStack
+ * Query boundary; spelling it inline there left the wire contract in two
+ * places, so a change to the envelope would update the server while the client
+ * went on validating the old shape — and a zod boundary that describes an
+ * obsolete contract fails closed on correct data.
+ */
 export const paymentIntentResponseSchema = z.object({ intent: paymentIntentSchema }).strict();
-export const paymentIntentListResponseSchema = z
-  .object({ intents: z.array(paymentIntentSchema).max(100) })
-  .strict();
 
 // ---------------------------------------------------------------------------
 // Production proposals (WS-M.4).  The same governance_proposal entity as the
@@ -725,10 +731,6 @@ export const treasuryReconciliationSnapshotSchema = z
   })
   .strict();
 export type TreasuryReconciliationSnapshot = z.infer<typeof treasuryReconciliationSnapshotSchema>;
-
-export const reconciliationHistoryResponseSchema = z
-  .object({ snapshots: z.array(treasuryReconciliationSnapshotSchema).max(100) })
-  .strict();
 
 export const accountingExportRowSchema = z
   .object({

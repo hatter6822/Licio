@@ -437,7 +437,16 @@ with a regression test):
   investment allocation bands fail-closed (`checkInvestmentBands`, a required
   `targetAllocation`), rejects non-finite/negative amounts (`invalid_amount`), and
   `executeTreasuryAction` gates each action on its per-category `treasury.*`
-  capability (not just the gateway cap).
+  capability (not just the gateway cap).  "Fail-closed" holds on BOTH sides of
+  every comparison: the proposed fractions and the policy band edges are checked
+  for finiteness first, since a NaN on either side makes the comparison false and
+  would let the bands pass vacuously — returning `accepted: true` with a positive
+  `investment_bands passed` proof for an allocation satisfying no band.  The
+  amount guard likewise covers the history entries and law-pack bound strings the
+  arithmetic reads, not just `action.amount`: a value outside the decimal domain
+  throws out of `decSum`/`decCompare`, so leaving those unguarded turned a bad
+  input into an exception instead of a typed `Verdict`
+  (`docs/knomosis/threat-model-treasury-indexer-lawpack.md` §4).
 - **Election/ratification integrity** (M3/L3). The election winner is re-validated
   as a current room member at seat assignment (fail-safe to the incumbent), the
   cast-time candidate-eligibility is enforced on the service, and both tallies clamp

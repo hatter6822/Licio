@@ -28,8 +28,8 @@ export interface TransactionPreviewProps {
 
 const RISK_TONE: Record<TransactionPreview['risk_label'], { className: string; label: string }> = {
   normal: { className: 'text-ink-muted', label: 'Normal risk' },
-  elevated: { className: 'text-warning-fg', label: 'Elevated risk' },
-  high: { className: 'text-error-fg', label: 'High risk' },
+  elevated: { className: 'text-warning-on-soft', label: 'Elevated risk' },
+  high: { className: 'text-error-on-soft', label: 'High risk' },
 };
 
 function Field({ label, value }: { label: string; value: string }): React.ReactElement {
@@ -150,7 +150,7 @@ export function TransactionPreviewCard({
       ) : null}
 
       {signDisabled && signDisabledReason !== undefined ? (
-        <p className="text-sm text-warning-fg" role="status">
+        <p className="text-sm text-warning-on-soft" role="status">
           {signDisabledReason}
         </p>
       ) : null}

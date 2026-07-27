@@ -37,11 +37,31 @@ function pairedChannels(): { a: PeerChannel; b: PeerChannel; stats: { delivered:
   return { a, b, stats };
 }
 
-async function settle(stats: { delivered: number }): Promise<void> {
+/**
+ * Let the paired channels run until the sync is done.
+ *
+ * With `until`, that means the CONDITION the caller is about to assert; without
+ * it, quiescence — deliveries stable for 30 turns — which is the only sensible
+ * wait when the assertion is that nothing arrived.
+ *
+ * The distinction is not cosmetic.  Quiescence is a heuristic: the commit path
+ * here is `onMlsCommit → applyCommit → deriveEpochState → retryPending`, and a
+ * stretch of that chain moves no bytes, so under load the counter can sit still
+ * for 30 turns while the epoch is still being applied.  `settle` then returned
+ * and the assertion read a state that had not converged yet — a test that waits
+ * on the CLOCK rather than on what it is about to check.  It failed in CI on a
+ * commit that touched none of this code.
+ */
+async function settle(
+  stats: { delivered: number },
+  until?: () => boolean | Promise<boolean>,
+): Promise<void> {
   let last = -1;
   let stable = 0;
   for (let i = 0; i < 3_000; i++) {
-    if (stats.delivered === last) {
+    if (until !== undefined) {
+      if (await until()) return;
+    } else if (stats.delivered === last) {
       if (++stable >= 30) return;
     } else {
       stable = 0;
@@ -49,6 +69,15 @@ async function settle(stats: { delivered: number }): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 0));
   }
+}
+
+/**
+ * Byte-identical room state — what "converged" MEANS here, and what these tests
+ * go on to assert.  Waiting for a single story to appear would return while the
+ * rest of the epoch was still arriving.
+ */
+function sameCommitment(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, i) => byte === right[i]);
 }
 
 describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
@@ -164,7 +193,9 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
 
     // The §10.9 commit is delivered over the live session (the room manager's broadcast).
     aliceSession.sendMlsCommit(p2p.encodeCommit(addCarol.commit), 2);
-    await settle(stats);
+    await settle(stats, () =>
+      sameCommitment(p2p.roomStateCommitment(bob.state()), p2p.roomStateCommitment(alice.state())),
+    );
 
     // bob advanced to epoch 2 and converged the epoch-2 content — byte-identical state.
     expect(bob.state().stories.get('s2')?.title).toBe('epoch-2 story');
@@ -320,7 +351,7 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const sb = new PrivateSyncSession(bob, b, codec);
     sa.start();
     sb.start();
-    await settle(stats);
+    await settle(stats, async () => (await bob.openAttachment(attachmentId)) !== undefined);
 
     // bob synced the op AND lazily fetched the manifest + chunk blocks over the session,
     // then decrypted the media — byte-identical, all without a full offline archive.
@@ -408,7 +439,9 @@ describe('WP-1 cross-epoch sync over the live session (§10.9)', () => {
     const sb = new PrivateSyncSession(bob, b, codec);
     sa.start();
     sb.start();
-    await settle(stats);
+    await settle(stats, () =>
+      sameCommitment(p2p.roomStateCommitment(bob.state()), p2p.roomStateCommitment(alice.state())),
+    );
 
     // bob could NOT fetch the pruned genesis/s1/s2 op-by-op, so it requested alice's
     // snapshot archive, bootstrapped from it, and synced the post-snapshot s3 — converging

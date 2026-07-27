@@ -21,7 +21,13 @@
 // read/parse/crypto failure — yields a typed UNTRUSTED verdict that locks the
 // rooms.  There is no soft pass and no "unknown ⇒ allow" branch.
 
-import { ED25519_PUBLIC_KEY_LENGTH, fromBase64Url, sha256Concat, verifyEd25519 } from './crypto.js';
+import {
+  ED25519_PUBLIC_KEY_LENGTH,
+  fromBase64Url,
+  LOG_LEAF_DOMAIN,
+  sha256Concat,
+  verifyEd25519,
+} from './crypto.js';
 import { bytesEqual, leafHash, verifyInclusion } from './merkle.js';
 import {
   canonicalCheckpointBody,
@@ -29,9 +35,6 @@ import {
   type UpdateManifest,
   updateManifestSchema,
 } from './schema.js';
-
-/** Domain separator for the transparency-log leaf input (§22.4). */
-const LOG_LEAF_DOMAIN = new TextEncoder().encode('licio-update-v1:');
 
 /** The typed reasons a bundle is NOT trusted (consumed verbatim by the UI). */
 export type UpdateUntrustedReason =

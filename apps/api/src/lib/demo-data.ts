@@ -9,7 +9,6 @@
 import {
   type FeedItem,
   LEGACY_DISTRIBUTION_REASON,
-  type SignalLedgerEntry,
   type StoryDetail,
   topicIdForSlug,
 } from '@licio/shared';
@@ -107,31 +106,6 @@ const STORY_DETAILS: Record<string, StoryDetail> = {
     topic_ids: [topicIdForSlug('local-community')],
   },
 };
-
-export const DEMO_LEDGER: SignalLedgerEntry[] = [
-  {
-    item_id: STORY_1,
-    story_title: feedWater.title,
-    recorded_at: '2026-06-08T09:20:00.000Z',
-    active_dwell_bucket: 'medium',
-    source_opened: true,
-    context_opened: true,
-    reply_depth_bucket: 'moderate',
-    return_visit_count_bucket: 'few',
-    cap_reached: false,
-  },
-  {
-    item_id: STORY_2,
-    story_title: feedZoning.title,
-    recorded_at: '2026-06-08T12:00:00.000Z',
-    active_dwell_bucket: 'long',
-    source_opened: false,
-    context_opened: true,
-    reply_depth_bucket: 'shallow',
-    return_visit_count_bucket: 'none',
-    cap_reached: true,
-  },
-];
 
 export function demoStory(storyId: string): StoryDetail | undefined {
   return STORY_DETAILS[storyId];

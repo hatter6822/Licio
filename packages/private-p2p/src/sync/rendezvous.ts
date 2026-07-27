@@ -76,10 +76,6 @@ export const RENDEZVOUS_MAX_TTL_MS = 30 * 60 * 1000;
 /** §15.3.2 — the default coarse `time_bucket` granularity (15 minutes). */
 export const RENDEZVOUS_DEFAULT_BUCKET_MS = 15 * 60 * 1000;
 
-/** §15.3.1 — the server's bounded poll response size (never an existence oracle:
- *  the server returns ≤ this many records whether or not the blind id is known). */
-export const RENDEZVOUS_MAX_RECORDS_PER_POLL = 256;
-
 /** Clamp a requested TTL into the §15.3.2 `[MIN, MAX]` window (floored to ms). */
 export function clampRendezvousTtl(ttlMs: number): number {
   if (!Number.isFinite(ttlMs)) throw new RangeError(`clampRendezvousTtl: invalid ttl ${ttlMs}`);

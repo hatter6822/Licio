@@ -411,7 +411,7 @@ function ProductionProposalCard({
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}
@@ -669,7 +669,7 @@ function CreateProposalForm({
         </Button>
       </div>
       {error ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

@@ -6,10 +6,22 @@
 // (applause) field. This gate enumerates the LCAP schema surface
 // (`packages/lcap/src/schemas`) and fails the build if any record/proof/receipt
 // schema names a forbidden field — the LCAP analogue of the §22.1 aggregate
-// no-raw-egress assertion + the no-applause static gate. Comments are stripped so
-// doctrine may be discussed in prose while a real field still fails the scan.
+// no-raw-egress assertion + the no-applause static gate.
+//
+// A field is NAMED, so the names are read from the PARSE: identifiers, property
+// keys, strings and template chunks.  Prose may discuss doctrine freely because
+// a comment is not a node.
+//
+// That replaced two regexes that blanked comments with no idea what a string is
+// — `'a // b'` lost its tail and a `/* */` inside one was blanked, either of
+// which could HIDE a real field declared after it.  The search is otherwise
+// deliberately as broad as it was: an identifier ANYWHERE still counts, because
+// distinguishing a schema field from a local that happens to share its name is
+// not something this gate tries to do, and erring wide is the safe direction.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { SyntaxKind } from 'typescript/unstable/ast';
+import { type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 // The LCAP schema surface (`@licio/lcap` schemas) + the optional-transport plane
@@ -103,11 +115,6 @@ const FORBIDDEN_FIELD_TOKENS: ReadonlyArray<{ token: string; kind: string }> = [
   ].map((token) => ({ token, kind: 'applause field' })),
 ];
 
-/** Strip block + line comments so doctrine prose may mention forbidden constructs. */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
-}
-
 function collect(dir: string): string[] {
   const out: string[] = [];
   if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return out;
@@ -122,16 +129,169 @@ function collect(dir: string): string[] {
   return out;
 }
 
-/** Pure: the forbidden-field violations in one schema source (importable for tests). */
-export function findSchemaEgressIssues(filename: string, content: string): string[] {
-  const code = stripComments(content);
+/**
+ * Pure: the forbidden-field violations in one schema source.
+ *
+ * Read from the PARSE.  Blanking comments with two regexes and then searching
+ * the whole file for a word meant prose was stripped by something with no idea
+ * what a string is (`'a // b'` lost its tail, a `/* *\/` inside a string was
+ * blanked) — and then the search matched any occurrence anywhere, so an
+ * unrelated local named `followers` read as a schema field.
+ *
+ * A field is NAMED by an identifier, a property key, or a string; those are
+ * what is searched, so a comment cannot trip the gate and cannot hide a
+ * violation either.
+ */
+/** Every word a source NAMES — in an identifier, a property key or a string. */
+function namedWords(root: Syntax, held?: (name: Syntax) => Syntax | undefined): Set<string> {
+  const words = new Set<string>();
+  for (const node of walk(root)) {
+    // Every chunk of a template counts too: a field name can be spelled in one
+    // (`\`prefix ipAddress ${x}\``), and reading only the hole-free form would
+    // have LOST a case the whole-text search it replaces already covered.
+    // A COMPOSED name is the name the schema actually declares.
+    if (
+      node.kind === SyntaxKind.TemplateExpression ||
+      (node.kind === SyntaxKind.BinaryExpression &&
+        node.operatorToken?.kind === SyntaxKind.PlusToken)
+    ) {
+      const folded = staticConcat(node, 0, held);
+      if (folded !== null) {
+        for (const word of folded.split(/[^A-Za-z0-9_]+/)) {
+          if (word !== '') words.add(word);
+        }
+      }
+      continue;
+    }
+    if (
+      node.kind !== SyntaxKind.Identifier &&
+      node.kind !== SyntaxKind.PrivateIdentifier &&
+      node.kind !== SyntaxKind.StringLiteral &&
+      node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral &&
+      node.kind !== SyntaxKind.TemplateHead &&
+      node.kind !== SyntaxKind.TemplateMiddle &&
+      node.kind !== SyntaxKind.TemplateTail
+    ) {
+      continue;
+    }
+    for (const word of (node.text ?? node.getText()).split(/[^A-Za-z0-9_]+/)) {
+      if (word !== '') words.add(word);
+    }
+  }
+  return words;
+}
+
+/**
+ * A string built from static pieces, folded.
+ *
+ * `['ip_' + 'address']` names the field `ip_address` at runtime, and splitting
+ * each literal into words on its own recorded `ip_` and `address` — neither of
+ * which is the forbidden token.  The concatenation is where the name actually
+ * comes from, so it is folded before the words are taken.
+ */
+function kidsOf(node: Syntax): Syntax[] {
+  const children: Syntax[] = [];
+  node.forEachChild((child: Syntax) => {
+    children.push(child);
+  });
+  return children;
+}
+
+function staticConcat(
+  node: Syntax,
+  hop = 0,
+  held?: (name: Syntax) => Syntax | undefined,
+): string | null {
+  if (hop > 16) return null;
+  if (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return node.text ?? '';
+  }
+  if (node.kind === SyntaxKind.ParenthesizedExpression || node.kind === SyntaxKind.AsExpression) {
+    return node.expression === undefined ? null : staticConcat(node.expression, hop + 1, held);
+  }
+  // A TEMPLATE whose holes are all static is the same composed name written a
+  // second way: `` `ip_${'address'}` `` names `ip_address` exactly as
+  // `'ip_' + 'address'` does.
+  if (node.kind === SyntaxKind.TemplateExpression) {
+    let text = node.head?.text ?? '';
+    for (const span of kidsOf(node)) {
+      if (span.kind !== SyntaxKind.TemplateSpan) continue;
+      const parts = kidsOf(span);
+      const hole = parts[0] === undefined ? null : staticConcat(parts[0], hop + 1, held);
+      if (hole === null) return null;
+      text += hole + (span.literal?.text ?? '');
+    }
+    return text;
+  }
+  if (
+    node.kind === SyntaxKind.BinaryExpression &&
+    node.operatorToken?.kind === SyntaxKind.PlusToken &&
+    node.left !== undefined &&
+    node.right !== undefined
+  ) {
+    const left = staticConcat(node.left, hop + 1, held);
+    const right = staticConcat(node.right, hop + 1, held);
+    return left === null || right === null ? null : left + right;
+  }
+  // A NAME holding one of the pieces: `const s = 'address'; ['ip_' + s]` names
+  // the same field as the fully spelled form, and the composition is where the
+  // runtime name comes from either way.
+  if (node.kind === SyntaxKind.Identifier && held !== undefined) {
+    const bound = held(node);
+    return bound === undefined ? null : staticConcat(bound, hop + 1, held);
+  }
+  return null;
+}
+
+/** The forbidden-field violations a source's named words imply. */
+function issuesFor(filename: string, named: ReadonlySet<string>): string[] {
   const issues: string[] = [];
   for (const { token, kind } of FORBIDDEN_FIELD_TOKENS) {
-    if (new RegExp(`\\b${token}\\b`).test(code)) {
+    if (named.has(token)) {
       issues.push(`${filename}: LCAP schema names a forbidden ${kind} "${token}"`);
     }
   }
   return issues;
+}
+
+/** Pure: the forbidden-field violations in one schema source. */
+export function findSchemaEgressIssues(filename: string, content: string): readonly string[] {
+  return findSchemaEgressIssuesIn([{ path: filename, content }]).get(filename) ?? [];
+}
+
+/** The same, over many sources sharing ONE parse. */
+export function findSchemaEgressIssuesIn(
+  sources: readonly Source[],
+): Map<string, readonly string[]> {
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, readonly string[]>();
+    for (const { path, root } of parsed) {
+      const here = String(root.path);
+      // What a NAME holds — one memoised hop through the binding, which is the
+      // whole of the question a composed key asks.
+      const bound = new Map<number, Syntax | undefined>();
+      const held = (name: Syntax): Syntax | undefined => {
+        const at = name.getStart();
+        if (bound.has(at)) return bound.get(at);
+        bound.set(at, undefined); // cycle guard while this one resolves
+        const declaration = project.checker
+          .getSymbolAtPosition(here, at)
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        const initializer =
+          declaration?.kind === SyntaxKind.VariableDeclaration
+            ? declaration.initializer
+            : undefined;
+        bound.set(at, initializer);
+        return initializer;
+      };
+      byPath.set(path, issuesFor(path, namedWords(root, held)));
+    }
+    return byPath;
+  });
 }
 
 function main(): void {
@@ -142,10 +302,11 @@ function main(): void {
     );
     process.exit(1);
   }
-  const errors: string[] = [];
-  for (const file of files) {
-    errors.push(...findSchemaEgressIssues(file.replace(ROOT, ''), readFileSync(file, 'utf-8')));
-  }
+  // ONE parse for the whole schema surface.
+  const found = findSchemaEgressIssuesIn(
+    files.map((file) => ({ path: file.replace(ROOT, ''), content: readFileSync(file, 'utf-8') })),
+  );
+  const errors = [...found.values()].flat();
   if (errors.length > 0) {
     console.error('check:lcap-schema-egress FAILED — LCAP doctrine violation(s):');
     for (const error of errors) console.error(`  - ${error}`);

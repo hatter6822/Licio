@@ -8,6 +8,7 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
+import { buildSessionCookie, createSession } from '../identity/sessions.js';
 import { storeKnomosisConfigValue } from '../knomosis/config.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
@@ -738,6 +739,328 @@ describe('WS-M treasury + payment intents', () => {
       note: 'not a server room',
     });
     expect(attest.status).toBe(404);
+  });
+
+  // STEWARD_ROLES.md: "`ROLE_INTEGRITY` owns the cross-room surface and can
+  // `room-governance-freeze` / `treasury-freeze` any room's agent", with
+  // treasury scope additionally "Requires counsel co-approval" (WS-A.1.2c).
+  describe('cross-room freeze carries the doctrine capability', () => {
+    it('refuses a cross-room TREASURY freeze — counsel co-approval is unprovable today', async () => {
+      // Fail-closed, and deliberately so: proving a SECOND person consented needs
+      // an authenticated approval bound to this room and reason, which does not
+      // exist yet (tracked in docs/treasury/README.md).  Accepting a
+      // client-named counsel id would have recorded an approval nobody gave.
+      const fixture = await wsmFixture({ steward: false });
+      const staff = await seedUserWithSession(fixture.identity, { admin: true });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'freeze',
+        scope: 'treasury',
+        source: 'platform_security',
+        reason: 'suspected drain',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'co_approval_required',
+      );
+    });
+
+    it('ALLOWS a cross-room ROOM freeze, which cascades onto the treasury', async () => {
+      // So the emergency capability is never stranded by the refusal above: a
+      // room-scope freeze halts the treasury too (`freezeCascade`).
+      const fixture = await wsmFixture({ steward: false });
+      const staff = await seedUserWithSession(fixture.identity, { admin: true });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'governance paused pending review',
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('does NOT demand co-approval to CLEAR a treasury hold', async () => {
+      // Doctrine attaches co-approval to placing a hold; requiring it to lift one
+      // could strand a room whose counsel is unavailable.  Reaching the domain
+      // (`no_treasury` on this fixture) proves the gate let the unfreeze through.
+      const fixture = await wsmFixture({ steward: false });
+      const staff = await seedUserWithSession(fixture.identity, { admin: true });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'unfreeze',
+        scope: 'treasury',
+        source: 'platform_security',
+        reason: 'investigation closed',
+      });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
+    });
+
+    // The two grants are DISJOINT in the doctrine — ROLE_SAFETY holds `restrict`
+    // and neither freeze; ROLE_INTEGRITY holds both freezes and not `restrict`.
+    // Every test above seeds `admin`, which implicitly holds all five roles and
+    // therefore cannot tell the two authorities apart.  These do.
+    it('lets a ROLE_SAFETY operator (platform staff, no freeze grant) LIFT a hold', async () => {
+      // `setGovernanceFreeze`'s contract is "only platform staff may UNFREEZE",
+      // and platform staff IS the `restrict` capability.  Keying the precheck on
+      // the freeze capability 404'd exactly this operator.
+      const fixture = await wsmFixture({ steward: false });
+      const safety = await seedUserWithSession(fixture.identity, {
+        handle: 'safety_only',
+        stewardRoles: ['ROLE_SAFETY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, safety.cookie, {
+        action: 'unfreeze',
+        scope: 'treasury',
+        source: 'platform_security',
+        reason: 'investigation closed',
+      });
+      // Reaching the domain (`no_treasury` on this fixture) proves the route
+      // gate let it through; a 404 `not_found` would be the regression.
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
+    });
+
+    it('refuses that same operator a cross-room FREEZE — 403, not 404', async () => {
+      // They have business on this endpoint (they lift holds), so the existence
+      // check must not hide the room from them; PLACING a hold is the narrower
+      // ROLE_INTEGRITY capability and is refused on its merits.
+      const fixture = await wsmFixture({ steward: false });
+      const safety = await seedUserWithSession(fixture.identity, {
+        handle: 'safety_only_freeze',
+        stewardRoles: ['ROLE_SAFETY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, safety.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'not my capability',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'insufficient_capability',
+      );
+    });
+
+    it('lets a ROLE_INTEGRITY operator PLACE a hold under a platform source', async () => {
+      // The action is a platform action even though this actor holds no
+      // `restrict`, so it must be attributable to `platform_security` — writing
+      // it down as `steward` would misattribute it in the audit record.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_only',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const placed = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'governance paused pending review',
+      });
+      expect(placed.status).toBe(200);
+    });
+
+    // The `source` lands VERBATIM in the hash-chained audit and is read later as
+    // fact, so it has to be one the actor can actually speak for.  The domain's
+    // check is one bit — "has platform authority?" — under which any holder
+    // could record their own freeze as legal's, or as a machine's.
+    it.each([
+      ['legal', 'legal counsel'],
+      ['trust_safety', 'the trust-and-safety role'],
+      ['automated_monitoring', 'automated monitoring'],
+    ])('refuses a ROLE_INTEGRITY actor the "%s" source', async (source, expected) => {
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: `integrity_${source}`,
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source,
+        reason: 'attribution check',
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('source_not_authorized');
+      expect(body.error.message).toContain(expected);
+    });
+
+    it('ALLOWS the source the actor can speak for', async () => {
+      // ROLE_INTEGRITY owns the cross-room freeze surface, so
+      // `platform_security` is its own action to attribute.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_own_source',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'governance paused pending review',
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('tells a platform operator to STEP UP MFA rather than that they lack authority', async () => {
+      // A ROLE_SAFETY operator who ALSO stewards this room holds `restrict` —
+      // the release authority — but has not verified MFA on this session.  The
+      // `ownSteward` branch skips every capability check, so the domain answered
+      // `platform_review_required`: "only platform staff can lift a freeze", to
+      // someone who IS platform staff, with a code the step-up path cannot act
+      // on.  The actionable denial is `mfa_required`.
+      const fixture = await wsmFixture({ steward: true });
+      const seeded = await seedUserWithSession(fixture.identity, {
+        handle: 'safety_steward_nomfa',
+        stewardRoles: ['ROLE_SAFETY'],
+      });
+      // A session for the same account with MFA NOT verified.
+      const unverified = await createSession(fixture.identity.sessions, {
+        userId: seeded.userId,
+        authMethod: 'webauthn',
+        credentialRef: `cred-${seeded.userId}`,
+        deviceLabel: 'test',
+        rememberMe: false,
+        mfaVerified: false,
+      });
+      const cookie = buildSessionCookie(unverified.token, unverified.maxAgeSec).split(
+        ';',
+      )[0] as string;
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'review complete',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('mfa_required');
+    });
+
+    it('does NOT let that operator lift it — releasing is `restrict`, a separate grant', async () => {
+      // The domain's asymmetry is worth exactly as much as the set of accounts
+      // that can release, so holding the cross-room FREEZE capability must not
+      // imply it.  An integrity analyst halts any room; a safety/legal operator
+      // is still required to let it go.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_no_release',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'review complete',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'platform_review_required',
+      );
+    });
+
+    it('and a ROLE_SAFETY operator CAN lift what integrity placed', async () => {
+      // The pair is the control: neither role can both halt a room and release
+      // it, and nobody is stranded.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_places',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const safety = await seedUserWithSession(fixture.identity, {
+        handle: 'safety_releases',
+        stewardRoles: ['ROLE_SAFETY'],
+      });
+      const placed = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'halted pending review',
+      });
+      expect(placed.status).toBe(200);
+      const lifted = await req('POST', `/rooms/${ROOM}/governance/freeze`, safety.cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'platform_security',
+        reason: 'review complete',
+      });
+      expect(lifted.status).toBe(200);
+      expect((await lifted.json()) as { freeze_state: string }).toMatchObject({
+        freeze_state: 'active',
+      });
+    });
+
+    it('refuses a cross-room actor claiming the `steward` source', async () => {
+      // The source lands VERBATIM in the hash-chained audit record, so it has to
+      // match who is acting: a platform enforcement action recorded as `steward`
+      // would durably misattribute it to the community.  The other direction is
+      // already gated by `actsWithPlatformAuthority` in the domain.
+      const fixture = await wsmFixture({ steward: false });
+      const integrity = await seedUserWithSession(fixture.identity, {
+        handle: 'integrity_mislabel',
+        stewardRoles: ['ROLE_INTEGRITY'],
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, integrity.cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not my label to claim',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'source_not_authorized',
+      );
+    });
+
+    it('refuses `steward` attribution on an UNFREEZE, even from the room steward', async () => {
+      // Lifting is platform-only whoever asks, so `steward` is never a truthful
+      // source for it — not even from an actor who genuinely stewards the room
+      // and also holds platform staff, whose release exercises the PLATFORM
+      // authority.  The source lands verbatim in the hash-chained audit.
+      const fixture = await wsmFixture(); // every user stewards the room here
+      const staff = await seedUserWithSession(fixture.identity, {
+        handle: 'steward_and_staff',
+        admin: true,
+      });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, staff.cookie, {
+        action: 'unfreeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not a community action',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'source_not_authorized',
+      );
+    });
+
+    it('404s a plain member rather than leaking that the room exists', async () => {
+      const fixture = await wsmFixture({ steward: false });
+      const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'plain_one' });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+        action: 'freeze',
+        scope: 'room',
+        source: 'steward',
+        reason: 'not mine to freeze',
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("leaves the room's OWN steward able to stop its treasury unaided", async () => {
+      // ELECTED_ROOM_STEWARD is deliberately outside the platform ROLE_*
+      // namespace; the cross-room rule governs acting on rooms you do NOT
+      // steward.  Unfreeze still requires platform staff, so a room can stop its
+      // own bleeding but never release itself.
+      const fixture = await wsmFixture(); // every user is the room's steward here
+      const { cookie } = await seedUserWithSession(fixture.identity, { handle: 'room_steward' });
+      const res = await req('POST', `/rooms/${ROOM}/governance/freeze`, cookie, {
+        action: 'freeze',
+        scope: 'treasury',
+        source: 'steward',
+        reason: 'pausing while we investigate',
+      });
+      // Reaches the domain with no co-approver — the gate never fired.
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('no_treasury');
+    });
   });
 
   it('platform staff reach the mode machine without room stewardship (PR #144 review)', async () => {

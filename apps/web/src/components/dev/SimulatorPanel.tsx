@@ -462,8 +462,8 @@ export function SimulatorPanel(): React.ReactElement {
                     entry.outcome === 'ok'
                       ? 'text-ink-muted'
                       : entry.outcome === 'rejected'
-                        ? 'text-warning'
-                        : 'text-error'
+                        ? 'text-warning-on-soft'
+                        : 'text-error-on-soft'
                   }
                 >
                   {entry.summary}

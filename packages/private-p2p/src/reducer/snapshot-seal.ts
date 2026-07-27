@@ -88,15 +88,6 @@ export function deserializeSnapshotBundle(bytes: Uint8Array): SnapshotBundle {
   };
 }
 
-/** A sealed snapshot body: the ciphertext + AEAD params + its CID (over ciphertext). */
-export interface SealedSnapshot {
-  readonly cid: string;
-  readonly epoch: number;
-  readonly nonce: string;
-  readonly wrappedObjectKey: string;
-  readonly ciphertext: string;
-}
-
 export const sealedSnapshotSchema = z
   .object({
     schema: z.literal('licio.private.sealed_snapshot.v1'),

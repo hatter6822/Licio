@@ -24,6 +24,7 @@ import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
+import { verifyTotp } from '../../lib/auth-api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
@@ -45,6 +46,7 @@ import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
 import { Dialog } from '../ui/Dialog/index.js';
 import { ErrorState } from '../ui/ErrorState/index.js';
+import { Input } from '../ui/Input/index.js';
 import { Select } from '../ui/Select/index.js';
 import { Tabs } from '../ui/Tabs/index.js';
 import { TextArea } from '../ui/TextArea/index.js';
@@ -84,12 +86,59 @@ const MODIFY_ACTION_OPTIONS: ReadonlyArray<{ value: ConsoleAction; label: string
 
 const slaTone: Record<string, string> = {
   ok: 'text-ink-muted',
-  approaching: 'text-warning',
-  breached: 'text-error font-semibold',
+  approaching: 'text-warning-on-soft',
+  breached: 'text-error-on-soft font-semibold',
 };
 
 function isForbidden(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 403;
+}
+
+/**
+ * The session holds the steward role but has NOT cleared MFA on THIS session.
+ *
+ * Distinct from a role denial even though both are 403: `mfa_required` is
+ * recoverable right here, and a role denial is not.  Only the ENROLLING session
+ * is marked verified server-side (`/mfa/totp/confirm`), so every later sign-in
+ * starts unverified — without this branch a steward saw "your role does not
+ * have access", which is both wrong and a dead end.
+ */
+function isMfaRequired(error: unknown): boolean {
+  return error instanceof ApiClientError && error.status === 403 && error.code === 'mfa_required';
+}
+
+/** The steward holds the role but has never ENROLLED MFA.  A verification form
+ *  cannot help — there is no authenticator to read a code from — so this gets
+ *  its own notice pointing at enrolment.  The server distinguishes the two
+ *  because one code for both is a form that can never succeed. */
+/**
+ * The steward holds the role but has never enrolled MFA.  Distinct from the
+ * verification form: there is no code to enter yet, so the repair is enrolment
+ * in account security, not a challenge on this session.
+ */
+function MfaEnrollmentNotice(): React.ReactElement {
+  const t = useT();
+  return (
+    <div className="neu-raised rounded-lg p-4" role="status">
+      <h2 className="font-medium text-ink">
+        {t('console.mfaEnrollTitle', 'Set up two-factor authentication')}
+      </h2>
+      <p className="mt-1 text-sm text-ink-muted">
+        {t(
+          'console.mfaEnrollBody',
+          'Steward accounts require two-factor authentication. Enrol an authenticator in account security, then reopen the console.',
+        )}
+      </p>
+    </div>
+  );
+}
+
+function isMfaEnrollmentRequired(error: unknown): boolean {
+  return (
+    error instanceof ApiClientError &&
+    error.status === 403 &&
+    error.code === 'mfa_enrollment_required'
+  );
 }
 
 /** A TRUE authentication failure (the api client has already flipped the auth
@@ -133,7 +182,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
 
   if (state === 'malicious') {
     return (
-      <span role="status" className="font-semibold text-error">
+      <span role="status" className="font-semibold text-error-on-soft">
         {t('console.linkMalicious', 'Blocked: this link resolves to a known malicious site.')}{' '}
         <span className="font-normal text-ink-muted line-through">{url}</span>
       </span>
@@ -143,7 +192,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
     <>
       <button
         type="button"
-        className="text-left text-primary underline"
+        className="text-left text-primary-on-soft underline"
         onClick={activate}
         title={t('console.linkCheckTitle', 'Checks this link for malware before opening')}
       >
@@ -155,7 +204,7 @@ function CheckedLink({ url }: { url: string }): React.ReactElement {
         </span>
       ) : null}
       {state === 'unavailable' ? (
-        <span role="status" className="ml-1 text-warning">
+        <span role="status" className="ml-1 text-warning-on-soft">
           {t('console.linkUnverified', 'Could not verify this link.')}{' '}
           <a href={url} target="_blank" rel="noreferrer noopener" className="underline">
             {t('console.linkOpenAnyway', 'Open anyway')}
@@ -227,6 +276,97 @@ function AccessNotice(): React.ReactElement {
   );
 }
 
+/**
+ * Clear MFA on the CURRENT session (WS-D.1.5b) and retry.
+ *
+ * `denyCapability` requires `mfa_verified` for every steward action, and only
+ * `/v1/auth/mfa/totp/verify` sets it on an already-authenticated session.  This
+ * is the affordance that calls it — a steward whose enrolment session has ended
+ * has no other way back into the console.  Recovery codes are accepted by the
+ * same endpoint, so a steward without their authenticator is not locked out.
+ */
+function MfaVerifyNotice({ onVerified }: { onVerified: () => void }): React.ReactElement {
+  const t = useT();
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  /** Which failure to show — the four are NOT interchangeable advice. */
+  const [failure, setFailure] = useState<'none' | 'rejected' | 'expired' | 'throttled' | 'error'>(
+    'none',
+  );
+
+  const submit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    if (code.trim().length === 0 || busy) return;
+    setBusy(true);
+    setFailure('none');
+    try {
+      await verifyTotp(code);
+      setCode('');
+      onVerified();
+    } catch (error) {
+      // Only a REJECTED CODE is reported opaquely — a wrong code and an unknown
+      // recovery code must stay indistinguishable so the form is not an oracle
+      // on which codes exist.  The other three say nothing about any code, and
+      // collapsing them into "that code was not accepted" is actively wrong
+      // advice: an expired session can NEVER succeed on retry, and a
+      // rate-limited steward would be told to keep hammering the endpoint.
+      if (error instanceof ApiClientError) {
+        if (error.status === 401) setFailure('expired');
+        else if (error.status === 429) setFailure('throttled');
+        else if (error.status !== undefined && error.status >= 500) setFailure('error');
+        else setFailure('rejected');
+      } else {
+        setFailure('error'); // network / parse: transient, not a code verdict
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const message: Record<Exclude<typeof failure, 'none'>, string> = {
+    rejected: t('console.mfaFailed', 'That code was not accepted. Try again.'),
+    expired: t('console.mfaExpired', 'Your session has expired. Sign in again to continue.'),
+    throttled: t('console.mfaThrottled', 'Too many attempts. Wait a moment before trying again.'),
+    error: t('console.mfaUnavailable', 'Verification is unavailable right now. Try again shortly.'),
+  };
+
+  return (
+    <form
+      onSubmit={(event) => void submit(event)}
+      className="flex flex-col gap-3 rounded-md border border-line bg-canvas p-4"
+    >
+      <p className="text-ink-muted">
+        {t(
+          'console.mfaRequired',
+          'Verify your authenticator to use the moderation console on this session.',
+        )}
+      </p>
+      <Input
+        label={t('console.mfaCodeLabel', 'Authenticator or recovery code')}
+        value={code}
+        onChange={(event) => setCode(event.target.value)}
+        autoComplete="one-time-code"
+        // NOT `numeric`: the field also takes a RECOVERY code, which is
+        // Crockford base32 (`generateRecoveryCodes`) — letters included.  A
+        // digits-only virtual keyboard would make the fallback untypeable on
+        // mobile, precisely when the authenticator is the thing unavailable.
+        inputMode="text"
+        disabled={busy}
+      />
+      {failure !== 'none' ? (
+        <p role="alert" className="text-error-on-soft">
+          {message[failure]}
+        </p>
+      ) : null}
+      <div>
+        <Button type="submit" disabled={busy || code.trim().length === 0}>
+          {t('console.mfaVerify', 'Verify')}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 /** The session lapsed mid-use (401 — the api client already flipped the auth
  *  store to `session-expired`; the route guards redirect on the next protected
  *  navigation). Say so and point at sign-in — never "retry". */
@@ -244,13 +384,15 @@ function SessionExpiredNotice(): React.ReactElement {
 }
 
 /**
- * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome (the
- * access notice), a 401 is an AUTHENTICATION outcome (the session lapsed —
- * sign in again; retrying cannot succeed), and only everything else —
- * network, 5xx, malformed payload — is a transient error with a retry.
- * Collapsing these told a fully-authorized steward their role lost access
- * whenever the API blipped, or that an expired session was "not a
- * permissions problem, retry", both wrong.
+ * Honest per-panel failure state: a 403 is an AUTHORIZATION outcome, a 401 is an
+ * AUTHENTICATION outcome (the session lapsed — sign in again; retrying cannot
+ * succeed), and only everything else — network, 5xx, malformed payload — is a
+ * transient error with a retry.  Collapsing these told a fully-authorized
+ * steward their role lost access whenever the API blipped, or that an expired
+ * session was "not a permissions problem, retry", both wrong.
+ *
+ * The 403s split further: `mfa_required` is RECOVERABLE on this session, so it
+ * gets the verification form rather than the dead-end access notice.
  */
 function PanelError({
   error,
@@ -260,6 +402,8 @@ function PanelError({
   onRetry: () => void;
 }): React.ReactElement {
   const t = useT();
+  if (isMfaEnrollmentRequired(error)) return <MfaEnrollmentNotice />;
+  if (isMfaRequired(error)) return <MfaVerifyNotice onVerified={onRetry} />;
   if (isForbidden(error)) return <AccessNotice />;
   if (isUnauthenticated(error)) return <SessionExpiredNotice />;
   return (
@@ -398,7 +542,7 @@ function CaseReviewDialog({
         <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
       ) : null}
       {review.isError ? (
-        <p role="alert" className="text-error">
+        <p role="alert" className="text-error-on-soft">
           {isForbidden(review.error)
             ? t('console.caseForbidden', 'Your role cannot open this case for review.')
             : isUnauthenticated(review.error)
@@ -511,7 +655,7 @@ function CaseReviewDialog({
 
           {data.side_by_side ? (
             <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
-              <h3 className="text-xs font-semibold uppercase text-warning">
+              <h3 className="text-xs font-semibold uppercase text-warning-on-soft">
                 {t('console.editedAfter', 'Edited after the report')}
               </h3>
               <div className="mt-1 grid grid-cols-2 gap-2">
@@ -972,7 +1116,7 @@ function AppealReviewDialog({
         <p className="text-ink-muted">{t('common.loading', 'Loading…')}</p>
       ) : null}
       {review.isError ? (
-        <p className="text-error">
+        <p className="text-error-on-soft">
           {isUnauthenticated(review.error)
             ? t('console.sessionExpiredCase', 'Your session has expired — sign in again.')
             : t('console.appealReviewError', 'Could not load this appeal for review.')}
@@ -1031,7 +1175,7 @@ function AppealReviewDialog({
 
           {data.side_by_side ? (
             <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
-              <h3 className="text-xs font-semibold uppercase text-warning">
+              <h3 className="text-xs font-semibold uppercase text-warning-on-soft">
                 {t('console.editedAfter', 'Edited after the report')}
               </h3>
               <div className="mt-1 grid grid-cols-2 gap-2">

@@ -25,8 +25,31 @@
 //
 // Every allowlist entry requires a written reason; an entry that no longer
 // matches anything is itself an error (allowlists must not rot).
+//
+// READ FROM THE PARSE.  All three legs ask structural questions — which classes
+// implement which interfaces, which modules the boot statically imports, which
+// `process.env` keys are read, which state a production adapter holds — and all
+// three were answered with regexes over text plus a FOURTH hand-written comment
+// stripper.  Leg 3 tracked class scope by counting `{` and `}` per LINE, which
+// counts braces inside strings, templates and regexes; and the env-schema
+// reader depended on the schema being indented exactly two spaces.
+//
+// The compiler answers each of them directly, and the one deliberate
+// APPROXIMATION survives unchanged: dynamic imports are still not followed
+// (see `buildBootClosure`), because under-approximating the boot closure can
+// only make this gate stricter.
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { SyntaxKind } from 'typescript/unstable/ast';
+import type { Project } from 'typescript/unstable/sync';
+import {
+  lineAt,
+  newlineIndex,
+  type ParsedSource,
+  type Syntax,
+  walk,
+  withParsedSources,
+} from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const API_SRC = resolve(ROOT, 'apps/api/src');
@@ -121,122 +144,206 @@ function collectFiles(dir: string, base: string, out: Map<string, string>): void
   }
 }
 
+/** Shared AST helpers: a name, a static string, and the children of a node. */
+function nameOf(node: Syntax | undefined): string | undefined {
+  return node === undefined ? undefined : (node.text ?? node.getText());
+}
+
+function staticString(node: Syntax | undefined, hop = 0): string | undefined {
+  if (node === undefined || hop > 8) return undefined;
+  if (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return node.text ?? '';
+  }
+  // `'KEY' as const` and `('KEY')` are the same string: the wrappers change
+  // the TYPE and nothing about the value, and stopping at them read a literal
+  // written the ordinary way as unreadable.
+  if (
+    node.kind === SyntaxKind.AsExpression ||
+    node.kind === SyntaxKind.SatisfiesExpression ||
+    node.kind === SyntaxKind.ParenthesizedExpression ||
+    node.kind === SyntaxKind.NonNullExpression
+  ) {
+    return staticString(node.expression, hop + 1);
+  }
+  return undefined;
+}
+
+function childrenOf(node: Syntax): Syntax[] {
+  const children: Syntax[] = [];
+  node.forEachChild((child) => {
+    children.push(child);
+  });
+  return children;
+}
+
+/** Parse a file map once, in one project. */
+function parseAll(files: Map<string, string>): ParsedSource[] {
+  return withParsedSources(
+    [...files].map(([path, content]) => ({ path, content })),
+    (parsed) => [...parsed],
+  );
+}
+
 /**
- * Strip block + line comments so prose can never trip a code pattern — via a
- * small tokenizer, not regexes: string/template literals are respected (a
- * regex strip mangles sources carrying `//` inside a string), and newlines
- * are preserved so finding line numbers stay accurate.  Regex literals are
- * not modeled (a quote inside one could open a phantom string state) — an
- * accepted residual far rarer than the regex-stripper's failure modes.
+ * Parse and run `body` WITH the project still open.
+ *
+ * `parseAll` hands the trees back after the project is torn down, which is
+ * enough for a purely syntactic leg and useless to one that has to resolve a
+ * name.  Two legs do: an adapter reached through an import alias and an
+ * environment read reached through a binding are both invisible to a scan that
+ * compares the spelling at the use site.
  */
-export function stripComments(source: string): string {
-  let out = '';
-  let state: 'code' | 'line' | 'block' | 'single' | 'double' | 'template' = 'code';
-  for (let i = 0; i < source.length; i += 1) {
-    const ch = source[i] as string;
-    const next = source[i + 1];
-    if (state === 'code') {
-      if (ch === '/' && next === '/') {
-        state = 'line';
-        out += '  ';
-        i += 1;
-      } else if (ch === '/' && next === '*') {
-        state = 'block';
-        out += '  ';
-        i += 1;
-      } else {
-        if (ch === "'") state = 'single';
-        else if (ch === '"') state = 'double';
-        else if (ch === '`') state = 'template';
-        out += ch;
-      }
-    } else if (state === 'line') {
-      if (ch === '\n') {
-        state = 'code';
-        out += ch;
-      } else {
-        out += ' ';
-      }
-    } else if (state === 'block') {
-      if (ch === '*' && next === '/') {
-        state = 'code';
-        out += '  ';
-        i += 1;
-      } else {
-        out += ch === '\n' ? ch : ' ';
-      }
-    } else {
-      // Inside a string/template literal: emit verbatim, honour escapes.
-      if (ch === '\\') {
-        out += ch + (next ?? '');
-        i += 1;
-        continue;
-      }
-      if (
-        (state === 'single' && (ch === "'" || ch === '\n')) ||
-        (state === 'double' && (ch === '"' || ch === '\n')) ||
-        (state === 'template' && ch === '`')
-      ) {
-        state = 'code';
-      }
-      out += ch;
+function withParsed<T>(
+  files: Map<string, string>,
+  body: (parsed: readonly ParsedSource[], project: Project) => T,
+): T {
+  return withParsedSources(
+    [...files].map(([path, content]) => ({ path, content })),
+    body,
+  );
+}
+
+/** The declaration a name binds to, followed through import aliases. */
+function declarationOf(node: Syntax, project: Project, file: string): Syntax | undefined {
+  const symbol = project.checker.getSymbolAtPosition(file, node.getStart());
+  if (symbol === undefined) return undefined;
+  let resolved = symbol;
+  for (let hop = 0; hop < 8; hop += 1) {
+    const handle = resolved.declarations[0];
+    if (handle === undefined) return undefined;
+    const declaration = handle.resolve(project) as unknown as Syntax | undefined;
+    if (declaration === undefined) return undefined;
+    // `const Store = InMemoryThing` names the same class in one more hop, so
+    // the local alias is followed exactly as the import alias is — the fix that
+    // only crossed module edges left the in-file spelling open.
+    if (declaration.kind === SyntaxKind.VariableDeclaration) {
+      const initializer = declaration.initializer;
+      if (initializer?.kind !== SyntaxKind.Identifier) return declaration;
+      const next = project.checker.getSymbolAtPosition(file, initializer.getStart());
+      if (next === undefined) return declaration;
+      resolved = next;
+      continue;
+    }
+    if (!IMPORTED_BINDING.has(declaration.kind)) return declaration;
+    try {
+      const next = project.checker.getAliasedSymbol(resolved);
+      if (next === undefined) return declaration;
+      resolved = next;
+    } catch {
+      return declaration;
     }
   }
-  return out;
+  return undefined;
 }
+
+/** Bindings that name something declared in another module. */
+const IMPORTED_BINDING: ReadonlySet<SyntaxKind> = new Set([
+  SyntaxKind.ImportSpecifier,
+  SyntaxKind.ImportClause,
+  SyntaxKind.NamespaceImport,
+  SyntaxKind.ImportEqualsDeclaration,
+]);
 
 // ---------------------------------------------------------------------------
 // Leg 1 — adapter coverage.
 // ---------------------------------------------------------------------------
 
-const IN_MEMORY_CLASS = /class\s+((?:InMemory|Memory)\w*)(?:<[^>{]*>)?\s+implements\s+([^{]+)\{/g;
+const IN_MEMORY_PREFIX = /^(?:InMemory|Memory)\w*/;
 const PRODUCTION_PREFIX = /^(?:Drizzle|Redis|Postgres|S3|Ses|Http)\w*/;
-const PRODUCTION_CLASS =
-  /class\s+((?:Drizzle|Redis|Postgres|S3|Ses|Http)\w*)(?:<[^>{]*>)?\s+implements\s+([^{]+)\{/g;
-
-/** Split an `implements` list into interface names: commas split at generic
- *  depth 0 only, and each entry contributes its LEADING identifier — a
- *  positive match, no sanitizing replace (`Store<Map<K, V>>, Other` →
- *  `['Store', 'Other']`). */
-function parseInterfaceList(raw: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let current = '';
-  for (const ch of raw) {
-    if (ch === '<') depth += 1;
-    else if (ch === '>') depth = Math.max(0, depth - 1);
-    else if (ch === ',' && depth === 0) {
-      parts.push(current);
-      current = '';
-      continue;
-    }
-    current += ch;
-  }
-  parts.push(current);
-  return parts
-    .map((part) => /^\s*([A-Za-z_$][\w$]*)/.exec(part)?.[1])
-    .filter((name): name is string => name !== undefined);
-}
 
 export interface AdapterInfo {
   className: string;
   interfaces: string[];
+  /**
+   * The same interfaces as DECLARATION IDENTITIES.
+   *
+   * Two modules may each declare a `Store`, and they are different contracts.
+   * Matching by name treated an in-memory adapter of one as covered by a
+   * production adapter of the other — the exact confusion this gate exists to
+   * prevent.  The name is kept for the message; the identity does the matching.
+   */
+  interfaceKeys: string[];
   file: string;
 }
 
-export function collectAdapters(files: Map<string, string>, pattern: RegExp): AdapterInfo[] {
+/**
+ * The classes whose NAME matches `prefix` and the interfaces they implement.
+ *
+ * A heritage clause is a node, so the generics that made the old regex need a
+ * depth-aware splitter (`Store<Map<K, V>>, Other`) are simply not in the way —
+ * and a multi-line `implements` list, an `extends X implements Y`, or a type
+ * argument containing `{` cannot break it.
+ */
+function adaptersIn(
+  parsed: readonly ParsedSource[],
+  prefix: RegExp,
+  project: Project,
+): AdapterInfo[] {
   const out: AdapterInfo[] = [];
-  for (const [file, raw] of files) {
-    const source = stripComments(raw);
-    for (const match of source.matchAll(pattern)) {
-      out.push({
-        className: match[1] as string,
-        interfaces: parseInterfaceList(match[2] as string),
-        file,
-      });
+  for (const { path, root } of parsed) {
+    const here = String(root.path);
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.ClassDeclaration) continue;
+      const className = nameOf(node.name);
+      if (className === undefined || !prefix.test(className)) continue;
+      const interfaces: string[] = [];
+      const interfaceKeys: string[] = [];
+      for (const clause of childrenOf(node)) {
+        if (clause.kind !== SyntaxKind.HeritageClause) continue;
+        if (clause.token !== SyntaxKind.ImplementsKeyword) continue;
+        for (const implemented of childrenOf(clause)) {
+          const named = implemented.expression;
+          const name = nameOf(named);
+          if (name === undefined || named === undefined) continue;
+          interfaces.push(name);
+          // The DECLARATION the name resolves to, so two same-named interfaces
+          // in different modules are two contracts.  Followed through the
+          // IMPORT: an imported interface resolves to the specifier in THIS
+          // file, so two files importing the same contract would otherwise get
+          // two identities — which is the same confusion in the other
+          // direction.  An unresolvable one falls back to the name.
+          interfaceKeys.push(interfaceIdentity(named, project, here) ?? `name:${name}`);
+        }
+      }
+      if (interfaces.length > 0) out.push({ className, interfaces, interfaceKeys, file: path });
     }
   }
   return out;
+}
+
+export function collectAdapters(files: Map<string, string>, prefix: RegExp): AdapterInfo[] {
+  return withParsed(files, (parsed, project) => adaptersIn(parsed, prefix, project));
+}
+
+/** Every class NEWED anywhere in these sources. */
+function constructedIn(
+  parsed: readonly ParsedSource[],
+  project: Project,
+): Map<string, Set<string>> {
+  const byFile = new Map<string, Set<string>>();
+  for (const { path, root } of parsed) {
+    const names = new Set<string>();
+    const here = String(root.path);
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.NewExpression) continue;
+      const callee = node.expression;
+      if (callee === undefined) continue;
+      // The SPELLING at the call site is not the class: `import { InMemoryX as
+      // Store } from './s.js'; new Store()` records `Store`, while coverage
+      // looks for `InMemoryX` — so an in-memory adapter constructed under an
+      // alias had no counterpart demanded of it, and production could silently
+      // keep process-local state.
+      const declared = declarationOf(callee, project, here);
+      const name =
+        declared?.kind === SyntaxKind.ClassDeclaration ? nameOf(declared.name) : nameOf(callee);
+      if (name !== undefined) names.add(name);
+    }
+    byFile.set(path, names);
+  }
+  return byFile;
 }
 
 /**
@@ -265,27 +372,44 @@ export function collectAdapters(files: Map<string, string>, pattern: RegExp): Ad
  * inspects the real container objects after every boot condition has
  * evaluated.
  */
-export function buildBootClosure(files: Map<string, string>, entry: string): Set<string> {
+function closureIn(parsed: readonly ParsedSource[], entry: string): Set<string> {
+  // STATIC relative specifiers only.  A dynamic `import(…)` is a call, not an
+  // import declaration, so it is not collected — which is the documented
+  // approximation above, now true by construction rather than by a regex that
+  // happened to require `from`.
+  const importsOf = new Map<string, string[]>();
+  for (const { path, root } of parsed) {
+    const specifiers: string[] = [];
+    for (const node of walk(root)) {
+      if (
+        node.kind !== SyntaxKind.ImportDeclaration &&
+        node.kind !== SyntaxKind.ExportDeclaration
+      ) {
+        continue;
+      }
+      const specifier = staticString(node.moduleSpecifier);
+      if (specifier?.startsWith('.') === true) specifiers.push(specifier);
+    }
+    importsOf.set(path, specifiers);
+  }
+
   const closure = new Set<string>();
   const queue = [entry];
-  const importRe = /(?:import|export)\s[^;]*?from\s+['"](\.{1,2}\/[^'"]+)['"]/g;
-  const sideEffectRe = /import\s+['"](\.{1,2}\/[^'"]+)['"]/g;
   while (queue.length > 0) {
     const current = queue.pop() as string;
     if (closure.has(current)) continue;
-    const source = files.get(current);
-    if (source === undefined) continue; // excluded (dev-only) or external
+    const specifiers = importsOf.get(current);
+    if (specifiers === undefined) continue; // excluded (dev-only) or external
     closure.add(current);
-    const stripped = stripComments(source);
-    for (const re of [importRe, sideEffectRe]) {
-      for (const match of stripped.matchAll(re)) {
-        const spec = (match[1] as string).replace(/\.js$/, '.ts');
-        const target = join(dirname(current), spec).replaceAll('\\', '/');
-        queue.push(target);
-      }
+    for (const specifier of specifiers) {
+      queue.push(join(dirname(current), specifier.replace(/\.js$/, '.ts')).replaceAll('\\', '/'));
     }
   }
   return closure;
+}
+
+export function buildBootClosure(files: Map<string, string>, entry: string): Set<string> {
+  return closureIn(parseAll(files), entry);
 }
 
 export function checkAdapterCoverage(
@@ -293,14 +417,24 @@ export function checkAdapterCoverage(
   closure: Set<string>,
   allowlist: Record<string, string> = ADAPTER_ALLOWLIST,
 ): string[] {
+  return withParsed(files, (parsed, project) => coverageIn(parsed, project, closure, allowlist));
+}
+
+function coverageIn(
+  parsed: readonly ParsedSource[],
+  project: Project,
+  closure: Set<string>,
+  allowlist: Record<string, string> = ADAPTER_ALLOWLIST,
+): string[] {
   const issues: string[] = [];
-  const inMemory = collectAdapters(files, IN_MEMORY_CLASS);
-  const production = collectAdapters(files, PRODUCTION_CLASS);
+  const inMemory = adaptersIn(parsed, IN_MEMORY_PREFIX, project);
+  const production = adaptersIn(parsed, PRODUCTION_PREFIX, project);
+  const constructed = constructedIn(parsed, project);
 
   // interface → production adapter class names.
   const productionByInterface = new Map<string, string[]>();
   for (const adapter of production) {
-    for (const iface of adapter.interfaces) {
+    for (const iface of adapter.interfaceKeys) {
       const list = productionByInterface.get(iface) ?? [];
       list.push(adapter.className);
       productionByInterface.set(iface, list);
@@ -310,9 +444,7 @@ export function checkAdapterCoverage(
   // Which production adapters are INSTANTIATED within the boot closure?
   const instantiatedInClosure = new Set<string>();
   for (const file of closure) {
-    const source = stripComments(files.get(file) ?? '');
-    for (const match of source.matchAll(/new\s+(\w+)\s*[(<]/g)) {
-      const name = match[1] as string;
+    for (const name of constructed.get(file) ?? []) {
       if (PRODUCTION_PREFIX.test(name)) instantiatedInClosure.add(name);
     }
   }
@@ -320,15 +452,13 @@ export function checkAdapterCoverage(
   const usedAllowlist = new Set<string>();
   for (const adapter of inMemory) {
     // Only adapters actually constructed in server code matter.
-    const constructed = [...files.values()].some((raw) =>
-      new RegExp(`new\\s+${adapter.className}\\s*[(<]`).test(stripComments(raw)),
-    );
-    if (!constructed) continue;
+    const isConstructed = [...constructed.values()].some((names) => names.has(adapter.className));
+    if (!isConstructed) continue;
     if (allowlist[adapter.className] !== undefined) {
       usedAllowlist.add(adapter.className);
       continue;
     }
-    const covered = adapter.interfaces.some((iface) =>
+    const covered = adapter.interfaceKeys.some((iface) =>
       (productionByInterface.get(iface) ?? []).some((name) => instantiatedInClosure.has(name)),
     );
     if (!covered) {
@@ -361,13 +491,121 @@ export function checkEnvKeys(
   schemaKeys: ReadonlySet<string>,
   allowlist: Record<string, string> = ENV_ALLOWLIST,
 ): string[] {
+  return withParsed(files, (parsed, project) => envKeysIn(parsed, project, schemaKeys, allowlist));
+}
+
+/** The `process.env` keys a source reads, in either access spelling. */
+/**
+ * A stable identity for an interface reference, across the modules that use it.
+ *
+ * `path#index` of the ORIGINAL declaration, so the same contract imported into
+ * two files is one identity and two same-named contracts are two.
+ */
+function interfaceIdentity(node: Syntax, project: Project, file: string): string | undefined {
+  let symbol = project.checker.getSymbolAtPosition(file, node.getStart());
+  if (symbol === undefined) return undefined;
+  for (let hop = 0; hop < 8; hop += 1) {
+    const handle = symbol.declarations[0];
+    if (handle === undefined) return undefined;
+    const declaration = handle.resolve(project) as unknown as Syntax | undefined;
+    if (declaration === undefined || !IMPORTED_BINDING.has(declaration.kind)) {
+      return `${String(handle.path)}#${handle.index}`;
+    }
+    try {
+      const next = project.checker.getAliasedSymbol(symbol);
+      if (next === undefined) return `${String(handle.path)}#${handle.index}`;
+      symbol = next;
+    } catch {
+      return `${String(handle.path)}#${handle.index}`;
+    }
+  }
+  return undefined;
+}
+
+/** The marker for an environment key whose name this gate cannot recover. */
+export const UNREADABLE_ENV_KEY = '\u0000unreadable';
+
+/** A string a NAME holds, followed one hop through its binding. */
+function constantString(
+  node: Syntax | undefined,
+  project: Project,
+  file: string,
+  hop = 0,
+): string | undefined {
+  if (node?.kind !== SyntaxKind.Identifier || hop > 4) return undefined;
+  const declaration = declarationOf(node, project, file);
+  if (declaration?.kind !== SyntaxKind.VariableDeclaration) return undefined;
+  return (
+    staticString(declaration.initializer) ??
+    constantString(declaration.initializer, project, file, hop + 1)
+  );
+}
+
+/** Whether an expression IS `process.env`, however it was reached. */
+function isProcessEnv(node: Syntax | undefined, project: Project, file: string, hop = 0): boolean {
+  if (node === undefined || hop > 8) return false;
+  if (node.kind === SyntaxKind.PropertyAccessExpression) {
+    return nameOf(node.expression) === 'process' && nameOf(node.name) === 'env';
+  }
+  if (node.kind !== SyntaxKind.Identifier) return false;
+  // `const env = process.env; env.KEY` reads the environment exactly as the
+  // spelled form does; comparing the receiver's SYNTAX saw only the latter.
+  const declaration = declarationOf(node, project, file);
+  if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+  return isProcessEnv(declaration.initializer, project, file, hop + 1);
+}
+
+function envKeysOf(root: Syntax, project: Project): string[] {
+  const keys: string[] = [];
+  const here = String(root.path);
+  for (const node of walk(root)) {
+    // `const { KEY } = process.env` names the key in a BINDING PATTERN rather
+    // than in a property access, and reads it just the same.
+    if (node.kind === SyntaxKind.BindingElement) {
+      const pattern = node.parent;
+      if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) continue;
+      if (!isProcessEnv(pattern.parent?.initializer, project, here)) continue;
+      const key = nameOf((node.propertyName ?? node.name) as Syntax);
+      if (key !== undefined) keys.push(key);
+      continue;
+    }
+    const isProperty = node.kind === SyntaxKind.PropertyAccessExpression;
+    const isElement = node.kind === SyntaxKind.ElementAccessExpression;
+    if (!isProperty && !isElement) continue;
+    if (!isProcessEnv(node.expression, project, here)) continue;
+    // The key may be held in a CONSTANT: `const KEY = 'X' as const;
+    // process.env[KEY]` reads the environment exactly as the literal does, and
+    // reading only the syntax at the access saw nothing.
+    const key = isProperty
+      ? nameOf(node.name)
+      : (staticString(node.argumentExpression) ??
+        constantString(node.argumentExpression, project, here));
+    // A key this gate CANNOT read is one it cannot match against the schema,
+    // and passing it silently is the failure a fail-closed check must not have:
+    // `process.env[pick()]` would otherwise read anything at all.
+    keys.push(key ?? UNREADABLE_ENV_KEY);
+  }
+  return keys;
+}
+
+function envKeysIn(
+  parsed: readonly ParsedSource[],
+  project: Project,
+  schemaKeys: ReadonlySet<string>,
+  allowlist: Record<string, string> = ENV_ALLOWLIST,
+): string[] {
   const issues: string[] = [];
   const usedAllowlist = new Set<string>();
-  const envRe = /process\.env(?:\[['"]([A-Za-z0-9_]+)['"]\]|\.([A-Za-z0-9_]+)\b)/g;
-  for (const [file, raw] of files) {
-    const source = stripComments(raw);
-    for (const match of source.matchAll(envRe)) {
-      const key = (match[1] ?? match[2]) as string;
+  for (const { path: file, root } of parsed) {
+    for (const key of envKeysOf(root, project)) {
+      if (key === UNREADABLE_ENV_KEY) {
+        issues.push(
+          `${file}: reads process.env with a key this gate cannot read, so it cannot be matched ` +
+            'against the validated server env schema. Use a literal key (or a constant holding ' +
+            'one) so the read can be judged.',
+        );
+        continue;
+      }
       if (schemaKeys.has(key)) continue;
       if (allowlist[key] !== undefined) {
         usedAllowlist.add(key);
@@ -394,62 +632,100 @@ export function checkEnvKeys(
 // ---------------------------------------------------------------------------
 
 const PRODUCTION_ADAPTER_FILE = /^(?:drizzle|redis)-[\w-]*\.ts$/;
-// The full set of production-adapter class prefixes (CLAUDE.md store-adapter
-// convention).  S3/Ses/Http/Postgres adapters live in conventionally-NAMED
-// files (object-store-s3.ts, mailer-ses.ts, embeddings.ts, gateway.ts, …) that
-// PRODUCTION_ADAPTER_FILE does not match, so they are scanned class-scoped
-// instead — otherwise their in-memory state would escape the purity gate.
-const PRODUCTION_ADAPTER_CLASS =
-  /^\s*(?:export\s+)?(?:abstract\s+)?class\s+(?:Drizzle|Redis|Postgres|S3|Ses|Http)[A-Z]\w*/;
-/** Long-lived in-memory state inside a production adapter: an in-memory
- *  adapter composed anywhere, or a Map/Set held as a CLASS FIELD (per-call
- *  locals — `const out = new Map(...)` working structures — are fine). */
-const IN_MEMORY_STATE = [
-  /new\s+(?:InMemory|Memory)\w+\s*\(/,
-  /(?:#\w+|readonly\s+\w+|(?:private|protected|public)\s+[\w\s]*\w+)\s*(?::[^=;]+)?=\s*new\s+(?:Map|Set)\b/,
-];
+/**
+ * The production-adapter class prefixes (CLAUDE.md store-adapter convention).
+ *
+ * S3/Ses/Http/Postgres adapters live in conventionally-NAMED files
+ * (object-store-s3.ts, mailer-ses.ts, embeddings.ts, gateway.ts, …) that
+ * `PRODUCTION_ADAPTER_FILE` does not match, so they are scanned class-scoped
+ * instead — otherwise their in-memory state would escape the purity gate.
+ *
+ * A class NAME now, not a line of source: the declaration is a node, so the
+ * `export`/`abstract` modifiers it used to have to spell out are simply part
+ * of it.
+ */
+const PRODUCTION_ADAPTER_CLASS = /^(?:Drizzle|Redis|Postgres|S3|Ses|Http)[A-Z]\w*/;
+
+/**
+ * Long-lived in-memory state a production adapter holds.
+ *
+ * Two shapes: an in-memory adapter COMPOSED anywhere, and a Map/Set held as a
+ * CLASS FIELD.  A per-call local (`const out = new Map()` as a working
+ * structure) is fine, and telling the two apart is what the old regex needed a
+ * modifier alternation for — a field is a `PropertyDeclaration`, so the
+ * distinction is structural.
+ */
+function inMemoryStateIn(region: Syntax): Syntax[] {
+  const found: Syntax[] = [];
+  for (const node of walk(region)) {
+    if (node.kind === SyntaxKind.NewExpression) {
+      const name = nameOf(node.expression) ?? '';
+      if (/^(?:InMemory|Memory)\w+/.test(name)) found.push(node);
+      continue;
+    }
+    if (node.kind !== SyntaxKind.PropertyDeclaration) continue;
+    const initializer = node.initializer;
+    if (initializer?.kind !== SyntaxKind.NewExpression) continue;
+    const held = nameOf(initializer.expression) ?? '';
+    if (held === 'Map' || held === 'Set') found.push(node);
+  }
+  return found;
+}
 
 export function checkAdapterPurity(
   files: Map<string, string>,
   allowlist: Array<{ file: string; needle: string; reason: string }> = PURITY_ALLOWLIST,
 ): string[] {
+  return purityIn(parseAll(files), allowlist);
+}
+
+function purityIn(
+  parsed: readonly ParsedSource[],
+  allowlist: Array<{ file: string; needle: string; reason: string }> = PURITY_ALLOWLIST,
+): string[] {
   const issues: string[] = [];
   const usedAllowlist = new Set<number>();
-  for (const [file, raw] of files) {
-    const source = stripComments(raw);
+  for (const { path: file, content, root } of parsed) {
     // drizzle-*/redis-* files are production-only (no in-memory classes), so the
-    // whole file is scanned.  Any OTHER file is scanned ONLY inside a production-
-    // adapter class body — a file that co-locates an in-memory adapter with a
-    // production one (e.g. knomosis/gateway.ts) must not have the in-memory
-    // class's legitimate Map/Set fields flagged.
+    // whole file is scanned.  Any OTHER file is scanned only inside a
+    // production-adapter class BODY — a file co-locating an in-memory adapter
+    // with a production one must not have the in-memory class's legitimate
+    // Map/Set fields flagged.  The class body is a NODE, so the scope needs no
+    // brace counting: the old line-by-line depth tracker counted braces inside
+    // strings, templates and regexes alike.
     const isPrefixFile = PRODUCTION_ADAPTER_FILE.test(basename(file));
-    // Brace-depth tracking scopes the scan to a production-adapter class BODY, so
-    // top-level dev-default factories after the class (`getTokenStore()` →
-    // `new MemoryTokenStore()`) and co-located in-memory classes are not flagged.
-    let depth = 0;
-    let classDepth = -1; // brace depth at which the current production class opened
-    for (const [index, line] of source.split('\n').entries()) {
-      const enteringProd = !isPrefixFile && classDepth < 0 && PRODUCTION_ADAPTER_CLASS.test(line);
-      const inRegion = isPrefixFile || classDepth >= 0 || enteringProd;
-      if (enteringProd) classDepth = depth;
-      depth += (line.match(/{/g)?.length ?? 0) - (line.match(/}/g)?.length ?? 0);
-      const wasInRegion = inRegion;
-      if (classDepth >= 0 && depth <= classDepth) classDepth = -1; // class body closed
-      if (!wasInRegion) continue;
-      if (!IN_MEMORY_STATE.some((pattern) => pattern.test(line))) continue;
-      const allowed = allowlist.findIndex(
-        (entry) => file.endsWith(entry.file) && line.includes(entry.needle),
-      );
-      if (allowed >= 0) {
-        usedAllowlist.add(allowed);
-        continue;
+    const regions: Syntax[] = [];
+    if (isPrefixFile) regions.push(root);
+    else {
+      for (const node of walk(root)) {
+        if (node.kind !== SyntaxKind.ClassDeclaration) continue;
+        const className = nameOf(node.name);
+        if (className !== undefined && PRODUCTION_ADAPTER_CLASS.test(className)) regions.push(node);
       }
-      issues.push(
-        `${file}:${index + 1}: a production adapter holds in-memory state ` +
-          `(${line.trim().slice(0, 80)}…) — state in a Drizzle/Redis adapter must live in the ` +
-          'backing service (this is how upload bytes once vanished on restart). Move it, or ' +
-          'allowlist the line in scripts/check-prod-parity.ts with a written justification.',
-      );
+    }
+    const lines = content.split('\n');
+    const newlines = newlineIndex(content);
+    const reported = new Set<number>();
+    for (const region of regions) {
+      for (const node of inMemoryStateIn(region)) {
+        const line = lineAt(newlines, node.getStart());
+        if (reported.has(line)) continue;
+        reported.add(line);
+        const text = lines[line - 1] ?? '';
+        const allowed = allowlist.findIndex(
+          (entry) => file.endsWith(entry.file) && text.includes(entry.needle),
+        );
+        if (allowed >= 0) {
+          usedAllowlist.add(allowed);
+          continue;
+        }
+        issues.push(
+          `${file}:${line}: a production adapter holds in-memory state ` +
+            `(${text.trim().slice(0, 80)}…) — state in a Drizzle/Redis adapter must live in the ` +
+            'backing service (this is how upload bytes once vanished on restart). Move it, or ' +
+            'allowlist the line in scripts/check-prod-parity.ts with a written justification.',
+        );
+      }
     }
   }
   allowlist.forEach((entry, index) => {
@@ -469,11 +745,41 @@ export function checkAdapterPurity(
  *  fields are SCREAMING_SNAKE zod entries).  A refactor that empties the parse
  *  fails loudly via the sanity floor rather than silently passing leg 2. */
 export function parseServerEnvSchemaKeys(source: string): Set<string> {
-  const block = /export const serverEnvSchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(source);
-  const keys = new Set<string>();
-  for (const match of (block?.[1] ?? '').matchAll(/^\s{2}([A-Z][A-Z0-9_]*):/gm)) {
-    keys.add(match[1] as string);
-  }
+  // The schema's fields are the PROPERTIES of the object literal it is built
+  // from.  The regex this replaces matched a `[\s\S]*?` block and then keys at
+  // exactly two spaces of indentation — so reformatting the file would have
+  // emptied it silently, which is what the sanity floor below existed to catch.
+  const keys = withParsedSources([{ path: 'env.ts', content: source }], (parsed) => {
+    const found = new Set<string>();
+    const root = parsed[0]?.root;
+    if (root === undefined) return found;
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.VariableDeclaration) continue;
+      if (nameOf(node.name) !== 'serverEnvSchema') continue;
+      for (const literal of walk(node)) {
+        if (literal.kind !== SyntaxKind.ObjectLiteralExpression) continue;
+        // TOP-LEVEL literals only.  Walking every one beneath the declaration
+        // read a NESTED validator's fields as environment keys, so
+        // `CONFIG: z.object({ UNVALIDATED: z.string() })` added `UNVALIDATED`
+        // to the validated set — after which `process.env.UNVALIDATED` passed
+        // the gate despite never being parsed from the environment.
+        let nested = false;
+        for (let above = literal.parent; above !== undefined; above = above.parent) {
+          if (above.getStart() === node.getStart()) break;
+          if (above.kind === SyntaxKind.ObjectLiteralExpression) {
+            nested = true;
+            break;
+          }
+        }
+        if (nested) continue;
+        for (const member of childrenOf(literal)) {
+          const key = nameOf(member.name);
+          if (key !== undefined && /^[A-Z][A-Z0-9_]*$/.test(key)) found.add(key);
+        }
+      }
+    }
+    return found;
+  });
   if (keys.size < 10) {
     throw new Error(
       `check-prod-parity: parsed only ${keys.size} server env schema keys — the schema layout ` +

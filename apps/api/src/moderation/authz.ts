@@ -10,8 +10,14 @@
 //   • every console action requires VERIFIED MFA (STEWARD_ROLES.md: "MFA is
 //     required for all steward accounts") — enrolled is not enough;
 //   • senior-only capabilities (permanent `ban`) require the senior grant,
-//     which the platform `admin` role carries.
+//     which the platform `admin` role carries;
+//   • CO-APPROVAL capabilities (`treasury-freeze`) require a SECOND, distinct
+//     actor holding legal counsel — STEWARD_ROLES.md: "`treasury-freeze` |
+//     `ROLE_INTEGRITY` only | Requires counsel co-approval (WS-A.1.2c)", and
+//     MODERATION_TAXONOMY.md's machine-readable row `{"action_type": "Treasury
+//     freeze", …, "co_approver": "counsel"}`.
 import {
+  CO_APPROVAL_CAPABILITIES,
   type ModerationQueue,
   SENIOR_ONLY_CAPABILITIES,
   STEWARD_ROLE_IDS,
@@ -21,7 +27,7 @@ import {
   stewardRolesCanAccessQueue,
   stewardRolesQueues,
 } from '@licio/shared';
-import type { Role } from '../identity/rbac.js';
+import { isCounsel, type Role } from '../identity/rbac.js';
 
 export interface StewardActor {
   userId: string;
@@ -51,30 +57,85 @@ export function isStewardActor(actor: StewardActor): boolean {
 }
 
 export type CapabilityDenial = {
-  code: 'mfa_required' | 'insufficient_capability';
+  code: 'mfa_required' | 'insufficient_capability' | 'co_approval_required';
   message: string;
 };
 
-/** Resolve whether the actor may invoke a console capability (null ⇒ allowed). */
+/**
+ * The ROLE-and-seniority half of the decision, without the per-invocation gates
+ * (MFA freshness, co-approval).  Factored out because {@link denyCapability} and
+ * {@link availableConsoleActions} both need exactly this and previously spelled
+ * it out separately — two places deciding one question, free to drift.
+ *
+ * Exported for EXISTENCE checks: a route that answers 404 rather than 403 to
+ * avoid an enumeration oracle needs "could this actor ever act here?" separately
+ * from "may they act right now?".  Answering that with `denyCapability` would
+ * leak, because its MFA check fires FIRST — a plain member with a stale session
+ * would get `mfa_required`, and a 403 confirms the resource exists.
+ */
+export function grantsCapability(actor: StewardActor, capability: StewardCapability): boolean {
+  const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
+  if (!stewardRolesCan(roles, capability)) return false;
+  if (SENIOR_ONLY_CAPABILITIES.has(capability) && !isSenior(actor.platformRoles)) return false;
+  return true;
+}
+
+/** The second approver presented alongside a co-approval capability. */
+export interface CoApprover {
+  userId: string;
+  platformRoles: readonly Role[];
+}
+
+/**
+ * Resolve whether the actor may invoke a console capability (null ⇒ allowed).
+ *
+ * `coApprover` is REQUIRED for every capability in `CO_APPROVAL_CAPABILITIES`
+ * and ignored otherwise.  Omitting it DENIES — the fail-closed direction, and
+ * the reason this parameter is optional rather than required: every existing
+ * call site passes a capability that needs no co-approver, and any future one
+ * that does must opt in explicitly rather than inherit a pass.
+ */
 export function denyCapability(
   actor: StewardActor,
   capability: StewardCapability,
+  coApprover?: CoApprover | null,
 ): CapabilityDenial | null {
   if (!actor.mfaActive || !actor.mfaVerified) {
     return { code: 'mfa_required', message: 'Verify MFA to perform steward actions' };
   }
-  const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
-  if (!stewardRolesCan(roles, capability)) {
+  if (!grantsCapability(actor, capability)) {
+    const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
     return {
       code: 'insufficient_capability',
-      message: `Capability "${capability}" is not granted to your steward role`,
+      message: stewardRolesCan(roles, capability)
+        ? `"${capability}" requires a senior grant`
+        : `Capability "${capability}" is not granted to your steward role`,
     };
   }
-  if (SENIOR_ONLY_CAPABILITIES.has(capability) && !isSenior(actor.platformRoles)) {
-    return {
-      code: 'insufficient_capability',
-      message: `"${capability}" requires a senior grant`,
-    };
+  // Counsel co-approval (WS-A.1.2c).  Three conditions, each of which a
+  // one-condition check would let through: a co-approver must be PRESENT, must
+  // be a DIFFERENT person (an actor naming themselves is not four eyes), and
+  // must actually hold the counsel capability (`compliance.counsel.approve`) —
+  // the doctrine says counsel, not "any second steward".
+  if (CO_APPROVAL_CAPABILITIES.has(capability)) {
+    if (!coApprover) {
+      return {
+        code: 'co_approval_required',
+        message: `"${capability}" requires legal-counsel co-approval`,
+      };
+    }
+    if (coApprover.userId === actor.userId) {
+      return {
+        code: 'co_approval_required',
+        message: `"${capability}" requires a co-approver other than yourself`,
+      };
+    }
+    if (!isCounsel(coApprover.platformRoles)) {
+      return {
+        code: 'co_approval_required',
+        message: `"${capability}" requires the co-approver to hold legal counsel`,
+      };
+    }
   }
   return null;
 }
@@ -141,10 +202,18 @@ export function maySeeCoordinationDetail(actor: StewardActor): boolean {
   return isIntegrityActor(actor);
 }
 
-/** The console actions the actor's role may take (for the review payload's
- *  `available_actions`). */
+/**
+ * The console actions the actor's role may take (for the review payload's
+ * `available_actions`).
+ *
+ * Deliberately the ROLE grant only — MFA freshness is a per-invocation gate the
+ * UI resolves by stepping up, not a reason to hide an action the role holds.
+ * The palette carries no co-approval capability (`CO_APPROVAL_CAPABILITIES` is
+ * disjoint from it); should one be added, {@link denyCapability} still refuses
+ * it without a counsel co-approver, so the fail-closed floor holds regardless of
+ * what this offers.
+ */
 export function availableConsoleActions(actor: StewardActor): StewardCapability[] {
-  const roles = effectiveStewardRoles(actor.platformRoles, actor.stewardRoles);
   const palette: StewardCapability[] = [
     'warn',
     'hide',
@@ -156,11 +225,7 @@ export function availableConsoleActions(actor: StewardActor): StewardCapability[
     'escalate',
     'clear',
   ];
-  return palette.filter((capability) => {
-    if (!stewardRolesCan(roles, capability)) return false;
-    if (SENIOR_ONLY_CAPABILITIES.has(capability) && !isSenior(actor.platformRoles)) return false;
-    return true;
-  });
+  return palette.filter((capability) => grantsCapability(actor, capability));
 }
 
 /**

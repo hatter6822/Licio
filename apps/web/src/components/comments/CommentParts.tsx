@@ -444,7 +444,7 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
                 href={item.url}
                 target="_blank"
                 rel="noreferrer"
-                className="font-medium text-primary underline"
+                className="font-medium text-primary-on-soft underline"
               >
                 Open the GIF deliberately
               </a>
@@ -642,7 +642,7 @@ export function CommentComposer({
           Saved — this comment will post when you’re back online.
         </p>
       ) : mutation.isError ? (
-        <p role="alert" className="text-sm text-error">
+        <p role="alert" className="text-sm text-error-on-soft">
           Comment could not be posted. Please try again.
         </p>
       ) : null}
@@ -786,13 +786,13 @@ export function CorrectionComposer({
         hours, and the debate queues for resolution an hour after you both stop editing.
       </p>
       {targetBlock !== null ? (
-        <p role="alert" className="text-sm text-error">
+        <p role="alert" className="text-sm text-error-on-soft">
           {targetBlockCopy(targetBlock)}
         </p>
       ) : account !== null ? (
         <p
           role={account.blocked ? 'alert' : undefined}
-          className={cn('text-sm', account.blocked ? 'text-error' : 'text-ink-muted')}
+          className={cn('text-sm', account.blocked ? 'text-error-on-soft' : 'text-ink-muted')}
         >
           {account.text}
         </p>
@@ -816,7 +816,7 @@ export function CorrectionComposer({
           : 'No source linked yet — turn the key phrase into a link to its source.'}
       </p>
       {error ? (
-        <p role="alert" className="text-sm text-error">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}
@@ -838,7 +838,7 @@ export function CorrectionComposer({
           Saved — this correction will open its debate when you’re back online.
         </p>
       ) : mutation.isError ? (
-        <p role="alert" className="text-sm text-error">
+        <p role="alert" className="text-sm text-error-on-soft">
           The correction could not be opened. Please try again.
         </p>
       ) : null}

@@ -3,9 +3,11 @@
 export {
   createDbClient,
   type DbClient,
+  type DbClientOptions,
   type DbExecutor,
   type DbTransaction,
   migrationsFolder,
+  type PostgresNotice,
   pingDatabase,
 } from './client.js';
 export * from './content-schema-check.js';

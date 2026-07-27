@@ -150,6 +150,10 @@ export function RadioGroup({
                 className={cn(
                   dotBase,
                   error ? 'border-error' : 'border-line-strong',
+                  // a11y-bare-hue-ok: `aria-hidden` radio INDICATOR — the hue is
+                  // the ring plus the `bg-current` dot below, a graphical UI
+                  // component (WCAG 1.4.11, 3:1), never text.  The visible
+                  // label is the sibling `<span>` in `text-ink`.
                   checked && 'border-primary text-primary',
                 )}
               >

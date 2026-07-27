@@ -168,13 +168,3 @@ export function computeFreshnessScore(
     config.eventWeight * eventTerm;
   return Number.isFinite(score) ? score : 0;
 }
-
-/** The persisted feature record shape (WS-F.1.4g acceptance: versioned). */
-export interface FreshnessBaselineRecord {
-  storyId: string;
-  freshnessScore: number;
-  /** The topic-baseline input used (ms), or null when unknown — reproducibility. */
-  topicBaselineMs: number | null;
-  computedAt: string;
-  featureVersion: number;
-}

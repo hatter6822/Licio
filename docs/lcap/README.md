@@ -180,6 +180,16 @@ env-gated `POST /api/lcap/v2/public-bridge/{publish,republish}` route (503
 it structurally cannot carry itself; budget-exempt, no initial-bundle constraint, so
 `check:lcap-p2p-split` does not apply).
 
+Every Postgres-backed singleton in `apps/api/src/lcap/service.ts` — the ingest
+store, the publisher's takedown oracle, the publish-eligibility resolver, the
+block-provenance store, the §22.7 review store and the publish-audit store —
+shares ONE `createDbClient` handle, memoized on `DATABASE_URL`.  Each is an
+independent lazy singleton, so each building its own client meant six postgres.js
+pools (default `max: 10` connections apiece) against the same database, per API
+process, multiplied by the replica count, against a server whose `max_connections`
+defaults to 100.  None of them needs isolation from the others: they are all
+process-wide, all long-lived, and all built from the same URL.
+
 The remaining WS-R cards are **I/O integration** — the transport profiles' remaining
 adapters (WS-R.15), the client surface polish (WS-R.17), and the network simulator
 (WS-R.18) — plus the live two-browser convergence E2E for the WS-S private plane.

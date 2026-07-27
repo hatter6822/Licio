@@ -134,7 +134,6 @@ export type PrivacyRequestCreatedEvent = z.infer<typeof privacyRequestCreatedEve
  */
 export const ITEM_SAFETY_STATES = ['normal', 'frozen', 'removed'] as const;
 export type ItemSafetyState = (typeof ITEM_SAFETY_STATES)[number];
-export const itemSafetyStateSchema = z.enum(ITEM_SAFETY_STATES);
 
 /** WS-G.1.1 thread-level safety vocabulary (distinct from item states). */
 const THREAD_SAFETY_DIMENSION_STATES = [

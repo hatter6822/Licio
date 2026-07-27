@@ -10,7 +10,6 @@ export {
   isPushSupported,
   isStandalone,
   type PushReadiness,
-  renewSubscription,
   subscribeToPush,
   unsubscribeFromPush,
   urlBase64ToUint8Array,

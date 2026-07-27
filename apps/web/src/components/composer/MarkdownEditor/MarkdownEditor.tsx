@@ -460,7 +460,7 @@ export function MarkdownEditor({
               </div>
             </div>
             {sourceError ? (
-              <p role="alert" className="text-sm text-error">
+              <p role="alert" className="text-sm text-error-on-soft">
                 {sourceError}
               </p>
             ) : null}

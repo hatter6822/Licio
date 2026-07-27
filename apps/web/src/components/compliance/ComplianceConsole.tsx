@@ -108,7 +108,7 @@ export function ComplianceConsole({
   if (cases.isError || fraud.isError) {
     return (
       <div className="flex flex-col items-start gap-2">
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {t('compliance.console.load_error', 'Could not load the compliance queues.')}
         </p>
         <Button
@@ -186,7 +186,7 @@ function CaseQueue({ cases }: { cases: FinancialComplianceCase[] | null }): Reac
   return (
     <div className="flex flex-col gap-3">
       {error !== null ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}
@@ -320,7 +320,7 @@ function FraudQueue({ items }: { items: FraudQueueResponse['items'] | null }): R
   return (
     <div className="flex flex-col gap-2">
       {error !== null ? (
-        <p role="alert" className="text-sm text-error-fg">
+        <p role="alert" className="text-sm text-error-on-soft">
           {error}
         </p>
       ) : null}

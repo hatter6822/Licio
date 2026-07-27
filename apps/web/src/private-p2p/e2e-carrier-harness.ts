@@ -17,7 +17,11 @@ export { connectPrivatePeer } from './connect-peer.js';
 // `check:private-p2p-split` green and the heavy chunk out of the initial bundle.
 export { PrivateSyncSession, type SyncCodec } from './sync-session.js';
 
-/** Dynamically load the code-split `@licio/private-p2p` chunk for the E2E harness. */
+/** dead-exports-entry: this module is fetched by URL through the Vite dev module
+ *  graph from `e2e/private-carrier.realwebrtc.spec.ts`, so no TypeScript import edge to it
+ *  exists and binding resolution cannot see the call.
+ *
+ *  Dynamically load the code-split `@licio/private-p2p` chunk for the E2E harness. */
 export function loadP2p(): Promise<typeof import('@licio/private-p2p')> {
   return import('@licio/private-p2p');
 }
