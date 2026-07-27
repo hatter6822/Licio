@@ -342,31 +342,118 @@ app.post('/rooms/:roomId/governance/vote', handler);`;
 });
 
 describe('every mounted route module is CLASSIFIED', () => {
-  it('bites when a module is mounted and classified nowhere', () => {
-    const mount = readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8')
-      .replace(
-        'import { createAuthRoutes }',
-        "import { createBrandNewRoutes } from './brand-new.js';\nimport { createAuthRoutes }",
-      )
+  const readRepo = (rel: string): string => readFileSync(resolve(ROOT, rel), 'utf-8');
+
+  /** The repository, with some files swapped for or added as fixtures. */
+  const withFiles =
+    (files: Readonly<Record<string, string>>) =>
+    (rel: string): string =>
+      files[rel] ?? readRepo(rel);
+
+  /** A real, readable module for a mount to point at, so a test that means
+   *  "unclassified" does not also trip the unreadable-module path. */
+  const BRAND_NEW = `
+export const brandNewRoutes = new Hono().get('/', (c) => c.json({ ok: true }));
+export function createBrandNewRoutes() { return brandNewRoutes; }
+export default createBrandNewRoutes;`;
+
+  /** `v1.ts` with an extra module mounted through `mount`, imported by `imports`. */
+  const v1Mounting = (imports: string, mount: string): string =>
+    readRepo('apps/api/src/routes/v1.ts')
+      .replace('import { createAuthRoutes }', `${imports}\nimport { createAuthRoutes }`)
       .replace(
         ".route('/auth', createAuthRoutes())",
-        ".route('/brand', createBrandNewRoutes())\n      .route('/auth', createAuthRoutes())",
+        `${mount}\n      .route('/auth', createAuthRoutes())`,
       );
-    const issues = runGovernanceKycGate((rel) =>
-      rel === 'apps/api/src/routes/v1.ts' ? mount : readFileSync(resolve(ROOT, rel), 'utf-8'),
+
+  it.each([
+    [
+      'a NAMED import',
+      "import { createBrandNewRoutes } from './brand-new.js';",
+      ".route('/brand', createBrandNewRoutes())",
+    ],
+    // Reading `ImportSpecifier` alone made the next two invisible: the mount
+    // resolved to no module, so the module was absent from BOTH classification
+    // lists and the gate still reported success over it.
+    [
+      'a DEFAULT import',
+      "import createBrandNewRoutes from './brand-new.js';",
+      ".route('/brand', createBrandNewRoutes())",
+    ],
+    [
+      'a NAMESPACE import',
+      "import * as brandNew from './brand-new.js';",
+      ".route('/brand', brandNew.createBrandNewRoutes())",
+    ],
+    [
+      'a router exported ready-made, with no factory call',
+      "import { brandNewRoutes } from './brand-new.js';",
+      ".route('/brand', brandNewRoutes)",
+    ],
+    [
+      'a router held in a local const',
+      "import { createBrandNewRoutes } from './brand-new.js';\nconst brandNew = createBrandNewRoutes();",
+      ".route('/brand', brandNew)",
+    ],
+  ])('bites when a module is mounted through %s and classified nowhere', (_l, imports, mount) => {
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1Mounting(imports, mount),
+        'apps/api/src/routes/brand-new.ts': BRAND_NEW,
+      }),
     );
     // A fixed list of four files cannot notice a fifth being mounted, which is
-    // the gap between what this gate claimed and what it checked.
-    expect(issues.some((issue) => issue.includes('CLASSIFIED NOWHERE'))).toBe(true);
+    // the gap between what this gate claimed and what it checked.  The module
+    // READS fine here, so nothing but the classification can be what bit.
+    expect(issues).toContainEqual(expect.stringContaining('brand-new.ts is mounted'));
+    expect(issues).not.toContainEqual(expect.stringContaining('could not be READ'));
+  });
+
+  it('reports a mount it cannot resolve rather than dropping it', () => {
+    // A mount the gate cannot follow is a module it has never read — strictly
+    // worse than an unguarded route, because nothing reports it.
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1Mounting(
+          '',
+          ".route('/brand', (globalThis as never)['makeRoutes']())",
+        ),
+      }),
+    );
+    expect(issues).toContainEqual(expect.stringContaining('cannot resolve to a module'));
+  });
+
+  it('reports a mounted module whose source cannot be READ', () => {
+    const mount = v1Mounting(
+      "import { createBrandNewRoutes } from './brand-new.js';",
+      ".route('/brand', createBrandNewRoutes())",
+    );
+    const issues = runGovernanceKycGate((rel) => {
+      if (rel === 'apps/api/src/routes/v1.ts') return mount;
+      if (rel === 'apps/api/src/routes/brand-new.ts') throw new Error('ENOENT');
+      return readRepo(rel);
+    });
+    expect(issues).toContainEqual(expect.stringContaining('could not be READ'));
   });
 
   it('classifies every module the live mount graph carries', () => {
-    const mounted = mountedRouteModules(
-      readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8'),
-    );
-    expect(mounted.length).toBeGreaterThan(15);
+    const { modules, issues } = mountedRouteModules(readRepo);
+    expect(issues).toEqual([]);
+    // Walking `v1.ts` alone found 21 of these; `app.ts` mounts four routers
+    // itself and `auth.ts`/`events.ts` each mount sub-routers of their own.
+    expect(modules.length).toBeGreaterThan(25);
     const classified = new Set([...GOVERNANCE_ROUTE_FILES, ...Object.keys(NON_GOVERNANCE_ROUTES)]);
-    expect(mounted.filter((each) => !classified.has(each))).toEqual([]);
+    expect(modules.filter((each) => !classified.has(each))).toEqual([]);
+  });
+
+  it.each([
+    ['the composition root itself', 'apps/api/src/app.ts'],
+    ['a router app.ts mounts directly', 'apps/api/src/routes/health.ts'],
+    ['a router outside routes/', 'apps/api/src/lcap/routes.ts'],
+    ['a sub-router of a mounted module', 'apps/api/src/routes/auth-mfa.ts'],
+    ['a sub-router two mounts deep', 'apps/api/src/routes/events-admin.ts'],
+  ])('reaches %s', (_label, file) => {
+    expect(mountedRouteModules(readRepo).modules).toContain(file);
   });
 });
 
