@@ -149,13 +149,24 @@ function nameOf(node: Syntax | undefined): string | undefined {
   return node === undefined ? undefined : (node.text ?? node.getText());
 }
 
-function staticString(node: Syntax | undefined): string | undefined {
-  if (node === undefined) return undefined;
+function staticString(node: Syntax | undefined, hop = 0): string | undefined {
+  if (node === undefined || hop > 8) return undefined;
   if (
     node.kind === SyntaxKind.StringLiteral ||
     node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
   ) {
     return node.text ?? '';
+  }
+  // `'KEY' as const` and `('KEY')` are the same string: the wrappers change
+  // the TYPE and nothing about the value, and stopping at them read a literal
+  // written the ordinary way as unreadable.
+  if (
+    node.kind === SyntaxKind.AsExpression ||
+    node.kind === SyntaxKind.SatisfiesExpression ||
+    node.kind === SyntaxKind.ParenthesizedExpression ||
+    node.kind === SyntaxKind.NonNullExpression
+  ) {
+    return staticString(node.expression, hop + 1);
   }
   return undefined;
 }
@@ -460,6 +471,22 @@ export function checkEnvKeys(
 }
 
 /** The `process.env` keys a source reads, in either access spelling. */
+/** A string a NAME holds, followed one hop through its binding. */
+function constantString(
+  node: Syntax | undefined,
+  project: Project,
+  file: string,
+  hop = 0,
+): string | undefined {
+  if (node?.kind !== SyntaxKind.Identifier || hop > 4) return undefined;
+  const declaration = declarationOf(node, project, file);
+  if (declaration?.kind !== SyntaxKind.VariableDeclaration) return undefined;
+  return (
+    staticString(declaration.initializer) ??
+    constantString(declaration.initializer, project, file, hop + 1)
+  );
+}
+
 /** Whether an expression IS `process.env`, however it was reached. */
 function isProcessEnv(node: Syntax | undefined, project: Project, file: string, hop = 0): boolean {
   if (node === undefined || hop > 8) return false;
@@ -492,7 +519,13 @@ function envKeysOf(root: Syntax, project: Project): string[] {
     const isElement = node.kind === SyntaxKind.ElementAccessExpression;
     if (!isProperty && !isElement) continue;
     if (!isProcessEnv(node.expression, project, here)) continue;
-    const key = isProperty ? nameOf(node.name) : staticString(node.argumentExpression);
+    // The key may be held in a CONSTANT: `const KEY = 'X' as const;
+    // process.env[KEY]` reads the environment exactly as the literal does, and
+    // reading only the syntax at the access saw nothing.
+    const key = isProperty
+      ? nameOf(node.name)
+      : (staticString(node.argumentExpression) ??
+        constantString(node.argumentExpression, project, here));
     if (key !== undefined) keys.push(key);
   }
   return keys;

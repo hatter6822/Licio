@@ -273,6 +273,36 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
   });
 });
 
+describe('the guard is resolved, not matched by name', () => {
+  it('rejects a LOCAL function that merely shares the name', () => {
+    // A fail-closed gate satisfied by any function called
+    // `checkGovernanceEligibility` is satisfied by one that returns nothing.
+    const src = `
+const app = new Hono();
+function checkGovernanceEligibility(id) { return null; }
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('accepts the IMPORTED guard, which is how every real route uses it', () => {
+    // An import specifier is a declaration in the file too, so the test is
+    // what KIND it is — not merely whether one exists.
+    const src = `
+import { checkGovernanceEligibility } from '../governance/eligibility.js';
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+});
+
 describe('a handler passed BY NAME', () => {
   it('reads the function the identifier denotes', () => {
     // Walking only the identifier saw an empty body, so a correctly guarded

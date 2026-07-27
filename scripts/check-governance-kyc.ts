@@ -197,6 +197,15 @@ export interface MutationRoute {
  *  guarded or allowlisted.  GET/HEAD are reads and are judged nowhere. */
 const MUTATION_METHODS: ReadonlySet<string> = new Set(['post', 'put', 'patch', 'delete']);
 
+/** Declarations that DEFINE a value here, rather than name one from elsewhere. */
+const DEFINED_LOCALLY: ReadonlySet<number> = new Set([
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.VariableDeclaration,
+  SyntaxKind.ClassDeclaration,
+  SyntaxKind.MethodDeclaration,
+  SyntaxKind.Parameter,
+]);
+
 /** Equality operators, whose polarity depends on what is on the other side. */
 const EQUALITY: ReadonlySet<number> = new Set([
   SyntaxKind.EqualsEqualsEqualsToken,
@@ -689,6 +698,15 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
               ? nameOf(callee.name)
               : undefined;
         if (called === undefined || !GUARD_NAMES.has(called)) continue;
+        // The guard comes from ANOTHER MODULE.  Matching the NAME alone meant
+        // a local function called `checkGovernanceEligibility` — which may
+        // return anything at all — satisfied a fail-closed gate.  An IMPORT
+        // binding is a declaration in this file too, so the test is what KIND
+        // of declaration it is: locally DEFINED here is not the guard, imported
+        // or unresolved is.
+        const spelledAs = callee.kind === SyntaxKind.Identifier ? callee : callee.name;
+        const declaredAs = spelledAs === undefined ? undefined : localDeclaration(spelledAs);
+        if (declaredAs !== undefined && DEFINED_LOCALLY.has(declaredAs.kind)) continue;
         // MIDDLEWARE guards by being INSTALLED, not by being called:
         // `requireGovernanceEligibility()` inside a handler body merely builds
         // a middleware function and drops it, and an ineligible member walks

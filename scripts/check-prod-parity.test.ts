@@ -199,6 +199,19 @@ describe('reading the environment INDIRECTLY', () => {
     expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
   });
 
+  it.each([
+    [
+      'a const-asserted key',
+      "const KEY = 'UNVALIDATED' as const;\nexport const a = process.env[KEY];",
+    ],
+    ['a plain constant key', "const KEY = 'UNVALIDATED';\nexport const a = process.env[KEY];"],
+  ])('BITES on %s', (_label, content) => {
+    // `'KEY' as const` is the same string as `'KEY'`: the wrapper changes the
+    // TYPE and nothing about the value.
+    const issues = checkEnvKeys(files({ 'x.ts': content }), schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
+  });
+
   it('does not flag an unrelated object that happens to be called env', () => {
     const tree = files({
       'x.ts': 'const env = { SOMETHING: 1 };\nexport const a = env.SOMETHING;',
