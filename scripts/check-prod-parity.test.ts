@@ -212,6 +212,14 @@ describe('reading the environment INDIRECTLY', () => {
     expect(issues.some((issue) => issue.includes('UNVALIDATED'))).toBe(true);
   });
 
+  it('FAILS CLOSED on a key it cannot read', () => {
+    // `process.env[pick()]` cannot be matched against the schema, and passing
+    // it silently is the one failure a fail-closed check must not have.
+    const tree = files({ 'x.ts': 'const key = pick();\nexport const a = process.env[key];' });
+    const issues = checkEnvKeys(tree, schemaKeys, {});
+    expect(issues.some((issue) => issue.includes('cannot read'))).toBe(true);
+  });
+
   it('does not flag an unrelated object that happens to be called env', () => {
     const tree = files({
       'x.ts': 'const env = { SOMETHING: 1 };\nexport const a = env.SOMETHING;',

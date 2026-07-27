@@ -522,6 +522,9 @@ function interfaceIdentity(node: Syntax, project: Project, file: string): string
   return undefined;
 }
 
+/** The marker for an environment key whose name this gate cannot recover. */
+export const UNREADABLE_ENV_KEY = '\u0000unreadable';
+
 /** A string a NAME holds, followed one hop through its binding. */
 function constantString(
   node: Syntax | undefined,
@@ -577,7 +580,10 @@ function envKeysOf(root: Syntax, project: Project): string[] {
       ? nameOf(node.name)
       : (staticString(node.argumentExpression) ??
         constantString(node.argumentExpression, project, here));
-    if (key !== undefined) keys.push(key);
+    // A key this gate CANNOT read is one it cannot match against the schema,
+    // and passing it silently is the failure a fail-closed check must not have:
+    // `process.env[pick()]` would otherwise read anything at all.
+    keys.push(key ?? UNREADABLE_ENV_KEY);
   }
   return keys;
 }
@@ -592,6 +598,14 @@ function envKeysIn(
   const usedAllowlist = new Set<string>();
   for (const { path: file, root } of parsed) {
     for (const key of envKeysOf(root, project)) {
+      if (key === UNREADABLE_ENV_KEY) {
+        issues.push(
+          `${file}: reads process.env with a key this gate cannot read, so it cannot be matched ` +
+            'against the validated server env schema. Use a literal key (or a constant holding ' +
+            'one) so the read can be judged.',
+        );
+        continue;
+      }
       if (schemaKeys.has(key)) continue;
       if (allowlist[key] !== undefined) {
         usedAllowlist.add(key);

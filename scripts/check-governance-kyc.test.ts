@@ -288,6 +288,20 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
     expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
   });
 
+  it('rejects a same-named guard imported from ANOTHER module', () => {
+    // Accepting any import meant `from './fake.js'` certified a route as
+    // guarded.  The import's SOURCE is what makes it the guard.
+    const src = `
+import { checkGovernanceEligibility } from './fake.js';
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
   it('accepts the IMPORTED guard, which is how every real route uses it', () => {
     // An import specifier is a declaration in the file too, so the test is
     // what KIND it is — not merely whether one exists.

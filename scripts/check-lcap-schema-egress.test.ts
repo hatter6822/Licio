@@ -74,3 +74,23 @@ describe('what NAMES a field', () => {
     ).toEqual([]);
   });
 });
+
+describe('a COMPOSED field name', () => {
+  // The collector splits every literal into words, so a name assembled from
+  // pieces recorded `ip_` and `address` and never the forbidden token.  The
+  // composition is where the runtime name comes from, so it is folded first.
+  it.each([
+    ['concatenation', "export const s = z.object({ ['ip_' + 'address']: z.string() });"],
+    // Built, so a literal `${` never appears inside a plain string here.
+    ['a template', `export const s = z.object({ [\`ip_$${'{'}'address'}\`]: z.string() });`],
+  ])('catches a forbidden key built by %s', (_label, source) => {
+    expect(findSchemaEgressIssues('x.ts', source).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['a harmless composition', "export const s = z.object({ ['room_' + 'id']: z.string() });"],
+    ['a hole that is not static', `export const s = z.object({ [\`ip_$${'{'}x}\`]: z.string() });`],
+  ])('does not flag %s', (_label, source) => {
+    expect(findSchemaEgressIssues('x.ts', source)).toEqual([]);
+  });
+});

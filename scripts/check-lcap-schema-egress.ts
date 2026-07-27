@@ -151,8 +151,9 @@ function namedWords(root: Syntax): Set<string> {
     // have LOST a case the whole-text search it replaces already covered.
     // A COMPOSED name is the name the schema actually declares.
     if (
-      node.kind === SyntaxKind.BinaryExpression &&
-      node.operatorToken?.kind === SyntaxKind.PlusToken
+      node.kind === SyntaxKind.TemplateExpression ||
+      (node.kind === SyntaxKind.BinaryExpression &&
+        node.operatorToken?.kind === SyntaxKind.PlusToken)
     ) {
       const folded = staticConcat(node);
       if (folded !== null) {
@@ -188,6 +189,14 @@ function namedWords(root: Syntax): Set<string> {
  * which is the forbidden token.  The concatenation is where the name actually
  * comes from, so it is folded before the words are taken.
  */
+function kidsOf(node: Syntax): Syntax[] {
+  const children: Syntax[] = [];
+  node.forEachChild((child: Syntax) => {
+    children.push(child);
+  });
+  return children;
+}
+
 function staticConcat(node: Syntax, hop = 0): string | null {
   if (hop > 16) return null;
   if (
@@ -198,6 +207,20 @@ function staticConcat(node: Syntax, hop = 0): string | null {
   }
   if (node.kind === SyntaxKind.ParenthesizedExpression || node.kind === SyntaxKind.AsExpression) {
     return node.expression === undefined ? null : staticConcat(node.expression, hop + 1);
+  }
+  // A TEMPLATE whose holes are all static is the same composed name written a
+  // second way: `` `ip_${'address'}` `` names `ip_address` exactly as
+  // `'ip_' + 'address'` does.
+  if (node.kind === SyntaxKind.TemplateExpression) {
+    let text = node.head?.text ?? '';
+    for (const span of kidsOf(node)) {
+      if (span.kind !== SyntaxKind.TemplateSpan) continue;
+      const parts = kidsOf(span);
+      const hole = parts[0] === undefined ? null : staticConcat(parts[0], hop + 1);
+      if (hole === null) return null;
+      text += hole + (span.literal?.text ?? '');
+    }
+    return text;
   }
   if (
     node.kind === SyntaxKind.BinaryExpression &&
