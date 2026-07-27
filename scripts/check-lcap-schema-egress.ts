@@ -143,7 +143,7 @@ function collect(dir: string): string[] {
  * violation either.
  */
 /** Every word a source NAMES — in an identifier, a property key or a string. */
-function namedWords(root: Syntax): Set<string> {
+function namedWords(root: Syntax, held?: (name: Syntax) => Syntax | undefined): Set<string> {
   const words = new Set<string>();
   for (const node of walk(root)) {
     // Every chunk of a template counts too: a field name can be spelled in one
@@ -155,7 +155,7 @@ function namedWords(root: Syntax): Set<string> {
       (node.kind === SyntaxKind.BinaryExpression &&
         node.operatorToken?.kind === SyntaxKind.PlusToken)
     ) {
-      const folded = staticConcat(node);
+      const folded = staticConcat(node, 0, held);
       if (folded !== null) {
         for (const word of folded.split(/[^A-Za-z0-9_]+/)) {
           if (word !== '') words.add(word);
@@ -197,7 +197,11 @@ function kidsOf(node: Syntax): Syntax[] {
   return children;
 }
 
-function staticConcat(node: Syntax, hop = 0): string | null {
+function staticConcat(
+  node: Syntax,
+  hop = 0,
+  held?: (name: Syntax) => Syntax | undefined,
+): string | null {
   if (hop > 16) return null;
   if (
     node.kind === SyntaxKind.StringLiteral ||
@@ -206,7 +210,7 @@ function staticConcat(node: Syntax, hop = 0): string | null {
     return node.text ?? '';
   }
   if (node.kind === SyntaxKind.ParenthesizedExpression || node.kind === SyntaxKind.AsExpression) {
-    return node.expression === undefined ? null : staticConcat(node.expression, hop + 1);
+    return node.expression === undefined ? null : staticConcat(node.expression, hop + 1, held);
   }
   // A TEMPLATE whose holes are all static is the same composed name written a
   // second way: `` `ip_${'address'}` `` names `ip_address` exactly as
@@ -216,7 +220,7 @@ function staticConcat(node: Syntax, hop = 0): string | null {
     for (const span of kidsOf(node)) {
       if (span.kind !== SyntaxKind.TemplateSpan) continue;
       const parts = kidsOf(span);
-      const hole = parts[0] === undefined ? null : staticConcat(parts[0], hop + 1);
+      const hole = parts[0] === undefined ? null : staticConcat(parts[0], hop + 1, held);
       if (hole === null) return null;
       text += hole + (span.literal?.text ?? '');
     }
@@ -228,9 +232,16 @@ function staticConcat(node: Syntax, hop = 0): string | null {
     node.left !== undefined &&
     node.right !== undefined
   ) {
-    const left = staticConcat(node.left, hop + 1);
-    const right = staticConcat(node.right, hop + 1);
+    const left = staticConcat(node.left, hop + 1, held);
+    const right = staticConcat(node.right, hop + 1, held);
     return left === null || right === null ? null : left + right;
+  }
+  // A NAME holding one of the pieces: `const s = 'address'; ['ip_' + s]` names
+  // the same field as the fully spelled form, and the composition is where the
+  // runtime name comes from either way.
+  if (node.kind === SyntaxKind.Identifier && held !== undefined) {
+    const bound = held(node);
+    return bound === undefined ? null : staticConcat(bound, hop + 1, held);
   }
   return null;
 }
@@ -255,9 +266,30 @@ export function findSchemaEgressIssues(filename: string, content: string): reado
 export function findSchemaEgressIssuesIn(
   sources: readonly Source[],
 ): Map<string, readonly string[]> {
-  return withParsedSources(sources, (parsed) => {
+  return withParsedSources(sources, (parsed, project) => {
     const byPath = new Map<string, readonly string[]>();
-    for (const { path, root } of parsed) byPath.set(path, issuesFor(path, namedWords(root)));
+    for (const { path, root } of parsed) {
+      const here = String(root.path);
+      // What a NAME holds — one memoised hop through the binding, which is the
+      // whole of the question a composed key asks.
+      const bound = new Map<number, Syntax | undefined>();
+      const held = (name: Syntax): Syntax | undefined => {
+        const at = name.getStart();
+        if (bound.has(at)) return bound.get(at);
+        bound.set(at, undefined); // cycle guard while this one resolves
+        const declaration = project.checker
+          .getSymbolAtPosition(here, at)
+          ?.declarations.find((each) => String(each.path) === here)
+          ?.resolve(project) as unknown as Syntax | undefined;
+        const initializer =
+          declaration?.kind === SyntaxKind.VariableDeclaration
+            ? declaration.initializer
+            : undefined;
+        bound.set(at, initializer);
+        return initializer;
+      };
+      byPath.set(path, issuesFor(path, namedWords(root, held)));
+    }
     return byPath;
   });
 }

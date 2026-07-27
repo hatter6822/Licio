@@ -88,7 +88,24 @@ describe('a COMPOSED field name', () => {
   });
 
   it.each([
+    [
+      'a binding in a computed key',
+      "const part = 'address';\nexport const s = z.object({ ['ip_' + part]: z.string() });",
+    ],
+    [
+      'a binding in a template hole',
+      `const part = 'address';\nexport const s = z.object({ [\`ip_$${'{'}part}\`]: z.string() });`,
+    ],
+  ])('catches a forbidden key built by %s', (_label, source) => {
+    expect(findSchemaEgressIssues('x.ts', source).length).toBeGreaterThan(0);
+  });
+
+  it.each([
     ['a harmless composition', "export const s = z.object({ ['room_' + 'id']: z.string() });"],
+    [
+      'a binding that is not static',
+      "const part = pick();\nexport const s = z.object({ ['ip_' + part]: z.string() });",
+    ],
     ['a hole that is not static', `export const s = z.object({ [\`ip_$${'{'}x}\`]: z.string() });`],
   ])('does not flag %s', (_label, source) => {
     expect(findSchemaEgressIssues('x.ts', source)).toEqual([]);
