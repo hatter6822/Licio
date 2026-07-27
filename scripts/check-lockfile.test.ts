@@ -118,6 +118,29 @@ describe('counting the packages section', () => {
     expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
   });
 
+  it('accepts a resolution written as a YAML BLOCK, as pnpm does', () => {
+    // Requiring the flow spelling rejected an integrity-covered package
+    // outright — a gate refusing valid input, which is worse than one that
+    // misses.
+    const content = lockfile(
+      ['  a@1.0.0:', '    resolution:', `      integrity: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('does not let a block resolution vouch for the NEXT entry', () => {
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        '    resolution:',
+        `      integrity: sha512-${digest('a')}`,
+        '  b@2.0.0:',
+        '    resolution:',
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
+  });
+
   it('counts a digest only on the resolution the entry pins', () => {
     const content = lockfile(
       ['  a@1.0.0:', '    resolution: {}', `    somethingElse: sha512-${digest('a')}`].join('\n'),

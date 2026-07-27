@@ -85,10 +85,13 @@ export function countPackagesSection(content: string): { entries: number; integr
   let inside = false;
   let open = false;
   let covered = false;
+  /** Indent of the `resolution:` key while its BLOCK body is being read. */
+  let resolutionAt: number | undefined;
   const close = (): void => {
     if (open && covered) integrity += 1;
     open = false;
     covered = false;
+    resolutionAt = undefined;
   };
   for (const line of content.split('\n')) {
     if (/^[A-Za-z]/.test(line)) {
@@ -103,6 +106,19 @@ export function countPackagesSection(content: string): { entries: number; integr
       open = true;
       continue;
     }
+    if (!open) continue;
+
+    const indent = line.length - line.trimStart().length;
+    // YAML writes a mapping either INLINE (`resolution: {integrity: …}`) or as
+    // an indented BLOCK, and pnpm verifies the digest under both.  Requiring
+    // the flow spelling rejected an integrity-covered package outright — a gate
+    // refusing valid input, which is worse than one that misses — so the block
+    // form is tracked by indentation: the resolution's body is every line
+    // indented deeper than its key, and ends at the first line that is not.
+    if (resolutionAt !== undefined && indent <= resolutionAt) resolutionAt = undefined;
+    const opensResolution = /^\s*resolution:/.test(line);
+    if (opensResolution) resolutionAt = indent;
+
     // A DIGEST OF THE DECLARED ALGORITHM, on the RESOLUTION this entry pins —
     // not just the algorithm prefix, not merely something long enough, and not
     // some other `integrity:` further down the same entry.  Matching `sha512-`
@@ -111,9 +127,8 @@ export function countPackagesSection(content: string): { entries: number; integr
     // SHA-512's size — so a lockfile with every digest emptied or truncated
     // still reported full coverage, the exact failure this check exists to
     // notice.
-    if (open && !covered && line.includes('resolution:') && isAlgorithmLengthDigest(line)) {
-      covered = true;
-    }
+    const withinResolution = opensResolution || resolutionAt !== undefined;
+    if (!covered && withinResolution && isAlgorithmLengthDigest(line)) covered = true;
   }
   close();
   return { entries, integrity };
