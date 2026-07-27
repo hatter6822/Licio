@@ -496,6 +496,13 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const declaration = localDeclaration(target);
     if (declaration === undefined) return false;
     if (declaration.kind === SyntaxKind.FunctionDeclaration) return true;
+    // An IMPORTED handler is a handler this file cannot see the body of, and
+    // "cannot see" must not mean "not a handler": with the router and the path
+    // both unresolvable too, rejecting it discarded the registration entirely
+    // and took the whole file out of the corpus.  Counted conservatively, the
+    // unreadable path below then reports the route, which is the outcome a
+    // gate that cannot read something owes.
+    if (IMPORTED.has(declaration.kind)) return true;
     return (
       declaration.kind === SyntaxKind.VariableDeclaration &&
       isHandlerShaped(declaration.initializer, hop + 1)
@@ -1054,7 +1061,7 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
  * tracked sources parse in one project in under a third of a second, so the
  * whole question costs less than the walk it replaces.
  */
-const API_SOURCE_GLOB = 'apps/api/src/**/*.ts';
+const API_SOURCE_ROOT = 'apps/api/src';
 
 /**
  * Tests declare routers of their own; they serve nothing.
@@ -1069,11 +1076,23 @@ function isTestPath(path: string): boolean {
   return path.endsWith('.test.ts') || path.includes('/__tests__/') || path.startsWith('__tests__/');
 }
 
-/** Every tracked API source, from git rather than from a directory walk. */
+/**
+ * Every tracked API source, from git rather than from a directory walk.
+ *
+ * A DIRECTORY pathspec, deliberately.  A recursive glob of the double-star
+ * form reads as "every TypeScript file under here" and is not: git's `**`
+ * required at least one intermediate directory, so the three files that sit
+ * directly in `apps/api/src`
+ * — `app.ts`, `index.ts` and `e2e-server.ts`, the composition roots — were
+ * silently outside the corpus, which is the exact failure this enumeration
+ * replaced a mount walk to prevent.  A directory pathspec has no such subtlety:
+ * it is every tracked path beneath it, and the extension is filtered here where
+ * it can be read.
+ */
 export function trackedApiSources(): string[] {
-  return execFileSync('git', ['ls-files', API_SOURCE_GLOB], { cwd: ROOT, encoding: 'utf-8' })
+  return execFileSync('git', ['ls-files', API_SOURCE_ROOT], { cwd: ROOT, encoding: 'utf-8' })
     .split('\n')
-    .filter((each) => each.length > 0 && !isTestPath(each));
+    .filter((each) => each.endsWith('.ts') && !isTestPath(each));
 }
 
 export function runGovernanceKycGate(

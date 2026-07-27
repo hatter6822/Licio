@@ -4,8 +4,7 @@
 // registration is found wherever it sits, the guard is attributed by
 // CONTAINMENT rather than by text proximity, and the only fail-closed case left
 // is a route path the gate genuinely cannot read.
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -422,6 +421,17 @@ app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
     ).toBe(true);
   });
 
+  it.each(['apps/api/src/app.ts', 'apps/api/src/index.ts', 'apps/api/src/e2e-server.ts'])(
+    'enumerates the top-level composition file %s',
+    (file) => {
+      // `apps/api/src/**` + `/*.ts` required at least one INTERMEDIATE directory
+      // in a git pathspec, so these three sat silently outside the corpus — the
+      // exact failure the enumeration replaced a mount walk to prevent, in the
+      // enumeration itself.
+      expect(live).toContain(file);
+    },
+  );
+
   it('enumerates the API tree, so nothing above passes vacuously', () => {
     expect(live.length).toBeGreaterThan(200);
     expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
@@ -429,14 +439,23 @@ app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
     expect(
       live.filter((each) => each.endsWith('.test.ts') || each.includes('/__tests__/')),
     ).toEqual([]);
-    // …and the exclusion is not so broad that it drops real sources: every
-    // suite the repository has under apps/api/src is accounted for by it.
-    const tracked = execFileSync('git', ['ls-files', 'apps/api/src/**/*.ts'], {
-      cwd: ROOT,
-      encoding: 'utf-8',
-    })
-      .split('\n')
-      .filter((each) => each.length > 0);
+    // …and the exclusion is not so broad that it drops real sources.  The
+    // comparison walks the FILESYSTEM rather than asking git with the same
+    // pathspec: a corpus checked against its own enumeration cannot notice the
+    // enumeration being wrong, which is how three composition files went
+    // missing without a single assertion failing.
+    const tracked: string[] = [];
+    const walkDir = (dir: string): void => {
+      for (const entry of readdirSync(resolve(ROOT, dir), { withFileTypes: true })) {
+        const at = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules') walkDir(at);
+        } else if (entry.name.endsWith('.ts')) {
+          tracked.push(at);
+        }
+      }
+    };
+    walkDir('apps/api/src');
     const excluded = tracked.filter((each) => !live.includes(each));
     expect(
       excluded.filter((each) => !each.endsWith('.test.ts') && !each.includes('/__tests__/')),
@@ -484,6 +503,10 @@ describe('a NAMED route handler', () => {
     ['a function declaration', 'function handler(c) { return castVote(); }'],
     ['a const arrow', 'const handler = (c) => castVote();'],
     ['a const function expression', 'const handler = function (c) { return castVote(); };'],
+    // A handler this file cannot see the body of is still a handler: with the
+    // router and the path both unresolvable too, rejecting it discarded the
+    // registration and took the whole file out of the corpus.
+    ['an IMPORTED handler', "import { handler } from './handler.js';"],
   ])('qualifies a registration on an unknown receiver: %s', (_label, declaration) => {
     const src = `
 import { app } from './router.js';
