@@ -200,6 +200,28 @@ describe('runGovernanceKycGate', () => {
     expect(issues.some((issue) => issue.includes('line-start'))).toBe(false);
   });
 
+  it('FAILS CLOSED on a method list it cannot fully read', () => {
+    // `.on(['GET', mutation], …)` yielded only `GET`, so the registration
+    // classified as a read and was skipped — letting an unguarded POST through
+    // a gate whose whole point is failing closed.
+    const partial = [
+      "const mutation = 'POST' as const;",
+      "export const r = new Hono().on(['GET', mutation], '/rooms/:id/governance/vote', (c) => c.json({}));",
+    ].join('\n');
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? partial : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.includes('could not be read'))).toBe(true);
+  });
+
+  it('still skips a registration that is only READS', () => {
+    const reads = `export const r = new Hono().on(['GET','HEAD'], '/rooms/:id/read', (c) => c.json({}));`;
+    const issues = runGovernanceKycGate((relPath) =>
+      relPath === GOVERNANCE_ROUTE_FILES[0] ? reads : 'export const nothing = 1;',
+    );
+    expect(issues.some((issue) => issue.startsWith(GOVERNANCE_ROUTE_FILES[0]))).toBe(false);
+  });
+
   it('FAILS CLOSED on a route path it cannot read', () => {
     // The one place the discipline is still needed: a mutation registered on a
     // router with a computed path cannot be matched to a guard or an allowlist.

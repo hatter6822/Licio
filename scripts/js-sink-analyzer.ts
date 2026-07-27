@@ -66,7 +66,7 @@ export interface SinkSpec {
    * argument must satisfy it, which is how `setTimeout(fn, 0)` stays clean
    * while `setTimeout('code', 0)` does not.
    */
-  readonly codeArgument?: (arg: Syntax) => boolean;
+  readonly codeArgument?: (values: readonly Syntax[]) => boolean;
   /**
    * The sink takes an UNBOUNDED list of code arguments, so `codeArgument` is
    * tested against every one of them and any match fires.  `importScripts`
@@ -110,6 +110,21 @@ const INVOKERS: ReadonlySet<string> = new Set(['call', 'apply', 'bind']);
 /** `Reflect` methods that invoke their FIRST argument. */
 const REFLECT_INVOKERS: ReadonlySet<string> = new Set(['apply', 'construct']);
 
+/**
+ * Operators that WRITE the property they are applied to.
+ *
+ * `+=` appends markup as destructively as `=` does, and the logical forms write
+ * it too — `node.innerHTML ||= payload` sets it whenever the element is empty,
+ * which is exactly when a sink assignment matters.
+ */
+const WRITING_ASSIGNMENTS: ReadonlySet<number> = new Set([
+  SyntaxKind.EqualsToken,
+  SyntaxKind.PlusEqualsToken,
+  SyntaxKind.BarBarEqualsToken,
+  SyntaxKind.AmpersandAmpersandEqualsToken,
+  SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
 /** Wrappers that yield exactly the expression they wrap. */
 const TRANSPARENT: ReadonlySet<number> = new Set([
   SyntaxKind.ParenthesizedExpression,
@@ -121,6 +136,13 @@ const TRANSPARENT: ReadonlySet<number> = new Set([
 
 /** How far an alias chain is followed before it is treated as a cycle. */
 const MAX_HOPS = 24;
+
+/** Operators that SELECT one of their operands, either of which may run. */
+const SELECTORS: ReadonlySet<number> = new Set([
+  SyntaxKind.BarBarToken,
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.QuestionQuestionToken,
+]);
 
 /**
  * Strip everything that changes nothing about what an expression evaluates to.
@@ -206,8 +228,12 @@ function staticPrefix(node: Syntax | undefined, hop = 0): string | null {
  * host compiles, so requiring a fully static literal would miss the form an
  * attacker is most likely to use.
  */
-export const isStringLiteral = (arg: Syntax): boolean => {
-  const target = unwrap(arg);
+export const isStringLiteral = (values: readonly Syntax[]): boolean =>
+  values.some((value) => isStringLike(value));
+
+/** Whether ONE expression is a string the host would compile. */
+function isStringLike(node: Syntax | undefined): boolean {
+  const target = unwrap(node);
   if (target === undefined) return false;
   if (
     target.kind === SyntaxKind.StringLiteral ||
@@ -221,15 +247,10 @@ export const isStringLiteral = (arg: Syntax): boolean => {
     target.kind === SyntaxKind.BinaryExpression &&
     target.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
-    const left = target.left;
-    const right = target.right;
-    return (
-      (left !== undefined && isStringLiteral(left)) ||
-      (right !== undefined && isStringLiteral(right))
-    );
+    return isStringLike(target.left) || isStringLike(target.right);
   }
   return false;
-};
+}
 
 /**
  * The code argument is a statically known URL that is NOT same-origin.
@@ -253,8 +274,12 @@ export const isStringLiteral = (arg: Syntax): boolean => {
  * for a special scheme, so `\\evil.example/x.js` is protocol-relative just as
  * `//evil.example/x.js` is.
  */
-export const isNonSameOriginUrl = (arg: Syntax): boolean => {
-  const prefix = staticPrefix(arg);
+export const isNonSameOriginUrl = (values: readonly Syntax[]): boolean =>
+  values.some((value) => isOffOrigin(value));
+
+/** Whether ONE expression is a statically known URL that is not same-origin. */
+function isOffOrigin(node: Syntax): boolean {
+  const prefix = staticPrefix(node);
   if (prefix === null) return false;
   // Written without a control-character regex class (which the linter forbids,
   // rightly — they are unreadable) but doing exactly what the URL parser does.
@@ -264,7 +289,7 @@ export const isNonSameOriginUrl = (arg: Syntax): boolean => {
   const url = stripped.slice(from);
   if (/^[/\\]{2}/.test(url)) return true; // protocol-relative (either slash)
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url); // ANY scheme is off-origin
-};
+}
 
 /**
  * Everything one file needs to answer "is this expression a sink".
@@ -370,29 +395,51 @@ function analyser(root: Syntax, project: Project, source: string) {
    * collected, because a gate must fire if any of them makes the name a sink.
    */
   const rebound = new Map<string, Syntax[]>();
-  for (const node of walk(root)) {
-    if (node.kind !== SyntaxKind.BinaryExpression) continue;
-    if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
-    const target = unwrap(node.left);
-    const value = node.right;
-    if (target === undefined || value === undefined) continue;
-    if (target.kind === SyntaxKind.Identifier) {
-      const key = receiverKey(target);
-      if (key !== undefined) rebound.set(key, [...(rebound.get(key) ?? []), value]);
-      continue;
+  // Deferred: resolving a DESTRUCTURING target needs `heldAt`, which is defined
+  // below, so the walk is invoked once the closure is fully built.
+  const collectAssignments = (): void => {
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.BinaryExpression) continue;
+      if (node.operatorToken?.kind !== SyntaxKind.EqualsToken) continue;
+      const target = unwrap(node.left);
+      const value = node.right;
+      if (target === undefined || value === undefined) continue;
+      if (target.kind === SyntaxKind.Identifier) {
+        const key = receiverKey(target);
+        if (key !== undefined) rebound.set(key, [...(rebound.get(key) ?? []), value]);
+        continue;
+      }
+      // `({ run: execute } = { run: eval })` rebinds `execute` exactly as
+      // `execute = eval` does — a destructuring assignment is still an assignment.
+      if (
+        target.kind === SyntaxKind.ObjectLiteralExpression ||
+        target.kind === SyntaxKind.ArrayLiteralExpression
+      ) {
+        const isArray = target.kind === SyntaxKind.ArrayLiteralExpression;
+        childrenOf(target).forEach((member, index) => {
+          const bound = member.kind === SyntaxKind.PropertyAssignment ? member.initializer : member;
+          const from = isArray ? String(index) : nameOf(member.name ?? member);
+          if (bound?.kind !== SyntaxKind.Identifier || from === undefined) return;
+          const key = receiverKey(bound);
+          const held = heldAt(value, from, 0);
+          if (key === undefined || held === undefined) return;
+          rebound.set(key, [...(rebound.get(key) ?? []), held]);
+        });
+        continue;
+      }
+      if (
+        target.kind !== SyntaxKind.PropertyAccessExpression &&
+        target.kind !== SyntaxKind.ElementAccessExpression
+      ) {
+        continue;
+      }
+      const base = target.expression;
+      const name = propertyName(target);
+      const key = base === undefined ? undefined : receiverKey(base);
+      if (name === undefined || key === undefined) continue;
+      written.set(`${key} ${name}`, value);
     }
-    if (
-      target.kind !== SyntaxKind.PropertyAccessExpression &&
-      target.kind !== SyntaxKind.ElementAccessExpression
-    ) {
-      continue;
-    }
-    const base = target.expression;
-    const name = propertyName(target);
-    const key = base === undefined ? undefined : receiverKey(base);
-    if (name === undefined || key === undefined) continue;
-    written.set(`${key} ${name}`, value);
-  }
+  };
 
   /** Whether an expression IS the global object, directly or through a name. */
   const isGlobalReceiver = (node: Syntax | undefined, hop = 0): boolean => {
@@ -530,43 +577,101 @@ function analyser(root: Syntax, project: Project, source: string) {
   };
 
   /**
-   * The GLOBAL NAME an expression evaluates to, if any.
+   * Every expression a node could evaluate to.
    *
-   * A name rather than a spec, so one walk serves every spec set and
-   * `globalThis.whatever` resolves without knowing which names the caller cares
-   * about.
+   * SELECTION and BINDING are the two ways a value arrives somewhere other than
+   * where it was written, and both must be followed or the thing at the end of
+   * them is invisible: `(eval || fallback)(x)` invokes `eval` because it is
+   * truthy, and `const code = 'alert(1)'; setTimeout(code, 0)` compiles a string
+   * the argument's own syntax does not show.
+   *
+   * One resolver rather than a rule per predicate, because the sink walk, the
+   * string test and the URL test all ask the same question of the same shapes —
+   * and answering it in only one of them is how the other two went stale.
    */
-  const sinkName = (node: Syntax | undefined, hop = 0): string | undefined => {
+  const valuesOf = (node: Syntax | undefined, hop = 0, seen = new Set<string>()): Syntax[] => {
     const target = unwrap(node);
-    if (target === undefined || hop > MAX_HOPS) return undefined;
+    if (target === undefined || hop > MAX_HOPS) return [];
+    // Keyed on the full RANGE: a binary expression starts where its left operand
+    // does, so a start offset alone is not an identity and the operand that
+    // matters would be skipped as already-seen.
+    const at = `${target.getStart()}:${target.getEnd()}`;
+    if (seen.has(at)) return [];
+    seen.add(at);
 
-    if (target.kind === SyntaxKind.Identifier) {
-      if (isGlobalBinding(target)) return nameOf(target);
-      // A later assignment reaches this name just as an initializer does, and
-      // either can be the one that makes it a sink.
+    if (target.kind === SyntaxKind.ConditionalExpression) {
+      return [
+        ...valuesOf(target.whenTrue, hop + 1, seen),
+        ...valuesOf(target.whenFalse, hop + 1, seen),
+      ];
+    }
+    // `||`, `&&` and `??` all SELECT one operand; either may be the one that runs.
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      return [...valuesOf(target.left, hop + 1, seen), ...valuesOf(target.right, hop + 1, seen)];
+    }
+    if (target.kind === SyntaxKind.Identifier && !isGlobalBinding(target)) {
+      const from: Syntax[] = [];
       const key = receiverKey(target);
       for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
-        const named = sinkName(assigned, hop + 1);
-        if (named !== undefined) return named;
+        from.push(...valuesOf(assigned, hop + 1, seen));
       }
       const declaration = localDeclaration(target);
       if (declaration?.kind === SyntaxKind.VariableDeclaration) {
-        return sinkName(declaration.initializer, hop + 1);
+        from.push(...valuesOf(declaration.initializer, hop + 1, seen));
       }
+      // The name itself stays a candidate: it may BE the thing (a parameter, an
+      // import), and dropping it would lose every sink reached through one.
+      return [target, ...from];
+    }
+    return [target];
+  };
+
+  /**
+   * The GLOBAL NAME an expression evaluates to, if any.
+   *
+   * EVERY name, not the first: a selection runs one of its operands and only
+   * the caller knows which names are sinks, so `(ready && eval)(x)` must offer
+   * both rather than stopping at the first global it can name.
+   *
+   * Names rather than specs, so one walk serves every spec set and
+   * `globalThis.whatever` resolves without knowing which names the caller cares
+   * about.
+   */
+  const sinkNames = (node: Syntax | undefined, hop = 0): string[] => {
+    const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return [];
+
+    if (target.kind === SyntaxKind.Identifier) {
+      if (isGlobalBinding(target)) return [nameOf(target)];
+      // A later assignment reaches this name just as an initializer does, and
+      // either can be the one that makes it a sink.
+      const names: string[] = [];
+      const key = receiverKey(target);
+      for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
+        names.push(...sinkNames(assigned, hop + 1));
+      }
+      const declaration = localDeclaration(target);
+      if (declaration?.kind === SyntaxKind.VariableDeclaration) {
+        names.push(...sinkNames(declaration.initializer, hop + 1));
+      }
+      if (names.length > 0) return names;
       if (declaration?.kind === SyntaxKind.BindingElement) {
         // `const { eval: e } = globalThis` names a property off the global; and
         // `const [F] = [Function]` names one off a container by POSITION.  Both
         // are the same act, so both are read through the same lookup.
         const pattern = declaration.parent;
         const from = pattern?.parent?.initializer;
-        if (pattern === undefined || from === undefined) return undefined;
+        if (pattern === undefined || from === undefined) return [];
         const name = bindingKey(declaration, pattern);
-        if (name === undefined) return undefined;
-        if (isGlobalReceiver(from)) return name;
+        if (name === undefined) return [];
+        if (isGlobalReceiver(from)) return [name];
         const held = heldAt(from, name, hop);
-        return held === undefined ? undefined : sinkName(held, hop + 1);
+        return held === undefined ? [] : sinkNames(held, hop + 1);
       }
-      return undefined;
+      return [];
     }
 
     if (
@@ -575,28 +680,36 @@ function analyser(root: Syntax, project: Project, source: string) {
     ) {
       const name = propertyName(target);
       const base = target.expression;
-      if (name === undefined || base === undefined) return undefined;
+      if (name === undefined || base === undefined) return [];
       // What was WRITTEN into this slot wins over what the receiver is.
       const held = heldAt(base, name, hop);
-      if (held !== undefined) return sinkName(held, hop + 1);
-      if (isGlobalReceiver(base)) return name;
+      if (held !== undefined) return sinkNames(held, hop + 1);
+      if (isGlobalReceiver(base)) return [name];
       // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
-      if (INVOKERS.has(name)) return sinkName(base, hop + 1);
-      if (name === 'constructor') return 'Function';
-      return undefined;
+      if (INVOKERS.has(name)) return sinkNames(base, hop + 1);
+      if (name === 'constructor') return ['Function'];
+      return [];
     }
 
     if (target.kind === SyntaxKind.CallExpression) {
       // `Reflect.apply(F, …)` / `Reflect.construct(F, …)` invoke their FIRST
       // argument, so the sink is whatever that argument resolves to.
       const invoked = reflectTarget(target);
-      return invoked === undefined ? undefined : sinkName(invoked, hop + 1);
+      return invoked === undefined ? [] : sinkNames(invoked, hop + 1);
     }
 
+    // A SELECTION runs one of its operands, and either may be the sink:
+    // `(eval || fallback)(x)` invokes `eval` because it is truthy.
     if (target.kind === SyntaxKind.ConditionalExpression) {
-      return sinkName(target.whenTrue, hop + 1) ?? sinkName(target.whenFalse, hop + 1);
+      return [...sinkNames(target.whenTrue, hop + 1), ...sinkNames(target.whenFalse, hop + 1)];
     }
-    return undefined;
+    if (
+      target.kind === SyntaxKind.BinaryExpression &&
+      SELECTORS.has(target.operatorToken?.kind ?? -1)
+    ) {
+      return [...sinkNames(target.left, hop + 1), ...sinkNames(target.right, hop + 1)];
+    }
+    return [];
   };
 
   /**
@@ -638,6 +751,8 @@ function analyser(root: Syntax, project: Project, source: string) {
     return variadic ? elements : elements.slice(0, 1);
   };
 
+  collectAssignments();
+
   const newlines = newlineIndex(source);
   const finding = (node: Syntax, label: string): SinkFinding => ({
     label,
@@ -652,12 +767,13 @@ function analyser(root: Syntax, project: Project, source: string) {
   };
 
   return {
-    sinkName,
+    sinkNames,
     codePosition,
     codeArguments,
     propertyName,
     reflectTarget,
     reflectPosition,
+    valuesOf,
     finding,
   };
 }
@@ -717,12 +833,14 @@ function invocationsIn(
       // `Reflect.apply(eval, null, ['x'])` runs the sink HERE, rather than
       // producing something that is invoked later.
       const reflected = viaImport ? undefined : read.reflectTarget(node);
-      const name = viaImport
-        ? 'import'
+      const names = viaImport
+        ? ['import']
         : reflected === undefined
-          ? read.sinkName(callee)
-          : read.sinkName(reflected);
-      const spec = name === undefined ? undefined : byName.get(name);
+          ? read.sinkNames(callee)
+          : read.sinkNames(reflected);
+      // The callee may be a SELECTION, so several names are possible and only
+      // this caller knows which of them are sinks.
+      const spec = names.map((name) => byName.get(name)).find((each) => each !== undefined);
       if (spec === undefined) continue;
       if (spec.codeArgument !== undefined) {
         const position = viaImport
@@ -733,7 +851,10 @@ function invocationsIn(
               ? { index: 0, inArray: false }
               : read.codePosition(callee);
         const args = read.codeArguments(node, position, spec.variadic === true);
-        if (!args.some((arg) => spec.codeArgument?.(arg) === true)) continue;
+        // Each argument is judged over everything it could BE, not over the
+        // syntax written at the call: `setTimeout(code, 0)` compiles a string
+        // when `code` holds one.
+        if (!args.some((arg) => spec.codeArgument?.(read.valuesOf(arg)) === true)) continue;
       }
       const entry = read.finding(node, spec.label);
       found.set(`${entry.line}:${entry.label}:${entry.text}`, entry);
@@ -766,18 +887,31 @@ export function findJavascriptUrlsIn(sources: readonly Source[]): Map<string, Si
     for (const { path, content, root } of parsed) {
       const newlines = newlineIndex(content);
       const found: SinkFinding[] = [];
+      const seen = new Set<number>();
       for (const node of walk(root)) {
+        // The SCHEME is the static part, so an interpolated template counts:
+        // `\`javascript:${payload}\`` navigates exactly as the literal does, and
+        // so does `'java' + 'script:x'`.  `staticPrefix` folds all three.
         if (
           node.kind !== SyntaxKind.StringLiteral &&
-          node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral
+          node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral &&
+          node.kind !== SyntaxKind.TemplateExpression &&
+          !(
+            node.kind === SyntaxKind.BinaryExpression &&
+            node.operatorToken?.kind === SyntaxKind.PlusToken
+          )
         ) {
           continue;
         }
-        const value = node.text ?? '';
-        if (!isJavascriptUrl(value)) continue;
+        const prefix = staticPrefix(node);
+        if (prefix === null || !isJavascriptUrl(prefix)) continue;
+        const line = lineAt(newlines, node.getStart());
+        // A folded concatenation and the literal inside it are one URL.
+        if (seen.has(line)) continue;
+        seen.add(line);
         found.push({
           label: 'javascript: URL (XSS vector)',
-          line: lineAt(newlines, node.getStart()),
+          line,
           text: content.slice(node.getStart(), node.getEnd()).slice(0, 200),
         });
       }
@@ -830,14 +964,25 @@ function memberUsesIn(
       if (name === undefined) continue;
       const parent = node.parent;
       const at = node.getStart();
-      // `x.p(…)` — the access is the CALLEE, not an argument.
-      const called =
+      // `x.p(…)` — the access is the CALLEE.  It is ALSO invoked through the
+      // standard wrappers, which run the same method without naming it
+      // differently: `document.write.call(document, p)` and
+      // `Reflect.apply(document.write, document, [p])`.
+      const directly =
         parent?.kind === SyntaxKind.CallExpression && parent.expression?.getStart() === at;
-      // `x.p = …` and `x.p += …`, which appends markup just as destructively.
+      const viaInvoker =
+        (parent?.kind === SyntaxKind.PropertyAccessExpression ||
+          parent?.kind === SyntaxKind.ElementAccessExpression) &&
+        parent.expression?.getStart() === at &&
+        INVOKERS.has(read.propertyName(parent) ?? '') &&
+        parent.parent?.kind === SyntaxKind.CallExpression;
+      const viaReflect =
+        parent?.kind === SyntaxKind.CallExpression && read.reflectTarget(parent)?.getStart() === at;
+      const called = directly || viaInvoker === true || viaReflect === true;
+      // Every operator that writes the property, `=` through `??=`.
       const assigned =
         parent?.kind === SyntaxKind.BinaryExpression &&
-        (parent.operatorToken?.kind === SyntaxKind.EqualsToken ||
-          parent.operatorToken?.kind === SyntaxKind.PlusEqualsToken) &&
+        WRITING_ASSIGNMENTS.has(parent.operatorToken?.kind ?? -1) &&
         parent.left?.getStart() === at;
 
       for (const spec of specs) {

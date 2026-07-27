@@ -745,6 +745,36 @@ describe('a sink that reaches a name AFTER it is declared', () => {
   });
 });
 
+describe('a sink reached through SELECTION or a binding', () => {
+  // Selection and binding are the two ways a value arrives somewhere other than
+  // where it was written, and each was invisible until both were followed.
+  it.each([
+    ['a `||` fallback', '(eval || (() => undefined))(payload)'],
+    ['a `??` fallback', '(eval ?? other)(payload)'],
+    ['a `&&` guard, sink on the right', '(ready && eval)(payload)'],
+    [
+      'a destructuring assignment',
+      'let e: (s: string) => unknown = () => undefined; ({ run: e } = { run: eval }); e(payload)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['timer code held in a const', "const code = 'alert(1)'; setTimeout(code, 0)"],
+    ['timer code chosen by a ternary', "const c = flag ? 'alert(1)' : other; setTimeout(c, 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['an unrelated selection', '(handler || other)(payload)'],
+    ['a timer given a bound FUNCTION', 'const fn = tick; setTimeout(fn, 0)'],
+  ])('does not flag %s', (_label, code) => {
+    expect(fires(code)).toBe(false);
+  });
+});
+
 describe('sinks written INTO an existing container', () => {
   // Round 22. Building a registry empty and filling it afterwards is the
   // ordinary way one is populated, so reading only the LITERAL left the whole
@@ -782,6 +812,29 @@ describe('sinks written INTO an existing container', () => {
     ['an assigned timer given a function', 'const o = {}; o.t = setTimeout; o.t(tick, 0)'],
   ])('does not flag %s', (_label, code) => {
     expect(fires(code)).toBe(false);
+  });
+});
+
+describe('a DOM sink written or invoked indirectly', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  it.each([
+    ['a logical-OR assignment', 'node.innerHTML ||= payload'],
+    ['a nullish assignment', 'node.outerHTML ??= payload'],
+    ['a logical-AND assignment', 'node.innerHTML &&= payload'],
+  ])('catches %s — it writes the property too', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['`.call`', 'document.write.call(document, payload)'],
+    ['`Reflect.apply`', 'Reflect.apply(document.write, document, [payload])'],
+  ])('catches document.write through %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag a property that is only READ', () => {
+    expect(dom('const markup = node.innerHTML;')).toBe(false);
   });
 });
 

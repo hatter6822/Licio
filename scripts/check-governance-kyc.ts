@@ -359,23 +359,35 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const viaOn = called === 'on';
     const viaAll = called === 'all';
     if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) continue;
-    const methods = viaOn ? staticStrings(args[0]).map((m) => m.toLowerCase()) : [called];
+    const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
+    const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
     // `.all` covers every mutation; it is reported under its own name rather
     // than four times over, and the allowlist matches on path regardless.
     const mutations = viaAll ? ['all'] : methods.filter((method) => MUTATION_METHODS.has(method));
-    if (mutations.length === 0) continue;
+    // A method list with an unreadable entry may hide a mutation, so the
+    // registration is reported rather than skipped.
+    if (mutations.length === 0 && declared.complete) continue;
 
     // `.on` accepts an ARRAY of paths, each registering the same handler.
     const paths = staticStrings(pathArgument);
     const guarded = guardedBy(viaOn ? args.slice(2) : args.slice(1));
     const line = lineAt(node.getStart());
-    for (const method of mutations) {
-      if (paths.length === 0) {
-        found.push({ file, method, path: '<non-static path>', guarded, line, readable: false });
+    const readable = paths.complete && paths.values.length > 0 && declared.complete;
+    const named = mutations.length > 0 ? mutations : ['<unreadable method>'];
+    for (const method of named) {
+      if (!readable) {
+        found.push({
+          file,
+          method,
+          path: paths.values[0] ?? '<non-static path>',
+          guarded,
+          line,
+          readable: false,
+        });
         continue;
       }
-      for (const path of paths) {
+      for (const path of paths.values) {
         found.push({ file, method, path, guarded, line, readable: true });
       }
     }
@@ -383,18 +395,30 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   return found;
 }
 
-/** A static string, or every static string of an array literal. */
-function staticStrings(node: Syntax | undefined): string[] {
+/**
+ * A static string, or every static string of an array literal — and whether ALL
+ * of them could be read.
+ *
+ * `complete` is the load-bearing half.  `.on(['GET', mutation], …)` yielded only
+ * `GET`, so the registration classified as a read and was skipped entirely,
+ * letting an unguarded POST through a gate whose whole point is failing closed.
+ * A list this cannot fully read is a list it must not judge.
+ */
+function staticStrings(node: Syntax | undefined): { values: string[]; complete: boolean } {
   const single = staticString(node);
-  if (single !== undefined) return [single];
+  if (single !== undefined) return { values: [single], complete: true };
   const target = unwrap(node);
-  if (target?.kind !== SyntaxKind.ArrayLiteralExpression) return [];
+  if (target?.kind !== SyntaxKind.ArrayLiteralExpression) {
+    return { values: [], complete: node === undefined };
+  }
   const values: string[] = [];
+  let complete = true;
   target.forEachChild((element) => {
     const value = staticString(element);
-    if (value !== undefined) values.push(value);
+    if (value === undefined) complete = false;
+    else values.push(value);
   });
-  return values;
+  return { values, complete };
 }
 
 /** Parse each source once and extract its mutation routes. */
@@ -433,9 +457,10 @@ export function runGovernanceKycGate(
       // depends on how the file is formatted.
       if (!route.readable) {
         issues.push(
-          `${file}:${route.line}: ${route.method.toUpperCase()} route path is not a static ` +
-            'string, so it cannot be matched against the guard or the allowlist. Register the ' +
-            'route with a literal path.',
+          `${file}:${route.line}: ${route.method.toUpperCase()} registration could not be read ` +
+            '(its method list or path is not a static string), so it cannot be matched against ' +
+            'the guard or the allowlist. Register the route with literal methods and a literal ' +
+            'path.',
         );
         continue;
       }
