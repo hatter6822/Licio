@@ -565,6 +565,15 @@ describe('aliased sinks', () => {
       'a key composed from an array destructure',
       "const [a, b] = ['ev', 'al']; globalThis[a + b]('x')",
     ],
+    // A SLOT of an immutable container is as fixed as a binding is.
+    [
+      'a key composed from const container slots',
+      "const keys = { a: 'ev', b: 'al' }; globalThis[keys.a + keys.b]('x')",
+    ],
+    [
+      'a key composed from an indexed const container',
+      "const keys = ['ev', 'al']; globalThis[keys[0] + keys[1]]('x')",
+    ],
   ])('catches %s', (_label, code) => {
     expect(fires(code)).toBe(true);
   });

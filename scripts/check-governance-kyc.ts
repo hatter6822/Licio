@@ -855,7 +855,13 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const source = pattern.parent?.initializer;
     if (source === undefined) return undefined;
     const named = declaration.propertyName ?? declaration.name;
-    const method = named === undefined ? undefined : nameOf(named);
+    // `const { ['post']: register } = app` selects the same method the plain
+    // spelling does; reading the computed node's TEXT gave `['post']`, which
+    // names no method, so the registration was not found at all.
+    const method =
+      named?.kind === SyntaxKind.ComputedPropertyName
+        ? staticString(named.expression)
+        : nameOf(named);
     return method === undefined ? undefined : { method, receiver: source };
   };
 

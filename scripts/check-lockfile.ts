@@ -62,6 +62,9 @@ function isAlgorithmLengthDigest(line: string): boolean {
   return decoded.byteLength === expectedBytes;
 }
 
+/** Entries sit at two spaces, so their own fields sit at four. */
+const ENTRY_FIELD_INDENT = 4;
+
 /**
  * How many `packages:` entries there are, and how many carry their OWN digest.
  *
@@ -116,7 +119,11 @@ export function countPackagesSection(content: string): { entries: number; integr
     // form is tracked by indentation: the resolution's body is every line
     // indented deeper than its key, and ends at the first line that is not.
     if (resolutionAt !== undefined && indent <= resolutionAt) resolutionAt = undefined;
-    const opensResolution = /^\s*resolution:/.test(line);
+    // The entry's OWN `resolution:` field, at the entry's field indentation.
+    // Accepting one at any depth let a `peerDependenciesMeta` subtree carry a
+    // well-formed decoy that covered for the package's own missing digest —
+    // the masking this per-entry counting was meant to end, one level down.
+    const opensResolution = indent === ENTRY_FIELD_INDENT && /^\s*resolution:/.test(line);
     if (opensResolution) resolutionAt = indent;
 
     // A DIGEST OF THE DECLARED ALGORITHM, on the RESOLUTION this entry pins —
