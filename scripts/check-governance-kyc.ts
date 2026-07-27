@@ -999,11 +999,15 @@ function moduleFileFor(fromFile: string, specifier: string): string | undefined 
   return resolved.endsWith('.js') ? `${resolved.slice(0, -'.js'.length)}.ts` : resolved;
 }
 
-/** Where a mounted router came from. */
-type Mount =
-  | { readonly kind: 'module'; readonly file: string }
-  | { readonly kind: 'local' }
-  | { readonly kind: 'unresolved' };
+/** Where a mounted router came from — every answer one mount expression gives. */
+interface MountResolution {
+  /** Modules the router may come from; a branchy wrapper can name several. */
+  readonly modules: Set<string>;
+  /** Some branch is a router built in THIS file, whose routes are already read. */
+  local: boolean;
+  /** Some branch could not be read at all, so the mount fails closed. */
+  unresolved: boolean;
+}
 
 /** What one file mounts, and every mount in it the gate could not resolve. */
 interface MountScan {
@@ -1052,36 +1056,108 @@ function mountsIn(file: string, root: Syntax, project: Project, source: string):
     return undefined;
   };
 
-  const mountOf = (node: Syntax | undefined, hops: number): Mount => {
+  /**
+   * What a locally-declared callee RETURNS, so a wrapper can be followed.
+   *
+   * `function wrapper() { return createSecretRoutes(); }` mounted as
+   * `.route('/', wrapper())` is a router from ANOTHER module, but the callee is
+   * declared here — so treating every local declaration as a finished local
+   * router filed the imported module under nothing and raised no unresolved
+   * mount either.  The same reading `routesIn` already applies to a router
+   * built by a local factory.
+   */
+  const returnsOfCallee = (declaration: Syntax): Syntax[] => {
+    const fn =
+      declaration.kind === SyntaxKind.FunctionDeclaration
+        ? declaration
+        : unwrap(declaration.initializer);
+    if (
+      fn?.kind !== SyntaxKind.FunctionDeclaration &&
+      fn?.kind !== SyntaxKind.ArrowFunction &&
+      fn?.kind !== SyntaxKind.FunctionExpression
+    ) {
+      return [];
+    }
+    const body = fn.body;
+    if (body === undefined) return [];
+    // A concise arrow body IS the returned expression.
+    if (body.kind !== SyntaxKind.Block) return [body];
+    const returned: Syntax[] = [];
+    for (const node of walk(body)) {
+      if (node.kind === SyntaxKind.ReturnStatement && node.expression !== undefined) {
+        returned.push(node.expression);
+      }
+    }
+    return returned;
+  };
+
+  /**
+   * Every module a mounted router could come from, accumulated.
+   *
+   * An accumulator rather than one verdict, because a wrapper may return a
+   * different router on each branch and the gate has to read all of them —
+   * reporting the first would leave the rest unclassified, which is the failure
+   * it exists to prevent.
+   */
+  const resolveMount = (node: Syntax | undefined, hops: number, into: MountResolution): void => {
     const target = unwrap(node);
-    if (target === undefined || hops > MAX_HOPS) return { kind: 'unresolved' };
+    if (target === undefined || hops > MAX_HOPS) {
+      into.unresolved = true;
+      return;
+    }
     switch (target.kind) {
       // `new Hono()…` — a router built HERE, whose registrations therefore sit
       // in a file the graph has already reached.
       case SyntaxKind.NewExpression:
-        return { kind: 'local' };
-      // A factory call, a namespace member, an index — all read through to
-      // whatever produced the router.
-      case SyntaxKind.CallExpression:
+        into.local = true;
+        return;
+      case SyntaxKind.CallExpression: {
+        // A factory call: what the callee RETURNS is the router, so a local
+        // wrapper around an imported factory is followed rather than stopped at.
+        const callee = unwrap(target.expression);
+        if (callee?.kind === SyntaxKind.Identifier) {
+          const declaration = localDeclaration(callee);
+          if (declaration !== undefined && !IMPORT_BINDINGS.has(declaration.kind)) {
+            const returned = returnsOfCallee(declaration);
+            if (returned.length > 0) {
+              for (const each of returned) resolveMount(each, hops + 1, into);
+              return;
+            }
+          }
+        }
+        resolveMount(target.expression, hops + 1, into);
+        return;
+      }
+      // A namespace member or an index — read through to what produced it.
       case SyntaxKind.PropertyAccessExpression:
       case SyntaxKind.ElementAccessExpression:
-        return mountOf(target.expression, hops + 1);
+        resolveMount(target.expression, hops + 1, into);
+        return;
       case SyntaxKind.Identifier: {
         const declaration = localDeclaration(target);
-        if (declaration === undefined) return { kind: 'unresolved' };
+        if (declaration === undefined) {
+          into.unresolved = true;
+          return;
+        }
         if (IMPORT_BINDINGS.has(declaration.kind)) {
           const mounted = moduleOfImport(declaration);
-          return mounted === undefined ? { kind: 'unresolved' } : { kind: 'module', file: mounted };
+          if (mounted === undefined) into.unresolved = true;
+          else into.modules.add(mounted);
+          return;
         }
         // `const rooms = createRoomsRoutes(); app.route('/', rooms)` — the
         // binding says what it holds, so the module is still reached.
         if (declaration.kind === SyntaxKind.VariableDeclaration) {
-          return mountOf(declaration.initializer, hops + 1);
+          if (declaration.initializer === undefined) into.unresolved = true;
+          else resolveMount(declaration.initializer, hops + 1, into);
+          return;
         }
-        return { kind: 'local' };
+        into.local = true;
+        return;
       }
       default:
-        return { kind: 'unresolved' };
+        into.unresolved = true;
+        return;
     }
   };
 
@@ -1094,9 +1170,12 @@ function mountsIn(file: string, root: Syntax, project: Project, source: string):
     if (callee.name === undefined || nameOf(callee.name) !== 'route') continue;
     // `.route(path, router)` — the router is the SECOND argument, so a mount
     // with no router to read is itself unresolvable rather than skipped.
-    const mount = mountOf((node.arguments ?? [])[1], 0);
-    if (mount.kind === 'module') mounts.add(mount.file);
-    else if (mount.kind === 'unresolved') {
+    const resolution: MountResolution = { modules: new Set(), local: false, unresolved: false };
+    resolveMount((node.arguments ?? [])[1], 0, resolution);
+    for (const mounted of resolution.modules) mounts.add(mounted);
+    // ANY unreadable branch is reported, even beside a branch that did resolve:
+    // the gate can only claim to have read a mount it read all the way through.
+    if (resolution.unresolved) {
       unresolved.push(
         `${file}:${lineAt(newlines, node.getStart())}: this .route() mounts a router the gate ` +
           'cannot resolve to a module, so the module cannot be classified. Mount a value ' +

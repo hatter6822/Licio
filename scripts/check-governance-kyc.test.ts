@@ -395,6 +395,24 @@ export default createBrandNewRoutes;`;
       "import { createBrandNewRoutes } from './brand-new.js';\nconst brandNew = createBrandNewRoutes();",
       ".route('/brand', brandNew)",
     ],
+    // A LOCAL wrapper is not a local router.  Stopping at "declared here" filed
+    // the imported module under nothing and raised no unresolved mount either,
+    // so the module could add governance routes unseen.
+    [
+      'a local function wrapping an imported factory',
+      "import { createBrandNewRoutes } from './brand-new.js';\nfunction wrap() { return createBrandNewRoutes(); }",
+      ".route('/brand', wrap())",
+    ],
+    [
+      'a concise arrow wrapping an imported factory',
+      "import { createBrandNewRoutes } from './brand-new.js';\nconst wrap = () => createBrandNewRoutes();",
+      ".route('/brand', wrap())",
+    ],
+    [
+      'ONE branch of a wrapper that returns two routers',
+      "import { createBrandNewRoutes } from './brand-new.js';\nfunction wrap(f) { if (f) { return new Hono(); } return createBrandNewRoutes(); }",
+      ".route('/brand', wrap(flag))",
+    ],
   ])('bites when a module is mounted through %s and classified nowhere', (_l, imports, mount) => {
     const issues = runGovernanceKycGate(
       withFiles({
@@ -434,6 +452,21 @@ export default createBrandNewRoutes;`;
       return readRepo(rel);
     });
     expect(issues).toContainEqual(expect.stringContaining('could not be READ'));
+  });
+
+  it('does NOT report a router a local factory builds here', () => {
+    // The live graph relies on this: `auth.ts` mounts `createLoginRoutes()`, a
+    // local function returning `new Hono()…`, whose routes are in a file the
+    // walk has already reached.  Failing closed on it would be noise, not rigour.
+    const { issues } = mountedRouteModules(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1Mounting(
+          'function makeLocal() { return new Hono(); }',
+          ".route('/local', makeLocal())",
+        ),
+      }),
+    );
+    expect(issues).toEqual([]);
   });
 
   it('classifies every module the live mount graph carries', () => {
