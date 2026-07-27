@@ -358,12 +358,51 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     SyntaxKind.ImportEqualsDeclaration,
   ]);
 
+  /** The module specifier an import binding came from. */
+  const importedFrom = (binding: Syntax): string | undefined => {
+    let node: Syntax | undefined = binding;
+    for (let hop = 0; node !== undefined && hop <= MAX_HOPS; hop += 1) {
+      if (node.kind === SyntaxKind.ImportDeclaration) return staticString(node.moduleSpecifier);
+      node = node.parent;
+    }
+    return undefined;
+  };
+
+  /**
+   * What `new X()` constructs: a router, definitely something else, or unknown.
+   *
+   * Read from what `X` BINDS TO rather than from how it is spelled.  Testing
+   * `nameOf(...).startsWith('Hono')` made `import { Hono as Router } from
+   * 'hono'; new Router()` classify as 'other', which DROPPED every route in the
+   * file — and, once the corpus became "files that register a route", dropped
+   * the file from classification altogether.
+   *
+   * Anything unrecognised is 'unknown', not 'other': an unresolvable
+   * constructor may well be a router, and the registration still has to look
+   * like one before it is treated as a route, so failing closed here costs
+   * nothing.  `new Map()`/`new Date()` stay 'other' through the checker, which
+   * knows their declarations are the standard library's.
+   */
+  const constructs = (called: Syntax | undefined): Receiver => {
+    if (called?.kind !== SyntaxKind.Identifier) return 'unknown';
+    const declaration = localDeclaration(called);
+    if (declaration !== undefined && IMPORTED.has(declaration.kind)) {
+      const from = importedFrom(declaration);
+      if (from === 'hono' || from?.startsWith('hono/') === true) return 'router';
+      // The ORIGINAL exported name survives an alias: `{ Hono as Router }`.
+      const original = nameOf(declaration.propertyName ?? declaration.name ?? called) ?? '';
+      return original.startsWith('Hono') ? 'router' : 'unknown';
+    }
+    if (declaration === undefined && isAmbientGlobal(called)) return 'other';
+    return (nameOf(called) ?? '').startsWith('Hono') ? 'router' : 'unknown';
+  };
+
   const receiverKind = (node: Syntax | undefined, bindings = 0): Receiver => {
     let target = unwrap(node);
     let hops = bindings;
     while (target !== undefined) {
       if (target.kind === SyntaxKind.NewExpression) {
-        return (nameOf(unwrap(target.expression)) ?? '').startsWith('Hono') ? 'router' : 'other';
+        return constructs(unwrap(target.expression));
       }
       if (NOT_A_ROUTER.has(target.kind)) return 'other';
       // A CALL is either a chained registration (`app.post(…).get(…)`) or a
@@ -438,10 +477,28 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   };
 
   /** Whether an argument is a route HANDLER — a function handed to the router. */
-  function isHandlerShaped(node: Syntax | undefined): boolean {
+  function isHandlerShaped(node: Syntax | undefined, hop = 0): boolean {
     const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return false;
+    if (
+      target.kind === SyntaxKind.ArrowFunction ||
+      target.kind === SyntaxKind.FunctionExpression ||
+      target.kind === SyntaxKind.FunctionDeclaration
+    ) {
+      return true;
+    }
+    // A NAMED handler is still a handler.  Accepting only an inline function
+    // meant `import { app } from './router.js'; app.post(path, handler)` — an
+    // unreadable receiver AND an unreadable path — qualified as no
+    // registration at all and vanished, taking the file out of the corpus with
+    // it.  Asked of the binding, the spelling stops mattering.
+    if (target.kind !== SyntaxKind.Identifier) return false;
+    const declaration = localDeclaration(target);
+    if (declaration === undefined) return false;
+    if (declaration.kind === SyntaxKind.FunctionDeclaration) return true;
     return (
-      target?.kind === SyntaxKind.ArrowFunction || target?.kind === SyntaxKind.FunctionExpression
+      declaration.kind === SyntaxKind.VariableDeclaration &&
+      isHandlerShaped(declaration.initializer, hop + 1)
     );
   }
 
@@ -999,14 +1056,24 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
  */
 const API_SOURCE_GLOB = 'apps/api/src/**/*.ts';
 
-/** Tests declare routers of their own; they serve nothing. */
-const TEST_PATH = /(?:^|\/)__tests__\/|\.test\.ts$/;
+/**
+ * Tests declare routers of their own; they serve nothing.
+ *
+ * Spelled out rather than written as one alternation, because this decides what
+ * the gate DOES NOT read: `/(?:^|\/)__tests__\/|\.test\.ts$/` anchors its second
+ * branch and not its first, which CodeQL flags as misleading precedence and a
+ * reader has to work out.  An exclusion nobody can read at a glance is how a
+ * real source ends up silently outside a security gate's corpus.
+ */
+function isTestPath(path: string): boolean {
+  return path.endsWith('.test.ts') || path.includes('/__tests__/') || path.startsWith('__tests__/');
+}
 
 /** Every tracked API source, from git rather than from a directory walk. */
 export function trackedApiSources(): string[] {
   return execFileSync('git', ['ls-files', API_SOURCE_GLOB], { cwd: ROOT, encoding: 'utf-8' })
     .split('\n')
-    .filter((each) => each.length > 0 && !TEST_PATH.test(each));
+    .filter((each) => each.length > 0 && !isTestPath(each));
 }
 
 export function runGovernanceKycGate(

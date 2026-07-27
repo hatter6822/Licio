@@ -4,6 +4,7 @@
 // registration is found wherever it sits, the guard is attributed by
 // CONTAINMENT rather than by text proximity, and the only fail-closed case left
 // is a route path the gate genuinely cannot read.
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -425,7 +426,86 @@ app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
     expect(live.length).toBeGreaterThan(200);
     expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
     // Tests declare routers of their own and serve nothing.
-    expect(live.filter((each) => /__tests__|\.test\.ts$/.test(each))).toEqual([]);
+    expect(
+      live.filter((each) => each.endsWith('.test.ts') || each.includes('/__tests__/')),
+    ).toEqual([]);
+    // …and the exclusion is not so broad that it drops real sources: every
+    // suite the repository has under apps/api/src is accounted for by it.
+    const tracked = execFileSync('git', ['ls-files', 'apps/api/src/**/*.ts'], {
+      cwd: ROOT,
+      encoding: 'utf-8',
+    })
+      .split('\n')
+      .filter((each) => each.length > 0);
+    const excluded = tracked.filter((each) => !live.includes(each));
+    expect(
+      excluded.filter((each) => !each.endsWith('.test.ts') && !each.includes('/__tests__/')),
+    ).toEqual([]);
+    expect(excluded.length).toBeGreaterThan(0);
+  });
+});
+
+describe('a router named something other than Hono', () => {
+  // Read from what the constructor BINDS TO, not from how it is spelled.
+  // `startsWith('Hono')` made an aliased import classify as "definitely not a
+  // router", which dropped every route in the file — and, once the corpus
+  // became "files that register a route", dropped the file from classification
+  // altogether.
+  it.each([
+    ['an aliased import', "import { Hono as Router } from 'hono';"],
+    ['a default import from hono', "import Router from 'hono';"],
+    ['a deep import', "import { Hono as Router } from 'hono/tiny';"],
+  ])('finds routes on a router constructed through %s', (_label, importLine) => {
+    const src = `${importLine}
+const app = new Router();
+app.post('/rooms/:roomId/governance/vote', authMiddleware(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('still ignores an ordinary collection that shares a method name', () => {
+    // The qualification is what keeps `new Map().delete(k)` out, so failing
+    // closed on an unrecognised constructor costs nothing.
+    const src = `
+const cache = new Map();
+cache.delete('key');
+const rows = new Set();
+rows.delete(id);`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
+describe('a NAMED route handler', () => {
+  // Accepting only an INLINE function meant a registration with an unreadable
+  // receiver AND an unreadable path qualified as no registration at all and
+  // vanished — taking the file out of the corpus with it.
+  it.each([
+    ['a function declaration', 'function handler(c) { return castVote(); }'],
+    ['a const arrow', 'const handler = (c) => castVote();'],
+    ['a const function expression', 'const handler = function (c) { return castVote(); };'],
+  ])('qualifies a registration on an unknown receiver: %s', (_label, declaration) => {
+    const src = `
+import { app } from './router.js';
+const path = '/rooms/:roomId/governance/vote';
+${declaration}
+app.post(path, handler);`;
+    const routes = extractMutationRoutes('f.ts', src);
+    expect(routes).toHaveLength(1);
+    // The path is not readable, so it fails CLOSED rather than being guessed.
+    expect(routes[0]?.method).toBe('post');
+  });
+
+  it('does not turn an ordinary two-argument call into a route', () => {
+    const src = `
+function onDone(x) { return x; }
+cache.delete('key', onDone);
+db.delete(rows);`;
+    // `delete('key', …)` has no rooted path; the handler shape alone must not
+    // manufacture a route out of a collection call.
+    expect(extractMutationRoutes('f.ts', src).map((each) => each.path)).not.toContain(
+      '/rooms/:roomId/governance/vote',
+    );
   });
 });
 
