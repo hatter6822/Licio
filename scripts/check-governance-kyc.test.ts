@@ -10,9 +10,9 @@ import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
-  mountedRouteModules,
   NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
+  trackedApiSources,
 } from './check-governance-kyc.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -341,7 +341,7 @@ app.post('/rooms/:roomId/governance/vote', handler);`;
   });
 });
 
-describe('every mounted route module is CLASSIFIED', () => {
+describe('every route-registering file is CLASSIFIED', () => {
   const readRepo = (rel: string): string => readFileSync(resolve(ROOT, rel), 'utf-8');
 
   /** The repository, with some files swapped for or added as fixtures. */
@@ -350,143 +350,82 @@ describe('every mounted route module is CLASSIFIED', () => {
     (rel: string): string =>
       files[rel] ?? readRepo(rel);
 
-  /** A real, readable module for a mount to point at, so a test that means
-   *  "unclassified" does not also trip the unreadable-module path. */
-  const BRAND_NEW = `
-export const brandNewRoutes = new Hono().get('/', (c) => c.json({ ok: true }));
-export function createBrandNewRoutes() { return brandNewRoutes; }
-export default createBrandNewRoutes;`;
+  const live = trackedApiSources();
 
-  /** `v1.ts` with an extra module mounted through `mount`, imported by `imports`. */
-  const v1Mounting = (imports: string, mount: string): string =>
-    readRepo('apps/api/src/routes/v1.ts')
-      .replace('import { createAuthRoutes }', `${imports}\nimport { createAuthRoutes }`)
-      .replace(
-        ".route('/auth', createAuthRoutes())",
-        `${mount}\n      .route('/auth', createAuthRoutes())`,
-      );
-
+  // The corpus is no longer a WALK, so none of these mount shapes has to be
+  // modelled: a file that registers a route is in it however its router is
+  // reached, or never reached at all.  Each of these once needed its own rule.
   it.each([
-    [
-      'a NAMED import',
-      "import { createBrandNewRoutes } from './brand-new.js';",
-      ".route('/brand', createBrandNewRoutes())",
-    ],
-    // Reading `ImportSpecifier` alone made the next two invisible: the mount
-    // resolved to no module, so the module was absent from BOTH classification
-    // lists and the gate still reported success over it.
-    [
-      'a DEFAULT import',
-      "import createBrandNewRoutes from './brand-new.js';",
-      ".route('/brand', createBrandNewRoutes())",
-    ],
-    [
-      'a NAMESPACE import',
-      "import * as brandNew from './brand-new.js';",
-      ".route('/brand', brandNew.createBrandNewRoutes())",
-    ],
-    [
-      'a router exported ready-made, with no factory call',
-      "import { brandNewRoutes } from './brand-new.js';",
-      ".route('/brand', brandNewRoutes)",
-    ],
-    [
-      'a router held in a local const',
-      "import { createBrandNewRoutes } from './brand-new.js';\nconst brandNew = createBrandNewRoutes();",
-      ".route('/brand', brandNew)",
-    ],
-    // A LOCAL wrapper is not a local router.  Stopping at "declared here" filed
-    // the imported module under nothing and raised no unresolved mount either,
-    // so the module could add governance routes unseen.
-    [
-      'a local function wrapping an imported factory',
-      "import { createBrandNewRoutes } from './brand-new.js';\nfunction wrap() { return createBrandNewRoutes(); }",
-      ".route('/brand', wrap())",
-    ],
-    [
-      'a concise arrow wrapping an imported factory',
-      "import { createBrandNewRoutes } from './brand-new.js';\nconst wrap = () => createBrandNewRoutes();",
-      ".route('/brand', wrap())",
-    ],
-    [
-      'ONE branch of a wrapper that returns two routers',
-      "import { createBrandNewRoutes } from './brand-new.js';\nfunction wrap(f) { if (f) { return new Hono(); } return createBrandNewRoutes(); }",
-      ".route('/brand', wrap(flag))",
-    ],
-  ])('bites when a module is mounted through %s and classified nowhere', (_l, imports, mount) => {
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1Mounting(imports, mount),
-        'apps/api/src/routes/brand-new.ts': BRAND_NEW,
-      }),
-    );
-    // A fixed list of four files cannot notice a fifth being mounted, which is
-    // the gap between what this gate claimed and what it checked.  The module
-    // READS fine here, so nothing but the classification can be what bit.
-    expect(issues).toContainEqual(expect.stringContaining('brand-new.ts is mounted'));
-    expect(issues).not.toContainEqual(expect.stringContaining('could not be READ'));
+    ['a NAMED import', "import { make } from './x.js';\nexport const r = make();"],
+    ['a DEFAULT import', "import make from './x.js';\nexport const r = make();"],
+    ['a NAMESPACE import', "import * as x from './x.js';\nexport const r = x.make();"],
+    ['a local wrapper', "import { make } from './x.js';\nfunction wrap() { return make(); }"],
+    ['an imported wrapper', "import { wrap } from './w.js';\nexport const r = wrap();"],
+    ['no mount at all', '// nothing mounts this file'],
+  ])('bites on a file registering a mutation, reached through %s', (_label, preamble) => {
+    const fixture = `${preamble}
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    const issues = runGovernanceKycGate(withFiles({ 'apps/api/src/brand-new.ts': fixture }), [
+      ...live,
+      'apps/api/src/brand-new.ts',
+    ]);
+    expect(issues).toContainEqual(expect.stringContaining('brand-new.ts REGISTERS a mutation'));
   });
 
-  it('reports a mount it cannot resolve rather than dropping it', () => {
-    // A mount the gate cannot follow is a module it has never read — strictly
-    // worse than an unguarded route, because nothing reports it.
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1Mounting(
-          '',
-          ".route('/brand', (globalThis as never)['makeRoutes']())",
-        ),
-      }),
-    );
-    expect(issues).toContainEqual(expect.stringContaining('cannot resolve to a module'));
-  });
-
-  it('reports a mounted module whose source cannot be READ', () => {
-    const mount = v1Mounting(
-      "import { createBrandNewRoutes } from './brand-new.js';",
-      ".route('/brand', createBrandNewRoutes())",
-    );
-    const issues = runGovernanceKycGate((rel) => {
-      if (rel === 'apps/api/src/routes/v1.ts') return mount;
-      if (rel === 'apps/api/src/routes/brand-new.ts') throw new Error('ENOENT');
-      return readRepo(rel);
-    });
-    expect(issues).toContainEqual(expect.stringContaining('could not be READ'));
-  });
-
-  it('does NOT report a router a local factory builds here', () => {
-    // The live graph relies on this: `auth.ts` mounts `createLoginRoutes()`, a
-    // local function returning `new Hono()…`, whose routes are in a file the
-    // walk has already reached.  Failing closed on it would be noise, not rigour.
-    const { issues } = mountedRouteModules(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1Mounting(
-          'function makeLocal() { return new Hono(); }',
-          ".route('/local', makeLocal())",
-        ),
-      }),
-    );
+  it('does NOT ask a read-only file to be classified', () => {
+    // A surface with no mutation cannot carry participation, so requiring an
+    // entry for it would be a list that grows without adding a guarantee.
+    const fixture = `
+const app = new Hono();
+app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
+    const issues = runGovernanceKycGate(withFiles({ 'apps/api/src/read-only.ts': fixture }), [
+      ...live,
+      'apps/api/src/read-only.ts',
+    ]);
     expect(issues).toEqual([]);
   });
 
-  it('classifies every module the live mount graph carries', () => {
-    const { modules, issues } = mountedRouteModules(readRepo);
+  it('reports a stale entry for a file that registers no mutation', () => {
+    const [stale] = Object.keys(NON_GOVERNANCE_ROUTES);
+    const issues = runGovernanceKycGate(
+      withFiles({ [String(stale)]: '// every route removed\nexport const nothing = 1;' }),
+      live,
+    );
+    expect(issues).toContainEqual(
+      expect.stringContaining(`stale NON_GOVERNANCE_ROUTES entry '${stale}'`),
+    );
+  });
+
+  it('classifies every route-registering file in the repository', () => {
+    const issues = runGovernanceKycGate();
     expect(issues).toEqual([]);
-    // Walking `v1.ts` alone found 21 of these; `app.ts` mounts four routers
-    // itself and `auth.ts`/`events.ts` each mount sub-routers of their own.
-    expect(modules.length).toBeGreaterThan(25);
-    const classified = new Set([...GOVERNANCE_ROUTE_FILES, ...Object.keys(NON_GOVERNANCE_ROUTES)]);
-    expect(modules.filter((each) => !classified.has(each))).toEqual([]);
   });
 
   it.each([
-    ['the composition root itself', 'apps/api/src/app.ts'],
-    ['a router app.ts mounts directly', 'apps/api/src/routes/health.ts'],
+    // Three files NOTHING reached before: the walk started at the production
+    // composition root, and these are mounted by the development boot and by
+    // `e2e-server.ts`.
+    ['the DEV-only simulator surface', 'apps/api/src/simulator/routes.ts'],
+    ['the E2E-only session minter', 'apps/api/src/routes/test-auth.ts'],
+    ['the E2E-only wallet signer', 'apps/api/src/routes/test-wallet.ts'],
+    // …and the ones the walk did reach, which must not regress.
     ['a router outside routes/', 'apps/api/src/lcap/routes.ts'],
     ['a sub-router of a mounted module', 'apps/api/src/routes/auth-mfa.ts'],
     ['a sub-router two mounts deep', 'apps/api/src/routes/events-admin.ts'],
-  ])('reaches %s', (_label, file) => {
-    expect(mountedRouteModules(readRepo).modules).toContain(file);
+  ])('covers %s', (_label, file) => {
+    expect(trackedApiSources()).toContain(file);
+    expect(
+      GOVERNANCE_ROUTE_FILES.includes(file as (typeof GOVERNANCE_ROUTE_FILES)[number]) ||
+        NON_GOVERNANCE_ROUTES[file] !== undefined,
+    ).toBe(true);
+  });
+
+  it('enumerates the API tree, so nothing above passes vacuously', () => {
+    expect(live.length).toBeGreaterThan(200);
+    expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
+    // Tests declare routers of their own and serve nothing.
+    expect(live.filter((each) => /__tests__|\.test\.ts$/.test(each))).toEqual([]);
   });
 });
 

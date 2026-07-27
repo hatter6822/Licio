@@ -29,19 +29,12 @@
 // somewhere INSIDE that registration's arguments — containment, so a guard in
 // one route can never be attributed to the next, and prose can never satisfy it
 // because a comment is not a node.
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { posix, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
-import {
-  asNode,
-  lineAt,
-  newlineIndex,
-  type Source,
-  type Syntax,
-  walk,
-  withParsedSources,
-} from './ts-source.js';
+import { asNode, type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -911,39 +904,30 @@ export function extractMutationRoutes(file: string, source: string): MutationRou
  *
  * The corpus is derived from HERE rather than assumed, because the gate's
  * guarantee is about governance participation wherever it lives — and a fixed
- * list of four files quietly stops being that the moment a fifth module is
- * mounted.
- *
- * The walk is TRANSITIVE for the same reason.  Reading `routes/v1.ts` alone,
- * as this used to, found 21 modules of the 31 the running app serves: `app.ts`
- * mounts the health, CSP-report, private-rendezvous and LCAP routers itself,
- * and `auth.ts` and `events.ts` each mount sub-routers of their own.  A
- * governance surface added to any of those ten would have been classified
- * nowhere with the gate reporting success — which is the one failure the
- * classification lists exist to prevent, reached by a different door.
+ * list of four files quietly stops being that the moment a fifth registers a
+ * route.
  */
-const APP_ROOT_FILE = 'apps/api/src/app.ts';
-
-/** Mounts are followed only inside the API's own source tree. */
-const API_SOURCE_ROOT = 'apps/api/src';
 
 /**
- * Files in the mount graph that carry NO governance-participation surface.
+ * Files that register a route but carry NO governance-participation surface.
  *
- * Every file the graph reaches must appear here or in
+ * Every file that registers a mutation route must appear here or in
  * `GOVERNANCE_ROUTE_FILES`: a file in neither is one the gate has never looked
  * at, and reporting success over it is exactly the silent gap this list
  * closes.  Adding a governance surface to one of these means moving it, which
  * is a visible act in review.
  *
+ * A file that registers no MUTATION is not listed at all — a read-only surface
+ * cannot carry participation, and an entry for one is stale by construction.
+ * That is why the health probes, the public invariant reads and the model-hub
+ * proxy are absent: each said "read-only" in its own reason, and the gate now
+ * agrees rather than taking their word for it.
+ *
  * A stale entry fails the gate, like every other allowlist here.
  */
 export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
-  'apps/api/src/app.ts':
-    'composition root — it mounts routers and registers only GET /api/csrf-token',
   'apps/api/src/routes/v1.ts':
     'versioned BFF surface: settings, attention ingest, telemetry, push and notifications',
-  'apps/api/src/routes/health.ts': 'liveness and readiness probes, no mutation at all',
   'apps/api/src/routes/csp-report.ts': 'browser CSP violation report sink',
   'apps/api/src/routes/private-rendezvous.ts':
     'WS-S.6.6 server-blind rendezvous — opaque announce/poll/signal, no room state',
@@ -962,7 +946,6 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
   'apps/api/src/routes/events.ts': 'attention aggregate ingest — bucketed signal, no participation',
   'apps/api/src/routes/stories.ts': 'content submission and reading',
   'apps/api/src/routes/ingestion-admin.ts': 'platform ingestion operations (staff capability)',
-  'apps/api/src/routes/invariants-public.ts': 'read-only invariant reporting',
   'apps/api/src/routes/invariants-admin.ts': 'platform invariant operations (staff capability)',
   'apps/api/src/routes/ranking-admin.ts': 'platform ranking operations (staff capability)',
   'apps/api/src/routes/forum.ts':
@@ -973,298 +956,98 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
     'platform enforcement console (staff capability + MFA)',
   'apps/api/src/routes/ai-governance-public.ts': 'model transparency reads',
   'apps/api/src/routes/ai-governance-admin.ts': 'platform model operations (staff capability)',
-  'apps/api/src/routes/model-hub.ts': 'proxied huggingface.co metadata reads, no room state',
   'apps/api/src/routes/wallet.ts': 'wallet linking; holding a wallet is not participating',
   'apps/api/src/routes/knomosis.ts': 'finality gateway — submits what governance already decided',
   'apps/api/src/routes/compliance.ts': 'lawful-access and SAR handling under counsel authority',
+  // Reached by NOTHING the old mount walk did: these are mounted by the
+  // development boot and by `e2e-server.ts`, never by the production root.
+  'apps/api/src/simulator/routes.ts':
+    'DEV-ONLY traffic-simulator control surface, mounted only when NODE_ENV is development',
+  'apps/api/src/routes/test-auth.ts':
+    'E2E-ONLY session minter for the BFF harness, mounted only by e2e-server.ts',
+  'apps/api/src/routes/test-wallet.ts':
+    'E2E-ONLY wallet signer for the BFF harness, mounted only by e2e-server.ts',
 };
 
 /** Bindings that name a value from ANOTHER module — every import form there is. */
-const IMPORT_BINDINGS: ReadonlySet<SyntaxKind> = new Set([
-  SyntaxKind.ImportSpecifier,
-  SyntaxKind.ImportClause,
-  SyntaxKind.NamespaceImport,
-  SyntaxKind.ImportEqualsDeclaration,
-]);
-
-/** The repo-relative source a specifier names, or undefined when it names
- *  something outside the API's own tree (a package, or a sibling workspace). */
-function moduleFileFor(fromFile: string, specifier: string): string | undefined {
-  if (!specifier.startsWith('.')) return undefined;
-  const resolved = posix.normalize(posix.join(posix.dirname(fromFile), specifier));
-  if (!resolved.startsWith(`${API_SOURCE_ROOT}/`)) return undefined;
-  // Relative imports carry the `.js` extension ESM resolves; the SOURCE is the
-  // `.ts` beside it.  A specifier without one is left alone and fails to read,
-  // which is the fail-closed answer rather than a guess.
-  return resolved.endsWith('.js') ? `${resolved.slice(0, -'.js'.length)}.ts` : resolved;
-}
-
-/** Where a mounted router came from — every answer one mount expression gives. */
-interface MountResolution {
-  /** Modules the router may come from; a branchy wrapper can name several. */
-  readonly modules: Set<string>;
-  /** Some branch is a router built in THIS file, whose routes are already read. */
-  local: boolean;
-  /** Some branch could not be read at all, so the mount fails closed. */
-  unresolved: boolean;
-}
-
-/** What one file mounts, and every mount in it the gate could not resolve. */
-interface MountScan {
-  readonly mounts: readonly string[];
-  readonly unresolved: readonly string[];
-}
-
 /**
- * Every module a parsed file mounts, and every mount it could not resolve.
+ * Every file under the API source tree that REGISTERS a route.
  *
- * The router is resolved through the CHECKER rather than through a scan of the
- * import list.  A scan that recorded `ImportSpecifier` alone saw
- * `import { createX } from './x.js'` and nothing else, so the same module
- * mounted through `import createX from './x.js'` or `import * as x from
- * './x.js'` bound a name it had never recorded: the mount resolved to no
- * module, and the module was absent from BOTH classification lists with the
- * gate reporting success.  Asked of the binding, every import form — default,
- * namespace, named, `import =` — answers alike, and so does a router reached
- * through a namespace member or held in a local `const`.
+ * THE BOUNDED QUESTION, and why it replaced the mount graph.  This gate used
+ * to derive its corpus by WALKING the mount graph — following `.route()` calls
+ * from the composition root, through import forms, through local wrappers,
+ * through bindings — and every round of review found one more shape that walk
+ * could not follow: a default import, a namespace import, a router held in a
+ * const, a local function returning an imported factory, an imported function
+ * returning another module's factory.  Each fix was correct and invited the
+ * next, which is the same trap the sink analyzer's header describes: modelling
+ * how a value REACHES somewhere is unbounded.
  *
- * A mount that resolves to NOTHING is reported rather than dropped, for the
- * same reason an unreadable route path is: a mount the gate cannot follow is a
- * module it has never read, which is worse than an unguarded route.
+ * "Which files register a route?" is bounded.  It is answered by the same
+ * predicate that already decides what a route IS — a mutation call on a
+ * receiver chain rooting at `new Hono()` — asked of every tracked source
+ * instead of only the ones a walk managed to reach.  No mount shape can hide a
+ * file from it, because it never asks how the router got mounted.
+ *
+ * It is also STRICTLY WIDER than the walk was.  The walk started at the
+ * production composition root, so it structurally could not see
+ * `simulator/routes.ts` (mounted by the development boot) or the two E2E-only
+ * harness routes (mounted by `e2e-server.ts`) — three route-registering files
+ * that were classified nowhere while the gate reported success.  All 337
+ * tracked sources parse in one project in under a third of a second, so the
+ * whole question costs less than the walk it replaces.
  */
-function mountsIn(file: string, root: Syntax, project: Project, source: string): MountScan {
-  const newlines = newlineIndex(source);
+const API_SOURCE_GLOB = 'apps/api/src/**/*.ts';
 
-  const localDeclaration = (node: Syntax): Syntax | undefined => {
-    const symbol = project.checker.getSymbolAtPosition(String(root.path), node.getStart());
-    const handle = symbol?.declarations.find(
-      (declaration) => String(declaration.path) === String(root.path),
-    );
-    return handle?.resolve(project) as unknown as Syntax | undefined;
-  };
+/** Tests declare routers of their own; they serve nothing. */
+const TEST_PATH = /(?:^|\/)__tests__\/|\.test\.ts$/;
 
-  /** The module an import binding names, walking out to its declaration. */
-  const moduleOfImport = (binding: Syntax): string | undefined => {
-    let node: Syntax | undefined = binding;
-    for (let hop = 0; node !== undefined && hop <= MAX_HOPS; hop += 1) {
-      if (node.kind === SyntaxKind.ImportDeclaration) {
-        const specifier = staticString(node.moduleSpecifier);
-        return specifier === undefined ? undefined : moduleFileFor(file, specifier);
-      }
-      node = node.parent;
-    }
-    return undefined;
-  };
-
-  /**
-   * What a locally-declared callee RETURNS, so a wrapper can be followed.
-   *
-   * `function wrapper() { return createSecretRoutes(); }` mounted as
-   * `.route('/', wrapper())` is a router from ANOTHER module, but the callee is
-   * declared here — so treating every local declaration as a finished local
-   * router filed the imported module under nothing and raised no unresolved
-   * mount either.  The same reading `routesIn` already applies to a router
-   * built by a local factory.
-   */
-  const returnsOfCallee = (declaration: Syntax): Syntax[] => {
-    const fn =
-      declaration.kind === SyntaxKind.FunctionDeclaration
-        ? declaration
-        : unwrap(declaration.initializer);
-    if (
-      fn?.kind !== SyntaxKind.FunctionDeclaration &&
-      fn?.kind !== SyntaxKind.ArrowFunction &&
-      fn?.kind !== SyntaxKind.FunctionExpression
-    ) {
-      return [];
-    }
-    const body = fn.body;
-    if (body === undefined) return [];
-    // A concise arrow body IS the returned expression.
-    if (body.kind !== SyntaxKind.Block) return [body];
-    const returned: Syntax[] = [];
-    for (const node of walk(body)) {
-      if (node.kind === SyntaxKind.ReturnStatement && node.expression !== undefined) {
-        returned.push(node.expression);
-      }
-    }
-    return returned;
-  };
-
-  /**
-   * Every module a mounted router could come from, accumulated.
-   *
-   * An accumulator rather than one verdict, because a wrapper may return a
-   * different router on each branch and the gate has to read all of them —
-   * reporting the first would leave the rest unclassified, which is the failure
-   * it exists to prevent.
-   */
-  const resolveMount = (node: Syntax | undefined, hops: number, into: MountResolution): void => {
-    const target = unwrap(node);
-    if (target === undefined || hops > MAX_HOPS) {
-      into.unresolved = true;
-      return;
-    }
-    switch (target.kind) {
-      // `new Hono()…` — a router built HERE, whose registrations therefore sit
-      // in a file the graph has already reached.
-      case SyntaxKind.NewExpression:
-        into.local = true;
-        return;
-      case SyntaxKind.CallExpression: {
-        // A factory call: what the callee RETURNS is the router, so a local
-        // wrapper around an imported factory is followed rather than stopped at.
-        const callee = unwrap(target.expression);
-        if (callee?.kind === SyntaxKind.Identifier) {
-          const declaration = localDeclaration(callee);
-          if (declaration !== undefined && !IMPORT_BINDINGS.has(declaration.kind)) {
-            const returned = returnsOfCallee(declaration);
-            if (returned.length > 0) {
-              for (const each of returned) resolveMount(each, hops + 1, into);
-              return;
-            }
-          }
-        }
-        resolveMount(target.expression, hops + 1, into);
-        return;
-      }
-      // A namespace member or an index — read through to what produced it.
-      case SyntaxKind.PropertyAccessExpression:
-      case SyntaxKind.ElementAccessExpression:
-        resolveMount(target.expression, hops + 1, into);
-        return;
-      case SyntaxKind.Identifier: {
-        const declaration = localDeclaration(target);
-        if (declaration === undefined) {
-          into.unresolved = true;
-          return;
-        }
-        if (IMPORT_BINDINGS.has(declaration.kind)) {
-          const mounted = moduleOfImport(declaration);
-          if (mounted === undefined) into.unresolved = true;
-          else into.modules.add(mounted);
-          return;
-        }
-        // `const rooms = createRoomsRoutes(); app.route('/', rooms)` — the
-        // binding says what it holds, so the module is still reached.
-        if (declaration.kind === SyntaxKind.VariableDeclaration) {
-          if (declaration.initializer === undefined) into.unresolved = true;
-          else resolveMount(declaration.initializer, hops + 1, into);
-          return;
-        }
-        into.local = true;
-        return;
-      }
-      default:
-        into.unresolved = true;
-        return;
-    }
-  };
-
-  const mounts = new Set<string>();
-  const unresolved: string[] = [];
-  for (const node of walk(root)) {
-    if (node.kind !== SyntaxKind.CallExpression) continue;
-    const callee = unwrap(node.expression);
-    if (callee?.kind !== SyntaxKind.PropertyAccessExpression) continue;
-    if (callee.name === undefined || nameOf(callee.name) !== 'route') continue;
-    // `.route(path, router)` — the router is the SECOND argument, so a mount
-    // with no router to read is itself unresolvable rather than skipped.
-    const resolution: MountResolution = { modules: new Set(), local: false, unresolved: false };
-    resolveMount((node.arguments ?? [])[1], 0, resolution);
-    for (const mounted of resolution.modules) mounts.add(mounted);
-    // ANY unreadable branch is reported, even beside a branch that did resolve:
-    // the gate can only claim to have read a mount it read all the way through.
-    if (resolution.unresolved) {
-      unresolved.push(
-        `${file}:${lineAt(newlines, node.getStart())}: this .route() mounts a router the gate ` +
-          'cannot resolve to a module, so the module cannot be classified. Mount a value ' +
-          'imported from a file under apps/api/src, or build the router in this file.',
-      );
-    }
-  }
-  return { mounts: [...mounts].sort(), unresolved };
-}
-
-/** The transitive mount closure, and every mount that could not be followed. */
-export interface MountGraph {
-  /** Every file the running API mounts, the composition root included. */
-  readonly modules: readonly string[];
-  /** Mounts the gate could not follow — each one fails it. */
-  readonly issues: readonly string[];
-}
-
-/** Every file the API mounts, walked from the composition root. */
-export function mountedRouteModules(read: (relPath: string) => string): MountGraph {
-  const modules = new Set<string>([APP_ROOT_FILE]);
-  const issues: string[] = [];
-  let frontier: readonly string[] = [APP_ROOT_FILE];
-
-  // Each round parses only the files the round before discovered — one project
-  // per round rather than one per file, which is the cost that matters.  The
-  // bound is on ROUNDS, and a round only runs when the last one found a module
-  // nothing had reached yet, so it can only be hit by a mount chain deeper than
-  // any this repository has.
-  for (let round = 0; frontier.length > 0 && round <= MAX_HOPS; round += 1) {
-    const sources: Source[] = [];
-    for (const file of frontier) {
-      try {
-        sources.push({ path: file, content: read(file) });
-      } catch {
-        issues.push(
-          `${file} is mounted into the API but could not be READ, so nothing in it has been ` +
-            'judged. Check the mount specifier resolves to a file under apps/api/src.',
-        );
-      }
-    }
-    const next: string[] = [];
-    withParsedSources(sources, (parsed, project) => {
-      for (const { path, root, content } of parsed) {
-        const scan = mountsIn(path, root, project, content);
-        issues.push(...scan.unresolved);
-        for (const mounted of scan.mounts) {
-          if (modules.has(mounted)) continue;
-          modules.add(mounted);
-          next.push(mounted);
-        }
-      }
-    });
-    frontier = next;
-  }
-
-  return { modules: [...modules].sort(), issues };
+/** Every tracked API source, from git rather than from a directory walk. */
+export function trackedApiSources(): string[] {
+  return execFileSync('git', ['ls-files', API_SOURCE_GLOB], { cwd: ROOT, encoding: 'utf-8' })
+    .split('\n')
+    .filter((each) => each.length > 0 && !TEST_PATH.test(each));
 }
 
 export function runGovernanceKycGate(
   read: (relPath: string) => string = (relPath) => readFileSync(resolve(ROOT, relPath), 'utf-8'),
+  files: readonly string[] = trackedApiSources(),
 ): string[] {
   const issues: string[] = [];
-  // EVERY mounted module must be classified.  One that is neither scanned nor
-  // declared non-governance is a surface the gate has never read, and a fixed
-  // list of four files cannot notice a fifth being mounted.
   const scanned = new Set<string>(GOVERNANCE_ROUTE_FILES);
-  const { modules: mounted, issues: mountIssues } = mountedRouteModules(read);
-  issues.push(...mountIssues);
-  for (const file of mounted) {
+
+  // ONE parse for the whole API tree: it answers which files register a route
+  // AND what those routes are, so the corpus and the verdict cannot disagree.
+  const byFile = routesFor(
+    [...new Set([...files, ...GOVERNANCE_ROUTE_FILES])].map((file) => ({
+      path: file,
+      content: read(file),
+    })),
+  );
+
+  // EVERY file that registers a route must be classified.  One that is neither
+  // scanned nor declared non-governance is a surface the gate has never read.
+  const registering = [...byFile.entries()]
+    .filter(([, routes]) => routes.length > 0)
+    .map(([file]) => file)
+    .sort();
+  for (const file of registering) {
     if (scanned.has(file) || NON_GOVERNANCE_ROUTES[file] !== undefined) continue;
     issues.push(
-      `${file} is mounted into the API but is CLASSIFIED NOWHERE. Add it to ` +
+      `${file} REGISTERS a mutation route but is CLASSIFIED NOWHERE. Add it to ` +
         'GOVERNANCE_ROUTE_FILES if it carries a governance-participation surface, or to ' +
         'NON_GOVERNANCE_ROUTES with a written reason it does not.',
     );
   }
+  const registers = new Set(registering);
   for (const file of Object.keys(NON_GOVERNANCE_ROUTES)) {
-    if (!mounted.includes(file)) {
+    if (!registers.has(file)) {
       issues.push(
-        `stale NON_GOVERNANCE_ROUTES entry '${file}': it is not mounted into the API — remove it.`,
+        `stale NON_GOVERNANCE_ROUTES entry '${file}': it registers no mutation route — remove it.`,
       );
     }
   }
   const usedAllowlist = new Set<number>();
-  // One parse for the whole route tree.
-  const byFile = routesFor(
-    GOVERNANCE_ROUTE_FILES.map((file) => ({ path: file, content: read(file) })),
-  );
   for (const file of GOVERNANCE_ROUTE_FILES) {
     const routes = byFile.get(file) ?? [];
     for (const route of routes) {
