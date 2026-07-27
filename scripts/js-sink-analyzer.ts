@@ -54,6 +54,30 @@ import {
 
 export type { Source } from './ts-source.js';
 
+/**
+ * A STRING the relation proved, which no node in the source spells.
+ *
+ * `String(payload)` and `x.toString()` produce one, and so does a wrapper that
+ * was handed `String` — the coercion is a fact about the VALUE, not about the
+ * syntax at the call, so a predicate reading nodes alone could never see it.
+ */
+export interface CoercedString {
+  readonly coercedString: true;
+}
+
+/** What a sink's code-argument predicate is given: expressions, and coercions. */
+export type SinkValue = Syntax | CoercedString;
+
+const COERCED: CoercedString = { coercedString: true };
+
+/** Methods whose RESULT is a string, whatever they are called on. */
+const STRING_COERCIONS: ReadonlySet<string> = new Set([
+  'toString',
+  'toLocaleString',
+  'stringify',
+  'join',
+]);
+
 /** A globally-named dynamic-code sink. */
 export interface SinkSpec {
   /** The identifier that names the sink (`eval`, `Function`, `setTimeout`, …). */
@@ -66,7 +90,7 @@ export interface SinkSpec {
    * argument must satisfy it, which is how `setTimeout(fn, 0)` stays clean
    * while `setTimeout('code', 0)` does not.
    */
-  readonly codeArgument?: (values: readonly Syntax[]) => boolean;
+  readonly codeArgument?: (values: readonly SinkValue[]) => boolean;
   /**
    * The sink takes an UNBOUNDED list of code arguments, so `codeArgument` is
    * tested against every one of them and any match fires.  `importScripts`
@@ -305,8 +329,8 @@ function staticPrefix(node: Syntax | undefined, hop = 0): string | null {
  * host compiles, so requiring a fully static literal would miss the form an
  * attacker is most likely to use.
  */
-export const isStringLiteral = (values: readonly Syntax[]): boolean =>
-  values.some((value) => isStringLike(value));
+export const isStringLiteral = (values: readonly SinkValue[]): boolean =>
+  values.some((value) => ('coercedString' in value ? true : isStringLike(value)));
 
 /** Whether ONE expression is a string the host would compile. */
 function isStringLike(node: Syntax | undefined): boolean {
@@ -325,24 +349,6 @@ function isStringLike(node: Syntax | undefined): boolean {
     target.operatorToken?.kind === SyntaxKind.PlusToken
   ) {
     return isStringLike(target.left) || isStringLike(target.right);
-  }
-  // COERCIONS produce a string the host compiles just the same:
-  // `setTimeout(String(payload), 0)` and `setInterval(x.toString(), 0)` are
-  // implicit eval, and recognising only literal syntax read them as clean.
-  // The receiver is not resolved here on purpose — anything's `.toString()`
-  // returns a string, so the method name alone settles it.
-  if (target.kind === SyntaxKind.CallExpression) {
-    const callee = unwrap(target.expression);
-    if (callee?.kind === SyntaxKind.Identifier && (callee.text ?? callee.getText()) === 'String') {
-      return true;
-    }
-    if (
-      callee?.kind === SyntaxKind.PropertyAccessExpression &&
-      callee.name !== undefined &&
-      (callee.name.text ?? callee.name.getText()) === 'toString'
-    ) {
-      return true;
-    }
   }
   return false;
 }
@@ -369,8 +375,10 @@ function isStringLike(node: Syntax | undefined): boolean {
  * for a special scheme, so `\\evil.example/x.js` is protocol-relative just as
  * `//evil.example/x.js` is.
  */
-export const isNonSameOriginUrl = (values: readonly Syntax[]): boolean =>
-  values.some((value) => isOffOrigin(value));
+export const isNonSameOriginUrl = (values: readonly SinkValue[]): boolean =>
+  // A coercion says a value is a STRING, not which URL it is, so it answers
+  // nothing here and is skipped rather than guessed at.
+  values.some((value) => !('coercedString' in value) && isOffOrigin(value));
 
 /** Whether ONE expression is a statically known URL that is not same-origin. */
 function isOffOrigin(node: Syntax): boolean {
@@ -678,6 +686,21 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     const assigned = key === undefined ? undefined : written.get(`${key} ${name}`);
     if (assigned !== undefined) return assigned;
     if (hop > MAX_HOPS) return undefined;
+    // `Proxy.revocable(target, handler)` hands back `{ proxy, revoke }`, and
+    // its `proxy` IS the target — the only container in this file that is
+    // built by a call rather than written as a literal, so nothing else could
+    // reach it.
+    if (name === 'proxy') {
+      const call = unwrap(base);
+      if (call?.kind === SyntaxKind.CallExpression) {
+        for (const callee of accessesBehind(call.expression)) {
+          if (!isGlobalNamed(callee.expression, 'Proxy')) continue;
+          if (propertyName(callee) !== 'revocable') continue;
+          const wrapped = argumentsOf(call)[0];
+          if (wrapped !== undefined) return wrapped;
+        }
+      }
+    }
     // `const o = { run: eval }`, `const h = [eval]`, and the nested forms —
     // reached through the binding rather than through a table beside the scan.
     const literal = containerOf(base, hop);
@@ -737,41 +760,44 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * dotted spelling rather than a second case.
    */
   const reflectTarget = (call: Syntax): Syntax | undefined => {
-    const callee = accessBehind(call.expression, 0);
-    if (callee === undefined) return undefined;
-    if (!isGlobalNamed(callee.expression, 'Reflect')) return undefined;
-    const method = propertyName(callee);
-    if (method === undefined || !REFLECT_INVOKERS.has(method)) return undefined;
-    return argumentsOf(call)[0];
+    for (const callee of accessesBehind(call.expression)) {
+      if (!isGlobalNamed(callee.expression, 'Reflect')) continue;
+      const method = propertyName(callee);
+      if (method === undefined || !REFLECT_INVOKERS.has(method)) continue;
+      return argumentsOf(call)[0];
+    }
+    return undefined;
   };
 
   /**
-   * The property ACCESS an expression denotes, through any bindings.
+   * The property ACCESSES an expression can denote.
    *
-   * `Reflect.construct` is a value like any other, so copying it into a local
-   * (`const c = Reflect.construct; c(Function, ['x'])`) invokes the same helper
-   * — and matching the ACCESS SYNTAX at the call saw only the spelled form.
+   * `Reflect.construct` and `Object.assign` are values like any other, so
+   * copying one into a local, passing it to a wrapper, or returning it from a
+   * function all reach the same helper — and matching the ACCESS SYNTAX at the
+   * call saw only the spelled form.
    *
-   * Resolved with the binding walk rather than the full relation on purpose:
-   * the relation asks this function about every call, so consulting it here
-   * would not terminate.
+   * This asks the RELATION, which is the whole point: a private walk here
+   * covered bindings and nothing else, which is the same defect the value
+   * relation was introduced to end, reintroduced one helper down.  The relation
+   * asks about every call, so it would re-enter this function — hence the
+   * in-progress guard rather than a weaker resolver.
    */
-  const accessBehind = (node: Syntax | undefined, hop: number): Syntax | undefined => {
-    const target = unwrap(node);
-    if (target === undefined || hop > MAX_HOPS) return undefined;
-    if (
-      target.kind === SyntaxKind.PropertyAccessExpression ||
-      target.kind === SyntaxKind.ElementAccessExpression
-    ) {
-      return target;
+  const resolving = new Set<string>();
+  const accessesBehind = (node: Syntax | undefined): Syntax[] => {
+    if (node === undefined) return [];
+    const key = `${node.getStart()}:${node.getEnd()}`;
+    if (resolving.has(key)) return [];
+    resolving.add(key);
+    try {
+      return nodesFrom(node).filter(
+        (each) =>
+          each.kind === SyntaxKind.PropertyAccessExpression ||
+          each.kind === SyntaxKind.ElementAccessExpression,
+      );
+    } finally {
+      resolving.delete(key);
     }
-    if (target.kind !== SyntaxKind.Identifier || isGlobalBinding(target)) return undefined;
-    const key = receiverKey(target);
-    for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
-      const found = accessBehind(assigned, hop + 1);
-      if (found !== undefined) return found;
-    }
-    return accessBehind(boundValue(localDeclaration(target), hop), hop + 1);
   };
 
   /** Whether an expression is the named global (and nothing local). */
@@ -1171,6 +1197,34 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
   const nodesFrom = (node: Syntax | undefined): Syntax[] =>
     reaches(node).flatMap((value) => (value.kind === 'node' ? [value.node] : []));
 
+  /**
+   * Whether CALLING a value yields a string.
+   *
+   * `String(x)` is the global; `x.toString()`, `xs.join('')` and
+   * `JSON.stringify(x)` are methods whose result is a string whatever they are
+   * called on, so the property name settles it without resolving a receiver.
+   */
+  const coercesToString = (of: Value): boolean => {
+    if (of.kind === 'global') return of.name === 'String';
+    if (of.kind === 'member') return STRING_COERCIONS.has(of.property);
+    return false;
+  };
+
+  /**
+   * The values a sink's code argument is judged over.
+   *
+   * Expressions, plus a marker for a coercion the relation proved — which has
+   * no node to hand back, and is exactly the case a node-only view missed:
+   * `function w(s) { setTimeout(s(payload), 0) } w(String)` compiles code, and
+   * nothing in the argument's syntax says so.
+   */
+  const codeValues = (node: Syntax | undefined): SinkValue[] =>
+    reaches(node).flatMap<SinkValue>((value) => {
+      if (value.kind === 'node') return [value.node];
+      if (value.kind === 'result' && coercesToString(value.of)) return [COERCED];
+      return [];
+    });
+
   /** The METHODS-ON-A-RECEIVER an expression can hold — what a member spec matches. */
   const memberSinks = (node: Syntax | undefined): Array<{ access: Syntax; property: string }> =>
     reaches(node).flatMap((value) =>
@@ -1240,35 +1294,60 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * setter", and the set is closed and small.
    */
   const reflectiveWrites = (call: Syntax): Array<{ at: Syntax; property: string; on: Syntax }> => {
-    // Resolved through bindings, like the invocation helpers: `const assign =
-    // Object.assign; assign(node, { innerHTML: payload })` reaches the same
-    // setter, and a copy is the cheapest way past a scan that matches syntax.
-    const callee = accessBehind(call.expression, 0);
-    if (callee === undefined) return [];
-    const method = propertyName(callee);
-    if (method === undefined) return [];
+    // Resolved through the relation, like the invocation helpers: `const
+    // assign = Object.assign; assign(node, { innerHTML: payload })` reaches the
+    // same setter, and a copy is the cheapest way past a scan matching syntax.
     const args = argumentsOf(call);
     const target = args[0];
     if (target === undefined) return [];
     const writes: Array<{ at: Syntax; property: string; on: Syntax }> = [];
+    for (const callee of accessesBehind(call.expression)) {
+      const method = propertyName(callee);
+      if (method === undefined) continue;
+      writes.push(...writesVia(method, callee, call, args, target));
+    }
+    return writes;
+  };
 
-    // `Object.assign(target, …sources)` — every property of every literal source.
-    if (method === 'assign' && isGlobalNamed(callee.expression, 'Object')) {
-      for (const source of args.slice(1)) {
-        const literal = unwrap(source);
-        if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) continue;
-        for (const member of childrenOf(literal)) {
-          if (member.name === undefined) continue;
-          const named =
-            member.name.kind === SyntaxKind.ComputedPropertyName
-              ? staticPrefix(member.name.expression)
-              : nameOf(member.name);
-          if (named !== null && named !== undefined) {
-            writes.push({ at: member, property: named, on: target });
-          }
-        }
+  /** The writes ONE resolved setter performs with these arguments. */
+  const writesVia = (
+    method: string,
+    callee: Syntax,
+    call: Syntax,
+    args: readonly Syntax[],
+    target: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax }> => {
+    const writes: Array<{ at: Syntax; property: string; on: Syntax }> = [];
+    /** Every statically-named member of an object literal. */
+    const members = (source: Syntax | undefined): Array<{ at: Syntax; property: string }> => {
+      const literal = unwrap(source);
+      if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) return [];
+      const named: Array<{ at: Syntax; property: string }> = [];
+      for (const member of childrenOf(literal)) {
+        if (member.name === undefined) continue;
+        const property =
+          member.name.kind === SyntaxKind.ComputedPropertyName
+            ? staticPrefix(member.name.expression)
+            : nameOf(member.name);
+        if (property !== null && property !== undefined) named.push({ at: member, property });
       }
-      return writes;
+      return named;
+    };
+
+    // `Object.assign(target, …sources)` — every property of every literal
+    // source.  `Object.defineProperties(target, descriptors)` names its
+    // properties the same way, one level up from `defineProperty`.
+    if (isGlobalNamed(callee.expression, 'Object')) {
+      if (method === 'assign') {
+        for (const source of args.slice(1)) {
+          for (const { at, property } of members(source)) writes.push({ at, property, on: target });
+        }
+        return writes;
+      }
+      if (method === 'defineProperties') {
+        for (const { at, property } of members(args[1])) writes.push({ at, property, on: target });
+        return writes;
+      }
     }
 
     // `Reflect.set(target, key, value)` and `Object.defineProperty(target, key,
@@ -1285,13 +1364,20 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
 
   /** Where the code argument sits in a `Reflect.apply` / `Reflect.construct`. */
   const reflectPosition = (call: Syntax): CodePosition => {
-    const method = propertyName(unwrap(call.expression) as Syntax) ?? '';
-    return method === 'construct' ? { index: 1, inArray: true } : { index: 2, inArray: true };
+    // Read off the RESOLVED helper: an aliased `Reflect.construct` has an
+    // identifier as its callee, and asking that for a property name returned
+    // nothing — which silently fell back to `apply`'s argument position.
+    for (const callee of accessesBehind(call.expression)) {
+      if (!isGlobalNamed(callee.expression, 'Reflect')) continue;
+      if (propertyName(callee) === 'construct') return { index: 1, inArray: true };
+    }
+    return { index: 2, inArray: true };
   };
 
   return {
     sinkNames,
     memberSinks,
+    codeValues,
     reflectiveWrites,
     codePosition,
     codeArguments,
@@ -1383,7 +1469,7 @@ function invocationsIn(
         // Each argument is judged over everything it could BE, not over the
         // syntax written at the call: `setTimeout(code, 0)` compiles a string
         // when `code` holds one.
-        if (!args.some((arg) => spec.codeArgument?.(read.nodesFrom(arg)) === true)) continue;
+        if (!args.some((arg) => spec.codeArgument?.(read.codeValues(arg)) === true)) continue;
       }
       const entry = read.finding(node, spec.label);
       found.set(`${entry.line}:${entry.label}:${entry.text}`, entry);

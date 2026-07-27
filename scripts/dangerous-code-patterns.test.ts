@@ -995,6 +995,58 @@ describe('sinks that are not written as sinks', () => {
   });
 });
 
+describe('the same sweep, over the helpers themselves', () => {
+  const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
+
+  // The helpers were resolved by a PRIVATE walk that knew bindings and nothing
+  // else — the same "one more walker outside the relation" defect twice
+  // removed from this file already.  They go through the relation now, so a
+  // helper reached any way a value can be reached resolves.
+  it.each([
+    [
+      'a setter passed into a wrapper',
+      'function w(set) { set(node, "innerHTML", p); } w(Reflect.set)',
+    ],
+    [
+      'a setter returned by a function',
+      'function g() { return Object.assign; } g()(node, { innerHTML: p })',
+    ],
+    ['a setter held in an object', 'const o = { a: Object.assign }; o.a(node, { innerHTML: p })'],
+    ['Object.defineProperties', 'Object.defineProperties(node, { innerHTML: { value: p } })'],
+  ])('catches %s', (_label, code) => {
+    expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    [
+      'an invoker passed into a wrapper',
+      'function w(f) { f(eval, null, ["x"]); } w(Reflect.apply)',
+    ],
+    [
+      'an invoker returned by a function',
+      'function g() { return Reflect.construct; } g()(Function, ["x"])()',
+    ],
+    ['a revocable proxy', 'const { proxy } = Proxy.revocable(eval, {}); proxy(payload)'],
+    // The coercion is a fact about the VALUE: nothing in the argument's syntax
+    // says this produces a string, and the relation is what knows.
+    [
+      'String reached through a parameter',
+      'function w(s) { setTimeout(s(payload), 0); } w(String)',
+    ],
+    ['JSON.stringify', 'setTimeout(JSON.stringify(payload), 0)'],
+    ['toLocaleString', 'setTimeout(payload.toLocaleString(), 0)'],
+    ['a joined array', "setTimeout(parts.join(''), 0)"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it.each([
+    ['a harmless setter alias', 'Object.defineProperties(node, { textContent: { value: p } })'],
+  ])('does not flag %s', (_label, code) => {
+    expect(dom(code)).toBe(false);
+  });
+});
+
 describe('a receiver-specific DOM sink reached through an ALIAS', () => {
   const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
 
