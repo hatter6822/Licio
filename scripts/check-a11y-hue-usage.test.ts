@@ -591,6 +591,36 @@ describe('a class assembled through a CONSTANT', () => {
   });
 });
 
+describe('mutually exclusive class-list branches', () => {
+  const cn = 'export function cn(...v: unknown[]): string { return String(v); }\n';
+  const inComponent = async (body: string): Promise<number> =>
+    (
+      await findBareHueTextUses([
+        { path: 'apps/web/src/lib/cn.ts', content: cn },
+        {
+          path: 'apps/web/src/components/x.tsx',
+          content: `import { cn } from '../lib/cn.js';\nconst c = ${body};`,
+        },
+      ])
+    ).length;
+
+  it('reports a foreground whose background is in the OTHER branch', async () => {
+    // The branches never render together, so merging them invented a pairing
+    // the element never has — white text could reach the canvas unpaired.
+    expect(await inComponent("cn(condition ? 'bg-error' : 'text-error-fg')")).toBe(1);
+  });
+
+  it('still accepts a pairing present in EVERY branch', async () => {
+    expect(await inComponent("cn('bg-error', on ? 'text-error-fg' : 'text-error-fg')")).toBe(0);
+  });
+
+  it('still accepts a conditional that only ADDS a class', async () => {
+    // `&&` is not exclusive — the operand contributes or it does not, and the
+    // siblings render either way — so unioning it is exact.
+    expect(await inComponent("cn('bg-error', enabled && 'text-error-fg')")).toBe(0);
+  });
+});
+
 describe('the reasoned exemption', () => {
   it('accepts a marker on the same line', async () => {
     const source = `const c = 'text-warning'; // a11y-bare-hue-ok: bar fill, not text`;

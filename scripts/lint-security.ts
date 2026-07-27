@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import {
   DOM_MEMBER_SINKS,
   findDynamicCodeSinksIn,
+  findForbiddenGlobalReferencesIn,
   findJavascriptUrlsIn,
   findMemberSinkUsesIn,
   SOURCE_CODE_SINKS,
@@ -80,10 +81,32 @@ function lint(): void {
   const memberUses = findMemberSinkUsesIn(sources, DOM_MEMBER_SINKS);
   const codeSinks = findDynamicCodeSinksIn(sources, SOURCE_CODE_SINKS);
   const jsUrls = findJavascriptUrlsIn(sources);
+  const forbiddenRefs = findForbiddenGlobalReferencesIn(sources);
   {
     const relative = '';
     const source = '';
-    // Three scans, because the sink classes need different machinery.
+    // FOUR scans, because the sink classes need different machinery — and
+    // because two DIFFERENT questions are being asked.
+    //
+    //   Is it MENTIONED?  For `eval` and `Function`, which this project
+    //   references zero times, the reference itself is the violation.  That
+    //   question is BOUNDED: every way of laundering one into a call — a
+    //   container, a prototype, a proxy, an iterator, a borrowed method — still
+    //   has to name it somewhere.  Asking instead whether it is invoked is not
+    //   bounded, and six review rounds of `Map` seeds, `Object.create`,
+    //   `Proxy.revocable` and `Function.prototype.call.call` were that list
+    //   restarting one level up from the spelling regexes: the standard
+    //   library, restated by hand.
+    //
+    //   Is it USED THAT WAY?  `setTimeout` is legitimate 55 times over and
+    //   forbidden only with a string; `innerHTML` is forbidden only as an
+    //   assignment target.  Those need the value analysis, and its job is now
+    //   the small one it can actually finish.
+    //
+    // Neither is a defence against an author determined to evade it —
+    // `globalThis[atob(…)]` defeats any static reading.  The CSP is: no
+    // `'unsafe-eval'`, `require-trusted-types-for 'script'`, enforced by the
+    // browser and asserted on the BUILT artifact by `check:csp-parity`.
     //   • TEXTUAL sinks (`javascript:`) — string CONTENT with no receiver
     //     and no call chain, so a whole-text regex over both lexings of the
     //     ambiguous `/` is the right tool. Whole-text, not per line, because
@@ -102,6 +125,7 @@ function lint(): void {
       ...(jsUrls.get(entry.relative) ?? []),
       ...(memberUses.get(entry.relative) ?? []),
       ...(codeSinks.get(entry.relative) ?? []),
+      ...(forbiddenRefs.get(entry.relative) ?? []),
     ]) {
       errors.push(`${entry.relative}:${line}: ${label}`);
     }

@@ -32,6 +32,7 @@
 
 import type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
 import {
+  findGlobalReferencesIn,
   findSinkInvocations,
   findSinkInvocationsIn,
   isNonSameOriginUrl,
@@ -41,6 +42,7 @@ import { blankComments, withParsedSources } from './ts-source.js';
 
 export type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
 export {
+  findGlobalReferencesIn,
   findJavascriptUrlsIn,
   findMemberSinkUses,
   findMemberSinkUsesIn,
@@ -134,6 +136,38 @@ export function findDynamicCodeSinks(
   sinks: readonly SinkSpec[] = DYNAMIC_CODE_SINKS,
 ): SinkMatch[] {
   return findSinkInvocations(source, sinks).map(({ label, line }) => ({ label, line }));
+}
+
+/**
+ * Globals this project may not MENTION, not merely may not invoke.
+ *
+ * `eval` and `Function` are referenced ZERO times across 1284 first-party
+ * files, so "never referenced" is the rule the code already keeps — and it is
+ * the rule that ENDS the question rather than extending it.  Asking instead
+ * whether a sink is INVOKED is unbounded: a value reaches a call through a
+ * container, a prototype, a proxy, an iterator, a borrowed method or a
+ * coercion, and modelling one shape invites the next, which is the same trap
+ * the spelling regexes were in one level down.
+ *
+ * `setTimeout`/`setInterval` are NOT here: they are used legitimately 55 times,
+ * so only the string-argument form is forbidden and that question genuinely
+ * needs the value analysis.
+ */
+export const FORBIDDEN_GLOBAL_REFERENCES: readonly string[] = ['eval', 'Function'];
+
+/** Every reference to a forbidden global across many sources, in one parse. */
+export function findForbiddenGlobalReferencesIn(
+  sources: readonly Source[],
+  names: readonly string[] = FORBIDDEN_GLOBAL_REFERENCES,
+): Map<string, SinkMatch[]> {
+  const found = new Map<string, SinkMatch[]>();
+  for (const [path, refs] of findGlobalReferencesIn(sources, names)) {
+    found.set(
+      path,
+      refs.map(({ label, line }) => ({ label, line })),
+    );
+  }
+  return found;
 }
 
 /**

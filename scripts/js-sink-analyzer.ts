@@ -731,6 +731,16 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     if (target.kind === SyntaxKind.NewExpression) {
       return containerOf(target.expression, hop + 1);
     }
+    // `Object.create(proto)` returns an object that INHERITS from `proto`, so
+    // a property read on it finds what the prototype holds — the one container
+    // here reached across a prototype boundary rather than by ownership.
+    if (target.kind === SyntaxKind.CallExpression) {
+      for (const callee of accessesBehind(target.expression)) {
+        if (propertyName(callee) !== 'create') continue;
+        if (!isGlobalNamed(callee.expression, 'Object')) continue;
+        return containerOf(argumentsOf(target)[0], hop + 1);
+      }
+    }
     // A reflective setter RETURNS its target, so the fluent form denotes the
     // same container the write landed in.
     if (target.kind === SyntaxKind.CallExpression && reflectiveWrites(target).length > 0) {
@@ -1811,7 +1821,31 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    */
   const collectReflectiveWrites = (): void => {
     for (const node of walk(root)) {
-      if (node.kind !== SyntaxKind.CallExpression) continue;
+      if (node.kind !== SyntaxKind.CallExpression && node.kind !== SyntaxKind.NewExpression) {
+        continue;
+      }
+      // `new Map([['run', eval]])` SEEDS the same slots `.set` fills, so the
+      // constructor's iterable is read into the same table.
+      if (node.kind === SyntaxKind.NewExpression && isGlobalNamed(node.expression, 'Map')) {
+        const seed = containerOf(argumentsOf(node)[0], 0);
+        if (seed?.kind === SyntaxKind.ArrayLiteralExpression) {
+          // Keyed where the READ will look: `m.get('run')` keys on the binding
+          // `m`, so the seed must be recorded against that same declaration
+          // rather than against the `new` expression that produced it.
+          const bound =
+            node.parent?.kind === SyntaxKind.VariableDeclaration ? node.parent.name : undefined;
+          const holder = bound === undefined ? undefined : receiverKey(bound);
+          for (const entry of childrenOf(seed)) {
+            const pair = containerOf(entry, 0);
+            if (pair?.kind !== SyntaxKind.ArrayLiteralExpression) continue;
+            const [key, value] = childrenOf(pair);
+            const named = key === undefined ? null : staticPrefix(key);
+            if (named === null || value === undefined || holder === undefined) continue;
+            const slot = `${holder} ${named}`;
+            written.set(slot, [...(written.get(slot) ?? []), value]);
+          }
+        }
+      }
       // `m.set('run', eval)` fills a slot exactly as `o.run = eval` does; the
       // standard collection API is a container with a different spelling, and
       // reading only property syntax let a sink cross it untouched.
@@ -1870,6 +1904,82 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     nodesFrom,
     finding,
   };
+}
+
+/**
+ * Find REFERENCES to globals this project may not mention at all.
+ *
+ * THE BOUNDED QUESTION, and the reason it exists.  Everything else in this file
+ * answers "is this sink INVOKED", which is unbounded: a value can reach a call
+ * through a container, a prototype, a proxy, an iterator, a borrowed method,
+ * a coercion — and each shape modelled invites the next, exactly as each regex
+ * once invited the next spelling.  Six review rounds of `Map` seeds,
+ * `Object.create`, `Proxy.revocable` and `Function.prototype.call.call` are
+ * that list restarting one level up: the JavaScript STANDARD LIBRARY, restated
+ * by hand, in a file whose own header describes escaping precisely this trap
+ * for the grammar.
+ *
+ * For `eval` and `Function` the question does not need to be asked.  This
+ * project references them ZERO times in 1284 first-party files, so the rule is
+ * that it never does — the shape `check:no-applause` and `check:no-raw-egress`
+ * already use, and the shape that ENDS a list rather than extending it.  Every
+ * laundering route above still has to name the global somewhere, and naming it
+ * is the violation.
+ *
+ * A reference is a VALUE reference: a type annotation (`fn: Function`) is
+ * erased and means nothing at runtime, a property called `eval` on some object
+ * is not the global, and a local binding that shadows the name is not it
+ * either.  The compiler settles all three.
+ *
+ * WHAT THIS IS NOT.  It is not a defence against an author determined to
+ * evade it — `globalThis[atob('ZXZhbA==')]` defeats any static reading, and
+ * always will.  What stops that is the CSP: `script-src` without
+ * `'unsafe-eval'` plus `require-trusted-types-for 'script'`, enforced by the
+ * browser rather than by a scan, and asserted on the BUILT artifact by
+ * `check:csp-parity`.  This gate is hygiene over first-party source; the
+ * runtime boundary is the control.
+ */
+export function findGlobalReferencesIn(
+  sources: readonly Source[],
+  names: readonly string[],
+): Map<string, SinkFinding[]> {
+  const forbidden = new Set(names);
+  return withParsedSources(sources, (parsed, project) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    for (const { path, content, root } of parsed) {
+      const here = String(root.path);
+      const newlines = newlineIndex(content);
+      const found: SinkFinding[] = [];
+      for (const node of walk(root)) {
+        if (node.kind !== SyntaxKind.Identifier) continue;
+        const name = node.text ?? node.getText();
+        if (!forbidden.has(name)) continue;
+        // A NAME being declared, or the property half of `a.b`, is not a
+        // reference to the global.
+        if (node.parent?.name?.getStart() === node.getStart()) continue;
+        // A TYPE position is erased at build and runs nothing.  The range is
+        // the compiler's own, so a new type node kind needs no entry here.
+        let inType = false;
+        for (let above = node.parent; above !== undefined; above = above.parent) {
+          if (above.kind >= SyntaxKind.FirstTypeNode && above.kind <= SyntaxKind.LastTypeNode) {
+            inType = true;
+            break;
+          }
+        }
+        if (inType) continue;
+        // A local binding that shadows the name is not the global.
+        const symbol = project.checker.getSymbolAtPosition(here, node.getStart());
+        if (symbol?.declarations.some((each) => String(each.path) === here) === true) continue;
+        found.push({
+          label: `reference to the forbidden global \`${name}\``,
+          line: lineAt(newlines, node.getStart()),
+          text: content.slice(node.getStart(), node.getEnd()),
+        });
+      }
+      byPath.set(path, found);
+    }
+    return byPath;
+  });
 }
 
 /**

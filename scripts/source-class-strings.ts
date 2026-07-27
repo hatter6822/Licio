@@ -195,6 +195,12 @@ function fold(
   // unknown left the token never reconstructed — so the gate saw nothing where
   // a bare semantic hue was about to carry normal text.
   if (node.kind === SyntaxKind.Identifier && held !== undefined) {
+    // A USE, not the name being DECLARED.  Folding `c` in `const c = cn(…)`
+    // rendered the call a second time — through the union path rather than the
+    // alternatives — and then walked its unknown parts, emitting each ternary
+    // branch on its own as well.  A declaration's own name sits in its
+    // parent's `name`.
+    if (node.parent?.name?.getStart() === node.getStart()) return null;
     for (const value of held(node)) {
       if (value.getStart() === node.getStart()) continue;
       const folded = fold(value, source, joins, held);
@@ -259,13 +265,16 @@ function contributed(
   joins?: (callee: Syntax) => boolean,
   held?: (name: Syntax) => readonly Syntax[],
 ): Fold | null {
+  // ONLY the logical operators, whose operand either contributes or does not
+  // — so unioning them is exact.  A TERNARY'S branches are mutually EXCLUSIVE
+  // and are handled as alternatives instead: unioning `cond ? 'bg-error' :
+  // 'text-error-fg'` made the white foreground look paired with a solid fill
+  // that is never present in the same state.
   const sides =
-    node.kind === SyntaxKind.ConditionalExpression
-      ? [node.whenTrue, node.whenFalse]
-      : node.kind === SyntaxKind.BinaryExpression &&
-          CONDITIONAL_OPERATORS.has(node.operatorToken?.kind ?? -1)
-        ? [node.left, node.right]
-        : [];
+    node.kind === SyntaxKind.BinaryExpression &&
+    CONDITIONAL_OPERATORS.has(node.operatorToken?.kind ?? -1)
+      ? [node.left, node.right]
+      : [];
   if (sides.length === 0) return null;
   const pieces: Piece[] = [];
   const unknown: Syntax[] = [];
@@ -288,6 +297,89 @@ const CONDITIONAL_OPERATORS: ReadonlySet<number> = new Set([
   SyntaxKind.BarBarToken,
   SyntaxKind.QuestionQuestionToken,
 ]);
+
+/** An expression with its transparent wrappers removed. */
+function bare(node: Syntax | undefined): Syntax | undefined {
+  let current = node;
+  for (let hop = 0; current !== undefined && hop < 8; hop += 1) {
+    if (!TRANSPARENT.has(current.kind)) return current;
+    current = current.expression;
+  }
+  return current;
+}
+
+/** How many alternative class sets one expression may produce. */
+const MAX_ALTERNATIVES = 16;
+
+/**
+ * Every class set an expression can render, as ALTERNATIVES.
+ *
+ * A class-list call whose arguments include a ternary renders one set per
+ * branch, not the union of both — the branches never render together, so
+ * merging them invented a pairing that the element never has.  Everything else
+ * has exactly one set, which is what `fold` already answers.
+ *
+ * Bounded, because the combinations multiply: past the cap the sets are merged,
+ * which is the conservative direction for a gate that reports unpaired
+ * foregrounds.
+ */
+function foldEach(
+  node: Syntax,
+  source: string,
+  joins?: (callee: Syntax) => boolean,
+  held?: (name: Syntax) => readonly Syntax[],
+): Fold[] {
+  if (node.kind !== SyntaxKind.CallExpression || node.expression === undefined) {
+    const one = fold(node, source, joins, held);
+    return one === null ? [] : [one];
+  }
+  if (joins?.(node.expression) !== true) {
+    const one = fold(node, source, joins, held);
+    return one === null ? [] : [one];
+  }
+  // Each argument's own alternatives; a ternary has two, everything else one.
+  const perArgument: Fold[][] = [];
+  for (const argument of node.arguments ?? []) {
+    const inner = bare(argument);
+    const alternatives =
+      inner?.kind === SyntaxKind.ConditionalExpression
+        ? [inner.whenTrue, inner.whenFalse]
+            .filter((side): side is Syntax => side !== undefined)
+            .flatMap((side) => foldEach(side, source, joins, held))
+        : [
+            fold(argument, source, joins, held) ?? contributed(argument, source, joins, held),
+          ].filter((each): each is Fold => each !== null);
+    perArgument.push(
+      alternatives.length > 0
+        ? alternatives
+        : [{ pieces: [unknownPiece(argument)], unknown: [argument] }],
+    );
+  }
+  if (perArgument.length === 0) return [];
+  const total = perArgument.reduce((count, each) => count * each.length, 1);
+  if (total > MAX_ALTERNATIVES) {
+    const one = fold(node, source, joins, held);
+    return one === null ? [] : [one];
+  }
+  let combinations: Fold[] = [{ pieces: [], unknown: [] }];
+  for (const alternatives of perArgument) {
+    const next: Fold[] = [];
+    for (const so_far of combinations) {
+      for (const one of alternatives) {
+        const separator: Piece[] =
+          so_far.pieces.length === 0
+            ? []
+            : [{ text: ' ', at: one.pieces[0]?.at ?? node.getStart(), verbatimAt: null }];
+        next.push({
+          pieces: [...so_far.pieces, ...separator, ...one.pieces],
+          unknown: [...so_far.unknown, ...one.unknown],
+        });
+      }
+    }
+    combinations = next;
+  }
+  return combinations;
+}
 
 /** The JSX element an expression sits inside, from the tree. */
 function enclosingElement(node: Syntax): string | null {
@@ -390,12 +482,13 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
       };
       const strings: ClassString[] = [];
       const visit = (node: Syntax): void => {
-        const folded = fold(node, content, joins, held);
-        if (folded === null) {
+        const alternatives = foldEach(node, content, joins, held);
+        const folded = alternatives[0];
+        if (folded === undefined) {
           node.forEachChild(visit);
           return;
         }
-        strings.push(render(folded.pieces, node));
+        for (const each of alternatives) strings.push(render(each.pieces, node));
         // Only the parts this fold could NOT read are walked again, so a class
         // buried in a call argument is still found and a folded one is not
         // counted twice.

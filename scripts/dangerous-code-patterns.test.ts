@@ -19,6 +19,7 @@ import {
   DOM_MEMBER_SINKS,
   DYNAMIC_CODE_SINKS,
   findDynamicCodeSinks,
+  findForbiddenGlobalReferencesIn,
   findJavascriptUrlsIn,
   findMemberSinkUses,
   REMOTE_DYNAMIC_IMPORT_SINK,
@@ -1045,6 +1046,9 @@ describe('sinks that are not written as sinks', () => {
   it.each([
     ['a harmless Map slot', "const m = new Map(); m.set('run', safe); m.get('run')(payload)"],
     ['a Map read at another key', "const m = new Map(); m.set('a', eval); m.get('b')(payload)"],
+    ['a harmless Map seed', "const m = new Map([['run', safe]]); m.get('run')(payload)"],
+    ['a Map seeded at another key', "const m = new Map([['a', eval]]); m.get('b')(payload)"],
+    ['a harmless prototype', 'Object.create({ run: safe }).run(payload)'],
     ['a harmless element iterated', 'const arr = [handler]; arr.forEach((fn) => fn(payload))'],
     [
       'a descriptor with no value field',
@@ -1137,6 +1141,65 @@ describe('the same sweep, over the helpers themselves', () => {
     ['a harmless setter alias', 'Object.defineProperties(node, { textContent: { value: p } })'],
   ])('does not flag %s', (_label, code) => {
     expect(dom(code)).toBe(false);
+  });
+});
+
+describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
+  const refs = (code: string): number =>
+    (findForbiddenGlobalReferencesIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).length;
+
+  // Every laundering route six review rounds surfaced still has to NAME the
+  // global.  Asking "is it invoked" is unbounded — a value reaches a call
+  // through a container, a prototype, a proxy, an iterator, a borrowed method
+  // — and modelling one shape invites the next, which is the spelling-regex
+  // trap one level up.  Asking "is it mentioned" ends the list.
+  it.each([
+    ['a Map constructor seed', "const m = new Map([['run', eval]]); m.get('run')(p)"],
+    ['an Object.create prototype', 'Object.create({ run: eval }).run(p)'],
+    ['a revocable proxy', 'const { proxy } = Proxy.revocable(eval, {}); proxy(p)'],
+    ['a borrowed invoker', 'Function.prototype.call.call(eval, null, p)'],
+    ['a generator boundary', 'function* g() { yield eval; } g().next().value(p)'],
+    ['an iteration callback', 'const a = [eval]; a.forEach((f) => f(p))'],
+    ['a reflective write', 'Object.assign(o, { run: eval }); o.run(p)'],
+    // The point of the rule: shapes NOBODY has modelled are covered too.
+    ['a shape the relation does not model', 'const k = Object.fromEntries([["r", eval]]); k.r(p)'],
+    // …and one the invocation analysis could never catch, because there is no
+    // invocation in this file at all.
+    ['a sink stored and exported', 'export const stash = { run: eval };'],
+  ])('catches %s', (_label, code) => {
+    expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    // Erased at build; runs nothing.
+    ['a type annotation', 'export function run(fn: Function): void { fn(); }'],
+    // Not the global.
+    ['a property named eval', 'const o = { eval: 1 }; export const v = o.eval;'],
+    ['a local that shadows it', 'export function f(eval: string) { return eval; }'],
+    // Doctrine has to be discussable.
+    ['prose in a comment', '// never use eval or Function here\nexport const x = 1;'],
+    ['a string mentioning it', 'export const msg = "do not use eval";'],
+  ])('does not flag %s', (_label, code) => {
+    expect(refs(code)).toBe(0);
+  });
+
+  it('reports the real first-party tree as clean', async () => {
+    // Zero references across 1284 files is what makes the rule affordable:
+    // it is the code's existing behaviour written down, not a new constraint.
+    const { execFileSync } = await import('node:child_process');
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const root = resolve(import.meta.dirname, '..');
+    const files = execFileSync('git', ['ls-files', 'apps', 'packages'], {
+      cwd: root,
+      encoding: 'utf-8',
+    })
+      .split('\n')
+      .filter((each) => /\.(ts|tsx)$/.test(each) && !/\.test\.|\.spec\./.test(each));
+    const found = findForbiddenGlobalReferencesIn(
+      files.map((path) => ({ path, content: readFileSync(resolve(root, path), 'utf-8') })),
+    );
+    expect([...found.values()].flat()).toEqual([]);
   });
 });
 
