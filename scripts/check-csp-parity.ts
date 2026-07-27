@@ -119,6 +119,25 @@ function findPlacementProblem(html: string, meta: { at: number; inHead: boolean 
   return null;
 }
 
+/**
+ * The two artifacts the parity check reads.
+ *
+ * This shape was USED as a parameter type and never declared — erased at
+ * runtime, so the gate worked and nothing typechecked `scripts/`.
+ */
+export interface CspDelivery {
+  /** The hand-authored entry point, which must carry NO policy of its own. */
+  readonly indexHtml: string;
+  /**
+   * The BUILT artifact, absent until a web build has run.
+   *
+   * Optional because the gate is useful before one: the hand-authored entry
+   * point is checked either way, and the built form — the courier WebView's
+   * only policy — is checked when it exists.
+   */
+  readonly builtIndexHtml?: string;
+}
+
 /** Pure: every delivery problem (empty ⇒ the built artifact carries the policy). */
 export function findCspDeliveryProblems(delivery: CspDelivery): string[] {
   const problems: string[] = [];
@@ -214,7 +233,14 @@ function main(): void {
     process.exit(1);
   }
 
-  const problems = findCspDeliveryProblems({ indexHtml: read(INDEX_HTML_FILE), builtIndexHtml });
+  // Spread rather than always setting the key: under
+  // `exactOptionalPropertyTypes` an ABSENT built artifact and one present but
+  // undefined are different things, and only the first is what "no build yet"
+  // means.
+  const problems = findCspDeliveryProblems({
+    indexHtml: read(INDEX_HTML_FILE),
+    ...(builtIndexHtml === undefined ? {} : { builtIndexHtml }),
+  });
   if (problems.length > 0) {
     console.error('check:csp-parity FAILED — the CSP is not being delivered as defined:');
     for (const problem of problems) console.error(`  - ${problem}`);

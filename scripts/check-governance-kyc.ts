@@ -412,6 +412,14 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return returned;
   };
 
+  /** Whether an argument is a route HANDLER — a function handed to the router. */
+  function isHandlerShaped(node: Syntax | undefined): boolean {
+    const target = unwrap(node);
+    return (
+      target?.kind === SyntaxKind.ArrowFunction || target?.kind === SyntaxKind.FunctionExpression
+    );
+  }
+
   /** Every identifier in `scope` that binds to the same declaration as `name`. */
   const referencesTo = (name: Syntax, scope: Syntax): Syntax[] => {
     const declaration = project.checker
@@ -438,6 +446,21 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       if (each.kind === SyntaxKind.ReturnStatement || each.kind === SyntaxKind.ThrowStatement) {
         return true;
       }
+    }
+    return false;
+  };
+
+  /**
+   * Whether anything is AWAITED strictly between two positions in the handler.
+   *
+   * The guard's own `await` ends at `from`, so it is never counted; what this
+   * finds is work the handler did while an ineligible member was still on
+   * their way to being refused.
+   */
+  const awaitsBetween = (scope: Syntax, from: number, to: number): boolean => {
+    for (const each of walk(scope)) {
+      if (each.kind !== SyntaxKind.AwaitExpression) continue;
+      if (each.getStart() >= from && each.getEnd() <= to) return true;
     }
     return false;
   };
@@ -469,7 +492,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * `!== null` keeps it — and at an `if`/ternary the branch that must refuse is
    * the one taken when the verdict is TRUTHY, because that is the denial.
    */
-  const controlsARefusal = (use: Syntax): boolean => {
+  const controlsARefusal = (use: Syntax): number | undefined => {
     let node: Syntax = use;
     let truthy = true;
     // Whether the verdict has been consumed as a CONDITION on the way up.
@@ -482,22 +505,24 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     let asCondition = false;
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const parent = node.parent;
-      if (parent === undefined) return false;
+      if (parent === undefined) return undefined;
       if (parent.kind === SyntaxKind.ReturnStatement || parent.kind === SyntaxKind.ThrowStatement) {
         // Handing the verdict itself back refuses whoever it denies — but only
         // if what is handed back IS the denial, not its negation, and not a
         // value it merely selected between.
-        return truthy && !asCondition;
+        return truthy && !asCondition ? parent.getStart() : undefined;
       }
       if (parent.kind === SyntaxKind.IfStatement) {
         // Only the CONDITION decides anything; the verdict appearing inside a
         // branch is just a value being used there.
-        if (parent.expression?.getStart() !== node.getStart()) return false;
-        return refusesWithin(truthy ? parent.thenStatement : parent.elseStatement);
+        if (parent.expression?.getStart() !== node.getStart()) return undefined;
+        return refusesWithin(truthy ? parent.thenStatement : parent.elseStatement)
+          ? parent.getStart()
+          : undefined;
       }
       if (parent.kind === SyntaxKind.ConditionalExpression) {
-        if (parent.condition?.getStart() !== node.getStart()) return false;
-        if (refusesWithin(truthy ? parent.whenTrue : parent.whenFalse)) return true;
+        if (parent.condition?.getStart() !== node.getStart()) return undefined;
+        if (refusesWithin(truthy ? parent.whenTrue : parent.whenFalse)) return parent.getStart();
         // The ternary's VALUE still tracks the verdict, so an enclosing `if`
         // can still be judged — but the return rule no longer can.
         asCondition = true;
@@ -525,7 +550,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
             operator !== SyntaxKind.ExclamationEqualsEqualsToken &&
             operator !== SyntaxKind.ExclamationEqualsToken
           ) {
-            return false;
+            return undefined;
           }
         }
         node = parent;
@@ -536,9 +561,9 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         node = parent;
         continue;
       }
-      return false;
+      return undefined;
     }
-    return false;
+    return undefined;
   };
 
   /**
@@ -579,7 +604,22 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
           declaration?.kind === SyntaxKind.VariableDeclaration && declaration.name !== undefined
             ? referencesTo(declaration.name, argument)
             : [verdict];
-        if (uses.some((use) => controlsARefusal(use))) return true;
+        // WHERE the refusal sits matters as much as that it exists.  With
+        //   const denial = await check(id); await castVote();
+        //   if (denial) return c.json(denial, 403);
+        // the vote is already persisted when the ineligible member is turned
+        // away, so the guard refuses nothing that has not already happened.
+        //
+        // The decidable form of "the refusal dominates the mutations" is that
+        // nothing else is AWAITED between the guard and the refusal: the reads
+        // real handlers do first (`requireAuth(c)`, `c.req.valid('param')`) are
+        // synchronous, and persisting anything in this codebase is not.
+        const guardEnds = node.getEnd();
+        for (const use of uses) {
+          const refusesAt = controlsARefusal(use);
+          if (refusesAt === undefined) continue;
+          if (!awaitsBetween(argument, guardEnds, refusesAt)) return true;
+        }
       }
     }
     return false;
@@ -620,12 +660,21 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // When the receiver could not be resolved, the REGISTRATION has to look
     // like one before this is treated as a route.  `db.delete(rows)`,
     // `cache.delete('key')` and `Promise.all([…])` are ordinary calls that
-    // happen to share a name with a Hono method, and they have no path; a route
-    // takes one, and it starts at the root.  Asking about the ARGUMENT rather
-    // than the receiver keeps an unresolvable-but-real router in scope without
-    // dragging every same-named method call in with it.
-    if (receiver === 'unknown' && !(staticString(pathArgument)?.startsWith('/') ?? false)) {
-      continue;
+    // happen to share a name with a Hono method.  Asking about the ARGUMENTS
+    // rather than the receiver keeps an unresolvable-but-real router in scope
+    // without dragging every same-named method call in with it.
+    //
+    // TWO shapes qualify, because requiring the path alone lost the case that
+    // most needs failing closed: `import { app } from './router.js';
+    // app.post(path, handler)` has no readable path AND no readable receiver,
+    // so it vanished entirely — while the identical computed path on a LOCAL
+    // Hono router was correctly reported unreadable.  A registration also looks
+    // like one when it HANDS OVER A HANDLER, which an ordinary `.delete(rows)`
+    // does not; the unreadable-path failure below then does its job.
+    if (receiver === 'unknown') {
+      const rooted = staticString(pathArgument)?.startsWith('/') ?? false;
+      const handled = args.slice(1).some((each) => isHandlerShaped(each));
+      if (!rooted && !handled) continue;
     }
     // `.all` covers every mutation; it is reported under its own name rather
     // than four times over, and the allowlist matches on path regardless.

@@ -27,7 +27,12 @@ export interface PolicyDoc {
   jsonError: string | null;
 }
 
-const FILES: Record<string, string> = {
+// NOT `Record<string, string>`: that annotation threw away the keys, so every
+// `POLICY_FILES.SIGNAL_MATRIX` became an index-signature read of type
+// `string | undefined` — twelve bracket-access errors and eleven
+// possibly-undefined arguments, all of them the annotation's doing rather than
+// anything about the data.
+const FILES = {
   SIGNAL_MATRIX: 'SIGNAL_MATRIX.md',
   MODERATION_TAXONOMY: 'MODERATION_TAXONOMY.md',
   TRANSPARENCY_DICTIONARY: 'TRANSPARENCY_DICTIONARY.md',
@@ -36,7 +41,7 @@ const FILES: Record<string, string> = {
   CRYPTO_FEATURE_MATRIX: 'CRYPTO_FEATURE_MATRIX.md',
   JURISDICTION_MATRIX: 'JURISDICTION_MATRIX.md',
   PRIVACY_REGULATION_MAP: 'PRIVACY_REGULATION_MAP.md',
-};
+} as const;
 
 const SLA_BY_SEVERITY: Record<string, string> = {
   minor: '72h',
@@ -227,7 +232,7 @@ function validateSignalMatrix(doc: PolicyDoc, push: Push): void {
   }
 
   const rntIds: string[] = [];
-  for (const s of byKind.prohibited ?? []) {
+  for (const s of byKind['prohibited'] ?? []) {
     const id = getString(s, 'id');
     const rnt = getString(s, 'rnt');
     const suite = getString(s, 'suite');
@@ -243,7 +248,7 @@ function validateSignalMatrix(doc: PolicyDoc, push: Push): void {
     push(`SIGNAL_MATRIX: RNT ids are not unique: ${duplicates(rntIds).join(', ')}`);
   }
 
-  for (const s of byKind.anti ?? []) {
+  for (const s of byKind['anti'] ?? []) {
     for (const cond of getStringArray(s, 'conditioning')) {
       if (cond !== 'MFCI-1' && cond !== 'MFCI-2') {
         push(
@@ -637,7 +642,7 @@ function validateJurisdictionMatrix(doc: PolicyDoc, push: Push): void {
   for (const row of records(getArray(doc.json, 'exemplar_rows'))) {
     const region = getString(row, 'region_code');
     const legalStatus = getString(row, 'legal_review_status');
-    const cells = isRecord(row.cells) ? row.cells : {};
+    const cells = isRecord(row['cells']) ? row['cells'] : {};
     if (getString(cells, 'core_social') !== 'enabled') {
       push(
         `JURISDICTION_MATRIX: exemplar row "${region}" must keep core_social enabled (invariant 8)`,

@@ -21,7 +21,7 @@
 // imports — is the part no scan can do.
 
 import { resolve } from 'node:path';
-import type { SyntaxKind } from 'typescript/unstable/ast';
+import type { Node, SyntaxKind } from 'typescript/unstable/ast';
 import { createVirtualFileSystem } from 'typescript/unstable/fs';
 import { API, type Project } from 'typescript/unstable/sync';
 
@@ -45,6 +45,12 @@ export interface Syntax {
   readonly initializer?: Syntax;
   readonly body?: Syntax;
   readonly moduleSpecifier?: Syntax;
+  readonly importClause?: Syntax;
+  readonly namedBindings?: Syntax;
+  readonly elements?: readonly Syntax[];
+  readonly tagName?: Syntax;
+  readonly dotDotDotToken?: unknown;
+  readonly isTypeOnly?: boolean;
   readonly token?: SyntaxKind;
   readonly argumentExpression?: Syntax;
   readonly operatorToken?: { readonly kind: SyntaxKind };
@@ -57,8 +63,8 @@ export interface Syntax {
   readonly elseStatement?: Syntax;
   readonly whenTrue?: Syntax;
   readonly whenFalse?: Syntax;
-  readonly head?: { readonly text?: string };
-  readonly literal?: { readonly text?: string };
+  readonly head?: Syntax;
+  readonly literal?: Syntax;
   readonly text?: string;
   readonly path: unknown;
   /** FULL start — the offset of this node's leading trivia. */
@@ -68,6 +74,29 @@ export interface Syntax {
   getText(): string;
   forEachChild(visitor: (node: Syntax) => void): void;
 }
+
+/**
+ * A parsed file, as the API hands it back.
+ *
+ * `getOrCreateNodeAtIndex` is how a tree is entered from a `SourceFile`; the
+ * published `SourceFile` type does not carry it, so the one member the gates
+ * need is declared here rather than asserted away at each entry point.
+ */
+export interface SourceRoot {
+  getOrCreateNodeAtIndex(at: number): Syntax;
+}
+
+/**
+ * The SAME object, seen as the compiler's node or as the reading view above.
+ *
+ * `Syntax` describes the members a gate reads; the checker's signatures want
+ * its own `Node`.  Nothing converts — these are two static views of one
+ * runtime object — so the crossing is declared once here rather than cast at
+ * each of the two dozen call sites, where a stray `as never` would also
+ * silence a genuine mismatch.
+ */
+export const asNode = (node: Syntax): Node => node as unknown as Node;
+export const asSyntax = (node: unknown): Syntax => node as Syntax;
 
 /** A source to parse, named so a finding can point back at it. */
 export interface Source {

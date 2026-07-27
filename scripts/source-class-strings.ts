@@ -30,8 +30,8 @@
 // types `'a' + 'b'` as `string`, not `"ab"` — so concatenation is folded here,
 // structurally, over the AST rather than over a token stream.
 
-import { type NodeHandle, SyntaxKind } from 'typescript/unstable/ast';
-import { type Source as SourceFile, withParsedSources } from './ts-source.js';
+import { SyntaxKind } from 'typescript/unstable/ast';
+import { type Source as SourceFile, type Syntax, withParsedSources } from './ts-source.js';
 
 export type { Source as SourceFile } from './ts-source.js';
 
@@ -74,7 +74,7 @@ interface Fold {
   /** Sub-expressions folded as UNKNOWN, which may hold class strings of their
    *  own — `f('text-error') + x` renders nothing knowable, and still contains
    *  one.  They are walked separately rather than lost or double-counted. */
-  readonly unknown: readonly NodeHandle[];
+  readonly unknown: readonly Syntax[];
 }
 
 /** Expressions that render exactly what they wrap. */
@@ -90,7 +90,7 @@ const TRANSPARENT = new Set<number>([
  *  Dropping it would join the text around it and invent a class that never
  *  renders — `text-${x}error` would read as `text-error` and fail a correct
  *  build. */
-function unknownPiece(node: NodeHandle): Piece {
+function unknownPiece(node: Syntax): Piece {
   return { text: ' ', at: node.getStart(), verbatimAt: null };
 }
 
@@ -100,7 +100,7 @@ function unknownPiece(node: NodeHandle): Piece {
  * The content of every literal form starts one character in — after the quote,
  * the backtick, or the `}` that closed the hole before it.
  */
-function literalPiece(node: NodeHandle, source: string): Piece {
+function literalPiece(node: Syntax, source: string): Piece {
   const text = node.text ?? '';
   const at = node.getStart();
   const contentAt = at + 1;
@@ -109,7 +109,7 @@ function literalPiece(node: NodeHandle, source: string): Piece {
 }
 
 /** What `node` renders, or `null` when nothing about it is known. */
-function fold(node: NodeHandle, source: string): Fold | null {
+function fold(node: Syntax, source: string): Fold | null {
   if (
     node.kind === SyntaxKind.StringLiteral ||
     node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
@@ -125,7 +125,7 @@ function fold(node: NodeHandle, source: string): Fold | null {
 
   if (node.kind === SyntaxKind.TemplateExpression) {
     const pieces: Piece[] = [];
-    const unknown: NodeHandle[] = [];
+    const unknown: Syntax[] = [];
     const head = node.head;
     if (head !== undefined) pieces.push(literalPiece(head, source));
     node.forEachChild((child) => {
@@ -157,7 +157,7 @@ function fold(node: NodeHandle, source: string): Fold | null {
     // normally lets each operand be judged on its own.
     if (left === null && right === null) return null;
     const pieces: Piece[] = [];
-    const unknown: NodeHandle[] = [];
+    const unknown: Syntax[] = [];
     for (const [side, folded] of [
       [node.left, left],
       [node.right, right],
@@ -179,7 +179,7 @@ function fold(node: NodeHandle, source: string): Fold | null {
 }
 
 /** The JSX element an expression sits inside, from the tree. */
-function enclosingElement(node: NodeHandle): string | null {
+function enclosingElement(node: Syntax): string | null {
   for (let up = node.parent; up !== undefined; up = up.parent) {
     if (up.kind === SyntaxKind.JsxSelfClosingElement || up.kind === SyntaxKind.JsxOpeningElement) {
       return up.tagName?.getText() ?? null;
@@ -189,7 +189,7 @@ function enclosingElement(node: NodeHandle): string | null {
 }
 
 /** Join a fold's pieces into the rendered text, with a source offset per unit. */
-function render(pieces: readonly Piece[], node: NodeHandle): ClassString {
+function render(pieces: readonly Piece[], node: Syntax): ClassString {
   const units: string[] = [];
   const offsets: number[] = [];
   for (const piece of pieces) {
@@ -219,7 +219,7 @@ export function readClassStrings(files: readonly SourceFile[]): Map<string, Clas
     const found = new Map<string, ClassString[]>();
     for (const { path, content, root } of parsed) {
       const strings: ClassString[] = [];
-      const visit = (node: NodeHandle): void => {
+      const visit = (node: Syntax): void => {
         const folded = fold(node, content);
         if (folded === null) {
           node.forEachChild(visit);

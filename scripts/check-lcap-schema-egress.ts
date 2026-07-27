@@ -179,7 +179,7 @@ function issuesFor(filename: string, named: ReadonlySet<string>): string[] {
 }
 
 /** Pure: the forbidden-field violations in one schema source. */
-export function findSchemaEgressIssues(filename: string, content: string): string[] {
+export function findSchemaEgressIssues(filename: string, content: string): readonly string[] {
   return findSchemaEgressIssuesIn([{ path: filename, content }]).get(filename) ?? [];
 }
 

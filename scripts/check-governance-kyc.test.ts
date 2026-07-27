@@ -195,6 +195,40 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
   });
 });
 
+describe('WHERE the refusal sits', () => {
+  it('rejects a refusal that comes after the mutation', () => {
+    // The verdict is checked, with the right polarity, in the right branch —
+    // and the vote is already persisted when the ineligible member is turned
+    // away.  A guard that refuses nothing that has not already happened is not
+    // a guard, so existence was never the whole property.
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  await castVote();
+  if (denial) return c.json(denial, 403);
+  return c.json({ ok: true });
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('accepts synchronous reads before the refusal', () => {
+    // The decidable form of "the refusal dominates the mutations" is that
+    // nothing else is AWAITED in between.  Real handlers read the auth context
+    // and the validated params first, and none of that is asynchronous.
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const auth = requireAuth(c);
+  const roomId = c.req.valid('param').roomId;
+  const denial = await checkGovernanceEligibility(auth.userId);
+  if (denial) return c.json(denial, 403);
+  return c.json(await castVote(roomId));
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+});
+
 describe('a receiver the gate cannot classify', () => {
   // Skipping an unrecognised receiver DROPPED the registration, and a dropped
   // route is worse than an unguarded one: the gate reported success over an
@@ -214,6 +248,18 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
 import { app } from './router.js';
 app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
     expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('reports a COMPUTED path on an imported router rather than dropping it', () => {
+    // Neither the receiver nor the path is readable, which is exactly when
+    // dropping is worst: the same computed path on a local Hono router already
+    // failed closed, so this form was the one way to disappear entirely.  A
+    // registration that hands over a HANDLER is one whatever its path says.
+    const src = `
+import { app } from './router.js';
+const path = buildPath();
+app.post(path, async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src).length).toBeGreaterThan(0);
   });
 
   it('still skips an ambient global — `Promise.all` is not a route', () => {

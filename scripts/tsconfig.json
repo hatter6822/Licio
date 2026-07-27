@@ -21,7 +21,46 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    // The gates read BROWSER shapes (`CryptoKeyPair` in the update-manifest
+    // signer, DOM sink names) and import workspace packages, so this project
+    // needs the same environment the workspaces have.  Without it the include
+    // below could not be widened, which is the state that let a `return false`
+    // in a `number | undefined` function reach the remote twice.
+    "lib": ["ES2023", "DOM"],
+    "allowImportingTsExtensions": true,
+    "paths": {
+      // `zod` is a WORKSPACE dependency, not a root one, so it has no
+      // node_modules entry at the repository root for this project to find.
+      "zod": ["../packages/shared/node_modules/zod"],
+      "@licio/shared": ["../packages/shared/src"],
+      "@licio/shared/*": ["../packages/shared/src/*"],
+      "@licio/db": ["../packages/db/src"],
+      "@licio/db/*": ["../packages/db/src/*"],
+      "@licio/invariants": ["../packages/invariants/src"],
+      "@licio/invariants/*": ["../packages/invariants/src/*"],
+      "@licio/ranking": ["../packages/ranking/src"],
+      "@licio/ranking/*": ["../packages/ranking/src/*"],
+      "@licio/ai-governance": ["../packages/ai-governance/src"],
+      "@licio/ai-governance/*": ["../packages/ai-governance/src/*"],
+      "@licio/governance": ["../packages/governance/src"],
+      "@licio/governance/*": ["../packages/governance/src/*"],
+      "@licio/lcap": ["../packages/lcap/src"],
+      "@licio/lcap/*": ["../packages/lcap/src/*"],
+      "@licio/lcap-p2p": ["../packages/lcap-p2p/src"],
+      "@licio/lcap-p2p/*": ["../packages/lcap-p2p/src/*"],
+      "@licio/private-p2p": ["../packages/private-p2p/src"],
+      "@licio/private-p2p/*": ["../packages/private-p2p/src/*"]
+    }
   },
-  "include": ["setup-local-llm.ts", "bench-local-llm.ts", "dangerous-code-patterns.ts"]
+  // Every gate and its tests.  `scripts/` sat OUTSIDE every tsconfig until now,
+  // which is how a parameter type that does not exist (`CspDelivery`), an
+  // interface member that was used but never declared (`FileScan.spreads`), a
+  // type-only import of a name the module never exported (`NodeHandle` from
+  // `typescript/unstable/ast`) and a `boolean` returned from a `number |
+  // undefined` function all reached the remote — in the very code that gates
+  // everything else.
+  //
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
 }

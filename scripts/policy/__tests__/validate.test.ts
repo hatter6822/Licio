@@ -38,7 +38,7 @@ describe('policy doctrine documents (WS-A)', () => {
 
   it('SIGNAL_MATRIX enumerates the expected signal counts', () => {
     const json = loadDocs(POLICY_DIR).get('SIGNAL_MATRIX')?.json;
-    const signals = (json?.signals as { kind: string }[]) ?? [];
+    const signals = (json?.['signals'] as { kind: string }[]) ?? [];
     const count = (kind: string) => signals.filter((s) => s.kind === kind).length;
     expect(count('attention')).toBe(7);
     expect(count('participation')).toBe(8);

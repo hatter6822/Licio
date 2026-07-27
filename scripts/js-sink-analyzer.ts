@@ -40,10 +40,10 @@
 // behaviour the old table needed a rule for now falls out — `g.zzz` and
 // `self.zzz` are different keys because `g` and `self` are different symbols.
 
-import type { Node } from 'typescript/unstable/ast';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
 import {
+  asNode,
   lineAt,
   newlineIndex,
   type Source,
@@ -368,10 +368,6 @@ function isOffOrigin(node: Syntax): boolean {
  */
 function analyser(root: Syntax, project: Project, source: string) {
   const filePath = String(root.path);
-  // `Syntax` is this module's reading view of the tree; the checker wants the
-  // API's own node type, and the two describe the same object.
-  const asNode = (node: Syntax): Node => node as unknown as Node;
-
   const symbolAt = (node: Syntax) => project.checker.getSymbolAtPosition(filePath, node.getStart());
 
   /**

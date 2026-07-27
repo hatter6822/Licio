@@ -93,8 +93,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { type NodeHandle, SyntaxKind } from 'typescript/unstable/ast';
+import { SyntaxKind } from 'typescript/unstable/ast';
 import { API, type Project, SymbolFlags, type Symbol as TsSymbol } from 'typescript/unstable/sync';
+import { asNode, asSyntax, type SourceRoot, type Syntax } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -202,12 +203,12 @@ const BINDING_KEYWORD = /^(const|let|var)\b/;
  * Cosmetic only — the gate's verdict never depends on it — so an unrecognised
  * shape degrades to a generic word rather than failing.
  */
-function labelOf(node: NodeHandle, text: string): string {
+function labelOf(node: Syntax, text: string): string {
   const known = KIND_LABEL.get(node.kind);
   if (known !== undefined) return known;
   if (node.kind === SyntaxKind.VariableDeclaration || node.kind === SyntaxKind.BindingElement) {
     // Walk out to the declaration LIST, whose first word is the keyword.
-    let owner: NodeHandle | undefined = node;
+    let owner: Syntax | undefined = node;
     for (let hop = 0; owner !== undefined && hop < MAX_ALIAS_HOPS; hop += 1) {
       if (owner.kind === SyntaxKind.VariableDeclarationList) {
         return BINDING_KEYWORD.exec(text.slice(owner.getStart()))?.[1] ?? 'variable';
@@ -230,7 +231,7 @@ function labelOf(node: NodeHandle, text: string): string {
  * decoded value for an identifier and a string literal alike, so reading it is
  * both simpler and right.
  */
-function nameOf(node: NodeHandle | undefined): string | undefined {
+function nameOf(node: Syntax | undefined): string | undefined {
   const value: unknown = node?.text;
   return typeof value === 'string' ? value : undefined;
 }
@@ -272,7 +273,7 @@ function publishesValue(symbol: TsSymbol, project: Project): boolean {
  * as obsolete }` introduces `obsolete`, a public runtime name that exists
  * NOWHERE else, so an entirely unused alias would otherwise pass forever.
  */
-function isUnchangedRepublish(node: NodeHandle, project: Project): boolean {
+function isUnchangedRepublish(node: Syntax, project: Project): boolean {
   const name = node.name;
   if (name === undefined) return false;
   const exported = nameOf(name);
@@ -282,7 +283,9 @@ function isUnchangedRepublish(node: NodeHandle, project: Project): boolean {
   if (node.parent?.parent?.moduleSpecifier !== undefined) return true;
   // `import { live } from './x.js'; export { live }` — the local it publishes
   // is itself an import binding, so this is the same republish in two statements.
-  const local = project.checker.getExportSpecifierLocalTargetSymbol(node);
+  // `Syntax` is this module's reading view of the tree; the checker wants the
+  // API's own node type, and the two describe the same object.
+  const local = project.checker.getExportSpecifierLocalTargetSymbol(asNode(node));
   if (local === undefined || (local.flags & SymbolFlags.Alias) === 0) return false;
   // But the IMPORT may have done the renaming: `import { live as obsolete };
   // export { obsolete }` publishes a name the source module never had, and this
@@ -305,7 +308,7 @@ interface FileScan {
    * TYPE, which the walk cannot ask for — the checker is only in hand once the
    * owning project is.
    */
-  readonly accesses: NodeHandle[];
+  readonly accesses: Syntax[];
   /**
    * Offsets where a NAMESPACE is used without selecting a member from it.
    *
@@ -318,6 +321,13 @@ interface FileScan {
    */
   readonly escapes: number[];
   /**
+   * Object-spread sources: `{ ...mod }` reads every export it holds.
+   *
+   * This member was USED and never declared — the interface simply omitted it,
+   * and nothing noticed because `scripts/` was outside every tsconfig.
+   */
+  readonly spreads: Syntax[];
+  /**
    * Object destructuring sites: the names taken, and the node whose TYPE says
    * what they were taken FROM.
    *
@@ -329,7 +339,7 @@ interface FileScan {
    */
   readonly destructures: Array<{
     at: number;
-    source: NodeHandle;
+    source: Syntax;
     names: string[];
     /**
      * Whether a `...rest` element takes what the names did not.
@@ -347,7 +357,7 @@ interface FileScan {
      * cannot ask for — the same question `mod[key]` turns on, so it is answered
      * the same way rather than by a rule about which spellings are allowed.
      */
-    computed: NodeHandle[];
+    computed: Syntax[];
   }>;
 }
 
@@ -373,7 +383,7 @@ const BINDING_PARENTS = new Set<number>([
  * `for…in` subject — hands the whole object over, and whoever received it can
  * read every property without ever writing one down.
  */
-function isNamespaceEscape(node: NodeHandle): boolean {
+function isNamespaceEscape(node: Syntax): boolean {
   const parent = node.parent;
   if (parent === undefined) return false;
   if (BINDING_PARENTS.has(parent.kind)) return false;
@@ -405,13 +415,13 @@ function isNamespaceEscape(node: NodeHandle): boolean {
  * symbol.  That also settles `'abc'[0]`, whose object type is a string and has
  * no such property, without a rule about which position the literal sits in.
  */
-function elementAccessExports(node: NodeHandle, project: Project): TsSymbol[] {
+function elementAccessExports(node: Syntax, project: Project): TsSymbol[] {
   const argument = node.argumentExpression;
   const receiver = node.expression;
   if (argument === undefined || receiver === undefined) return [];
-  const target = project.checker.getTypeAtLocation(receiver);
+  const target = project.checker.getTypeAtLocation(asNode(receiver));
   if (target === undefined) return [];
-  const key = project.checker.getTypeAtLocation(argument);
+  const key = project.checker.getTypeAtLocation(asNode(argument));
   if (key === undefined) return [];
   // A UNION of literal keys selects EVERY member it could be: after
   // `const k: keyof typeof mod = flag ? 'a' : 'b'`, `mod[k]` reads whichever of
@@ -423,7 +433,7 @@ function elementAccessExports(node: NodeHandle, project: Project): TsSymbol[] {
   // them, so the whole module is read.  That is the honest answer, and it is
   // the one that stops the gate rejecting valid code.
   if (named.length !== constituents.length || named.length === 0) {
-    return project.checker.getPropertiesOfType(target);
+    return [...project.checker.getPropertiesOfType(target)];
   }
   return named.flatMap((each) => {
     const property = project.checker.getPropertyOfType(target, String(each.value));
@@ -445,7 +455,7 @@ function elementAccessExports(node: NodeHandle, project: Project): TsSymbol[] {
  * that had already done one.  The TYPE of the pattern answers all six at once,
  * so the walk only has to say WHERE to ask.
  */
-function scanFile(root: NodeHandle): FileScan {
+function scanFile(root: Syntax): FileScan {
   const scan: FileScan = {
     offsets: [],
     imports: [],
@@ -458,10 +468,10 @@ function scanFile(root: NodeHandle): FileScan {
   /** The EXPORT-side names a pattern or assignment target takes, and whether a
    *  `...rest` element sweeps up whatever those names left. */
   const namesOfPattern = (
-    pattern: NodeHandle,
-  ): { names: string[]; rest: boolean; computed: NodeHandle[] } => {
+    pattern: Syntax,
+  ): { names: string[]; rest: boolean; computed: Syntax[] } => {
     const names: string[] = [];
-    const computed: NodeHandle[] = [];
+    const computed: Syntax[] = [];
     let rest = false;
     pattern.forEachChild((element) => {
       // A DECLARATION's pattern holds `BindingElement`s; an ASSIGNMENT's target
@@ -496,14 +506,14 @@ function scanFile(root: NodeHandle): FileScan {
     return { names, rest, computed };
   };
 
-  const destructure = (target: NodeHandle, source: NodeHandle): void => {
+  const destructure = (target: Syntax, source: Syntax): void => {
     const { names, rest, computed } = namesOfPattern(target);
     if (names.length > 0 || rest || computed.length > 0) {
       scan.destructures.push({ at: target.getStart(), source, names, rest, computed });
     }
   };
 
-  const visit = (node: NodeHandle): void => {
+  const visit = (node: Syntax): void => {
     if (node.kind === SyntaxKind.Identifier) {
       const parentKind = node.parent?.kind;
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
@@ -600,12 +610,12 @@ function exportsOfFile(
     for (const handle of symbol.declarations) {
       if (handle.path !== absolute) continue; // declared elsewhere; judged there
       const node = handle.resolve(project);
-      const name = node?.name;
+      const name = asSyntax(node).name;
       if (node === undefined || name === undefined) continue;
       if (
         !judgeRepublished &&
         node.kind === SyntaxKind.ExportSpecifier &&
-        isUnchangedRepublish(node, project)
+        isUnchangedRepublish(asSyntax(node), project)
       ) {
         continue;
       }
@@ -614,7 +624,7 @@ function exportsOfFile(
         binding: {
           file,
           name: symbol.name,
-          kind: labelOf(node, text),
+          kind: labelOf(asSyntax(node), text),
           line: source.getLineAndCharacterOfPosition(offset).line + 1,
           offset,
         },
@@ -746,7 +756,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         declared.push(entry);
       }
 
-      const scan = scanFile(source.getOrCreateNodeAtIndex(0));
+      const scan = scanFile((source as unknown as SourceRoot).getOrCreateNodeAtIndex(0));
 
       // Names taken from ANOTHER module, resolved through the module symbol
       // rather than through the local identifier.  A destructured dynamic
@@ -791,7 +801,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
 
       // A SPREAD of a namespace reads every export it holds.
       for (const spread of scan.spreads) {
-        const type = project.checker.getTypeAtLocation(spread);
+        const type = project.checker.getTypeAtLocation(asNode(spread));
         if (type === undefined) continue;
         for (const property of project.checker.getPropertiesOfType(type)) {
           creditChain(property, { file, offset: spread.getStart() }, project);
@@ -805,7 +815,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
       // a `.then` callback's contextual parameter — is already in that type,
       // which is why none of them needs a rule here.
       for (const site of scan.destructures) {
-        const type = project.checker.getTypeAtLocation(site.source);
+        const type = project.checker.getTypeAtLocation(asNode(site.source));
         if (type === undefined) continue;
         // A `...rest` element reads EVERY remaining enumerable property, so the
         // taken set is the type's whole property list rather than the names the
@@ -815,7 +825,7 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
         // `mod[key]` does — so `const { [key]: value } = mod` is the same read.
         const named = [...site.names];
         for (const key of site.computed) {
-          const keyType = project.checker.getTypeAtLocation(key);
+          const keyType = project.checker.getTypeAtLocation(asNode(key));
           if (keyType?.isStringLiteralType() === true) named.push(String(keyType.value));
         }
         const taken = site.rest
