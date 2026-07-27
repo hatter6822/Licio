@@ -799,11 +799,26 @@ describe('sinks written INTO an existing container', () => {
     ).toHaveLength(2);
   });
 
-  it('does not leak an assigned property into the SHARED global table', () => {
+  it('does not leak an assigned property into an UNRELATED receiver', () => {
     // …and must NOT reach every other holder of that table, which is why the
     // extension copies rather than mutating in place.
-    expect(fires("const g = globalThis; g.zzz = eval; self.zzz('x')")).toBe(false);
+    expect(fires("const a = {}; const b = {}; a.zzz = eval; b.zzz('x')")).toBe(false);
   });
+
+  it.each([
+    ['globalThis then self', "globalThis.zzz = eval; self.zzz('x')"],
+    ['window then globalThis', "window.zzz = eval; globalThis.zzz('x')"],
+    ['an alias of one, read through another', "const g = globalThis; g.zzz = eval; top.zzz('x')"],
+  ])(
+    'follows a global written through one spelling and called through another (%s)',
+    (_l, code) => {
+      // `window`, `self`, `globalThis`, `top` and friends are ONE object at
+      // runtime, so these all execute.  Keeping the spellings apart filed the
+      // write under one key and looked the read up under another, and a test here
+      // asserted that miss was correct — a bypass with a passing test over it.
+      expect(fires(code)).toBe(true);
+    },
+  );
 
   it.each([
     ['a non-sink assignment', "const o = {}; o.run = handler; o.run('x')"],
@@ -852,6 +867,46 @@ describe('a sink handed back by a local function', () => {
   });
 });
 
+describe('sinks reached through indirection review found open', () => {
+  // Six bypasses reported against the first value-flow cut, and none of them
+  // was a missing SPELLING — each was a place the relation stopped: a callee it
+  // would not resolve, a binding it did not model, an identity it split in two,
+  // a ceiling it returned quietly from.  They are pinned together because they
+  // were one defect, and a regression in any of them is a regression in it.
+  it.each([
+    // The callee was resolved by a private walker that knew only a bare name.
+    [
+      'an alias of a sink-returning function',
+      'const get = () => eval; const alias = get; alias()(payload)',
+    ],
+    ['a sink-returning function assigned later', 'let get; get = () => eval; get()(payload)'],
+    [
+      'a sink-returning function held in an object',
+      'const box = { get: () => eval }; box.get()(payload)',
+    ],
+    // A parameter had no incoming edge at all, so any local wrapper hid a sink.
+    ['a sink passed into a wrapper', 'function invoke(fn) { fn(payload); } invoke(eval)'],
+    ['a sink passed into an arrow wrapper', 'const invoke = (fn) => fn(payload); invoke(Function)'],
+    [
+      'a sink passed through TWO wrappers',
+      'function inner(g) { g(payload); } function outer(f) { inner(f); } outer(eval)',
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not stop short when the sink is preceded by padding', () => {
+    // The ceiling used to be 512 values and returning early reported the file
+    // clean, so padding the search was all a bypass needed.
+    const padding = Array.from({ length: 600 }, () => 'fn = handler;').join(' ');
+    expect(fires(`let fn; ${padding} fn = eval; fn(payload)`)).toBe(true);
+  });
+
+  it('still does not flag a wrapper handed something harmless', () => {
+    expect(fires('function invoke(fn) { fn(payload); } invoke(handler)')).toBe(false);
+  });
+});
+
 describe('a receiver-specific DOM sink reached through an ALIAS', () => {
   const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
 
@@ -862,8 +917,24 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
     expect(dom(code)).toBe(true);
   });
 
+  it.each([
+    ['a method copied into a local', 'const write = document.write; write(payload)'],
+    ['a method copied and then aliased', 'const w = document.write; const w2 = w; w2(payload)'],
+    ['a method held in an object', 'const box = { w: document.write }; box.w(payload)'],
+    ['a method returned by a local function', 'const get = () => document.write; get()(payload)'],
+  ])('catches document.write %s', (_label, code) => {
+    // A member sink is a VALUE, so copying it out of the receiver does not
+    // shed its identity.  Matching the access syntax and its parent meant one
+    // `const` hid the most explicitly forbidden call in the project.
+    expect(dom(code)).toBe(true);
+  });
+
   it('does not flag an unrelated receiver', () => {
     expect(dom('const obj = other; obj.write(payload)')).toBe(false);
+  });
+
+  it('does not flag an unrelated method copied into a local', () => {
+    expect(dom('const write = other.write; write(payload)')).toBe(false);
   });
 });
 

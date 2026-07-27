@@ -621,6 +621,20 @@ describe('the reasoned exemption', () => {
     expect(await hues(source)).toEqual(['3:error']);
   });
 
+  it('covers only the offender it sits on, inside ONE folded expression', async () => {
+    // The exemption used to be applied to the FIRST offender of an expression
+    // and then skip the whole expression, so a reasoned comment about a
+    // non-text `text-error` also silenced an unexempted `text-warning` folded
+    // in beside it — one comment covering a class nobody had looked at.
+    const source = [
+      `const c =`,
+      `  // a11y-bare-hue-ok: svg stroke, not text`,
+      `  'text-error ' +`,
+      `  'text-warning';`,
+    ].join('\n');
+    expect(await hues(source)).toEqual(['4:warning']);
+  });
+
   it('lets a blank line sit between the comment block and the class', async () => {
     const source = [`// a11y-bare-hue-ok: bar fill`, ``, `const c = 'text-warning';`].join('\n');
     expect(await hues(source)).toEqual([]);

@@ -555,24 +555,37 @@ export async function findBareHueTextUses(files: readonly SourceFile[]): Promise
       ...(isIcon ? [] : bareHuePaints(all, facts, hues)),
       ...unpairedForegrounds(all, facts, hues),
     ];
-    const match = offenders.sort((left, right) => left.candidate.at - right.candidate.at)[0];
-    if (match === undefined) continue;
-    // A template may span lines, so anchor on the CLASS rather than the token
-    // start: the reported line is where it actually sits, and the offset map
-    // carries that folded index back to the source.
+    if (offenders.length === 0) continue;
     const newlines = newlineIndex(file.content);
-    const line = lineOf(
-      newlines,
-      entry.rendered.offsets[match.candidate.at] ?? entry.rendered.start,
-    );
     const lines = file.content.split('\n');
-    if (isExempt(lines, line)) continue;
-    findings.push({
-      file: file.path,
-      line,
-      hue: match.hue,
-      source: (lines[line - 1] ?? '').trim(),
-    });
+    // EACH offender is judged on ITS OWN line.  Taking only the first and
+    // exempting the whole expression on that one line meant a reasoned
+    // exemption for a non-text `text-error` also silenced an unrelated,
+    // unexempted `text-warning` folded in beside it — one comment covering
+    // classes nobody had looked at.  An exemption is a statement about a
+    // specific use, so it can only excuse the use it sits on.
+    for (const offender of offenders.sort(
+      (left, right) => left.candidate.at - right.candidate.at,
+    )) {
+      // A template may span lines, so anchor on the CLASS rather than the token
+      // start: the reported line is where it actually sits, and the offset map
+      // carries that folded index back to the source.
+      const line = lineOf(
+        newlines,
+        entry.rendered.offsets[offender.candidate.at] ?? entry.rendered.start,
+      );
+      if (isExempt(lines, line)) continue;
+      const already = findings.some(
+        (found) => found.file === file.path && found.line === line && found.hue === offender.hue,
+      );
+      if (already) continue;
+      findings.push({
+        file: file.path,
+        line,
+        hue: offender.hue,
+        source: (lines[line - 1] ?? '').trim(),
+      });
+    }
   }
   return findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 }

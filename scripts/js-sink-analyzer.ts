@@ -191,20 +191,73 @@ function childrenOf(node: Syntax): Syntax[] {
 }
 
 /**
- * A value a resolution can arrive at: an expression, or a GLOBAL by name.
+ * A value a resolution can arrive at.
  *
- * Globals are named rather than pointed at because they have no declaration in
- * the file — `eval` IS its name here, and that is what a spec matches.
+ * FOUR kinds, and the two beyond the obvious pair are what keep every sink
+ * inside one model:
+ *
+ *   • `node` — an expression written in this file.
+ *   • `global` — a name with no declaration here.  Globals are named rather
+ *     than pointed at because they have none: `eval` IS its name, and that is
+ *     what a spec matches.
+ *   • `member` — a METHOD ON a receiver, `document.write`.  It is a value for
+ *     the same reason a global is: `const write = document.write` copies the
+ *     method, so a detector that reads the ACCESS syntax sees nothing and one
+ *     that reads the value sees it.  Member sinks used to be found by matching
+ *     the shape of the access and its parent, which is why exactly one `const`
+ *     hid the most explicitly forbidden call in the project.
+ *   • `result` — whatever CALLING another value yields.  Written as a wrapper
+ *     rather than resolved on the spot so that "the function being called" is
+ *     resolved by the same relation as everything else: `flowsInto` on a
+ *     `result` either reads a function's returns or DISTRIBUTES over the
+ *     callee's own flow.  The previous shape — a `returnedBy` helper that
+ *     re-implemented identifier and property resolution — was the last walker
+ *     left outside the unification, and it missed every callee reached through
+ *     an alias or held in an object.
  */
 type Value =
   | { readonly kind: 'node'; readonly node: Syntax }
-  | { readonly kind: 'global'; readonly name: string };
+  | { readonly kind: 'global'; readonly name: string }
+  | { readonly kind: 'member'; readonly access: Syntax; readonly property: string }
+  | { readonly kind: 'result'; readonly of: Value };
 
 const nodeValue = (node: Syntax): Value => ({ kind: 'node', node });
 const globalValue = (name: string): Value => ({ kind: 'global', name });
+const memberValue = (access: Syntax, property: string): Value => ({
+  kind: 'member',
+  access,
+  property,
+});
+const resultValue = (of: Value): Value => ({ kind: 'result', of });
 
-/** A ceiling on one resolution, so a pathological graph cannot run away. */
-const MAX_VALUES = 512;
+/** A structural identity for a value, so a search visits each one once. */
+function valueKey(value: Value): string {
+  switch (value.kind) {
+    case 'global':
+      return `g:${value.name}`;
+    case 'member':
+      return `m:${value.access.getStart()}:${value.access.getEnd()}:${value.property}`;
+    case 'result':
+      return `r:${valueKey(value.of)}`;
+    default:
+      return `n:${value.node.getStart()}:${value.node.getEnd()}`;
+  }
+}
+
+/**
+ * A ceiling on one resolution, which EXISTS ONLY TO BE UNREACHABLE.
+ *
+ * Termination does not depend on it: every key is derived from a node range or
+ * a global name, both finite in a file, so the search ends on its own.  The
+ * ceiling is a backstop against a defect in that reasoning — so exceeding it
+ * THROWS rather than returning what was found so far.
+ *
+ * It used to be 512 and it used to return quietly, which made it a bypass: 512
+ * benign assignments to a name, then the sink, and the search stopped short of
+ * the assignment that mattered and reported the file clean.  A ceiling a gate
+ * can be padded past is worse than no ceiling at all.
+ */
+const MAX_VALUES = 200_000;
 
 /** Where a sink's code argument starts, and whether it arrives inside an array. */
 interface CodePosition {
@@ -375,10 +428,13 @@ function analyser(root: Syntax, project: Project, source: string) {
    * binding whose initializer is another identifier is followed to the name it
    * ultimately holds.
    *
-   * That following stops at a GLOBAL, which is what keeps the copy-on-write
-   * behaviour honest: `const g = globalThis` canonicalises to `globalThis`, so
-   * `g.zzz = eval` is visible through `globalThis.zzz` — and not through
-   * `self.zzz`, a different name for a different key.
+   * That following stops at a GLOBAL, and the standard spellings OF the global
+   * object collapse to ONE key there — `globalThis`, `window`, `self`, `top`
+   * and the rest denote the same object at runtime, so a property written
+   * through any of them is readable through all of them.  Keeping the spellings
+   * apart made `window.run = eval; globalThis.run(payload)` invisible: two keys
+   * for one slot, the write filed under the first and the read looked up under
+   * the second.  `const g = globalThis` canonicalises there too.
    */
   const receiverKey = (base: Syntax, hop = 0): string | undefined => {
     const target = unwrap(base);
@@ -388,7 +444,10 @@ function analyser(root: Syntax, project: Project, source: string) {
     const declaration = symbolAt(target)?.declarations.find(
       (each) => String(each.path) === filePath,
     );
-    if (declaration === undefined) return `global:${nameOf(target)}`;
+    if (declaration === undefined) {
+      const name = nameOf(target);
+      return GLOBAL_RECEIVERS.has(name) ? 'global:@globalThis' : `global:${name}`;
+    }
     const bound = unwrap(
       (declaration.resolve(project) as unknown as Syntax | undefined)?.initializer,
     );
@@ -511,6 +570,13 @@ function analyser(root: Syntax, project: Project, source: string) {
    */
   const boundValues = (declaration: Syntax | undefined): Value[] => {
     if (declaration === undefined) return [];
+    // A `function get() {}` / `class C {}` declaration IS the value its name
+    // holds — there is no initializer to read.  The old return-walker knew this
+    // privately, which is precisely why it had to exist; stated here, every
+    // consumer of the relation gets it at once.
+    if (isFunction(declaration) || declaration.kind === SyntaxKind.ClassDeclaration) {
+      return [nodeValue(declaration)];
+    }
     if (declaration.kind === SyntaxKind.BindingElement) {
       const pattern = declaration.parent;
       const from = pattern?.parent?.initializer;
@@ -614,6 +680,98 @@ function analyser(root: Syntax, project: Project, source: string) {
     return nameOf(target) === name && isGlobalBinding(target);
   };
 
+  /** Whether a node is something that can be CALLED and has a body to read. */
+  const isFunction = (node: Syntax | undefined): boolean =>
+    node?.kind === SyntaxKind.ArrowFunction ||
+    node?.kind === SyntaxKind.FunctionExpression ||
+    node?.kind === SyntaxKind.FunctionDeclaration ||
+    node?.kind === SyntaxKind.MethodDeclaration;
+
+  /**
+   * ARGUMENTS that reach each parameter, keyed by the parameter's range.
+   *
+   * A parameter is a binding like any other, and passing a sink to a wrapper —
+   * `function invoke(fn) { fn(payload) } invoke(eval)` — is how one is written
+   * through in practice.  Without this edge the relation stopped dead at every
+   * parameter, so any indirection through a local helper was a bypass.
+   */
+  const argumentsForParameter = new Map<string, Syntax[]>();
+  /**
+   * Whether the call-site map is being built, which is what makes this
+   * terminate.
+   *
+   * Building the map needs to know which function each call reaches, and that
+   * is the relation itself — so parameter edges yield nothing WHILE the map is
+   * being built and everything afterwards.  The one thing this cannot see is a
+   * callee that is itself a parameter (a wrapper invoked through a wrapper);
+   * the arguments of such a call are still followed, only the dispatch is not.
+   */
+  let buildingCallSites = false;
+  let callSitesReady = false;
+
+  const parameterKey = (parameter: Syntax): string =>
+    `${parameter.getStart()}:${parameter.getEnd()}`;
+
+  const buildCallSites = (): void => {
+    if (callSitesReady || buildingCallSites) return;
+    buildingCallSites = true;
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.CallExpression && node.kind !== SyntaxKind.NewExpression) {
+        continue;
+      }
+      const args = argumentsOf(node);
+      if (args.length === 0) continue;
+      for (const callee of nodesFrom(node.expression)) {
+        if (!isFunction(callee)) continue;
+        childrenOf(callee)
+          .filter((child) => child.kind === SyntaxKind.Parameter)
+          .forEach((parameter, index) => {
+            const supplied = args[index];
+            if (supplied === undefined) return;
+            const key = parameterKey(parameter);
+            argumentsForParameter.set(key, [...(argumentsForParameter.get(key) ?? []), supplied]);
+          });
+      }
+    }
+    buildingCallSites = false;
+    callSitesReady = true;
+  };
+
+  /** The arguments that can arrive at a parameter, across every call site. */
+  const argumentsAt = (parameter: Syntax): Syntax[] => {
+    if (buildingCallSites) return [];
+    buildCallSites();
+    return argumentsForParameter.get(parameterKey(parameter)) ?? [];
+  };
+
+  /**
+   * The expressions a function BODY hands back.
+   *
+   * Both body forms count: an arrow's expression body, and every `return` in a
+   * block.  Nested functions are excluded — their returns belong to them, not
+   * to the function being called.
+   */
+  const returnsOf = (fn: Syntax): Syntax[] => {
+    const body = fn.body;
+    if (body === undefined) return [];
+    if (body.kind !== SyntaxKind.Block) return [body];
+    const returned: Syntax[] = [];
+    // Explicit recursion rather than a flat walk, because a nested function's
+    // `return` has to be PRUNED, not skipped: it belongs to that function, and
+    // `f()` does not yield what the arrow inside `f` returns.  Nothing is lost
+    // by the precision — `f()()` reaches it as a `result` of a `result`.
+    const visit = (node: Syntax): void => {
+      if (isFunction(node)) return;
+      if (node.kind === SyntaxKind.ReturnStatement) {
+        if (node.expression !== undefined) returned.push(node.expression);
+        return;
+      }
+      for (const child of childrenOf(node)) visit(child);
+    };
+    for (const child of childrenOf(body)) visit(child);
+    return returned;
+  };
+
   /**
    * ONE STEP of value flow: everything that can supply this value.
    *
@@ -631,7 +789,21 @@ function analyser(root: Syntax, project: Project, source: string) {
    * predicates that care about strings read those shapes structurally instead.
    */
   const flowsInto = (value: Value): Value[] => {
-    if (value.kind === 'global') return [];
+    // A global and a member are IDENTITIES, not expressions: nothing flows into
+    // them, they are where a resolution ends.
+    if (value.kind === 'global' || value.kind === 'member') return [];
+
+    // Calling a value: read a function's returns, or push the call INWARDS
+    // through the callee's own flow until one is found.  Distributing like this
+    // is what makes every callee spelling work at once — an alias, a property,
+    // a parameter, a `||` between two functions — without any of them being
+    // named here.
+    if (value.kind === 'result') {
+      const of = value.of;
+      if (of.kind === 'node' && isFunction(of.node)) return returnsOf(of.node).map(nodeValue);
+      return flowsInto(of).map(resultValue);
+    }
+
     const target = value.node;
 
     // Wrappers that yield exactly what they wrap.
@@ -667,7 +839,15 @@ function analyser(root: Syntax, project: Project, source: string) {
       for (const assigned of key === undefined ? [] : (rebound.get(key) ?? [])) {
         from.push(nodeValue(assigned));
       }
-      from.push(...boundValues(localDeclaration(target)));
+      const declaration = localDeclaration(target);
+      // A PARAMETER is bound by its call sites rather than by an initializer.
+      if (declaration?.kind === SyntaxKind.Parameter) {
+        from.push(...argumentsAt(declaration).map(nodeValue));
+        const fallback = declaration.initializer;
+        if (fallback !== undefined) from.push(nodeValue(fallback));
+        return from;
+      }
+      from.push(...boundValues(declaration));
       return from;
     }
 
@@ -678,22 +858,29 @@ function analyser(root: Syntax, project: Project, source: string) {
       const name = propertyName(target);
       const base = target.expression;
       if (name === undefined || base === undefined) return [];
-      // What was WRITTEN into this slot wins over what the receiver is.
+      const from: Value[] = [];
+      // What was WRITTEN into this slot, and what its literal holds.
       const held = heldAt(base, name, 0);
-      if (held !== undefined) return [nodeValue(held)];
-      if (isGlobalReceiver(base)) return [globalValue(name)];
+      if (held !== undefined) from.push(nodeValue(held));
+      if (isGlobalReceiver(base)) from.push(globalValue(name));
       // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
-      if (INVOKERS.has(name)) return [nodeValue(base)];
-      if (name === 'constructor') return [globalValue('Function')];
-      return [];
+      if (INVOKERS.has(name)) from.push(nodeValue(base));
+      if (name === 'constructor') from.push(globalValue('Function'));
+      // The access ALSO denotes the method itself, whoever the receiver turns
+      // out to be — which is what survives being copied into a local.  Emitted
+      // alongside the rest rather than instead of it, and harmless when the
+      // property is nobody's sink: only a spec naming this property and
+      // resolving to this receiver ever reads it.
+      from.push(memberValue(target, name));
+      return from;
     }
 
-    if (target.kind === SyntaxKind.CallExpression) {
+    if (target.kind === SyntaxKind.CallExpression || target.kind === SyntaxKind.NewExpression) {
       // `Reflect.apply(F, …)` invokes its first argument; any other call yields
       // whatever the function it names RETURNS.
       const invoked = reflectTarget(target);
       if (invoked !== undefined) return [nodeValue(invoked)];
-      return returnedBy(target.expression, 0).map(nodeValue);
+      return target.expression === undefined ? [] : [resultValue(nodeValue(target.expression))];
     }
 
     return [];
@@ -706,21 +893,47 @@ function analyser(root: Syntax, project: Project, source: string) {
    * can be, whether it can be a string, what URL prefix it can carry — so those
    * answers cannot drift apart the way three separate walkers did.
    */
+  /**
+   * `flowsInto`, memoised on the value's identity.
+   *
+   * The relation is a pure function of the tree, and the same values are asked
+   * about constantly — every call site resolves its callee, and callees repeat.
+   * Recomputing meant re-entering the checker for each one, which is the cost
+   * that matters: symbol resolution, not the walk.
+   */
+  const stepCache = new Map<string, Value[]>();
+  const stepsFrom = (value: Value, key: string): Value[] => {
+    const cached = stepCache.get(key);
+    if (cached !== undefined) return cached;
+    const step = flowsInto(value);
+    // While the call-site map is being built, parameter edges are empty BY
+    // CONSTRUCTION rather than by fact, so those answers must not be kept.
+    if (!buildingCallSites) stepCache.set(key, step);
+    return step;
+  };
+
   const reaches = (node: Syntax | undefined): Value[] => {
     if (node === undefined) return [];
     const seen = new Set<string>();
     const found: Value[] = [];
     const queue: Value[] = [nodeValue(node)];
-    while (queue.length > 0 && found.length < MAX_VALUES) {
+    while (queue.length > 0) {
       const value = queue.shift() as Value;
-      const key =
-        value.kind === 'global'
-          ? `g:${value.name}`
-          : `n:${value.node.getStart()}:${value.node.getEnd()}`;
+      const key = valueKey(value);
       if (seen.has(key)) continue;
       seen.add(key);
+      // The search runs to EXHAUSTION.  Every key is a node range or a global
+      // name, so the space is finite and repetition ends each branch; stopping
+      // early on a count was a bypass, because the padding that reaches the
+      // ceiling is exactly what an attacker controls.
+      if (found.length >= MAX_VALUES) {
+        throw new Error(
+          `sink analysis did not converge in ${filePath} after ${MAX_VALUES} values — ` +
+            'refusing to report this file clean',
+        );
+      }
       found.push(value);
-      queue.push(...flowsInto(value));
+      queue.push(...stepsFrom(value, key));
     }
     return found;
   };
@@ -733,43 +946,11 @@ function analyser(root: Syntax, project: Project, source: string) {
   const nodesFrom = (node: Syntax | undefined): Syntax[] =>
     reaches(node).flatMap((value) => (value.kind === 'node' ? [value.node] : []));
 
-  /**
-   * The expressions a called function can RETURN, when it is a local one.
-   *
-   * `const get = () => eval` hands the global to whoever calls `get()`, so a
-   * callee that is itself a call is not automatically clean — the value it
-   * yields has to be resolved too.  Both body forms count: an arrow's
-   * expression body, and every `return` in a block.
-   */
-  const returnedBy = (callee: Syntax | undefined, hop: number): Syntax[] => {
-    const target = unwrap(callee);
-    if (target === undefined || hop > MAX_HOPS) return [];
-    let fn: Syntax | undefined;
-    if (target.kind === SyntaxKind.Identifier && !isGlobalBinding(target)) {
-      const declaration = localDeclaration(target);
-      if (declaration?.kind === SyntaxKind.FunctionDeclaration) fn = declaration;
-      else fn = unwrap(boundValue(declaration, hop));
-    } else {
-      fn = target;
-    }
-    if (
-      fn?.kind !== SyntaxKind.ArrowFunction &&
-      fn?.kind !== SyntaxKind.FunctionExpression &&
-      fn?.kind !== SyntaxKind.FunctionDeclaration
-    ) {
-      return [];
-    }
-    const body = fn.body;
-    if (body === undefined) return [];
-    if (body.kind !== SyntaxKind.Block) return [body];
-    const returned: Syntax[] = [];
-    for (const node of walk(body)) {
-      if (node.kind === SyntaxKind.ReturnStatement && node.expression !== undefined) {
-        returned.push(node.expression);
-      }
-    }
-    return returned;
-  };
+  /** The METHODS-ON-A-RECEIVER an expression can hold — what a member spec matches. */
+  const memberSinks = (node: Syntax | undefined): Array<{ access: Syntax; property: string }> =>
+    reaches(node).flatMap((value) =>
+      value.kind === 'member' ? [{ access: value.access, property: value.property }] : [],
+    );
 
   /**
    * Where the CODE argument sits for the way this sink was reached.
@@ -826,6 +1007,7 @@ function analyser(root: Syntax, project: Project, source: string) {
 
   return {
     sinkNames,
+    memberSinks,
     codePosition,
     codeArguments,
     propertyName,
@@ -1010,8 +1192,42 @@ function memberUsesIn(
   {
     const read = analyser(root, project, source);
     const found = new Map<string, SinkFinding>();
+    const callSpecs = specs.filter((spec) => spec.form === 'call');
+    const assignSpecs = specs.filter((spec) => spec.form !== 'call');
+
+    const report = (access: Syntax, spec: MemberSinkSpec): void => {
+      if (spec.receiver !== undefined) {
+        // The receiver is resolved, not spelled: `const doc = document;
+        // doc.write(p)` reaches the same absolutely-forbidden method, and
+        // comparing identifier TEXT saw only the literal name.
+        const base = access.expression;
+        if (base === undefined || !read.sinkNames(base).includes(spec.receiver)) return;
+      }
+      const entry = read.finding(access, spec.label);
+      found.set(`${entry.line}:${entry.label}`, entry);
+    };
 
     for (const node of walk(root)) {
+      // CALLING one.  Asked of the CALLEE'S VALUE rather than of the syntax at
+      // the call, which is the whole difference: `document.write(p)` and
+      // `const write = document.write; write(p)` invoke the same method, and a
+      // scan keyed on "a property access whose parent is a call" saw only the
+      // first.  The wrapper spellings — `document.write.call(…)`,
+      // `Reflect.apply(document.write, …)` — need no case of their own either,
+      // since the relation already resolves both to the same member value.
+      if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
+        const invoked = read.reflectTarget(node) ?? node.expression;
+        for (const member of read.memberSinks(invoked)) {
+          for (const spec of callSpecs) {
+            if (spec.property === member.property) report(member.access, spec);
+          }
+        }
+        continue;
+      }
+
+      // WRITING one.  An assignment TARGET is a location, not a value, so it
+      // cannot be aliased into a local the way a method can — reading the
+      // syntax here is not a shortcut, it is what the property is.
       if (
         node.kind !== SyntaxKind.PropertyAccessExpression &&
         node.kind !== SyntaxKind.ElementAccessExpression
@@ -1021,40 +1237,14 @@ function memberUsesIn(
       const name = read.propertyName(node);
       if (name === undefined) continue;
       const parent = node.parent;
-      const at = node.getStart();
-      // `x.p(…)` — the access is the CALLEE.  It is ALSO invoked through the
-      // standard wrappers, which run the same method without naming it
-      // differently: `document.write.call(document, p)` and
-      // `Reflect.apply(document.write, document, [p])`.
-      const directly =
-        parent?.kind === SyntaxKind.CallExpression && parent.expression?.getStart() === at;
-      const viaInvoker =
-        (parent?.kind === SyntaxKind.PropertyAccessExpression ||
-          parent?.kind === SyntaxKind.ElementAccessExpression) &&
-        parent.expression?.getStart() === at &&
-        INVOKERS.has(read.propertyName(parent) ?? '') &&
-        parent.parent?.kind === SyntaxKind.CallExpression;
-      const viaReflect =
-        parent?.kind === SyntaxKind.CallExpression && read.reflectTarget(parent)?.getStart() === at;
-      const called = directly || viaInvoker === true || viaReflect === true;
       // Every operator that writes the property, `=` through `??=`.
       const assigned =
         parent?.kind === SyntaxKind.BinaryExpression &&
         WRITING_ASSIGNMENTS.has(parent.operatorToken?.kind ?? -1) &&
-        parent.left?.getStart() === at;
-
-      for (const spec of specs) {
-        if (spec.property !== name) continue;
-        if (spec.form === 'call' ? !called : !assigned) continue;
-        if (spec.receiver !== undefined) {
-          // The receiver is resolved, not spelled: `const doc = document;
-          // doc.write(p)` reaches the same absolutely-forbidden method, and
-          // comparing identifier TEXT saw only the literal name.
-          const base = node.expression;
-          if (base === undefined || !read.sinkNames(base).includes(spec.receiver)) continue;
-        }
-        const entry = read.finding(node, spec.label);
-        found.set(`${entry.line}:${entry.label}`, entry);
+        parent.left?.getStart() === node.getStart();
+      if (!assigned) continue;
+      for (const spec of assignSpecs) {
+        if (spec.property === name) report(node, spec);
       }
     }
     return [...found.values()].sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));

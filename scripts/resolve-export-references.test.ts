@@ -167,6 +167,35 @@ const FILES: Record<string, string> = {
     '\n',
   ),
 
+  // ── Reference: WHOLESALE consumption of a namespace ──────────────────────
+  // Enumerating a namespace observably reads every export and spells none, and
+  // so does indexing it with a key whose type does not say which member it is.
+  // The gate used to name the wholesale forms it knew (a spread, a `...rest`),
+  // which reported live exports dead in every form it did not name.
+  'src/enumerated.ts': [
+    'export const FIRST = 1;',
+    'export const SECOND = 2;',
+    'export const THIRD = 3;',
+  ].join('\n'),
+  'src/enumerates.ts': [
+    "import * as enumerated from './enumerated.js';",
+    'export const names = Object.keys(enumerated);',
+  ].join('\n'),
+  'src/union-key.ts': ['export const ALPHA = 1;', 'export const BETA = 2;'].join('\n'),
+  'src/union-reader.ts': [
+    "import * as unionKey from './union-key.js';",
+    'declare const flag: boolean;',
+    "const key: keyof typeof unionKey = flag ? 'ALPHA' : 'BETA';",
+    'export const picked = unionKey[key];',
+  ].join('\n'),
+  // The counterpart: indexing with a SINGLE known key must still leave the
+  // others dead, or "credit everything" would quietly retire the whole gate.
+  'src/single-key.ts': ['export const READ = 1;', 'export const UNREAD = 2;'].join('\n'),
+  'src/single-reader.ts': [
+    "import * as singleKey from './single-key.js';",
+    "export const one = singleKey['READ'];",
+  ].join('\n'),
+
   // ── Reference: a NESTED template interpolation is still code ─────────────
   // The only use of `NESTED` is two interpolations deep, in this same file.  A
   // collector that walked only the outer hole reported a live export as dead.
@@ -563,6 +592,23 @@ describe('resolution: which sites use a binding', () => {
   it('counts a real import', () => {
     expect(usesOf('src/plain.ts', 'LIVE').length).toBeGreaterThan(0);
     expect(usesOf('src/plain.ts', 'DEAD')).toHaveLength(0);
+  });
+
+  it.each([
+    ['Object.keys enumeration', 'src/enumerated.ts', ['FIRST', 'SECOND', 'THIRD']],
+    ['a union-typed key', 'src/union-key.ts', ['ALPHA', 'BETA']],
+  ])('credits EVERY export consumed by %s', (_label, file, names) => {
+    for (const name of names) {
+      expect(usesOf(file, name).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('still reports the members a SINGLE known key does not read', () => {
+    // The other half of the rule.  Crediting everything whenever a namespace is
+    // touched would make the gate unfalsifiable, so a key the compiler can pin
+    // to one name credits that name only.
+    expect(usesOf('src/single-key.ts', 'READ').length).toBeGreaterThan(0);
+    expect(usesOf('src/single-key.ts', 'UNREAD')).toHaveLength(0);
   });
 
   it('counts a use nested inside two template interpolations', () => {

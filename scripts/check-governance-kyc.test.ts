@@ -134,6 +134,84 @@ describe('extractMutationRoutes', () => {
   });
 });
 
+describe('the POLARITY of the eligibility verdict', () => {
+  // `checkGovernanceEligibility` resolves to `null` for an ELIGIBLE member and
+  // a denial for an ineligible one, so "some branch returns" is not the
+  // property — the branch that returns has to be the DENIAL'S.  Reading the
+  // shape without the polarity accepted a route that refused everybody who was
+  // allowed and let everybody who was not straight through.
+  const route = (guard: string): string => `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const denial = await checkGovernanceEligibility(c.get('userId'));
+  ${guard}
+  return c.json(await castVote());
+});`;
+
+  it.each([
+    ['if (denial) return', 'if (denial) return c.json(denial, 403);'],
+    ['if (denial !== null) return', 'if (denial !== null) return c.json(denial, 403);'],
+    ['if (denial != null) throw', 'if (denial != null) throw new HTTPException(403);'],
+    ['a ternary on the verdict', 'if (denial ? true : false) return c.json(denial, 403);'],
+    ['returning the verdict itself', 'if (true) return denial ?? c.json(await castVote());'],
+  ])('accepts %s — the DENIED are refused', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
+  it.each([
+    ['if (!denial) return', 'if (!denial) return c.json({}, 403);'],
+    ['if (denial === null) return', 'if (denial === null) return c.json({}, 403);'],
+    ['if (denial == null) return', 'if (denial == null) return c.json({}, 403);'],
+    [
+      'refusing in the ELSE of a truthy test',
+      'if (denial) { log(denial); } else { return c.json({}, 403); }',
+    ],
+  ])('rejects %s — it refuses the ELIGIBLE', (_label, guard) => {
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it('rejects a verdict that is bound and never consulted', () => {
+    const src = `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => {
+  const ignored = await checkGovernanceEligibility(c.get('userId'));
+  return c.json(await castVote());
+});`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+});
+
+describe('a receiver the gate cannot classify', () => {
+  // Skipping an unrecognised receiver DROPPED the registration, and a dropped
+  // route is worse than an unguarded one: the gate reported success over an
+  // endpoint it never looked at.
+  it('follows a router built by a local factory', () => {
+    const src = `
+function makeRouter() { return new Hono(); }
+const app = makeRouter();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('reports a route on an IMPORTED receiver rather than dropping it', () => {
+    const src = `
+import { app } from './router.js';
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(false);
+  });
+
+  it('still skips an ambient global — `Promise.all` is not a route', () => {
+    // Asked of the checker, not of a list of global names: every declaration of
+    // `Promise` is in a `lib.*.d.ts`, and nothing declared there is a router.
+    const src = `
+const app = new Hono();
+app.get('/x', async (c) => c.json(await Promise.all([one(), two()])));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
 describe('the ways Hono registers a route', () => {
   // All three reach the same handler, so all three are governance mutations.
   // `.all` answers every method and was skipped entirely, which let an

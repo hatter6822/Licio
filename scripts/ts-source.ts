@@ -48,6 +48,8 @@ export interface Syntax {
   readonly token?: SyntaxKind;
   readonly argumentExpression?: Syntax;
   readonly operatorToken?: { readonly kind: SyntaxKind };
+  /** A prefix/postfix operator, which is a bare kind rather than a token node. */
+  readonly operator?: SyntaxKind;
   readonly left?: Syntax;
   readonly right?: Syntax;
   readonly condition?: Syntax;

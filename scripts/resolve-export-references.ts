@@ -307,6 +307,17 @@ interface FileScan {
    */
   readonly accesses: NodeHandle[];
   /**
+   * Offsets where a NAMESPACE is used without selecting a member from it.
+   *
+   * `Object.keys(mod)`, `for (const k in mod)`, `send(mod)`, `return mod` —
+   * each observably consumes every export, and none of them spells one.  The
+   * gate used to name the wholesale-consumption forms it knew (an object
+   * spread, a `...rest` element), which meant every form it did NOT name
+   * reported live exports dead.  So the question is inverted: a namespace that
+   * is not being INDEXED has escaped, and everything in it is read.
+   */
+  readonly escapes: number[];
+  /**
    * Object destructuring sites: the names taken, and the node whose TYPE says
    * what they were taken FROM.
    *
@@ -343,8 +354,47 @@ interface FileScan {
 /** Identifier parents that PUBLISH a name rather than consume one. */
 const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind.NamespaceExport]);
 
+/** Identifier parents that DECLARE the name rather than use the value. */
+const BINDING_PARENTS = new Set<number>([
+  SyntaxKind.NamespaceImport,
+  SyntaxKind.ImportSpecifier,
+  SyntaxKind.ImportClause,
+  SyntaxKind.ImportEqualsDeclaration,
+  SyntaxKind.NamespaceExport,
+  SyntaxKind.ExportSpecifier,
+  SyntaxKind.QualifiedName,
+]);
+
 /**
- * The export an element access names, when it names one statically.
+ * Whether an identifier uses a value WITHOUT selecting a member from it.
+ *
+ * Being the receiver of `mod.NAME` or `mod[key]` selects one export and is
+ * credited by name.  Anything else — an argument, a return, an initializer, a
+ * `for…in` subject — hands the whole object over, and whoever received it can
+ * read every property without ever writing one down.
+ */
+function isNamespaceEscape(node: NodeHandle): boolean {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  if (BINDING_PARENTS.has(parent.kind)) return false;
+  const at = node.getStart();
+  // Being BOUND is not escaping.  `const { A } = ns` takes exactly what the
+  // pattern spells and the destructuring route already credits it from the
+  // pattern's type; `const alias = ns` hands the namespace to a local this same
+  // analysis goes on to read.  Treating either as an escape credited every
+  // sibling export and would have retired the gate for that module.
+  if (parent.kind === SyntaxKind.VariableDeclaration && parent.initializer?.getStart() === at) {
+    return false;
+  }
+  const selecting =
+    (parent.kind === SyntaxKind.PropertyAccessExpression ||
+      parent.kind === SyntaxKind.ElementAccessExpression) &&
+    parent.expression?.getStart() === at;
+  return !selecting;
+}
+
+/**
+ * The exports an element access names.
  *
  * `mod['LIVE']` reads an export, and so does `mod[key]` after
  * `const key = 'LIVE' as const` — the two differ only in where the string is
@@ -355,15 +405,30 @@ const PLUMBING_PARENTS = new Set<number>([SyntaxKind.ExportSpecifier, SyntaxKind
  * symbol.  That also settles `'abc'[0]`, whose object type is a string and has
  * no such property, without a rule about which position the literal sits in.
  */
-function elementAccessExport(node: NodeHandle, project: Project): TsSymbol | undefined {
+function elementAccessExports(node: NodeHandle, project: Project): TsSymbol[] {
   const argument = node.argumentExpression;
   const receiver = node.expression;
-  if (argument === undefined || receiver === undefined) return undefined;
-  const key = project.checker.getTypeAtLocation(argument);
-  if (key === undefined || !key.isStringLiteralType()) return undefined;
+  if (argument === undefined || receiver === undefined) return [];
   const target = project.checker.getTypeAtLocation(receiver);
-  if (target === undefined) return undefined;
-  return project.checker.getPropertyOfType(target, String(key.value));
+  if (target === undefined) return [];
+  const key = project.checker.getTypeAtLocation(argument);
+  if (key === undefined) return [];
+  // A UNION of literal keys selects EVERY member it could be: after
+  // `const k: keyof typeof mod = flag ? 'a' : 'b'`, `mod[k]` reads whichever of
+  // the two the branch takes, so both are referenced.  Reading only a single
+  // literal type left the rest looking dead.
+  const constituents = key.isUnionType() ? key.getTypes() : [key];
+  const named = constituents.filter((each) => each.isStringLiteralType());
+  // A key whose type says NOTHING about which member it names may name any of
+  // them, so the whole module is read.  That is the honest answer, and it is
+  // the one that stops the gate rejecting valid code.
+  if (named.length !== constituents.length || named.length === 0) {
+    return project.checker.getPropertiesOfType(target);
+  }
+  return named.flatMap((each) => {
+    const property = project.checker.getPropertyOfType(target, String(each.value));
+    return property === undefined ? [] : [property];
+  });
 }
 
 /**
@@ -381,7 +446,14 @@ function elementAccessExport(node: NodeHandle, project: Project): TsSymbol | und
  * so the walk only has to say WHERE to ask.
  */
 function scanFile(root: NodeHandle): FileScan {
-  const scan: FileScan = { offsets: [], imports: [], destructures: [], accesses: [], spreads: [] };
+  const scan: FileScan = {
+    offsets: [],
+    imports: [],
+    destructures: [],
+    accesses: [],
+    spreads: [],
+    escapes: [],
+  };
 
   /** The EXPORT-side names a pattern or assignment target takes, and whether a
    *  `...rest` element sweeps up whatever those names left. */
@@ -437,6 +509,7 @@ function scanFile(root: NodeHandle): FileScan {
       if (parentKind === undefined || !PLUMBING_PARENTS.has(parentKind)) {
         scan.offsets.push(node.getStart());
       }
+      if (isNamespaceEscape(node)) scan.escapes.push(node.getStart());
     } else if (
       node.kind === SyntaxKind.SpreadAssignment ||
       node.kind === SyntaxKind.SpreadElement
@@ -695,10 +768,25 @@ export function resolveExportReferences(input: ResolveInput): ResolvedReferences
       // ELEMENT ACCESS, answered by the TYPE of the key rather than by its
       // node kind, so a constant carrying the name reads the same as the name.
       for (const access of scan.accesses) {
-        const property = elementAccessExport(access, project);
-        if (property !== undefined) {
+        for (const property of elementAccessExports(access, project)) {
           creditChain(property, { file, offset: access.getStart() }, project);
         }
+      }
+
+      // A NAMESPACE that escaped without being indexed: every export is read,
+      // because whoever holds the object can read any of them.  Resolved
+      // through the MODULE symbol rather than the type, which is the same route
+      // the import path takes and costs one batched symbol lookup.
+      if (scan.escapes.length > 0) {
+        project.checker.getSymbolAtPosition(absolute, scan.escapes).forEach((symbol, index) => {
+          const offset = scan.escapes[index];
+          if (symbol === undefined || offset === undefined) return;
+          const module = aliasTarget(symbol, project) ?? symbol;
+          if (!module.declarations.some((each) => each.kind === SyntaxKind.SourceFile)) return;
+          for (const property of project.checker.getExportsOfModule(module)) {
+            creditChain(property, { file, offset }, project);
+          }
+        });
       }
 
       // A SPREAD of a namespace reads every export it holds.

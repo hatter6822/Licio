@@ -274,7 +274,16 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   };
 
   /**
-   * Whether a receiver chain roots at `new Hono…()` — i.e. it is a ROUTER.
+   * What a receiver chain ROOTS at: a router, something definitely else, or
+   * something this cannot resolve.
+   *
+   * The third answer is the point.  This used to be a boolean and an
+   * unrecognised receiver meant `false`, which SILENTLY DROPPED the
+   * registration — the gate then reported success over a route it never
+   * judged, which is the one failure a fail-closed gate must not have.  A
+   * governance router built by a local factory (`const app = makeRouter()`)
+   * was exactly that: invisible, not unguarded.  Now an unresolvable receiver
+   * is treated as a router and its handler must carry a guard like any other.
    *
    * The chain is walked WITHOUT a depth bound, because it is a finite spine of
    * the syntax tree: `new Hono().get(…).post(…)` nests each link inside the one
@@ -286,15 +295,70 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * Only BINDING hops are bounded, since `const a = b; const b = a` is the one
    * step here that can cycle.
    */
-  const isRouter = (node: Syntax | undefined, bindings = 0): boolean => {
+  type Receiver = 'router' | 'other' | 'unknown';
+
+  /** Constructions that are definitely NOT a router, so a route can be skipped. */
+  const NOT_A_ROUTER: ReadonlySet<SyntaxKind> = new Set([
+    SyntaxKind.ObjectLiteralExpression,
+    SyntaxKind.ArrayLiteralExpression,
+    SyntaxKind.StringLiteral,
+    SyntaxKind.NumericLiteral,
+    SyntaxKind.ArrowFunction,
+    SyntaxKind.FunctionExpression,
+  ]);
+
+  /**
+   * Whether a name is an AMBIENT GLOBAL — declared only by the standard
+   * library, never by this project.
+   *
+   * `Promise.all([...])` is a `.all` call on a receiver, and once an
+   * unclassifiable receiver stopped being skipped it became a reported route.
+   * Asked of the CHECKER rather than of a list of global names: every
+   * declaration of `Promise` sits in a `lib.*.d.ts`, and nothing declared there
+   * is a Hono router this project built.
+   */
+  const isAmbientGlobal = (node: Syntax): boolean => {
+    const declarations =
+      project.checker.getSymbolAtPosition(String(root.path), node.getStart())?.declarations ?? [];
+    return (
+      declarations.length > 0 && declarations.every((each) => String(each.path).endsWith('.d.ts'))
+    );
+  };
+
+  /** Bindings that name a value from ANOTHER module, which may well be a router. */
+  const IMPORTED: ReadonlySet<SyntaxKind> = new Set([
+    SyntaxKind.ImportSpecifier,
+    SyntaxKind.ImportClause,
+    SyntaxKind.NamespaceImport,
+    SyntaxKind.ImportEqualsDeclaration,
+  ]);
+
+  const receiverKind = (node: Syntax | undefined, bindings = 0): Receiver => {
     let target = unwrap(node);
     let hops = bindings;
     while (target !== undefined) {
       if (target.kind === SyntaxKind.NewExpression) {
-        return (nameOf(unwrap(target.expression)) ?? '').startsWith('Hono');
+        return (nameOf(unwrap(target.expression)) ?? '').startsWith('Hono') ? 'router' : 'other';
+      }
+      if (NOT_A_ROUTER.has(target.kind)) return 'other';
+      // A CALL is either a chained registration (`app.post(…).get(…)`) or a
+      // FACTORY.  Chaining is read through the callee as before; a factory is
+      // read through what its function hands back, so `const app =
+      // makeRouter()` classifies exactly as `const app = new Hono()` does.
+      if (target.kind === SyntaxKind.CallExpression) {
+        const callee = unwrap(target.expression);
+        const returned = callee === undefined ? [] : returnsOfCallee(callee, hops);
+        if (returned.length > 0) {
+          const verdicts = returned.map((each) => receiverKind(each, hops + 1));
+          if (verdicts.includes('router')) return 'router';
+          if (verdicts.includes('unknown')) return 'unknown';
+          // A factory that demonstrably returns something else is not a router,
+          // but the CALLEE chain may still be one (`app.post(…).get(…)`).
+        }
+        target = callee;
+        continue;
       }
       if (
-        target.kind === SyntaxKind.CallExpression ||
         target.kind === SyntaxKind.PropertyAccessExpression ||
         target.kind === SyntaxKind.ElementAccessExpression
       ) {
@@ -303,16 +367,49 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       }
       // `const app = new Hono(); app.post(…)` — the binding says what it holds.
       if (target.kind === SyntaxKind.Identifier) {
-        if (hops > MAX_HOPS) return false;
+        if (hops > MAX_HOPS) return 'unknown';
         hops += 1;
+        if (isAmbientGlobal(target)) return 'other';
         const declaration = localDeclaration(target);
-        if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
-        target = unwrap(declaration.initializer);
+        if (declaration === undefined) return 'unknown';
+        if (declaration.kind === SyntaxKind.Parameter) return 'unknown';
+        if (IMPORTED.has(declaration.kind)) return 'unknown';
+        if (declaration.kind !== SyntaxKind.VariableDeclaration) return 'other';
+        const initializer = unwrap(declaration.initializer);
+        if (initializer === undefined) return 'unknown';
+        target = initializer;
         continue;
       }
-      return false;
+      return 'unknown';
     }
-    return false;
+    return 'unknown';
+  };
+
+  /** What a locally-declared callee RETURNS, so a factory can be followed. */
+  const returnsOfCallee = (callee: Syntax, hops: number): Syntax[] => {
+    if (callee.kind !== SyntaxKind.Identifier || hops > MAX_HOPS) return [];
+    const declaration = localDeclaration(callee);
+    const fn =
+      declaration?.kind === SyntaxKind.FunctionDeclaration
+        ? declaration
+        : unwrap(declaration?.initializer);
+    if (
+      fn?.kind !== SyntaxKind.FunctionDeclaration &&
+      fn?.kind !== SyntaxKind.ArrowFunction &&
+      fn?.kind !== SyntaxKind.FunctionExpression
+    ) {
+      return [];
+    }
+    const body = fn.body;
+    if (body === undefined) return [];
+    if (body.kind !== SyntaxKind.Block) return [body];
+    const returned: Syntax[] = [];
+    for (const node of walk(body)) {
+      if (node.kind === SyntaxKind.ReturnStatement && node.expression !== undefined) {
+        returned.push(node.expression);
+      }
+    }
+    return returned;
   };
 
   /** Every identifier in `scope` that binds to the same declaration as `name`. */
@@ -345,45 +442,85 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
+  /** `null`, `undefined`, or `void 0` — what an ELIGIBLE verdict is. */
+  const isNullish = (node: Syntax | undefined): boolean => {
+    const target = unwrap(node);
+    if (target === undefined) return false;
+    if (target.kind === SyntaxKind.NullKeyword || target.kind === SyntaxKind.VoidExpression) {
+      return true;
+    }
+    return target.kind === SyntaxKind.Identifier && nameOf(target) === 'undefined';
+  };
+
   /**
-   * Whether this use of the verdict CONTROLS a refusal.
+   * Whether this use of the verdict CONTROLS a refusal OF THE INELIGIBLE.
    *
    * Not "is the result used" — a verdict can be read, logged and ignored, and
-   * an ineligible account is refused by none of that.  The property that
-   * matters is that the verdict decides whether the handler returns early, so
-   * the walk looks for the verdict reaching a `return`/`throw` directly, or
-   * standing in the CONDITION of an `if`/ternary whose taken branch does.
+   * an ineligible account is refused by none of that.  And not "does some
+   * branch return" either: `checkGovernanceEligibility` resolves to `null` for
+   * an ELIGIBLE member and a denial for an ineligible one, so
+   * `if (!denial) return c.json({}, 403)` exits for exactly the wrong people
+   * while looking, structurally, like a guard.  Reading the shape without the
+   * POLARITY accepted a route that refused everybody who was allowed and let
+   * everybody who was not straight through.
    *
-   * Negation, comparison (`=== null`) and logical composition are walked
-   * through, because each is a way of spelling the same test.
+   * So the walk carries polarity.  `truthy` means "this expression is truthy
+   * exactly when the verdict is" — negation flips it, `=== null` flips it,
+   * `!== null` keeps it — and at an `if`/ternary the branch that must refuse is
+   * the one taken when the verdict is TRUTHY, because that is the denial.
    */
   const controlsARefusal = (use: Syntax): boolean => {
     let node: Syntax = use;
+    let truthy = true;
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       const parent = node.parent;
       if (parent === undefined) return false;
       if (parent.kind === SyntaxKind.ReturnStatement || parent.kind === SyntaxKind.ThrowStatement) {
-        return true;
+        // Handing the verdict itself back refuses whoever it denies — but only
+        // if what is handed back IS the denial, not its negation.
+        return truthy;
       }
       if (parent.kind === SyntaxKind.IfStatement) {
         // Only the CONDITION decides anything; the verdict appearing inside a
         // branch is just a value being used there.
         if (parent.expression?.getStart() !== node.getStart()) return false;
-        return refusesWithin(parent.thenStatement) || refusesWithin(parent.elseStatement);
+        return refusesWithin(truthy ? parent.thenStatement : parent.elseStatement);
       }
       if (parent.kind === SyntaxKind.ConditionalExpression) {
         if (parent.condition?.getStart() !== node.getStart()) return false;
-        if (refusesWithin(parent.whenTrue) || refusesWithin(parent.whenFalse)) return true;
+        if (refusesWithin(truthy ? parent.whenTrue : parent.whenFalse)) return true;
+        node = parent;
+        continue;
+      }
+      if (parent.kind === SyntaxKind.PrefixUnaryExpression) {
+        // `!denial` is true for the ELIGIBLE, so the branch to check swaps.
+        if (parent.operator === SyntaxKind.ExclamationToken) truthy = !truthy;
+        node = parent;
+        continue;
+      }
+      if (parent.kind === SyntaxKind.BinaryExpression) {
+        const operator = parent.operatorToken?.kind;
+        const other = parent.left?.getStart() === node.getStart() ? parent.right : parent.left;
+        // Comparing AGAINST nothing is the same test spelled as an equality:
+        // `denial === null` holds for the eligible, `!== null` for the denied.
+        if (isNullish(other)) {
+          if (
+            operator === SyntaxKind.EqualsEqualsEqualsToken ||
+            operator === SyntaxKind.EqualsEqualsToken
+          ) {
+            truthy = !truthy;
+          } else if (
+            operator !== SyntaxKind.ExclamationEqualsEqualsToken &&
+            operator !== SyntaxKind.ExclamationEqualsToken
+          ) {
+            return false;
+          }
+        }
         node = parent;
         continue;
       }
       // Ways of spelling the same test, all of which keep the verdict in play.
-      if (
-        TRANSPARENT.has(parent.kind) ||
-        parent.kind === SyntaxKind.PrefixUnaryExpression ||
-        parent.kind === SyntaxKind.AwaitExpression ||
-        parent.kind === SyntaxKind.BinaryExpression
-      ) {
+      if (TRANSPARENT.has(parent.kind) || parent.kind === SyntaxKind.AwaitExpression) {
         node = parent;
         continue;
       }
@@ -451,7 +588,11 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         ? nameOf(callee.name)
         : staticString(callee.argumentExpression);
     if (called === undefined) continue;
-    if (!isRouter(callee.expression)) continue;
+    const receiver = receiverKind(callee.expression);
+    // 'unknown' is deliberately NOT skipped: a receiver this cannot classify
+    // may well be a governance router, and dropping it would report success
+    // over an endpoint the gate never looked at.
+    if (receiver === 'other') continue;
 
     const args = [...(node.arguments ?? [])];
     // The THREE ways Hono registers a route, all of which reach the same
@@ -464,6 +605,16 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
     const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
+    // When the receiver could not be resolved, the REGISTRATION has to look
+    // like one before this is treated as a route.  `db.delete(rows)`,
+    // `cache.delete('key')` and `Promise.all([…])` are ordinary calls that
+    // happen to share a name with a Hono method, and they have no path; a route
+    // takes one, and it starts at the root.  Asking about the ARGUMENT rather
+    // than the receiver keeps an unresolvable-but-real router in scope without
+    // dragging every same-named method call in with it.
+    if (receiver === 'unknown' && !(staticString(pathArgument)?.startsWith('/') ?? false)) {
+      continue;
+    }
     // `.all` covers every mutation; it is reported under its own name rather
     // than four times over, and the allowlist matches on path regardless.
     const mutations = viaAll ? ['all'] : methods.filter((method) => MUTATION_METHODS.has(method));
