@@ -835,26 +835,38 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
+  /**
+   * A registration method DESTRUCTURED off a router: `const { post } = app`.
+   *
+   * Hono installs its verb methods as instance arrow functions bound to the
+   * router (`this[method] = (…) => …`), so a destructured `post` registers a
+   * route exactly as `app.post` does — but the call's callee is an identifier,
+   * not a property access, so it was not read as a registration at all and the
+   * file left the corpus unclassified.  The binding says which router the
+   * method came off and which method it is, so both are read from it.
+   */
+  const destructuredMethod = (
+    identifier: Syntax,
+  ): { readonly method: string; readonly receiver: Syntax } | undefined => {
+    const declaration = localDeclaration(identifier);
+    if (declaration?.kind !== SyntaxKind.BindingElement) return undefined;
+    const pattern = declaration.parent;
+    if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) return undefined;
+    const source = pattern.parent?.initializer;
+    if (source === undefined) return undefined;
+    const named = declaration.propertyName ?? declaration.name;
+    const method = named === undefined ? undefined : nameOf(named);
+    return method === undefined ? undefined : { method, receiver: source };
+  };
+
   const found: FoundRoute[] = [];
-  for (const node of walk(root)) {
-    if (node.kind !== SyntaxKind.CallExpression) continue;
-    const callee = unwrap(node.expression);
-    if (
-      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
-      callee?.kind !== SyntaxKind.ElementAccessExpression
-    ) {
-      continue;
-    }
-    const called =
-      callee.kind === SyntaxKind.PropertyAccessExpression
-        ? nameOf(callee.name)
-        : staticString(callee.argumentExpression);
-    if (called === undefined) continue;
-    const receiver = receiverKind(callee.expression);
+
+  /** Read ONE call as a registration of `called` on a receiver of `receiver`. */
+  const register = (node: Syntax, called: string, receiver: Receiver): void => {
     // 'unknown' is deliberately NOT skipped: a receiver this cannot classify
     // may well be a governance router, and dropping it would report success
     // over an endpoint the gate never looked at.
-    if (receiver === 'other') continue;
+    if (receiver === 'other') return;
 
     const args = [...(node.arguments ?? [])];
     // The THREE ways Hono registers a route, all of which reach the same
@@ -863,7 +875,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // surely as `.post` is, and skipping it let one ship unguarded.
     const viaOn = called === 'on';
     const viaAll = called === 'all';
-    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) continue;
+    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
     const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
     const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
@@ -884,14 +896,14 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     if (receiver === 'unknown') {
       const rooted = staticString(pathArgument)?.startsWith('/') ?? false;
       const handled = args.slice(1).some((each) => isHandlerShaped(each));
-      if (!rooted && !handled) continue;
+      if (!rooted && !handled) return;
     }
     // `.all` covers every mutation; it is reported under its own name rather
     // than four times over, and the allowlist matches on path regardless.
     const mutations = viaAll ? ['all'] : methods.filter((method) => MUTATION_METHODS.has(method));
     // A method list with an unreadable entry may hide a mutation, so the
     // registration is reported rather than skipped.
-    if (mutations.length === 0 && declared.complete) continue;
+    if (mutations.length === 0 && declared.complete) return;
 
     // `.on` accepts an ARRAY of paths, each registering the same handler.
     const paths = staticStrings(pathArgument);
@@ -915,6 +927,30 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         found.push({ file, method, path, guarded, line, readable: true });
       }
     }
+  };
+
+  for (const node of walk(root)) {
+    if (node.kind !== SyntaxKind.CallExpression) continue;
+    const callee = unwrap(node.expression);
+    // `const { post } = app; post(…)` — the method was taken OFF the router, so
+    // the callee is a plain identifier and the receiver is the binding's source.
+    if (callee?.kind === SyntaxKind.Identifier) {
+      const off = destructuredMethod(callee);
+      if (off !== undefined) register(node, off.method, receiverKind(off.receiver));
+      continue;
+    }
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      continue;
+    }
+    const called =
+      callee.kind === SyntaxKind.PropertyAccessExpression
+        ? nameOf(callee.name)
+        : staticString(callee.argumentExpression);
+    if (called === undefined) continue;
+    register(node, called, receiverKind(callee.expression));
   }
   return found;
 }

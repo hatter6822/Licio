@@ -495,6 +495,42 @@ rows.delete(id);`;
   });
 });
 
+describe('a registration method taken OFF the router', () => {
+  // Hono installs its verb methods as instance arrow functions bound to the
+  // router (`this[method] = (…) => …`), so a destructured `post` registers a
+  // route exactly as `app.post` does — but the callee is a plain identifier, so
+  // it was not read as a registration and the file left the corpus entirely.
+  it.each([
+    ['a destructured method', 'const { post } = app;\npost'],
+    ['a renamed destructured method', 'const { post: register } = app;\nregister'],
+  ])('finds a route registered through %s', (_label, prelude) => {
+    const call = prelude.split('\n')[1];
+    const src = `
+const app = new Hono();
+${prelude.split('\n')[0]}
+${call}('/rooms/:roomId/governance/vote', authMiddleware(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('reads the GUARD inside a destructured registration too', () => {
+    const src = `
+const app = new Hono();
+const { post } = app;
+post('/rooms/:roomId/governance/vote', requireGovernanceEligibility(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+
+  it('does not treat a destructure from a NON-router as a registration', () => {
+    const src = `
+const store = new Map();
+const { delete: drop } = store;
+drop('key');`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
 describe('a NAMED route handler', () => {
   // Accepting only an INLINE function meant a registration with an unreadable
   // receiver AND an unreadable path qualified as no registration at all and
