@@ -66,7 +66,9 @@ export interface Syntax {
   readonly head?: Syntax;
   readonly literal?: Syntax;
   readonly text?: string;
+  /** Present on the ROOT only; a nested node reaches its file via `getSourceFile`. */
   readonly path: unknown;
+  getSourceFile?(): { readonly path?: unknown } | undefined;
   /** FULL start — the offset of this node's leading trivia. */
   readonly pos?: number;
   getStart(): number;
@@ -129,7 +131,14 @@ const CONFIG_CONTENT = JSON.stringify({
     jsx: 'react-jsx',
     allowJs: true,
     noEmit: true,
-    noResolve: true,
+    // Resolution is ON so that an import BETWEEN two scanned sources binds.
+    // With it off, `export const run = eval` in one file and `run(payload)` in
+    // another were two unrelated programs: the importing file saw `run` as a
+    // name with no declaration — indistinguishable from a global — so splitting
+    // an alias across a module boundary walked past every sink gate.
+    //
+    // Nothing outside the batch resolves, which is the same meaningful answer
+    // as before: a name from an unscanned module still has no declaration here.
     skipLibCheck: true,
     types: [],
   },
@@ -139,19 +148,29 @@ const CONFIG_CONTENT = JSON.stringify({
 /**
  * Where a source is mounted.
  *
- * The EXTENSION is preserved, because it selects the grammar: `<string>x` is a
- * type assertion in a `.ts` file and malformed JSX in a `.tsx` one, so mounting
- * every source as `.tsx` made a legal `.ts` helper fail to parse — and a gate
- * that sees nothing in a file reports it clean.
+ * The DIRECTORY STRUCTURE is preserved, because relative imports are resolved
+ * against it: a file importing `./b.js` only finds `b` if the two sit beside
+ * each other in the virtual tree.  Flattening every source into one directory
+ * (with an index prefix to keep that injective) made every relative specifier
+ * point at nothing, so a sink could be aliased in one module and invoked from
+ * another with NEITHER file showing a finding — the importing side saw a name
+ * with no declaration, which is indistinguishable from a global.
  *
- * The name is flattened so no path can escape the mount point, and PREFIXED
- * with the caller's index so the flattening stays injective: `foo/bar.ts` and
- * `foo_bar.ts` flatten alike, and without the prefix the second would silently
- * replace the first.
+ * Preserving the path is injective by construction: two sources with the same
+ * repo-relative path are the same source, so no prefix is needed.  Segments
+ * that would climb out of the mount point are dropped rather than trusted.
+ *
+ * The EXTENSION is preserved too, because it selects the grammar: `<string>x`
+ * is a type assertion in a `.ts` file and malformed JSX in a `.tsx` one, so
+ * mounting every source as `.tsx` made a legal `.ts` helper fail to parse — and
+ * a gate that sees nothing in a file reports it clean.
  */
-function virtualPath(path: string, index: number): string {
-  const extension = /\.(tsx|ts|jsx|mjs|cjs|js)$/.exec(path)?.[1] ?? 'ts';
-  return `${VIRTUAL_ROOT}/src/${index}-${path.replace(/[^\w.-]/g, '_')}.${extension}`;
+function virtualPath(path: string): string {
+  const inside = path
+    .split('/')
+    .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+    .join('/');
+  return `${VIRTUAL_ROOT}/src/${/\.(tsx|ts|jsx|mjs|cjs|js)$/.test(inside) ? inside : `${inside}.ts`}`;
 }
 
 /**
@@ -168,8 +187,8 @@ export function withParsedSources<T>(
   if (sources.length === 0) return body([], undefined as unknown as Project);
 
   const contents: Record<string, string> = { [VIRTUAL_CONFIG]: CONFIG_CONTENT };
-  const mounted = sources.map((source, index) => {
-    const at = virtualPath(source.path, index);
+  const mounted = sources.map((source) => {
+    const at = virtualPath(source.path);
     contents[at] = source.content;
     return { at, source };
   });

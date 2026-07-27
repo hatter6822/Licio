@@ -125,6 +125,14 @@ const WRITING_ASSIGNMENTS: ReadonlySet<number> = new Set([
   SyntaxKind.QuestionQuestionEqualsToken,
 ]);
 
+/** Bindings that name a value declared in ANOTHER module. */
+const IMPORT_BINDINGS: ReadonlySet<number> = new Set([
+  SyntaxKind.ImportSpecifier,
+  SyntaxKind.ImportClause,
+  SyntaxKind.NamespaceImport,
+  SyntaxKind.ImportEqualsDeclaration,
+]);
+
 /** Wrappers that yield exactly the expression they wrap. */
 const TRANSPARENT: ReadonlySet<number> = new Set([
   SyntaxKind.ParenthesizedExpression,
@@ -366,9 +374,30 @@ function isOffOrigin(node: Syntax): boolean {
  * A closure rather than free functions because every answer depends on the
  * project the handles came from and on the container table built for this file.
  */
-function analyser(root: Syntax, project: Project, source: string) {
+function analyser(root: Syntax, project: Project, source: string, batch: ReadonlySet<string>) {
   const filePath = String(root.path);
-  const symbolAt = (node: Syntax) => project.checker.getSymbolAtPosition(filePath, node.getStart());
+  /**
+   * Whether a declaration belongs to a source in THIS SCAN.
+   *
+   * The question used to be "is it in THIS FILE", which made every import look
+   * like a global: `export const run = eval` in one module and `run(payload)`
+   * in another were two unrelated programs, and the invocation resolved to a
+   * name with no declaration — the same answer a real global gives.  Splitting
+   * an alias across a module boundary walked past every sink gate that way.
+   */
+  const inBatch = (path: unknown): boolean => batch.has(String(path));
+  /**
+   * The file a node belongs to.
+   *
+   * Only the ROOT carries `path`, so a nested node is asked for its source
+   * file — which matters now that a declaration this follows may live in
+   * ANOTHER source of the batch, where the offsets mean something else.
+   */
+  const pathOf = (node: Syntax): string =>
+    String(node.getSourceFile?.()?.path ?? node.path ?? filePath);
+
+  const symbolAt = (node: Syntax) =>
+    project.checker.getSymbolAtPosition(pathOf(node), node.getStart());
 
   /**
    * Whether an identifier names a GLOBAL rather than something declared here.
@@ -380,15 +409,13 @@ function analyser(root: Syntax, project: Project, source: string) {
   const isGlobalBinding = (node: Syntax): boolean => {
     const symbol = symbolAt(node);
     if (symbol === undefined) return true;
-    return !symbol.declarations.some((declaration) => String(declaration.path) === filePath);
+    return !symbol.declarations.some((declaration) => inBatch(declaration.path));
   };
 
   /** The declaration a local name binds to, resolved to a node. */
   const localDeclaration = (node: Syntax): Syntax | undefined => {
     const symbol = symbolAt(node);
-    const handle = symbol?.declarations.find(
-      (declaration) => String(declaration.path) === filePath,
-    );
+    const handle = symbol?.declarations.find((declaration) => inBatch(declaration.path));
     return handle?.resolve(project) as Syntax | undefined;
   };
 
@@ -437,9 +464,7 @@ function analyser(root: Syntax, project: Project, source: string) {
     if (target === undefined || target.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) {
       return undefined;
     }
-    const declaration = symbolAt(target)?.declarations.find(
-      (each) => String(each.path) === filePath,
-    );
+    const declaration = symbolAt(target)?.declarations.find((each) => inBatch(each.path));
     if (declaration === undefined) {
       const name = nameOf(target);
       return GLOBAL_RECEIVERS.has(name) ? 'global:@globalThis' : `global:${name}`;
@@ -714,6 +739,24 @@ function analyser(root: Syntax, project: Project, source: string) {
     return nameOf(target) === name && isGlobalBinding(target);
   };
 
+  /** What an imported name is bound to, followed through the module edge. */
+  const aliasedValues = (name: Syntax): Value[] => {
+    const symbol = symbolAt(name);
+    if (symbol === undefined) return [];
+    let aliased: ReturnType<typeof project.checker.getAliasedSymbol>;
+    try {
+      aliased = project.checker.getAliasedSymbol(symbol);
+    } catch {
+      return [];
+    }
+    const handle = aliased?.declarations.find((each) => inBatch(each.path));
+    const declaration = handle?.resolve(project) as Syntax | undefined;
+    if (declaration === undefined) return [];
+    // The ORIGINAL declaration is read exactly as a local one would be, so a
+    // re-export chain and a plain import take the same path from here.
+    return boundValues(declaration);
+  };
+
   /** Whether a node is something that can be CALLED and has a body to read. */
   const isFunction = (node: Syntax | undefined): boolean =>
     node?.kind === SyntaxKind.ArrowFunction ||
@@ -935,6 +978,15 @@ function analyser(root: Syntax, project: Project, source: string) {
         from.push(nodeValue(assigned));
       }
       const declaration = localDeclaration(target);
+      // An IMPORT binds to a declaration in ANOTHER module, and the checker is
+      // what crosses that edge: the specifier itself holds nothing, so a chain
+      // that stopped there read `import { run } from './a.js'; run(payload)` as
+      // an unresolvable name — which is how a sink aliased in one file and
+      // invoked from another showed no finding in either.
+      if (declaration !== undefined && IMPORT_BINDINGS.has(declaration.kind)) {
+        from.push(...aliasedValues(target));
+        return from;
+      }
       // A PARAMETER is bound by its call sites rather than by an initializer.
       if (declaration?.kind === SyntaxKind.Parameter) {
         from.push(...argumentsAt(declaration).map(nodeValue));
@@ -976,6 +1028,24 @@ function analyser(root: Syntax, project: Project, source: string) {
       const invoked = reflectTarget(target);
       if (invoked !== undefined) return [nodeValue(invoked)];
       return target.expression === undefined ? [] : [resultValue(nodeValue(target.expression))];
+    }
+
+    // A CLASS is its superclass, for the purpose of what constructing it runs.
+    // `class F extends Function {}` inherits `Function`'s constructor, so
+    // `new F('return payload')()` compiles and runs code exactly as the global
+    // does — the subclass changes the spelling, not the sink.
+    if (target.kind === SyntaxKind.ClassDeclaration || target.kind === SyntaxKind.ClassExpression) {
+      const extended: Value[] = [];
+      for (const child of childrenOf(target)) {
+        if (child.kind !== SyntaxKind.HeritageClause) continue;
+        if (child.token !== SyntaxKind.ExtendsKeyword) continue;
+        for (const base of childrenOf(child)) {
+          const from =
+            base.kind === SyntaxKind.ExpressionWithTypeArguments ? base.expression : base;
+          if (from !== undefined) extended.push(nodeValue(from));
+        }
+      }
+      return extended;
     }
 
     // `` tag`text` `` INVOKES its tag, so its value is what the tag returns —
@@ -1105,6 +1175,67 @@ function analyser(root: Syntax, project: Project, source: string) {
     text: source.slice(node.getStart(), node.getEnd()).replace(/\s+/g, ' ').trim().slice(0, 200),
   });
 
+  /**
+   * Property WRITES a call performs, for the standard reflective setters.
+   *
+   * `node.innerHTML = payload` is one spelling of a write; the platform offers
+   * three more that reach the SAME setter and parse the same HTML —
+   * `Object.assign(node, { innerHTML: payload })`, `Reflect.set(node,
+   * 'innerHTML', payload)` and `Object.defineProperty(node, 'innerHTML', {
+   * value: payload })`.  A scan that recognised only an assignment TARGET saw
+   * none of them, so the most direct XSS write in the language had three
+   * unguarded synonyms.
+   *
+   * These are distinct platform APIs rather than lexical variants of one form,
+   * which is why they are named here: no parse answers "does this invoke a
+   * setter", and the set is closed and small.
+   */
+  const reflectiveWrites = (call: Syntax): Array<{ at: Syntax; property: string; on: Syntax }> => {
+    const callee = unwrap(call.expression);
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return [];
+    }
+    const method = propertyName(callee);
+    if (method === undefined) return [];
+    const args = argumentsOf(call);
+    const target = args[0];
+    if (target === undefined) return [];
+    const writes: Array<{ at: Syntax; property: string; on: Syntax }> = [];
+
+    // `Object.assign(target, …sources)` — every property of every literal source.
+    if (method === 'assign' && isGlobalNamed(callee.expression, 'Object')) {
+      for (const source of args.slice(1)) {
+        const literal = unwrap(source);
+        if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) continue;
+        for (const member of childrenOf(literal)) {
+          if (member.name === undefined) continue;
+          const named =
+            member.name.kind === SyntaxKind.ComputedPropertyName
+              ? staticPrefix(member.name.expression)
+              : nameOf(member.name);
+          if (named !== null && named !== undefined) {
+            writes.push({ at: member, property: named, on: target });
+          }
+        }
+      }
+      return writes;
+    }
+
+    // `Reflect.set(target, key, value)` and `Object.defineProperty(target, key,
+    // descriptor)` both name the property in their SECOND argument.
+    const named =
+      (method === 'set' && isGlobalNamed(callee.expression, 'Reflect')) ||
+      (method === 'defineProperty' && isGlobalNamed(callee.expression, 'Object'));
+    if (!named) return [];
+    const key = args[1];
+    const property = key === undefined ? null : staticPrefix(key);
+    if (property === null) return [];
+    return [{ at: call, property, on: target }];
+  };
+
   /** Where the code argument sits in a `Reflect.apply` / `Reflect.construct`. */
   const reflectPosition = (call: Syntax): CodePosition => {
     const method = propertyName(unwrap(call.expression) as Syntax) ?? '';
@@ -1114,6 +1245,7 @@ function analyser(root: Syntax, project: Project, source: string) {
   return {
     sinkNames,
     memberSinks,
+    reflectiveWrites,
     codePosition,
     codeArguments,
     propertyName,
@@ -1138,8 +1270,11 @@ export function findSinkInvocationsIn(
 ): Map<string, SinkFinding[]> {
   return withParsedSources(sources, (parsed, project) => {
     const byPath = new Map<string, SinkFinding[]>();
+    // Every source in the scan, so a declaration reached ACROSS a module edge
+    // is recognised as local to the batch rather than mistaken for a global.
+    const batch = new Set(parsed.map((each) => String(each.root.path)));
     for (const { path, content, root } of parsed) {
-      byPath.set(path, invocationsIn(root, project, content, specs));
+      byPath.set(path, invocationsIn(root, project, content, specs, batch));
     }
     return byPath;
   });
@@ -1155,9 +1290,10 @@ function invocationsIn(
   project: Project,
   source: string,
   specs: readonly SinkSpec[],
+  batch: ReadonlySet<string>,
 ): SinkFinding[] {
   {
-    const read = analyser(root, project, source);
+    const read = analyser(root, project, source, batch);
     const byName = new Map(specs.map((spec) => [spec.name, spec]));
     const found = new Map<string, SinkFinding>();
 
@@ -1274,8 +1410,9 @@ export function findMemberSinkUsesIn(
 ): Map<string, SinkFinding[]> {
   return withParsedSources(sources, (parsed, project) => {
     const byPath = new Map<string, SinkFinding[]>();
+    const batch = new Set(parsed.map((each) => String(each.root.path)));
     for (const { path, content, root } of parsed) {
-      byPath.set(path, memberUsesIn(root, project, content, specs));
+      byPath.set(path, memberUsesIn(root, project, content, specs, batch));
     }
     return byPath;
   });
@@ -1294,19 +1431,20 @@ function memberUsesIn(
   project: Project,
   source: string,
   specs: readonly MemberSinkSpec[],
+  batch: ReadonlySet<string>,
 ): SinkFinding[] {
   {
-    const read = analyser(root, project, source);
+    const read = analyser(root, project, source, batch);
     const found = new Map<string, SinkFinding>();
     const callSpecs = specs.filter((spec) => spec.form === 'call');
     const assignSpecs = specs.filter((spec) => spec.form !== 'call');
 
-    const report = (access: Syntax, spec: MemberSinkSpec): void => {
+    const report = (access: Syntax, spec: MemberSinkSpec, on?: Syntax): void => {
       if (spec.receiver !== undefined) {
         // The receiver is resolved, not spelled: `const doc = document;
         // doc.write(p)` reaches the same absolutely-forbidden method, and
         // comparing identifier TEXT saw only the literal name.
-        const base = access.expression;
+        const base = on ?? access.expression;
         if (base === undefined || !read.sinkNames(base).includes(spec.receiver)) return;
       }
       const entry = read.finding(access, spec.label);
@@ -1328,6 +1466,14 @@ function memberUsesIn(
       ) {
         // `` document.write`<b>${p}</b>` `` invokes the method exactly as the
         // parenthesised call does — the tag is where the callee sits.
+        // A call may also WRITE a property, through the reflective setters.
+        if (node.kind !== SyntaxKind.TaggedTemplateExpression) {
+          for (const write of read.reflectiveWrites(node)) {
+            for (const spec of assignSpecs) {
+              if (spec.property === write.property) report(write.at, spec, write.on);
+            }
+          }
+        }
         const invoked =
           node.kind === SyntaxKind.TaggedTemplateExpression
             ? node.tag

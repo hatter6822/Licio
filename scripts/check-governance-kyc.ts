@@ -623,7 +623,14 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
               ? nameOf(callee.name)
               : undefined;
         if (called === undefined || !GUARD_NAMES.has(called)) continue;
-        if (called === 'requireGovernanceEligibility') return true;
+        // MIDDLEWARE guards by being INSTALLED, not by being called:
+        // `requireGovernanceEligibility()` inside a handler body merely builds
+        // a middleware function and drops it, and an ineligible member walks
+        // straight past.  It counts only as the registration ARGUMENT itself.
+        if (called === 'requireGovernanceEligibility') {
+          if (unwrap(argument)?.getStart() === node.getStart()) return true;
+          continue;
+        }
 
         // The verdict is either this expression, or the name it was bound to.
         let verdict: Syntax = node;

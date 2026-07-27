@@ -947,6 +947,21 @@ describe('every position the value relation governs', () => {
   });
 });
 
+describe('sinks that are not written as sinks', () => {
+  it.each([
+    // A subclass inherits the constructor: `new F('code')` compiles code.
+    ['a Function subclass', "class F extends Function {}; new F('return payload')()"],
+    ['a Function subclass expression', "const F = class extends Function {}; new F('x')()"],
+    ['a subclass of a subclass', "class A extends Function {}; class B extends A {}; new B('x')()"],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag a class extending something else', () => {
+    expect(fires("class F extends Base {}; new F('x')()")).toBe(false);
+  });
+});
+
 describe('a receiver-specific DOM sink reached through an ALIAS', () => {
   const dom = (code: string): boolean => findMemberSinkUses(code, DOM_MEMBER_SINKS).length > 0;
 
@@ -980,6 +995,21 @@ describe('a receiver-specific DOM sink reached through an ALIAS', () => {
     ['held in an array', 'const a = [document.write]; a[0](payload)'],
   ])('catches document.write %s', (_label, code) => {
     expect(dom(code)).toBe(true);
+  });
+
+  it.each([
+    ['Object.assign', 'Object.assign(node, { innerHTML: payload })'],
+    ['Object.assign, computed key', "Object.assign(node, { ['outer' + 'HTML']: payload })"],
+    ['Reflect.set', "Reflect.set(node, 'outerHTML', payload)"],
+    ['Object.defineProperty', "Object.defineProperty(node, 'innerHTML', { value: payload })"],
+  ])('catches a markup write through %s', (_label, code) => {
+    // The browser runs the SAME setter for each of these, so recognising only
+    // an assignment TARGET left the most direct XSS write three synonyms.
+    expect(dom(code)).toBe(true);
+  });
+
+  it('does not flag an unrelated property written reflectively', () => {
+    expect(dom('Object.assign(node, { textContent: payload })')).toBe(false);
   });
 
   it('does not flag an unrelated receiver', () => {
