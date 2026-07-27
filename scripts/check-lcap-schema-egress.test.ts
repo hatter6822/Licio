@@ -48,3 +48,29 @@ describe('findSchemaEgressIssues (WS-R.14.3 LCAP schema denylist)', () => {
     expect(findSchemaEgressIssues('r.ts', '/* no karma here */ const x = 1;')).toEqual([]);
   });
 });
+
+describe('what NAMES a field', () => {
+  it('reads a token spelled in a template chunk', () => {
+    // The whole-text search this replaced covered these; collecting only the
+    // hole-free template form would have lost the case.
+    const source = `export const x = \`p ipAddress \${y}\`;`;
+    expect(findSchemaEgressIssues('f.ts', source)).toHaveLength(1);
+  });
+
+  it('is not fooled by a string that contains a comment opener', () => {
+    // The two regexes it replaced were string-unaware: `'a // b'` lost its tail,
+    // so a real field declared after it on the same line could be HIDDEN.
+    expect(
+      findSchemaEgressIssues(
+        'f.ts',
+        "export const u = 'a // b'; export const s = { latitude: 1 };",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('still ignores a token that only appears in prose', () => {
+    expect(
+      findSchemaEgressIssues('f.ts', '// followers is forbidden\nexport const x = 1;'),
+    ).toEqual([]);
+  });
+});

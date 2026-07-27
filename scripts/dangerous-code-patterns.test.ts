@@ -19,11 +19,11 @@ import {
   DOM_MEMBER_SINKS,
   DYNAMIC_CODE_SINKS,
   findDynamicCodeSinks,
+  findJavascriptUrlsIn,
   findMemberSinkUses,
   REMOTE_DYNAMIC_IMPORT_SINK,
   REMOTE_IMPORT_SCRIPTS_SINK,
   SOURCE_CODE_SINKS,
-  scanSourceForSinks,
   stripComments,
 } from './dangerous-code-patterns.js';
 
@@ -839,16 +839,30 @@ describe('stripComments', () => {
   });
 });
 
-describe('scanSourceForSinks (textual DOM patterns)', () => {
-  const DOM = [{ pattern: /\.innerHTML\s*=/, label: 'innerHTML' }];
+describe('javascript: URLs', () => {
+  const urls = (code: string): string[] =>
+    (findJavascriptUrlsIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).map(
+      (finding) => `${finding.line}:${finding.label}`,
+    );
 
-  it('matches over the whole text and reports the line', () => {
-    const code = ['const a = 1;', 'el.innerHTML = html;'].join('\n');
-    expect(scanSourceForSinks(code, DOM)).toEqual([{ label: 'innerHTML', line: 2 }]);
+  it('flags the plain spelling', () => {
+    expect(urls(`const href = 'javascript:alert(1)';`)).toHaveLength(1);
   });
 
-  it('does not match inside a comment', () => {
-    expect(scanSourceForSinks('// el.innerHTML = x\n', DOM)).toEqual([]);
+  // The pattern this replaced required the quote immediately before the scheme,
+  // so every equivalent spelling slipped past it — and all of them navigate.
+  it.each([
+    ['a leading space the URL parser trims', `const h = ' javascript:alert(1)';`],
+    ['an escape', String.raw`const h = '\x6aavascript:alert(1)';`],
+    ['a tab inside the scheme', String.raw`const h = 'java\tscript:alert(1)';`],
+    ['a template with no holes', 'const h = `javascript:alert(1)`;'],
+  ])('flags %s', (_label, code) => {
+    expect(urls(code)).toHaveLength(1);
+  });
+
+  it('does not flag a comment or an unrelated URL', () => {
+    expect(urls('// javascript:alert(1)\n')).toEqual([]);
+    expect(urls(`const h = 'https://example.test/javascript:x';`)).toEqual([]);
   });
 });
 

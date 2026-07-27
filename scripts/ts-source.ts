@@ -53,6 +53,8 @@ export interface Syntax {
   readonly literal?: { readonly text?: string };
   readonly text?: string;
   readonly path: unknown;
+  /** FULL start — the offset of this node's leading trivia. */
+  readonly pos?: number;
   getStart(): number;
   getEnd(): number;
   getText(): string;
@@ -165,6 +167,39 @@ export function* walk(node: Syntax): Generator<Syntax> {
     children.push(child);
   });
   for (const child of children) yield* walk(child);
+}
+
+/**
+ * `source` with every COMMENT replaced by spaces, length- and line-preserving.
+ *
+ * A gate that looks for a marker in the source needs prose not to satisfy it,
+ * and three separate hand-written strippers grew up doing that — one of them
+ * scanning the file twice under both readings of `/` because, in its own words,
+ * the case is "ambiguous without a parser".
+ *
+ * The parser has already settled it.  A node's leading TRIVIA is exactly
+ * `[pos, getStart())`, and trivia is whitespace and comments and nothing else —
+ * so blanking that range to spaces erases every comment and leaves real
+ * whitespace as it was, which is what keeps a marker spanning several tokens
+ * (`action: 'lock-rooms'`) matchable.
+ */
+export function blankComments(source: string, root: Syntax): string {
+  const out = source.split('');
+  let last = 0;
+  const blank = (from: number, to: number): void => {
+    for (let at = from; at < to && at < out.length; at += 1) {
+      if (out[at] !== '\n' && out[at] !== '\r') out[at] = ' ';
+    }
+  };
+  for (const node of walk(root)) {
+    const pos = node.pos;
+    if (pos !== undefined && pos < node.getStart()) blank(pos, node.getStart());
+    last = Math.max(last, node.getEnd());
+  }
+  // Trivia after the last node is leading trivia of the end-of-file token,
+  // which is not a child of anything.
+  blank(last, source.length);
+  return out.join('');
 }
 
 /** Offsets of every `\n`, ascending — the index `lineAt` binary-searches. */

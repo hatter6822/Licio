@@ -2,12 +2,11 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  type CodeSinkPattern,
   DOM_MEMBER_SINKS,
   findDynamicCodeSinksIn,
+  findJavascriptUrlsIn,
   findMemberSinkUsesIn,
   SOURCE_CODE_SINKS,
-  scanSourceForSinks,
 } from './dangerous-code-patterns.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -34,12 +33,7 @@ const SOURCE_DIRS = [
 // (`innerHTML`, `document.write`) moved to `DOM_MEMBER_SINKS`, which is walked
 // structurally: a pattern anchored on `.innerHTML` reads only the dotted
 // spelling, and `node['innerHTML'] = payload` reaches the same sink.
-const BLOCKED_PATTERNS: CodeSinkPattern[] = [
-  {
-    pattern: /['"`]javascript\s*:/i,
-    label: 'javascript: URL (XSS vector)',
-  },
-];
+
 // The DYNAMIC-CODE sinks are not patterns: `eval`, the `Function` constructor
 // and the string-argument timers are found by tokenising and walking the
 // access chain (`findDynamicCodeSinks`), because the spellings that reach them
@@ -85,6 +79,7 @@ function lint(): void {
   const sources = scanned.map(({ relative, source }) => ({ path: relative, content: source }));
   const memberUses = findMemberSinkUsesIn(sources, DOM_MEMBER_SINKS);
   const codeSinks = findDynamicCodeSinksIn(sources, SOURCE_CODE_SINKS);
+  const jsUrls = findJavascriptUrlsIn(sources);
   {
     const relative = '';
     const source = '';
@@ -104,7 +99,7 @@ function lint(): void {
 
   for (const entry of scanned) {
     for (const { label, line } of [
-      ...scanSourceForSinks(entry.source, BLOCKED_PATTERNS),
+      ...(jsUrls.get(entry.relative) ?? []),
       ...(memberUses.get(entry.relative) ?? []),
       ...(codeSinks.get(entry.relative) ?? []),
     ]) {

@@ -742,6 +742,51 @@ function invocationsIn(
   }
 }
 
+/**
+ * A `javascript:` URL — string CONTENT that executes when navigated to.
+ *
+ * Read from the COOKED value of a string, not from a pattern over the source.
+ * The pattern this replaces required the quote immediately before the scheme,
+ * so it saw `'javascript:alert(1)'` and missed every equivalent spelling: a
+ * leading space (`' javascript:…'` — the URL parser trims it), an escape
+ * (`'\x6aavascript:…'`), and a tab inside the scheme (`'java\tscript:…'`,
+ * which HTML attribute parsing strips).  All three navigate.
+ */
+function isJavascriptUrl(value: string): boolean {
+  const stripped = [...value].filter((c) => c !== '\t' && c !== '\n' && c !== '\r').join('');
+  let from = 0;
+  while (from < stripped.length && (stripped.codePointAt(from) ?? 0x21) <= 0x20) from += 1;
+  return /^javascript:/i.test(stripped.slice(from));
+}
+
+/** Every `javascript:` URL literal in each source. */
+export function findJavascriptUrlsIn(sources: readonly Source[]): Map<string, SinkFinding[]> {
+  return withParsedSources(sources, (parsed) => {
+    const byPath = new Map<string, SinkFinding[]>();
+    for (const { path, content, root } of parsed) {
+      const newlines = newlineIndex(content);
+      const found: SinkFinding[] = [];
+      for (const node of walk(root)) {
+        if (
+          node.kind !== SyntaxKind.StringLiteral &&
+          node.kind !== SyntaxKind.NoSubstitutionTemplateLiteral
+        ) {
+          continue;
+        }
+        const value = node.text ?? '';
+        if (!isJavascriptUrl(value)) continue;
+        found.push({
+          label: 'javascript: URL (XSS vector)',
+          line: lineAt(newlines, node.getStart()),
+          text: content.slice(node.getStart(), node.getEnd()).slice(0, 200),
+        });
+      }
+      byPath.set(path, found);
+    }
+    return byPath;
+  });
+}
+
 /** Find member-named DOM sink uses across many sources, in ONE project. */
 export function findMemberSinkUsesIn(
   sources: readonly Source[],

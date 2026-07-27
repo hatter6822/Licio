@@ -24,13 +24,11 @@
 // this module only declares WHICH names are sinks and which argument makes an
 // invocation dangerous.
 //
-// The regex machinery below is retained ONLY for the textual DOM sinks
-// (`innerHTML =`, `javascript:` URLs). Those have no call chain to walk, so
-// they have no equivalent class of spellings and a pattern is the right tool.
-//
-// Deliberately DEPENDENCY-FREE (no zod, no `node:` builtins) so the
-// `scripts`-rooted vitest project — which resolves no external packages —
-// can unit test it directly.
+// Nothing here is a pattern over source text any more.  A `javascript:` URL is
+// string CONTENT, so it is read from the cooked value of a string literal; the
+// member-named DOM sinks are walked structurally; and the one remaining textual
+// need — blanking comments for the update-channel MARKER checks — is answered
+// by the parser rather than by a state machine.
 
 import type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
 import {
@@ -39,9 +37,11 @@ import {
   isNonSameOriginUrl,
   isStringLiteral,
 } from './js-sink-analyzer.js';
+import { blankComments, withParsedSources } from './ts-source.js';
 
 export type { MemberSinkSpec, SinkSpec, Source } from './js-sink-analyzer.js';
 export {
+  findJavascriptUrlsIn,
   findMemberSinkUses,
   findMemberSinkUsesIn,
   findSinkInvocations,
@@ -175,209 +175,20 @@ export const DOM_MEMBER_SINKS: readonly MemberSinkSpec[] = [
 // a pattern remains the right tool for it.
 // ---------------------------------------------------------------------------
 
-export interface CodeSinkPattern {
-  readonly pattern: RegExp;
-  /** Short human label naming the sink (gates wrap this in their own phrasing). */
-  readonly label: string;
-}
-
-/** Keywords after which a `/` begins a REGEX literal rather than a division. */
-const KEYWORDS_BEFORE_REGEX: ReadonlySet<string> = new Set([
-  'return',
-  'typeof',
-  'instanceof',
-  'in',
-  'of',
-  'new',
-  'delete',
-  'void',
-  'throw',
-  'case',
-  'do',
-  'else',
-  'yield',
-  'await',
-]);
-
 /**
- * Blank out COMMENTS so doctrine may be DISCUSSED in prose while real code
- * still trips a scan.
+ * Blank COMMENTS so doctrine may be discussed in prose while real wiring still
+ * satisfies a marker check.
  *
- * NO LONGER LOAD-BEARING FOR SINK DETECTION — the analyzer discards comments
- * while tokenising, which is correct by construction rather than by heuristic.
- * This remains for the gates' MARKER checks (`check:update-channel` requires
- * certain identifiers to be present as real wiring, not merely mentioned in a
- * comment) and for the textual DOM patterns above.
+ * Length- and newline-preserving, so a match index still maps to its line.
  *
- * LENGTH- AND NEWLINE-PRESERVING: every blanked character becomes a space and
- * newlines are kept, so a match index still maps back to its original line.
+ * This was a 120-line hand-written state machine that scanned the file TWICE,
+ * under both readings of `/`, because — its own comment — the case is
+ * "ambiguous without a parser".  It is; the parser settles it, and a node's
+ * leading trivia is exactly where a comment can be.
  */
-export function stripComments(source: string, preferRegex = false): string {
-  const out = source.split('');
-  const n = source.length;
-
-  const blank = (from: number, to: number): void => {
-    for (let k = from; k < to && k < n; k += 1) if (out[k] !== '\n') out[k] = ' ';
-  };
-
-  /** Does the `/` at `at` open a regex literal (rather than divide)? */
-  const opensRegex = (at: number): boolean => {
-    let k = at - 1;
-    while (k >= 0 && /\s/.test(source[k] as string)) k -= 1;
-    if (k < 0) return true;
-    const prev = source[k] as string;
-    // Ambiguous without a parser (`if (ok) /re/` vs `(a) / b`); `preferRegex`
-    // flips the guess so a caller can scan both readings.
-    if (/[)\]}]/.test(prev)) return preferRegex;
-    // POSTFIX `++`/`--` yields a value, so a `/` after it divides.
-    if ((prev === '+' || prev === '-') && source[k - 1] === prev) return false;
-    if (/[A-Za-z0-9_$]/.test(prev)) {
-      let s = k;
-      while (s >= 0 && /[A-Za-z0-9_$]/.test(source[s] as string)) s -= 1;
-      const word = source.slice(s + 1, k + 1);
-      return KEYWORDS_BEFORE_REGEX.has(word) ? true : preferRegex;
-    }
-    return true;
-  };
-
-  // Template-literal `${…}` spans push a BRACE-DEPTH counter onto this stack;
-  // tracking depth (not merely presence) keeps an object literal inside an
-  // interpolation from ending the interpolation early.
-  const templateStack: number[] = [];
-
-  /** Scan forward from inside a template literal body. */
-  const resumeTemplate = (from: number): number => {
-    let k = from;
-    while (k < n) {
-      const ch = source[k] as string;
-      if (ch === '\\') k += 2;
-      else if (ch === '`') return k + 1;
-      else if (ch === '$' && source[k + 1] === '{') {
-        templateStack.push(1);
-        return k + 2;
-      } else k += 1;
-    }
-    return n;
-  };
-
-  let i = 0;
-  while (i < n) {
-    const c = source[i] as string;
-    const two = source.slice(i, i + 2);
-
-    if (two === '//') {
-      const nl = source.indexOf('\n', i);
-      const end = nl === -1 ? n : nl;
-      blank(i, end);
-      i = end;
-      continue;
-    }
-    if (two === '/*') {
-      const close = source.indexOf('*/', i + 2);
-      const end = close === -1 ? n : close + 2;
-      blank(i, end);
-      i = end;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      i += 1;
-      while (i < n) {
-        const ch = source[i] as string;
-        if (ch === '\\') i += 2;
-        else if (ch === c) {
-          i += 1;
-          break;
-        } else if (ch === '\n') break;
-        else i += 1;
-      }
-      continue;
-    }
-    if (c === '`') {
-      i = resumeTemplate(i + 1);
-      continue;
-    }
-    if (c === '{' && templateStack.length > 0) {
-      templateStack.push((templateStack.pop() as number) + 1);
-      i += 1;
-      continue;
-    }
-    if (c === '}' && templateStack.length > 0) {
-      const depth = (templateStack.pop() as number) - 1;
-      if (depth > 0) {
-        templateStack.push(depth);
-        i += 1;
-        continue;
-      }
-      i = resumeTemplate(i + 1);
-      continue;
-    }
-    if (c === '/' && opensRegex(i)) {
-      i += 1;
-      let inClass = false;
-      while (i < n) {
-        const ch = source[i] as string;
-        if (ch === '\\') i += 2;
-        else if (ch === '\n') break;
-        else if (ch === '[') {
-          inClass = true;
-          i += 1;
-        } else if (ch === ']') {
-          inClass = false;
-          i += 1;
-        } else if (ch === '/' && !inClass) {
-          i += 1;
-          break;
-        } else i += 1;
-      }
-      continue;
-    }
-    i += 1;
-  }
-  return out.join('');
-}
-
-/**
- * Find matches of TEXTUAL patterns across the whole file, reporting the line
- * each match starts on.
- *
- * Whole-text rather than per-line: a pattern may span a newline, which a
- * line-by-line scan can never match. Both lexings of the ambiguous `/` are
- * scanned and unioned so a lexer guess cannot hide a match.
- */
-export function scanSourceForSinks(
-  source: string,
-  patterns: readonly CodeSinkPattern[],
-): SinkMatch[] {
-  const lineStarts: number[] = [0];
-  for (let k = 0; k < source.length; k += 1) if (source[k] === '\n') lineStarts.push(k + 1);
-  const lineOf = (offset: number): number => {
-    let lo = 0;
-    let hi = lineStarts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if ((lineStarts[mid] as number) <= offset) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo + 1;
-  };
-
-  const seen = new Set<string>();
-  const matches: SinkMatch[] = [];
-  for (const text of [stripComments(source), stripComments(source, true)]) {
-    for (const { pattern, label } of patterns) {
-      const global = new RegExp(
-        pattern.source,
-        pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
-      );
-      for (const match of text.matchAll(global)) {
-        if (match.index === undefined) continue;
-        const line = lineOf(match.index);
-        const key = `${line}:${label}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        matches.push({ label, line });
-      }
-    }
-  }
-  return matches.sort((a, b) => a.line - b.line || a.label.localeCompare(b.label));
+export function stripComments(source: string): string {
+  return withParsedSources([{ path: 'strip.ts', content: source }], (parsed) => {
+    const root = parsed[0]?.root;
+    return root === undefined ? source : blankComments(source, root);
+  });
 }
