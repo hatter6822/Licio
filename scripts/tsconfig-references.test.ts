@@ -18,8 +18,9 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { SyntaxKind } from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
-import { blankComments, withParsedSources } from './ts-source.js';
+import { type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -30,37 +31,83 @@ interface TrackedConfig {
   readonly references: readonly string[];
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null;
-
-/** `extends` is a string or an array of them; both name config files. */
-const extendsOf = (parsed: unknown): string[] => {
-  if (!isRecord(parsed)) return [];
-  const value = parsed['extends'];
-  if (typeof value === 'string') return [value];
-  if (!Array.isArray(value)) return [];
-  return value.filter((each): each is string => typeof each === 'string');
+const childrenOf = (node: Syntax): Syntax[] => {
+  const found: Syntax[] = [];
+  node.forEachChild((child) => {
+    found.push(child);
+  });
+  return found;
 };
 
-const referencesOf = (parsed: unknown): string[] => {
-  if (!isRecord(parsed)) return [];
-  const value = parsed['references'];
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((each) =>
-    isRecord(each) && typeof each['path'] === 'string' ? [each['path']] : [],
+/** The value an object literal holds at `key`. */
+const valueAt = (object: Syntax | undefined, key: string): Syntax | undefined => {
+  if (object?.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+  for (const member of childrenOf(object)) {
+    if (member.kind !== SyntaxKind.PropertyAssignment) continue;
+    // `.text` decodes both `extends:` and `"extends":`, which a config may use
+    // interchangeably.
+    if (member.name?.text === key) return member.initializer;
+  }
+  return undefined;
+};
+
+/** `extends` is a string or an array of them; both name config files. */
+const stringsIn = (node: Syntax | undefined): string[] => {
+  if (node === undefined) return [];
+  if (node.kind === SyntaxKind.StringLiteral) return [node.text ?? ''];
+  if (node.kind !== SyntaxKind.ArrayLiteralExpression) return [];
+  return childrenOf(node).flatMap((each) =>
+    each.kind === SyntaxKind.StringLiteral ? [each.text ?? ''] : [],
   );
 };
 
+const referencePathsIn = (config: Syntax | undefined): string[] => {
+  const value = valueAt(config, 'references');
+  if (value?.kind !== SyntaxKind.ArrayLiteralExpression) return [];
+  return childrenOf(value).flatMap((entry) => stringsIn(valueAt(entry, 'path')));
+};
+
 /**
- * Every tracked tsconfig, parsed.
+ * Every tracked tsconfig, read from the PARSE.
  *
- * A tsconfig is JSONC and `JSON.parse` cannot read one, so the text is wrapped
- * in parentheses — making it a TypeScript object literal — and handed to the
- * parser the gates already share.  Blanking comments through the compiler's own
- * trivia ranges is exactly what `blankComments` exists for; writing a fourth
- * hand-rolled comment stripper to read a config file is the habit `ts-source.ts`
- * was built to end.
+ * A tsconfig is JSONC, so `JSON.parse` cannot read one: comments and — the
+ * shape that matters here — a TRAILING COMMA, which TypeScript accepts in both
+ * object and array literals. Converting the text back through strict JSON would
+ * throw on a perfectly valid config and fail `pnpm test` for it, so nothing is
+ * converted: the text is wrapped in parentheses, making it a TypeScript object
+ * literal, and the two fields are read off the syntax tree the parser already
+ * built. Comments are trivia the parser drops on its own, and a trailing comma
+ * is grammar it accepts, so both cost nothing here.
+ *
+ * The compiler's own `parseConfigFileTextToJson` would be the obvious tool, but
+ * the TypeScript 7 package this repository pins does not expose it.
  */
+function readConfigs(files: ReadonlyArray<{ path: string; text: string }>): TrackedConfig[] {
+  const sources = files.map(({ path, text }) => ({
+    // `.ts` so the parser reads TypeScript grammar rather than guessing.
+    path: `${path}.ts`,
+    content: `(${text})`,
+  }));
+
+  return withParsedSources(sources, (parsed) =>
+    parsed.map(({ path, root }) => {
+      // The parenthesised config is the first object literal in the file.
+      let config: Syntax | undefined;
+      for (const node of walk(root)) {
+        if (node.kind === SyntaxKind.ObjectLiteralExpression) {
+          config = node;
+          break;
+        }
+      }
+      return {
+        path: path.replace(/\.ts$/, ''),
+        extends: stringsIn(valueAt(config, 'extends')),
+        references: referencePathsIn(config),
+      };
+    }),
+  );
+}
+
 function trackedConfigs(): TrackedConfig[] {
   const paths = execFileSync('git', ['ls-files', '*tsconfig*.json'], {
     cwd: ROOT,
@@ -69,25 +116,38 @@ function trackedConfigs(): TrackedConfig[] {
     .split('\n')
     .filter((each) => each.length > 0);
 
-  const sources = paths.map((path) => ({
-    // `.ts` so the parser reads TypeScript grammar rather than guessing.
-    path: `${path}.ts`,
-    content: `(${readFileSync(resolve(ROOT, path), 'utf-8')})`,
-  }));
-
-  return withParsedSources(sources, (parsed) =>
-    parsed.map(({ path, content, root }) => {
-      // Drop the parentheses this added back off before reading it as JSON.
-      const json = blankComments(content, root).slice(1, -1);
-      const config: unknown = JSON.parse(json);
-      return {
-        path: path.replace(/\.ts$/, ''),
-        extends: extendsOf(config),
-        references: referencesOf(config),
-      };
-    }),
+  return readConfigs(
+    paths.map((path) => ({ path, text: readFileSync(resolve(ROOT, path), 'utf-8') })),
   );
 }
+
+describe('reading a tsconfig', () => {
+  // JSONC is not JSON.  Converting the text back through `JSON.parse` threw on
+  // a TRAILING COMMA — grammar TypeScript accepts in both object and array
+  // literals — which would have failed `pnpm test` over a perfectly valid
+  // compiler config.  Read off the parse, neither costs anything.
+  it.each([
+    ['line comments', '// leading\n{ "extends": "../base.json" /* inline */ }'],
+    ['a trailing comma in an object', '{ "extends": "../base.json", }'],
+    ['a trailing comma in an array', '{ "extends": ["../base.json",] }'],
+    ['both, together', '{\n  // why\n  "extends": ["../base.json",],\n}'],
+  ])('reads `extends` through %s', (_label, text) => {
+    expect(readConfigs([{ path: 'x/tsconfig.json', text }])[0]?.extends).toEqual(['../base.json']);
+  });
+
+  it('reads `references` through a trailing comma in every position', () => {
+    const text = '{\n  "references": [\n    { "path": "../a/tsconfig.json", },\n  ],\n}';
+    expect(readConfigs([{ path: 'x/tsconfig.json', text }])[0]?.references).toEqual([
+      '../a/tsconfig.json',
+    ]);
+  });
+
+  it('reads a config that declares neither field', () => {
+    expect(readConfigs([{ path: 'x/tsconfig.json', text: '{ "compilerOptions": {} }' }])).toEqual([
+      { path: 'x/tsconfig.json', extends: [], references: [] },
+    ]);
+  });
+});
 
 describe('tsconfig project references', () => {
   const configs = trackedConfigs();
