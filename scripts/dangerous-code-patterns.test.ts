@@ -1224,6 +1224,7 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     ['a computed template key', 'const { [`eval`]: run } = globalThis;'],
     ['a string-literal key', "const { 'eval': run } = globalThis;"],
     ['a computed key held in a const', "const k = 'eval'; const { [k]: run } = globalThis;"],
+    // A key that folds COMPLETELY still resolves; only a partial one does not.
     ['a COMPOSED computed key', "const { ['ev' + 'al']: run } = globalThis;"],
     ['the constructor through a computed key', "const { ['Function']: F } = globalThis;"],
     ['a computed key off `self`', "const { ['eval']: run } = self;"],
@@ -1265,6 +1266,17 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
   });
 
   it.each([
+    // A key is the WHOLE value, not a prefix.  Folding `'eval' + String('Safe')`
+    // to its known head named `eval` and rejected a source that only ever
+    // selects `evalSafe` — a gate refusing correct code, which is worse than one
+    // that misses.  The prefix helper stays where a prefix IS the answer: a URL
+    // scheme.
+    [
+      'a key with a known prefix and an unknown tail',
+      "const { ['eval' + String('Safe')]: run } = globalThis;",
+    ],
+    ['the same shape as an element access', "globalThis['eval' + String('Safe')](payload);"],
+    ['a template key with a hole', `const { [\`eval${'$'}{suffix}\`]: run } = globalThis;`],
     // The SOURCE is resolved, exactly as a property receiver is, so a computed
     // key off an unrelated record is not the global.
     ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],

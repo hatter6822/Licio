@@ -360,6 +360,39 @@ function staticPrefix(
 }
 
 /**
+ * The COMPLETE static string an expression denotes, or `null` when any part of
+ * it is unknown.
+ *
+ * Distinct from {@link staticPrefix}, and deliberately so.  A URL SCHEME check
+ * depends only on the leading text, so a known prefix with an unknown tail is a
+ * usable answer there.  A property KEY is the whole value: `'eval' +
+ * String('Safe')` has the prefix `eval` and names `evalSafe`, which is not the
+ * global — reading the prefix as the key made a harmless source fail
+ * `lint:security`.  Concatenation folds only when BOTH sides fold, and a
+ * template with holes folds to nothing.
+ */
+function staticText(node: Syntax | undefined, hop = 0): string | null {
+  const target = unwrap(node);
+  if (target === undefined || hop > MAX_HOPS) return null;
+  if (
+    target.kind === SyntaxKind.StringLiteral ||
+    target.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return target.text ?? '';
+  }
+  if (
+    target.kind === SyntaxKind.BinaryExpression &&
+    target.operatorToken?.kind === SyntaxKind.PlusToken
+  ) {
+    const left = staticText(target.left, hop + 1);
+    if (left === null) return null;
+    const right = staticText(target.right, hop + 1);
+    return right === null ? null : left + right;
+  }
+  return null;
+}
+
+/**
  * The static property name a KEY expression denotes, whatever spelling reaches
  * it.
  *
@@ -378,8 +411,10 @@ function staticKeyOf(argument: Syntax | undefined, project: Project): string | u
   // A literal the checker did not narrow (a `.js` source has no `as const`).
   if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
   // A key the checker did not narrow, including a COMPOSED one:
-  // `node['inner' + 'HTML']` names the same property as the plain spelling.
-  return staticPrefix(argument) ?? undefined;
+  // `node['inner' + 'HTML']` names the same property as the plain spelling —
+  // but only when the WHOLE key folds, which is what separates it from a
+  // scheme prefix.
+  return staticText(argument) ?? undefined;
 }
 
 /**
