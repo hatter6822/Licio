@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { HISTORICAL_EXEMPTIONS, isHistoricallyExempt } from '../identifier-limits.js';
 
 const DB_URL = process.env['DATABASE_URL'];
 const COMMONS = 'c0000000-0000-4000-8000-000000000000';
@@ -52,9 +53,33 @@ async function readStatements(tag: string): Promise<string[]> {
     .filter((s) => s.length > 0);
 }
 
+/**
+ * A truncation Postgres REPORTED while applying a migration.
+ *
+ * `NOTICE: identifier "…" will be truncated to "…"` is Postgres's own account
+ * of the defect, and it is emitted for every route a name can arrive by — a
+ * literal `CREATE`, a name Drizzle derived, and a name built at runtime inside
+ * `EXECUTE format(…)`.  Nothing static covers that last one in general, which
+ * is why this is the authoritative half of the 63-byte check and
+ * `check:sql-identifiers` is the fast pre-check beside it.
+ */
+interface Truncation {
+  readonly tag: string;
+  readonly message: string;
+}
+
+const TRUNCATION = /identifier .* will be truncated/i;
+
+/** The name Postgres was GIVEN, out of its own truncation notice. */
+function intendedName(message: string): string | undefined {
+  return /identifier "([^"]+)" will be truncated/i.exec(message)?.[1];
+}
+
 describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
   let root: ReturnType<typeof postgres>;
   let client: ReturnType<typeof postgres>;
+  const truncations: Truncation[] = [];
+  let applying = '';
   const dbName = `licio_wsq_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
 
   // Seeded ids (captured for the post-migration assertions).
@@ -74,12 +99,20 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
     await root.unsafe(`CREATE DATABASE "${dbName}"`);
     const url = new URL(DB_URL as string);
     url.pathname = `/${dbName}`;
-    client = postgres(url.toString(), { max: 1 });
+    client = postgres(url.toString(), {
+      max: 1,
+      // Postgres tells us when it truncates; the only thing needed is to listen.
+      onnotice: (notice) => {
+        const message = String(notice['message'] ?? '');
+        if (TRUNCATION.test(message)) truncations.push({ tag: applying, message });
+      },
+    });
 
     const tags = await migrationTags();
 
     // --- Phase 1: the pre-WS-Q schema (idx 0–13) -----------------------------
     for (const tag of tags.slice(0, WSQ_BOUNDARY)) {
+      applying = tag;
       for (const stmt of await readStatements(tag)) await client.unsafe(stmt);
     }
 
@@ -126,8 +159,10 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
 
     // --- Phase 2: idx 14 → END (the WS-Q chain + every later migration) -------
     for (const tag of tags.slice(WSQ_BOUNDARY)) {
+      applying = tag;
       for (const stmt of await readStatements(tag)) await client.unsafe(stmt);
     }
+    applying = '';
   }, 120_000);
 
   afterAll(async () => {
@@ -224,97 +259,41 @@ describe.skipIf(!DB_URL)('WS-Q.6.1 migration validation harness', () => {
     expect((commons[0] as unknown as { n: number }).n).toBe(1);
   });
 
-  // Schema hygiene (migration 0097): Postgres SILENTLY TRUNCATES an identifier
-  // over `NAMEDATALEN - 1` (63 bytes) and emits only a NOTICE, so two different
-  // intended names that agree on their first 63 bytes collapse to one stored
-  // name — a duplicate-object failure at migrate time, or a later DROP/RENAME
-  // hitting whichever survived.  `pnpm check:sql-identifiers` scans the
-  // hand-authored SQL; this asserts the SAME property over the REAL post-chain
-  // catalog, which additionally covers names Drizzle DERIVES rather than spells
-  // out.  Runs against the harness's throwaway database, so it sees the full
-  // chain exactly as a fresh deployment would.
-  it('leaves NO truncated identifier in the catalog after the full chain', async () => {
-    // Postgres cannot STORE a name longer than 63 bytes, so querying for
-    // `length > 63` is necessarily empty and proves nothing. The only evidence
-    // truncation leaves behind is a name sitting EXACTLY at the cap — so that
-    // is what this checks, against an explicit allowlist of the names known to
-    // be legitimately 63 bytes.
-    //
-    // This is the half the static scanner cannot cover: it reads the migration
-    // SQL, so it sees names that are SPELLED OUT, while an inline
-    // `.references()` lets Drizzle DERIVE a name that never appears there. A
-    // derived name over the limit reaches the catalog already truncated, and
-    // this assertion is what notices.
-    const LEGITIMATE_63_BYTE_NAMES = [
-      // Exactly 63 bytes as written — stored whole, never truncated. Adding to
-      // this list means asserting the same of a NEW name; the safer fix is
-      // almost always to shorten it.
-      'model_ratification_ballot_vote_id_model_ratification_vote_id_fk',
-    ];
-    // OCTET_LENGTH, not LENGTH: `NAMEDATALEN` bounds the identifier's BYTE
-    // length, while `length()` counts CHARACTERS. A non-ASCII name truncated to
-    // 63 bytes holds fewer than 63 characters — a 61-byte ASCII prefix plus one
-    // `é` is 62 characters — so a character-counting predicate omits exactly
-    // the truncated rows this assertion exists to surface.
-    //
-    // Truncation also clips on a CHARACTER boundary, so a multibyte name can
-    // land well below 63 bytes. Worst case in UTF-8: the character straddling
-    // byte 63 is four bytes long and starts at byte 61, so the kept prefix ends
-    // at byte 60 — three bytes of boundary loss, not one. The multibyte arm
-    // therefore starts at `>= 60`; it is gated on the byte and character counts
-    // DIFFERING, so it cannot widen the ASCII case (where clipping is exact)
-    // into noise.
-    const MULTIBYTE_FLOOR = 63 - 3;
-    const atCap = await client.unsafe(
-      `SELECT c.conname AS name
-         FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
-        WHERE octet_length(c.conname) >= 63
-           OR (octet_length(c.conname) >= ${MULTIBYTE_FLOOR}
-               AND octet_length(c.conname) <> length(c.conname))
-       UNION ALL
-       SELECT c.relname
-         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE (octet_length(c.relname) >= 63
-           OR (octet_length(c.relname) >= ${MULTIBYTE_FLOOR}
-               AND octet_length(c.relname) <> length(c.relname)))
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')`,
+  // POSTGRES ITSELF reports every truncation, naming the identifier it was
+  // given and the one it stored.  That is the whole check: it needs no parser,
+  // and it covers the three routes a name arrives by — spelled in the SQL,
+  // DERIVED by Drizzle, or composed at runtime inside `EXECUTE format(…)`,
+  // the last of which nothing static can resolve in general.
+  //
+  // What this replaces was necessarily indirect: Postgres cannot STORE a name
+  // over 63 bytes, so a query for `length > 63` is empty by construction, and
+  // the only static evidence was a name of EXACTLY 63 bytes weighed against an
+  // allowlist of legitimate ones.  A notice says what happened instead of
+  // inferring it from what survived.
+  it('applies every migration without Postgres truncating an identifier', () => {
+    const unexpected = truncations.filter(
+      (each) => !isHistoricallyExempt(intendedName(each.message) ?? '', each.tag),
     );
-    const unexpected = atCap
-      .map((r) => (r as unknown as { name: string }).name)
-      .filter((name) => !LEGITIMATE_63_BYTE_NAMES.includes(name));
-    // A name here is either a genuine 63-byte identifier (add it above, having
-    // checked it) or the visible residue of a silent truncation (shorten it).
-    expect(unexpected).toEqual([]);
+    expect(
+      unexpected.map((each) => `${each.tag}: ${each.message}`),
+      'Postgres truncated an identifier while applying the migration chain. Two intended ' +
+        'names that agree on their first 63 bytes collapse to one stored name — give the ' +
+        'constraint/index an explicit shorter name.',
+    ).toEqual([]);
+  });
 
-    // The five FKs migration 0097 renamed now carry their short names, and the
-    // truncated originals are gone.
-    const named = await client.unsafe(
-      `SELECT conname FROM pg_constraint
-        WHERE conname IN (
-          'debate_arenas_challenger_contribution_fk',
-          'debate_arenas_target_contribution_fk',
-          'steward_governance_vote_election_fk',
-          'room_governance_prompt_model_fk',
-          'room_agent_binding_prompt_fk')
-        ORDER BY conname`,
+  it('sees every exempted truncation actually happen (no stale entry)', () => {
+    // The exemptions describe applied HISTORY, so each one must still be
+    // observed.  An entry that stops matching means the migration it excuses
+    // has changed, and the excuse should go with it — the same allowlist
+    // discipline the static gate keeps.
+    const observed = new Set(
+      truncations.flatMap((each) => {
+        const name = intendedName(each.message);
+        return name === undefined ? [] : [name];
+      }),
     );
-    expect(named.map((r) => (r as unknown as { conname: string }).conname)).toEqual([
-      'debate_arenas_challenger_contribution_fk',
-      'debate_arenas_target_contribution_fk',
-      'room_agent_binding_prompt_fk',
-      'room_governance_prompt_model_fk',
-      'steward_governance_vote_election_fk',
-    ]);
-
-    const leftovers = await client.unsafe(
-      `SELECT conname FROM pg_constraint WHERE conname IN (
-         'debate_arenas_challenger_contribution_id_contributions_contribu',
-         'debate_arenas_target_contribution_id_contributions_contribution',
-         'steward_governance_vote_election_id_steward_election_election_i',
-         'room_governance_prompt_model_id_room_governance_model_model_id_',
-         'room_agent_binding_prompt_id_room_governance_prompt_prompt_id_f')`,
-    );
-    expect(leftovers).toEqual([]);
+    expect([...HISTORICAL_EXEMPTIONS.keys()].filter((name) => !observed.has(name))).toEqual([]);
   });
 
   // The renamed constraints must still ENFORCE what they always did — a rename

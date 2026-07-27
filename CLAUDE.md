@@ -78,8 +78,13 @@ pnpm check:dead-exports             # no exported VALUE is referenced nowhere (N
                                     #   narrower, NOT-in-CI report of exports confined to their own file
 pnpm check:a11y-hue-usage           # `text-<hue>` (3:1 in dark mode) is never used for NORMAL text —
                                     #   only `text-<hue>-on-soft` clears WCAG 1.4.3 AA there
-pnpm check:sql-identifiers          # no migration identifier over Postgres's 63-byte limit
-                                    #   (over-long names TRUNCATE silently and can collide)
+pnpm check:sql-identifiers          # no migration identifier AT Postgres's 63-byte limit, read with
+                                    #   the server's own parser (over-long names TRUNCATE silently and
+                                    #   can collide).  The parser applies the limit too, so a cut name
+                                    #   is indistinguishable from a genuine 63 — declare the genuine
+                                    #   ones; the gated migration harness settles it authoritatively by
+                                    #   listening for Postgres's own truncation NOTICE, which also
+                                    #   covers Drizzle-derived and `EXECUTE format()` names
 pnpm check:governance-kyc           # every governance-participation POST enforces the KYC guard
 pnpm check:neutrality               # WS-I ranking neutrality · check:adversarial — WS-O.4.5 ensemble suite
 pnpm check:lcap-scheduler           # WS-R lane anti-starvation
