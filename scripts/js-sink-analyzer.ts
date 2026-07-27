@@ -545,7 +545,7 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * Building a registry empty and filling it afterwards is the ordinary way one
    * is populated, so reading only the literal left the whole pattern open.
    */
-  const written = new Map<string, Syntax>();
+  const written = new Map<string, Syntax[]>();
   /**
    * Values assigned to a NAME after it was declared.
    *
@@ -596,7 +596,12 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       const name = propertyName(target);
       const key = base === undefined ? undefined : receiverKey(base);
       if (name === undefined || key === undefined) continue;
-      written.set(`${key} ${name}`, value);
+      // EVERY write, not just the last: `o.run = eval; o.run(payload);
+      // o.run = safe` runs the sink before it is overwritten, and keeping one
+      // source occurrence per slot lost exactly that.  The relation asks what a
+      // slot CAN hold, which is all of them.
+      const slot = `${key} ${name}`;
+      written.set(slot, [...(written.get(slot) ?? []), value]);
     }
   };
 
@@ -718,11 +723,15 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
   };
 
   /** What a container holds at `name` — from a later write, or from its literal. */
-  const heldAt = (base: Syntax, name: string, hop: number): Syntax | undefined => {
+  const heldAt = (base: Syntax, name: string, hop: number): Syntax | undefined =>
+    heldValues(base, name, hop)[0];
+
+  /** EVERY value a slot can hold — writes first, then what the literal says. */
+  const heldValues = (base: Syntax, name: string, hop: number): Syntax[] => {
     const key = receiverKey(base);
-    const assigned = key === undefined ? undefined : written.get(`${key} ${name}`);
-    if (assigned !== undefined) return assigned;
-    if (hop > MAX_HOPS) return undefined;
+    const assigned = key === undefined ? [] : (written.get(`${key} ${name}`) ?? []);
+    if (assigned.length > 0) return assigned;
+    if (hop > MAX_HOPS) return [];
     // `Proxy.revocable(target, handler)` hands back `{ proxy, revoke }`, and
     // its `proxy` IS the target — the only container in this file that is
     // built by a call rather than written as a literal, so nothing else could
@@ -734,14 +743,14 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
           if (!isGlobalNamed(callee.expression, 'Proxy')) continue;
           if (propertyName(callee) !== 'revocable') continue;
           const wrapped = argumentsOf(call)[0];
-          if (wrapped !== undefined) return wrapped;
+          if (wrapped !== undefined) return [wrapped];
         }
       }
     }
     // `const o = { run: eval }`, `const h = [eval]`, and the nested forms —
     // reached through the binding rather than through a table beside the scan.
     const literal = containerOf(base, hop);
-    if (literal === undefined) return undefined;
+    if (literal === undefined) return [];
     if (literal.kind === SyntaxKind.ObjectLiteralExpression) {
       for (const member of childrenOf(literal)) {
         if (member.name === undefined) continue;
@@ -757,17 +766,18 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
           member.kind === SyntaxKind.GetAccessor ||
           member.kind === SyntaxKind.MethodDeclaration
         ) {
-          return member;
+          return [member];
         }
-        return member.kind === SyntaxKind.ShorthandPropertyAssignment
-          ? member.name
-          : member.initializer;
+        const held =
+          member.kind === SyntaxKind.ShorthandPropertyAssignment ? member.name : member.initializer;
+        return held === undefined ? [] : [held];
       }
-      return undefined;
+      return [];
     }
     if (literal.kind === SyntaxKind.ArrayLiteralExpression) {
       const index = Number(name);
-      return Number.isInteger(index) ? childrenOf(literal)[index] : undefined;
+      const at = Number.isInteger(index) ? childrenOf(literal)[index] : undefined;
+      return at === undefined ? [] : [at];
     }
     if (
       literal.kind === SyntaxKind.ClassDeclaration ||
@@ -781,13 +791,15 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
           member.kind === SyntaxKind.MethodDeclaration ||
           member.kind === SyntaxKind.GetAccessor
         ) {
-          return member;
+          return [member];
         }
-        if (member.kind === SyntaxKind.PropertyDeclaration) return member.initializer;
+        if (member.kind === SyntaxKind.PropertyDeclaration) {
+          return member.initializer === undefined ? [] : [member.initializer];
+        }
       }
-      return undefined;
+      return [];
     }
-    return undefined;
+    return [];
   };
 
   /**
@@ -841,7 +853,9 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       // `const o = { a: Object.assign }; o.a(node, { innerHTML: p })`.
       const name = propertyName(target);
       const base = target.expression;
-      if (name !== undefined && base !== undefined) add(heldAt(base, name, hop + 1));
+      if (name !== undefined && base !== undefined) {
+        for (const held of heldValues(base, name, hop + 1)) add(held);
+      }
       return found;
     }
     if (target.kind === SyntaxKind.ConditionalExpression) {
@@ -1244,9 +1258,10 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       const base = target.expression;
       if (name === undefined || base === undefined) return [];
       const from: Value[] = [];
-      // What was WRITTEN into this slot, and what its literal holds.
-      const held = heldAt(base, name, 0);
-      if (held !== undefined) from.push(nodeValue(held));
+      // What was WRITTEN into this slot, and what its literal holds — ALL of
+      // them, since the question is what the slot can hold rather than what it
+      // holds last.
+      for (const held of heldValues(base, name, 0)) from.push(nodeValue(held));
       if (isGlobalReceiver(base)) from.push(globalValue(name));
       // `F.call(…)` still runs `F`; an invoked `.constructor` is `Function`.
       if (INVOKERS.has(name)) from.push(nodeValue(base));
@@ -1497,7 +1512,9 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
    * which is why they are named here: no parse answers "does this invoke a
    * setter", and the set is closed and small.
    */
-  const reflectiveWrites = (call: Syntax): Array<{ at: Syntax; property: string; on: Syntax }> => {
+  const reflectiveWrites = (
+    call: Syntax,
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
     // Resolved through the relation, like the invocation helpers: `const
     // assign = Object.assign; assign(node, { innerHTML: payload })` reaches the
     // same setter, and a copy is the cheapest way past a scan matching syntax.
@@ -1520,20 +1537,27 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     call: Syntax,
     args: readonly Syntax[],
     target: Syntax,
-  ): Array<{ at: Syntax; property: string; on: Syntax }> => {
-    const writes: Array<{ at: Syntax; property: string; on: Syntax }> = [];
+  ): Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> => {
+    const writes: Array<{ at: Syntax; property: string; on: Syntax; value?: Syntax }> = [];
     /** Every statically-named member of an object literal. */
-    const members = (source: Syntax | undefined): Array<{ at: Syntax; property: string }> => {
+    const members = (
+      source: Syntax | undefined,
+    ): Array<{ at: Syntax; property: string; value?: Syntax }> => {
       const literal = unwrap(source);
       if (literal?.kind !== SyntaxKind.ObjectLiteralExpression) return [];
-      const named: Array<{ at: Syntax; property: string }> = [];
+      const named: Array<{ at: Syntax; property: string; value?: Syntax }> = [];
       for (const member of childrenOf(literal)) {
         if (member.name === undefined) continue;
         const property =
           member.name.kind === SyntaxKind.ComputedPropertyName
             ? staticPrefix(member.name.expression)
             : nameOf(member.name);
-        if (property !== null && property !== undefined) named.push({ at: member, property });
+        if (property === null || property === undefined) continue;
+        const value =
+          member.kind === SyntaxKind.ShorthandPropertyAssignment ? member.name : member.initializer;
+        named.push(
+          value === undefined ? { at: member, property } : { at: member, property, value },
+        );
       }
       return named;
     };
@@ -1544,12 +1568,20 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     if (isGlobalNamed(callee.expression, 'Object')) {
       if (method === 'assign') {
         for (const source of args.slice(1)) {
-          for (const { at, property } of members(source)) writes.push({ at, property, on: target });
+          for (const each of members(source)) writes.push({ ...each, on: target });
         }
         return writes;
       }
       if (method === 'defineProperties') {
-        for (const { at, property } of members(args[1])) writes.push({ at, property, on: target });
+        // A descriptor map: each member's own `value` is what lands in the slot.
+        for (const each of members(args[1])) {
+          const inner = each.value === undefined ? undefined : members(each.value)[0]?.value;
+          writes.push(
+            inner === undefined
+              ? { at: each.at, property: each.property, on: target }
+              : { at: each.at, property: each.property, on: target, value: inner },
+          );
+        }
         return writes;
       }
     }
@@ -1563,7 +1595,51 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     const key = args[1];
     const property = key === undefined ? null : staticPrefix(key);
     if (property === null) return [];
-    return [{ at: call, property, on: target }];
+    // `Reflect.set` takes the value third; `Object.defineProperty` wraps it in
+    // a descriptor whose own `value` is what the slot receives.
+    const supplied =
+      method === 'set'
+        ? args[2]
+        : args[2] === undefined
+          ? undefined
+          : ((): Syntax | undefined => {
+              const descriptor = unwrap(args[2]);
+              if (descriptor?.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+              for (const member of childrenOf(descriptor)) {
+                if (member.name === undefined || nameOf(member.name) !== 'value') continue;
+                return member.initializer;
+              }
+              return undefined;
+            })();
+    return [
+      supplied === undefined
+        ? { at: call, property, on: target }
+        : { at: call, property, on: target, value: supplied },
+    ];
+  };
+
+  /**
+   * Reflective writes, recorded into the SAME container table as `o.run = …`.
+   *
+   * `Object.assign(o, { run: eval })` then `o.run(payload)` runs the global.
+   * The reflective setters were read for member-sink REPORTING only, so the
+   * value they place never reached the slot and laundering a sink through one
+   * of them walked past the relation entirely.
+   *
+   * A second pass because it needs `reflectiveWrites`, which needs the
+   * resolution built above it.
+   */
+  const collectReflectiveWrites = (): void => {
+    for (const node of walk(root)) {
+      if (node.kind !== SyntaxKind.CallExpression) continue;
+      for (const write of reflectiveWrites(node)) {
+        if (write.value === undefined) continue;
+        const key = receiverKey(write.on);
+        if (key === undefined) continue;
+        const slot = `${key} ${write.property}`;
+        written.set(slot, [...(written.get(slot) ?? []), write.value]);
+      }
+    }
   };
 
   /** Where the code argument sits in a `Reflect.apply` / `Reflect.construct`. */
@@ -1577,6 +1653,10 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
     }
     return { index: 2, inArray: true };
   };
+
+  // After BOTH collectors, so a slot filled reflectively is visible to every
+  // question asked below.
+  collectReflectiveWrites();
 
   return {
     sinkNames,

@@ -206,6 +206,20 @@ app.post('/rooms/:roomId/governance/vote', async (c) => {
     expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
   });
 
+  it('rejects a branch that exits only on SOME paths', () => {
+    // `if (denial) { if (shouldEnforce) return … }` refuses only when the inner
+    // condition holds, so the presence of a return in the branch proves
+    // nothing — the refusal has to dominate.
+    const guard = 'if (denial) { if (shouldEnforce) return c.json(denial, 403); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(false);
+  });
+
+  it('accepts a branch where BOTH paths exit', () => {
+    const guard =
+      'if (denial) { if (x) return c.json(denial, 403); else throw new HTTPException(403); }';
+    expect(extractMutationRoutes('f.ts', route(guard))[0]?.guarded).toBe(true);
+  });
+
   it('rejects a branch whose only return is inside a nested callback', () => {
     // `if (denial) { const f = () => { return 1; }; }` declares a callback and
     // exits nothing, so a flat walk read a branch that falls straight through

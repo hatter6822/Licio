@@ -986,6 +986,34 @@ describe('sinks that are not written as sinks', () => {
     expect(fires(code)).toBe(false);
   });
 
+  it.each([
+    // The slot table kept only the LAST write, so a sink invoked before being
+    // overwritten disappeared.  What a slot CAN hold is all of them.
+    ['a sink overwritten after use', 'const o = {}; o.run = eval; o.run(payload); o.run = safe;'],
+    [
+      'a sink written after a safe one',
+      'const o = {}; o.run = safe; o.run = eval; o.run(payload);',
+    ],
+    // A reflective setter fills a slot exactly as `o.run = eval` does.
+    [
+      'a sink assigned reflectively',
+      'const o = {}; Object.assign(o, { run: eval }); o.run(payload);',
+    ],
+    ['a sink set reflectively', "const o = {}; Reflect.set(o, 'run', eval); o.run(payload);"],
+    [
+      'a sink defined reflectively',
+      "const o = {}; Object.defineProperty(o, 'run', { value: eval }); o.run(payload);",
+    ],
+  ])('catches %s', (_label, code) => {
+    expect(fires(code)).toBe(true);
+  });
+
+  it('does not flag a container whose every write is harmless', () => {
+    expect(
+      fires('const o = {}; o.run = safe; Object.assign(o, { run: other }); o.run(payload);'),
+    ).toBe(false);
+  });
+
   it('does not flag a Proxy over something harmless', () => {
     expect(fires('const p = new Proxy(handler, {}); p(payload)')).toBe(false);
   });

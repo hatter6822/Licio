@@ -197,15 +197,6 @@ export interface MutationRoute {
  *  guarded or allowlisted.  GET/HEAD are reads and are judged nowhere. */
 const MUTATION_METHODS: ReadonlySet<string> = new Set(['post', 'put', 'patch', 'delete']);
 
-/** Wrappers that yield exactly the expression they wrap. */
-/** Functions whose `return` belongs to THEM, not to the branch they sit in. */
-const NESTED_FUNCTION: ReadonlySet<number> = new Set([
-  SyntaxKind.ArrowFunction,
-  SyntaxKind.FunctionExpression,
-  SyntaxKind.FunctionDeclaration,
-  SyntaxKind.MethodDeclaration,
-]);
-
 /** Equality operators, whose polarity depends on what is on the other side. */
 const EQUALITY: ReadonlySet<number> = new Set([
   SyntaxKind.EqualsEqualsEqualsToken,
@@ -221,6 +212,7 @@ const COMPOSITION: ReadonlySet<number> = new Set([
   SyntaxKind.QuestionQuestionToken,
 ]);
 
+/** Wrappers that yield exactly the expression they wrap. */
 const TRANSPARENT: ReadonlySet<number> = new Set([
   SyntaxKind.ParenthesizedExpression,
   SyntaxKind.AsExpression,
@@ -465,20 +457,48 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   /** Whether a statement or expression contains a RETURN or a THROW. */
   const refusesWithin = (node: Syntax | undefined): boolean => {
     if (node === undefined) return false;
-    // PRUNED at a nested function: `if (denial) { const f = () => { return 1; } }`
-    // declares a callback and exits nothing, so a flat walk read a branch that
-    // falls straight through as a refusal.
-    let refuses = false;
-    const visit = (each: Syntax): void => {
-      if (refuses || NESTED_FUNCTION.has(each.kind)) return;
-      if (each.kind === SyntaxKind.ReturnStatement || each.kind === SyntaxKind.ThrowStatement) {
-        refuses = true;
-        return;
-      }
-      each.forEachChild(visit);
-    };
-    visit(node);
-    return refuses;
+    // EVERY PATH must exit, not merely some.  `if (denial) { if (shouldEnforce)
+    // return c.json(denial, 403); }` refuses only when the inner condition
+    // holds, and an ineligible member walks past when it does not — so the
+    // presence of a `return` somewhere in the branch proves nothing.
+    //
+    // PRUNED at a nested function too: `if (denial) { const f = () => {
+    // return 1; } }` declares a callback and exits nothing.
+    return alwaysExits(node);
+  };
+
+  /**
+   * Whether control ALWAYS leaves the handler from this statement.
+   *
+   * The ordinary definite-exit question: a `return`/`throw` exits; a block
+   * exits if any statement in it does (nothing after it runs); an `if` exits
+   * only when BOTH branches do, which is what an `else`-less `if` fails.
+   */
+  const statementsOf = (node: Syntax): Syntax[] => {
+    const children: Syntax[] = [];
+    node.forEachChild((child: Syntax) => {
+      children.push(child);
+    });
+    return children;
+  };
+
+  const alwaysExits = (node: Syntax | undefined): boolean => {
+    if (node === undefined) return false;
+    if (node.kind === SyntaxKind.ReturnStatement || node.kind === SyntaxKind.ThrowStatement) {
+      return true;
+    }
+    if (node.kind === SyntaxKind.Block) {
+      return statementsOf(node).some((statement) => alwaysExits(statement));
+    }
+    if (node.kind === SyntaxKind.IfStatement) {
+      return alwaysExits(node.thenStatement) && alwaysExits(node.elseStatement);
+    }
+    // A labelled or `try` body can exit too, but only through statements this
+    // already recognises; anything else — a loop, an expression — does not.
+    if (node.kind === SyntaxKind.TryStatement || node.kind === SyntaxKind.LabeledStatement) {
+      return statementsOf(node).some((child) => alwaysExits(child));
+    }
+    return false;
   };
 
   /**
