@@ -44,10 +44,15 @@ export interface Syntax {
   readonly propertyName?: Syntax;
   readonly initializer?: Syntax;
   readonly body?: Syntax;
+  readonly moduleSpecifier?: Syntax;
+  readonly token?: SyntaxKind;
   readonly argumentExpression?: Syntax;
   readonly operatorToken?: { readonly kind: SyntaxKind };
   readonly left?: Syntax;
   readonly right?: Syntax;
+  readonly condition?: Syntax;
+  readonly thenStatement?: Syntax;
+  readonly elseStatement?: Syntax;
   readonly whenTrue?: Syntax;
   readonly whenFalse?: Syntax;
   readonly head?: { readonly text?: string };

@@ -10,9 +10,9 @@ import {
   checkAdapterCoverage,
   checkAdapterPurity,
   checkEnvKeys,
+  collectAdapters,
   collectApiSourceFiles,
   runProdParityGate,
-  stripComments,
 } from './check-prod-parity.js';
 
 const files = (entries: Record<string, string>): Map<string, string> =>
@@ -207,36 +207,45 @@ describe('leg 3 — production-adapter purity (the upload-bytes failure shape)',
   });
 
   it('never trips on comments', () => {
-    const source = stripComments('// readonly #x = new Map<string, string>();\nconst y = 1;');
+    // RAW source, no pre-stripping: the gate reads the parse, so a comment is
+    // not a node and cannot be mistaken for state.
+    const source = '// readonly #x = new Map<string, string>();\nconst y = 1;';
     expect(checkAdapterPurity(files({ 'a/drizzle-a.ts': source }), [])).toEqual([]);
   });
-});
 
-describe('stripComments (tokenizer)', () => {
-  it('strips line + block comments while preserving newlines (line numbers hold)', () => {
-    const stripped = stripComments('a; // gone\n/* also\ngone */ b;');
-    expect(stripped).not.toContain('gone');
-    expect(stripped).toContain('a;');
-    expect(stripped).toContain('b;');
-    // Newlines survive so leg-3 finding line numbers stay accurate.
-    expect(stripped.split('\n')).toHaveLength(3);
-    expect(stripped.split('\n')[2]).toContain('b;');
+  it('scopes to a class BODY without counting braces', () => {
+    // The old scope tracker counted `{` and `}` per line, so a brace inside a
+    // string or template shifted the depth and could end the class region
+    // early — carrying the scan out of the production adapter, or leaving it
+    // inside one it had already left.
+    const source = [
+      'export class DrizzleThing implements Store {',
+      `  readonly label = \`a } brace \${"in {a} template"}\`;`,
+      '  readonly #cache = new Map<string, string>();',
+      '}',
+      'export class InMemoryThing implements Store {',
+      '  readonly #fine = new Map<string, string>();',
+      '}',
+    ].join('\n');
+    const issues = checkAdapterPurity(files({ 'a/thing.ts': source }), []);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toContain('a/thing.ts:3');
   });
 
-  it('respects string and template literals (no mangling of // inside strings)', () => {
-    expect(stripComments("const u = 'https://x/y'; // tail")).toBe(
-      "const u = 'https://x/y';        ",
-    );
-    expect(stripComments('const s = "a // not a comment";')).toBe(
-      'const s = "a // not a comment";',
-    );
-    expect(stripComments('const t = `block /* kept */ inside`;')).toBe(
-      'const t = `block /* kept */ inside`;',
-    );
-  });
-
-  it('honours escapes so an escaped quote cannot desynchronize the states', () => {
-    expect(stripComments("const q = 'it\\'s'; // gone")).toBe("const q = 'it\\'s';        ");
+  it('reads a multi-line implements clause', () => {
+    // Generic arguments and a wrapped clause both broke a single-line regex.
+    const source = [
+      'export class InMemoryWide',
+      '  implements Store<Map<string, number>>, Other',
+      '{',
+      '  readonly #x = 1;',
+      '}',
+      'const made = new InMemoryWide();',
+    ].join('\n');
+    const adapters = collectAdapters(files({ 'a/wide.ts': source }), /^(?:InMemory|Memory)\w*/);
+    expect(adapters).toEqual([
+      { className: 'InMemoryWide', interfaces: ['Store', 'Other'], file: 'a/wide.ts' },
+    ]);
   });
 });
 

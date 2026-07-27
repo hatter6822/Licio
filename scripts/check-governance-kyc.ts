@@ -315,31 +315,90 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
+  /** Every identifier in `scope` that binds to the same declaration as `name`. */
+  const referencesTo = (name: Syntax, scope: Syntax): Syntax[] => {
+    const declaration = project.checker
+      .getSymbolAtPosition(String(root.path), name.getStart())
+      ?.declarations.find((each) => String(each.path) === String(root.path));
+    if (declaration === undefined) return [];
+    const key = `${String(declaration.path)}#${declaration.index}`;
+    const uses: Syntax[] = [];
+    for (const node of walk(scope)) {
+      if (node.kind !== SyntaxKind.Identifier) continue;
+      const found = project.checker
+        .getSymbolAtPosition(String(root.path), node.getStart())
+        ?.declarations.find((each) => String(each.path) === String(root.path));
+      if (found === undefined) continue;
+      if (`${String(found.path)}#${found.index}` === key) uses.push(node);
+    }
+    return uses;
+  };
+
+  /** Whether a statement or expression contains a RETURN or a THROW. */
+  const refusesWithin = (node: Syntax | undefined): boolean => {
+    if (node === undefined) return false;
+    for (const each of walk(node)) {
+      if (each.kind === SyntaxKind.ReturnStatement || each.kind === SyntaxKind.ThrowStatement) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   /**
-   * Whether a call's RESULT is used for anything.
+   * Whether this use of the verdict CONTROLS a refusal.
    *
-   * A guard whose verdict is discarded refuses nobody: `void
-   * checkGovernanceEligibility(id)` and a bare `await checkGovernanceEligibility(id);`
-   * statement both call the helper and both let an ineligible account through.
-   * Middleware is unaffected — `requireGovernanceEligibility()` sits in an
-   * argument list, so its result is consumed by the registration itself.
+   * Not "is the result used" — a verdict can be read, logged and ignored, and
+   * an ineligible account is refused by none of that.  The property that
+   * matters is that the verdict decides whether the handler returns early, so
+   * the walk looks for the verdict reaching a `return`/`throw` directly, or
+   * standing in the CONDITION of an `if`/ternary whose taken branch does.
+   *
+   * Negation, comparison (`=== null`) and logical composition are walked
+   * through, because each is a way of spelling the same test.
    */
-  const resultIsUsed = (call: Syntax): boolean => {
-    let node: Syntax | undefined = call;
-    for (let hop = 0; hop < MAX_HOPS && node?.parent !== undefined; hop += 1) {
-      const parent: Syntax = node.parent;
-      if (parent.kind === SyntaxKind.VoidExpression) return false;
-      if (parent.kind === SyntaxKind.ExpressionStatement) return false;
-      if (parent.kind === SyntaxKind.AwaitExpression || TRANSPARENT.has(parent.kind)) {
+  const controlsARefusal = (use: Syntax): boolean => {
+    let node: Syntax = use;
+    for (let hop = 0; hop < MAX_HOPS; hop += 1) {
+      const parent = node.parent;
+      if (parent === undefined) return false;
+      if (parent.kind === SyntaxKind.ReturnStatement || parent.kind === SyntaxKind.ThrowStatement) {
+        return true;
+      }
+      if (parent.kind === SyntaxKind.IfStatement) {
+        // Only the CONDITION decides anything; the verdict appearing inside a
+        // branch is just a value being used there.
+        if (parent.expression?.getStart() !== node.getStart()) return false;
+        return refusesWithin(parent.thenStatement) || refusesWithin(parent.elseStatement);
+      }
+      if (parent.kind === SyntaxKind.ConditionalExpression) {
+        if (parent.condition?.getStart() !== node.getStart()) return false;
+        if (refusesWithin(parent.whenTrue) || refusesWithin(parent.whenFalse)) return true;
         node = parent;
         continue;
       }
-      return true;
+      // Ways of spelling the same test, all of which keep the verdict in play.
+      if (
+        TRANSPARENT.has(parent.kind) ||
+        parent.kind === SyntaxKind.PrefixUnaryExpression ||
+        parent.kind === SyntaxKind.AwaitExpression ||
+        parent.kind === SyntaxKind.BinaryExpression
+      ) {
+        node = parent;
+        continue;
+      }
+      return false;
     }
-    return true;
+    return false;
   };
 
-  /** Whether the eligibility guard is INVOKED — and heeded — in these arguments. */
+  /**
+   * Whether the eligibility guard is invoked AND its verdict refuses somebody.
+   *
+   * Middleware needs no verdict check: `requireGovernanceEligibility()` is the
+   * refusal, installed in the chain.  A handler-level `checkGovernanceEligibility`
+   * RETURNS a verdict, and calling it decides nothing on its own.
+   */
   const guardedBy = (args: readonly Syntax[]): boolean => {
     for (const argument of args) {
       for (const node of walk(argument)) {
@@ -353,8 +412,25 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
               ? nameOf(callee.name)
               : undefined;
         if (called === undefined || !GUARD_NAMES.has(called)) continue;
-        // Calling the guard is not enforcing it.
-        if (resultIsUsed(node)) return true;
+        if (called === 'requireGovernanceEligibility') return true;
+
+        // The verdict is either this expression, or the name it was bound to.
+        let verdict: Syntax = node;
+        for (let hop = 0; hop < MAX_HOPS; hop += 1) {
+          const parent = verdict.parent;
+          if (parent === undefined) break;
+          if (parent.kind === SyntaxKind.AwaitExpression || TRANSPARENT.has(parent.kind)) {
+            verdict = parent;
+            continue;
+          }
+          break;
+        }
+        const declaration = verdict.parent;
+        const uses =
+          declaration?.kind === SyntaxKind.VariableDeclaration && declaration.name !== undefined
+            ? referencesTo(declaration.name, argument)
+            : [verdict];
+        if (uses.some((use) => controlsARefusal(use))) return true;
       }
     }
     return false;
