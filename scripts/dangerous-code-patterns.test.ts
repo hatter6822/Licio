@@ -574,6 +574,16 @@ describe('aliased sinks', () => {
       'a key composed from an indexed const container',
       "const keys = ['ev', 'al']; globalThis[keys[0] + keys[1]]('x')",
     ],
+    // A slot reached through ANOTHER slot: the descent has to recurse, not
+    // handle one level.
+    [
+      'a key composed from NESTED const containers',
+      "const keys = { part: { a: 'ev' }, b: 'al' }; globalThis[keys.part.a + keys.b]('x')",
+    ],
+    [
+      'a key three containers deep',
+      "const k = { x: { y: { a: 'ev' } }, b: 'al' }; globalThis[k.x.y.a + k.b]('x')",
+    ],
   ])('catches %s', (_label, code) => {
     expect(fires(code)).toBe(true);
   });

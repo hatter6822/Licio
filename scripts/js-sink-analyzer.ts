@@ -537,8 +537,15 @@ function valueAt(
 ): Syntax | undefined {
   const target = unwrap(source);
   if (target === undefined || hop > MAX_HOPS) return undefined;
-  // Reached through a NAME rather than written inline.
-  if (target.kind === SyntaxKind.Identifier) {
+  // Reached through a NAME, or through another SLOT, rather than written
+  // inline.  `keys.part.a` hands `keys.part` in here, so resolving only
+  // identifiers stopped at the first level of nesting; `constantValue` answers
+  // for both, which makes the descent recursive at any depth.
+  if (
+    target.kind === SyntaxKind.Identifier ||
+    target.kind === SyntaxKind.PropertyAccessExpression ||
+    target.kind === SyntaxKind.ElementAccessExpression
+  ) {
     return valueAt(constantValue(target, project), key, project, hop + 1);
   }
   if (target.kind === SyntaxKind.ArrayLiteralExpression) {

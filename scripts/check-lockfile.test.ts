@@ -118,6 +118,33 @@ describe('counting the packages section', () => {
     expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
   });
 
+  it("counts an entry written in YAML's FLOW form", () => {
+    // The whole mapping sits on the entry line, so continuing past it without
+    // looking rejected a lockfile pnpm accepts.
+    const content = lockfile(`  a@1.0.0: {resolution: {integrity: sha512-${digest('a')}}}`);
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('still requires a DIGEST on an inline entry', () => {
+    const content = lockfile('  a@1.0.0: {resolution: {integrity: sha512-}}');
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
+  it("ignores a `resolution` nested below the entry's own field", () => {
+    // A well-formed decoy one level down covered for the package's missing
+    // digest — the masking per-entry counting was meant to end, deeper.
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        '    resolution: {}',
+        '    peerDependenciesMeta:',
+        '      x:',
+        `        resolution: {integrity: sha512-${digest('a')}}`,
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
   it('accepts a resolution written as a YAML BLOCK, as pnpm does', () => {
     // Requiring the flow spelling rejected an integrity-covered package
     // outright — a gate refusing valid input, which is worse than one that

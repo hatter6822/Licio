@@ -107,6 +107,10 @@ export function countPackagesSection(content: string): { entries: number; integr
       close();
       entries += 1;
       open = true;
+      // An entry written in YAML's FLOW form carries its whole mapping on this
+      // one line — `a@1.0.0: {resolution: {integrity: …}}` — so continuing past
+      // it without looking rejected a lockfile pnpm accepts.
+      if (/resolution:/.test(line) && isAlgorithmLengthDigest(line)) covered = true;
       continue;
     }
     if (!open) continue;

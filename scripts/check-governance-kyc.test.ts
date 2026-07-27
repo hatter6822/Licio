@@ -503,11 +503,18 @@ describe('a registration method taken OFF the router', () => {
   it.each([
     ['a destructured method', 'const { post } = app;\npost'],
     ['a renamed destructured method', 'const { post: register } = app;\nregister'],
+    ['a COMPUTED destructured method key', "const { ['post']: register } = app;\nregister"],
+    // The same method taken by a property access rather than by a pattern.
+    ['a method held in a const', 'const register = app.post;\nregister'],
+    ['a computed method held in a const', "const register = app['post'];\nregister"],
+    ['an alias of a method alias', 'const first = app.post;\nconst register = first;\nregister'],
   ])('finds a route registered through %s', (_label, prelude) => {
-    const call = prelude.split('\n')[1];
+    // Every line but the LAST declares; the last names the call.
+    const lines = prelude.split('\n');
+    const call = lines[lines.length - 1];
     const src = `
 const app = new Hono();
-${prelude.split('\n')[0]}
+${lines.slice(0, -1).join('\n')}
 ${call}('/rooms/:roomId/governance/vote', authMiddleware(), (c) => c.json({}));`;
     expect(extractMutationRoutes('f.ts', src)).toEqual([
       { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },

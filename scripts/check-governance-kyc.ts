@@ -836,7 +836,8 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   };
 
   /**
-   * A registration method DESTRUCTURED off a router: `const { post } = app`.
+   * A registration method taken OFF a router: `const { post } = app`, or
+   * `const register = app.post`.
    *
    * Hono installs its verb methods as instance arrow functions bound to the
    * router (`this[method] = (…) => …`), so a destructured `post` registers a
@@ -845,24 +846,50 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * file left the corpus unclassified.  The binding says which router the
    * method came off and which method it is, so both are read from it.
    */
-  const destructuredMethod = (
+  const methodTakenOffARouter = (
     identifier: Syntax,
+    hop = 0,
   ): { readonly method: string; readonly receiver: Syntax } | undefined => {
     const declaration = localDeclaration(identifier);
-    if (declaration?.kind !== SyntaxKind.BindingElement) return undefined;
-    const pattern = declaration.parent;
-    if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) return undefined;
-    const source = pattern.parent?.initializer;
-    if (source === undefined) return undefined;
-    const named = declaration.propertyName ?? declaration.name;
-    // `const { ['post']: register } = app` selects the same method the plain
-    // spelling does; reading the computed node's TEXT gave `['post']`, which
-    // names no method, so the registration was not found at all.
+    if (declaration === undefined || hop > MAX_HOPS) return undefined;
+
+    // `const { post } = app` / `const { ['post']: register } = app` — the
+    // method is SELECTED by the pattern, and a computed key names the same
+    // method the plain spelling does.
+    if (declaration.kind === SyntaxKind.BindingElement) {
+      const pattern = declaration.parent;
+      if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) return undefined;
+      const source = pattern.parent?.initializer;
+      if (source === undefined) return undefined;
+      const named = declaration.propertyName ?? declaration.name;
+      const method =
+        named?.kind === SyntaxKind.ComputedPropertyName
+          ? staticString(named.expression)
+          : nameOf(named);
+      return method === undefined ? undefined : { method, receiver: source };
+    }
+
+    // `const register = app.post` — the same method, taken by a property
+    // access rather than by a pattern.  Reading only the pattern form left
+    // this alias registering routes no one could see; the two are one act
+    // written twice, so both resolve here.  A further hop (`const r =
+    // register`) follows the same edge.
+    if (declaration.kind !== SyntaxKind.VariableDeclaration) return undefined;
+    const held = unwrap(declaration.initializer);
+    if (held === undefined) return undefined;
+    if (held.kind === SyntaxKind.Identifier) return methodTakenOffARouter(held, hop + 1);
+    if (
+      held.kind !== SyntaxKind.PropertyAccessExpression &&
+      held.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
     const method =
-      named?.kind === SyntaxKind.ComputedPropertyName
-        ? staticString(named.expression)
-        : nameOf(named);
-    return method === undefined ? undefined : { method, receiver: source };
+      held.kind === SyntaxKind.PropertyAccessExpression
+        ? nameOf(held.name)
+        : staticString(held.argumentExpression);
+    const receiver = held.expression;
+    return method === undefined || receiver === undefined ? undefined : { method, receiver };
   };
 
   const found: FoundRoute[] = [];
@@ -941,7 +968,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // `const { post } = app; post(…)` — the method was taken OFF the router, so
     // the callee is a plain identifier and the receiver is the binding's source.
     if (callee?.kind === SyntaxKind.Identifier) {
-      const off = destructuredMethod(callee);
+      const off = methodTakenOffARouter(callee);
       if (off !== undefined) register(node, off.method, receiverKind(off.receiver));
       continue;
     }
