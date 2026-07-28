@@ -4,6 +4,7 @@
 // it: a ratio that sat permanently on its own threshold, and an integrity
 // check that counted the algorithm prefix without a digest.  Both are pinned
 // here against the shape a real pnpm lockfile has.
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { countPackagesSection } from './check-lockfile.js';
 
@@ -49,6 +50,22 @@ describe('counting the packages section', () => {
     ['an EMPTY digest', 'sha512-'],
     ['a non-base64 digest', 'sha512-not!base64'],
     ['a digest too short for the algorithm', 'sha512-abc123'],
+    // A single shared 40-character minimum accepted every one of these: none
+    // encodes a digest of the algorithm it declares, and the first three are
+    // the exact fixtures that minimum let through.
+    ['a 40-character digest under sha256', `sha256-${'A'.repeat(40)}`],
+    ['a 40-character digest under sha384', `sha384-${'A'.repeat(40)}`],
+    ['a 40-character digest under sha512', `sha512-${'A'.repeat(40)}`],
+    ['a digest one character short', `sha512-${'A'.repeat(85)}==`],
+    ['a digest one character long', `sha512-${'A'.repeat(87)}==`],
+    ['a sha256 digest declared as sha512', `sha512-${'A'.repeat(43)}=`],
+    ['a sha512 digest declared as sha256', `sha256-${'A'.repeat(86)}==`],
+    // Base64 that decodes to the right SIZE but is not the canonical encoding
+    // of those bytes: the final character carries padding bits that a real
+    // encoder always leaves zero, and Node's LENIENT decoder discards them.
+    ['a digest with non-canonical padding bits', `sha512-${'A'.repeat(85)}B==`],
+    // A broken algorithm is not coverage, however well-formed its digest.
+    ['a sha1 digest', `sha1-${'A'.repeat(27)}=`],
   ])('does not count %s as an integrity hash', (_label, value) => {
     // Counting the algorithm PREFIX accepted a lockfile whose every digest had
     // been emptied — the exact substitution this gate exists to notice.
@@ -66,6 +83,119 @@ describe('counting the packages section', () => {
       ].join('\n'),
     );
     expect(countPackagesSection(content).integrity).toBe(2);
+  });
+
+  it.each([
+    ['sha256', 32],
+    ['sha384', 48],
+    ['sha512', 64],
+  ])('counts a real %s digest of a real payload', (algorithm, bytes) => {
+    // Generated rather than hand-shaped, so the fixture is whatever the
+    // algorithm actually emits — padding bits and all — for every size.
+    const encoded = createHash(algorithm).update('licio').digest('base64');
+    expect(Buffer.from(encoded, 'base64').byteLength).toBe(bytes);
+    const content = lockfile(
+      [`  a@1.0.0:`, `    resolution: {integrity: ${algorithm}-${encoded}}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('does not let one entry"s extra digest cover for another entry"s missing one', () => {
+    // Two running totals compared at the end can be EQUAL while a package is
+    // uncovered: a second `integrity:` anywhere in the first entry's subtree
+    // balanced out the second entry having no hash at all, and the gate
+    // reported full coverage over it.
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        `    resolution: {integrity: sha512-${digest('a')}}`,
+        '    peerDependenciesMeta:',
+        `      x: {integrity: sha512-${digest('b')}}`,
+        '  b@2.0.0:',
+        '    resolution: {}',
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
+  });
+
+  it('ignores a YAML COMMENT at the entry indent', () => {
+    // Counting one added a phantom package with no integrity and blocked a
+    // lockfile pnpm accepts.
+    const content = lockfile(
+      [
+        '  # why this pin exists',
+        '  a@1.0.0:',
+        `    resolution: {integrity: sha512-${digest('a')}}`,
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('ignores a nested `resolution` on an INLINE entry line', () => {
+    // Searching the whole line let a decoy mask a package whose own resolution
+    // was empty — the masking per-entry counting exists to prevent, on one
+    // line instead of several.
+    const content = lockfile(
+      `  a@1.0.0: {resolution: {}, peerDependenciesMeta: {x: {resolution: {integrity: sha512-${digest('a')}}}}}`,
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
+  it("counts an entry written in YAML's FLOW form", () => {
+    // The whole mapping sits on the entry line, so continuing past it without
+    // looking rejected a lockfile pnpm accepts.
+    const content = lockfile(`  a@1.0.0: {resolution: {integrity: sha512-${digest('a')}}}`);
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('still requires a DIGEST on an inline entry', () => {
+    const content = lockfile('  a@1.0.0: {resolution: {integrity: sha512-}}');
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
+  it("ignores a `resolution` nested below the entry's own field", () => {
+    // A well-formed decoy one level down covered for the package's missing
+    // digest — the masking per-entry counting was meant to end, deeper.
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        '    resolution: {}',
+        '    peerDependenciesMeta:',
+        '      x:',
+        `        resolution: {integrity: sha512-${digest('a')}}`,
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
+  it('accepts a resolution written as a YAML BLOCK, as pnpm does', () => {
+    // Requiring the flow spelling rejected an integrity-covered package
+    // outright — a gate refusing valid input, which is worse than one that
+    // misses.
+    const content = lockfile(
+      ['  a@1.0.0:', '    resolution:', `      integrity: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('does not let a block resolution vouch for the NEXT entry', () => {
+    const content = lockfile(
+      [
+        '  a@1.0.0:',
+        '    resolution:',
+        `      integrity: sha512-${digest('a')}`,
+        '  b@2.0.0:',
+        '    resolution:',
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
+  });
+
+  it('counts a digest only on the resolution the entry pins', () => {
+    const content = lockfile(
+      ['  a@1.0.0:', '    resolution: {}', `    somethingElse: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
   });
 
   it('reads the REAL lockfile as fully covered', async () => {

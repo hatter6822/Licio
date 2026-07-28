@@ -26,13 +26,13 @@
   },
   "include": ["src/**/*", "src/**/*.json"],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/db" },
-    { "path": "../../packages/invariants" },
-    { "path": "../../packages/ranking" },
-    { "path": "../../packages/ai-governance" },
-    { "path": "../../packages/governance" },
-    { "path": "../../packages/lcap" },
-    { "path": "../../packages/lcap-p2p" }
+    { "path": "../../packages/shared/tsconfig.json" },
+    { "path": "../../packages/db/tsconfig.json" },
+    { "path": "../../packages/invariants/tsconfig.json" },
+    { "path": "../../packages/ranking/tsconfig.json" },
+    { "path": "../../packages/ai-governance/tsconfig.json" },
+    { "path": "../../packages/governance/tsconfig.json" },
+    { "path": "../../packages/lcap/tsconfig.json" },
+    { "path": "../../packages/lcap-p2p/tsconfig.json" }
   ]
 }

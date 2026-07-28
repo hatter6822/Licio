@@ -360,6 +360,255 @@ function staticPrefix(
 }
 
 /**
+ * The COMPLETE static string an expression denotes, or `null` when any part of
+ * it is unknown.
+ *
+ * Distinct from {@link staticPrefix}, and deliberately so.  A URL SCHEME check
+ * depends only on the leading text, so a known prefix with an unknown tail is a
+ * usable answer there.  A property KEY is the whole value: `'eval' +
+ * String('Safe')` has the prefix `eval` and names `evalSafe`, which is not the
+ * global — reading the prefix as the key made a harmless source fail
+ * `lint:security`.  Concatenation folds only when BOTH sides fold, and a
+ * template with holes folds to nothing.
+ */
+function staticText(
+  node: Syntax | undefined,
+  hop = 0,
+  bound?: (identifier: Syntax) => Syntax | undefined,
+): string | null {
+  const target = unwrap(node);
+  if (target === undefined || hop > MAX_HOPS) return null;
+  if (
+    target.kind === SyntaxKind.StringLiteral ||
+    target.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return target.text ?? '';
+  }
+  if (
+    target.kind === SyntaxKind.BinaryExpression &&
+    target.operatorToken?.kind === SyntaxKind.PlusToken
+  ) {
+    const left = staticText(target.left, hop + 1, bound);
+    if (left === null) return null;
+    const right = staticText(target.right, hop + 1, bound);
+    return right === null ? null : left + right;
+  }
+  // A `const` holding the text folds to what it holds: `const a = 'ev', b =
+  // 'al'; globalThis[a + b]` names `eval` as surely as the spelled literal
+  // does, and the checker widens `a + b` to `string` so the type cannot settle
+  // it.  Only an immutable binding is followed — a `let` may hold something
+  // else by the time the key is read, and folding it would invent a key.
+  //
+  // A container SLOT is deliberately NOT followed.  `const` prevents rebinding
+  // the name, not mutating the object, so `const keys = { a: 'ev' }; keys.a =
+  // 'safe'` makes the literal a lie — folding it would invent a key the code
+  // never uses, which is a FALSE POSITIVE in a gate.  Proving a container
+  // unmutated is whole-program aliasing analysis, the unbounded question this
+  // module's header declines; the CSP is the control for a key assembled that
+  // way.  See docs/planning/audit-residuals-2026-07.md.
+  if (bound !== undefined && target.kind === SyntaxKind.Identifier) {
+    const held = bound(target);
+    if (held !== undefined) return staticText(held, hop + 1, bound);
+  }
+  return null;
+}
+
+/**
+ * The static property name a KEY expression denotes, whatever spelling reaches
+ * it.
+ *
+ * `o.run`, `o['run']`, `o[key]` after `const key = 'run'`, and the computed
+ * binding `const { ['run']: r } = o` all select the same property; the key's
+ * TYPE settles every one of them, so no rule is needed per form.  It lives at
+ * module scope because the forbidden-global rule asks the same question of the
+ * same kind of node as the value-flow analyzer does, and answering it twice is
+ * how one of the two ends up not covering a spelling.
+ */
+function staticKeyOf(argument: Syntax | undefined, project: Project): string | undefined {
+  if (argument === undefined) return undefined;
+  const type = project.checker.getTypeAtLocation(asNode(argument));
+  if (type?.isStringLiteralType() === true) return String(type.value);
+  if (type?.isNumberLiteralType() === true) return String(type.value);
+  // A literal the checker did not narrow (a `.js` source has no `as const`).
+  if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
+  // A key the checker did not narrow, including a COMPOSED one:
+  // `node['inner' + 'HTML']` names the same property as the plain spelling —
+  // but only when the WHOLE key folds, which is what separates it from a
+  // scheme prefix.
+  return staticText(argument, 0, (identifier) => constantValue(identifier, project)) ?? undefined;
+}
+
+/**
+ * What an immutable local binding holds, or undefined when it is not one.
+ *
+ * `const` only: a `let` can hold something else by the time the key is read, so
+ * folding it would invent a property name the code never selects.
+ */
+function constantValue(identifier: Syntax, project: Project): Syntax | undefined {
+  const declaration = declarationOf(identifier, project);
+  if (declaration === undefined || !isImmutableBinding(declaration)) return undefined;
+  if (declaration.kind === SyntaxKind.VariableDeclaration) return declaration.initializer;
+  // `const { a, b } = { a: 'ev', b: 'al' }` binds through a PATTERN, so what
+  // the name holds is whatever the source holds at the key this element takes.
+  // Reading only a variable declaration refused to fold either name, and the
+  // key `a + b` — fully static, naming the global — folded to nothing.
+  return declaration.kind === SyntaxKind.BindingElement
+    ? selectedValue(declaration, project, 0)
+    : undefined;
+}
+
+/** The declaration a name binds to, within the file the name sits in. */
+function declarationOf(identifier: Syntax, project: Project): Syntax | undefined {
+  const path = String(identifier.getSourceFile?.()?.path ?? '');
+  if (path === '') return undefined;
+  return project.checker
+    .getSymbolAtPosition(path, identifier.getStart())
+    ?.declarations.find((each) => String(each.path) === path)
+    ?.resolve(project) as unknown as Syntax | undefined;
+}
+
+/**
+ * Whether a declaration cannot be rebound.
+ *
+ * `const` only: a `let` may hold something else by the time the value is read,
+ * so folding it would invent a value the code never has.
+ */
+function isImmutableBinding(declaration: Syntax): boolean {
+  let owner: Syntax | undefined = declaration.parent;
+  for (let hop = 0; owner !== undefined && hop <= MAX_HOPS; hop += 1) {
+    if (owner.kind === SyntaxKind.VariableDeclarationList) return /^const\b/.test(owner.getText());
+    owner = owner.parent;
+  }
+  return false;
+}
+
+/** Containers a destructure reads BY POSITION rather than by name. */
+const POSITIONAL: ReadonlySet<number> = new Set([
+  SyntaxKind.ArrayBindingPattern,
+  SyntaxKind.ArrayLiteralExpression,
+]);
+
+/**
+ * The key an element takes from its container: a NAME in an object one, a
+ * POSITION in an array one.
+ *
+ * Both container kinds are handled here rather than only objects, because a
+ * destructure nests them freely: `const [{ ['eval']: run }] = [globalThis]`
+ * reads index 0 and then a property, and treating the array element as a
+ * property selected nothing at all.
+ */
+function containerKey(element: Syntax, container: Syntax, project: Project): string | undefined {
+  if (POSITIONAL.has(container.kind)) {
+    const at = childrenOf(container).findIndex((each) => each.getStart() === element.getStart());
+    return at < 0 ? undefined : String(at);
+  }
+  const named = (element.propertyName ?? element.name) as Syntax | undefined;
+  return keyText(named, project);
+}
+
+/** The key a destructuring element names, however it is spelled. */
+function keyText(named: Syntax | undefined, project: Project): string | undefined {
+  if (named === undefined) return undefined;
+  if (named.kind === SyntaxKind.ComputedPropertyName) return staticKeyOf(named.expression, project);
+  return named.text ?? named.getText();
+}
+
+/** What a source holds at `key` — a property of an object, an index of an
+ *  array, or whatever the name it is reached through holds. */
+function valueAt(
+  source: Syntax | undefined,
+  key: string,
+  project: Project,
+  hop: number,
+): Syntax | undefined {
+  const target = unwrap(source);
+  if (target === undefined || hop > MAX_HOPS) return undefined;
+  // Reached through a NAME rather than written inline.  A slot reached through
+  // another SLOT is not followed, for the mutability reason `staticText`
+  // records.
+  if (target.kind === SyntaxKind.Identifier) {
+    return valueAt(constantValue(target, project), key, project, hop + 1);
+  }
+  if (target.kind === SyntaxKind.ArrayLiteralExpression) {
+    const at = Number(key);
+    return Number.isInteger(at) && at >= 0 ? childrenOf(target)[at] : undefined;
+  }
+  if (target.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+  for (const member of childrenOf(target)) {
+    if (keyText(member.name, project) !== key) continue;
+    if (member.kind === SyntaxKind.PropertyAssignment) return member.initializer;
+    if (member.kind === SyntaxKind.ShorthandPropertyAssignment) return member.name;
+  }
+  return undefined;
+}
+
+/**
+ * The value a destructuring CONTAINER takes its properties from.
+ *
+ * A binding pattern gets its source from the declaration or parameter that owns
+ * it; an object or array literal used as an assignment TARGET gets it from the
+ * right of the `=`.  Either can NEST, and a nested container selects from the
+ * slot its own element took — by name inside an object, by position inside an
+ * array.  When the descent finds no such slot, a binding element's DEFAULT is
+ * what binds.
+ *
+ * A literal that is NOT an assignment target has no source: `const o = {
+ * ['eval']: 1 }` builds a record, and its key selects nothing.
+ */
+function selectionSource(
+  container: Syntax | undefined,
+  project: Project,
+  hop: number,
+): Syntax | undefined {
+  const owner = container?.parent;
+  if (container === undefined || owner === undefined || hop > MAX_HOPS) return undefined;
+
+  /** One level out: the slot this container was reached by, descended into. */
+  const through = (element: Syntax, outer: Syntax): Syntax | undefined => {
+    const key = containerKey(element, outer, project);
+    if (key === undefined) return undefined;
+    return valueAt(selectionSource(outer, project, hop + 1), key, project, 0);
+  };
+
+  if (
+    container.kind === SyntaxKind.ObjectLiteralExpression ||
+    container.kind === SyntaxKind.ArrayLiteralExpression
+  ) {
+    if (
+      owner.kind === SyntaxKind.BinaryExpression &&
+      owner.operatorToken?.kind === SyntaxKind.EqualsToken &&
+      unwrap(owner.left)?.getStart() === container.getStart()
+    ) {
+      return owner.right;
+    }
+    // A literal nested inside an assignment target is itself a target: by name
+    // when its parent is a property, by position when it is an array element.
+    if (owner.kind === SyntaxKind.PropertyAssignment && owner.parent !== undefined) {
+      return through(owner, owner.parent);
+    }
+    if (owner.kind === SyntaxKind.ArrayLiteralExpression) return through(container, owner);
+    return undefined;
+  }
+
+  // A binding pattern: owned by a declaration, a parameter, or — nested — by
+  // the binding element that selected it.
+  if (owner.kind !== SyntaxKind.BindingElement) return owner.initializer;
+  const outer = owner.parent;
+  return (outer === undefined ? undefined : through(owner, outer)) ?? owner.initializer;
+}
+
+/** What ONE binding element ultimately holds. */
+function selectedValue(element: Syntax, project: Project, hop: number): Syntax | undefined {
+  const pattern = element.parent;
+  if (pattern === undefined || hop > MAX_HOPS) return undefined;
+  const key = containerKey(element, pattern, project);
+  if (key === undefined) return element.initializer;
+  return (
+    valueAt(selectionSource(pattern, project, hop + 1), key, project, 0) ?? element.initializer
+  );
+}
+
+/**
  * The code argument is a STRING — the implicit-eval timer form.
  *
  * An INTERPOLATED template counts: a template with holes is still a string the
@@ -493,16 +742,7 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       return node.name === undefined ? undefined : nameOf(node.name);
     }
     if (node.kind !== SyntaxKind.ElementAccessExpression) return undefined;
-    const argument = node.argumentExpression;
-    if (argument === undefined) return undefined;
-    const type = project.checker.getTypeAtLocation(asNode(argument));
-    if (type?.isStringLiteralType() === true) return String(type.value);
-    if (type?.isNumberLiteralType() === true) return String(type.value);
-    // A literal the checker did not narrow (a `.js` source has no `as const`).
-    if (argument.kind === SyntaxKind.NumericLiteral) return argument.text ?? argument.getText();
-    // A key the checker did not narrow, including a COMPOSED one:
-    // `node['inner' + 'HTML']` names the same property as the plain spelling.
-    return staticPrefix(argument) ?? undefined;
+    return staticKeyOf(node.argumentExpression, project);
   };
 
   /**
@@ -628,6 +868,13 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
   /**
    * The key a binding element takes from its source — a NAME in an object
    * pattern, a POSITION in an array one.
+   *
+   * A COMPUTED key is resolved exactly as `o[key]` is, because it selects
+   * exactly the same property: `const { ['eval']: run } = globalThis` and
+   * `const { eval: run } = globalThis` bind the same value.  Reading the
+   * computed form's text instead gave the key `['eval']` — a property no object
+   * has — so the binding resolved to nothing and `run(payload)` reached no
+   * sink, in a file that mentions the global only inside a string.
    */
   const bindingKey = (element: Syntax, pattern: Syntax): string | undefined => {
     if (pattern.kind === SyntaxKind.ArrayBindingPattern) {
@@ -635,7 +882,11 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
       return at < 0 ? undefined : String(at);
     }
     const named = (element.propertyName ?? element.name) as Syntax | undefined;
-    return named === undefined ? undefined : nameOf(named);
+    if (named === undefined) return undefined;
+    if (named.kind === SyntaxKind.ComputedPropertyName) {
+      return staticKeyOf(named.expression, project);
+    }
+    return nameOf(named);
   };
 
   /**
@@ -1970,7 +2221,55 @@ export function findGlobalReferencesIn(
         return isGlobalObject(declaration.initializer, hop + 1);
       };
 
+      /**
+       * The forbidden global a DESTRUCTURE selects off the global object.
+       *
+       * A destructure names the property it takes, and `const { ['eval']: run }
+       * = globalThis` selects exactly what `globalThis.eval` selects — but it
+       * spells the name in a string literal, which is neither an identifier nor
+       * a property access, so both branches below walked past it.  A
+       * destructuring ASSIGNMENT, `({ eval: run } = globalThis)`, spells it in
+       * a key the declaration-name exclusion skips, and was invisible for the
+       * other reason.
+       *
+       * The SOURCE must still be the global object, so a key off an unrelated
+       * record is not a reference to the global — the same discipline the
+       * property branch applies to its receiver.
+       */
+      const destructuredGlobal = (node: Syntax): string | undefined => {
+        let named: Syntax | undefined;
+        if (node.kind === SyntaxKind.BindingElement) {
+          // A SEPARATE identifier key (`{ eval: run }`) is reported as a bare
+          // reference below; claiming it here too would say it twice.  A
+          // SHORTHAND (`{ Function }`) has no separate key node, so that branch
+          // suppresses it as a name being declared and every later use resolves
+          // to the local — which left `const { Function } = globalThis` naming
+          // the global nowhere at all.
+          if (node.propertyName?.kind === SyntaxKind.Identifier) return undefined;
+          named = node.propertyName ?? node.name;
+        } else if (
+          node.kind === SyntaxKind.PropertyAssignment ||
+          node.kind === SyntaxKind.ShorthandPropertyAssignment
+        ) {
+          named = node.name;
+        } else {
+          return undefined;
+        }
+        const key = keyText(named, project);
+        if (key === undefined || !forbidden.has(key)) return undefined;
+        return isGlobalObject(selectionSource(node.parent, project, 0)) ? key : undefined;
+      };
+
       for (const node of walk(root)) {
+        const selected = destructuredGlobal(node);
+        if (selected !== undefined) {
+          found.push({
+            label: `reference to the forbidden global \`${selected}\``,
+            line: lineAt(newlines, node.getStart()),
+            text: content.slice(node.getStart(), node.getEnd()),
+          });
+          continue;
+        }
         // `globalThis.eval` and `self['eval']` name the global through a
         // PROPERTY, where the identifier is the property half — which the
         // declaration-name exclusion below was skipping, so the rule had a hole
@@ -1980,12 +2279,17 @@ export function findGlobalReferencesIn(
           node.kind === SyntaxKind.PropertyAccessExpression ||
           node.kind === SyntaxKind.ElementAccessExpression
         ) {
+          // The computed half is read with the SAME resolver the destructure
+          // branch uses.  Taking `argumentExpression.text` saw only a bare
+          // literal, so `globalThis['ev' + 'al']` — a fully static key naming
+          // the global, with no invocation for the sink scan to report either —
+          // passed the rule the file's whole premise rests on.
           const named =
             node.kind === SyntaxKind.PropertyAccessExpression
               ? node.name === undefined
                 ? undefined
                 : (node.name.text ?? node.name.getText())
-              : (node.argumentExpression?.text ?? undefined);
+              : staticKeyOf(node.argumentExpression, project);
           if (named !== undefined && forbidden.has(named) && isGlobalObject(node.expression)) {
             found.push({
               label: `reference to the forbidden global \`${named}\``,

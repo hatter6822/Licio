@@ -6,5 +6,5 @@
     "rootDir": "src"
   },
   "include": ["src/**/*", "src/**/*.json"],
-  "references": [{ "path": "../shared" }, { "path": "../invariants" }]
+  "references": [{ "path": "../shared/tsconfig.json" }, { "path": "../invariants/tsconfig.json" }]
 }

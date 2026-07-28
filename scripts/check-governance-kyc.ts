@@ -29,6 +29,7 @@
 // somewhere INSIDE that registration's arguments — containment, so a guard in
 // one route can never be attributed to the next, and prose can never satisfy it
 // because a comment is not a node.
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
@@ -357,12 +358,51 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     SyntaxKind.ImportEqualsDeclaration,
   ]);
 
+  /** The module specifier an import binding came from. */
+  const importedFrom = (binding: Syntax): string | undefined => {
+    let node: Syntax | undefined = binding;
+    for (let hop = 0; node !== undefined && hop <= MAX_HOPS; hop += 1) {
+      if (node.kind === SyntaxKind.ImportDeclaration) return staticString(node.moduleSpecifier);
+      node = node.parent;
+    }
+    return undefined;
+  };
+
+  /**
+   * What `new X()` constructs: a router, definitely something else, or unknown.
+   *
+   * Read from what `X` BINDS TO rather than from how it is spelled.  Testing
+   * `nameOf(...).startsWith('Hono')` made `import { Hono as Router } from
+   * 'hono'; new Router()` classify as 'other', which DROPPED every route in the
+   * file — and, once the corpus became "files that register a route", dropped
+   * the file from classification altogether.
+   *
+   * Anything unrecognised is 'unknown', not 'other': an unresolvable
+   * constructor may well be a router, and the registration still has to look
+   * like one before it is treated as a route, so failing closed here costs
+   * nothing.  `new Map()`/`new Date()` stay 'other' through the checker, which
+   * knows their declarations are the standard library's.
+   */
+  const constructs = (called: Syntax | undefined): Receiver => {
+    if (called?.kind !== SyntaxKind.Identifier) return 'unknown';
+    const declaration = localDeclaration(called);
+    if (declaration !== undefined && IMPORTED.has(declaration.kind)) {
+      const from = importedFrom(declaration);
+      if (from === 'hono' || from?.startsWith('hono/') === true) return 'router';
+      // The ORIGINAL exported name survives an alias: `{ Hono as Router }`.
+      const original = nameOf(declaration.propertyName ?? declaration.name ?? called) ?? '';
+      return original.startsWith('Hono') ? 'router' : 'unknown';
+    }
+    if (declaration === undefined && isAmbientGlobal(called)) return 'other';
+    return (nameOf(called) ?? '').startsWith('Hono') ? 'router' : 'unknown';
+  };
+
   const receiverKind = (node: Syntax | undefined, bindings = 0): Receiver => {
     let target = unwrap(node);
     let hops = bindings;
     while (target !== undefined) {
       if (target.kind === SyntaxKind.NewExpression) {
-        return (nameOf(unwrap(target.expression)) ?? '').startsWith('Hono') ? 'router' : 'other';
+        return constructs(unwrap(target.expression));
       }
       if (NOT_A_ROUTER.has(target.kind)) return 'other';
       // A CALL is either a chained registration (`app.post(…).get(…)`) or a
@@ -437,10 +477,35 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
   };
 
   /** Whether an argument is a route HANDLER — a function handed to the router. */
-  function isHandlerShaped(node: Syntax | undefined): boolean {
+  function isHandlerShaped(node: Syntax | undefined, hop = 0): boolean {
     const target = unwrap(node);
+    if (target === undefined || hop > MAX_HOPS) return false;
+    if (
+      target.kind === SyntaxKind.ArrowFunction ||
+      target.kind === SyntaxKind.FunctionExpression ||
+      target.kind === SyntaxKind.FunctionDeclaration
+    ) {
+      return true;
+    }
+    // A NAMED handler is still a handler.  Accepting only an inline function
+    // meant `import { app } from './router.js'; app.post(path, handler)` — an
+    // unreadable receiver AND an unreadable path — qualified as no
+    // registration at all and vanished, taking the file out of the corpus with
+    // it.  Asked of the binding, the spelling stops mattering.
+    if (target.kind !== SyntaxKind.Identifier) return false;
+    const declaration = localDeclaration(target);
+    if (declaration === undefined) return false;
+    if (declaration.kind === SyntaxKind.FunctionDeclaration) return true;
+    // An IMPORTED handler is a handler this file cannot see the body of, and
+    // "cannot see" must not mean "not a handler": with the router and the path
+    // both unresolvable too, rejecting it discarded the registration entirely
+    // and took the whole file out of the corpus.  Counted conservatively, the
+    // unreadable path below then reports the route, which is the outcome a
+    // gate that cannot read something owes.
+    if (IMPORTED.has(declaration.kind)) return true;
     return (
-      target?.kind === SyntaxKind.ArrowFunction || target?.kind === SyntaxKind.FunctionExpression
+      declaration.kind === SyntaxKind.VariableDeclaration &&
+      isHandlerShaped(declaration.initializer, hop + 1)
     );
   }
 
@@ -770,26 +835,71 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     return false;
   };
 
-  const found: FoundRoute[] = [];
-  for (const node of walk(root)) {
-    if (node.kind !== SyntaxKind.CallExpression) continue;
-    const callee = unwrap(node.expression);
-    if (
-      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
-      callee?.kind !== SyntaxKind.ElementAccessExpression
-    ) {
-      continue;
+  /**
+   * A registration method taken OFF a router: `const { post } = app`, or
+   * `const register = app.post`.
+   *
+   * Hono installs its verb methods as instance arrow functions bound to the
+   * router (`this[method] = (…) => …`), so a destructured `post` registers a
+   * route exactly as `app.post` does — but the call's callee is an identifier,
+   * not a property access, so it was not read as a registration at all and the
+   * file left the corpus unclassified.  The binding says which router the
+   * method came off and which method it is, so both are read from it.
+   */
+  const methodTakenOffARouter = (
+    identifier: Syntax,
+    hop = 0,
+  ): { readonly method: string; readonly receiver: Syntax } | undefined => {
+    const declaration = localDeclaration(identifier);
+    if (declaration === undefined || hop > MAX_HOPS) return undefined;
+
+    // `const { post } = app` / `const { ['post']: register } = app` — the
+    // method is SELECTED by the pattern, and a computed key names the same
+    // method the plain spelling does.
+    if (declaration.kind === SyntaxKind.BindingElement) {
+      const pattern = declaration.parent;
+      if (pattern?.kind !== SyntaxKind.ObjectBindingPattern) return undefined;
+      const source = pattern.parent?.initializer;
+      if (source === undefined) return undefined;
+      const named = declaration.propertyName ?? declaration.name;
+      const method =
+        named?.kind === SyntaxKind.ComputedPropertyName
+          ? staticString(named.expression)
+          : nameOf(named);
+      return method === undefined ? undefined : { method, receiver: source };
     }
-    const called =
-      callee.kind === SyntaxKind.PropertyAccessExpression
-        ? nameOf(callee.name)
-        : staticString(callee.argumentExpression);
-    if (called === undefined) continue;
-    const receiver = receiverKind(callee.expression);
+
+    // `const register = app.post` — the same method, taken by a property
+    // access rather than by a pattern.  Reading only the pattern form left
+    // this alias registering routes no one could see; the two are one act
+    // written twice, so both resolve here.  A further hop (`const r =
+    // register`) follows the same edge.
+    if (declaration.kind !== SyntaxKind.VariableDeclaration) return undefined;
+    const held = unwrap(declaration.initializer);
+    if (held === undefined) return undefined;
+    if (held.kind === SyntaxKind.Identifier) return methodTakenOffARouter(held, hop + 1);
+    if (
+      held.kind !== SyntaxKind.PropertyAccessExpression &&
+      held.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      return undefined;
+    }
+    const method =
+      held.kind === SyntaxKind.PropertyAccessExpression
+        ? nameOf(held.name)
+        : staticString(held.argumentExpression);
+    const receiver = held.expression;
+    return method === undefined || receiver === undefined ? undefined : { method, receiver };
+  };
+
+  const found: FoundRoute[] = [];
+
+  /** Read ONE call as a registration of `called` on a receiver of `receiver`. */
+  const register = (node: Syntax, called: string, receiver: Receiver): void => {
     // 'unknown' is deliberately NOT skipped: a receiver this cannot classify
     // may well be a governance router, and dropping it would report success
     // over an endpoint the gate never looked at.
-    if (receiver === 'other') continue;
+    if (receiver === 'other') return;
 
     const args = [...(node.arguments ?? [])];
     // The THREE ways Hono registers a route, all of which reach the same
@@ -798,7 +908,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // surely as `.post` is, and skipping it let one ship unguarded.
     const viaOn = called === 'on';
     const viaAll = called === 'all';
-    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) continue;
+    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
     const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
     const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
@@ -819,14 +929,14 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     if (receiver === 'unknown') {
       const rooted = staticString(pathArgument)?.startsWith('/') ?? false;
       const handled = args.slice(1).some((each) => isHandlerShaped(each));
-      if (!rooted && !handled) continue;
+      if (!rooted && !handled) return;
     }
     // `.all` covers every mutation; it is reported under its own name rather
     // than four times over, and the allowlist matches on path regardless.
     const mutations = viaAll ? ['all'] : methods.filter((method) => MUTATION_METHODS.has(method));
     // A method list with an unreadable entry may hide a mutation, so the
     // registration is reported rather than skipped.
-    if (mutations.length === 0 && declared.complete) continue;
+    if (mutations.length === 0 && declared.complete) return;
 
     // `.on` accepts an ARRAY of paths, each registering the same handler.
     const paths = staticStrings(pathArgument);
@@ -850,6 +960,30 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         found.push({ file, method, path, guarded, line, readable: true });
       }
     }
+  };
+
+  for (const node of walk(root)) {
+    if (node.kind !== SyntaxKind.CallExpression) continue;
+    const callee = unwrap(node.expression);
+    // `const { post } = app; post(…)` — the method was taken OFF the router, so
+    // the callee is a plain identifier and the receiver is the binding's source.
+    if (callee?.kind === SyntaxKind.Identifier) {
+      const off = methodTakenOffARouter(callee);
+      if (off !== undefined) register(node, off.method, receiverKind(off.receiver));
+      continue;
+    }
+    if (
+      callee?.kind !== SyntaxKind.PropertyAccessExpression &&
+      callee?.kind !== SyntaxKind.ElementAccessExpression
+    ) {
+      continue;
+    }
+    const called =
+      callee.kind === SyntaxKind.PropertyAccessExpression
+        ? nameOf(callee.name)
+        : staticString(callee.argumentExpression);
+    if (called === undefined) continue;
+    register(node, called, receiverKind(callee.expression));
   }
   return found;
 }
@@ -899,33 +1033,52 @@ export function extractMutationRoutes(file: string, source: string): MutationRou
 }
 
 /**
- * The file every API route module is mounted from.
+ * The composition root the running API is built from.
  *
  * The corpus is derived from HERE rather than assumed, because the gate's
  * guarantee is about governance participation wherever it lives — and a fixed
- * list of four files quietly stops being that the moment a fifth module is
- * mounted.
+ * list of four files quietly stops being that the moment a fifth registers a
+ * route.
  */
-const MOUNT_FILE = 'apps/api/src/routes/v1.ts';
 
 /**
- * Mounted route modules that carry NO governance-participation surface.
+ * Files that register a route but carry NO governance-participation surface.
  *
- * Every mounted module must appear here or in `GOVERNANCE_ROUTE_FILES`: a
- * module in neither is one the gate has never looked at, and reporting success
- * over it is exactly the silent gap this list closes.  Adding a governance
- * surface to one of these means moving it, which is a visible act in review.
+ * Every file that registers a mutation route must appear here or in
+ * `GOVERNANCE_ROUTE_FILES`: a file in neither is one the gate has never looked
+ * at, and reporting success over it is exactly the silent gap this list
+ * closes.  Adding a governance surface to one of these means moving it, which
+ * is a visible act in review.
+ *
+ * A file that registers no MUTATION is not listed at all — a read-only surface
+ * cannot carry participation, and an entry for one is stale by construction.
+ * That is why the health probes, the public invariant reads and the model-hub
+ * proxy are absent: each said "read-only" in its own reason, and the gate now
+ * agrees rather than taking their word for it.
  *
  * A stale entry fails the gate, like every other allowlist here.
  */
 export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
+  'apps/api/src/routes/v1.ts':
+    'versioned BFF surface: settings, attention ingest, telemetry, push and notifications',
+  'apps/api/src/routes/csp-report.ts': 'browser CSP violation report sink',
+  'apps/api/src/routes/private-rendezvous.ts':
+    'WS-S.6.6 server-blind rendezvous — opaque announce/poll/signal, no room state',
+  'apps/api/src/lcap/routes.ts':
+    '§29 LCAP content/checkpoint sync plane — content availability, never participation',
   'apps/api/src/routes/auth.ts':
     'sign-in and session lifecycle; participation is not governed here',
+  'apps/api/src/routes/auth-register.ts':
+    'sign-up: proof-of-work CAPTCHA, registration, email verification',
+  'apps/api/src/routes/auth-credentials.ts':
+    'WebAuthn/email/wallet credential and step-up management for an existing account',
+  'apps/api/src/routes/auth-mfa.ts': 'TOTP enrolment and removal — a credential, not a vote',
+  'apps/api/src/routes/events-admin.ts':
+    'platform event-pipeline operations (requireSteward staff capability + MFA)',
   'apps/api/src/routes/privacy.ts': 'consent and data-rights self-service, never a governance vote',
   'apps/api/src/routes/events.ts': 'attention aggregate ingest — bucketed signal, no participation',
   'apps/api/src/routes/stories.ts': 'content submission and reading',
   'apps/api/src/routes/ingestion-admin.ts': 'platform ingestion operations (staff capability)',
-  'apps/api/src/routes/invariants-public.ts': 'read-only invariant reporting',
   'apps/api/src/routes/invariants-admin.ts': 'platform invariant operations (staff capability)',
   'apps/api/src/routes/ranking-admin.ts': 'platform ranking operations (staff capability)',
   'apps/api/src/routes/forum.ts':
@@ -936,80 +1089,135 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
     'platform enforcement console (staff capability + MFA)',
   'apps/api/src/routes/ai-governance-public.ts': 'model transparency reads',
   'apps/api/src/routes/ai-governance-admin.ts': 'platform model operations (staff capability)',
-  'apps/api/src/routes/model-hub.ts': 'proxied huggingface.co metadata reads, no room state',
   'apps/api/src/routes/wallet.ts': 'wallet linking; holding a wallet is not participating',
   'apps/api/src/routes/knomosis.ts': 'finality gateway — submits what governance already decided',
   'apps/api/src/routes/compliance.ts': 'lawful-access and SAR handling under counsel authority',
+  // Reached by NOTHING the old mount walk did: these are mounted by the
+  // development boot and by `e2e-server.ts`, never by the production root.
+  'apps/api/src/simulator/routes.ts':
+    'DEV-ONLY traffic-simulator control surface, mounted only when NODE_ENV is development',
+  'apps/api/src/routes/test-auth.ts':
+    'E2E-ONLY session minter for the BFF harness, mounted only by e2e-server.ts',
+  'apps/api/src/routes/test-wallet.ts':
+    'E2E-ONLY wallet signer for the BFF harness, mounted only by e2e-server.ts',
 };
 
-/** Route modules mounted into the API, from the mount file itself. */
-export function mountedRouteModules(source: string): string[] {
-  return withParsedSources([{ path: MOUNT_FILE, content: source }], (parsed) => {
-    const root = parsed[0]?.root;
-    if (root === undefined) return [];
-    // `import { createX } from './x.js'` → the module `createX` comes from,
-    // read off the import rather than guessed from the factory's name.
-    const from = new Map<string, string>();
-    for (const node of walk(root)) {
-      if (node.kind !== SyntaxKind.ImportDeclaration) continue;
-      const specifier = staticString(node.moduleSpecifier);
-      if (specifier === undefined || !specifier.startsWith('.')) continue;
-      const file = `apps/api/src/routes/${specifier.replace(/^\.\//, '').replace(/\.js$/, '.ts')}`;
-      for (const named of walk(node)) {
-        if (named.kind !== SyntaxKind.ImportSpecifier) continue;
-        const local = named.name === undefined ? undefined : nameOf(named.name);
-        if (local !== undefined && local !== '') from.set(local, file);
-      }
-    }
-    const mounted = new Set<string>();
-    for (const node of walk(root)) {
-      if (node.kind !== SyntaxKind.CallExpression) continue;
-      const callee = unwrap(node.expression);
-      if (callee?.kind !== SyntaxKind.PropertyAccessExpression) continue;
-      if (callee.name === undefined || nameOf(callee.name) !== 'route') continue;
-      for (const argument of node.arguments ?? []) {
-        const inner = unwrap(argument);
-        if (inner?.kind !== SyntaxKind.CallExpression) continue;
-        const factory = unwrap(inner.expression);
-        if (factory?.kind !== SyntaxKind.Identifier) continue;
-        const named = nameOf(factory);
-        const file = named === undefined ? undefined : from.get(named);
-        if (file !== undefined) mounted.add(file);
-      }
-    }
-    return [...mounted].sort();
-  });
+/** Bindings that name a value from ANOTHER module — every import form there is. */
+/**
+ * Every file under the API source tree that REGISTERS a route.
+ *
+ * THE BOUNDED QUESTION, and why it replaced the mount graph.  This gate used
+ * to derive its corpus by WALKING the mount graph — following `.route()` calls
+ * from the composition root, through import forms, through local wrappers,
+ * through bindings — and every round of review found one more shape that walk
+ * could not follow: a default import, a namespace import, a router held in a
+ * const, a local function returning an imported factory, an imported function
+ * returning another module's factory.  Each fix was correct and invited the
+ * next, which is the same trap the sink analyzer's header describes: modelling
+ * how a value REACHES somewhere is unbounded.
+ *
+ * "Which files register a route?" is bounded.  It is answered by the same
+ * predicate that already decides what a route IS — a mutation call on a
+ * receiver chain rooting at `new Hono()` — asked of every tracked source
+ * instead of only the ones a walk managed to reach.  No mount shape can hide a
+ * file from it, because it never asks how the router got mounted.
+ *
+ * It is also STRICTLY WIDER than the walk was.  The walk started at the
+ * production composition root, so it structurally could not see
+ * `simulator/routes.ts` (mounted by the development boot) or the two E2E-only
+ * harness routes (mounted by `e2e-server.ts`) — three route-registering files
+ * that were classified nowhere while the gate reported success.  All 337
+ * tracked sources parse in one project in under a third of a second, so the
+ * whole question costs less than the walk it replaces.
+ */
+const API_SOURCE_ROOT = 'apps/api/src';
+
+/**
+ * Tests declare routers of their own; they serve nothing.
+ *
+ * Spelled out rather than written as one alternation, because this decides what
+ * the gate DOES NOT read: `/(?:^|\/)__tests__\/|\.test\.ts$/` anchors its second
+ * branch and not its first, which CodeQL flags as misleading precedence and a
+ * reader has to work out.  An exclusion nobody can read at a glance is how a
+ * real source ends up silently outside a security gate's corpus.
+ */
+function isTestPath(path: string): boolean {
+  return (
+    /\.test\.[cm]?tsx?$/.test(path) || path.includes('/__tests__/') || path.startsWith('__tests__/')
+  );
+}
+
+/**
+ * Whether a tracked path is a TypeScript SOURCE the API compiles.
+ *
+ * Every extension `tsconfig`'s `src` include covers, not just `.ts`: a route
+ * module written as `.tsx` registers a Hono POST exactly as its `.ts` sibling
+ * does, and accepting only names ending in `.ts` dropped it from the corpus —
+ * the same completeness hole as the pathspec, one filter along.  A `.d.ts`
+ * declares types and registers nothing.
+ */
+function isTypeScriptSource(path: string): boolean {
+  return /\.[cm]?tsx?$/.test(path) && !path.endsWith('.d.ts');
+}
+
+/**
+ * Every tracked API source, from git rather than from a directory walk.
+ *
+ * A DIRECTORY pathspec, deliberately.  A recursive glob of the double-star
+ * form reads as "every TypeScript file under here" and is not: git's `**`
+ * required at least one intermediate directory, so the three files that sit
+ * directly in `apps/api/src`
+ * — `app.ts`, `index.ts` and `e2e-server.ts`, the composition roots — were
+ * silently outside the corpus, which is the exact failure this enumeration
+ * replaced a mount walk to prevent.  A directory pathspec has no such subtlety:
+ * it is every tracked path beneath it, and the extension is filtered here where
+ * it can be read.
+ */
+export function trackedApiSources(): string[] {
+  return execFileSync('git', ['ls-files', API_SOURCE_ROOT], { cwd: ROOT, encoding: 'utf-8' })
+    .split('\n')
+    .filter((each) => isTypeScriptSource(each) && !isTestPath(each));
 }
 
 export function runGovernanceKycGate(
   read: (relPath: string) => string = (relPath) => readFileSync(resolve(ROOT, relPath), 'utf-8'),
+  files: readonly string[] = trackedApiSources(),
 ): string[] {
   const issues: string[] = [];
-  // EVERY mounted module must be classified.  One that is neither scanned nor
-  // declared non-governance is a surface the gate has never read, and a fixed
-  // list of four files cannot notice a fifth being mounted.
   const scanned = new Set<string>(GOVERNANCE_ROUTE_FILES);
-  const mounted = mountedRouteModules(read(MOUNT_FILE));
-  for (const file of mounted) {
+
+  // ONE parse for the whole API tree: it answers which files register a route
+  // AND what those routes are, so the corpus and the verdict cannot disagree.
+  const byFile = routesFor(
+    [...new Set([...files, ...GOVERNANCE_ROUTE_FILES])].map((file) => ({
+      path: file,
+      content: read(file),
+    })),
+  );
+
+  // EVERY file that registers a route must be classified.  One that is neither
+  // scanned nor declared non-governance is a surface the gate has never read.
+  const registering = [...byFile.entries()]
+    .filter(([, routes]) => routes.length > 0)
+    .map(([file]) => file)
+    .sort();
+  for (const file of registering) {
     if (scanned.has(file) || NON_GOVERNANCE_ROUTES[file] !== undefined) continue;
     issues.push(
-      `${file} is mounted into the API but is CLASSIFIED NOWHERE. Add it to ` +
+      `${file} REGISTERS a mutation route but is CLASSIFIED NOWHERE. Add it to ` +
         'GOVERNANCE_ROUTE_FILES if it carries a governance-participation surface, or to ' +
         'NON_GOVERNANCE_ROUTES with a written reason it does not.',
     );
   }
+  const registers = new Set(registering);
   for (const file of Object.keys(NON_GOVERNANCE_ROUTES)) {
-    if (!mounted.includes(file)) {
+    if (!registers.has(file)) {
       issues.push(
-        `stale NON_GOVERNANCE_ROUTES entry '${file}': it is not mounted into the API — remove it.`,
+        `stale NON_GOVERNANCE_ROUTES entry '${file}': it registers no mutation route — remove it.`,
       );
     }
   }
   const usedAllowlist = new Set<number>();
-  // One parse for the whole route tree.
-  const byFile = routesFor(
-    GOVERNANCE_ROUTE_FILES.map((file) => ({ path: file, content: read(file) })),
-  );
   for (const file of GOVERNANCE_ROUTE_FILES) {
     const routes = byFile.get(file) ?? [];
     for (const route of routes) {

@@ -8,40 +8,180 @@ const LOCKFILE_PATH = resolve(ROOT, 'pnpm-lock.yaml');
 const ALLOWED_HOSTS = new Set(['registry.npmjs.org']);
 
 /**
- * A Subresource-Integrity value: an algorithm, then a BASE64 digest.
+ * Digest size, in bytes, of every SRI algorithm this gate accepts as coverage.
  *
- * The length is checked because the shortest algorithm pnpm emits is SHA-256,
- * whose base64 form is 44 characters — anything shorter is not a digest that
- * algorithm could have produced.
+ * SHA-1 and MD5 are deliberately absent: a lockfile pinned with a broken hash
+ * is not integrity-covered, so it must not be counted as such.
  */
-const VALID_INTEGRITY =
-  /integrity:\s*sha(?:256|384|512)-[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])/;
+const DIGEST_BYTES = new Map<string, number>([
+  ['sha256', 32],
+  ['sha384', 48],
+  ['sha512', 64],
+]);
 
 /**
- * The `packages:` section's entry and integrity counts.
+ * A Subresource-Integrity value: an algorithm, then a BASE64 digest.
+ *
+ * Matched permissively on purpose — the digest is VALIDATED against the
+ * declared algorithm in {@link isAlgorithmLengthDigest}, not by this pattern.
+ * The trailing lookahead keeps an over-long digest from being accepted on the
+ * strength of a prefix.
+ */
+const INTEGRITY_VALUE = /integrity:\s*(sha[0-9]+)-([A-Za-z0-9+/]*={0,2})(?![A-Za-z0-9+/=])/;
+
+/**
+ * True when the line carries a digest of exactly the length its own algorithm
+ * produces.
+ *
+ * A single shared minimum length cannot express this: 40 base64 characters is
+ * short of every one of the three (44 / 64 / 88 characters), so `sha512-` +
+ * 40 `A`s — a digest a third of the required size, and one no SHA-512 could
+ * ever have produced — satisfied it. The decoded byte count is the property
+ * that actually matters, so it is the property checked.
+ *
+ * The round-trip pins the encoding as well as the size. Node's base64 decoder
+ * is LENIENT: it skips characters outside the alphabet and tolerates
+ * non-canonical padding bits, so `Buffer.from()` alone would silently accept a
+ * malformed payload and report a plausible byte count for it. Re-encoding and
+ * comparing rejects anything that is not the exact canonical encoding of those
+ * bytes.
+ */
+function isAlgorithmLengthDigest(line: string): boolean {
+  const match = INTEGRITY_VALUE.exec(line);
+  if (!match) return false;
+
+  const [, algorithm, encoded] = match;
+  if (algorithm === undefined || encoded === undefined) return false;
+
+  const expectedBytes = DIGEST_BYTES.get(algorithm);
+  if (expectedBytes === undefined) return false;
+
+  const decoded = Buffer.from(encoded, 'base64');
+  if (decoded.toString('base64') !== encoded) return false;
+
+  return decoded.byteLength === expectedBytes;
+}
+
+/**
+ * The value of `member` in a YAML FLOW mapping, at its TOP level only.
+ *
+ * Brace-matched rather than searched, so a member of the same name nested
+ * inside another value — `{resolution: {}, meta: {x: {resolution: {…}}}}` —
+ * is not mistaken for the mapping's own.
+ */
+function directFlowMember(line: string, member: string): string | undefined {
+  const opened = line.indexOf('{');
+  if (opened < 0) return undefined;
+  let depth = 0;
+  let memberAt: number | undefined;
+  for (let at = opened; at < line.length; at += 1) {
+    const char = line[at];
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      if (memberAt !== undefined && depth === 2) return line.slice(memberAt, at + 1);
+      depth -= 1;
+      if (depth === 0) break;
+      continue;
+    }
+    if (depth === 1 && memberAt === undefined && line.startsWith(`${member}:`, at)) {
+      memberAt = at;
+    }
+  }
+  // A member whose value is a SCALAR rather than a nested mapping.
+  return memberAt === undefined ? undefined : line.slice(memberAt);
+}
+
+/** Entries sit at two spaces, so their own fields sit at four. */
+const ENTRY_FIELD_INDENT = 4;
+
+/**
+ * How many `packages:` entries there are, and how many carry their OWN digest.
  *
  * Scoped by section rather than matched across the whole file: top-level keys
  * sit at column 0 and entries at two spaces, so the boundary is unambiguous,
  * and `snapshots:` — which repeats every package WITHOUT a resolution — cannot
  * inflate the denominator.
+ *
+ * Counted PER ENTRY, and only on the entry's own `resolution:` line.  Two
+ * running totals compared at the end can be equal while a package is
+ * uncovered: one entry carrying a real digest plus any second `integrity:`
+ * anywhere in its subtree — a `peerDependenciesMeta` block, a nested field —
+ * balanced out the next entry having `resolution: {}` and nothing else, and
+ * the gate reported full coverage over a package with no hash at all.  An
+ * entry can now contribute at most one, and only from the line that actually
+ * pins the tarball.
  */
 export function countPackagesSection(content: string): { entries: number; integrity: number } {
   let entries = 0;
   let integrity = 0;
   let inside = false;
+  let open = false;
+  let covered = false;
+  /** Indent of the `resolution:` key while its BLOCK body is being read. */
+  let resolutionAt: number | undefined;
+  const close = (): void => {
+    if (open && covered) integrity += 1;
+    open = false;
+    covered = false;
+    resolutionAt = undefined;
+  };
   for (const line of content.split('\n')) {
     if (/^[A-Za-z]/.test(line)) {
+      close();
       inside = line.startsWith('packages:');
       continue;
     }
     if (!inside) continue;
-    if (/^ {2}\S/.test(line)) entries += 1;
-    // A DIGEST, not just the algorithm prefix.  Matching `sha512-` alone
-    // accepted `integrity: sha512-` and `sha512-not!base64` as hashes, so a
-    // lockfile with every digest emptied still reported full coverage — the
-    // exact failure this check exists to notice.
-    if (VALID_INTEGRITY.test(line)) integrity += 1;
+    // A YAML COMMENT at the entry indent is not an entry.  Counting one added a
+    // phantom package with no integrity and blocked a lockfile pnpm accepts.
+    if (/^\s*#/.test(line)) continue;
+    if (/^ {2}\S/.test(line)) {
+      close();
+      entries += 1;
+      open = true;
+      // An entry written in YAML's FLOW form carries its whole mapping on this
+      // one line — `a@1.0.0: {resolution: {integrity: …}}` — so continuing past
+      // it without looking rejected a lockfile pnpm accepts.  Only the entry's
+      // DIRECT `resolution` member counts: searching the whole line let a
+      // nested `peerDependenciesMeta` decoy mask a package whose own
+      // resolution was empty, which is the masking per-entry counting exists
+      // to prevent, on one line instead of several.
+      const inline = directFlowMember(line, 'resolution');
+      if (inline !== undefined && isAlgorithmLengthDigest(inline)) covered = true;
+      continue;
+    }
+    if (!open) continue;
+
+    const indent = line.length - line.trimStart().length;
+    // YAML writes a mapping either INLINE (`resolution: {integrity: …}`) or as
+    // an indented BLOCK, and pnpm verifies the digest under both.  Requiring
+    // the flow spelling rejected an integrity-covered package outright — a gate
+    // refusing valid input, which is worse than one that misses — so the block
+    // form is tracked by indentation: the resolution's body is every line
+    // indented deeper than its key, and ends at the first line that is not.
+    if (resolutionAt !== undefined && indent <= resolutionAt) resolutionAt = undefined;
+    // The entry's OWN `resolution:` field, at the entry's field indentation.
+    // Accepting one at any depth let a `peerDependenciesMeta` subtree carry a
+    // well-formed decoy that covered for the package's own missing digest —
+    // the masking this per-entry counting was meant to end, one level down.
+    const opensResolution = indent === ENTRY_FIELD_INDENT && /^\s*resolution:/.test(line);
+    if (opensResolution) resolutionAt = indent;
+
+    // A DIGEST OF THE DECLARED ALGORITHM, on the RESOLUTION this entry pins —
+    // not just the algorithm prefix, not merely something long enough, and not
+    // some other `integrity:` further down the same entry.  Matching `sha512-`
+    // alone accepted `integrity: sha512-` and `sha512-not!base64` as hashes,
+    // and a shared 40-character minimum then accepted a digest a third of
+    // SHA-512's size — so a lockfile with every digest emptied or truncated
+    // still reported full coverage, the exact failure this check exists to
+    // notice.
+    const withinResolution = opensResolution || resolutionAt !== undefined;
+    if (!covered && withinResolution && isAlgorithmLengthDigest(line)) covered = true;
   }
+  close();
   return { entries, integrity };
 }
 

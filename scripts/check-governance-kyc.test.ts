@@ -4,15 +4,15 @@
 // registration is found wherever it sits, the guard is attributed by
 // CONTAINMENT rather than by text proximity, and the only fail-closed case left
 // is a route path the gate genuinely cannot read.
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
-  mountedRouteModules,
   NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
+  trackedApiSources,
 } from './check-governance-kyc.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -341,32 +341,281 @@ app.post('/rooms/:roomId/governance/vote', handler);`;
   });
 });
 
-describe('every mounted route module is CLASSIFIED', () => {
-  it('bites when a module is mounted and classified nowhere', () => {
-    const mount = readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8')
-      .replace(
-        'import { createAuthRoutes }',
-        "import { createBrandNewRoutes } from './brand-new.js';\nimport { createAuthRoutes }",
-      )
-      .replace(
-        ".route('/auth', createAuthRoutes())",
-        ".route('/brand', createBrandNewRoutes())\n      .route('/auth', createAuthRoutes())",
-      );
-    const issues = runGovernanceKycGate((rel) =>
-      rel === 'apps/api/src/routes/v1.ts' ? mount : readFileSync(resolve(ROOT, rel), 'utf-8'),
-    );
-    // A fixed list of four files cannot notice a fifth being mounted, which is
-    // the gap between what this gate claimed and what it checked.
-    expect(issues.some((issue) => issue.includes('CLASSIFIED NOWHERE'))).toBe(true);
+describe('every route-registering file is CLASSIFIED', () => {
+  const readRepo = (rel: string): string => readFileSync(resolve(ROOT, rel), 'utf-8');
+
+  /** The repository, with some files swapped for or added as fixtures. */
+  const withFiles =
+    (files: Readonly<Record<string, string>>) =>
+    (rel: string): string =>
+      files[rel] ?? readRepo(rel);
+
+  const live = trackedApiSources();
+
+  // The corpus is no longer a WALK, so none of these mount shapes has to be
+  // modelled: a file that registers a route is in it however its router is
+  // reached, or never reached at all.  Each of these once needed its own rule.
+  it.each([
+    ['a NAMED import', "import { make } from './x.js';\nexport const r = make();"],
+    ['a DEFAULT import', "import make from './x.js';\nexport const r = make();"],
+    ['a NAMESPACE import', "import * as x from './x.js';\nexport const r = x.make();"],
+    ['a local wrapper', "import { make } from './x.js';\nfunction wrap() { return make(); }"],
+    ['an imported wrapper', "import { wrap } from './w.js';\nexport const r = wrap();"],
+    ['no mount at all', '// nothing mounts this file'],
+  ])('bites on a file registering a mutation, reached through %s', (_label, preamble) => {
+    const fixture = `${preamble}
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`;
+    const issues = runGovernanceKycGate(withFiles({ 'apps/api/src/brand-new.ts': fixture }), [
+      ...live,
+      'apps/api/src/brand-new.ts',
+    ]);
+    expect(issues).toContainEqual(expect.stringContaining('brand-new.ts REGISTERS a mutation'));
   });
 
-  it('classifies every module the live mount graph carries', () => {
-    const mounted = mountedRouteModules(
-      readFileSync(resolve(ROOT, 'apps/api/src/routes/v1.ts'), 'utf-8'),
+  it('does NOT ask a read-only file to be classified', () => {
+    // A surface with no mutation cannot carry participation, so requiring an
+    // entry for it would be a list that grows without adding a guarantee.
+    const fixture = `
+const app = new Hono();
+app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
+    const issues = runGovernanceKycGate(withFiles({ 'apps/api/src/read-only.ts': fixture }), [
+      ...live,
+      'apps/api/src/read-only.ts',
+    ]);
+    expect(issues).toEqual([]);
+  });
+
+  it('reports a stale entry for a file that registers no mutation', () => {
+    const [stale] = Object.keys(NON_GOVERNANCE_ROUTES);
+    const issues = runGovernanceKycGate(
+      withFiles({ [String(stale)]: '// every route removed\nexport const nothing = 1;' }),
+      live,
     );
-    expect(mounted.length).toBeGreaterThan(15);
-    const classified = new Set([...GOVERNANCE_ROUTE_FILES, ...Object.keys(NON_GOVERNANCE_ROUTES)]);
-    expect(mounted.filter((each) => !classified.has(each))).toEqual([]);
+    expect(issues).toContainEqual(
+      expect.stringContaining(`stale NON_GOVERNANCE_ROUTES entry '${stale}'`),
+    );
+  });
+
+  it('classifies every route-registering file in the repository', () => {
+    const issues = runGovernanceKycGate();
+    expect(issues).toEqual([]);
+  });
+
+  it.each([
+    // Three files NOTHING reached before: the walk started at the production
+    // composition root, and these are mounted by the development boot and by
+    // `e2e-server.ts`.
+    ['the DEV-only simulator surface', 'apps/api/src/simulator/routes.ts'],
+    ['the E2E-only session minter', 'apps/api/src/routes/test-auth.ts'],
+    ['the E2E-only wallet signer', 'apps/api/src/routes/test-wallet.ts'],
+    // …and the ones the walk did reach, which must not regress.
+    ['a router outside routes/', 'apps/api/src/lcap/routes.ts'],
+    ['a sub-router of a mounted module', 'apps/api/src/routes/auth-mfa.ts'],
+    ['a sub-router two mounts deep', 'apps/api/src/routes/events-admin.ts'],
+  ])('covers %s', (_label, file) => {
+    expect(trackedApiSources()).toContain(file);
+    expect(
+      GOVERNANCE_ROUTE_FILES.includes(file as (typeof GOVERNANCE_ROUTE_FILES)[number]) ||
+        NON_GOVERNANCE_ROUTES[file] !== undefined,
+    ).toBe(true);
+  });
+
+  it.each(['apps/api/src/app.ts', 'apps/api/src/index.ts', 'apps/api/src/e2e-server.ts'])(
+    'enumerates the top-level composition file %s',
+    (file) => {
+      // `apps/api/src/**` + `/*.ts` required at least one INTERMEDIATE directory
+      // in a git pathspec, so these three sat silently outside the corpus — the
+      // exact failure the enumeration replaced a mount walk to prevent, in the
+      // enumeration itself.
+      expect(live).toContain(file);
+    },
+  );
+
+  it.each([
+    ['a .tsx route module', 'apps/api/src/routes/new-governance.tsx'],
+    ['a plain .ts module', 'apps/api/src/routes/new-governance.ts'],
+  ])('judges %s once it is in the corpus', (_label, path) => {
+    // A route module written as `.tsx` registers a Hono POST exactly as its
+    // `.ts` sibling does.
+    const issues = runGovernanceKycGate(
+      (rel) =>
+        rel === path
+          ? `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`
+          : readRepo(rel),
+      [...live, path],
+    );
+    expect(issues).toContainEqual(expect.stringContaining(`${path} REGISTERS`));
+  });
+
+  it('enumerates EVERY TypeScript source extension, not just `.ts`', () => {
+    // Accepting only names ending in `.ts` dropped a `.tsx` route module — the
+    // same completeness hole as the pathspec, one filter along.  Asserted on
+    // the enumeration itself, since that is where the filter lives.
+    const walkDir = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(resolve(ROOT, dir), { withFileTypes: true })) {
+        const at = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules') out.push(...walkDir(at));
+        } else out.push(at);
+      }
+      return out;
+    };
+    const onDisk = walkDir('apps/api/src');
+    const sources = (each: string): boolean =>
+      /\.[cm]?tsx?$/.test(each) &&
+      !each.endsWith('.d.ts') &&
+      !/\.test\.[cm]?tsx?$/.test(each) &&
+      !each.includes('/__tests__/');
+    expect([...live].sort()).toEqual(onDisk.filter(sources).sort());
+    // …and the exclusions are exactly declarations and tests, nothing else.
+    expect(live.filter((each) => each.endsWith('.d.ts'))).toEqual([]);
+    expect(live.filter((each) => /\.test\.[cm]?tsx?$/.test(each))).toEqual([]);
+  });
+
+  it('enumerates the API tree, so nothing above passes vacuously', () => {
+    expect(live.length).toBeGreaterThan(200);
+    expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
+    // Tests declare routers of their own and serve nothing.
+    expect(
+      live.filter((each) => each.endsWith('.test.ts') || each.includes('/__tests__/')),
+    ).toEqual([]);
+    // …and the exclusion is not so broad that it drops real sources.  The
+    // comparison walks the FILESYSTEM rather than asking git with the same
+    // pathspec: a corpus checked against its own enumeration cannot notice the
+    // enumeration being wrong, which is how three composition files went
+    // missing without a single assertion failing.
+    const tracked: string[] = [];
+    const walkDir = (dir: string): void => {
+      for (const entry of readdirSync(resolve(ROOT, dir), { withFileTypes: true })) {
+        const at = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules') walkDir(at);
+        } else if (entry.name.endsWith('.ts')) {
+          tracked.push(at);
+        }
+      }
+    };
+    walkDir('apps/api/src');
+    const excluded = tracked.filter((each) => !live.includes(each));
+    expect(
+      excluded.filter((each) => !each.endsWith('.test.ts') && !each.includes('/__tests__/')),
+    ).toEqual([]);
+    expect(excluded.length).toBeGreaterThan(0);
+  });
+});
+
+describe('a router named something other than Hono', () => {
+  // Read from what the constructor BINDS TO, not from how it is spelled.
+  // `startsWith('Hono')` made an aliased import classify as "definitely not a
+  // router", which dropped every route in the file — and, once the corpus
+  // became "files that register a route", dropped the file from classification
+  // altogether.
+  it.each([
+    ['an aliased import', "import { Hono as Router } from 'hono';"],
+    ['a default import from hono', "import Router from 'hono';"],
+    ['a deep import', "import { Hono as Router } from 'hono/tiny';"],
+  ])('finds routes on a router constructed through %s', (_label, importLine) => {
+    const src = `${importLine}
+const app = new Router();
+app.post('/rooms/:roomId/governance/vote', authMiddleware(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('still ignores an ordinary collection that shares a method name', () => {
+    // The qualification is what keeps `new Map().delete(k)` out, so failing
+    // closed on an unrecognised constructor costs nothing.
+    const src = `
+const cache = new Map();
+cache.delete('key');
+const rows = new Set();
+rows.delete(id);`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
+describe('a registration method taken OFF the router', () => {
+  // Hono installs its verb methods as instance arrow functions bound to the
+  // router (`this[method] = (…) => …`), so a destructured `post` registers a
+  // route exactly as `app.post` does — but the callee is a plain identifier, so
+  // it was not read as a registration and the file left the corpus entirely.
+  it.each([
+    ['a destructured method', 'const { post } = app;\npost'],
+    ['a renamed destructured method', 'const { post: register } = app;\nregister'],
+    ['a COMPUTED destructured method key', "const { ['post']: register } = app;\nregister"],
+    // The same method taken by a property access rather than by a pattern.
+    ['a method held in a const', 'const register = app.post;\nregister'],
+    ['a computed method held in a const', "const register = app['post'];\nregister"],
+    ['an alias of a method alias', 'const first = app.post;\nconst register = first;\nregister'],
+  ])('finds a route registered through %s', (_label, prelude) => {
+    // Every line but the LAST declares; the last names the call.
+    const lines = prelude.split('\n');
+    const call = lines[lines.length - 1];
+    const src = `
+const app = new Hono();
+${lines.slice(0, -1).join('\n')}
+${call}('/rooms/:roomId/governance/vote', authMiddleware(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([
+      { file: 'f.ts', method: 'post', path: '/rooms/:roomId/governance/vote', guarded: false },
+    ]);
+  });
+
+  it('reads the GUARD inside a destructured registration too', () => {
+    const src = `
+const app = new Hono();
+const { post } = app;
+post('/rooms/:roomId/governance/vote', requireGovernanceEligibility(), (c) => c.json({}));`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.guarded).toBe(true);
+  });
+
+  it('does not treat a destructure from a NON-router as a registration', () => {
+    const src = `
+const store = new Map();
+const { delete: drop } = store;
+drop('key');`;
+    expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
+describe('a NAMED route handler', () => {
+  // Accepting only an INLINE function meant a registration with an unreadable
+  // receiver AND an unreadable path qualified as no registration at all and
+  // vanished — taking the file out of the corpus with it.
+  it.each([
+    ['a function declaration', 'function handler(c) { return castVote(); }'],
+    ['a const arrow', 'const handler = (c) => castVote();'],
+    ['a const function expression', 'const handler = function (c) { return castVote(); };'],
+    // A handler this file cannot see the body of is still a handler: with the
+    // router and the path both unresolvable too, rejecting it discarded the
+    // registration and took the whole file out of the corpus.
+    ['an IMPORTED handler', "import { handler } from './handler.js';"],
+  ])('qualifies a registration on an unknown receiver: %s', (_label, declaration) => {
+    const src = `
+import { app } from './router.js';
+const path = '/rooms/:roomId/governance/vote';
+${declaration}
+app.post(path, handler);`;
+    const routes = extractMutationRoutes('f.ts', src);
+    expect(routes).toHaveLength(1);
+    // The path is not readable, so it fails CLOSED rather than being guessed.
+    expect(routes[0]?.method).toBe('post');
+  });
+
+  it('does not turn an ordinary two-argument call into a route', () => {
+    const src = `
+function onDone(x) { return x; }
+cache.delete('key', onDone);
+db.delete(rows);`;
+    // `delete('key', …)` has no rooted path; the handler shape alone must not
+    // manufacture a route out of a collection call.
+    expect(extractMutationRoutes('f.ts', src).map((each) => each.path)).not.toContain(
+      '/rooms/:roomId/governance/vote',
+    );
   });
 });
 
