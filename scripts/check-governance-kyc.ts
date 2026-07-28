@@ -1229,32 +1229,49 @@ function importsOfExcludedTests(
   read: (relPath: string) => string,
 ): string[] {
   const judged = new Set(files);
-  const issues: string[] = [];
+  const sources: Source[] = [];
   for (const file of files) {
-    let source: string;
     try {
-      source = read(file);
-    } catch {
-      continue; // The unreadable-file path below reports this.
-    }
-    for (const match of source.matchAll(/\bfrom\s*'(\.[^']*)'/g)) {
-      const specifier = match[1];
-      if (specifier === undefined) continue;
-      const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
-      const target = resolved.replace(/\.js$/, '.ts');
-      if (!isTestPath(target) && !isTestPath(resolved)) continue;
-      // A test path the corpus deliberately does not judge, reached from one it
-      // does.  Either the import is wrong or the module is misnamed; both are
-      // review-visible acts, and neither may pass silently.
-      if (judged.has(target)) continue;
-      issues.push(
-        `${file} imports '${specifier}', a TEST path the gate deliberately does not judge. ` +
-          'A module a production source mounts must not be named as a test: rename it out of ' +
-          '`__tests__/` and off the `.test.ts` suffix so it is classified like any other.',
-      );
-    }
+      sources.push({ path: file, content: read(file) });
+    } catch {}
   }
-  return issues;
+  return withParsedSources(sources, (parsed) =>
+    parsed.flatMap(({ path, root }) => {
+      const issues: string[] = [];
+      for (const node of walk(root)) {
+        // Read from the PARSE, static and DYNAMIC alike.  A regex over `from
+        // '…'` saw neither `(await import('./x.test.js')).createRoutes()` nor
+        // `import('./x.test.js')`, so a route module mounted that way stayed
+        // unjudged — the shape this check exists to catch, spelled the other
+        // way.  `require` counts too: it names a module just as an import does.
+        const specifier =
+          node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration
+            ? staticString(node.moduleSpecifier)
+            : node.kind === SyntaxKind.CallExpression && isModuleLoad(node)
+              ? staticString((node.arguments ?? [])[0])
+              : undefined;
+        if (specifier === undefined || !specifier.startsWith('.')) continue;
+        const resolved = posix.normalize(posix.join(posix.dirname(path), specifier));
+        const target = resolved.replace(/\.js$/, '.ts');
+        if (!isTestPath(target) && !isTestPath(resolved)) continue;
+        if (judged.has(target)) continue;
+        issues.push(
+          `${path} imports '${specifier}', a TEST path the gate deliberately does not judge. ` +
+            'A module a production source mounts must not be named as a test: rename it out of ' +
+            '`__tests__/` and off the `.test.ts` suffix so it is classified like any other.',
+        );
+      }
+      return issues;
+    }),
+  );
+}
+
+/** Whether a call LOADS a module: `import(…)` or `require(…)`. */
+function isModuleLoad(call: Syntax): boolean {
+  const callee = unwrap(call.expression);
+  if (callee === undefined) return false;
+  if (callee.kind === SyntaxKind.ImportKeyword) return true;
+  return callee.kind === SyntaxKind.Identifier && nameOf(callee) === 'require';
 }
 
 export function runGovernanceKycGate(

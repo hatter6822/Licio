@@ -628,11 +628,18 @@ function selectionSource(
  * Whether an expression IS `undefined` — the value a destructuring default
  * replaces.
  */
-function isUndefinedValue(node: Syntax | undefined): boolean {
+function isUndefinedValue(node: Syntax | undefined, project: Project): boolean {
   const target = unwrap(node);
   if (target === undefined) return false;
   if (target.kind === SyntaxKind.VoidExpression) return true;
-  return target.kind === SyntaxKind.Identifier && (target.text ?? target.getText()) === 'undefined';
+  if (target.kind !== SyntaxKind.Identifier) return false;
+  if ((target.text ?? target.getText()) !== 'undefined') return false;
+  // `undefined` is not a keyword — it is a global BINDING, and a parameter or a
+  // local may shadow it.  `function f(undefined) { const { k = 'safe' } = { k:
+  // undefined } }` holds whatever the caller passed, so reading the NAME and
+  // folding to the default is the same mistake the parameter fold was: a name
+  // read instead of resolved.  Only an unshadowed `undefined` is the primitive.
+  return declarationOf(target, project) === undefined;
 }
 
 /**
@@ -649,7 +656,7 @@ function selectedValue(element: Syntax, project: Project, hop: number): Syntax |
   const key = containerKey(element, pattern, project);
   if (key === undefined) return element.initializer;
   const selected = valueAt(selectionSource(pattern, project, hop + 1), key, project, 0);
-  if (selected === undefined || isUndefinedValue(selected)) {
+  if (selected === undefined || isUndefinedValue(selected, project)) {
     return element.initializer ?? selected;
   }
   return selected;

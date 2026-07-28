@@ -1293,6 +1293,10 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       'a default behind an explicit `undefined`',
       "const { k = 'eval' } = { k: undefined }; export const e = globalThis[k];",
     ],
+    [
+      'a default behind `void 0`',
+      "const { k = 'eval' } = { k: void 0 }; export const e = globalThis[k];",
+    ],
   ])('catches a destructure through %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
   });
@@ -1339,6 +1343,13 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     [
       'a catch-bound name, which is not a const',
       "try { x(); } catch ({ k }) { globalThis[k]('x'); }",
+    ],
+    // `undefined` is a global BINDING, not a keyword, so a parameter may shadow
+    // it — and the default then does NOT apply.  Reading the name instead of
+    // resolving it folded to the default and flagged harmless code.
+    [
+      'a default behind a SHADOWED `undefined`',
+      "function f(undefined) { const { k = 'eval' } = { k: undefined }; globalThis[k]('x'); } f('safe');",
     ],
     ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],
     // A record being BUILT is not a selection from anything.

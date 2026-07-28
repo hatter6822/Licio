@@ -123,10 +123,13 @@ function configClosure(
   read: (path: string) => string | undefined,
 ): TrackedConfig[] {
   const seen = new Set<string>(seeds);
-  let frontier = seeds;
+  let frontier: readonly string[] = seeds;
   const configs: TrackedConfig[] = [];
-  // Files are finite and each round adds only unseen ones, so this terminates.
-  for (let round = 0; frontier.length > 0 && round <= 32; round += 1) {
+  // No round bound: `seen` already guarantees termination, since a round only
+  // enqueues paths nothing has read yet and files are finite.  A bound would
+  // exit with a NON-EMPTY frontier and silently accept an incomplete closure —
+  // configs never checked, reported as checked.
+  while (frontier.length > 0) {
     const sources = frontier.flatMap((path) => {
       const text = read(path);
       return text === undefined ? [] : [{ path, text }];
@@ -136,11 +139,18 @@ function configClosure(
     const next: string[] = [];
     for (const config of parsed) {
       const from = dirname(config.path);
-      for (const named of [...config.extends, ...config.references]) {
-        if (!named.startsWith('.')) continue;
+      // A REFERENCE path is relative whether or not it starts with `.` — the
+      // root config here uses `packages/shared/tsconfig.json` — so the dot test
+      // belongs only to `extends`, where a bare specifier resolves through
+      // node_modules and is not this assertion's business.
+      const named = [
+        ...config.extends.filter((each) => each.startsWith('.')),
+        ...config.references,
+      ];
+      for (const each of named) {
         // Whatever the compiler would open: the path itself, or — for an
         // extensionless `extends` — the `.json` beside it.
-        const direct = posix.normalize(posix.join(from, named));
+        const direct = posix.normalize(posix.join(from, each));
         for (const candidate of [direct, `${direct}.json`]) {
           if (seen.has(candidate) || read(candidate) === undefined) continue;
           seen.add(candidate);
@@ -233,6 +243,36 @@ describe('the reference CLOSURE', () => {
     expect(directoryFormOffenders(configClosure(['a/tsconfig.json'], read))).toEqual([
       expect.stringContaining('b/build.json: reference "../c" names a directory'),
     ]);
+  });
+
+  it('follows a reference path with NO dot prefix', () => {
+    // A reference path is relative whether or not it starts with `.` — the
+    // repository's own root config uses `packages/shared/tsconfig.json` — so
+    // the dot test belonged only to `extends`.
+    const dotless: Readonly<Record<string, string>> = {
+      'tsconfig.json': '{ "references": [{ "path": "packages/foo/build.json" }] }',
+      'packages/foo/build.json': '{ "references": [{ "path": "../bar" }] }',
+    };
+    const closure = configClosure(['tsconfig.json'], (path) => dotless[path]);
+    expect(closure.map((each) => each.path)).toContain('packages/foo/build.json');
+    expect(directoryFormOffenders(closure)).toEqual([
+      expect.stringContaining('packages/foo/build.json: reference "../bar" names a directory'),
+    ]);
+  });
+
+  it('walks a chain deeper than any round bound', () => {
+    // A bound would exit with a NON-EMPTY frontier and accept an incomplete
+    // closure — configs never checked, reported as checked.
+    const deep: Record<string, string> = {};
+    for (let at = 0; at < 60; at += 1) {
+      deep[`d${at}/tsconfig.json`] =
+        at === 59
+          ? '{ "references": [{ "path": "../last" }] }'
+          : `{ "references": [{ "path": "../d${at + 1}/tsconfig.json" }] }`;
+    }
+    const closure = configClosure(['d0/tsconfig.json'], (path) => deep[path]);
+    expect(closure).toHaveLength(60);
+    expect(directoryFormOffenders(closure)).toHaveLength(1);
   });
 
   it('terminates on a reference CYCLE', () => {

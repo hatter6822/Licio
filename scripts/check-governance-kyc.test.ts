@@ -477,6 +477,27 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
   });
 
+  it.each([
+    ['a dynamic import', "(await import('./secret.test.js')).createSecretRoutes()"],
+    ['a bare dynamic import', "await import('./secret.test.js')"],
+    ['require', "require('./secret.test.js')"],
+  ])('reports %s of a test path', (_label, expression) => {
+    // Read from the PARSE: a regex over `from '…'` saw none of these, so a
+    // route module mounted that way stayed unjudged.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      ".route('/auth', createAuthRoutes())",
+      `.route('/secret', ${expression})\n      .route('/auth', createAuthRoutes())`,
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
   it('does not report an ordinary relative import', () => {
     expect(runGovernanceKycGate()).toEqual([]);
   });
