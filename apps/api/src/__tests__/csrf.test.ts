@@ -25,7 +25,15 @@ async function sessionCookie(): Promise<string> {
 }
 
 describe('CSRF protection', () => {
+  // The swap test below installs a store that accepts ONE fixed token for any
+  // session.  Leaving it installed silently disarmed the CSRF gate for every
+  // later test in this file: they still passed, but a token-bearing request
+  // would have been waved through by the stub rather than by the code under
+  // test.  Capture the real store once and put it back after each test.
+  const realTokenStore = getTokenStore();
+
   afterEach(async () => {
+    setTokenStore(realTokenStore);
     await getTokenStore().clear();
   });
 
@@ -285,6 +293,10 @@ describe('CSRF protection', () => {
       async clear() {},
     };
     setTokenStore(customStore);
+    // The `afterEach` above puts the real store back — asserted at the end of
+    // this test so a future edit to the teardown cannot silently disarm the
+    // rest of the file again.
+    expect(getTokenStore()).toBe(customStore);
 
     const app = createApp();
     const res = await app.request('/api/csrf-token', {

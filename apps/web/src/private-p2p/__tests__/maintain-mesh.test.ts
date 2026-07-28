@@ -8,9 +8,23 @@
 import { describe, expect, it } from 'vitest';
 import { type DialedSession, type MeshDial, maintainMesh } from '../sync-session.js';
 
-const waitFor = async (cond: () => boolean, ms = 1_000): Promise<void> => {
+/**
+ * Poll until `cond` holds, and THROW when it does not.
+ *
+ * Returning silently on timeout made every bare `await waitFor(...)` a no-op:
+ * the mesh could fail to dial, fail to drop, or never re-mesh after the
+ * cooldown, and the test would still pass — the cooldown-expiry case at the
+ * end of the churn test had no other assertion at all.  `ice-restart.test.ts`
+ * and the real-WebRTC e2e spec already throw here; these two were the
+ * asymmetric ones.
+ */
+const waitFor = async (cond: () => boolean, label = 'condition', ms = 1_000): Promise<void> => {
   const start = Date.now();
-  while (!cond() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 2));
+  while (Date.now() - start < ms) {
+    if (cond()) return;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  throw new Error(`waitFor timed out: ${label}`);
 };
 
 describe('maintainMesh (§15.6 multi-peer)', () => {

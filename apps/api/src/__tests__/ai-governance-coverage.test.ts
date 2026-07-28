@@ -303,13 +303,27 @@ describe('WS-K scheduler tick', () => {
     expect(errors).toContain('config_reload');
   });
 
-  it('starts and stops the hourly scheduler', () => {
+  it('consults the lease, skips the tick when DENIED, and stops cleanly', async () => {
+    // `expect(typeof stop).toBe('function')` is true of any function the
+    // factory returns, so `startAiGovernanceScheduler` could have been gutted
+    // to `() => () => {}` and this test would not have noticed — neither the
+    // lease gate nor the stop it names was asserted.
     const { ai } = fresh();
-    const stop = startAiGovernanceScheduler(ai, () => {}, 3_600_000, {
-      lease: { tryAcquire: async () => false },
+    let checks = 0;
+    const stop = startAiGovernanceScheduler(ai, () => {}, 5, {
+      lease: {
+        tryAcquire: async () => {
+          checks += 1;
+          return false;
+        },
+      },
     });
-    expect(typeof stop).toBe('function');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBeGreaterThan(0); // the gate is consulted
     stop();
+    const afterStop = checks;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBe(afterStop); // …and stop() really halts it
   });
 });
 

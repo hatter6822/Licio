@@ -2620,15 +2620,27 @@ describe('in-memory store adapters + services getter', () => {
     const fixture = await freshKnomosisServices();
     const { startKnomosisScheduler } = await import('../knomosis/scheduler.js');
     let granted = true;
-    const lease = { tryAcquire: async () => granted };
-    const stop = startKnomosisScheduler(fixture.knomosis, () => {}, 10_000, {
-      lease,
+    let checks = 0;
+    const countingLease = {
+      tryAcquire: async () => {
+        checks += 1;
+        return granted;
+      },
+    };
+    const stop = startKnomosisScheduler(fixture.knomosis, () => {}, 5, {
+      lease: countingLease,
       holder: 'test',
     });
-    // Immediate tick already ran under the granted lease; a denied lease is a no-op.
+    // Neither half of this test's NAME was asserted: `typeof stop` is true of
+    // any returned function, so the scheduler could have consulted no lease and
+    // run no tick.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBeGreaterThan(0);
     granted = false;
     stop();
-    expect(typeof stop).toBe('function');
+    const afterStop = checks;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBe(afterStop);
   });
 
   it('a simulated execution blocks when the sim treasury cannot cover it', async () => {

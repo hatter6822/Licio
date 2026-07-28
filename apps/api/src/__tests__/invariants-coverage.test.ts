@@ -347,11 +347,23 @@ describe('scheduler branches (WS-H.1.2f)', () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(leaseChecks).toBeGreaterThan(0);
+    const checksWhileDenied = leaseChecks;
     granted = true;
     await new Promise((resolve) => setTimeout(resolve, 30));
     stop();
+    // `toBeGreaterThanOrEqual(0)` is true of every array, so the whole point of
+    // the test — that a GRANTED lease produces a run and a DENIED one does not
+    // — was unasserted: the scheduler could have skipped every tick, or thrown
+    // and swallowed it, and this still passed.
     const runs = await fixture.invariants.runMetadata.listRecent('MERI', 1);
-    expect(runs.length).toBeGreaterThanOrEqual(0); // tick executed without throwing
+    expect(runs.length).toBeGreaterThan(0);
+    // …and the lease really was consulted on both sides of the flip.
+    expect(checksWhileDenied).toBeGreaterThan(0);
+    expect(leaseChecks).toBeGreaterThan(checksWhileDenied);
+    // After stop(), no further ticks.
+    const afterStop = leaseChecks;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(leaseChecks).toBe(afterStop);
   });
 });
 
