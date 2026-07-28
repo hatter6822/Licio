@@ -14,6 +14,11 @@ export interface ProjectTest {
   environment: 'node' | 'jsdom';
   setupFiles?: string[];
   env?: Record<string, string>;
+  /** Per-project timeout, in ms.  Declared because `policyProjectTest` sets it
+   *  — and, until this file entered a tsconfig, TypeScript never saw that the
+   *  interface omitted it (`error TS2353: 'testTimeout' does not exist in type
+   *  'ProjectTest'`).  See the root `tsconfig.tools.json`. */
+  testTimeout?: number;
 }
 
 /**

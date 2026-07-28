@@ -1,0 +1,27 @@
+{
+  // The repository-ROOT TypeScript files, which sat outside every tsconfig.
+  //
+  // `tsconfig.json` is a solution file (`"files": []` + project references) and
+  // every reference points into `apps/` or `packages/`; `scripts/tsconfig.json`
+  // covers `scripts/**`.  Between them nothing compiled `vitest.config.ts` or
+  // `vitest.shared.ts` — so `pnpm typecheck` had never once read the file that
+  // configures the whole test run.
+  //
+  // That is exactly the hole `scripts/tsconfig.json` was created to close, and
+  // it had already produced the same kind of defect: `vitest.shared.ts` declared
+  // `testTimeout: 120_000` on a `ProjectTest` interface with no such member —
+  // `error TS2353: Object literal may only specify known properties` — which
+  // nothing reported because nothing checked. It worked at runtime only because
+  // the object is spread into Vitest's own config, where the property is legal.
+  //
+  // `noEmit` + standalone, like the scripts project: a few seconds, no build
+  // order, no emit. Wired into `pnpm typecheck` / `typecheck:ci` at the root.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `vitest/config` pulls in Vite's types, which reference DOM shapes.
+    "types": ["node"],
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["vitest.config.ts", "vitest.shared.ts"]
+}

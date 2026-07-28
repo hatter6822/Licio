@@ -251,6 +251,41 @@ recorded here:
   documented as ignored for a role_class fixture; a governance-package test locks
   in that only signer ballots count toward the signer-set quorum.
 
+- **Route-PAGE coverage** — the exclusion is fixed, the tests are partial.
+  `vitest.config.ts` excluded `apps/web/src/routes/**` wholesale, which
+  discarded ~5.8k lines of real page components (`routes/-pages/**`) AND the ten
+  page test files that already existed.  The exclusion is now narrowed to the
+  route SHELLS (`routes/*.tsx` — `createFileRoute` declarations), so the pages
+  are measured; the global gate still passes (branches 80.5%).  What the
+  measurement now SHOWS is the residual gap: `privacy-data.tsx` 2%, `profile.tsx` 10%,
+  `auth.tsx` 21%, `security.tsx` 24%, and `mode.tsx` / `offline.tsx` /
+  `private-rooms.tsx` at 0%.  `dev-simulator.tsx` (its production kill-branch),
+  `moderation.tsx`, `compliance-console.tsx` and the two safety pages now have
+  behavioural tests.
+  **Closure target:** the four low-coverage pages, `security.tsx` first — it is
+  the largest (194 statements) and hosts the MFA/session surfaces.
+
+- **`context canceled` noise from the TypeScript 7 native host** — blocked
+  upstream. `new API(...)` in `scripts/ts-source.ts` /
+  `scripts/resolve-export-references.ts` spawns the Go compiler as a child whose
+  stderr is INHERITED (`typescript/dist/api/syncChannel.js` hard-codes
+  `stdio: ['pipe', 'pipe', 'inherit']`), and `close()` kills it — so it writes
+  `context canceled` to our stderr on the way out. A `vitest --project policy`
+  run prints a few hundred of them, interleaved with the test output; the count
+  varies run to run (it is a teardown race, worse under load) while the results
+  do not. Nothing is failing.
+  Not fixable from here: the `stdio` triple is not configurable through the
+  public API, and a child inherits fd 2 at spawn time, so no JS-side redirection
+  reaches it. **Reusing one host across calls was tried and rejected**: the
+  server keeps its own view of the mutable virtual tree, and neither removing
+  the batch's files nor `api.clearSourceFileCache()` makes the next
+  `updateSnapshot` see the new ones — 496 of 1235 policy tests fail, i.e. gates
+  judge the WRONG source. A quieter log is not worth a gate that reads stale
+  text.
+  **Closure target:** revisit when the TS 7 API exposes either child stdio
+  control or a host that can be reused across virtual-tree mutations; until
+  then the per-call host stays and the noise is documented at the call site.
+
 - **MFCI cheap-intake attribution** (`invariants/services.ts`): the window-global
   concentration statistic is attributed to the flagged item and pinned at `high`.
   Per the maintainer, the `Math.max` pin is intentional/conservative; the

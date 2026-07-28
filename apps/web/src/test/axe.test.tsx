@@ -46,7 +46,10 @@ describe('checkA11y', () => {
     // token table test and the Playwright runs are what check contrast.
     const { container } = render(<p>text</p>);
     const results = await checkA11y(container);
-    expect(results.violations.some((v) => v.id === 'color-contrast')).toBe(false);
-    expect(results.incomplete.some((v) => v.id === 'color-contrast')).toBe(false);
+    const ids = (rules: ReadonlyArray<{ id: string }>): string[] => rules.map((rule) => rule.id);
+    expect(ids(results.violations)).not.toContain('color-contrast');
+    expect(ids(results.incomplete as ReadonlyArray<{ id: string }>)).not.toContain(
+      'color-contrast',
+    );
   });
 });
