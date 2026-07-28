@@ -450,8 +450,8 @@ ratification path already does exactly that and is the model to copy.
 
 ### Governance + treasury correctness
 
-- **[HIGH]** `apps/api/src/treasury/proposals.ts:898` — Delegated voting weight is counted twice when one member splits an `all` and a `type:` delegation across two different delegates
-- **[HIGH]** `apps/api/src/treasury/proposals.ts:881` — Revoking a delegation after the delegate has voted lets the delegator cast the same unit a second time
+- ~~**[HIGH]** `apps/api/src/treasury/proposals.ts:898` — Delegated voting weight is counted twice when one member splits an `all` and a `type:` delegation across two different delegates~~ — **FIXED**
+- ~~**[HIGH]** `apps/api/src/treasury/proposals.ts:881` — Revoking a delegation after the delegate has voted lets the delegator cast the same unit a second time~~ — **FIXED**.  Both were one defect wearing two faces: the outgoing and incoming guards were asking different questions about the same fact.  `delegatorsAlreadyConsumed` is now the single predicate both call, and it reads EVERY delegation state (`listByDelegator`) rather than only `active`.
 - **[HIGH]** `apps/api/src/governance/service.ts:563` — Steward-election turnout denominator is read live at settle, so membership inflation before the tick fails the election and hands the incumbent a full new term
 - **[HIGH]** `apps/api/src/treasury/proposals.ts:278` — WS-M proposal quorum denominator is recomputed at settle, letting post-vote membership growth nullify a decided proposal
 - **[MEDIUM]** `apps/api/src/treasury/proposals.ts:828` — The `reputation_bounded` weight model always resolves weight 0, so every proposal in a room that adopts it is rejected

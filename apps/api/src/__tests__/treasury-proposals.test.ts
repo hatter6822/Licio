@@ -1383,6 +1383,96 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
   });
 
+  it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {
+    // The guard used to read only ACTIVE delegations, so revoking erased its
+    // evidence while the weight stayed inside the delegate's frozen
+    // `weightSnapshot` — and the refusal message ("revoke the delegation to
+    // vote directly") walked the delegator straight through the hole.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('2'); // own 1 + PROPOSER's 1
+
+    // Now revoke, then try to vote directly.
+    const all = await deps.delegations.listByRoom(ROOM, 10);
+    const mine = all.find((d) => d.delegatorUserId === PROPOSER);
+    expect(
+      await revokeDelegation(deps, {
+        roomId: ROOM,
+        delegationId: mine?.delegationId ?? '',
+        actorUserId: PROPOSER,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
+  });
+
+  it('SPLITTING an `all` and a `type:` delegation across two delegates counts the unit ONCE', async () => {
+    // `incomingDelegationsFor` dedups per DELEGATE, so it cannot see a sibling
+    // delegation the same delegator granted to someone else; `alreadyVoted`
+    // does not catch it either, because that delegator never voted directly.
+    // The unit was therefore counted once in each delegate's snapshot.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 3 });
+    const WALLET_3 = '33333333-3333-4333-8333-333333333333';
+    const signer3 = privateKeyToAccount(`0x${'59'.repeat(32)}`);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_3, STEWARD, signer3.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    // ONE delegator, TWO delegates, two scopes that both match this proposal.
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: STEWARD,
+      scope: { proposal_type: proposal.proposalType },
+    });
+    await openVoting(deps);
+
+    const first = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in first)) throw new Error(JSON.stringify(first));
+    expect(first.signature.weightSnapshot).toBe('2'); // own 1 + the delegated 1
+
+    const second = await castVote(deps, proposal.proposalId, STEWARD, WALLET_3, signer3, 'approve');
+    if (!('signature' in second)) throw new Error(JSON.stringify(second));
+    // Their OWN vote only — PROPOSER's unit is already inside the first ballot.
+    expect(second.signature.weightSnapshot).toBe('1');
+  });
+
   it('allows a delegator’s direct vote when the delegation POST-DATES the delegate’s ballot (WS-M.4.2c-1)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });

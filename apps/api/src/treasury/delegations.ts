@@ -109,6 +109,61 @@ export async function revokeDelegation(
  * type-specific scope wins as the more explicit instruction); without the
  * dedup one delegator would double-boost the same ballot.
  */
+/**
+ * The delegators whose unit is ALREADY inside some voter's counted snapshot.
+ *
+ * One predicate, two callers, and that is the point.  A delegated unit is
+ * consumed for a proposal the moment ANY delegate's ballot counts it — a
+ * `weightSnapshot` is frozen at signing time and never recomputed — so both
+ * sides of the ledger have to ask the same question, and they were asking two
+ * different ones:
+ *
+ *   • the OUTGOING guard (a delegator voting directly) read only ACTIVE
+ *     delegations, so revoking after the delegate signed removed the evidence
+ *     without removing the counted weight, and the delegator could cast the
+ *     same unit a second time;
+ *   • the INCOMING guard (a delegate's ballot) skipped only delegators who had
+ *     voted DIRECTLY, so a member who split an `all` delegation to one delegate
+ *     and a `type:` delegation to another had their weight counted twice, once
+ *     in each delegate's snapshot.  The per-delegate dedup in
+ *     `incomingDelegationsFor` cannot see this: it reads one delegate at a time.
+ *
+ * A delegation counts as consumed when it EXISTED at the delegate's vote
+ * instant (`createdAt <= voteTime`) and was still live then
+ * (`revokedAt === null || revokedAt > voteTime`) — a delegation created after,
+ * or revoked before, was never in that snapshot and leaves the unit free.
+ *
+ * `excludeDelegate` is the delegate whose ballot is being resolved right now:
+ * their own incoming set is what the caller is building, so counting it here
+ * would refuse every delegation to them.
+ */
+export async function delegatorsAlreadyConsumed(
+  delegations: DelegationStore,
+  roomId: string,
+  proposalType: string,
+  candidates: readonly string[],
+  voteTimeByUser: ReadonlyMap<string, string>,
+  excludeDelegate: string | null,
+): Promise<Set<string>> {
+  const consumed = new Set<string>();
+  for (const delegatorUserId of new Set(candidates)) {
+    // EVERY state: a revoked delegation is exactly the case the active-only
+    // read used to miss.
+    const granted = await delegations.listByDelegator(roomId, delegatorUserId);
+    for (const d of granted) {
+      if (d.delegateUserId === null || d.delegateUserId === excludeDelegate) continue;
+      if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposalType}`) continue;
+      const voteTime = voteTimeByUser.get(d.delegateUserId);
+      if (voteTime === undefined) continue;
+      if (d.createdAt > voteTime) continue; // granted after that ballot
+      if (d.revokedAt !== null && d.revokedAt <= voteTime) continue; // already gone
+      consumed.add(delegatorUserId);
+      break;
+    }
+  }
+  return consumed;
+}
+
 export async function incomingDelegationsFor(
   delegations: DelegationStore,
   roomId: string,

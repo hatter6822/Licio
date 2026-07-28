@@ -65,7 +65,7 @@ import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
-import { incomingDelegationsFor } from './delegations.js';
+import { delegatorsAlreadyConsumed, incomingDelegationsFor } from './delegations.js';
 import { createGrantFromProposal, type GrantDeps, hasValidMilestonePlan } from './grants.js';
 import {
   activeLawPack,
@@ -878,24 +878,50 @@ export async function signProposal(
   // was actually in that snapshot); a delegation created AFTER the delegate voted
   // was never counted, so the delegator's direct vote stands.
   if (model === 'delegated' && input.purpose === 'vote') {
-    const outgoing = await deps.delegations.listActiveByDelegator(input.roomId, input.userId);
-    const delegateSnapshotIncludesMe = outgoing.some((d) => {
-      if (d.delegateUserId === null) return false;
-      if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposal.proposalType}`) return false;
-      const voteTime = voteTimeByUser.get(d.delegateUserId);
-      return voteTime !== undefined && d.createdAt <= voteTime;
-    });
-    if (delegateSnapshotIncludesMe) {
+    // The SHARED predicate, so this guard and the incoming one below cannot
+    // drift apart again.  It reads EVERY delegation state, not just `active`:
+    // revoking after the delegate signed removed this check's evidence while
+    // leaving the weight inside the delegate's frozen snapshot, so the
+    // delegator could cast the same unit a second time — and the error message
+    // two lines down ("revoke the delegation to vote directly") walked them
+    // straight through it.
+    const consumed = await delegatorsAlreadyConsumed(
+      deps.delegations,
+      input.roomId,
+      proposal.proposalType,
+      [input.userId],
+      voteTimeByUser,
+      null,
+    );
+    if (consumed.has(input.userId)) {
       return tgErr(
         409,
         'delegated_weight_already_cast',
-        'Your vote was already cast via your delegate; revoke the delegation to vote directly.',
+        'Your vote was already cast via your delegate. Revoking the delegation does not ' +
+          'return the weight — that ballot is already counted.',
       );
     }
   }
+  // …and the SAME predicate on the incoming side.  `incomingDelegationsFor`
+  // dedups a delegator who granted both an `all` and a `type:` delegation to
+  // THIS delegate, but it reads one delegate at a time — so a member who split
+  // the two across two DIFFERENT delegates had their unit counted once in each
+  // ballot.  `alreadyVoted` does not catch it either: that delegator never
+  // voted directly.
+  const consumedElsewhere = await delegatorsAlreadyConsumed(
+    deps.delegations,
+    input.roomId,
+    proposal.proposalType,
+    delegations.flatMap((d) => (d.delegatorUserId === null ? [] : [d.delegatorUserId])),
+    voteTimeByUser,
+    input.userId,
+  );
   const incoming = [];
   for (const delegation of delegations) {
     if (delegation.delegatorUserId !== null && alreadyVoted.has(delegation.delegatorUserId)) {
+      continue;
+    }
+    if (delegation.delegatorUserId !== null && consumedElsewhere.has(delegation.delegatorUserId)) {
       continue;
     }
     let delegatorEligible = false;

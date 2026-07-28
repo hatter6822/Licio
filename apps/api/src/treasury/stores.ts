@@ -493,6 +493,15 @@ export interface DelegationStore {
   revoke(delegationId: string, revokedAt: string): Promise<DelegationRecordEntity | null>;
   listActiveByDelegate(roomId: string, delegateUserId: string): Promise<DelegationRecordEntity[]>;
   listActiveByDelegator(roomId: string, delegatorUserId: string): Promise<DelegationRecordEntity[]>;
+  /** EVERY delegation this delegator granted, revoked ones included.
+   *
+   *  A revoked delegation is still historically load-bearing: if the delegate
+   *  voted while it was live, the delegator's unit is inside that ballot's
+   *  frozen `weightSnapshot` for ever.  An active-only read cannot see that, so
+   *  revoking after the delegate signs used to erase the EVIDENCE of the vote
+   *  without erasing the counted weight — and the delegator could then cast the
+   *  same unit again directly. */
+  listByDelegator(roomId: string, delegatorUserId: string): Promise<DelegationRecordEntity[]>;
   listByRoom(roomId: string, limit: number): Promise<DelegationRecordEntity[]>;
   clear(): Promise<void>;
 }
@@ -1210,6 +1219,15 @@ export class InMemoryDelegationStore implements DelegationStore {
       .filter(
         (r) => r.roomId === roomId && r.delegatorUserId === delegatorUserId && r.state === 'active',
       )
+      .map(clone);
+  }
+
+  async listByDelegator(
+    roomId: string,
+    delegatorUserId: string,
+  ): Promise<DelegationRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.roomId === roomId && r.delegatorUserId === delegatorUserId)
       .map(clone);
   }
 

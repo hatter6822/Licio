@@ -1234,6 +1234,22 @@ export class DrizzleDelegationStore implements DelegationStore {
     return rows.map(mapDelegation);
   }
 
+  async listByDelegator(
+    roomId: string,
+    delegatorUserId: string,
+  ): Promise<DelegationRecordEntity[]> {
+    const rows = await this.db
+      .select()
+      .from(delegationRecords)
+      .where(
+        and(
+          eq(delegationRecords.roomId, roomId),
+          eq(delegationRecords.delegatorUserId, delegatorUserId),
+        ),
+      );
+    return rows.map(mapDelegation);
+  }
+
   async listByRoom(roomId: string, limit: number): Promise<DelegationRecordEntity[]> {
     const rows = await this.db
       .select()
