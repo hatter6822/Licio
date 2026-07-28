@@ -94,6 +94,20 @@ function directFlowMember(line: string, member: string): string | undefined {
   return memberAt === undefined ? undefined : line.slice(memberAt);
 }
 
+/**
+ * `line` with its YAML COMMENT removed.
+ *
+ * A digest is base64 and an algorithm prefix is alphanumeric, so neither can
+ * contain `#` — but a COMMENT can contain a digest, and `resolution: {} #
+ * integrity: sha512-…` then read as covered while the entry pinned nothing.
+ * Only a `#` that starts the line or follows whitespace opens a comment, which
+ * is YAML's own rule, so a `#` inside a value is left alone.
+ */
+function withoutComment(line: string): string {
+  const at = line.search(/(?:^|\s)#/);
+  return at < 0 ? line : line.slice(0, at);
+}
+
 /** Entries sit at two spaces, so their own fields sit at four. */
 const ENTRY_FIELD_INDENT = 4;
 
@@ -149,13 +163,20 @@ export function countPackagesSection(content: string): { entries: number; integr
       // nested `peerDependenciesMeta` decoy mask a package whose own
       // resolution was empty, which is the masking per-entry counting exists
       // to prevent, on one line instead of several.
-      const inline = directFlowMember(line, 'resolution');
+      const inline = directFlowMember(withoutComment(line), 'resolution');
       if (inline !== undefined && isAlgorithmLengthDigest(inline)) covered = true;
       continue;
     }
     if (!open) continue;
 
-    const indent = line.length - line.trimStart().length;
+    // A BLANK line is not a dedent — it is whitespace inside the block.  Its
+    // indent of zero closed the resolution early, so a digest written after one
+    // was ignored and an integrity-covered package reported as missing its
+    // hash: the gate refusing valid input again.
+    const bare = withoutComment(line);
+    if (bare.trim() === '') continue;
+
+    const indent = bare.length - bare.trimStart().length;
     // YAML writes a mapping either INLINE (`resolution: {integrity: …}`) or as
     // an indented BLOCK, and pnpm verifies the digest under both.  Requiring
     // the flow spelling rejected an integrity-covered package outright — a gate
@@ -167,7 +188,7 @@ export function countPackagesSection(content: string): { entries: number; integr
     // Accepting one at any depth let a `peerDependenciesMeta` subtree carry a
     // well-formed decoy that covered for the package's own missing digest —
     // the masking this per-entry counting was meant to end, one level down.
-    const opensResolution = indent === ENTRY_FIELD_INDENT && /^\s*resolution:/.test(line);
+    const opensResolution = indent === ENTRY_FIELD_INDENT && /^\s*resolution:/.test(bare);
     if (opensResolution) resolutionAt = indent;
 
     // A DIGEST OF THE DECLARED ALGORITHM, on the RESOLUTION this entry pins —
@@ -179,7 +200,7 @@ export function countPackagesSection(content: string): { entries: number; integr
     // still reported full coverage, the exact failure this check exists to
     // notice.
     const withinResolution = opensResolution || resolutionAt !== undefined;
-    if (!covered && withinResolution && isAlgorithmLengthDigest(line)) covered = true;
+    if (!covered && withinResolution && isAlgorithmLengthDigest(bare)) covered = true;
   }
   close();
   return { entries, integrity };

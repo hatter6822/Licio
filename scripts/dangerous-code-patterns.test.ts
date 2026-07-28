@@ -1191,6 +1191,20 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
   const refs = (code: string): number =>
     (findForbiddenGlobalReferencesIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).length;
 
+  /**
+   * WHY each finding was raised, not merely how many there were.
+   *
+   * Two rules report here — "this names the forbidden global" and "this key off
+   * the global object cannot be read" — and a count cannot tell them apart.
+   * That difference is the whole point of the cases below: a fold that INVENTED
+   * `eval` from a value the code never takes must stay wrong even though the
+   * access is reported for the other, honest reason.
+   */
+  const named = (code: string): boolean =>
+    (findForbiddenGlobalReferencesIn([{ path: 'x.ts', content: code }]).get('x.ts') ?? []).some(
+      ({ label }) => /forbidden global/.test(label),
+    );
+
   // Every laundering route six review rounds surfaced still has to NAME the
   // global.  Asking "is it invoked" is unbounded — a value reaches a call
   // through a container, a prototype, a proxy, an iterator, a borrowed method
@@ -1287,8 +1301,116 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       "let r; ({ a: { b: { ['eval']: r } } } = { a: { b: globalThis } });",
     ],
     ['a nested element default', "const { a: { ['eval']: r } = globalThis } = o;"],
+    // A PARAMETER'S DEFAULT is written here and is the value the binding holds
+    // whenever the argument is omitted, so it folds.  A CALLER'S argument lives
+    // in another file and never does — which is why the enclosing `const fn =
+    // …` must not lend the parameter its own declaration kind.
+    [
+      'a parameter default that applies when the call omits it',
+      "const fn = ({ key } = { key: 'eval' }) => globalThis[key]('x'); fn();",
+    ],
+    ['a plain parameter default', "const fn = (key = 'eval') => globalThis[key]('x'); fn();"],
+    // A CATCH binding is the same case: the thrown value is supplied from
+    // outside and unfoldable, the default beside it is written here.
+    ['a catch-binding default', "try { x(); } catch ({ k = 'eval' }) { globalThis[k]('x'); }"],
+    // A conditional with a FIXED condition selects one branch at compile time,
+    // so the default applies exactly as a bare `undefined` would.
+    [
+      'a default behind a decidable conditional',
+      "const { k = 'eval' } = { k: true ? undefined : 'safe' }; export const e = globalThis[k];",
+    ],
+    // …and the condition may be held in an immutable binding rather than
+    // spelled, so it is RESOLVED rather than matched on node kind.
+    [
+      'a default behind an ALIASED decidable condition',
+      "const yes = true; const { k = 'eval' } = { k: yes ? undefined : 'safe' }; export const e = globalThis[k];",
+    ],
+    // A default applies at EVERY nesting step, not only the last: the outer
+    // selection is `undefined`, so the OUTER default binds and the inner
+    // pattern destructures it.
+    [
+      'an OUTER default behind an explicit undefined',
+      "const { a: { k = 'safe' } = { k: 'eval' } } = { a: undefined }; export const e = globalThis[k];",
+    ],
+    // A default applies when the property is ABSENT *or* explicitly undefined;
+    // JavaScript makes no distinction.
+    [
+      'a default behind an explicit `undefined`',
+      "const { k = 'eval' } = { k: undefined }; export const e = globalThis[k];",
+    ],
+    [
+      'a default behind `void 0`',
+      "const { k = 'eval' } = { k: void 0 }; export const e = globalThis[k];",
+    ],
+    // A condition that is NOT decidable leaves BOTH branches live, so the value
+    // is a set and no single member of it is the answer.  Deciding the branch
+    // from a PARAMETER DEFAULT picked one, and `f(false)` took the other; then
+    // collapsing the undecidable case to "may be undefined, so take the
+    // default" picked the default and lost the branch naming the global.  Both
+    // readings are guesses, and the key is now simply unreadable — which is
+    // itself reported off the global object.
+    [
+      'a default behind a condition the caller supplies',
+      "function f(yes = true) { const { k = 'eval' } = { k: yes ? 'safe' : undefined }; globalThis[k]('x'); } f(false);",
+    ],
+    [
+      'a NON-undefined branch the default would discard',
+      "function f(yes: boolean) { const { k = 'safe' } = { k: yes ? 'eval' : undefined }; globalThis[k]('x'); } f(true);",
+    ],
   ])('catches a destructure through %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
+  });
+
+  describe('a key off the global object that cannot be READ', () => {
+    // The rule that makes the value analysis BOUNDED.  Asking "which value may
+    // this key hold" needs a parameter default, a conditional, a spread, an
+    // array hole, a getter, a proxy — and review found the next form every
+    // round, exactly as the spelling regexes did one level up.  Asking "is this
+    // key one this can read" ends the list: an expression form nothing here
+    // models yields no key, and no key off the global object is the finding.
+    //
+    // Adopted on a MEASUREMENT, as the never-mentioned rule was: the first-party
+    // corpus holds 15 element accesses off the global object and none whose key
+    // fails to resolve, so the rule costs nothing today.
+    it.each([
+      ['a key from a runtime parameter', 'export function f(k: string) { return globalThis[k]; }'],
+      [
+        'a key from a reassignable binding',
+        "let k = 'a'; k = 'b'; export const v = globalThis[k];",
+      ],
+      [
+        'a key off an aliased global',
+        'const g = globalThis; export function f(k: string) { return g[k]; }',
+      ],
+      ['a key with an unknown tail', "export const v = globalThis['ev' + String(x)];"],
+    ])('reports %s', (_label, code) => {
+      expect(refs(code)).toBe(1);
+    });
+
+    it.each([
+      // A key this CAN read is judged on what it names, not on its spelling —
+      // otherwise the rule would reject the 15 legitimate accesses it was
+      // measured against.
+      [
+        'a folded key naming something harmless',
+        "const k = 'toString'; export const t = globalThis[k];",
+      ],
+      ['a literal key', "export const t = globalThis['structuredClone'];"],
+      [
+        'a composed key that folds whole',
+        "const a = 'to', b = 'String'; export const t = globalThis[a + b];",
+      ],
+      // A PROPERTY access names its key outright; there is nothing to read.
+      ['a plain property access', 'export const c = globalThis.structuredClone;'],
+      // The receiver is resolved, so an unreadable key off an ordinary object
+      // is an ordinary lookup.
+      [
+        'an unreadable key off a NON-global',
+        'const o = { a: 1 }; export function f(k: string) { return o[k]; }',
+      ],
+    ])('does not report %s', (_label, code) => {
+      expect(refs(code)).toBe(0);
+    });
   });
 
   it.each([
@@ -1301,12 +1423,14 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     expect(refs(code)).toBe(1);
   });
 
+  // These select an UNREADABLE key off the global object, so the backstop above
+  // reports them — but the guarantee each was written for is unchanged and is
+  // what is asserted: the fold must never INVENT `eval` from a value the code
+  // does not take.  A count alone cannot say which rule fired, so the label is.
   it.each([
     // A key is the WHOLE value, not a prefix.  Folding `'eval' + String('Safe')`
-    // to its known head named `eval` and rejected a source that only ever
-    // selects `evalSafe` — a gate refusing correct code, which is worse than one
-    // that misses.  The prefix helper stays where a prefix IS the answer: a URL
-    // scheme.
+    // to its known head named `eval` a source that only ever selects `evalSafe`.
+    // The prefix helper stays where a prefix IS the answer: a URL scheme.
     [
       'a key with a known prefix and an unknown tail',
       "const { ['eval' + String('Safe')]: run } = globalThis;",
@@ -1319,8 +1443,51 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       'a key composed from a reassignable binding',
       "let a = 'ev'; a = 'zz'; const e = globalThis[a + 'al'];",
     ],
+    // A PARAMETER takes its value from the CALLER, so its default is one of the
+    // values it may hold and never the value it does.  Folding it read the
+    // enclosing `const fn = …` as the parameter's own declaration and invented
+    // a key the call never passes — wrong in BOTH directions, so neither the
+    // harmless default nor a caller's argument may be folded.
+    [
+      'a catch-bound name, which is not a const',
+      "try { x(); } catch ({ k }) { globalThis[k]('x'); }",
+    ],
+    // `undefined` is a global BINDING, not a keyword, so a parameter may shadow
+    // it — and the default then does NOT apply.  Reading the name instead of
+    // resolving it folded to the default and named the global from thin air.
+    [
+      'a default behind a SHADOWED `undefined`',
+      "function f(undefined) { const { k = 'eval' } = { k: undefined }; globalThis[k]('x'); } f('safe');",
+    ],
+  ])('never NAMES the global through %s', (_label, code) => {
+    expect(named(code)).toBe(false);
+    // …and it is still reported, on the honest ground that the key is unreadable.
+    expect(refs(code)).toBe(1);
+  });
+
+  it('catches a key a GETTER supplies behind a harmless default', () => {
+    // The getter supplies `k`, so the default never binds — but a lookup that
+    // answered "absent" for every member shape it could not read handed the
+    // default back, and the scan folded to `safe` over a property that returns
+    // the global.  One branch closes the getter, the setter, the method
+    // shorthand, the unfoldable computed key and the array spread together.
+    expect(refs("const { k = 'safe' } = { get k() { return 'eval'; } }; globalThis[k]('x');")).toBe(
+      1,
+    );
+  });
+
+  it('NAMES the global through an array hole', () => {
+    // An array HOLE reads as `undefined`, so the binding default applies — but
+    // the parser gives it its own node kind, which the `undefined`-identifier
+    // rule did not recognise.  The backstop reports this access either way, so
+    // what recognising the hole buys is PRECISION: the finding names `eval`
+    // rather than saying only that some key could not be read.
+    expect(named("const [a = 'ev', b = 'al'] = [,,]; globalThis[a + b]('x');")).toBe(true);
+  });
+
+  it.each([
     // The SOURCE is resolved, exactly as a property receiver is, so a computed
-    // key off an unrelated record is not the global.
+    // key off an unrelated record is not the global — readable or not.
     ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],
     // A record being BUILT is not a selection from anything.
     ['a computed key in an object literal VALUE', "export const o = { ['eval']: 1 };"],

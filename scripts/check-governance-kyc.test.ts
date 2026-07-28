@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
+  isTypeScriptSource,
   NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
   trackedApiSources,
@@ -450,6 +451,68 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining(`${path} REGISTERS`));
   });
 
+  // The import SCAN these tests covered is gone.  Asking "does any production
+  // file import an excluded test" meant naming a module, which is unbounded —
+  // it took four review findings across three rounds (a bound loader, a URL
+  // suffix, an aliased `require`, a type-only import) and would have taken
+  // more.  The corpus simply includes tests now, so a test-path file that
+  // registers a mutation must be classified HOWEVER it is reached, or not
+  // reached at all.
+  it.each([
+    [
+      'a pre-bound require',
+      "const load = require.bind(null, './secret.test.js');\nconst m = load();",
+    ],
+    ['a URL-suffixed dynamic import', "const m = import('./secret.test.js?mounted');"],
+    ['an aliased require', "const load = require;\nconst m = load('./secret.test.js');"],
+    ['no import at all', ''],
+  ])('classifies a test-path module registering a mutation, reached by %s', (_label, inject) => {
+    const target = 'apps/api/src/routes/secret.test.ts';
+    const v1 =
+      inject === ''
+        ? undefined
+        : readRepo('apps/api/src/routes/v1.ts').replace(
+            'import { createAuthRoutes }',
+            `${inject}\nimport { createAuthRoutes }`,
+          );
+    const issues = runGovernanceKycGate(
+      (rel) =>
+        rel === target
+          ? `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`
+          : rel === 'apps/api/src/routes/v1.ts' && v1 !== undefined
+            ? v1
+            : readRepo(rel),
+      [...live, target],
+    );
+    expect(issues).toContainEqual(expect.stringContaining(`${target} REGISTERS`));
+  });
+
+  it('takes test paths into the corpus, so none can hide there', () => {
+    const tests = live.filter(
+      (each) => /\.test\.[cm]?tsx?$/.test(each) || each.includes('/__tests__/'),
+    );
+    expect(tests.length).toBeGreaterThan(100);
+  });
+
+  it('does not report an ordinary relative import', () => {
+    expect(runGovernanceKycGate()).toEqual([]);
+  });
+
+  it.each([
+    ['types.d.ts', false],
+    ['types.d.mts', false],
+    ['types.d.cts', false],
+    ['routes.ts', true],
+    ['routes.tsx', true],
+    ['routes.mts', true],
+  ])('takes %s as a source: %s — a declaration file is erased whole', (name, wanted) => {
+    // Scanning a declaration file as runtime code reported a rename the build
+    // never needs; `.d.mts` and `.d.cts` are as erased as `.d.ts`.
+    expect(isTypeScriptSource(`apps/api/src/${name}`)).toBe(wanted);
+  });
+
   it('enumerates EVERY TypeScript source extension, not just `.ts`', () => {
     // Accepting only names ending in `.ts` dropped a `.tsx` route module — the
     // same completeness hole as the pathspec, one filter along.  Asserted on
@@ -466,23 +529,15 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     };
     const onDisk = walkDir('apps/api/src');
     const sources = (each: string): boolean =>
-      /\.[cm]?tsx?$/.test(each) &&
-      !each.endsWith('.d.ts') &&
-      !/\.test\.[cm]?tsx?$/.test(each) &&
-      !each.includes('/__tests__/');
+      /\.[cm]?tsx?$/.test(each) && !/\.d\.[cm]?ts$/.test(each);
     expect([...live].sort()).toEqual(onDisk.filter(sources).sort());
-    // …and the exclusions are exactly declarations and tests, nothing else.
-    expect(live.filter((each) => each.endsWith('.d.ts'))).toEqual([]);
-    expect(live.filter((each) => /\.test\.[cm]?tsx?$/.test(each))).toEqual([]);
+    // …and the ONLY exclusion is declaration files, which are erased whole.
+    expect(live.filter((each) => /\.d\.[cm]?ts$/.test(each))).toEqual([]);
   });
 
   it('enumerates the API tree, so nothing above passes vacuously', () => {
     expect(live.length).toBeGreaterThan(200);
     expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
-    // Tests declare routers of their own and serve nothing.
-    expect(
-      live.filter((each) => each.endsWith('.test.ts') || each.includes('/__tests__/')),
-    ).toEqual([]);
     // …and the exclusion is not so broad that it drops real sources.  The
     // comparison walks the FILESYSTEM rather than asking git with the same
     // pathspec: a corpus checked against its own enumeration cannot notice the
@@ -501,10 +556,8 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     };
     walkDir('apps/api/src');
     const excluded = tracked.filter((each) => !live.includes(each));
-    expect(
-      excluded.filter((each) => !each.endsWith('.test.ts') && !each.includes('/__tests__/')),
-    ).toEqual([]);
-    expect(excluded.length).toBeGreaterThan(0);
+    // The ONLY thing dropped is a declaration file, which is erased whole.
+    expect(excluded.filter((each) => !/\.d\.[cm]?ts$/.test(each))).toEqual([]);
   });
 });
 
@@ -539,6 +592,191 @@ rows.delete(id);`;
   });
 });
 
+describe('a route method the gate cannot READ', () => {
+  it('reports it rather than folding a parameter default', () => {
+    // The sink analyzer asks what a key MAY be, so a default is worth folding
+    // there.  This asks WHICH METHOD is registered: `h(method = 'get')` called
+    // with `'post'` registers a POST, and folding the default called it a GET
+    // and dropped the mutation.  Unreadable fails CLOSED instead.
+    const src = `
+const app = new Hono();
+function h(method = 'get') { app[method]('/rooms/:roomId/governance/vote', handler); }
+h('post');`;
+    const routes = extractMutationRoutes('f.ts', src);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a destructuring default whose SOURCE it cannot read', () => {
+    // `getConfig()` may well return `{ method: 'post' }`, so the fallback is a
+    // guess — and guessing `'get'` classified an unguarded governance POST as a
+    // read.  A default is certain only when the source is a container this
+    // could actually read and the key is genuinely absent.
+    const src = `
+const app = new Hono();
+function getConfig() { return { method: 'post' }; }
+const { method = 'get' } = getConfig();
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a NESTED default whose outer source it cannot read', () => {
+    // `undefined` from the descent means "could not look" as often as "not
+    // there"; taking the default on the first reading is a guess.
+    const src = `
+const app = new Hono();
+function getConfig() { return { nested: { method: 'post' } }; }
+const { nested: { method } = { method: 'get' } } = getConfig();
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a literal type that comes only from an `as` ASSERTION', () => {
+    // TypeScript assertions narrow a type without validating the value, so the
+    // checker says `'get'` while the runtime value is `'post'`.
+    const src = `
+const app = new Hono();
+function getConfig() { return 'post'; }
+const method = getConfig() as 'get';
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('keeps refusing one hop DEEPER, through a NAMED container', () => {
+    // The certain policy has to survive the descent that reads the container.
+    // Looking a key up through a name re-entered the fold at the default
+    // `'possible'`, so the parameter default this gate had just refused to fold
+    // directly was folded one call later — `h({ method: 'post' })` registers a
+    // POST while the gate read `'get'` off the default and dropped it.
+    const src = `
+const app = new Hono();
+function h(config = { method: 'get' }) {
+  const { method } = config;
+  app[method]('/rooms/:roomId/governance/vote', handler);
+}
+h({ method: 'post' });`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a default off a `const` container, which is not frozen', () => {
+    // `const` prevents REBINDING the name, not mutating the object, so the
+    // initializer is not the container's contents.  Reading `{}` as complete
+    // took the `'get'` default over a key that is present at runtime.
+    const src = `
+const app = new Hono();
+const config = {};
+config.method = 'post';
+const { method = 'get' } = config;
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('keeps an unreadable method taken OFF the router in scope', () => {
+    // The direct `app[method](…)` form already fails closed, so dropping the
+    // registration when the SAME method is taken off the router first made
+    // that the way around it — `bind('post')` registers a governance POST the
+    // corpus never saw.  The receiver is kept and the method reported.
+    const src = `
+const app = new Hono();
+function bind(method = 'get') { const register = app[method]; register('/rooms/:roomId/governance/vote', handler); }
+bind('post');`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('DOES take a NESTED default when the outer source is readable', () => {
+    const src = `
+const app = new Hono();
+const { nested: { method } = { method: 'post' } } = { other: 1 };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  // A key the container SUPPLIES with something no constant fold can read is
+  // not an absent key, and taking the binding default over one dropped the
+  // route from the corpus entirely — worse than failing closed, because a
+  // dropped route is a route the gate reports success over.
+  //
+  // These are one defect, not five: the lookup used to answer `undefined` for
+  // BOTH "not there" and "could not read", so every member shape it did not
+  // model arrived at the caller wearing the mask of an absent key.  They are
+  // listed individually because each was a live hole, and they are fixed by one
+  // branch — see the `Lookup` type in js-sink-analyzer.ts.
+  it.each([
+    ['a getter', "const { method = 'get' } = { get method() { return 'post'; } };"],
+    ['a setter', "const { method = 'get' } = { set method(v) {} };"],
+    ['a method shorthand', "const { method = 'get' } = { method() { return 'post'; } };"],
+    // A computed name may or may not BE this key, so neither the value beside
+    // it nor the default is the answer.
+    ['an unfoldable computed key', "const { method = 'get' } = { [maybe()]: 'post' };"],
+    // A spread shifts every later index, so no position at or after one reads.
+    ['an array spread', "const [method = 'get'] = [...xs];"],
+  ])('refuses a default the container may supply through %s', (_label, prelude) => {
+    const src = `
+const app = new Hono();
+${prelude}
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('still reads a computed key that DOES fold', () => {
+    const src = `
+const app = new Hono();
+const { method = 'get' } = { ['met' + 'hod']: 'post' };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('applies a default to an omitted ARRAY element', () => {
+    // A hole reads as `undefined`, so the default binds — `const [method =
+    // 'post'] = []` is a POST.  The parser represents a hole with its own node
+    // kind, which the `undefined`-identifier rule did not recognise, so the
+    // method read as unreadable and the route failed closed unnecessarily.
+    const src = `
+const app = new Hono();
+const [method = 'post'] = [,];
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('reads a key a SPREAD supplies rather than taking the default', () => {
+    // A spread supplies properties the literal does not spell, so skipping it
+    // read `{ ...{ method: 'post' } }` as having no `method` and took the
+    // `'get'` default over a POST.  Members are read in order, last write wins.
+    const src = `
+const app = new Hono();
+const { method = 'get' } = { ...{ method: 'post' } };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('refuses a default when a spread it cannot read may supply the key', () => {
+    // The same shape with an unreadable spread: the key is not provably absent,
+    // so the default is a guess and the route fails closed.
+    const src = `
+const app = new Hono();
+function extra() { return { method: 'post' }; }
+const { method = 'get' } = { ...extra() };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('DOES take a default when the source is readable and the key absent', () => {
+    const src = `
+const app = new Hono();
+const { method = 'post' } = { other: 1 };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('still reads a method held in a `const`, which IS certain', () => {
+    const src = `
+const app = new Hono();
+const method = 'post';
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+});
+
 describe('a registration method taken OFF the router', () => {
   // Hono installs its verb methods as instance arrow functions bound to the
   // router (`this[method] = (…) => …`), so a destructured `post` registers a
@@ -551,6 +789,15 @@ describe('a registration method taken OFF the router', () => {
     // The same method taken by a property access rather than by a pattern.
     ['a method held in a const', 'const register = app.post;\nregister'],
     ['a computed method held in a const', "const register = app['post'];\nregister"],
+    ['a method key held in a const', "const method = 'post';\napp[method]"],
+    [
+      'a method key from a const DESTRUCTURE',
+      "const { method } = { method: 'post' };\napp[method]",
+    ],
+    [
+      'a destructured key held in a const',
+      "const key = 'post';\nconst { [key]: register } = app;\nregister",
+    ],
     ['an alias of a method alias', 'const first = app.post;\nconst register = first;\nregister'],
   ])('finds a route registered through %s', (_label, prelude) => {
     // Every line but the LAST declares; the last names the call.

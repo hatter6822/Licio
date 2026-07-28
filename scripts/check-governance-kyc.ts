@@ -34,6 +34,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
+import { staticKeyOf } from './js-sink-analyzer.js';
 import { asNode, type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -845,11 +846,19 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * not a property access, so it was not read as a registration at all and the
    * file left the corpus unclassified.  The binding says which router the
    * method came off and which method it is, so both are read from it.
+   *
+   * An UNREADABLE method keeps the receiver rather than dropping the whole
+   * registration: `function bind(method = 'get') { const register = app[method];
+   * register(path, handler); } bind('post')` registers a POST, and returning
+   * nothing removed it from the corpus entirely.  The direct `app[method](…)`
+   * form already fails closed as `<unreadable method>`; taking the same method
+   * off the router must not be the way around it.  So `method` is optional here
+   * and `register` reports it, exactly as the direct form does.
    */
   const methodTakenOffARouter = (
     identifier: Syntax,
     hop = 0,
-  ): { readonly method: string; readonly receiver: Syntax } | undefined => {
+  ): { readonly method: string | undefined; readonly receiver: Syntax } | undefined => {
     const declaration = localDeclaration(identifier);
     if (declaration === undefined || hop > MAX_HOPS) return undefined;
 
@@ -864,9 +873,9 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       const named = declaration.propertyName ?? declaration.name;
       const method =
         named?.kind === SyntaxKind.ComputedPropertyName
-          ? staticString(named.expression)
+          ? staticStringFolded(named.expression)
           : nameOf(named);
-      return method === undefined ? undefined : { method, receiver: source };
+      return { method, receiver: source };
     }
 
     // `const register = app.post` — the same method, taken by a property
@@ -887,15 +896,33 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const method =
       held.kind === SyntaxKind.PropertyAccessExpression
         ? nameOf(held.name)
-        : staticString(held.argumentExpression);
+        : staticStringFolded(held.argumentExpression);
     const receiver = held.expression;
-    return method === undefined || receiver === undefined ? undefined : { method, receiver };
+    return receiver === undefined ? undefined : { method, receiver };
   };
+
+  /**
+   * The static string an expression denotes, folding an IMMUTABLE binding.
+   *
+   * `const method = 'post'; app[method](…)` registers a route as surely as
+   * `app.post(…)` does, and reading the syntax alone saw an identifier and
+   * stopped.  The FOLD is the sink analyzer's, shared rather than reimplemented:
+   * a second copy here knew about `const x = …` and not about `const { x } = …`,
+   * which is precisely the drift a shared resolver prevents.
+   *
+   * CERTAIN folding, though.  The sink analyzer asks what a key MAY be, so a
+   * parameter default is worth folding there; this asks WHICH METHOD is
+   * registered, and `function h(method = 'get')` called with `'post'` registers
+   * a POST — folding the default called it a GET and dropped the mutation.  One
+   * resolver, two policies, because they are two questions.
+   */
+  const staticStringFolded = (node: Syntax | undefined): string | undefined =>
+    staticString(node) ?? staticKeyOf(node, project, 'certain');
 
   const found: FoundRoute[] = [];
 
   /** Read ONE call as a registration of `called` on a receiver of `receiver`. */
-  const register = (node: Syntax, called: string, receiver: Receiver): void => {
+  const register = (node: Syntax, called: string | undefined, receiver: Receiver): void => {
     // 'unknown' is deliberately NOT skipped: a receiver this cannot classify
     // may well be a governance router, and dropping it would report success
     // over an endpoint the gate never looked at.
@@ -908,8 +935,12 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // surely as `.post` is, and skipping it let one ship unguarded.
     const viaOn = called === 'on';
     const viaAll = called === 'all';
-    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
-    const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
+    if (called !== undefined && !viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
+    const declared = viaOn
+      ? staticStrings(args[0])
+      : called === undefined
+        ? { values: [], complete: false }
+        : { values: [called], complete: true };
     const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
     // When the receiver could not be resolved, the REGISTRATION has to look
@@ -981,8 +1012,10 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const called =
       callee.kind === SyntaxKind.PropertyAccessExpression
         ? nameOf(callee.name)
-        : staticString(callee.argumentExpression);
-    if (called === undefined) continue;
+        : staticStringFolded(callee.argumentExpression);
+    // A computed method this cannot read may well be a mutation, so the
+    // registration is REPORTED rather than skipped — the same discipline an
+    // unreadable path and an unreadable `.on()` method list already get.
     register(node, called, receiverKind(callee.expression));
   }
   return found;
@@ -1100,6 +1133,12 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
     'E2E-ONLY session minter for the BFF harness, mounted only by e2e-server.ts',
   'apps/api/src/routes/test-wallet.ts':
     'E2E-ONLY wallet signer for the BFF harness, mounted only by e2e-server.ts',
+  // A TEST fixture, in the corpus because the corpus no longer excludes tests —
+  // asking "does this file register a mutation" needs no import analysis, and
+  // this is the only one of 256 test-path files that does.
+  'apps/api/src/__tests__/governance-eligibility.test.ts':
+    'unit fixture for this very gate: it mounts a one-route Hono app to assert ' +
+    'requireGovernanceEligibility() answers kyc_required — a test, served to nobody',
 };
 
 /** Bindings that name a value from ANOTHER module — every import form there is. */
@@ -1133,21 +1172,6 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
 const API_SOURCE_ROOT = 'apps/api/src';
 
 /**
- * Tests declare routers of their own; they serve nothing.
- *
- * Spelled out rather than written as one alternation, because this decides what
- * the gate DOES NOT read: `/(?:^|\/)__tests__\/|\.test\.ts$/` anchors its second
- * branch and not its first, which CodeQL flags as misleading precedence and a
- * reader has to work out.  An exclusion nobody can read at a glance is how a
- * real source ends up silently outside a security gate's corpus.
- */
-function isTestPath(path: string): boolean {
-  return (
-    /\.test\.[cm]?tsx?$/.test(path) || path.includes('/__tests__/') || path.startsWith('__tests__/')
-  );
-}
-
-/**
  * Whether a tracked path is a TypeScript SOURCE the API compiles.
  *
  * Every extension `tsconfig`'s `src` include covers, not just `.ts`: a route
@@ -1156,12 +1180,25 @@ function isTestPath(path: string): boolean {
  * the same completeness hole as the pathspec, one filter along.  A `.d.ts`
  * declares types and registers nothing.
  */
-function isTypeScriptSource(path: string): boolean {
-  return /\.[cm]?tsx?$/.test(path) && !path.endsWith('.d.ts');
+export function isTypeScriptSource(path: string): boolean {
+  // A DECLARATION file is erased whole — `.d.mts` and `.d.cts` as much as
+  // `.d.ts` — so its imports mount nothing and scanning one as runtime code
+  // reported a rename the build never needs.
+  return /\.[cm]?tsx?$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
 }
 
 /**
  * Every tracked API source, from git rather than from a directory walk.
+ *
+ * TESTS ARE INCLUDED, deliberately.  They used to be excluded — they declare
+ * routers of their own and serve nothing — and that exclusion then needed a
+ * SECOND check asking whether any production file imported one, which took four
+ * review findings across three rounds (a bound loader, a URL suffix, an aliased
+ * `require`, a type-only import) and was never going to be finished: naming a
+ * module is unbounded.  Asking instead "does this file register a mutation
+ * route" needs no import analysis at all, and of the 256 test-path files here
+ * exactly ONE does.  Classifying that one costs a line; the scan cost a round
+ * every time.
  *
  * A DIRECTORY pathspec, deliberately.  A recursive glob of the double-star
  * form reads as "every TypeScript file under here" and is not: git's `**`
@@ -1176,7 +1213,7 @@ function isTypeScriptSource(path: string): boolean {
 export function trackedApiSources(): string[] {
   return execFileSync('git', ['ls-files', API_SOURCE_ROOT], { cwd: ROOT, encoding: 'utf-8' })
     .split('\n')
-    .filter((each) => isTypeScriptSource(each) && !isTestPath(each));
+    .filter((each) => isTypeScriptSource(each));
 }
 
 export function runGovernanceKycGate(

@@ -45,7 +45,11 @@ export interface Syntax {
   readonly initializer?: Syntax;
   readonly body?: Syntax;
   readonly moduleSpecifier?: Syntax;
+  /** `import x = require('…')` — the specifier hides one level down. */
+  readonly moduleReference?: Syntax;
   readonly importClause?: Syntax;
+  /** `export { … } from '…'` — the named-binding clause. */
+  readonly exportClause?: Syntax;
   readonly namedBindings?: Syntax;
   readonly elements?: readonly Syntax[];
   readonly tagName?: Syntax;

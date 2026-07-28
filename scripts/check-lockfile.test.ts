@@ -118,6 +118,29 @@ describe('counting the packages section', () => {
     expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
   });
 
+  it('keeps a block resolution open across a BLANK line', () => {
+    // A blank line has indent zero but is not a dedent — it is whitespace
+    // inside the block.  Treating it as one closed the resolution early and
+    // reported an integrity-covered package as missing its hash.
+    const content = lockfile(
+      ['  a@1.0.0:', '    resolution:', '', `      integrity: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('does not read a digest out of a trailing COMMENT', () => {
+    // The entry pins nothing; the digest is only mentioned in prose.
+    const content = lockfile(
+      ['  a@1.0.0:', `    resolution: {} # integrity: sha512-${digest('a')}`].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
+  it('does not read a digest out of a comment on an INLINE entry', () => {
+    const content = lockfile(`  a@1.0.0: {resolution: {}} # integrity: sha512-${digest('a')}`);
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
   it('ignores a YAML COMMENT at the entry indent', () => {
     // Counting one added a phantom package with no integrity and blocked a
     // lockfile pnpm accepts.
