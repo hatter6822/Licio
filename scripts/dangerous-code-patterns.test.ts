@@ -1287,6 +1287,12 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       "let r; ({ a: { b: { ['eval']: r } } } = { a: { b: globalThis } });",
     ],
     ['a nested element default', "const { a: { ['eval']: r } = globalThis } = o;"],
+    // A default applies when the property is ABSENT *or* explicitly undefined;
+    // JavaScript makes no distinction.
+    [
+      'a default behind an explicit `undefined`',
+      "const { k = 'eval' } = { k: undefined }; export const e = globalThis[k];",
+    ],
   ])('catches a destructure through %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
   });
@@ -1321,6 +1327,19 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     ],
     // The SOURCE is resolved, exactly as a property receiver is, so a computed
     // key off an unrelated record is not the global.
+    // A PARAMETER takes its value from the CALLER, so its default is one of the
+    // values it may hold and never the value it does.  Folding it read the
+    // enclosing `const fn = …` as the parameter's own declaration and invented
+    // a key the call never passes — wrong in BOTH directions, so neither the
+    // harmless default nor a caller's argument may be folded.
+    [
+      "a parameter default that is never the caller's value",
+      "const fn = ({ key } = { key: 'eval' }) => globalThis[key]('x'); fn({ key: 'safe' });",
+    ],
+    [
+      'a catch-bound name, which is not a const',
+      "try { x(); } catch ({ k }) { globalThis[k]('x'); }",
+    ],
     ['a computed key off a plain record', "const rec = { eval: 1 }; const { ['eval']: n } = rec;"],
     // A record being BUILT is not a selection from anything.
     ['a computed key in an object literal VALUE', "export const o = { ['eval']: 1 };"],

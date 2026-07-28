@@ -450,6 +450,37 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining(`${path} REGISTERS`));
   });
 
+  it.each([
+    ['a `.test.ts` sibling', './secret.test.js', 'apps/api/src/routes/secret.test.ts'],
+    ['a `__tests__/` module', './__tests__/secret.js', 'apps/api/src/routes/__tests__/secret.ts'],
+  ])('reports a production import of %s', (_label, specifier, target) => {
+    // Excluding tests from the corpus is right — they declare routers of their
+    // own and serve nothing — but only while nothing production-reachable
+    // imports one.  Since the corpus stopped tracking mount reachability, such
+    // a module would be neither scanned nor declared, silently.
+    const v1 = readRepo('apps/api/src/routes/v1.ts')
+      .replace(
+        'import { createAuthRoutes }',
+        `import { createSecretRoutes } from '${specifier}';\nimport { createAuthRoutes }`,
+      )
+      .replace(
+        ".route('/auth', createAuthRoutes())",
+        ".route('/secret', createSecretRoutes())\n      .route('/auth', createAuthRoutes())",
+      );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        [target]: 'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
+  it('does not report an ordinary relative import', () => {
+    expect(runGovernanceKycGate()).toEqual([]);
+  });
+
   it('enumerates EVERY TypeScript source extension, not just `.ts`', () => {
     // Accepting only names ending in `.ts` dropped a `.tsx` route module — the
     // same completeness hole as the pathspec, one filter along.  Asserted on
@@ -551,6 +582,11 @@ describe('a registration method taken OFF the router', () => {
     // The same method taken by a property access rather than by a pattern.
     ['a method held in a const', 'const register = app.post;\nregister'],
     ['a computed method held in a const', "const register = app['post'];\nregister"],
+    ['a method key held in a const', "const method = 'post';\napp[method]"],
+    [
+      'a destructured key held in a const',
+      "const key = 'post';\nconst { [key]: register } = app;\nregister",
+    ],
     ['an alias of a method alias', 'const first = app.post;\nconst register = first;\nregister'],
   ])('finds a route registered through %s', (_label, prelude) => {
     // Every line but the LAST declares; the last names the call.

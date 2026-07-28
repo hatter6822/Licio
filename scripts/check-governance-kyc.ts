@@ -31,7 +31,7 @@
 // because a comment is not a node.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
 import { asNode, type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
@@ -864,7 +864,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       const named = declaration.propertyName ?? declaration.name;
       const method =
         named?.kind === SyntaxKind.ComputedPropertyName
-          ? staticString(named.expression)
+          ? staticStringFolded(named.expression)
           : nameOf(named);
       return method === undefined ? undefined : { method, receiver: source };
     }
@@ -887,9 +887,41 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const method =
       held.kind === SyntaxKind.PropertyAccessExpression
         ? nameOf(held.name)
-        : staticString(held.argumentExpression);
+        : staticStringFolded(held.argumentExpression);
     const receiver = held.expression;
     return method === undefined || receiver === undefined ? undefined : { method, receiver };
+  };
+
+  /**
+   * The static string an expression denotes, folding an IMMUTABLE binding.
+   *
+   * `const method = 'post'; app[method](…)` registers a route as surely as
+   * `app.post(…)` does, and reading the syntax alone saw an identifier and
+   * stopped — so the registration was not found and the file left the corpus.
+   * Only a `const` is followed, and only when the name is bound BY that
+   * declaration: a parameter takes its value from the caller, so its default is
+   * one of the values it may hold and never the value it does.
+   */
+  const staticStringFolded = (node: Syntax | undefined, hop = 0): string | undefined => {
+    const direct = staticString(node);
+    if (direct !== undefined) return direct;
+    const target = unwrap(node);
+    if (target?.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return undefined;
+    const declaration = localDeclaration(target);
+    if (declaration?.kind !== SyntaxKind.VariableDeclaration) return undefined;
+    let owner: Syntax | undefined = declaration.parent;
+    for (let step = 0; owner !== undefined && step <= MAX_HOPS; step += 1) {
+      if (owner.kind === SyntaxKind.VariableDeclarationList) {
+        return /^const\b/.test(owner.getText())
+          ? staticStringFolded(declaration.initializer, hop + 1)
+          : undefined;
+      }
+      if (owner.kind === SyntaxKind.Parameter || owner.kind === SyntaxKind.CatchClause) {
+        return undefined;
+      }
+      owner = owner.parent;
+    }
+    return undefined;
   };
 
   const found: FoundRoute[] = [];
@@ -981,7 +1013,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     const called =
       callee.kind === SyntaxKind.PropertyAccessExpression
         ? nameOf(callee.name)
-        : staticString(callee.argumentExpression);
+        : staticStringFolded(callee.argumentExpression);
     if (called === undefined) continue;
     register(node, called, receiverKind(callee.expression));
   }
@@ -1179,11 +1211,57 @@ export function trackedApiSources(): string[] {
     .filter((each) => isTypeScriptSource(each) && !isTestPath(each));
 }
 
+/**
+ * A production source importing a file the corpus EXCLUDES.
+ *
+ * Excluding tests is right — they declare routers of their own and serve
+ * nothing — but the exclusion is only safe while nothing production-reachable
+ * imports one.  Since the corpus stopped tracking mount reachability, a route
+ * module named `x.test.ts` or sitting under `__tests__/` would be dropped from
+ * classification even when an entry point mounted it, and its governance POSTs
+ * would be neither scanned nor declared.
+ *
+ * Asked as a bounded question — "does any judged file import an unjudged one?"
+ * — rather than by restoring the reachability walk the corpus replaced.
+ */
+function importsOfExcludedTests(
+  files: readonly string[],
+  read: (relPath: string) => string,
+): string[] {
+  const judged = new Set(files);
+  const issues: string[] = [];
+  for (const file of files) {
+    let source: string;
+    try {
+      source = read(file);
+    } catch {
+      continue; // The unreadable-file path below reports this.
+    }
+    for (const match of source.matchAll(/\bfrom\s*'(\.[^']*)'/g)) {
+      const specifier = match[1];
+      if (specifier === undefined) continue;
+      const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
+      const target = resolved.replace(/\.js$/, '.ts');
+      if (!isTestPath(target) && !isTestPath(resolved)) continue;
+      // A test path the corpus deliberately does not judge, reached from one it
+      // does.  Either the import is wrong or the module is misnamed; both are
+      // review-visible acts, and neither may pass silently.
+      if (judged.has(target)) continue;
+      issues.push(
+        `${file} imports '${specifier}', a TEST path the gate deliberately does not judge. ` +
+          'A module a production source mounts must not be named as a test: rename it out of ' +
+          '`__tests__/` and off the `.test.ts` suffix so it is classified like any other.',
+      );
+    }
+  }
+  return issues;
+}
+
 export function runGovernanceKycGate(
   read: (relPath: string) => string = (relPath) => readFileSync(resolve(ROOT, relPath), 'utf-8'),
   files: readonly string[] = trackedApiSources(),
 ): string[] {
-  const issues: string[] = [];
+  const issues: string[] = [...importsOfExcludedTests(files, read)];
   const scanned = new Set<string>(GOVERNANCE_ROUTE_FILES);
 
   // ONE parse for the whole API tree: it answers which files register a route

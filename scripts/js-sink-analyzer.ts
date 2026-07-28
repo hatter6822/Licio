@@ -473,10 +473,37 @@ function declarationOf(identifier: Syntax, project: Project): Syntax | undefined
  * `const` only: a `let` may hold something else by the time the value is read,
  * so folding it would invent a value the code never has.
  */
+/**
+ * Binders that give a name its value from somewhere other than a declaration
+ * list, so the walk out to a `const` keyword must stop at them.
+ */
+const BINDS_ELSEWHERE: ReadonlySet<number> = new Set([
+  SyntaxKind.Parameter,
+  SyntaxKind.CatchClause,
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.FunctionExpression,
+  SyntaxKind.ArrowFunction,
+  SyntaxKind.MethodDeclaration,
+  SyntaxKind.Constructor,
+  SyntaxKind.GetAccessor,
+  SyntaxKind.SetAccessor,
+]);
+
 function isImmutableBinding(declaration: Syntax): boolean {
   let owner: Syntax | undefined = declaration.parent;
   for (let hop = 0; owner !== undefined && hop <= MAX_HOPS; hop += 1) {
+    // A PARAMETER's value comes from the CALLER, so its default is one of the
+    // values it may hold and never the value it does hold.  The walk used to
+    // pass straight through a parameter and find the enclosing `const fn = …`,
+    // reading the function's own declaration kind as the parameter's — so
+    // `const fn = ({ key } = { key: 'safe' }) => globalThis[key]('x')` folded
+    // `key` to `safe` and `fn({ key: 'eval' })` reached the global unseen.
+    if (owner.kind === SyntaxKind.Parameter) return false;
     if (owner.kind === SyntaxKind.VariableDeclarationList) return /^const\b/.test(owner.getText());
+    // Any other binder — a catch clause, a function boundary — is not a `const`
+    // declaration list, and walking past it would read some OUTER declaration's
+    // keyword as this binding's.
+    if (BINDS_ELSEWHERE.has(owner.kind)) return false;
     owner = owner.parent;
   }
   return false;
@@ -597,15 +624,35 @@ function selectionSource(
   return (outer === undefined ? undefined : through(owner, outer)) ?? owner.initializer;
 }
 
-/** What ONE binding element ultimately holds. */
+/**
+ * Whether an expression IS `undefined` — the value a destructuring default
+ * replaces.
+ */
+function isUndefinedValue(node: Syntax | undefined): boolean {
+  const target = unwrap(node);
+  if (target === undefined) return false;
+  if (target.kind === SyntaxKind.VoidExpression) return true;
+  return target.kind === SyntaxKind.Identifier && (target.text ?? target.getText()) === 'undefined';
+}
+
+/**
+ * What ONE binding element ultimately holds.
+ *
+ * A default applies when the selected property is ABSENT *or* explicitly
+ * `undefined` — JavaScript makes no distinction, and reading only "found
+ * nothing" left `const { a = 'ev' } = { a: undefined }` folding to the
+ * `undefined` node instead of to `'ev'`.
+ */
 function selectedValue(element: Syntax, project: Project, hop: number): Syntax | undefined {
   const pattern = element.parent;
   if (pattern === undefined || hop > MAX_HOPS) return undefined;
   const key = containerKey(element, pattern, project);
   if (key === undefined) return element.initializer;
-  return (
-    valueAt(selectionSource(pattern, project, hop + 1), key, project, 0) ?? element.initializer
-  );
+  const selected = valueAt(selectionSource(pattern, project, hop + 1), key, project, 0);
+  if (selected === undefined || isUndefinedValue(selected)) {
+    return element.initializer ?? selected;
+  }
+  return selected;
 }
 
 /**

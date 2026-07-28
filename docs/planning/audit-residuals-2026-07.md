@@ -334,9 +334,14 @@ REMAINING — each blocked on a server change, a design pass, or a content audit
 The `lint:security` sink analyzer and `check:governance-kyc` resolve values
 through the compiler to answer "which property does this key name" and "which
 router is this". Ten review rounds walked that resolution one hop further each
-time — a binding, a container slot, a slot of a slot — and the following are
-DELIBERATELY left unresolved rather than extended again. Each is recorded with
-what would close it, and none is a silent gap: the shapes are listed here.
+time — a binding, a container slot, a slot of a slot — and ONE shape is
+DELIBERATELY left unresolved rather than extended again, recorded here with
+what would close it so it is not a silent gap.
+
+(Two shapes listed here originally — a destructuring default behind an explicit
+`undefined`, and a route method behind a bound computed key — were closed in the
+follow-up PR instead: both were bounded, and the second was the same
+immutable-binding fold the sink analyzer already performed.)
 
 - **A key assembled from a container SLOT** — `const keys = { a: 'ev', b: 'al' };
   globalThis[keys.a + keys.b]`. Folding this was implemented and then REVERTED:
@@ -348,16 +353,6 @@ what would close it, and none is a silent gap: the shapes are listed here.
   declines. The control for a key assembled this way is the CSP
   (`script-src` without `'unsafe-eval'` + Trusted Types), asserted on the built
   artifact by `check:csp-parity`.
-- **A destructuring default behind an explicit `undefined`** — `const { a = 'ev' }
-  = { a: undefined }`. JavaScript applies the default; the descent returns the
-  `undefined` node and the `??` fallback never fires. A MISS, not a false
-  positive. Closure: distinguish "selected a value that is undefined" from "found
-  no value" in `valueAt`.
-- **A route method behind a bound computed key** — `const method = 'post';
-  app[method](…)`. `staticString` does not fold the binding. Closure: use the
-  sink analyzer's `staticKeyOf` for the method key too, which is the same
-  resolver both files already share for property keys.
-
 The BOUNDED guarantees these gates rest on are unaffected and stay enforced:
 `eval`/`Function` are never NAMED in first-party source, every file registering
 a mutation route is classified, and every `packages:` entry carries its own

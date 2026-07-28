@@ -17,7 +17,7 @@
 // workspace.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, posix, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
 import { type Syntax, walk, withParsedSources } from './ts-source.js';
@@ -108,17 +108,78 @@ function readConfigs(files: ReadonlyArray<{ path: string; text: string }>): Trac
   );
 }
 
+/**
+ * The `extends`/`references` CLOSURE, not the files whose name says `tsconfig`.
+ *
+ * A reference may target a config with any name — `packages/foo/build.json` is
+ * as valid as `tsconfig.json` — and a name-matched enumeration never opens one,
+ * so directory-form references INSIDE it go unchecked and can reproduce exactly
+ * the Playwright load failure this file exists to prevent.  The closure is
+ * walked instead: every tracked `*tsconfig*.json` seeds it, and whatever those
+ * name is added and read in turn until nothing new appears.
+ */
+function configClosure(
+  seeds: readonly string[],
+  read: (path: string) => string | undefined,
+): TrackedConfig[] {
+  const seen = new Set<string>(seeds);
+  let frontier = seeds;
+  const configs: TrackedConfig[] = [];
+  // Files are finite and each round adds only unseen ones, so this terminates.
+  for (let round = 0; frontier.length > 0 && round <= 32; round += 1) {
+    const sources = frontier.flatMap((path) => {
+      const text = read(path);
+      return text === undefined ? [] : [{ path, text }];
+    });
+    const parsed = readConfigs(sources);
+    configs.push(...parsed);
+    const next: string[] = [];
+    for (const config of parsed) {
+      const from = dirname(config.path);
+      for (const named of [...config.extends, ...config.references]) {
+        if (!named.startsWith('.')) continue;
+        // Whatever the compiler would open: the path itself, or — for an
+        // extensionless `extends` — the `.json` beside it.
+        const direct = posix.normalize(posix.join(from, named));
+        for (const candidate of [direct, `${direct}.json`]) {
+          if (seen.has(candidate) || read(candidate) === undefined) continue;
+          seen.add(candidate);
+          next.push(candidate);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return configs;
+}
+
+/** Every reference in `configs` written as a DIRECTORY rather than a file. */
+function directoryFormOffenders(configs: readonly TrackedConfig[]): string[] {
+  return configs.flatMap(({ path, references }) =>
+    references
+      .filter((reference) => !reference.endsWith('.json'))
+      .map(
+        (reference) =>
+          `${path}: reference "${reference}" names a directory — write ` +
+          `"${reference.replace(/\/$/, '')}/tsconfig.json", which every reader resolves`,
+      ),
+  );
+}
+
 function trackedConfigs(): TrackedConfig[] {
-  const paths = execFileSync('git', ['ls-files', '*tsconfig*.json'], {
+  const seeds = execFileSync('git', ['ls-files', '*tsconfig*.json'], {
     cwd: ROOT,
     encoding: 'utf-8',
   })
     .split('\n')
     .filter((each) => each.length > 0);
-
-  return readConfigs(
-    paths.map((path) => ({ path, text: readFileSync(resolve(ROOT, path), 'utf-8') })),
-  );
+  return configClosure(seeds, (path) => {
+    try {
+      return readFileSync(resolve(ROOT, path), 'utf-8');
+    } catch {
+      return undefined;
+    }
+  });
 }
 
 describe('reading a tsconfig', () => {
@@ -149,6 +210,40 @@ describe('reading a tsconfig', () => {
   });
 });
 
+describe('the reference CLOSURE', () => {
+  // A reference may target a config with ANY name — `build.json` is as valid as
+  // `tsconfig.json` — so enumerating files whose NAME says tsconfig never opens
+  // one, and a directory-form reference inside it goes unchecked.  That is the
+  // very failure this file exists to prevent, hiding one file along.
+  const graph: Readonly<Record<string, string>> = {
+    'a/tsconfig.json': '{ "references": [{ "path": "../b/build.json" }] }',
+    'b/build.json': '{ "references": [{ "path": "../c" }] }',
+    'c/tsconfig.json': '{ "compilerOptions": {} }',
+  };
+  const read = (path: string): string | undefined => graph[path];
+
+  it('opens a referenced config whose NAME does not say tsconfig', () => {
+    expect(configClosure(['a/tsconfig.json'], read).map((each) => each.path)).toEqual([
+      'a/tsconfig.json',
+      'b/build.json',
+    ]);
+  });
+
+  it('reports a directory-form reference hidden inside one', () => {
+    expect(directoryFormOffenders(configClosure(['a/tsconfig.json'], read))).toEqual([
+      expect.stringContaining('b/build.json: reference "../c" names a directory'),
+    ]);
+  });
+
+  it('terminates on a reference CYCLE', () => {
+    const cyclic: Readonly<Record<string, string>> = {
+      'a/tsconfig.json': '{ "references": [{ "path": "../b/tsconfig.json" }] }',
+      'b/tsconfig.json': '{ "references": [{ "path": "../a/tsconfig.json" }] }',
+    };
+    expect(configClosure(['a/tsconfig.json'], (path) => cyclic[path])).toHaveLength(2);
+  });
+});
+
 describe('tsconfig project references', () => {
   const configs = trackedConfigs();
 
@@ -160,16 +255,7 @@ describe('tsconfig project references', () => {
   });
 
   it('names a config FILE, never the directory holding it', () => {
-    const offenders = configs.flatMap(({ path, references }) =>
-      references
-        .filter((reference) => !reference.endsWith('.json'))
-        .map(
-          (reference) =>
-            `${path}: reference "${reference}" names a directory — write ` +
-            `"${reference.replace(/\/$/, '')}/tsconfig.json", which every reader resolves`,
-        ),
-    );
-    expect(offenders).toEqual([]);
+    expect(directoryFormOffenders(configs)).toEqual([]);
   });
 
   it('resolves every reference and every `extends` to a file that exists', () => {
