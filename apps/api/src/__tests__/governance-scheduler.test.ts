@@ -78,6 +78,36 @@ describe('runElectionLifecycle', () => {
     expect(seat?.bootstrap).toBe(false);
   });
 
+  it('RECORDS the turnout electorate on the election row at open', async () => {
+    // `tallyElection` divides distinct voters by the electorate.  Reading that
+    // denominator live at SETTLE let anyone inflate room membership after the
+    // last ballot, push turnout under `minTurnout`, and fail an election that
+    // had met it — whereupon the fail-safe hands the incumbent a full new term.
+    // The ratification path has always snapshotted at open; this asserts
+    // elections do too.
+    const { svc, advance, now } = make(100, 50);
+    await svc.bootstrapSeat('r', 'creator');
+    advance(101_000);
+    // THREE eligible voters at open — the scheduler must pass its reader
+    // through to `scheduleElection` so the count lands on the row.
+    await svc.runElectionLifecycle(async () => 3, now());
+    const electionId = await openElectionId(svc, 'r');
+    expect((await svc.getElection(electionId))?.eligibleCount).toBe(3);
+
+    await svc.castVote('r', electionId, 'v1', 'challenger', true);
+    await svc.castVote('r', electionId, 'v2', 'challenger', true);
+    await svc.castVote('r', electionId, 'v3', 'challenger', true);
+    advance(51_000);
+    // …and a thousand by the time the scheduler ticks. The recorded 3 is what
+    // the tally divides by, so the challenger still wins. (The turnout
+    // ARITHMETIC is pinned in `governance-service.test.ts`, under a law pack
+    // with a non-zero `minTurnout` — the baseline pack used here has 0, so the
+    // denominator cannot decide an outcome in this harness.)
+    const result = await svc.runElectionLifecycle(async () => 1_000, now());
+    expect(result.settled).toBe(1);
+    expect((await svc.getSeat('r'))?.holderUserId).toBe('challenger');
+  });
+
   it('keeps the incumbent on a fail-safe (no-quorum) election', async () => {
     const { svc, advance, now } = make(100, 50);
     await svc.bootstrapSeat('r', 'creator');

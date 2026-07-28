@@ -1674,13 +1674,15 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       }),
     });
     if (!('proposal' in created)) throw new Error(JSON.stringify(created));
-    await openVoting(deps);
-    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
-    await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve');
-    // Capture the eligibility basis the TALLY hands the membership port: the
-    // ballot gate treats a category-less rule rewrite as spend-controlling, so
-    // the quorum denominator must apply the SAME predicate — members who
-    // could never sign must not inflate it (W14).
+    // Capture the eligibility basis the quorum denominator is computed with:
+    // the ballot gate treats a category-less rule rewrite as spend-controlling,
+    // so the denominator must apply the SAME predicate — members who could
+    // never sign must not inflate it (W14).
+    //
+    // The observation point is BEFORE `openVoting`, because the basis is frozen
+    // at the `deliberation → open` transition rather than recomputed at settle
+    // (migration 0100): reading it fresh at settle let membership growth after
+    // the last ballot nullify a decided proposal.
     const inner = deps.membership;
     const captured: boolean[] = [];
     deps.membership = {
@@ -1690,10 +1692,22 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
         return inner.eligibleMemberCount(roomId, eligibility);
       },
     };
-    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
-    await settleDueProposals(deps, ROOM);
+    await openVoting(deps);
     expect(captured).toContain(true);
     expect(captured).not.toContain(false);
+    // …and it really was recorded, not merely computed and discarded.
+    const opened = await deps.proposals.getById(created.proposal.proposalId);
+    expect(opened?.votingState).toBe('open');
+    expect(opened?.eligibleBasisCount).toBeGreaterThan(0);
+
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve');
+    captured.length = 0;
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    // The settle tally uses the FROZEN basis, so it asks the membership port
+    // nothing — that silence is the fix.
+    expect(captured).toEqual([]);
     // The ONE predicate both gates share.
     expect(isTreasuryControlling({ category: null, proposalType: 'treasury_policy_update' })).toBe(
       true,

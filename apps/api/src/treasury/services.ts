@@ -198,11 +198,23 @@ export function buildTreasuryExecutorPort(service: GovernanceService): TreasuryE
   };
 }
 
-/** Community-voted early rotation → a FORCED WS-U election (WS-M.4.3b). */
-export function buildStewardElectionPort(service: GovernanceService): StewardElectionPort {
+/** Community-voted early rotation → a FORCED WS-U election (WS-M.4.3b).
+ *
+ *  `eligibleVoterCount` is the same soft cross-context membership read the
+ *  governance scheduler injects.  A forced rotation opens a real election, so
+ *  it must freeze the same turnout electorate a scheduled one does — omitting
+ *  it would leave rotation-opened elections with the legacy live-read-at-settle
+ *  behaviour this port exists downstream of. */
+export function buildStewardElectionPort(
+  service: GovernanceService,
+  eligibleVoterCount?: (roomId: string) => Promise<number>,
+): StewardElectionPort {
   return {
     openElection: async (roomId) => {
-      const result = await service.scheduleElection(roomId, { force: true });
+      const result = await service.scheduleElection(roomId, {
+        force: true,
+        ...(eligibleVoterCount ? { eligibleVoterCount } : {}),
+      });
       // An already-open election satisfies the rotation intent (idempotent).
       return result.ok || result.code === 'election_open';
     },

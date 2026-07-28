@@ -241,6 +241,28 @@ function recordedVotes(signatures: readonly GovernanceSignatureRecord[]) {
     }));
 }
 
+/**
+ * The quorum basis for a proposal — ONE reader, so the value STAMPED at open
+ * and the value a legacy row falls back to are computed identically.  Two
+ * spellings of this predicate is how the denominator drifted from the ballots
+ * in the first place.
+ */
+async function eligibleBasisFor(
+  deps: ProposalDeps,
+  proposal: GovernanceProposalRecord,
+  pack: LawPack,
+): Promise<number> {
+  return deps.membership.eligibleMemberCount(proposal.roomId, {
+    rules: pack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: isTreasuryControlling(proposal),
+  });
+}
+
 async function tallyFor(
   deps: ProposalDeps,
   proposal: GovernanceProposalRecord,
@@ -275,15 +297,23 @@ async function tallyFor(
       },
     );
   }
-  const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId, {
-    rules: pack.eligibility ?? {
-      minMembershipDays: 0,
-      minContributions: 0,
-      requireVerifiedIdentity: false,
-      newWalletCoolingOffDays: 0,
-    },
-    treasuryControlling: isTreasuryControlling(proposal),
-  });
+  // The quorum DENOMINATOR, frozen when voting opened.
+  //
+  // This module's own header promises it "never recomputes weights, so a later
+  // cap/eligibility change cannot shift a result after votes were cast".  That
+  // covered the per-ballot weights and not this: `eligibleCount` was a LIVE
+  // membership read taken at settle, and `quorumMet` compares against it raw
+  // (the `Math.min(1, …)` clamp only sanitises the REPORTED turnout).  So
+  // growing the electorate after ballots were cast raised a bar the fixed voter
+  // set could no longer clear — a decided proposal nullified by people who did
+  // not vote — and shrinking it did the reverse.
+  //
+  // `eligibleBasisCount` is stamped at `deliberation → open`, the instant the
+  // electorate is fixed for the voters about to cast.  Null means the row
+  // predates migration 0100; only then is the live count used, which is the
+  // behaviour those rows have always had.
+  const eligibleCount =
+    proposal.eligibleBasisCount ?? (await eligibleBasisFor(deps, proposal, pack));
   return tallyProposalVotes(
     recordedVotes(signatures),
     { quorum, threshold },
@@ -1063,11 +1093,29 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       proposal.deliberationEndsAt != null &&
       proposal.deliberationEndsAt <= nowIso
     ) {
+      // FREEZE the quorum basis here — this is the instant the electorate is
+      // fixed for the voters about to cast.  Reading it fresh at settle let
+      // membership growth after the last ballot nullify a decided proposal (and
+      // shrinkage pass a failed one); see `tallyFor`.  Resolved through the
+      // PINNED law pack, so the eligibility rules are the ones the proposal was
+      // published under.
+      const pinned =
+        proposal.lawPackVersionId != null
+          ? await deps.lawPacks.get(proposal.lawPackVersionId)
+          : null;
+      const pack = (pinned?.lawPack ?? (await activeLawPack(deps, roomId))?.pack) as
+        | LawPack
+        | undefined;
+      // No resolvable pack ⇒ no basis to record. The row stays null and the
+      // tally falls back to the live read, which is what it did before — a
+      // missing pack must not silently stamp a 0 and fail quorum outright.
+      const eligibleBasisCount =
+        pack === undefined ? null : await eligibleBasisFor(deps, proposal, pack);
       const opened = await deps.proposals.casVotingState(
         proposal.proposalId,
         'deliberation',
         'open',
-        {},
+        eligibleBasisCount === null ? {} : { eligibleBasisCount },
       );
       if (opened !== null) settled += 1;
       continue;

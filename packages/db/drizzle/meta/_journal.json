@@ -687,6 +687,20 @@
       "when": 1783728000022,
       "tag": "0098_stories_canonical_url_hidden_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1783728000023,
+      "tag": "0099_election_eligible_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1783728000024,
+      "tag": "0100_proposal_eligible_basis",
+      "breakpoints": true
     }
   ]
 }

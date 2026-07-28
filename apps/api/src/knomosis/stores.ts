@@ -176,6 +176,10 @@ export interface GovernanceProposalRecord {
   deliberationEndsAt?: string | null;
   votingEndsAt?: string | null;
   challengeWindowEndsAt?: string | null;
+  /** The quorum DENOMINATOR frozen at `deliberation → open` (migration 0100).
+   *  Null ⇒ no basis recorded (a row opened before it existed), and the tally
+   *  falls back to the live membership count those rows always used. */
+  eligibleBasisCount?: number | null;
   /** The settled tally snapshot (proposalTallyWireSchema shape). */
   tallySnapshot?: Record<string, unknown> | null;
 }
@@ -644,6 +648,7 @@ export interface GovernanceProposalStore {
         | 'executableAfter'
         | 'challengeWindowEndsAt'
         | 'votingEndsAt'
+        | 'eligibleBasisCount'
         | 'tallySnapshot'
         | 'challengeState'
       >

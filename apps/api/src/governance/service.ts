@@ -335,13 +335,20 @@ export class GovernanceService {
     return this.deps.stores.seats.get(roomId);
   }
 
+  /** One election by id — the read that lets a caller (or a test) see the
+   *  turnout electorate frozen at open, which is otherwise only observable
+   *  through the settle outcome. */
+  async getElection(electionId: string) {
+    return this.deps.stores.elections.get(electionId);
+  }
+
   /** Schedule an election when the term has elapsed and none is open (ADR-7).
    *  `options.force` skips the term-elapsed check for a COMMUNITY-VOTED early
    *  rotation (a WS-M `steward_rotation` proposal execution) — the one-open-
    *  per-room guard still applies unconditionally. */
   async scheduleElection(
     roomId: string,
-    options: { force?: boolean } = {},
+    options: { force?: boolean; eligibleVoterCount?: (roomId: string) => Promise<number> } = {},
   ): Promise<GovernanceResult<string>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat) return err('no_seat', 'Room has no steward seat.');
@@ -349,6 +356,16 @@ export class GovernanceService {
     if (!options.force && this.deps.now().getTime() < Date.parse(seat.termEnd)) {
       return err('term_active', 'The current term has not elapsed.');
     }
+    // FREEZE the turnout electorate here, after the authorization checks pass so
+    // a refused call never pays for the count.  `tallyElection` divides
+    // `distinctVoters` by this; reading it fresh at SETTLE let anyone inflate
+    // room membership after the last ballot, push turnout below `minTurnout`,
+    // and fail an election that had met it — whereupon the fail-safe hands the
+    // incumbent a full new term.  The ratification path has always snapshotted
+    // its electorate at open; elections now match it.
+    const eligibleCount = options.eligibleVoterCount
+      ? Math.max(0, await options.eligibleVoterCount(roomId))
+      : 0;
     const electionId = this.deps.uuid();
     const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
@@ -362,6 +379,7 @@ export class GovernanceService {
       opensAt: opensAt.toISOString(),
       closesAt: closesAt.toISOString(),
       weightModel: 'one_civic_account_one_vote',
+      eligibleCount,
       winnerUserId: null,
       tally: null,
       mode: 'simulated',
@@ -478,10 +496,17 @@ export class GovernanceService {
     // baseline when the room has bound no law-pack — never a hardcoded constant.
     const rules = await this.resolveElectionRules(election.roomId);
     const ballots = await this.deps.stores.votes.listByElection(electionId);
+    // The FROZEN electorate wins over the caller's live read.  Dividing by a
+    // membership set that anyone can grow after the last ballot let a losing
+    // incumbent fail the election on turnout and take a full new term; the
+    // snapshot taken at open is the electorate the voters actually faced.
+    // A row opened before migration 0099 carries 0, and only then does the
+    // caller's count stand in — the same behaviour those rows had all along.
+    const turnoutBasis = election.eligibleCount > 0 ? election.eligibleCount : eligibleCount;
     const result = tallyElection(
       ballots.map((b) => ({ voterUserId: b.voterUserId, candidateUserId: b.candidateUserId })),
       rules,
-      { eligibleCount, incumbentUserId: seat?.holderUserId ?? null },
+      { eligibleCount: turnoutBasis, incumbentUserId: seat?.holderUserId ?? null },
     );
     const incumbent = seat?.holderUserId ?? null;
     let winnerUserId = result.winnerUserId;
@@ -549,7 +574,8 @@ export class GovernanceService {
     for (const seat of seats) {
       if (seat.currentElectionId === null) {
         if (nowMs >= Date.parse(seat.termEnd)) {
-          const result = await this.scheduleElection(seat.roomId);
+          // Pass the electorate reader so the turnout basis is frozen at OPEN.
+          const result = await this.scheduleElection(seat.roomId, { eligibleVoterCount });
           if (result.ok) scheduled += 1;
         }
         continue;

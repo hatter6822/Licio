@@ -369,6 +369,12 @@ export const governanceProposals = knomosisSchema.table(
     deliberationEndsAt: tz('deliberation_ends_at'),
     votingEndsAt: tz('voting_ends_at'),
     challengeWindowEndsAt: tz('challenge_window_ends_at'),
+    /** The quorum DENOMINATOR, frozen at the `deliberation → open` transition
+     *  (migration 0100).  NULL on a row opened before it existed, which the
+     *  tally reads as "fall back to the live count" — 0 would fail quorum
+     *  unconditionally.  Mirrors `eligible_count` on the ratification vote and
+     *  the steward election. */
+    eligibleBasisCount: integer('eligible_basis_count'),
     /** The settled tally snapshot (proposalTallyWireSchema) — recorded once at
      *  settle so later weight/eligibility changes cannot rewrite history. */
     tallySnapshot: jsonb('tally_snapshot'),

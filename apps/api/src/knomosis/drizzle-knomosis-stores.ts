@@ -1245,6 +1245,7 @@ function mapProposal(row: typeof governanceProposals.$inferSelect): GovernancePr
     deliberationEndsAt: isoOrNull(row.deliberationEndsAt),
     votingEndsAt: isoOrNull(row.votingEndsAt),
     challengeWindowEndsAt: isoOrNull(row.challengeWindowEndsAt),
+    eligibleBasisCount: row.eligibleBasisCount ?? null,
     tallySnapshot: (row.tallySnapshot as Record<string, unknown> | null) ?? null,
   };
 }
@@ -1281,6 +1282,7 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       deliberationEndsAt: dateOrNull(record.deliberationEndsAt ?? null),
       votingEndsAt: dateOrNull(record.votingEndsAt ?? null),
       challengeWindowEndsAt: dateOrNull(record.challengeWindowEndsAt ?? null),
+      eligibleBasisCount: record.eligibleBasisCount ?? null,
       tallySnapshot: record.tallySnapshot ?? null,
     });
     return record;
@@ -1440,6 +1442,9 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
           : {}),
         ...(patch.votingEndsAt !== undefined
           ? { votingEndsAt: dateOrNull(patch.votingEndsAt ?? null) }
+          : {}),
+        ...(patch.eligibleBasisCount !== undefined
+          ? { eligibleBasisCount: patch.eligibleBasisCount }
           : {}),
         ...(patch.tallySnapshot !== undefined ? { tallySnapshot: patch.tallySnapshot } : {}),
         ...(patch.challengeState !== undefined ? { challengeState: patch.challengeState } : {}),

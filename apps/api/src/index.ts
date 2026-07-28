@@ -1923,7 +1923,9 @@ const treasuryServices = createInMemoryTreasuryServices({
   governanceStores,
   membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
-  elections: buildStewardElectionPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
+    forumServices.rooms.countEligibleVoters(roomId),
+  ),
 });
 if (db) {
   Object.assign(treasuryServices, createDrizzleTreasuryStores(db));

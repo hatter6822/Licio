@@ -44,6 +44,10 @@ export interface ElectionRecord {
   opensAt: string;
   closesAt: string;
   weightModel: string;
+  /** The turnout electorate FROZEN at open (migration 0099) — the settle tally
+   *  divides by this, never by a fresh membership read.  0 on a row opened
+   *  before the column existed; `tallyElection` reads that as turnout 0. */
+  eligibleCount: number;
   winnerUserId: string | null;
   tally: CandidateTally[] | null;
   mode: ElectionMode;
