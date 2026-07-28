@@ -20,6 +20,7 @@ import { attentionEvent, sourceOpenEvent } from './event-test-helpers.js';
 
 const U1 = '11111111-1111-4111-8111-111111111111';
 const U2 = '22222222-2222-4222-8222-222222222222';
+const U3 = '33333333-3333-4333-8333-333333333333';
 const T0 = new Date().toISOString();
 
 const KNOMOSIS_TOPIC_LIST = ALL_EVENT_TOPICS.filter((topic) => isKnomosisTopic(topic));
@@ -32,6 +33,8 @@ function contributionEvent(): LicioEvent {
     schema_version: '1',
     contribution_id: randomUUID(),
     thread_id: U1,
+    // A thread's owning story — a SEPARATE uuid, as production mints it.
+    story_id: U3,
     user_id: U2,
     contribution_type: 'explanation',
     target_claim_id: null,

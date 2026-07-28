@@ -913,6 +913,7 @@ export async function createContribution(
     schema_version: '1',
     contribution_id: contribution.contributionId,
     thread_id: contribution.threadId,
+    story_id: thread.storyId,
     user_id: userId,
     contribution_type: eventType,
     target_claim_id: contribution.targetClaimId,

@@ -399,6 +399,9 @@ describe('metrics (WS-E.1.3a observability)', () => {
 
 describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () => {
   it('counts a sourced contribution into window volume; integrity stays anti-signal-only', async () => {
+    // The story and its thread are DISTINCT ids, as production mints them, so
+    // the fold key being the story is observable rather than coincidental.
+    const storyId = randomUUID();
     const threadId = randomUUID();
     const userId = randomUUID();
     await fixture.events.eventStore.insertMany([
@@ -411,6 +414,7 @@ describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () =
         retentionTier: 'public_contribution',
         payload: {
           thread_id: threadId,
+          story_id: storyId,
           user_id: userId,
           contribution_type: 'explanation',
           has_citation: true,
@@ -426,13 +430,17 @@ describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () =
         timestamp: IN_WINDOW,
         privacyClassification: 'restricted',
         retentionTier: 'security_log',
-        payload: { signal_type: 'rage_loop', target_ids: [threadId] },
+        payload: { signal_type: 'rage_loop', target_ids: [storyId] },
         ownerUserId: null,
         purgeAfter: null,
       },
     ]);
     await computeAggregationWindow(fixture.events, T0, '1h');
-    const window = await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h');
+    // Nothing is ever folded under the THREAD id.
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+    const window = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
     // Integrity signals are recorded as anti-signal counts but deliberately
     // do NOT inflate eventCount (which conditions burst detection volume).
     expect(window?.eventCount).toBe(1);
@@ -543,6 +551,7 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
   it('realtime rebuild covers the contribution branch and clear()', async () => {
     // A pinned clock keeps the fixed test window inside the live TTL.
     const realtime = new InMemoryRealtimeAggregator(() => T0 + 10 * 60_000);
+    const storyId = randomUUID();
     const threadId = randomUUID();
     const userId = randomUUID();
     await rebuildRealtimeFromEvents(
@@ -555,7 +564,12 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
           timestamp: IN_WINDOW,
           privacyClassification: 'public',
           retentionTier: 'public_contribution',
-          payload: { thread_id: threadId, user_id: userId, timestamp: IN_WINDOW },
+          payload: {
+            thread_id: threadId,
+            story_id: storyId,
+            user_id: userId,
+            timestamp: IN_WINDOW,
+          },
           ownerUserId: userId,
           createdAt: IN_WINDOW,
           purgeAfter: null,
@@ -564,12 +578,14 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
       ],
       actorKeyOfPayload,
     );
-    const snapshot = await realtime.snapshot(threadId, realtimeWindowStart(Date.parse(IN_WINDOW)));
+    const windowStart = realtimeWindowStart(Date.parse(IN_WINDOW));
+    // Recorded against the STORY, matching every other branch of the rebuild
+    // and every reader of this layer — never the thread.
+    expect(await realtime.snapshot(threadId, windowStart)).toBeNull();
+    const snapshot = await realtime.snapshot(storyId, windowStart);
     expect(snapshot?.contributions).toBe(1);
     await realtime.clear();
-    expect(
-      await realtime.snapshot(threadId, realtimeWindowStart(Date.parse(IN_WINDOW))),
-    ).toBeNull();
+    expect(await realtime.snapshot(storyId, windowStart)).toBeNull();
   });
 
   it('attention store: anonymize/delete branches across owners', async () => {

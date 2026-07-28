@@ -194,14 +194,22 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
     expect(await fixture.events.deadLetters.list()).toEqual([]);
   });
 
-  it('resolves THREAD-id targets too (forum-driven cascades aggregate by thread)', async () => {
-    // pwatt/aggregation folds contribution events by
-    // payload.thread_id, so cascades detected on forum activity carry
-    // THREAD ids in target_ids — the consumer must not silently skip them.
+  it('a THREAD-id target resolves to nothing — cascade targets are STORY ids', async () => {
+    // A cascade target is a PWAtt fold item id (`pwatt/scoring.ts` emits
+    // `target_ids: [item.itemId]`), and every branch of the fold keys by the
+    // owning story — including `contribution.created`, which used to key by
+    // `thread_id` and so produced a phantom item nothing downstream could
+    // reach.  This consumer therefore resolves by story id alone.
+    //
+    // Asserting the thread id does NOT elevate is what keeps that honest: a
+    // regression to thread-keyed folding would make real cascades arrive here
+    // as thread ids, and a tolerant two-sided lookup would absorb them
+    // silently — which is exactly how the defect survived. Now it fails loudly
+    // at the aggregation tests instead.
     await fixture.events.router.publish(cascadeSignal(threadId));
     await fixture.settleAll();
-    expect(await safetyState()).toBe('elevated');
-    expect(await conversationState()).toBe('tense');
+    expect(await safetyState()).toBe('normal');
+    expect(await conversationState()).not.toBe('tense');
   });
 
   it('ignores non-cascade signals and unknown targets', async () => {

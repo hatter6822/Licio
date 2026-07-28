@@ -10,6 +10,10 @@ const U1 = '11111111-1111-4111-8111-111111111111';
 const U2 = '22222222-2222-4222-8222-222222222222';
 const U3 = '33333333-3333-4333-8333-333333333333';
 const U4 = '44444444-4444-4444-8444-444444444444';
+/** A thread id is a SEPARATE uuid from its story's, so a fixture carrying both
+ *  must not spell them the same — that is precisely the confusion the
+ *  `contribution.created` fold key exists to prevent. */
+const U5 = '55555555-5555-4555-8555-555555555555';
 const T0 = '2026-06-10T10:00:00.000Z';
 
 const base = (eventType: string): Record<string, unknown> => ({
@@ -105,6 +109,7 @@ export const EVENT_FIXTURES: Readonly<Record<EventTopic, Record<string, unknown>
     ...base('contribution.created'),
     contribution_id: U2,
     thread_id: U3,
+    story_id: U5,
     user_id: U4,
     contribution_type: 'explanation',
     target_claim_id: null,

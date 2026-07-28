@@ -4,8 +4,10 @@
 // participation" comment view.
 //
 // IMPORTANT — what this is and is NOT: PWAtt (participation-weighted attention)
-// is scored per THREAD, not per comment — `contribution.created` events fold
-// under the thread id, and attention is never tracked per comment. So there is
+// is scored per STORY, not per comment — `contribution.created` events fold
+// under the thread's owning story, and attention is never tracked per comment
+// (nor per thread: keying participation by thread id was the defect that kept
+// contributions off the story they belong to). So there is
 // no per-comment attention score to sort by. What IS real and per-comment is the
 // CONTENT participation weight the WS-E.2.1c math already uses: a constructive,
 // SOURCED comment participates more than an unsourced one. That is a

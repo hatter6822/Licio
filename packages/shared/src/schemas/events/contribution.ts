@@ -39,6 +39,26 @@ export const contributionCreatedEventSchema = z
     event_type: z.literal('contribution.created'),
     contribution_id: uuidSchema,
     thread_id: uuidSchema,
+    /**
+     * The thread's OWNING STORY — the key every scoring consumer folds by.
+     *
+     * A thread and its story are two independently minted uuids
+     * (`ingestion/submission.ts` mints both), so a consumer that keys
+     * participation by `thread_id` while attention, source-opens and saves key
+     * by `story_id` silently produces TWO disjoint items: the real story with
+     * no contributions, and a phantom carrying nothing else.  Half the
+     * ConstructiveParticipation budget then never reaches the story it belongs
+     * to, and every downstream lookup by story id (the PWAtt row the ranking
+     * features read, the item-safety row a cascade freeze writes, the Signal
+     * Ledger's story title) misses.
+     *
+     * `threads.story_id` is `NOT NULL` with a foreign key, so the emitter
+     * always knows this; carrying it here is what makes the fold key uniform
+     * rather than something each consumer has to re-derive — which is how the
+     * divergence arose.  `thread_id` stays for the genuinely thread-scoped
+     * consumers (the SCOI bridge attempt, thread-posture escalation).
+     */
+    story_id: uuidSchema,
     user_id: uuidSchema,
     contribution_type: eventContributionTypeSchema,
     target_claim_id: uuidSchema.nullable(),

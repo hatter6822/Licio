@@ -41,13 +41,20 @@ const MFA_STEP_MEMORY_MS = 90_000; // remember the used step for ~3 windows
 const attemptsKey = (userId: string) => `mfaattempts:${userId}`;
 const usedStepKey = (userId: string) => `mfastep:${userId}`;
 
-/** Per-user attempt gate (5 per 5 minutes).  Returns false when the cap is hit. */
+/**
+ * Per-user attempt gate (5 per 5 minutes).  Returns false when the cap is hit.
+ *
+ * ONE atomic increment, not a read followed by a write.  This is the only
+ * limiter in front of `POST /v1/auth/mfa/totp/verify` — the route carries no
+ * `rateLimit()` middleware — so a get-then-set here bounded nothing: against
+ * Redis the two calls are separate round trips, every overlapping request read
+ * the same `count`, every one passed the test, and every one wrote the same
+ * `count + 1`.  The stored counter simply pinned near 1 while the codes were
+ * brute-forced.
+ */
 async function attemptAllowed(services: IdentityServices, userId: string): Promise<boolean> {
-  const raw = await services.otp.get(attemptsKey(userId));
-  const count = raw ? Number(raw) : 0;
-  if (count >= MFA_MAX_ATTEMPTS) return false;
-  await services.otp.set(attemptsKey(userId), String(count + 1), MFA_ATTEMPT_WINDOW_MS);
-  return true;
+  const attempts = await services.otp.increment(attemptsKey(userId), MFA_ATTEMPT_WINDOW_MS);
+  return attempts <= MFA_MAX_ATTEMPTS;
 }
 
 export function createMfaRoutes(resolve: () => IdentityServices) {

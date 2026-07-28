@@ -203,4 +203,46 @@ describe('runGovernanceTick', () => {
       vi.useRealTimers();
     }
   });
+
+  it('a REJECTING job lease is reported and skips the tick — it never escapes', async () => {
+    // The acquire is the one await in the interval callback that
+    // `runGovernanceTick`'s per-task catches do not cover. Unguarded, a
+    // transient Postgres error inside `tryAcquire` rejects a promise nobody
+    // holds, and Node's default `--unhandled-rejections=throw` terminates the
+    // BFF over a blip in an hourly background job.
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { svc, advance, now } = make(100, 50);
+      await svc.bootstrapSeat('r', 'creator');
+      advance(101_000);
+      const log = vi.fn();
+      const onError = vi.fn();
+      const stop = startGovernanceScheduler(
+        { service: svc, eligibleVoterCount: async () => 3, log, now },
+        onError,
+        10,
+        {
+          lease: {
+            tryAcquire: async () => {
+              throw new Error('connection terminated unexpectedly');
+            },
+          },
+          holder: 'test',
+        },
+      );
+      await vi.advanceTimersByTimeAsync(12);
+      stop();
+      expect(onError).toHaveBeenCalledWith(expect.any(Error), 'lease');
+      expect(log).not.toHaveBeenCalled(); // fail closed: no lease, no tick
+    } finally {
+      vi.useRealTimers();
+      // Let any escaped rejection surface before we judge.
+      await new Promise((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
 });

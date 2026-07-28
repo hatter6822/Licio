@@ -36,6 +36,34 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect(await store.get('ttl')).toBeNull(); // expired
   });
 
+  it('RedisEphemeralStore: setIfAbsent/increment are atomic against LIVE Redis', async () => {
+    // The in-memory adapter can be atomic by construction (no await between
+    // read and write); Redis cannot, and Redis is what production runs. These
+    // two primitives back the MFA attempt cap and the OTP resend cooldown, so
+    // "atomic in memory, racy in production" is the failure mode that matters.
+    const store = new RedisEphemeralStore(redis as IORedis, 'test-eph:');
+
+    const claims = await Promise.all(
+      Array.from({ length: 12 }, () => store.setIfAbsent('cooldown', 'x', 60_000)),
+    );
+    expect(claims.filter((won) => won)).toHaveLength(1);
+
+    const counts = await Promise.all(
+      Array.from({ length: 20 }, () => store.increment('attempts', 300_000)),
+    );
+    expect([...counts].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 20 }, (_unused, i) => i + 1),
+    );
+
+    // The window is armed on CREATION only, so a later increment does not push
+    // it out (`PEXPIRE` runs under `n == 1` inside the same script).
+    await store.increment('shortwindow', 40);
+    await new Promise((r) => setTimeout(r, 25));
+    expect(await store.increment('shortwindow', 40)).toBe(2);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await store.increment('shortwindow', 40)).toBe(1); // window elapsed
+  });
+
   it('RedisSessionStore: stores, lists per user, and deletes', async () => {
     const store = new RedisSessionStore(redis as IORedis, 'test-session:');
     const userId = '11111111-1111-4111-8111-111111111111';

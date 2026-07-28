@@ -199,13 +199,29 @@ export async function computeAggregationWindow(
       actor.saved = true;
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
-        thread_id: string;
+        story_id?: string;
         user_id: string;
         contribution_type: EventContributionType;
         has_citation: boolean;
         accusation_flag: boolean;
       };
-      const item = itemOf(payload.thread_id);
+      // Fold by the OWNING STORY, exactly as attention/source-open/save do
+      // above.  Keying this branch by `thread_id` — which it did — put
+      // participation on a phantom item no other signal and no downstream
+      // lookup ever reached, because a thread id and its story id are two
+      // independently minted uuids.
+      //
+      // The field is REQUIRED by `contributionCreatedEventSchema`, so only a
+      // row written before it existed can be missing it.  Such a row is
+      // skipped rather than folded under the thread id: re-creating the
+      // phantom is what made the defect invisible, and an `AggregationWindow`
+      // row written for a `targetType: 'story'` that is not a story is worse
+      // than a counted omission.
+      if (payload.story_id === undefined) {
+        events.metrics.increment('pwatt.contribution.unresolved_story');
+        continue;
+      }
+      const item = itemOf(payload.story_id);
       item.eventCount += 1;
       const actor = actorOf(item, payload.user_id);
       actor.eventCount += 1;

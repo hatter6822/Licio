@@ -243,11 +243,25 @@ export function startDebateScheduler(
       await runDebateSchedulerTick(onError);
       return;
     }
-    const acquired = await runner.lease.tryAcquire(
-      DEBATE_JOB_LEASE,
-      Math.ceil(intervalMs * 0.9),
-      runner.holder ?? hostname(),
-    );
+    // The lease acquire is the one await in this callback nothing else guards:
+    // `runDebateSchedulerTick` catches internally, but a `tryAcquire` rejection
+    // (any transient Postgres error — the Drizzle store issues raw SQL and
+    // catches nothing) escapes an async `setInterval` callback whose promise
+    // nobody holds, and Node's default `--unhandled-rejections=throw` then
+    // takes the whole BFF down over a blip in a background job.  Every sibling
+    // scheduler already fails closed here; this one and the governance
+    // scheduler were the two that did not.
+    let acquired: boolean;
+    try {
+      acquired = await runner.lease.tryAcquire(
+        DEBATE_JOB_LEASE,
+        Math.ceil(intervalMs * 0.9),
+        runner.holder ?? hostname(),
+      );
+    } catch (err) {
+      onError(err);
+      return; // fail closed: no lease, no tick — the next interval retries
+    }
     if (acquired) await runDebateSchedulerTick(onError);
   }, intervalMs);
   timer.unref();

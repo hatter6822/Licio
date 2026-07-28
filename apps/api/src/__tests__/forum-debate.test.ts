@@ -18,7 +18,7 @@ import {
   type DebateJudgeInput,
   MAX_CITATIONS,
 } from '@licio/shared';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assembleJudgeInput,
   closeDebatesForRemoval,
@@ -40,6 +40,7 @@ import {
   touchDebateActivityForContribution,
   withdrawDebate,
 } from '../forum/debate.js';
+import { startDebateScheduler } from '../forum/debate-scheduler.js';
 import { InMemoryDebateStore } from '../forum/debate-store.js';
 import { InMemoryContributionStore } from '../forum/stores.js';
 
@@ -1733,5 +1734,38 @@ describe('adjudicator-leg provenance (SPEC §24.1 — the arena states which leg
       content,
     );
     expect(viaSteward.adjudicator).toBeNull();
+  });
+});
+
+describe('the debate scheduler under a failing job lease', () => {
+  it('reports the lease error and skips the tick — it never escapes the interval', async () => {
+    // `runDebateSchedulerTick` catches internally, so the lease acquire is the
+    // one await in the interval callback nothing guarded. Unguarded, a
+    // transient Postgres error inside `tryAcquire` rejects a promise nobody
+    // holds, and Node's default `--unhandled-rejections=throw` terminates the
+    // BFF over a blip in a background job.
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    const onError = vi.fn();
+    try {
+      const stop = startDebateScheduler(onError, 10, {
+        lease: {
+          tryAcquire: async () => {
+            throw new Error('connection terminated unexpectedly');
+          },
+        },
+        holder: 'test',
+      });
+      await vi.advanceTimersByTimeAsync(12);
+      stop();
+    } finally {
+      vi.useRealTimers();
+      await new Promise((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    expect(unhandled).toEqual([]);
   });
 });

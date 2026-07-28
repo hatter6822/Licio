@@ -189,10 +189,16 @@ export async function rebuildRealtimeFromEvents(
         actorKeyOf(event.payload),
       );
     } else if (event.topic === 'contribution.created') {
-      const payload = event.payload as { thread_id?: string; user_id?: string; timestamp?: string };
-      if (payload.thread_id && payload.user_id) {
+      // The OWNING STORY, matching every other branch here and the durable
+      // fold in `pwatt/aggregation.ts`.  Recording by thread id counted a
+      // story's commenters under an id no reader of this layer ever asks for,
+      // so "live participants" for a story never included them — and the
+      // hourly reconciliation against `uniqueActiveUsers` agreed only because
+      // both sides were wrong the same way.
+      const payload = event.payload as { story_id?: string; user_id?: string; timestamp?: string };
+      if (payload.story_id && payload.user_id) {
         await aggregator.recordContribution(
-          payload.thread_id,
+          payload.story_id,
           actorKeyOf(event.payload),
           event.timestamp,
         );

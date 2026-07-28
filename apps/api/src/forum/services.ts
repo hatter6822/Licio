@@ -462,14 +462,12 @@ export function registerForumConsumers(
         now: forum.now,
       };
       for (const itemId of signal.target_ids) {
-        // Cascade target ids are HETEROGENEOUS: attention-driven items carry
-        // story ids, while contribution/evidence-driven items carry THREAD
-        // ids (pwatt/aggregation.ts folds those events by payload.thread_id).
-        // Resolve thread-first so forum-driven cascades — the common case
-        // for harassment — are never silently skipped.
-        const thread =
-          (await ingestion.stories.getThreadById(itemId)) ??
-          (await ingestion.stories.getThreadByStoryId(itemId));
+        // A cascade target is a fold ITEM id, and every branch of the fold
+        // now keys by the owning story (`pwatt/aggregation.ts`), so these are
+        // story ids uniformly — the `contribution.created` branch used to key
+        // by thread id, which is what made them heterogeneous and this lookup
+        // two-sided.
+        const thread = await ingestion.stories.getThreadByStoryId(itemId);
         if (!thread) continue;
         const applied = await escalateThreadOnIntegritySignal(
           deps,

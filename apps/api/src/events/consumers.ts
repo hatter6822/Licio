@@ -86,13 +86,16 @@ export function registerDefaultConsumers(
         await events.realtime.recordSourceOpen(sourceOpen, actorKey);
         itemIds.push(sourceOpen.story_id);
       } else if (event.event_type === 'contribution.created') {
-        const contribution = event as { thread_id: string; user_id: string; timestamp: string };
+        // By the OWNING STORY: `itemIds` feeds the early-aggregation trigger,
+        // whose items are the same ones the durable fold and every reader key
+        // by, and those are story ids.
+        const contribution = event as { story_id: string; user_id: string; timestamp: string };
         await events.realtime.recordContribution(
-          contribution.thread_id,
+          contribution.story_id,
           contribution.user_id,
           contribution.timestamp,
         );
-        itemIds.push(contribution.thread_id);
+        itemIds.push(contribution.story_id);
       } else if (event.event_type === 'content.saved') {
         const saved = event as ContentSavedAggregateEvent;
         await events.realtime.recordSave(saved, actorKey);
