@@ -62,6 +62,38 @@ function isAlgorithmLengthDigest(line: string): boolean {
   return decoded.byteLength === expectedBytes;
 }
 
+/**
+ * The value of `member` in a YAML FLOW mapping, at its TOP level only.
+ *
+ * Brace-matched rather than searched, so a member of the same name nested
+ * inside another value — `{resolution: {}, meta: {x: {resolution: {…}}}}` —
+ * is not mistaken for the mapping's own.
+ */
+function directFlowMember(line: string, member: string): string | undefined {
+  const opened = line.indexOf('{');
+  if (opened < 0) return undefined;
+  let depth = 0;
+  let memberAt: number | undefined;
+  for (let at = opened; at < line.length; at += 1) {
+    const char = line[at];
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      if (memberAt !== undefined && depth === 2) return line.slice(memberAt, at + 1);
+      depth -= 1;
+      if (depth === 0) break;
+      continue;
+    }
+    if (depth === 1 && memberAt === undefined && line.startsWith(`${member}:`, at)) {
+      memberAt = at;
+    }
+  }
+  // A member whose value is a SCALAR rather than a nested mapping.
+  return memberAt === undefined ? undefined : line.slice(memberAt);
+}
+
 /** Entries sit at two spaces, so their own fields sit at four. */
 const ENTRY_FIELD_INDENT = 4;
 
@@ -103,14 +135,22 @@ export function countPackagesSection(content: string): { entries: number; integr
       continue;
     }
     if (!inside) continue;
+    // A YAML COMMENT at the entry indent is not an entry.  Counting one added a
+    // phantom package with no integrity and blocked a lockfile pnpm accepts.
+    if (/^\s*#/.test(line)) continue;
     if (/^ {2}\S/.test(line)) {
       close();
       entries += 1;
       open = true;
       // An entry written in YAML's FLOW form carries its whole mapping on this
       // one line — `a@1.0.0: {resolution: {integrity: …}}` — so continuing past
-      // it without looking rejected a lockfile pnpm accepts.
-      if (/resolution:/.test(line) && isAlgorithmLengthDigest(line)) covered = true;
+      // it without looking rejected a lockfile pnpm accepts.  Only the entry's
+      // DIRECT `resolution` member counts: searching the whole line let a
+      // nested `peerDependenciesMeta` decoy mask a package whose own
+      // resolution was empty, which is the masking per-entry counting exists
+      // to prevent, on one line instead of several.
+      const inline = directFlowMember(line, 'resolution');
+      if (inline !== undefined && isAlgorithmLengthDigest(inline)) covered = true;
       continue;
     }
     if (!open) continue;

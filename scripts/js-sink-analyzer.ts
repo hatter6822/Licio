@@ -399,16 +399,14 @@ function staticText(
   // it.  Only an immutable binding is followed — a `let` may hold something
   // else by the time the key is read, and folding it would invent a key.
   //
-  // A SLOT of an immutable container folds the same way: `const keys = { a:
-  // 'ev', b: 'al' }; globalThis[keys.a + keys.b]` reaches the same two strings
-  // through a property rather than through a name, and following only names
-  // left it folding to nothing.
-  if (
-    bound !== undefined &&
-    (target.kind === SyntaxKind.Identifier ||
-      target.kind === SyntaxKind.PropertyAccessExpression ||
-      target.kind === SyntaxKind.ElementAccessExpression)
-  ) {
+  // A container SLOT is deliberately NOT followed.  `const` prevents rebinding
+  // the name, not mutating the object, so `const keys = { a: 'ev' }; keys.a =
+  // 'safe'` makes the literal a lie — folding it would invent a key the code
+  // never uses, which is a FALSE POSITIVE in a gate.  Proving a container
+  // unmutated is whole-program aliasing analysis, the unbounded question this
+  // module's header declines; the CSP is the control for a key assembled that
+  // way.  See docs/planning/audit-residuals-2026-07.md.
+  if (bound !== undefined && target.kind === SyntaxKind.Identifier) {
     const held = bound(target);
     if (held !== undefined) return staticText(held, hop + 1, bound);
   }
@@ -447,18 +445,6 @@ function staticKeyOf(argument: Syntax | undefined, project: Project): string | u
  * folding it would invent a property name the code never selects.
  */
 function constantValue(identifier: Syntax, project: Project): Syntax | undefined {
-  // `keys.a` / `keys['a']` — the slot of an immutable container is as fixed as
-  // a binding is, so it folds through the same descent.
-  if (
-    identifier.kind === SyntaxKind.PropertyAccessExpression ||
-    identifier.kind === SyntaxKind.ElementAccessExpression
-  ) {
-    const key =
-      identifier.kind === SyntaxKind.PropertyAccessExpression
-        ? keyText(identifier.name, project)
-        : staticKeyOf(identifier.argumentExpression, project);
-    return key === undefined ? undefined : valueAt(identifier.expression, key, project, 0);
-  }
   const declaration = declarationOf(identifier, project);
   if (declaration === undefined || !isImmutableBinding(declaration)) return undefined;
   if (declaration.kind === SyntaxKind.VariableDeclaration) return declaration.initializer;
@@ -537,15 +523,10 @@ function valueAt(
 ): Syntax | undefined {
   const target = unwrap(source);
   if (target === undefined || hop > MAX_HOPS) return undefined;
-  // Reached through a NAME, or through another SLOT, rather than written
-  // inline.  `keys.part.a` hands `keys.part` in here, so resolving only
-  // identifiers stopped at the first level of nesting; `constantValue` answers
-  // for both, which makes the descent recursive at any depth.
-  if (
-    target.kind === SyntaxKind.Identifier ||
-    target.kind === SyntaxKind.PropertyAccessExpression ||
-    target.kind === SyntaxKind.ElementAccessExpression
-  ) {
+  // Reached through a NAME rather than written inline.  A slot reached through
+  // another SLOT is not followed, for the mutability reason `staticText`
+  // records.
+  if (target.kind === SyntaxKind.Identifier) {
     return valueAt(constantValue(target, project), key, project, hop + 1);
   }
   if (target.kind === SyntaxKind.ArrayLiteralExpression) {

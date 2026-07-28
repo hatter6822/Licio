@@ -328,3 +328,37 @@ REMAINING — each blocked on a server change, a design pass, or a content audit
   mount — placing them (app shell insets, modal scroll regions) is a design pass.
 - **jargon** plain-language audit: a copy review (find/replace jargon), not a
   component wire-up.
+
+## Static-gate value resolution (#173, review rounds 8-10)
+
+The `lint:security` sink analyzer and `check:governance-kyc` resolve values
+through the compiler to answer "which property does this key name" and "which
+router is this". Ten review rounds walked that resolution one hop further each
+time — a binding, a container slot, a slot of a slot — and the following are
+DELIBERATELY left unresolved rather than extended again. Each is recorded with
+what would close it, and none is a silent gap: the shapes are listed here.
+
+- **A key assembled from a container SLOT** — `const keys = { a: 'ev', b: 'al' };
+  globalThis[keys.a + keys.b]`. Folding this was implemented and then REVERTED:
+  `const` prevents rebinding the name, not mutating the object, so `keys.a =
+  'safe'` makes the literal a lie and folding it invents a key the code never
+  uses — a FALSE POSITIVE in a gate, which is the failure mode that gets a gate
+  switched off. Closure: prove the container unmutated, which is whole-program
+  aliasing analysis — the unbounded question `js-sink-analyzer.ts`'s header
+  declines. The control for a key assembled this way is the CSP
+  (`script-src` without `'unsafe-eval'` + Trusted Types), asserted on the built
+  artifact by `check:csp-parity`.
+- **A destructuring default behind an explicit `undefined`** — `const { a = 'ev' }
+  = { a: undefined }`. JavaScript applies the default; the descent returns the
+  `undefined` node and the `??` fallback never fires. A MISS, not a false
+  positive. Closure: distinguish "selected a value that is undefined" from "found
+  no value" in `valueAt`.
+- **A route method behind a bound computed key** — `const method = 'post';
+  app[method](…)`. `staticString` does not fold the binding. Closure: use the
+  sink analyzer's `staticKeyOf` for the method key too, which is the same
+  resolver both files already share for property keys.
+
+The BOUNDED guarantees these gates rest on are unaffected and stay enforced:
+`eval`/`Function` are never NAMED in first-party source, every file registering
+a mutation route is classified, and every `packages:` entry carries its own
+digest.

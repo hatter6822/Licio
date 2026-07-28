@@ -118,6 +118,29 @@ describe('counting the packages section', () => {
     expect(countPackagesSection(content)).toEqual({ entries: 2, integrity: 1 });
   });
 
+  it('ignores a YAML COMMENT at the entry indent', () => {
+    // Counting one added a phantom package with no integrity and blocked a
+    // lockfile pnpm accepts.
+    const content = lockfile(
+      [
+        '  # why this pin exists',
+        '  a@1.0.0:',
+        `    resolution: {integrity: sha512-${digest('a')}}`,
+      ].join('\n'),
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 1 });
+  });
+
+  it('ignores a nested `resolution` on an INLINE entry line', () => {
+    // Searching the whole line let a decoy mask a package whose own resolution
+    // was empty — the masking per-entry counting exists to prevent, on one
+    // line instead of several.
+    const content = lockfile(
+      `  a@1.0.0: {resolution: {}, peerDependenciesMeta: {x: {resolution: {integrity: sha512-${digest('a')}}}}}`,
+    );
+    expect(countPackagesSection(content)).toEqual({ entries: 1, integrity: 0 });
+  });
+
   it("counts an entry written in YAML's FLOW form", () => {
     // The whole mapping sits on the entry line, so continuing past it without
     // looking rejected a lockfile pnpm accepts.

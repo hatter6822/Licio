@@ -432,6 +432,50 @@ app.get('/rooms/:roomId/governance', async (c) => c.json(await read()));`;
     },
   );
 
+  it.each([
+    ['a .tsx route module', 'apps/api/src/routes/new-governance.tsx'],
+    ['a plain .ts module', 'apps/api/src/routes/new-governance.ts'],
+  ])('judges %s once it is in the corpus', (_label, path) => {
+    // A route module written as `.tsx` registers a Hono POST exactly as its
+    // `.ts` sibling does.
+    const issues = runGovernanceKycGate(
+      (rel) =>
+        rel === path
+          ? `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`
+          : readRepo(rel),
+      [...live, path],
+    );
+    expect(issues).toContainEqual(expect.stringContaining(`${path} REGISTERS`));
+  });
+
+  it('enumerates EVERY TypeScript source extension, not just `.ts`', () => {
+    // Accepting only names ending in `.ts` dropped a `.tsx` route module — the
+    // same completeness hole as the pathspec, one filter along.  Asserted on
+    // the enumeration itself, since that is where the filter lives.
+    const walkDir = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(resolve(ROOT, dir), { withFileTypes: true })) {
+        const at = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules') out.push(...walkDir(at));
+        } else out.push(at);
+      }
+      return out;
+    };
+    const onDisk = walkDir('apps/api/src');
+    const sources = (each: string): boolean =>
+      /\.[cm]?tsx?$/.test(each) &&
+      !each.endsWith('.d.ts') &&
+      !/\.test\.[cm]?tsx?$/.test(each) &&
+      !each.includes('/__tests__/');
+    expect([...live].sort()).toEqual(onDisk.filter(sources).sort());
+    // …and the exclusions are exactly declarations and tests, nothing else.
+    expect(live.filter((each) => each.endsWith('.d.ts'))).toEqual([]);
+    expect(live.filter((each) => /\.test\.[cm]?tsx?$/.test(each))).toEqual([]);
+  });
+
   it('enumerates the API tree, so nothing above passes vacuously', () => {
     expect(live.length).toBeGreaterThan(200);
     expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);

@@ -1142,7 +1142,22 @@ const API_SOURCE_ROOT = 'apps/api/src';
  * real source ends up silently outside a security gate's corpus.
  */
 function isTestPath(path: string): boolean {
-  return path.endsWith('.test.ts') || path.includes('/__tests__/') || path.startsWith('__tests__/');
+  return (
+    /\.test\.[cm]?tsx?$/.test(path) || path.includes('/__tests__/') || path.startsWith('__tests__/')
+  );
+}
+
+/**
+ * Whether a tracked path is a TypeScript SOURCE the API compiles.
+ *
+ * Every extension `tsconfig`'s `src` include covers, not just `.ts`: a route
+ * module written as `.tsx` registers a Hono POST exactly as its `.ts` sibling
+ * does, and accepting only names ending in `.ts` dropped it from the corpus —
+ * the same completeness hole as the pathspec, one filter along.  A `.d.ts`
+ * declares types and registers nothing.
+ */
+function isTypeScriptSource(path: string): boolean {
+  return /\.[cm]?tsx?$/.test(path) && !path.endsWith('.d.ts');
 }
 
 /**
@@ -1161,7 +1176,7 @@ function isTestPath(path: string): boolean {
 export function trackedApiSources(): string[] {
   return execFileSync('git', ['ls-files', API_SOURCE_ROOT], { cwd: ROOT, encoding: 'utf-8' })
     .split('\n')
-    .filter((each) => each.endsWith('.ts') && !isTestPath(each));
+    .filter((each) => isTypeScriptSource(each) && !isTestPath(each));
 }
 
 export function runGovernanceKycGate(
