@@ -16,8 +16,12 @@
 import { sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
-// biome-ignore lint/suspicious/noExplicitAny: helpers accept any schema-typed drizzle database
-type Db = PostgresJsDatabase<any>;
+/** Any schema-typed Drizzle database.  `Record<string, unknown>` rather than
+ *  `any`: these helpers only ever issue raw `sql` templates, so they need the
+ *  DATABASE, never its schema map — and the wider bound accepts every caller's
+ *  richer schema just as `any` did, without the suppression comment that came
+ *  with it (this was the last `any` in non-generated source). */
+type Db = PostgresJsDatabase<Record<string, unknown>>;
 
 export interface SimilarityHit {
   targetId: string;

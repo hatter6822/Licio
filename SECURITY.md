@@ -47,7 +47,10 @@ regardless of CVSS score.
 
 | Version | Supported |
 |---------|-----------|
-| 0.8.x   | Yes       |
+| 0.9.x   | Yes       |
+
+Pre-1.0: only the current minor receives fixes.  The line here tracks the root
+`package.json` version, which every pull request bumps.
 
 ## Security Architecture
 

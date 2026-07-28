@@ -6,7 +6,9 @@ development workflow, quality gates, and security requirements.
 ## Prerequisites
 
 - Node.js 22+ (see `.nvmrc`)
-- pnpm 9+ (enforced via Corepack and the `packageManager` field)
+- pnpm 11+ (enforced via Corepack and the `packageManager` field).  NOT 9: the
+  security `overrides` live in `pnpm-workspace.yaml`, which pnpm 9 does not read
+  — it would install the unpatched versions without a word.
 - Docker & Docker Compose — optional, only for running dev against a real
   PostgreSQL/Redis (basic `pnpm dev` uses in-memory stores)
 
@@ -132,10 +134,8 @@ contributor exists — at that point an approval is something a *different* pers
 can actually give.
 
 Do NOT express this with classic branch protection: its `enforce_admins` flag is
-all-or-nothing, so waiving anything for the maintainer would also waive
-
-Do NOT express this with classic branch protection: its `enforce_admins` flag is
-the direct-push and force-push blocks.  That was verified by trying it — an admin
+all-or-nothing, so waiving anything for the maintainer would also waive the
+direct-push and force-push blocks.  That was verified by trying it — an admin
 push to `main` succeeded under classic protection and is refused (`GH013`) under
 the ruleset.
 

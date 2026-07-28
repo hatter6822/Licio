@@ -1,23 +1,28 @@
 {
-  // Typecheck for the LLM tooling scripts (they run under tsx, OUTSIDE the
-  // `tsc -b` workspace graph — a wrong import or argument shape here would
-  // otherwise only surface at runtime on an operator's machine; a debate
-  // fixture once shipped missing a required field exactly this way). noEmit +
-  // standalone: the `.js`-extension relative imports into apps/api/src and
-  // packages/*/src resolve to the TypeScript SOURCES (TS's built-in .js→.ts
-  // mapping under moduleResolution "bundler"), so the transitive closure is
-  // re-checked here with the same strict flag set — a few seconds, no build
-  // order, no emit. Widening `include` to the check-* gates is a one-line
-  // change. Wired into `pnpm typecheck` / `typecheck:ci` at the root.
+  // Typecheck for `scripts/**` — the CI static gates, the build validators, and
+  // the LLM tooling — which run under `tsx`, OUTSIDE the `tsc -b` workspace
+  // graph.  Wired into `pnpm typecheck` / `typecheck:ci` at the root.
   //
-  // `dangerous-code-patterns.ts` — the SSOT the four code-scan gates share — is
-  // included because it is DEPENDENCY-FREE and so needs no extra resolution
-  // setup. The remaining check-* gates are NOT a one-line addition despite the
-  // note above: they import `zod` and `@licio/*` (unresolvable from this
-  // standalone project) and reference DOM lib types this `lib` set omits, so
-  // widening `include` to `**/*.ts` currently reports ~30 resolution errors.
-  // Bringing them in means giving this project the workspace paths + lib —
-  // worth doing, but a real change, not a one-liner.
+  // `scripts/` sat outside every tsconfig until this project existed, and that
+  // is how a parameter type that does not exist (`CspDelivery`), an interface
+  // member used but never declared (`FileScan.spreads`), a type-only import of
+  // a name the module never exported (`NodeHandle` from
+  // `typescript/unstable/ast`) and a `boolean` returned from a
+  // `number | undefined` function all reached the remote — in the very code
+  // that gates everything else.
+  //
+  // `include` is now `**/*.ts`: every gate and every gate test.  (An earlier
+  // revision of this header argued that widening it past the dependency-free
+  // `dangerous-code-patterns.ts` was "NOT a one-line addition" because the
+  // check-* gates import `zod` and `@licio/*` and reference DOM types.  That
+  // was true then and is not now — the `paths` map and the `lib` set below are
+  // what made it work, and `tsc -p scripts` exits clean over the whole tree.)
+  //
+  // `noEmit` + standalone: the `.js`-extension relative imports into
+  // `apps/api/src` and `packages/*/src` resolve to the TypeScript SOURCES (TS's
+  // built-in `.js`→`.ts` mapping under `moduleResolution: "bundler"`), so the
+  // transitive closure is re-checked here with the same strict flag set — a few
+  // seconds, no build order, no emit.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,

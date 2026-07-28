@@ -1239,8 +1239,10 @@ source of truth; this is the working subset.
 **Static / security / doctrine gates** — run these locally before pushing.
 CI runs all of them on every PR (the `Lint & Format` job runs the doctrine
 scans — including `check:no-applause` — alongside Biome and `lint:security`;
-the built service worker is scanned by `scripts/validate-build.ts` in the
-`Security Audit` job after the production build). Running them locally first
+the built service worker is scanned by `scripts/check-sw-security.ts`, which the
+web package's own `build` script chains — so it runs in the `Build & Size Check`
+job, not in `Security Audit`, and it runs on every `pnpm build`). Running them
+locally first
 saves a CI round-trip:
 
 | Command | Fails if… |
