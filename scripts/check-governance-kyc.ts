@@ -34,6 +34,7 @@ import { readFileSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
+import { staticKeyOf } from './js-sink-analyzer.js';
 import { asNode, type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -897,32 +898,13 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    *
    * `const method = 'post'; app[method](…)` registers a route as surely as
    * `app.post(…)` does, and reading the syntax alone saw an identifier and
-   * stopped — so the registration was not found and the file left the corpus.
-   * Only a `const` is followed, and only when the name is bound BY that
-   * declaration: a parameter takes its value from the caller, so its default is
-   * one of the values it may hold and never the value it does.
+   * stopped.  The FOLD is the sink analyzer's, shared rather than reimplemented:
+   * a second copy here knew about `const x = …` and not about `const { x } = …`,
+   * which is precisely the drift a shared resolver prevents — and it brings the
+   * parameter, catch and `let` semantics with it.
    */
-  const staticStringFolded = (node: Syntax | undefined, hop = 0): string | undefined => {
-    const direct = staticString(node);
-    if (direct !== undefined) return direct;
-    const target = unwrap(node);
-    if (target?.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return undefined;
-    const declaration = localDeclaration(target);
-    if (declaration?.kind !== SyntaxKind.VariableDeclaration) return undefined;
-    let owner: Syntax | undefined = declaration.parent;
-    for (let step = 0; owner !== undefined && step <= MAX_HOPS; step += 1) {
-      if (owner.kind === SyntaxKind.VariableDeclarationList) {
-        return /^const\b/.test(owner.getText())
-          ? staticStringFolded(declaration.initializer, hop + 1)
-          : undefined;
-      }
-      if (owner.kind === SyntaxKind.Parameter || owner.kind === SyntaxKind.CatchClause) {
-        return undefined;
-      }
-      owner = owner.parent;
-    }
-    return undefined;
-  };
+  const staticStringFolded = (node: Syntax | undefined): string | undefined =>
+    staticString(node) ?? staticKeyOf(node, project);
 
   const found: FoundRoute[] = [];
 
@@ -1250,12 +1232,16 @@ function importsOfExcludedTests(
       const loadsAModule = (callee: Syntax, hop = 0): boolean => {
         if (callee.kind === SyntaxKind.ImportKeyword) return true;
         if (callee.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return false;
-        if (nameOf(callee) === 'require') return true;
         const declaration = project.checker
           .getSymbolAtPosition(String(root.path), callee.getStart())
           ?.declarations.find((each) => String(each.path) === String(root.path))
           ?.resolve(project) as unknown as Syntax | undefined;
-        if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+        // The CommonJS loader is a name nothing in this file declares.  Reading
+        // the spelling first reported `function require(p) { … }` — a local
+        // helper that loads no module — as importing an excluded test, which is
+        // a security gate blocking valid code.
+        if (declaration === undefined) return nameOf(callee) === 'require';
+        if (declaration.kind !== SyntaxKind.VariableDeclaration) return false;
         const held = unwrap(declaration.initializer);
         return held === undefined ? false : loadsAModule(held, hop + 1);
       };
@@ -1266,7 +1252,11 @@ function importsOfExcludedTests(
         // `import('./x.test.js')`, so a route module mounted that way stayed
         // unjudged — the shape this check exists to catch, spelled the other
         // way.  `require` counts too: it names a module just as an import does.
-        const specifier = moduleSpecifierOf(node, (callee) => loadsAModule(callee));
+        const specifier = moduleSpecifierOf(
+          node,
+          (callee) => loadsAModule(callee),
+          (argument) => staticKeyOf(argument, project),
+        );
         if (specifier === undefined || !specifier.startsWith('.')) continue;
         const resolved = posix.normalize(posix.join(posix.dirname(path), specifier));
         const target = sourceOfSpecifier(resolved);
@@ -1293,6 +1283,7 @@ function importsOfExcludedTests(
 function moduleSpecifierOf(
   node: Syntax,
   loadsAModule: (callee: Syntax) => boolean,
+  fold: (argument: Syntax | undefined) => string | undefined,
 ): string | undefined {
   if (node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration) {
     // A TYPE-ONLY declaration is ERASED: it cannot mount a router, so treating
@@ -1310,7 +1301,11 @@ function moduleSpecifierOf(
   if (node.kind !== SyntaxKind.CallExpression) return undefined;
   const callee = unwrap(node.expression);
   if (callee === undefined) return undefined;
-  return loadsAModule(callee) ? staticString((node.arguments ?? [])[0]) : undefined;
+  if (!loadsAModule(callee)) return undefined;
+  // The specifier itself may be an immutable alias: `const target =
+  // './x.test.js'; import(target)` loads the module all the same.
+  const argument = (node.arguments ?? [])[0];
+  return staticString(argument) ?? fold(argument);
 }
 
 /**

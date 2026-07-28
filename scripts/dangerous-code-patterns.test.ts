@@ -1299,6 +1299,13 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     // A CATCH binding is the same case: the thrown value is supplied from
     // outside and unfoldable, the default beside it is written here.
     ['a catch-binding default', "try { x(); } catch ({ k = 'eval' }) { globalThis[k]('x'); }"],
+    // A default applies at EVERY nesting step, not only the last: the outer
+    // selection is `undefined`, so the OUTER default binds and the inner
+    // pattern destructures it.
+    [
+      'an OUTER default behind an explicit undefined',
+      "const { a: { k = 'safe' } = { k: 'eval' } } = { a: undefined }; export const e = globalThis[k];",
+    ],
     // A default applies when the property is ABSENT *or* explicitly undefined;
     // JavaScript makes no distinction.
     [

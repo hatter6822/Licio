@@ -163,6 +163,38 @@ function configClosure(
   return configs;
 }
 
+/**
+ * Every `extends` or `references` path in `configs` that names no file.
+ *
+ * `extends` follows the COMPILER's rule, which appends `.json` to an
+ * extensionless relative path — so `"extends": "./base"` beside a `base.json`
+ * is valid, and an exact check would reject a config `tsc` accepts.  A bare
+ * `extends` resolves through node_modules and is not this assertion's business.
+ *
+ * A REFERENCE path is always relative, dot-prefixed or not, so every one is
+ * checked exactly: a missing DOTLESS target was dropped from the closure (there
+ * is nothing to read) and then skipped here too, so a broken reference passed
+ * the guard entirely.
+ */
+function unresolvableOffenders(
+  configs: readonly TrackedConfig[],
+  exists: (path: string) => boolean,
+): string[] {
+  const resolvesFrom = (from: string, specifier: string, appendJson: boolean): boolean => {
+    const target = posix.normalize(posix.join(dirname(from), specifier));
+    if (exists(target)) return true;
+    return appendJson && !specifier.endsWith('.json') && exists(`${target}.json`);
+  };
+  return configs.flatMap(({ path, extends: bases, references }) =>
+    [
+      ...bases.filter((each) => each.startsWith('.')).map((each) => ({ each, appendJson: true })),
+      ...references.map((each) => ({ each, appendJson: false })),
+    ]
+      .filter(({ each, appendJson }) => !resolvesFrom(path, each, appendJson))
+      .map(({ each }) => `${path}: "${each}" resolves to no file`),
+  );
+}
+
 /** Every reference in `configs` written as a DIRECTORY rather than a file. */
 function directoryFormOffenders(configs: readonly TrackedConfig[]): string[] {
   return configs.flatMap(({ path, references }) =>
@@ -275,6 +307,28 @@ describe('the reference CLOSURE', () => {
     expect(directoryFormOffenders(closure)).toHaveLength(1);
   });
 
+  it('keeps a MISSING dotless reference visible', () => {
+    // The closure drops what it cannot read, so the offender has to survive as
+    // a reference on the config that named it — otherwise a broken dotless
+    // target vanishes and the guard reports success over it.
+    const missing: Readonly<Record<string, string>> = {
+      'tsconfig.json': '{ "references": [{ "path": "packages/missing/build.json" }] }',
+    };
+    const closure = configClosure(['tsconfig.json'], (path) => missing[path]);
+    expect(closure).toHaveLength(1);
+    expect(closure[0]?.references).toEqual(['packages/missing/build.json']);
+  });
+
+  it('reports a MISSING dotless reference', () => {
+    const missing: Readonly<Record<string, string>> = {
+      'tsconfig.json': '{ "references": [{ "path": "packages/missing/build.json" }] }',
+    };
+    const closure = configClosure(['tsconfig.json'], (path) => missing[path]);
+    expect(unresolvableOffenders(closure, (path) => path in missing)).toEqual([
+      expect.stringContaining('"packages/missing/build.json" resolves to no file'),
+    ]);
+  });
+
   it('terminates on a reference CYCLE', () => {
     const cyclic: Readonly<Record<string, string>> = {
       'a/tsconfig.json': '{ "references": [{ "path": "../b/tsconfig.json" }] }',
@@ -299,29 +353,7 @@ describe('tsconfig project references', () => {
   });
 
   it('resolves every reference and every `extends` to a file that exists', () => {
-    // `extends` follows the COMPILER's rule, which appends `.json` to an
-    // extensionless relative path — so `"extends": "./base"` with `base.json`
-    // beside it is valid, and an exact filesystem check would reject a config
-    // `tsc` accepts.  A `references` path is held to the stricter rule this
-    // file exists to enforce, and is checked exactly.
-    const resolvesFrom = (path: string, specifier: string, appendJson: boolean): boolean => {
-      const from = dirname(resolve(ROOT, path));
-      const target = resolve(from, specifier);
-      if (existsSync(target)) return true;
-      return appendJson && !specifier.endsWith('.json') && existsSync(`${target}.json`);
-    };
-    const offenders = configs.flatMap(({ path, extends: bases, references }) =>
-      [
-        ...bases.map((each) => ({ each, appendJson: true })),
-        ...references.map((each) => ({ each, appendJson: false })),
-      ]
-        // A bare specifier resolves through node_modules, which is not this
-        // assertion's business; only relative paths are checked here.
-        .filter(({ each }) => each.startsWith('.'))
-        .filter(({ each, appendJson }) => !resolvesFrom(path, each, appendJson))
-        .map(({ each }) => `${path}: "${each}" resolves to no file`),
-    );
-    expect(offenders).toEqual([]);
+    expect(unresolvableOffenders(configs, (path) => existsSync(resolve(ROOT, path)))).toEqual([]);
   });
 
   it('accepts an extensionless `extends`, as the compiler does', () => {

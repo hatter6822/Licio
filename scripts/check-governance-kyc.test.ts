@@ -505,6 +505,38 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
   });
 
+  it('reports a dynamic import whose SPECIFIER is an immutable alias', () => {
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "const target = './secret.test.js';\nconst m = import(target);\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
+  it('does NOT report a SHADOWED `require`, which loads nothing', () => {
+    // A local helper named `require` loads no module; reporting it would be a
+    // security gate blocking valid code.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "function require(p) { return registry[p]; }\nconst m = require('./secret.test.js');\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).not.toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
   it('reports an ALIASED require of a test path', () => {
     // Read from what the callee BINDS TO, not from how it is spelled.
     const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
@@ -681,6 +713,10 @@ describe('a registration method taken OFF the router', () => {
     ['a method held in a const', 'const register = app.post;\nregister'],
     ['a computed method held in a const', "const register = app['post'];\nregister"],
     ['a method key held in a const', "const method = 'post';\napp[method]"],
+    [
+      'a method key from a const DESTRUCTURE',
+      "const { method } = { method: 'post' };\napp[method]",
+    ],
     [
       'a destructured key held in a const',
       "const key = 'post';\nconst { [key]: register } = app;\nregister",

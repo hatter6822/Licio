@@ -424,7 +424,7 @@ function staticText(
  * same kind of node as the value-flow analyzer does, and answering it twice is
  * how one of the two ends up not covering a spelling.
  */
-function staticKeyOf(argument: Syntax | undefined, project: Project): string | undefined {
+export function staticKeyOf(argument: Syntax | undefined, project: Project): string | undefined {
   if (argument === undefined) return undefined;
   const type = project.checker.getTypeAtLocation(asNode(argument));
   if (type?.isStringLiteralType() === true) return String(type.value);
@@ -611,11 +611,20 @@ function selectionSource(
   const owner = container?.parent;
   if (container === undefined || owner === undefined || hop > MAX_HOPS) return undefined;
 
-  /** One level out: the slot this container was reached by, descended into. */
+  /**
+   * One level out: the slot this container was reached by, descended into.
+   *
+   * A default applies at EVERY step, not only the last.  `const { a: { k =
+   * 'safe' } = { k: 'eval' } } = { a: undefined }` selects `undefined` for `a`,
+   * so the OUTER default binds and the inner pattern destructures `{ k: 'eval'
+   * }` — passing the `undefined` through instead made the inner default apply
+   * and folded `k` to `safe`.
+   */
   const through = (element: Syntax, outer: Syntax): Syntax | undefined => {
     const key = containerKey(element, outer, project);
     if (key === undefined) return undefined;
-    return valueAt(selectionSource(outer, project, hop + 1), key, project, 0);
+    const selected = valueAt(selectionSource(outer, project, hop + 1), key, project, 0);
+    return selected === undefined || isUndefinedValue(selected, project) ? undefined : selected;
   };
 
   if (
