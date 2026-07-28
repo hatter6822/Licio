@@ -1244,15 +1244,10 @@ function importsOfExcludedTests(
         // `import('./x.test.js')`, so a route module mounted that way stayed
         // unjudged — the shape this check exists to catch, spelled the other
         // way.  `require` counts too: it names a module just as an import does.
-        const specifier =
-          node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration
-            ? staticString(node.moduleSpecifier)
-            : node.kind === SyntaxKind.CallExpression && isModuleLoad(node)
-              ? staticString((node.arguments ?? [])[0])
-              : undefined;
+        const specifier = moduleSpecifierOf(node);
         if (specifier === undefined || !specifier.startsWith('.')) continue;
         const resolved = posix.normalize(posix.join(posix.dirname(path), specifier));
-        const target = resolved.replace(/\.js$/, '.ts');
+        const target = sourceOfSpecifier(resolved);
         if (!isTestPath(target) && !isTestPath(resolved)) continue;
         if (judged.has(target)) continue;
         issues.push(
@@ -1266,12 +1261,47 @@ function importsOfExcludedTests(
   );
 }
 
-/** Whether a call LOADS a module: `import(…)` or `require(…)`. */
-function isModuleLoad(call: Syntax): boolean {
-  const callee = unwrap(call.expression);
-  if (callee === undefined) return false;
-  if (callee.kind === SyntaxKind.ImportKeyword) return true;
-  return callee.kind === SyntaxKind.Identifier && nameOf(callee) === 'require';
+/**
+ * The module a node NAMES, in every form that names one.
+ *
+ * Static and re-export declarations, dynamic `import(…)`, `require(…)`, and
+ * TypeScript's `import x = require('…')` — whose specifier hides in an
+ * `ExternalModuleReference` and so belongs to neither of the first two shapes.
+ */
+function moduleSpecifierOf(node: Syntax): string | undefined {
+  if (node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration) {
+    return staticString(node.moduleSpecifier);
+  }
+  if (node.kind === SyntaxKind.ImportEqualsDeclaration) {
+    const reference = node.moduleReference;
+    return reference === undefined ? undefined : staticString(reference.expression);
+  }
+  if (node.kind !== SyntaxKind.CallExpression) return undefined;
+  const callee = unwrap(node.expression);
+  if (callee === undefined) return undefined;
+  const loads =
+    callee.kind === SyntaxKind.ImportKeyword ||
+    (callee.kind === SyntaxKind.Identifier && nameOf(callee) === 'require');
+  return loads ? staticString((node.arguments ?? [])[0]) : undefined;
+}
+
+/**
+ * The TypeScript SOURCE a JavaScript specifier names.
+ *
+ * Every emit extension, not just `.js`: this gate accepts `.mts` and `.cts`
+ * sources, so `./x.test.mjs` and `./x.test.cjs` name test modules it excludes
+ * exactly as `./x.test.js` does, and mapping only `.js` left those unmatched.
+ */
+function sourceOfSpecifier(resolved: string): string {
+  for (const [emitted, source] of [
+    ['.mjs', '.mts'],
+    ['.cjs', '.cts'],
+    ['.jsx', '.tsx'],
+    ['.js', '.ts'],
+  ] as const) {
+    if (resolved.endsWith(emitted)) return `${resolved.slice(0, -emitted.length)}${source}`;
+  }
+  return resolved;
 }
 
 export function runGovernanceKycGate(

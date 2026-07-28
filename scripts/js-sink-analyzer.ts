@@ -446,12 +446,16 @@ function staticKeyOf(argument: Syntax | undefined, project: Project): string | u
  */
 function constantValue(identifier: Syntax, project: Project): Syntax | undefined {
   const declaration = declarationOf(identifier, project);
-  if (declaration === undefined || !isImmutableBinding(declaration)) return undefined;
+  if (declaration === undefined) return undefined;
+  // A plain parameter folds to its own DEFAULT — `(key = 'eval') => …` holds
+  // exactly that whenever the call omits the argument.
+  if (declaration.kind === SyntaxKind.Parameter) return declaration.initializer;
+  if (foldabilityOf(declaration) === 'no') return undefined;
   if (declaration.kind === SyntaxKind.VariableDeclaration) return declaration.initializer;
   // `const { a, b } = { a: 'ev', b: 'al' }` binds through a PATTERN, so what
-  // the name holds is whatever the source holds at the key this element takes.
-  // Reading only a variable declaration refused to fold either name, and the
-  // key `a + b` — fully static, naming the global — folded to nothing.
+  // the name holds is whatever the source holds at the key this element takes;
+  // for a parameter pattern that source IS the default, which the descent
+  // already yields.
   return declaration.kind === SyntaxKind.BindingElement
     ? selectedValue(declaration, project, 0)
     : undefined;
@@ -474,11 +478,13 @@ function declarationOf(identifier: Syntax, project: Project): Syntax | undefined
  * so folding it would invent a value the code never has.
  */
 /**
- * Binders that give a name its value from somewhere other than a declaration
- * list, so the walk out to a `const` keyword must stop at them.
+ * Binders that give a name its value somewhere this cannot read, so the walk
+ * out to a declaration keyword must stop at them with no value at all.
+ *
+ * A PARAMETER is deliberately absent: it has an answer, just a different one —
+ * see {@link foldabilityOf}.
  */
 const BINDS_ELSEWHERE: ReadonlySet<number> = new Set([
-  SyntaxKind.Parameter,
   SyntaxKind.CatchClause,
   SyntaxKind.FunctionDeclaration,
   SyntaxKind.FunctionExpression,
@@ -489,24 +495,35 @@ const BINDS_ELSEWHERE: ReadonlySet<number> = new Set([
   SyntaxKind.SetAccessor,
 ]);
 
-function isImmutableBinding(declaration: Syntax): boolean {
+/**
+ * What a binding may be folded to, if anything.
+ *
+ * The distinction that matters is between a value written HERE and a value that
+ * arrives from somewhere this cannot see.
+ *
+ *   `'const'`   — the declaration'"'"'s own initializer, the only value it holds.
+ *   `'default'` — a PARAMETER'"'"'s default.  One value it may hold, and the one
+ *                 it does hold whenever the argument is omitted or `undefined`.
+ *                 A caller'"'"'s argument is never folded: callers live in other
+ *                 files, so treating a default as THE value missed a caller
+ *                 passing something else — and treating a parameter as `const`
+ *                 because the enclosing `const fn = …` is one invented a value
+ *                 outright.
+ *   `'no'`      — a `let`, a catch binding, anything else.
+ */
+type Foldability = 'const' | 'default' | 'no';
+
+function foldabilityOf(declaration: Syntax): Foldability {
   let owner: Syntax | undefined = declaration.parent;
   for (let hop = 0; owner !== undefined && hop <= MAX_HOPS; hop += 1) {
-    // A PARAMETER's value comes from the CALLER, so its default is one of the
-    // values it may hold and never the value it does hold.  The walk used to
-    // pass straight through a parameter and find the enclosing `const fn = …`,
-    // reading the function's own declaration kind as the parameter's — so
-    // `const fn = ({ key } = { key: 'safe' }) => globalThis[key]('x')` folded
-    // `key` to `safe` and `fn({ key: 'eval' })` reached the global unseen.
-    if (owner.kind === SyntaxKind.Parameter) return false;
-    if (owner.kind === SyntaxKind.VariableDeclarationList) return /^const\b/.test(owner.getText());
-    // Any other binder — a catch clause, a function boundary — is not a `const`
-    // declaration list, and walking past it would read some OUTER declaration's
-    // keyword as this binding's.
-    if (BINDS_ELSEWHERE.has(owner.kind)) return false;
+    if (owner.kind === SyntaxKind.Parameter) return 'default';
+    if (owner.kind === SyntaxKind.VariableDeclarationList) {
+      return /^const\b/.test(owner.getText()) ? 'const' : 'no';
+    }
+    if (BINDS_ELSEWHERE.has(owner.kind)) return 'no';
     owner = owner.parent;
   }
-  return false;
+  return 'no';
 }
 
 /** Containers a destructure reads BY POSITION rather than by name. */

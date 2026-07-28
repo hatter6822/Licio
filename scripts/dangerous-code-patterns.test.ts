@@ -1287,6 +1287,15 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       "let r; ({ a: { b: { ['eval']: r } } } = { a: { b: globalThis } });",
     ],
     ['a nested element default', "const { a: { ['eval']: r } = globalThis } = o;"],
+    // A PARAMETER'S DEFAULT is written here and is the value the binding holds
+    // whenever the argument is omitted, so it folds.  A CALLER'S argument lives
+    // in another file and never does — which is why the enclosing `const fn =
+    // …` must not lend the parameter its own declaration kind.
+    [
+      'a parameter default that applies when the call omits it',
+      "const fn = ({ key } = { key: 'eval' }) => globalThis[key]('x'); fn();",
+    ],
+    ['a plain parameter default', "const fn = (key = 'eval') => globalThis[key]('x'); fn();"],
     // A default applies when the property is ABSENT *or* explicitly undefined;
     // JavaScript makes no distinction.
     [
@@ -1336,10 +1345,6 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
     // enclosing `const fn = …` as the parameter's own declaration and invented
     // a key the call never passes — wrong in BOTH directions, so neither the
     // harmless default nor a caller's argument may be folded.
-    [
-      "a parameter default that is never the caller's value",
-      "const fn = ({ key } = { key: 'eval' }) => globalThis[key]('x'); fn({ key: 'safe' });",
-    ],
     [
       'a catch-bound name, which is not a const',
       "try { x(); } catch ({ k }) { globalThis[k]('x'); }",

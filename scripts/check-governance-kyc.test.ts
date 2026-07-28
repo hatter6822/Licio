@@ -481,6 +481,9 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     ['a dynamic import', "(await import('./secret.test.js')).createSecretRoutes()"],
     ['a bare dynamic import', "await import('./secret.test.js')"],
     ['require', "require('./secret.test.js')"],
+    // Every EMIT extension, since the gate accepts `.mts`/`.cts` sources.
+    ['an .mjs specifier', "(await import('./secret.test.mjs')).createSecretRoutes()"],
+    ['a .cjs specifier', "require('./secret.test.cjs')"],
   ])('reports %s of a test path', (_label, expression) => {
     // Read from the PARSE: a regex over `from '…'` saw none of these, so a
     // route module mounted that way stayed unjudged.
@@ -492,6 +495,27 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
       withFiles({
         'apps/api/src/routes/v1.ts': v1,
         'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
+        'apps/api/src/routes/secret.test.mts':
+          'export const createSecretRoutes = () => new Hono();',
+        'apps/api/src/routes/secret.test.cts':
+          'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
+  it("reports TypeScript's `import x = require(…)` of a test path", () => {
+    // The specifier hides in an `ExternalModuleReference`, so it belongs to
+    // neither the declaration nor the call shape.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "import secret = require('./__tests__/secret.cjs');\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/__tests__/secret.cts': 'export const x = 1;',
       }),
       live,
     );
