@@ -671,12 +671,93 @@ app[method]('/rooms/:roomId/governance/vote', handler);`;
     expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
   });
 
+  it('keeps an unreadable method taken OFF the router in scope', () => {
+    // The direct `app[method](…)` form already fails closed, so dropping the
+    // registration when the SAME method is taken off the router first made
+    // that the way around it — `bind('post')` registers a governance POST the
+    // corpus never saw.  The receiver is kept and the method reported.
+    const src = `
+const app = new Hono();
+function bind(method = 'get') { const register = app[method]; register('/rooms/:roomId/governance/vote', handler); }
+bind('post');`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
   it('DOES take a NESTED default when the outer source is readable', () => {
     const src = `
 const app = new Hono();
 const { nested: { method } = { method: 'post' } } = { other: 1 };
 app[method]('/rooms/:roomId/governance/vote', handler);`;
     expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  // A key the container SUPPLIES with something no constant fold can read is
+  // not an absent key, and taking the binding default over one dropped the
+  // route from the corpus entirely — worse than failing closed, because a
+  // dropped route is a route the gate reports success over.
+  //
+  // These are one defect, not five: the lookup used to answer `undefined` for
+  // BOTH "not there" and "could not read", so every member shape it did not
+  // model arrived at the caller wearing the mask of an absent key.  They are
+  // listed individually because each was a live hole, and they are fixed by one
+  // branch — see the `Lookup` type in js-sink-analyzer.ts.
+  it.each([
+    ['a getter', "const { method = 'get' } = { get method() { return 'post'; } };"],
+    ['a setter', "const { method = 'get' } = { set method(v) {} };"],
+    ['a method shorthand', "const { method = 'get' } = { method() { return 'post'; } };"],
+    // A computed name may or may not BE this key, so neither the value beside
+    // it nor the default is the answer.
+    ['an unfoldable computed key', "const { method = 'get' } = { [maybe()]: 'post' };"],
+    // A spread shifts every later index, so no position at or after one reads.
+    ['an array spread', "const [method = 'get'] = [...xs];"],
+  ])('refuses a default the container may supply through %s', (_label, prelude) => {
+    const src = `
+const app = new Hono();
+${prelude}
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('still reads a computed key that DOES fold', () => {
+    const src = `
+const app = new Hono();
+const { method = 'get' } = { ['met' + 'hod']: 'post' };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('applies a default to an omitted ARRAY element', () => {
+    // A hole reads as `undefined`, so the default binds — `const [method =
+    // 'post'] = []` is a POST.  The parser represents a hole with its own node
+    // kind, which the `undefined`-identifier rule did not recognise, so the
+    // method read as unreadable and the route failed closed unnecessarily.
+    const src = `
+const app = new Hono();
+const [method = 'post'] = [,];
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('reads a key a SPREAD supplies rather than taking the default', () => {
+    // A spread supplies properties the literal does not spell, so skipping it
+    // read `{ ...{ method: 'post' } }` as having no `method` and took the
+    // `'get'` default over a POST.  Members are read in order, last write wins.
+    const src = `
+const app = new Hono();
+const { method = 'get' } = { ...{ method: 'post' } };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
+  it('refuses a default when a spread it cannot read may supply the key', () => {
+    // The same shape with an unreadable spread: the key is not provably absent,
+    // so the default is a guess and the route fails closed.
+    const src = `
+const app = new Hono();
+function extra() { return { method: 'post' }; }
+const { method = 'get' } = { ...extra() };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
   });
 
   it('DOES take a default when the source is readable and the key absent', () => {

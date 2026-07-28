@@ -846,11 +846,19 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * not a property access, so it was not read as a registration at all and the
    * file left the corpus unclassified.  The binding says which router the
    * method came off and which method it is, so both are read from it.
+   *
+   * An UNREADABLE method keeps the receiver rather than dropping the whole
+   * registration: `function bind(method = 'get') { const register = app[method];
+   * register(path, handler); } bind('post')` registers a POST, and returning
+   * nothing removed it from the corpus entirely.  The direct `app[method](…)`
+   * form already fails closed as `<unreadable method>`; taking the same method
+   * off the router must not be the way around it.  So `method` is optional here
+   * and `register` reports it, exactly as the direct form does.
    */
   const methodTakenOffARouter = (
     identifier: Syntax,
     hop = 0,
-  ): { readonly method: string; readonly receiver: Syntax } | undefined => {
+  ): { readonly method: string | undefined; readonly receiver: Syntax } | undefined => {
     const declaration = localDeclaration(identifier);
     if (declaration === undefined || hop > MAX_HOPS) return undefined;
 
@@ -867,7 +875,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         named?.kind === SyntaxKind.ComputedPropertyName
           ? staticStringFolded(named.expression)
           : nameOf(named);
-      return method === undefined ? undefined : { method, receiver: source };
+      return { method, receiver: source };
     }
 
     // `const register = app.post` — the same method, taken by a property
@@ -890,7 +898,7 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
         ? nameOf(held.name)
         : staticStringFolded(held.argumentExpression);
     const receiver = held.expression;
-    return method === undefined || receiver === undefined ? undefined : { method, receiver };
+    return receiver === undefined ? undefined : { method, receiver };
   };
 
   /**

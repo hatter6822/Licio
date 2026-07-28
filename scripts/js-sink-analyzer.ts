@@ -630,6 +630,57 @@ function keyText(named: Syntax | undefined, project: Project): string | undefine
   return named.text ?? named.getText();
 }
 
+/**
+ * What looking a key up in a container FOUND — the three outcomes, kept apart.
+ *
+ * This distinction is the one the whole value analysis rests on, and collapsing
+ * it into `Syntax | undefined` was the single defect behind every finding four
+ * consecutive review rounds raised.  `undefined` meant BOTH:
+ *
+ *   • the key is genuinely ABSENT, so a binding default is what binds — sound,
+ *     and the entire reason defaults are folded at all; and
+ *   • the key could not be READ, where taking the default is a guess.
+ *
+ * A guess in the second case is a false NEGATIVE in both gates at once: the sink
+ * scan folds to a harmless key and reports clean, and the KYC gate folds to a
+ * non-mutation method and drops a governance route out of its corpus entirely.
+ *
+ * Every compensation this module grew — a readability predicate beside the
+ * lookup, a `folding` flag threaded through six functions, a clause per member
+ * kind — was an attempt to recover at the CALL SITE what the lookup had already
+ * thrown away.  Named here instead, the recovery is unnecessary and the failure
+ * mode is structural: a member kind nothing below models cannot be mistaken for
+ * an absent key, because saying "absent" now takes a deliberate branch.
+ */
+type Lookup =
+  /** No member of this container can supply the key.  A default binds. */
+  | { readonly at: 'absent' }
+  /** Something here may supply the key, and its value cannot be read. */
+  | { readonly at: 'unreadable' }
+  /** The key is supplied, by this node. */
+  | { readonly at: 'value'; readonly node: Syntax };
+
+const ABSENT: Lookup = { at: 'absent' };
+const UNREADABLE: Lookup = { at: 'unreadable' };
+
+/**
+ * Whether an object-literal member names `key` — in THREE answers, because two
+ * cannot express a computed name.
+ *
+ * `{ [maybe()]: 'post' }` names whatever `maybe()` returns.  Reading that as the
+ * key hands back a value the object may not hold under it; reading it as some
+ * OTHER key hands back the binding default instead.  Both are guesses, and the
+ * honest answer is the third one.
+ */
+function namesKey(member: Syntax, key: string, project: Project): 'yes' | 'no' | 'maybe' {
+  const named = keyText(member.name, project);
+  if (named !== undefined) return named === key ? 'yes' : 'no';
+  // A name this could not read.  Only a COMPUTED name can be unreadable; an
+  // identifier or string key spells itself, so anything else here is a member
+  // shape with no name at all (a spread, handled by the caller).
+  return member.name?.kind === SyntaxKind.ComputedPropertyName ? 'maybe' : 'no';
+}
+
 /** What a source holds at `key` — a property of an object, an index of an
  *  array, or whatever the name it is reached through holds. */
 function valueAt(
@@ -638,52 +689,67 @@ function valueAt(
   project: Project,
   hop: number,
   folding: Folding = 'possible',
-): Syntax | undefined {
+): Lookup {
   const target = unwrap(source);
-  if (target === undefined || hop > MAX_HOPS) return undefined;
-  // Reached through a NAME rather than written inline.  A slot reached through
-  // another SLOT is not followed, for the mutability reason `staticText`
-  // records.  The POLICY travels with the lookup: defaulting to `'possible'`
-  // here switched a `'certain'` caller back to the lenient rule one helper
-  // deeper, so a parameter default folded into a route method after all.
+  // Nothing to look in, or the descent ran out of hops: not evidence of absence.
+  if (target === undefined || hop > MAX_HOPS) return UNREADABLE;
+  // Reached through a NAME rather than written inline.  `const` prevents
+  // rebinding the name, not mutating the object, so `const config = {};
+  // config.method = 'post'` has a key the initializer does not show: what is
+  // found may be stale and what is MISSING proves nothing.  A value is still a
+  // value the code MAY take, so `'possible'` keeps it and `'certain'` does not.
   if (target.kind === SyntaxKind.Identifier) {
-    return valueAt(constantValue(target, project, folding), key, project, hop + 1, folding);
+    const held = constantValue(target, project, folding);
+    if (held === undefined) return UNREADABLE;
+    const found = valueAt(held, key, project, hop + 1, folding);
+    if (found.at === 'absent') return UNREADABLE;
+    return folding === 'certain' ? UNREADABLE : found;
   }
   if (target.kind === SyntaxKind.ArrayLiteralExpression) {
     const at = Number(key);
-    return Number.isInteger(at) && at >= 0 ? childrenOf(target)[at] : undefined;
+    if (!Number.isInteger(at) || at < 0) return ABSENT;
+    const elements = childrenOf(target);
+    // A SPREAD shifts every later position by however many values it yields, so
+    // no index at or after one can be read.  An element that is simply MISSING
+    // past the end is genuinely absent, and a HOLE is present and `undefined`.
+    if (elements.slice(0, at + 1).some((each) => each.kind === SyntaxKind.SpreadElement)) {
+      return UNREADABLE;
+    }
+    const element = elements[at];
+    return element === undefined ? ABSENT : { at: 'value', node: element };
   }
-  if (target.kind !== SyntaxKind.ObjectLiteralExpression) return undefined;
+  if (target.kind !== SyntaxKind.ObjectLiteralExpression) return UNREADABLE;
+  // Members are read IN ORDER and the LAST write wins, because that is how the
+  // literal is evaluated: `{ method: 'get', ...{ method: 'post' } }` is a POST.
+  let found: Lookup = ABSENT;
   for (const member of childrenOf(target)) {
-    if (keyText(member.name, project) !== key) continue;
-    if (member.kind === SyntaxKind.PropertyAssignment) return member.initializer;
-    if (member.kind === SyntaxKind.ShorthandPropertyAssignment) return member.name;
+    // A SPREAD supplies properties the literal does not spell.  Whether it
+    // supplies THIS one is the same question one level down, so it is asked
+    // that way: absent leaves the running answer alone, and unreadable makes
+    // the whole lookup unreadable because the spread may be shadowing a key.
+    if (member.kind === SyntaxKind.SpreadAssignment) {
+      const fromSpread = valueAt(member.expression, key, project, hop + 1, folding);
+      if (fromSpread.at !== 'absent') found = fromSpread;
+      continue;
+    }
+    const names = namesKey(member, key, project);
+    if (names === 'no') continue;
+    // Only the two assignment forms carry a readable value, and only a name
+    // this could READ proves the member supplies this key.  A getter, a setter
+    // and a method all supply it with something no constant fold can see; a
+    // computed name may or may not be this key at all.  Every one of those was
+    // reported as an absent key, which handed back the binding default.
+    if (names === 'yes' && member.kind === SyntaxKind.PropertyAssignment) {
+      found = { at: 'value', node: member.initializer ?? member };
+      continue;
+    }
+    if (names === 'yes' && member.kind === SyntaxKind.ShorthandPropertyAssignment) {
+      found = { at: 'value', node: member.name ?? member };
+      continue;
+    }
+    found = UNREADABLE;
   }
-  return undefined;
-}
-
-/**
- * Whether a source is a container whose ABSENT keys can be trusted.
- *
- * A literal written AT the destructure can be read, so a key it lacks is
- * genuinely absent.  A literal reached through a NAME cannot: `const` prevents
- * rebinding the name, not mutating the object, so `const config = {};
- * config.method = 'post'; const { method = 'get' } = config` has a key the
- * initializer does not show — and reading the initializer as complete took the
- * `'get'` default and called an unguarded governance POST a read.
- *
- * Ruling that out means proving no write reaches the object, which is the
- * whole-program aliasing analysis this module declines elsewhere for exactly
- * the same reason (see docs/planning/audit-residuals-2026-07.md).  So the
- * bounded rule is the literal itself, used directly.
- */
-function isReadableContainer(source: Syntax | undefined): boolean {
-  const target = unwrap(source);
-  if (target === undefined) return false;
-  return (
-    target.kind === SyntaxKind.ObjectLiteralExpression ||
-    target.kind === SyntaxKind.ArrayLiteralExpression
-  );
+  return found;
 }
 
 /**
@@ -717,20 +783,25 @@ function selectionSource(
    * }` — passing the `undefined` through instead made the inner default apply
    * and folded `k` to `safe`.
    */
-  const through = (element: Syntax, outer: Syntax): Syntax | undefined => {
+  const through = (element: Syntax, outer: Syntax): Lookup => {
     const key = containerKey(element, outer, project);
-    if (key === undefined) return undefined;
-    const selected = valueAt(
+    if (key === undefined) return UNREADABLE;
+    const found = valueAt(
       selectionSource(outer, project, hop + 1, folding),
       key,
       project,
       0,
       folding,
     );
-    return selected === undefined || isUndefinedValue(selected, project, folding)
-      ? undefined
-      : selected;
+    // A slot holding `undefined` is the same as a slot that is not there —
+    // JavaScript makes no distinction, and a default binds for both.
+    return found.at === 'value' && isUndefinedValue(found.node, project, folding) ? ABSENT : found;
   };
+
+  /** A nested literal TARGET has no default, so it has no source unless a value
+   *  was actually found. */
+  const sourceOf = (found: Lookup): Syntax | undefined =>
+    found.at === 'value' ? found.node : undefined;
 
   if (
     container.kind === SyntaxKind.ObjectLiteralExpression ||
@@ -746,9 +817,10 @@ function selectionSource(
     // A literal nested inside an assignment target is itself a target: by name
     // when its parent is a property, by position when it is an array element.
     if (owner.kind === SyntaxKind.PropertyAssignment && owner.parent !== undefined) {
-      return through(owner, owner.parent);
+      return sourceOf(through(owner, owner.parent));
     }
-    if (owner.kind === SyntaxKind.ArrayLiteralExpression) return through(container, owner);
+    if (owner.kind === SyntaxKind.ArrayLiteralExpression)
+      return sourceOf(through(container, owner));
     return undefined;
   }
 
@@ -756,16 +828,24 @@ function selectionSource(
   // the binding element that selected it.
   if (owner.kind !== SyntaxKind.BindingElement) return owner.initializer;
   const outer = owner.parent;
-  const selected = outer === undefined ? undefined : through(owner, outer);
-  if (selected !== undefined) return selected;
-  // The outer slot is absent OR unreadable, and under CERTAIN folding those are
-  // not the same: `const { nested: { m } = { m: 'get' } } = getConfig()` may
-  // well bind `'post'`, so taking the default there is a guess.  `undefined`
-  // from `valueAt` means "could not look" as often as "not there".
-  const outerSource =
-    outer === undefined ? undefined : selectionSource(outer, project, hop + 1, folding);
-  if (folding === 'certain' && !isReadableContainer(outerSource)) return undefined;
-  return owner.initializer;
+  const found = outer === undefined ? UNREADABLE : through(owner, outer);
+  // A default applies at EVERY step, not only the last.  When the outer slot
+  // could not be READ, whether to take it is the one place the two policies
+  // genuinely differ — and they differ because taking it moves the answer in
+  // OPPOSITE directions here and in `selectedValue`:
+  //
+  //   • Here the default is a SOURCE to select from, so following it only ADDS
+  //     candidates.  `const { a: { ['eval']: r } = globalThis } = o` binds
+  //     `globalThis.eval` whenever `o.a` is undefined, and `o` is unreadable, so
+  //     a may-analysis must keep that source or it reports LESS than the truth.
+  //   • In `selectedValue` the default is the KEY itself, so taking it REPLACES
+  //     the real value rather than adding to it, and a wrong guess reports less.
+  //
+  // So a possible-value fold takes it and a certain one does not:
+  // `const { nested: { m } = { m: 'get' } } = getConfig()` may well bind
+  // `'post'`, and a route method has to be the one it IS.
+  if (found.at === 'unreadable') return folding === 'certain' ? undefined : owner.initializer;
+  return found.at === 'value' ? found.node : owner.initializer;
 }
 
 /**
@@ -780,24 +860,21 @@ function isUndefinedValue(
   const target = unwrap(node);
   if (target === undefined) return false;
   if (target.kind === SyntaxKind.VoidExpression) return true;
+  // An ARRAY HOLE reads as `undefined`, so a binding default applies to it:
+  // `const [a = 'ev'] = [,]` binds `'ev'`.  The parser gives a hole its own node
+  // kind rather than an `undefined` identifier, so recognising the identifier
+  // alone missed it — and `const [a = 'ev', b = 'al'] = [,,]` then named the
+  // global with neither scan reporting anything.
+  if (target.kind === SyntaxKind.OmittedExpression) return true;
   // A conditional whose CONDITION is fixed at compile time selects one branch,
   // so `true ? undefined : 'safe'` is `undefined` and the default applies.
   // Rejecting the whole node kind read past that.
   //
-  // When the condition is NOT decidable, both branches are live, and which
-  // reading is right depends on the policy: under `'possible'` the value MAY be
-  // undefined if either branch is, so the default may apply; under `'certain'`
-  // nothing here is certain at all.  `function f(yes = true) { … yes ? 'safe' :
-  // undefined }` called with `false` takes the branch a decided-from-the-default
-  // reading never considered.
+  // An UNDECIDABLE condition is not answered here at all — see
+  // {@link isIndeterminate}, which stops the descent before this is asked.
   if (target.kind === SyntaxKind.ConditionalExpression) {
     const taken = decidedBranch(target, project);
-    if (taken !== undefined) return isUndefinedValue(taken, project, folding);
-    if (folding === 'certain') return false;
-    return (
-      isUndefinedValue(target.whenTrue, project, folding) ||
-      isUndefinedValue(target.whenFalse, project, folding)
-    );
+    return taken === undefined ? false : isUndefinedValue(taken, project, folding);
   }
   if (target.kind !== SyntaxKind.Identifier) return false;
   if ((target.text ?? target.getText()) !== 'undefined') return false;
@@ -827,15 +904,17 @@ function selectedValue(
   if (pattern === undefined || hop > MAX_HOPS) return undefined;
   const source = selectionSource(pattern, project, hop + 1, folding);
   const key = containerKey(element, pattern, project);
-  const selected = key === undefined ? undefined : valueAt(source, key, project, 0, folding);
-  if (selected !== undefined && !isUndefinedValue(selected, project, folding)) return selected;
-  // The property is ABSENT or undefined, so the default is what binds — but
-  // under CERTAIN folding that must be KNOWN, not assumed.  It is known only
-  // when the source is a container this could actually read: `const { method =
-  // 'get' } = getConfig()` may well bind `'post'`, and taking the fallback
-  // there classified an unguarded governance POST as a GET.
-  if (folding === 'certain' && !isReadableContainer(source)) return undefined;
-  return element.initializer ?? selected;
+  const found = key === undefined ? UNREADABLE : valueAt(source, key, project, 0, folding);
+  // COULD NOT READ is not evidence of absence, so no default may be taken from
+  // it — under either policy.  That one branch is what four review rounds kept
+  // finding the far side of: a container reached through a mutable name, a
+  // spread, a getter, a conditional this cannot decide, a source that is a call.
+  // Each was reported as a separate bug; all of them were this.
+  if (found.at === 'unreadable') return undefined;
+  // Present, and not `undefined` — the value itself binds.
+  if (found.at === 'value' && !isUndefinedValue(found.node, project, folding)) return found.node;
+  // Provably ABSENT (or explicitly `undefined`), so the default is what binds.
+  return element.initializer;
 }
 
 /**
@@ -2420,6 +2499,30 @@ function analyser(root: Syntax, project: Project, source: string, batch: Readonl
  * `check:csp-parity`.  This gate is hygiene over first-party source; the
  * runtime boundary is the control.
  */
+/**
+ * The finding raised for a property selected off the global object under a key
+ * the analyzer cannot read — whichever spelling selects it.
+ *
+ * This is the rule that makes the VALUE analysis bounded, and it is the same
+ * move this module's header records making for the SPELLINGS.  Asking "which
+ * value may this key hold" needs a model of parameter defaults, conditionals,
+ * spreads, array holes, getters and proxies, and review found the next form on
+ * four consecutive rounds — the list does not shorten, because it is JavaScript's
+ * value semantics restated by hand.  Asking "is this a key this can READ" ends
+ * it: an expression form nothing here models yields no key, and is reported on
+ * that ground alone rather than waiting to be enumerated.
+ *
+ * Adopted on a MEASUREMENT, exactly as the never-mentioned rule was: across
+ * 3632 first-party files there are 15 element accesses off the global object,
+ * ZERO of them with a key that fails to resolve, and no computed destructure off
+ * the global at all.  So the rule costs nothing today, and the remedy it names —
+ * spell the property — is always available.
+ */
+const UNREADABLE_GLOBAL_KEY = '\0unreadable-global-key';
+const UNREADABLE_GLOBAL_KEY_LABEL =
+  'computed property off the global object whose key cannot be read — ' +
+  'name the property directly';
+
 export function findGlobalReferencesIn(
   sources: readonly Source[],
   names: readonly string[],
@@ -2485,13 +2588,32 @@ export function findGlobalReferencesIn(
         } else {
           return undefined;
         }
+        // A COMPUTED key this cannot read, selected off the global object, is
+        // the same violation the element-access branch reports — and it has to
+        // be reported here too, or the destructuring spelling is simply the way
+        // around that rule.  Only a computed key can be unreadable: a plain or
+        // string key spells the property outright.
         const key = keyText(named, project);
-        if (key === undefined || !forbidden.has(key)) return undefined;
+        if (key === undefined) {
+          if (named?.kind !== SyntaxKind.ComputedPropertyName) return undefined;
+          return isGlobalObject(selectionSource(node.parent, project, 0))
+            ? UNREADABLE_GLOBAL_KEY
+            : undefined;
+        }
+        if (!forbidden.has(key)) return undefined;
         return isGlobalObject(selectionSource(node.parent, project, 0)) ? key : undefined;
       };
 
       for (const node of walk(root)) {
         const selected = destructuredGlobal(node);
+        if (selected === UNREADABLE_GLOBAL_KEY) {
+          found.push({
+            label: UNREADABLE_GLOBAL_KEY_LABEL,
+            line: lineAt(newlines, node.getStart()),
+            text: content.slice(node.getStart(), node.getEnd()),
+          });
+          continue;
+        }
         if (selected !== undefined) {
           found.push({
             label: `reference to the forbidden global \`${selected}\``,
@@ -2523,6 +2645,20 @@ export function findGlobalReferencesIn(
           if (named !== undefined && forbidden.has(named) && isGlobalObject(node.expression)) {
             found.push({
               label: `reference to the forbidden global \`${named}\``,
+              line: lineAt(newlines, node.getStart()),
+              text: content.slice(node.getStart(), node.getEnd()),
+            });
+            continue;
+          }
+          // See UNREADABLE_GLOBAL_KEY_LABEL: a key this cannot read, off the
+          // global object, is itself the finding.
+          if (
+            node.kind === SyntaxKind.ElementAccessExpression &&
+            named === undefined &&
+            isGlobalObject(node.expression)
+          ) {
+            found.push({
+              label: UNREADABLE_GLOBAL_KEY_LABEL,
               line: lineAt(newlines, node.getStart()),
               text: content.slice(node.getStart(), node.getEnd()),
             });

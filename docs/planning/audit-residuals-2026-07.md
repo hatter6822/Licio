@@ -329,31 +329,63 @@ REMAINING — each blocked on a server change, a design pass, or a content audit
 - **jargon** plain-language audit: a copy review (find/replace jargon), not a
   component wire-up.
 
-## Static-gate value resolution (#173, review rounds 8-10)
+## Static-gate value resolution (#173/#174, review rounds 8-10) — CLOSED
 
 The `lint:security` sink analyzer and `check:governance-kyc` resolve values
 through the compiler to answer "which property does this key name" and "which
-router is this". Ten review rounds walked that resolution one hop further each
-time — a binding, a container slot, a slot of a slot — and ONE shape is
-DELIBERATELY left unresolved rather than extended again, recorded here with
-what would close it so it is not a silent gap.
+router is this". Review walked that resolution one hop further on each of ten
+rounds — a binding, a container slot, a parameter default, a conditional, a
+spread, an array hole — and the list never shortened, because it was not a list
+of bugs: it was JavaScript's value semantics being restated by hand, one round at
+a time. That is the same trap `js-sink-analyzer.ts`'s own header records the
+spelling regexes falling into one level up.
 
-(Two shapes listed here originally — a destructuring default behind an explicit
-`undefined`, and a route method behind a bound computed key — were closed in the
-follow-up PR instead: both were bounded, and the second was the same
-immutable-binding fold the sink analyzer already performed.)
+**They were one defect.** The container lookup returned `Syntax | undefined`, and
+`undefined` meant BOTH "the key is genuinely absent, so a binding default is what
+binds" — sound, and the whole reason defaults are folded — and "I could not read
+this", where taking the default is a guess. Every finding from rounds 8-10 was
+that conflation reaching a caller: a mutable `const` container, a spread, a
+source that is a call, a conditional the analyzer cannot decide, an array hole.
+And every compensation the module had grown for it — a readability predicate
+beside the lookup, a `folding` flag threaded through six functions, a clause per
+member kind — was an attempt to recover at the CALL SITE what the lookup had
+already thrown away.
+
+The lookup now returns a three-way `Lookup` (`absent` / `unreadable` / `value`),
+so saying "absent" takes a deliberate branch and an unmodelled member shape
+cannot wear the mask of an absent key. That deleted the readability predicate
+outright and closed, without a rule of their own, five shapes review had not yet
+reached: a getter, a setter, a method shorthand, an unfoldable computed key, and
+an array spread — each of which previously took the default and dropped a
+governance route out of the KYC corpus entirely.
+
+The question was also INVERTED at the reporting end. The sink gate no longer asks
+only "which value may this key hold" — it also asks "is this a key I can READ",
+and a computed property selected off the GLOBAL OBJECT under a key that does not
+resolve is itself reported, whichever spelling selects it. So an expression form
+the analyzer does not model yields no key and is caught on that ground, instead
+of waiting to be enumerated by the next review round.
+
+Adopted on a measurement, exactly as the never-mentioned rule was: across 3632
+first-party files there are **15** element accesses off the global object, **zero**
+with a key that fails to resolve, and no computed destructure off the global at
+all. The rule costs nothing today, and the remedy it names — spell the property —
+is always available.
 
 - **A key assembled from a container SLOT** — `const keys = { a: 'ev', b: 'al' };
-  globalThis[keys.a + keys.b]`. Folding this was implemented and then REVERTED:
-  `const` prevents rebinding the name, not mutating the object, so `keys.a =
-  'safe'` makes the literal a lie and folding it invents a key the code never
-  uses — a FALSE POSITIVE in a gate, which is the failure mode that gets a gate
-  switched off. Closure: prove the container unmutated, which is whole-program
-  aliasing analysis — the unbounded question `js-sink-analyzer.ts`'s header
-  declines. The control for a key assembled this way is the CSP
-  (`script-src` without `'unsafe-eval'` + Trusted Types), asserted on the built
-  artifact by `check:csp-parity`.
+  globalThis[keys.a + keys.b]` — is the shape this section previously left open.
+  The slot is still deliberately NOT folded, for the reason it was reverted the
+  first time: `const` prevents rebinding the name, not mutating the object, so
+  `keys.a = 'safe'` makes the literal a lie and folding it would invent a key the
+  code never uses — a false positive, the failure mode that gets a gate switched
+  off. Proving the container unmutated remains whole-program aliasing analysis,
+  the unbounded question that header declines. But the shape is no longer a GAP:
+  the key does not resolve, it is taken off the global object, and it is reported
+  on exactly that ground. The CSP (`script-src` without `'unsafe-eval'` + Trusted
+  Types, asserted on the built artifact by `check:csp-parity`) remains the runtime
+  control.
+
 The BOUNDED guarantees these gates rest on are unaffected and stay enforced:
-`eval`/`Function` are never NAMED in first-party source, every file registering
-a mutation route is classified, and every `packages:` entry carries its own
-digest.
+`eval`/`Function` are never NAMED in first-party source, no unreadable key is
+taken off the global object, every file registering a mutation route is
+classified, and every `packages:` entry carries its own digest.
