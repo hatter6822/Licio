@@ -25,6 +25,7 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ForumServices } from './services.js';
 
 /** Bound for the cascade sweep (rooms are bounded by content count). */
@@ -86,7 +87,16 @@ export async function updateRoomGovernanceSettings(
 
 export type RoomVisibilityOutcome =
   | { ok: true; converted: number }
-  | { ok: false; status: 404; code: 'not_found'; message: string };
+  | { ok: false; status: 404; code: 'not_found'; message: string }
+  | {
+      ok: false;
+      status: 409;
+      code: 'duplicate_story';
+      message: string;
+      /** The public stories the sweep could not contain, so an operator can
+       *  resolve each duplicate and retry. */
+      blockedStoryIds: readonly string[];
+    };
 
 /** WS-Q.3.4 — the audited public⇄private room-visibility cascade. */
 export async function changeRoomVisibility(
@@ -110,6 +120,8 @@ export async function changeRoomVisibility(
   if (room.visibility === target) return { ok: true, converted: 0 };
   const nowIso = new Date(forum.now()).toISOString();
   let converted = 0;
+  /** Public stories a tier-unique collision refused to contain (see below). */
+  const blocked: string[] = [];
 
   if (target === 'private') {
     // Per-story sweep: force every PUBLIC story room_only. PAGED until none
@@ -121,7 +133,29 @@ export async function changeRoomVisibility(
       const batch = await ingestion.stories.listByRoom(roomId, CASCADE_SWEEP_LIMIT, 'public');
       if (batch.length === 0) break;
       for (const story of batch) {
-        await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
+        try {
+          await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
+        } catch (error) {
+          // `stories_canonical_url_room_uq` is a partial unique on
+          // `(canonical_url, room_id) where visibility = 'room_only'`, and a
+          // room may legitimately hold BOTH a public story and a room_only one
+          // for the same link — `ingestion/submission.ts` records the
+          // cross-tier pointer for exactly that pair.  Converting the public
+          // copy then collides with its in-room twin.
+          //
+          // Unhandled, that 23505 escaped the loop as a 500 with the room still
+          // PUBLIC and an arbitrary prefix of its stories already converted —
+          // a containment failure reported as a server error.  It is caught
+          // here so the sweep finishes every story it CAN contain, and the room
+          // flip below is skipped: a room that still holds public content must
+          // not be marked private, because the `room.visibility === target`
+          // short-circuit at the top would then answer a retry with
+          // `{ ok: true, converted: 0 }` and the content would stay published.
+          if (!isUniqueViolation(error)) throw error;
+          blocked.push(story.storyId);
+          ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
+          continue;
+        }
         const event = contentVisibilityChangedEventSchema.parse({
           event_id: randomUUID(),
           event_type: 'content.visibility.changed',
@@ -155,6 +189,22 @@ export async function changeRoomVisibility(
       }
       // A short page means no public stories remain — the sweep is complete.
       if (batch.length < CASCADE_SWEEP_LIMIT) break;
+      // Every story in this page was blocked, so the next `listByRoom` returns
+      // the same rows: page forward would loop for ever.  Stop and report.
+      if (blocked.length >= batch.length && converted === 0) break;
+    }
+    if (blocked.length > 0) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'duplicate_story',
+        message:
+          `${blocked.length} public ${blocked.length === 1 ? 'story shares' : 'stories share'} ` +
+          'a link with an existing in-room story and cannot be converted. Resolve the ' +
+          'duplicates, then retry — the room is still public and every other story is ' +
+          'already contained.',
+        blockedStoryIds: blocked,
+      };
     }
     // Flip the room; collapse an `open` join model (incoherent once private →
     // a request-approval gate) — active memberships are retained.

@@ -224,6 +224,14 @@ export const stories = pgTable(
       .where(
         sql`${t.canonicalUrl} is not null and ${t.visibility} = 'room_only' and ${t.hiddenState} is null`,
       ),
+    // The COMPLEMENT of the two uniques above: both carry `hidden_state is
+    // null`, so neither can serve the takedown-denylist probe
+    // (`hasHiddenForUrl`: `canonical_url = $1 and hidden_state is not null`),
+    // which runs on every link submission and every author widen and was a
+    // sequential scan of `stories` (migration 0098).
+    index('stories_canonical_url_hidden_idx')
+      .on(t.canonicalUrl)
+      .where(sql`${t.canonicalUrl} is not null and ${t.hiddenState} is not null`),
     index('stories_source_idx').on(t.sourceId),
     index('stories_topic_gin').using('gin', t.topicIds),
     index('stories_lifecycle_idx').on(t.lifecycleState, t.updatedAt),

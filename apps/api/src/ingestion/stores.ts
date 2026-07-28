@@ -30,6 +30,7 @@ import type {
   ThreadConversationState,
   ThreadSafetyState,
 } from '@licio/shared';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 
 // ---------------------------------------------------------------------------
 // Records (the storage shape; ISO timestamps on this side of the boundary).
@@ -819,8 +820,28 @@ export class InMemoryStoryStore implements StoryStore {
     const current = this.#stories.get(storyId);
     if (!current) return null;
     const updated: StoryRecord = { ...current, ...patch, updatedAt: nowIso(this.#now) };
+    // WS-Q.2.2a/2.4 — visibility or hidden_state changes MOVE the URL slot, and
+    // the destination slot may already be occupied: Postgres enforces
+    // `stories_canonical_url_public_uq` / `stories_canonical_url_room_uq` on
+    // every UPDATE, not only on INSERT.  This adapter used to reindex
+    // unconditionally, silently evicting the incumbent — so a collision that
+    // raises 23505 in production was invisible in every unit test, and both
+    // the story-narrow path and the room-visibility cascade shipped without
+    // handling it.  An in-memory adapter that is more permissive than the
+    // database is a dev↔prod divergence, and this is the direction that hides
+    // faults rather than inventing them.
+    const slot = this.#slotFor(updated);
+    if (slot !== null) {
+      const occupant = slot.map.get(slot.key);
+      if (occupant !== undefined && occupant !== storyId) {
+        throw new UniqueViolationError(
+          updated.visibility === 'public'
+            ? 'stories_canonical_url_public_uq'
+            : 'stories_canonical_url_room_uq',
+        );
+      }
+    }
     this.#stories.set(storyId, updated);
-    // WS-Q.2.2a/2.4 — visibility or hidden_state changes move the URL slot.
     this.#reindexUrl(current, updated);
     return updated;
   }

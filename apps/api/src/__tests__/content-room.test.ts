@@ -579,6 +579,55 @@ describe('WS-Q.2.4 author visibility transitions', () => {
     expect(((await again.json()) as { changed: boolean }).changed).toBe(false);
   });
 
+  it('narrowing onto an EXISTING in-room twin answers 409, and the story stays public', async () => {
+    // `stories_canonical_url_room_uq` is a partial unique on
+    // `(canonical_url, room_id) where visibility = 'room_only'`, and a room may
+    // legitimately hold a public story AND a room_only one for the same link
+    // (the cross-tier pointer above records exactly that pair).  Narrowing the
+    // public copy therefore collides.  The WIDEN branch has always screened for
+    // this; the NARROW branch screened for nothing, so the collision surfaced
+    // as an unhandled 23505 — a 500 with the story still PUBLIC.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/narrow-onto-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'nt-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    const twin = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+        twinAuthor.cookie,
+      ),
+    );
+    expect(twin.status).toBe(201);
+    const twinId = ((await twin.json()) as { story_id: string }).story_id;
+
+    const author = await seedUserWithSession(fixture.identity, { handle: 'nt-pub' });
+    await joinAsMember(room, author.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), author.cookie),
+    );
+    expect(published.status).toBe(201);
+    const publicId = ((await published.json()) as { story_id: string }).story_id;
+
+    const narrow = await app().request(
+      new Request(`http://local/v1/stories/${publicId}/visibility`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: author.cookie },
+        body: JSON.stringify({ visibility: 'room_only' }),
+      }),
+    );
+    // A typed duplicate that names the incumbent — not a 500.
+    expect(narrow.status).toBe(409);
+    const body = (await narrow.json()) as {
+      error: { code: string };
+      existing_story_id?: string;
+    };
+    expect(body.error.code).toBe('duplicate_story');
+    expect(body.existing_story_id ?? twinId).toBe(twinId);
+    // And the refusal left the story exactly as it was.
+    expect((await fixture.ingestion.stories.getById(publicId))?.visibility).toBe('public');
+  });
+
   it('widening a room_only LINK keeps its fetched (extracted) signature, not the thin submitted note', async () => {
     const room = await makeRoom('public');
     const author = await seedUserWithSession(fixture.identity, { handle: 'wl' });
@@ -1287,6 +1336,76 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
     const after = await fixture.forum.rooms.getById(room);
     expect(after?.visibility).toBe('private');
     expect(after?.joinModel).toBe('request_approval'); // open collapsed
+  });
+
+  it('a public story that collides with an in-room twin blocks the flip instead of 500-ing', async () => {
+    // The cascade converts every public story to room_only in a loop.  A room
+    // may legitimately hold a public story AND a room_only one for the same
+    // link, and converting the public copy then violates
+    // `stories_canonical_url_room_uq`.  Unhandled, that 23505 escaped the loop
+    // as a 500 with the room still PUBLIC and an arbitrary prefix of its
+    // stories already converted — a containment failure reported as a server
+    // error, and a retry would hit the `room.visibility === target`
+    // short-circuit and answer `{ ok: true, converted: 0 }` had the room been
+    // flipped first.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/cascade-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+            twinAuthor.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+
+    const pubAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-pub' });
+    await joinAsMember(room, pubAuthor.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), pubAuthor.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    // A SECOND public story with no twin must still be contained.
+    const otherAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-other' });
+    await joinAsMember(room, otherAuthor.userId);
+    const other = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/cascade-clean', { room_id: room }),
+        otherAuthor.cookie,
+      ),
+    );
+    expect(other.status).toBe(201);
+    const containedId = ((await other.json()) as { story_id: string }).story_id;
+
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'ct-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+    );
+
+    expect(out.ok).toBe(false);
+    if (!out.ok && out.status === 409) {
+      expect(out.code).toBe('duplicate_story');
+      expect(out.blockedStoryIds).toEqual([blockedId]);
+    }
+    // Everything containable WAS contained…
+    expect((await fixture.ingestion.stories.getById(containedId))?.visibility).toBe('room_only');
+    // …and the room stays PUBLIC, so the operator's retry re-runs the sweep
+    // rather than short-circuiting on an already-private room.
+    expect((await fixture.forum.rooms.getById(room))?.visibility).toBe('public');
   });
 
   it('changing visibility to the current value is a no-op (converted: 0)', async () => {

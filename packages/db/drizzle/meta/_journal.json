@@ -680,6 +680,13 @@
       "when": 1783728000021,
       "tag": "0097_constraint_name_truncation",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1783728000022,
+      "tag": "0098_stories_canonical_url_hidden_idx",
+      "breakpoints": true
     }
   ]
 }
