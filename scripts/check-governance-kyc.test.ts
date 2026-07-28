@@ -642,6 +642,35 @@ app[method]('/rooms/:roomId/governance/vote', handler);`;
     expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
   });
 
+  it('keeps refusing one hop DEEPER, through a NAMED container', () => {
+    // The certain policy has to survive the descent that reads the container.
+    // Looking a key up through a name re-entered the fold at the default
+    // `'possible'`, so the parameter default this gate had just refused to fold
+    // directly was folded one call later — `h({ method: 'post' })` registers a
+    // POST while the gate read `'get'` off the default and dropped it.
+    const src = `
+const app = new Hono();
+function h(config = { method: 'get' }) {
+  const { method } = config;
+  app[method]('/rooms/:roomId/governance/vote', handler);
+}
+h({ method: 'post' });`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a default off a `const` container, which is not frozen', () => {
+    // `const` prevents REBINDING the name, not mutating the object, so the
+    // initializer is not the container's contents.  Reading `{}` as complete
+    // took the `'get'` default over a key that is present at runtime.
+    const src = `
+const app = new Hono();
+const config = {};
+config.method = 'post';
+const { method = 'get' } = config;
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
   it('DOES take a NESTED default when the outer source is readable', () => {
     const src = `
 const app = new Hono();

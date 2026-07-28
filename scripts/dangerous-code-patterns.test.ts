@@ -1328,6 +1328,15 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       'a default behind `void 0`',
       "const { k = 'eval' } = { k: void 0 }; export const e = globalThis[k];",
     ],
+    // A condition that is NOT decidable leaves both branches live, and this
+    // scan asks what a key MAY be — so a key that may be `undefined` may take
+    // the default.  Reading a PARAMETER DEFAULT as the condition decided the
+    // branch outright, and `f(false)` then took the branch that reading never
+    // considered: a sink invoked while both scans reported clean.
+    [
+      'a default behind a condition the caller supplies',
+      "function f(yes = true) { const { k = 'eval' } = { k: yes ? 'safe' : undefined }; globalThis[k]('x'); } f(false);",
+    ],
   ])('catches a destructure through %s', (_label, code) => {
     expect(refs(code)).toBeGreaterThan(0);
   });

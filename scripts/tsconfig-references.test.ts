@@ -152,14 +152,25 @@ function configClosure(
       // belongs only to `extends`, where a bare specifier resolves through
       // node_modules and is not this assertion's business.
       const named = [
-        ...config.extends.filter((each) => each.startsWith('.')),
-        ...config.references,
+        // `extends` alone may be extensionless, and only then does the compiler
+        // try the `.json` beside it.
+        ...config.extends
+          .filter((each) => each.startsWith('.'))
+          .map((each) => [each, true] as const),
+        ...config.references.map((each) => [each, false] as const),
       ];
-      for (const each of named) {
-        // Whatever the compiler would open: the path itself, or — for an
-        // extensionless `extends` — the `.json` beside it.
+      for (const [each, mayAppendJson] of named) {
+        // EXACTLY what the compiler would open, and nothing else.  Enqueueing
+        // `${direct}.json` for every edge meant a reference naming
+        // `b/build.json` also pulled in an unrelated `b/build.json.json` if one
+        // existed, and a directory-form reference inside THAT could fail the
+        // suite though no compiler config points at it.
         const direct = posix.normalize(posix.join(from, each));
-        for (const candidate of [direct, `${direct}.json`]) {
+        const candidates =
+          mayAppendJson && !each.endsWith('.json') && read(direct) === undefined
+            ? [`${direct}.json`]
+            : [direct];
+        for (const candidate of candidates) {
           if (seen.has(candidate) || read(candidate) === undefined) continue;
           seen.add(candidate);
           next.push(candidate);
@@ -335,6 +346,38 @@ describe('the reference CLOSURE', () => {
     expect(unresolvableOffenders(closure, (path) => path in missing)).toEqual([
       expect.stringContaining('"packages/missing/build.json" resolves to no file'),
     ]);
+  });
+
+  it('opens EXACTLY what a reference names, never a `.json` beside it', () => {
+    // A reference resolves to a file or to a directory holding `tsconfig.json`
+    // — the compiler never appends `.json` to it, and that rule belongs to
+    // `extends` alone.  Enqueueing both spellings pulled `b/build.json` in
+    // behind a reference to `b/build`, so a directory-form reference inside a
+    // config no compiler reads failed the suite.
+    const beside: Readonly<Record<string, string>> = {
+      'tsconfig.json': '{ "references": [{ "path": "b/build" }] }',
+      'b/build.json': '{ "references": [{ "path": "../c" }] }',
+    };
+    const closure = configClosure(['tsconfig.json'], (path) => beside[path]);
+    expect(closure.map((each) => each.path)).toEqual(['tsconfig.json']);
+    // …and the reference is still judged: it names a directory, and it resolves
+    // to nothing, whatever sits beside it under another extension.
+    expect(directoryFormOffenders(closure)).toHaveLength(1);
+    expect(unresolvableOffenders(closure, (path) => path in beside)).toEqual([
+      expect.stringContaining('"b/build" resolves to no file'),
+    ]);
+  });
+
+  it('appends `.json` for an extensionless `extends`, which the compiler does', () => {
+    // The asymmetry is the compiler's, so the closure has to keep it in both
+    // directions: exact for a reference, `.json`-completing for an `extends`.
+    const based: Readonly<Record<string, string>> = {
+      'tsconfig.json': '{ "extends": "./base" }',
+      'base.json': '{}',
+    };
+    const closure = configClosure(['tsconfig.json'], (path) => based[path]);
+    expect(closure.map((each) => each.path)).toEqual(['tsconfig.json', 'base.json']);
+    expect(unresolvableOffenders(closure, (path) => path in based)).toEqual([]);
   });
 
   it('FAILS when a tracked seed cannot be read', () => {

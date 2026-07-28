@@ -576,6 +576,12 @@ function foldabilityOf(declaration: Syntax): Foldability {
  * The condition may be written as a literal or held in an immutable binding —
  * `const yes = true; yes ? undefined : 'safe'` selects the same branch as the
  * spelled `true` does — so it is resolved rather than pattern-matched on kind.
+ *
+ * The condition is folded CERTAINLY whatever policy the caller wants for the
+ * value, because a branch is not taken "possibly": `function f(yes = true)`
+ * called with `false` takes the other one, and deciding from the default picked
+ * a branch the code never runs.  An undecidable condition leaves BOTH branches
+ * live, which is the honest answer.
  */
 function decidedBranch(node: Syntax, project: Project, hop = 0): Syntax | undefined {
   const condition = unwrap(node.condition);
@@ -583,7 +589,7 @@ function decidedBranch(node: Syntax, project: Project, hop = 0): Syntax | undefi
   if (condition.kind === SyntaxKind.TrueKeyword) return node.whenTrue;
   if (condition.kind === SyntaxKind.FalseKeyword) return node.whenFalse;
   if (condition.kind !== SyntaxKind.Identifier) return undefined;
-  const held = constantValue(condition, project);
+  const held = constantValue(condition, project, 'certain');
   if (held === undefined) return undefined;
   const folded = unwrap(held);
   if (folded?.kind === SyntaxKind.TrueKeyword) return node.whenTrue;
@@ -631,14 +637,17 @@ function valueAt(
   key: string,
   project: Project,
   hop: number,
+  folding: Folding = 'possible',
 ): Syntax | undefined {
   const target = unwrap(source);
   if (target === undefined || hop > MAX_HOPS) return undefined;
   // Reached through a NAME rather than written inline.  A slot reached through
   // another SLOT is not followed, for the mutability reason `staticText`
-  // records.
+  // records.  The POLICY travels with the lookup: defaulting to `'possible'`
+  // here switched a `'certain'` caller back to the lenient rule one helper
+  // deeper, so a parameter default folded into a route method after all.
   if (target.kind === SyntaxKind.Identifier) {
-    return valueAt(constantValue(target, project), key, project, hop + 1);
+    return valueAt(constantValue(target, project, folding), key, project, hop + 1, folding);
   }
   if (target.kind === SyntaxKind.ArrayLiteralExpression) {
     const at = Number(key);
@@ -656,27 +665,25 @@ function valueAt(
 /**
  * Whether a source is a container whose ABSENT keys can be trusted.
  *
- * An object or array literal — reached directly or through immutable bindings —
- * can be read, so a key it lacks is genuinely absent.  A call, a parameter, an
- * import: those may hold anything, and "no key found" means "could not look".
+ * A literal written AT the destructure can be read, so a key it lacks is
+ * genuinely absent.  A literal reached through a NAME cannot: `const` prevents
+ * rebinding the name, not mutating the object, so `const config = {};
+ * config.method = 'post'; const { method = 'get' } = config` has a key the
+ * initializer does not show — and reading the initializer as complete took the
+ * `'get'` default and called an unguarded governance POST a read.
+ *
+ * Ruling that out means proving no write reaches the object, which is the
+ * whole-program aliasing analysis this module declines elsewhere for exactly
+ * the same reason (see docs/planning/audit-residuals-2026-07.md).  So the
+ * bounded rule is the literal itself, used directly.
  */
-function isReadableContainer(source: Syntax | undefined, project: Project, hop: number): boolean {
+function isReadableContainer(source: Syntax | undefined): boolean {
   const target = unwrap(source);
-  if (target === undefined || hop > MAX_HOPS) return false;
-  if (
+  if (target === undefined) return false;
+  return (
     target.kind === SyntaxKind.ObjectLiteralExpression ||
     target.kind === SyntaxKind.ArrayLiteralExpression
-  ) {
-    return true;
-  }
-  if (
-    target.kind === SyntaxKind.Identifier ||
-    target.kind === SyntaxKind.PropertyAccessExpression ||
-    target.kind === SyntaxKind.ElementAccessExpression
-  ) {
-    return isReadableContainer(constantValue(target, project), project, hop + 1);
-  }
-  return false;
+  );
 }
 
 /**
@@ -713,8 +720,16 @@ function selectionSource(
   const through = (element: Syntax, outer: Syntax): Syntax | undefined => {
     const key = containerKey(element, outer, project);
     if (key === undefined) return undefined;
-    const selected = valueAt(selectionSource(outer, project, hop + 1, folding), key, project, 0);
-    return selected === undefined || isUndefinedValue(selected, project) ? undefined : selected;
+    const selected = valueAt(
+      selectionSource(outer, project, hop + 1, folding),
+      key,
+      project,
+      0,
+      folding,
+    );
+    return selected === undefined || isUndefinedValue(selected, project, folding)
+      ? undefined
+      : selected;
   };
 
   if (
@@ -749,7 +764,7 @@ function selectionSource(
   // from `valueAt` means "could not look" as often as "not there".
   const outerSource =
     outer === undefined ? undefined : selectionSource(outer, project, hop + 1, folding);
-  if (folding === 'certain' && !isReadableContainer(outerSource, project, 0)) return undefined;
+  if (folding === 'certain' && !isReadableContainer(outerSource)) return undefined;
   return owner.initializer;
 }
 
@@ -757,16 +772,32 @@ function selectionSource(
  * Whether an expression IS `undefined` — the value a destructuring default
  * replaces.
  */
-function isUndefinedValue(node: Syntax | undefined, project: Project): boolean {
+function isUndefinedValue(
+  node: Syntax | undefined,
+  project: Project,
+  folding: Folding = 'possible',
+): boolean {
   const target = unwrap(node);
   if (target === undefined) return false;
   if (target.kind === SyntaxKind.VoidExpression) return true;
   // A conditional whose CONDITION is fixed at compile time selects one branch,
   // so `true ? undefined : 'safe'` is `undefined` and the default applies.
   // Rejecting the whole node kind read past that.
+  //
+  // When the condition is NOT decidable, both branches are live, and which
+  // reading is right depends on the policy: under `'possible'` the value MAY be
+  // undefined if either branch is, so the default may apply; under `'certain'`
+  // nothing here is certain at all.  `function f(yes = true) { … yes ? 'safe' :
+  // undefined }` called with `false` takes the branch a decided-from-the-default
+  // reading never considered.
   if (target.kind === SyntaxKind.ConditionalExpression) {
     const taken = decidedBranch(target, project);
-    return taken === undefined ? false : isUndefinedValue(taken, project);
+    if (taken !== undefined) return isUndefinedValue(taken, project, folding);
+    if (folding === 'certain') return false;
+    return (
+      isUndefinedValue(target.whenTrue, project, folding) ||
+      isUndefinedValue(target.whenFalse, project, folding)
+    );
   }
   if (target.kind !== SyntaxKind.Identifier) return false;
   if ((target.text ?? target.getText()) !== 'undefined') return false;
@@ -796,14 +827,14 @@ function selectedValue(
   if (pattern === undefined || hop > MAX_HOPS) return undefined;
   const source = selectionSource(pattern, project, hop + 1, folding);
   const key = containerKey(element, pattern, project);
-  const selected = key === undefined ? undefined : valueAt(source, key, project, 0);
-  if (selected !== undefined && !isUndefinedValue(selected, project)) return selected;
+  const selected = key === undefined ? undefined : valueAt(source, key, project, 0, folding);
+  if (selected !== undefined && !isUndefinedValue(selected, project, folding)) return selected;
   // The property is ABSENT or undefined, so the default is what binds — but
   // under CERTAIN folding that must be KNOWN, not assumed.  It is known only
   // when the source is a container this could actually read: `const { method =
   // 'get' } = getConfig()` may well bind `'post'`, and taking the fallback
   // there classified an unguarded governance POST as a GET.
-  if (folding === 'certain' && !isReadableContainer(source, project, 0)) return undefined;
+  if (folding === 'certain' && !isReadableContainer(source)) return undefined;
   return element.initializer ?? selected;
 }
 
