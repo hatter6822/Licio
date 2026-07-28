@@ -1305,6 +1305,12 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       'a default behind a decidable conditional',
       "const { k = 'eval' } = { k: true ? undefined : 'safe' }; export const e = globalThis[k];",
     ],
+    // …and the condition may be held in an immutable binding rather than
+    // spelled, so it is RESOLVED rather than matched on node kind.
+    [
+      'a default behind an ALIASED decidable condition',
+      "const yes = true; const { k = 'eval' } = { k: yes ? undefined : 'safe' }; export const e = globalThis[k];",
+    ],
     // A default applies at EVERY nesting step, not only the last: the outer
     // selection is `undefined`, so the OUTER default binds and the inner
     // pattern destructures it.

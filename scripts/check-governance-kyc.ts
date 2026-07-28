@@ -31,7 +31,7 @@
 // because a comment is not a node.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { posix, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import type { Project } from 'typescript/unstable/sync';
 import { staticKeyOf } from './js-sink-analyzer.js';
@@ -233,9 +233,6 @@ const TRANSPARENT: ReadonlySet<number> = new Set([
 
 /** How far a receiver chain or a binding is followed before giving up. */
 const MAX_HOPS = 32;
-
-/** Methods that hand a function on with its identity intact. */
-const INVOKERS: ReadonlySet<string> = new Set(['bind', 'call', 'apply']);
 
 function unwrap(node: Syntax | undefined): Syntax | undefined {
   let current = node;
@@ -1128,6 +1125,12 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
     'E2E-ONLY session minter for the BFF harness, mounted only by e2e-server.ts',
   'apps/api/src/routes/test-wallet.ts':
     'E2E-ONLY wallet signer for the BFF harness, mounted only by e2e-server.ts',
+  // A TEST fixture, in the corpus because the corpus no longer excludes tests —
+  // asking "does this file register a mutation" needs no import analysis, and
+  // this is the only one of 256 test-path files that does.
+  'apps/api/src/__tests__/governance-eligibility.test.ts':
+    'unit fixture for this very gate: it mounts a one-route Hono app to assert ' +
+    'requireGovernanceEligibility() answers kyc_required — a test, served to nobody',
 };
 
 /** Bindings that name a value from ANOTHER module — every import form there is. */
@@ -1161,21 +1164,6 @@ export const NON_GOVERNANCE_ROUTES: Readonly<Record<string, string>> = {
 const API_SOURCE_ROOT = 'apps/api/src';
 
 /**
- * Tests declare routers of their own; they serve nothing.
- *
- * Spelled out rather than written as one alternation, because this decides what
- * the gate DOES NOT read: `/(?:^|\/)__tests__\/|\.test\.ts$/` anchors its second
- * branch and not its first, which CodeQL flags as misleading precedence and a
- * reader has to work out.  An exclusion nobody can read at a glance is how a
- * real source ends up silently outside a security gate's corpus.
- */
-function isTestPath(path: string): boolean {
-  return (
-    /\.test\.[cm]?tsx?$/.test(path) || path.includes('/__tests__/') || path.startsWith('__tests__/')
-  );
-}
-
-/**
  * Whether a tracked path is a TypeScript SOURCE the API compiles.
  *
  * Every extension `tsconfig`'s `src` include covers, not just `.ts`: a route
@@ -1194,6 +1182,16 @@ export function isTypeScriptSource(path: string): boolean {
 /**
  * Every tracked API source, from git rather than from a directory walk.
  *
+ * TESTS ARE INCLUDED, deliberately.  They used to be excluded — they declare
+ * routers of their own and serve nothing — and that exclusion then needed a
+ * SECOND check asking whether any production file imported one, which took four
+ * review findings across three rounds (a bound loader, a URL suffix, an aliased
+ * `require`, a type-only import) and was never going to be finished: naming a
+ * module is unbounded.  Asking instead "does this file register a mutation
+ * route" needs no import analysis at all, and of the 256 test-path files here
+ * exactly ONE does.  Classifying that one costs a line; the scan cost a round
+ * every time.
+ *
  * A DIRECTORY pathspec, deliberately.  A recursive glob of the double-star
  * form reads as "every TypeScript file under here" and is not: git's `**`
  * required at least one intermediate directory, so the three files that sit
@@ -1207,187 +1205,14 @@ export function isTypeScriptSource(path: string): boolean {
 export function trackedApiSources(): string[] {
   return execFileSync('git', ['ls-files', API_SOURCE_ROOT], { cwd: ROOT, encoding: 'utf-8' })
     .split('\n')
-    .filter((each) => isTypeScriptSource(each) && !isTestPath(each));
-}
-
-/**
- * A production source importing a file the corpus EXCLUDES.
- *
- * Excluding tests is right — they declare routers of their own and serve
- * nothing — but the exclusion is only safe while nothing production-reachable
- * imports one.  Since the corpus stopped tracking mount reachability, a route
- * module named `x.test.ts` or sitting under `__tests__/` would be dropped from
- * classification even when an entry point mounted it, and its governance POSTs
- * would be neither scanned nor declared.
- *
- * Asked as a bounded question — "does any judged file import an unjudged one?"
- * — rather than by restoring the reachability walk the corpus replaced.
- */
-function importsOfExcludedTests(
-  files: readonly string[],
-  read: (relPath: string) => string,
-): string[] {
-  const judged = new Set(files);
-  const sources: Source[] = [];
-  for (const file of files) {
-    try {
-      sources.push({ path: file, content: read(file) });
-    } catch {}
-  }
-  return withParsedSources(sources, (parsed, project) =>
-    parsed.flatMap(({ path, root }) => {
-      const issues: string[] = [];
-      /**
-       * Whether a callee loads a module: `import(…)`, `require(…)`, or a name
-       * bound to `require`.
-       *
-       * Read from what the callee BINDS TO, not from how it is spelled — `const
-       * load = require; load('./x.test.cjs')` loads exactly as `require` does,
-       * and the repository already made this correction for the router
-       * constructor and the guard name.
-       */
-      /**
-       * What a name HOLDS, one binding hop, seeing through `bind`/`call`/`apply`.
-       *
-       * `const load = require.bind(null)` is the native loader with a `this`
-       * nobody reads; stopping at the CallExpression initializer let it load an
-       * excluded module unseen.
-       */
-      const loadsAModule2 = (held: Syntax | undefined, hop: number): boolean => {
-        const target = unwrap(held);
-        if (target === undefined || hop > MAX_HOPS) return false;
-        if (target.kind === SyntaxKind.CallExpression) {
-          const inner = unwrap(target.expression);
-          if (inner?.kind !== SyntaxKind.PropertyAccessExpression) return false;
-          if (!INVOKERS.has(nameOf(inner.name) ?? '')) return false;
-          return loadsAModule2(inner.expression, hop + 1);
-        }
-        return loadsAModule(target, hop + 1);
-      };
-
-      const loadsAModule = (callee: Syntax, hop = 0): boolean => {
-        if (callee.kind === SyntaxKind.ImportKeyword) return true;
-        if (callee.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return false;
-        const declaration = project.checker
-          .getSymbolAtPosition(String(root.path), callee.getStart())
-          ?.declarations.find((each) => String(each.path) === String(root.path))
-          ?.resolve(project) as unknown as Syntax | undefined;
-        // The CommonJS loader is a name nothing in this file declares.  Reading
-        // the spelling first reported `function require(p) { … }` — a local
-        // helper that loads no module — as importing an excluded test, which is
-        // a security gate blocking valid code.
-        if (declaration === undefined) return nameOf(callee) === 'require';
-        if (declaration.kind !== SyntaxKind.VariableDeclaration) return false;
-        return loadsAModule2(declaration.initializer, hop + 1);
-      };
-
-      for (const node of walk(root)) {
-        // Read from the PARSE, static and DYNAMIC alike.  A regex over `from
-        // '…'` saw neither `(await import('./x.test.js')).createRoutes()` nor
-        // `import('./x.test.js')`, so a route module mounted that way stayed
-        // unjudged — the shape this check exists to catch, spelled the other
-        // way.  `require` counts too: it names a module just as an import does.
-        const specifier = moduleSpecifierOf(
-          node,
-          (callee) => loadsAModule(callee),
-          (argument) => staticKeyOf(argument, project),
-        );
-        if (specifier === undefined || !specifier.startsWith('.')) continue;
-        const resolved = posix.normalize(posix.join(posix.dirname(path), specifier));
-        const target = sourceOfSpecifier(resolved);
-        if (!isTestPath(target) && !isTestPath(resolved)) continue;
-        if (judged.has(target)) continue;
-        issues.push(
-          `${path} imports '${specifier}', a TEST path the gate deliberately does not judge. ` +
-            'A module a production source mounts must not be named as a test: rename it out of ' +
-            '`__tests__/` and off the `.test.ts` suffix so it is classified like any other.',
-        );
-      }
-      return issues;
-    }),
-  );
-}
-
-/**
- * The module a node NAMES, in every form that names one.
- *
- * Static and re-export declarations, dynamic `import(…)`, `require(…)`, and
- * TypeScript's `import x = require('…')` — whose specifier hides in an
- * `ExternalModuleReference` and so belongs to neither of the first two shapes.
- */
-function moduleSpecifierOf(
-  node: Syntax,
-  loadsAModule: (callee: Syntax) => boolean,
-  fold: (argument: Syntax | undefined) => string | undefined,
-): string | undefined {
-  if (node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration) {
-    // A TYPE-ONLY declaration is ERASED: it cannot mount a router, so treating
-    // it as an import blocked CI over a module the build never loads.  Both
-    // spellings count — `import type { T } from …`, and a declaration whose
-    // every named binding carries its own `type`.
-    if (isTypeOnlyDeclaration(node)) return undefined;
-    return staticString(node.moduleSpecifier);
-  }
-  if (node.kind === SyntaxKind.ImportEqualsDeclaration) {
-    if (node.isTypeOnly === true) return undefined;
-    const reference = node.moduleReference;
-    return reference === undefined ? undefined : staticString(reference.expression);
-  }
-  if (node.kind !== SyntaxKind.CallExpression) return undefined;
-  const callee = unwrap(node.expression);
-  if (callee === undefined) return undefined;
-  if (!loadsAModule(callee)) return undefined;
-  // The specifier itself may be an immutable alias: `const target =
-  // './x.test.js'; import(target)` loads the module all the same.
-  const argument = (node.arguments ?? [])[0];
-  return staticString(argument) ?? fold(argument);
-}
-
-/**
- * Whether an import or export declaration is wholly TYPE-ONLY.
- *
- * `import type { T } from …` says so on the clause; `import { type T } from …`
- * says it on each specifier, and the declaration is erased only when EVERY
- * binding is type-only and no default or namespace binding survives.
- */
-function isTypeOnlyDeclaration(node: Syntax): boolean {
-  if (node.isTypeOnly === true) return true;
-  const clause = node.importClause ?? node.exportClause;
-  if (clause === undefined) return false;
-  if (clause.isTypeOnly === true) return true;
-  // `import def, { type T } from …` still binds `def` at runtime.
-  if (clause.kind === SyntaxKind.ImportClause && clause.name !== undefined) return false;
-  const bindings = clause.namedBindings ?? clause;
-  if (bindings.kind === SyntaxKind.NamespaceImport) return false;
-  const elements = bindings.elements;
-  if (elements === undefined || elements.length === 0) return false;
-  return elements.every((each) => each.isTypeOnly === true);
-}
-
-/**
- * The TypeScript SOURCE a JavaScript specifier names.
- *
- * Every emit extension, not just `.js`: this gate accepts `.mts` and `.cts`
- * sources, so `./x.test.mjs` and `./x.test.cjs` name test modules it excludes
- * exactly as `./x.test.js` does, and mapping only `.js` left those unmatched.
- */
-function sourceOfSpecifier(resolved: string): string {
-  for (const [emitted, source] of [
-    ['.mjs', '.mts'],
-    ['.cjs', '.cts'],
-    ['.jsx', '.tsx'],
-    ['.js', '.ts'],
-  ] as const) {
-    if (resolved.endsWith(emitted)) return `${resolved.slice(0, -emitted.length)}${source}`;
-  }
-  return resolved;
+    .filter((each) => isTypeScriptSource(each));
 }
 
 export function runGovernanceKycGate(
   read: (relPath: string) => string = (relPath) => readFileSync(resolve(ROOT, relPath), 'utf-8'),
   files: readonly string[] = trackedApiSources(),
 ): string[] {
-  const issues: string[] = [...importsOfExcludedTests(files, read)];
+  const issues: string[] = [];
   const scanned = new Set<string>(GOVERNANCE_ROUTE_FILES);
 
   // ONE parse for the whole API tree: it answers which files register a route

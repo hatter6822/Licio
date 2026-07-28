@@ -451,178 +451,49 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining(`${path} REGISTERS`));
   });
 
+  // The import SCAN these tests covered is gone.  Asking "does any production
+  // file import an excluded test" meant naming a module, which is unbounded —
+  // it took four review findings across three rounds (a bound loader, a URL
+  // suffix, an aliased `require`, a type-only import) and would have taken
+  // more.  The corpus simply includes tests now, so a test-path file that
+  // registers a mutation must be classified HOWEVER it is reached, or not
+  // reached at all.
   it.each([
-    ['a `.test.ts` sibling', './secret.test.js', 'apps/api/src/routes/secret.test.ts'],
-    ['a `__tests__/` module', './__tests__/secret.js', 'apps/api/src/routes/__tests__/secret.ts'],
-  ])('reports a production import of %s', (_label, specifier, target) => {
-    // Excluding tests from the corpus is right — they declare routers of their
-    // own and serve nothing — but only while nothing production-reachable
-    // imports one.  Since the corpus stopped tracking mount reachability, such
-    // a module would be neither scanned nor declared, silently.
-    const v1 = readRepo('apps/api/src/routes/v1.ts')
-      .replace(
-        'import { createAuthRoutes }',
-        `import { createSecretRoutes } from '${specifier}';\nimport { createAuthRoutes }`,
-      )
-      .replace(
-        ".route('/auth', createAuthRoutes())",
-        ".route('/secret', createSecretRoutes())\n      .route('/auth', createAuthRoutes())",
-      );
+    [
+      'a pre-bound require',
+      "const load = require.bind(null, './secret.test.js');\nconst m = load();",
+    ],
+    ['a URL-suffixed dynamic import', "const m = import('./secret.test.js?mounted');"],
+    ['an aliased require', "const load = require;\nconst m = load('./secret.test.js');"],
+    ['no import at all', ''],
+  ])('classifies a test-path module registering a mutation, reached by %s', (_label, inject) => {
+    const target = 'apps/api/src/routes/secret.test.ts';
+    const v1 =
+      inject === ''
+        ? undefined
+        : readRepo('apps/api/src/routes/v1.ts').replace(
+            'import { createAuthRoutes }',
+            `${inject}\nimport { createAuthRoutes }`,
+          );
     const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        [target]: 'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
+      (rel) =>
+        rel === target
+          ? `
+const app = new Hono();
+app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote()));`
+          : rel === 'apps/api/src/routes/v1.ts' && v1 !== undefined
+            ? v1
+            : readRepo(rel),
+      [...live, target],
     );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+    expect(issues).toContainEqual(expect.stringContaining(`${target} REGISTERS`));
   });
 
-  it.each([
-    ['a dynamic import', "(await import('./secret.test.js')).createSecretRoutes()"],
-    ['a bare dynamic import', "await import('./secret.test.js')"],
-    ['require', "require('./secret.test.js')"],
-    // Every EMIT extension, since the gate accepts `.mts`/`.cts` sources.
-    ['an .mjs specifier', "(await import('./secret.test.mjs')).createSecretRoutes()"],
-    ['a .cjs specifier', "require('./secret.test.cjs')"],
-  ])('reports %s of a test path', (_label, expression) => {
-    // Read from the PARSE: a regex over `from '…'` saw none of these, so a
-    // route module mounted that way stayed unjudged.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      ".route('/auth', createAuthRoutes())",
-      `.route('/secret', ${expression})\n      .route('/auth', createAuthRoutes())`,
+  it('takes test paths into the corpus, so none can hide there', () => {
+    const tests = live.filter(
+      (each) => /\.test\.[cm]?tsx?$/.test(each) || each.includes('/__tests__/'),
     );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
-        'apps/api/src/routes/secret.test.mts':
-          'export const createSecretRoutes = () => new Hono();',
-        'apps/api/src/routes/secret.test.cts':
-          'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it('reports a BOUND CommonJS loader of a test path', () => {
-    // `require.bind(null)` is the native loader with a `this` nobody reads.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "const load = require.bind(null);\nconst m = load('./secret.test.cjs');\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.cts':
-          'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it('reports a dynamic import whose SPECIFIER is an immutable alias', () => {
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "const target = './secret.test.js';\nconst m = import(target);\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it('does NOT report a SHADOWED `require`, which loads nothing', () => {
-    // A local helper named `require` loads no module; reporting it would be a
-    // security gate blocking valid code.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "function require(p) { return registry[p]; }\nconst m = require('./secret.test.js');\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.ts': 'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).not.toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it('reports an ALIASED require of a test path', () => {
-    // Read from what the callee BINDS TO, not from how it is spelled.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "const load = require;\nconst secret = load('./secret.test.cjs');\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.cts':
-          'export const createSecretRoutes = () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it.each([
-    ['a type-only declaration', "import type { Fixture } from './secret.test.js';"],
-    ['per-specifier type-only', "import { type Fixture } from './secret.test.js';"],
-    ['a type-only re-export', "export type { Fixture } from './secret.test.js';"],
-  ])('does NOT report %s — it is erased and mounts nothing', (_label, statement) => {
-    // Blocking CI over a module the build never loads is the failure direction
-    // that gets a gate switched off.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      `${statement}\nimport { createAuthRoutes }`,
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.ts': 'export type Fixture = { a: 1 };',
-      }),
-      live,
-    );
-    expect(issues).not.toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it('still reports a VALUE import beside a type-only one', () => {
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "import make, { type Fixture } from './secret.test.js';\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/secret.test.ts': 'export default () => new Hono();',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
-  });
-
-  it("reports TypeScript's `import x = require(…)` of a test path", () => {
-    // The specifier hides in an `ExternalModuleReference`, so it belongs to
-    // neither the declaration nor the call shape.
-    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
-      'import { createAuthRoutes }',
-      "import secret = require('./__tests__/secret.cjs');\nimport { createAuthRoutes }",
-    );
-    const issues = runGovernanceKycGate(
-      withFiles({
-        'apps/api/src/routes/v1.ts': v1,
-        'apps/api/src/routes/__tests__/secret.cts': 'export const x = 1;',
-      }),
-      live,
-    );
-    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+    expect(tests.length).toBeGreaterThan(100);
   });
 
   it('does not report an ordinary relative import', () => {
@@ -658,23 +529,15 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     };
     const onDisk = walkDir('apps/api/src');
     const sources = (each: string): boolean =>
-      /\.[cm]?tsx?$/.test(each) &&
-      !each.endsWith('.d.ts') &&
-      !/\.test\.[cm]?tsx?$/.test(each) &&
-      !each.includes('/__tests__/');
+      /\.[cm]?tsx?$/.test(each) && !/\.d\.[cm]?ts$/.test(each);
     expect([...live].sort()).toEqual(onDisk.filter(sources).sort());
-    // …and the exclusions are exactly declarations and tests, nothing else.
-    expect(live.filter((each) => each.endsWith('.d.ts'))).toEqual([]);
-    expect(live.filter((each) => /\.test\.[cm]?tsx?$/.test(each))).toEqual([]);
+    // …and the ONLY exclusion is declaration files, which are erased whole.
+    expect(live.filter((each) => /\.d\.[cm]?ts$/.test(each))).toEqual([]);
   });
 
   it('enumerates the API tree, so nothing above passes vacuously', () => {
     expect(live.length).toBeGreaterThan(200);
     expect(live.every((each) => each.startsWith('apps/api/src/'))).toBe(true);
-    // Tests declare routers of their own and serve nothing.
-    expect(
-      live.filter((each) => each.endsWith('.test.ts') || each.includes('/__tests__/')),
-    ).toEqual([]);
     // …and the exclusion is not so broad that it drops real sources.  The
     // comparison walks the FILESYSTEM rather than asking git with the same
     // pathspec: a corpus checked against its own enumeration cannot notice the
@@ -693,10 +556,8 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     };
     walkDir('apps/api/src');
     const excluded = tracked.filter((each) => !live.includes(each));
-    expect(
-      excluded.filter((each) => !each.endsWith('.test.ts') && !each.includes('/__tests__/')),
-    ).toEqual([]);
-    expect(excluded.length).toBeGreaterThan(0);
+    // The ONLY thing dropped is a declaration file, which is erased whole.
+    expect(excluded.filter((each) => !/\.d\.[cm]?ts$/.test(each))).toEqual([]);
   });
 });
 
@@ -744,6 +605,27 @@ h('post');`;
     const routes = extractMutationRoutes('f.ts', src);
     expect(routes).toHaveLength(1);
     expect(routes[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a destructuring default whose SOURCE it cannot read', () => {
+    // `getConfig()` may well return `{ method: 'post' }`, so the fallback is a
+    // guess — and guessing `'get'` classified an unguarded governance POST as a
+    // read.  A default is certain only when the source is a container this
+    // could actually read and the key is genuinely absent.
+    const src = `
+const app = new Hono();
+function getConfig() { return { method: 'post' }; }
+const { method = 'get' } = getConfig();
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('DOES take a default when the source is readable and the key absent', () => {
+    const src = `
+const app = new Hono();
+const { method = 'post' } = { other: 1 };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
   });
 
   it('still reads a method held in a `const`, which IS certain', () => {

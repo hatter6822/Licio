@@ -491,7 +491,7 @@ function constantValue(
   // for a parameter pattern that source IS the default, which the descent
   // already yields.
   return declaration.kind === SyntaxKind.BindingElement
-    ? selectedValue(declaration, project, 0)
+    ? selectedValue(declaration, project, 0, folding)
     : undefined;
 }
 
@@ -564,13 +564,27 @@ function foldabilityOf(declaration: Syntax): Foldability {
   return 'no';
 }
 
-/** The branch a conditional with a LITERAL condition takes, if it is decidable. */
-function decidedBranch(node: Syntax): Syntax | undefined {
+/**
+ * The branch a conditional takes, when its condition is DECIDABLE.
+ *
+ * The condition may be written as a literal or held in an immutable binding —
+ * `const yes = true; yes ? undefined : 'safe'` selects the same branch as the
+ * spelled `true` does — so it is resolved rather than pattern-matched on kind.
+ */
+function decidedBranch(node: Syntax, project: Project, hop = 0): Syntax | undefined {
   const condition = unwrap(node.condition);
-  if (condition === undefined) return undefined;
+  if (condition === undefined || hop > MAX_HOPS) return undefined;
   if (condition.kind === SyntaxKind.TrueKeyword) return node.whenTrue;
   if (condition.kind === SyntaxKind.FalseKeyword) return node.whenFalse;
-  return undefined;
+  if (condition.kind !== SyntaxKind.Identifier) return undefined;
+  const held = constantValue(condition, project);
+  if (held === undefined) return undefined;
+  const folded = unwrap(held);
+  if (folded?.kind === SyntaxKind.TrueKeyword) return node.whenTrue;
+  if (folded?.kind === SyntaxKind.FalseKeyword) return node.whenFalse;
+  return folded?.kind === SyntaxKind.ConditionalExpression
+    ? decidedBranch(folded, project, hop + 1)
+    : undefined;
 }
 
 /** Containers a destructure reads BY POSITION rather than by name. */
@@ -631,6 +645,32 @@ function valueAt(
     if (member.kind === SyntaxKind.ShorthandPropertyAssignment) return member.name;
   }
   return undefined;
+}
+
+/**
+ * Whether a source is a container whose ABSENT keys can be trusted.
+ *
+ * An object or array literal — reached directly or through immutable bindings —
+ * can be read, so a key it lacks is genuinely absent.  A call, a parameter, an
+ * import: those may hold anything, and "no key found" means "could not look".
+ */
+function isReadableContainer(source: Syntax | undefined, project: Project, hop: number): boolean {
+  const target = unwrap(source);
+  if (target === undefined || hop > MAX_HOPS) return false;
+  if (
+    target.kind === SyntaxKind.ObjectLiteralExpression ||
+    target.kind === SyntaxKind.ArrayLiteralExpression
+  ) {
+    return true;
+  }
+  if (
+    target.kind === SyntaxKind.Identifier ||
+    target.kind === SyntaxKind.PropertyAccessExpression ||
+    target.kind === SyntaxKind.ElementAccessExpression
+  ) {
+    return isReadableContainer(constantValue(target, project), project, hop + 1);
+  }
+  return false;
 }
 
 /**
@@ -709,7 +749,7 @@ function isUndefinedValue(node: Syntax | undefined, project: Project): boolean {
   // so `true ? undefined : 'safe'` is `undefined` and the default applies.
   // Rejecting the whole node kind read past that.
   if (target.kind === SyntaxKind.ConditionalExpression) {
-    const taken = decidedBranch(target);
+    const taken = decidedBranch(target, project);
     return taken === undefined ? false : isUndefinedValue(taken, project);
   }
   if (target.kind !== SyntaxKind.Identifier) return false;
@@ -730,16 +770,25 @@ function isUndefinedValue(node: Syntax | undefined, project: Project): boolean {
  * nothing" left `const { a = 'ev' } = { a: undefined }` folding to the
  * `undefined` node instead of to `'ev'`.
  */
-function selectedValue(element: Syntax, project: Project, hop: number): Syntax | undefined {
+function selectedValue(
+  element: Syntax,
+  project: Project,
+  hop: number,
+  folding: Folding = 'possible',
+): Syntax | undefined {
   const pattern = element.parent;
   if (pattern === undefined || hop > MAX_HOPS) return undefined;
+  const source = selectionSource(pattern, project, hop + 1);
   const key = containerKey(element, pattern, project);
-  if (key === undefined) return element.initializer;
-  const selected = valueAt(selectionSource(pattern, project, hop + 1), key, project, 0);
-  if (selected === undefined || isUndefinedValue(selected, project)) {
-    return element.initializer ?? selected;
-  }
-  return selected;
+  const selected = key === undefined ? undefined : valueAt(source, key, project, 0);
+  if (selected !== undefined && !isUndefinedValue(selected, project)) return selected;
+  // The property is ABSENT or undefined, so the default is what binds — but
+  // under CERTAIN folding that must be KNOWN, not assumed.  It is known only
+  // when the source is a container this could actually read: `const { method =
+  // 'get' } = getConfig()` may well bind `'post'`, and taking the fallback
+  // there classified an unguarded governance POST as a GET.
+  if (folding === 'certain' && !isReadableContainer(source, project, 0)) return undefined;
+  return element.initializer ?? selected;
 }
 
 /**
