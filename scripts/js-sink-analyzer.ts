@@ -424,7 +424,11 @@ function staticText(
  * same kind of node as the value-flow analyzer does, and answering it twice is
  * how one of the two ends up not covering a spelling.
  */
-export function staticKeyOf(argument: Syntax | undefined, project: Project): string | undefined {
+export function staticKeyOf(
+  argument: Syntax | undefined,
+  project: Project,
+  folding: Folding = 'possible',
+): string | undefined {
   if (argument === undefined) return undefined;
   const type = project.checker.getTypeAtLocation(asNode(argument));
   if (type?.isStringLiteralType() === true) return String(type.value);
@@ -435,7 +439,10 @@ export function staticKeyOf(argument: Syntax | undefined, project: Project): str
   // `node['inner' + 'HTML']` names the same property as the plain spelling —
   // but only when the WHOLE key folds, which is what separates it from a
   // scheme prefix.
-  return staticText(argument, 0, (identifier) => constantValue(identifier, project)) ?? undefined;
+  return (
+    staticText(argument, 0, (identifier) => constantValue(identifier, project, folding)) ??
+    undefined
+  );
 }
 
 /**
@@ -444,13 +451,40 @@ export function staticKeyOf(argument: Syntax | undefined, project: Project): str
  * `const` only: a `let` can hold something else by the time the key is read, so
  * folding it would invent a property name the code never selects.
  */
-function constantValue(identifier: Syntax, project: Project): Syntax | undefined {
+/**
+ * Which values a fold may use.
+ *
+ * `'possible'` — anything the binding MAY hold, defaults included.  Right for
+ *   "could this key name a forbidden global", where a value the code can take
+ *   is a value worth reporting.
+ * `'certain'`  — only what the binding definitely holds.  Right for "WHICH
+ *   route method is this", where a default is one candidate among several and
+ *   guessing it misclassifies the registration: `function h(method = 'get')`
+ *   called with `'post'` registers a POST, and folding the default called it a
+ *   GET and dropped a governance mutation.
+ *
+ * Sharing one resolver was right; sharing one POLICY was not, because the two
+ * gates are not asking the same question.
+ */
+export type Folding = 'possible' | 'certain';
+
+function constantValue(
+  identifier: Syntax,
+  project: Project,
+  folding: Folding = 'possible',
+): Syntax | undefined {
   const declaration = declarationOf(identifier, project);
   if (declaration === undefined) return undefined;
   // A plain parameter folds to its own DEFAULT — `(key = 'eval') => …` holds
-  // exactly that whenever the call omits the argument.
-  if (declaration.kind === SyntaxKind.Parameter) return declaration.initializer;
-  if (foldabilityOf(declaration) === 'no') return undefined;
+  // exactly that whenever the call omits the argument — but only when a
+  // POSSIBLE value will do.
+  if (declaration.kind === SyntaxKind.Parameter) {
+    return folding === 'possible' ? declaration.initializer : undefined;
+  }
+  const foldability = foldabilityOf(declaration);
+  if (foldability === 'no' || (foldability === 'default' && folding === 'certain')) {
+    return undefined;
+  }
   if (declaration.kind === SyntaxKind.VariableDeclaration) return declaration.initializer;
   // `const { a, b } = { a: 'ev', b: 'al' }` binds through a PATTERN, so what
   // the name holds is whatever the source holds at the key this element takes;
@@ -528,6 +562,15 @@ function foldabilityOf(declaration: Syntax): Foldability {
     owner = owner.parent;
   }
   return 'no';
+}
+
+/** The branch a conditional with a LITERAL condition takes, if it is decidable. */
+function decidedBranch(node: Syntax): Syntax | undefined {
+  const condition = unwrap(node.condition);
+  if (condition === undefined) return undefined;
+  if (condition.kind === SyntaxKind.TrueKeyword) return node.whenTrue;
+  if (condition.kind === SyntaxKind.FalseKeyword) return node.whenFalse;
+  return undefined;
 }
 
 /** Containers a destructure reads BY POSITION rather than by name. */
@@ -662,6 +705,13 @@ function isUndefinedValue(node: Syntax | undefined, project: Project): boolean {
   const target = unwrap(node);
   if (target === undefined) return false;
   if (target.kind === SyntaxKind.VoidExpression) return true;
+  // A conditional whose CONDITION is fixed at compile time selects one branch,
+  // so `true ? undefined : 'safe'` is `undefined` and the default applies.
+  // Rejecting the whole node kind read past that.
+  if (target.kind === SyntaxKind.ConditionalExpression) {
+    const taken = decidedBranch(target);
+    return taken === undefined ? false : isUndefinedValue(taken, project);
+  }
   if (target.kind !== SyntaxKind.Identifier) return false;
   if ((target.text ?? target.getText()) !== 'undefined') return false;
   // `undefined` is not a keyword — it is a global BINDING, and a parameter or a

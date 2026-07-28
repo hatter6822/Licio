@@ -234,6 +234,9 @@ const TRANSPARENT: ReadonlySet<number> = new Set([
 /** How far a receiver chain or a binding is followed before giving up. */
 const MAX_HOPS = 32;
 
+/** Methods that hand a function on with its identity intact. */
+const INVOKERS: ReadonlySet<string> = new Set(['bind', 'call', 'apply']);
+
 function unwrap(node: Syntax | undefined): Syntax | undefined {
   let current = node;
   for (let hop = 0; current !== undefined && TRANSPARENT.has(current.kind); hop += 1) {
@@ -900,16 +903,21 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
    * `app.post(…)` does, and reading the syntax alone saw an identifier and
    * stopped.  The FOLD is the sink analyzer's, shared rather than reimplemented:
    * a second copy here knew about `const x = …` and not about `const { x } = …`,
-   * which is precisely the drift a shared resolver prevents — and it brings the
-   * parameter, catch and `let` semantics with it.
+   * which is precisely the drift a shared resolver prevents.
+   *
+   * CERTAIN folding, though.  The sink analyzer asks what a key MAY be, so a
+   * parameter default is worth folding there; this asks WHICH METHOD is
+   * registered, and `function h(method = 'get')` called with `'post'` registers
+   * a POST — folding the default called it a GET and dropped the mutation.  One
+   * resolver, two policies, because they are two questions.
    */
   const staticStringFolded = (node: Syntax | undefined): string | undefined =>
-    staticString(node) ?? staticKeyOf(node, project);
+    staticString(node) ?? staticKeyOf(node, project, 'certain');
 
   const found: FoundRoute[] = [];
 
   /** Read ONE call as a registration of `called` on a receiver of `receiver`. */
-  const register = (node: Syntax, called: string, receiver: Receiver): void => {
+  const register = (node: Syntax, called: string | undefined, receiver: Receiver): void => {
     // 'unknown' is deliberately NOT skipped: a receiver this cannot classify
     // may well be a governance router, and dropping it would report success
     // over an endpoint the gate never looked at.
@@ -922,8 +930,12 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
     // surely as `.post` is, and skipping it let one ship unguarded.
     const viaOn = called === 'on';
     const viaAll = called === 'all';
-    if (!viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
-    const declared = viaOn ? staticStrings(args[0]) : { values: [called], complete: true };
+    if (called !== undefined && !viaOn && !viaAll && !MUTATION_METHODS.has(called)) return;
+    const declared = viaOn
+      ? staticStrings(args[0])
+      : called === undefined
+        ? { values: [], complete: false }
+        : { values: [called], complete: true };
     const methods = declared.values.map((method) => method.toLowerCase());
     const pathArgument = viaOn ? args[1] : args[0];
     // When the receiver could not be resolved, the REGISTRATION has to look
@@ -996,7 +1008,9 @@ function routesIn(file: string, root: Syntax, project: Project, source: string):
       callee.kind === SyntaxKind.PropertyAccessExpression
         ? nameOf(callee.name)
         : staticStringFolded(callee.argumentExpression);
-    if (called === undefined) continue;
+    // A computed method this cannot read may well be a mutation, so the
+    // registration is REPORTED rather than skipped — the same discipline an
+    // unreadable path and an unreadable `.on()` method list already get.
     register(node, called, receiverKind(callee.expression));
   }
   return found;
@@ -1170,8 +1184,11 @@ function isTestPath(path: string): boolean {
  * the same completeness hole as the pathspec, one filter along.  A `.d.ts`
  * declares types and registers nothing.
  */
-function isTypeScriptSource(path: string): boolean {
-  return /\.[cm]?tsx?$/.test(path) && !path.endsWith('.d.ts');
+export function isTypeScriptSource(path: string): boolean {
+  // A DECLARATION file is erased whole — `.d.mts` and `.d.cts` as much as
+  // `.d.ts` — so its imports mount nothing and scanning one as runtime code
+  // reported a rename the build never needs.
+  return /\.[cm]?tsx?$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
 }
 
 /**
@@ -1229,6 +1246,25 @@ function importsOfExcludedTests(
        * and the repository already made this correction for the router
        * constructor and the guard name.
        */
+      /**
+       * What a name HOLDS, one binding hop, seeing through `bind`/`call`/`apply`.
+       *
+       * `const load = require.bind(null)` is the native loader with a `this`
+       * nobody reads; stopping at the CallExpression initializer let it load an
+       * excluded module unseen.
+       */
+      const loadsAModule2 = (held: Syntax | undefined, hop: number): boolean => {
+        const target = unwrap(held);
+        if (target === undefined || hop > MAX_HOPS) return false;
+        if (target.kind === SyntaxKind.CallExpression) {
+          const inner = unwrap(target.expression);
+          if (inner?.kind !== SyntaxKind.PropertyAccessExpression) return false;
+          if (!INVOKERS.has(nameOf(inner.name) ?? '')) return false;
+          return loadsAModule2(inner.expression, hop + 1);
+        }
+        return loadsAModule(target, hop + 1);
+      };
+
       const loadsAModule = (callee: Syntax, hop = 0): boolean => {
         if (callee.kind === SyntaxKind.ImportKeyword) return true;
         if (callee.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return false;
@@ -1242,8 +1278,7 @@ function importsOfExcludedTests(
         // a security gate blocking valid code.
         if (declaration === undefined) return nameOf(callee) === 'require';
         if (declaration.kind !== SyntaxKind.VariableDeclaration) return false;
-        const held = unwrap(declaration.initializer);
-        return held === undefined ? false : loadsAModule(held, hop + 1);
+        return loadsAModule2(declaration.initializer, hop + 1);
       };
 
       for (const node of walk(root)) {

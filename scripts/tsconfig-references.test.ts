@@ -122,6 +122,14 @@ function configClosure(
   seeds: readonly string[],
   read: (path: string) => string | undefined,
 ): TrackedConfig[] {
+  // A tracked SEED that cannot be read is a config this never judged, and
+  // dropping it silently kept the suite green over it — a broken symlink or a
+  // bad checkout would pass while the aggregate counts stayed plausible.  Only
+  // a CANDIDATE discovered while resolving a reference may be absent; that is
+  // how a MISSING target is detected rather than hidden.
+  for (const seed of seeds) {
+    if (read(seed) === undefined) throw new Error(`tracked tsconfig ${seed} could not be read`);
+  }
   const seen = new Set<string>(seeds);
   let frontier: readonly string[] = seeds;
   const configs: TrackedConfig[] = [];
@@ -327,6 +335,13 @@ describe('the reference CLOSURE', () => {
     expect(unresolvableOffenders(closure, (path) => path in missing)).toEqual([
       expect.stringContaining('"packages/missing/build.json" resolves to no file'),
     ]);
+  });
+
+  it('FAILS when a tracked seed cannot be read', () => {
+    // Aggregate counts stayed plausible while an unread seed was never judged.
+    expect(() => configClosure(['tsconfig.json'], () => undefined)).toThrow(
+      /tracked tsconfig tsconfig\.json could not be read/,
+    );
   });
 
   it('terminates on a reference CYCLE', () => {

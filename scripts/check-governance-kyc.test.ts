@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractMutationRoutes,
   GOVERNANCE_ROUTE_FILES,
+  isTypeScriptSource,
   NON_GOVERNANCE_ROUTES,
   runGovernanceKycGate,
   trackedApiSources,
@@ -505,6 +506,23 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
   });
 
+  it('reports a BOUND CommonJS loader of a test path', () => {
+    // `require.bind(null)` is the native loader with a `this` nobody reads.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "const load = require.bind(null);\nconst m = load('./secret.test.cjs');\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.cts':
+          'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
   it('reports a dynamic import whose SPECIFIER is an immutable alias', () => {
     const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
       'import { createAuthRoutes }',
@@ -611,6 +629,19 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(runGovernanceKycGate()).toEqual([]);
   });
 
+  it.each([
+    ['types.d.ts', false],
+    ['types.d.mts', false],
+    ['types.d.cts', false],
+    ['routes.ts', true],
+    ['routes.tsx', true],
+    ['routes.mts', true],
+  ])('takes %s as a source: %s — a declaration file is erased whole', (name, wanted) => {
+    // Scanning a declaration file as runtime code reported a rename the build
+    // never needs; `.d.mts` and `.d.cts` are as erased as `.d.ts`.
+    expect(isTypeScriptSource(`apps/api/src/${name}`)).toBe(wanted);
+  });
+
   it('enumerates EVERY TypeScript source extension, not just `.ts`', () => {
     // Accepting only names ending in `.ts` dropped a `.tsx` route module — the
     // same completeness hole as the pathspec, one filter along.  Asserted on
@@ -697,6 +728,30 @@ cache.delete('key');
 const rows = new Set();
 rows.delete(id);`;
     expect(extractMutationRoutes('f.ts', src)).toEqual([]);
+  });
+});
+
+describe('a route method the gate cannot READ', () => {
+  it('reports it rather than folding a parameter default', () => {
+    // The sink analyzer asks what a key MAY be, so a default is worth folding
+    // there.  This asks WHICH METHOD is registered: `h(method = 'get')` called
+    // with `'post'` registers a POST, and folding the default called it a GET
+    // and dropped the mutation.  Unreadable fails CLOSED instead.
+    const src = `
+const app = new Hono();
+function h(method = 'get') { app[method]('/rooms/:roomId/governance/vote', handler); }
+h('post');`;
+    const routes = extractMutationRoutes('f.ts', src);
+    expect(routes).toHaveLength(1);
+    expect(routes[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('still reads a method held in a `const`, which IS certain', () => {
+    const src = `
+const app = new Hono();
+const method = 'post';
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
   });
 });
 
