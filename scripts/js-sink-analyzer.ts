@@ -430,7 +430,13 @@ export function staticKeyOf(
   folding: Folding = 'possible',
 ): string | undefined {
   if (argument === undefined) return undefined;
-  const type = project.checker.getTypeAtLocation(asNode(argument));
+  // The checker's LITERAL type is only evidence under `'possible'` folding.  A
+  // TypeScript assertion narrows a type without validating the value, so
+  // `getConfig() as 'get'` types as `'get'` while holding `'post'` — and a
+  // classifier that believed it called an unguarded governance POST a GET.
+  // Under `'certain'` the answer must come from the expression itself.
+  const type =
+    folding === 'certain' ? undefined : project.checker.getTypeAtLocation(asNode(argument));
   if (type?.isStringLiteralType() === true) return String(type.value);
   if (type?.isNumberLiteralType() === true) return String(type.value);
   // A literal the checker did not narrow (a `.js` source has no `as const`).
@@ -690,6 +696,7 @@ function selectionSource(
   container: Syntax | undefined,
   project: Project,
   hop: number,
+  folding: Folding = 'possible',
 ): Syntax | undefined {
   const owner = container?.parent;
   if (container === undefined || owner === undefined || hop > MAX_HOPS) return undefined;
@@ -706,7 +713,7 @@ function selectionSource(
   const through = (element: Syntax, outer: Syntax): Syntax | undefined => {
     const key = containerKey(element, outer, project);
     if (key === undefined) return undefined;
-    const selected = valueAt(selectionSource(outer, project, hop + 1), key, project, 0);
+    const selected = valueAt(selectionSource(outer, project, hop + 1, folding), key, project, 0);
     return selected === undefined || isUndefinedValue(selected, project) ? undefined : selected;
   };
 
@@ -734,7 +741,16 @@ function selectionSource(
   // the binding element that selected it.
   if (owner.kind !== SyntaxKind.BindingElement) return owner.initializer;
   const outer = owner.parent;
-  return (outer === undefined ? undefined : through(owner, outer)) ?? owner.initializer;
+  const selected = outer === undefined ? undefined : through(owner, outer);
+  if (selected !== undefined) return selected;
+  // The outer slot is absent OR unreadable, and under CERTAIN folding those are
+  // not the same: `const { nested: { m } = { m: 'get' } } = getConfig()` may
+  // well bind `'post'`, so taking the default there is a guess.  `undefined`
+  // from `valueAt` means "could not look" as often as "not there".
+  const outerSource =
+    outer === undefined ? undefined : selectionSource(outer, project, hop + 1, folding);
+  if (folding === 'certain' && !isReadableContainer(outerSource, project, 0)) return undefined;
+  return owner.initializer;
 }
 
 /**
@@ -778,7 +794,7 @@ function selectedValue(
 ): Syntax | undefined {
   const pattern = element.parent;
   if (pattern === undefined || hop > MAX_HOPS) return undefined;
-  const source = selectionSource(pattern, project, hop + 1);
+  const source = selectionSource(pattern, project, hop + 1, folding);
   const key = containerKey(element, pattern, project);
   const selected = key === undefined ? undefined : valueAt(source, key, project, 0);
   if (selected !== undefined && !isUndefinedValue(selected, project)) return selected;

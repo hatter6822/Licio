@@ -620,6 +620,36 @@ app[method]('/rooms/:roomId/governance/vote', handler);`;
     expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
   });
 
+  it('refuses a NESTED default whose outer source it cannot read', () => {
+    // `undefined` from the descent means "could not look" as often as "not
+    // there"; taking the default on the first reading is a guess.
+    const src = `
+const app = new Hono();
+function getConfig() { return { nested: { method: 'post' } }; }
+const { nested: { method } = { method: 'get' } } = getConfig();
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('refuses a literal type that comes only from an `as` ASSERTION', () => {
+    // TypeScript assertions narrow a type without validating the value, so the
+    // checker says `'get'` while the runtime value is `'post'`.
+    const src = `
+const app = new Hono();
+function getConfig() { return 'post'; }
+const method = getConfig() as 'get';
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('<unreadable method>');
+  });
+
+  it('DOES take a NESTED default when the outer source is readable', () => {
+    const src = `
+const app = new Hono();
+const { nested: { method } = { method: 'post' } } = { other: 1 };
+app[method]('/rooms/:roomId/governance/vote', handler);`;
+    expect(extractMutationRoutes('f.ts', src)[0]?.method).toBe('post');
+  });
+
   it('DOES take a default when the source is readable and the key absent', () => {
     const src = `
 const app = new Hono();
