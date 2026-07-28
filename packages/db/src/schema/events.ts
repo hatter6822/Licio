@@ -294,6 +294,16 @@ export const invariantOutputs = pgTable(
       t.targetType,
       sql`${t.createdAt} DESC`,
     ),
+    // Serves `InvariantOutputStore.latest()` — `(invariant_type, target_id)`
+    // ORDER BY `created_at DESC`, the per-candidate-story read on the FEED
+    // path.  Neither index above covers it: both key through `target_type`,
+    // which this query does not filter on, so it fetched the target's whole
+    // history and sorted it to take one row (migration 0101).
+    index('invariant_outputs_type_target_latest_idx').on(
+      t.invariantType,
+      t.targetId,
+      sql`${t.createdAt} DESC`,
+    ),
     check('invariant_outputs_confidence', sql`${t.confidence} >= 0 and ${t.confidence} <= 1`),
     check('invariant_outputs_coverage', sql`${t.coverage} >= 0 and ${t.coverage} <= 1`),
     // The type/target vocabularies are DERIVED from the single-source arrays
