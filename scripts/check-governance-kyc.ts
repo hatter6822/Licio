@@ -1235,16 +1235,38 @@ function importsOfExcludedTests(
       sources.push({ path: file, content: read(file) });
     } catch {}
   }
-  return withParsedSources(sources, (parsed) =>
+  return withParsedSources(sources, (parsed, project) =>
     parsed.flatMap(({ path, root }) => {
       const issues: string[] = [];
+      /**
+       * Whether a callee loads a module: `import(…)`, `require(…)`, or a name
+       * bound to `require`.
+       *
+       * Read from what the callee BINDS TO, not from how it is spelled — `const
+       * load = require; load('./x.test.cjs')` loads exactly as `require` does,
+       * and the repository already made this correction for the router
+       * constructor and the guard name.
+       */
+      const loadsAModule = (callee: Syntax, hop = 0): boolean => {
+        if (callee.kind === SyntaxKind.ImportKeyword) return true;
+        if (callee.kind !== SyntaxKind.Identifier || hop > MAX_HOPS) return false;
+        if (nameOf(callee) === 'require') return true;
+        const declaration = project.checker
+          .getSymbolAtPosition(String(root.path), callee.getStart())
+          ?.declarations.find((each) => String(each.path) === String(root.path))
+          ?.resolve(project) as unknown as Syntax | undefined;
+        if (declaration?.kind !== SyntaxKind.VariableDeclaration) return false;
+        const held = unwrap(declaration.initializer);
+        return held === undefined ? false : loadsAModule(held, hop + 1);
+      };
+
       for (const node of walk(root)) {
         // Read from the PARSE, static and DYNAMIC alike.  A regex over `from
         // '…'` saw neither `(await import('./x.test.js')).createRoutes()` nor
         // `import('./x.test.js')`, so a route module mounted that way stayed
         // unjudged — the shape this check exists to catch, spelled the other
         // way.  `require` counts too: it names a module just as an import does.
-        const specifier = moduleSpecifierOf(node);
+        const specifier = moduleSpecifierOf(node, (callee) => loadsAModule(callee));
         if (specifier === undefined || !specifier.startsWith('.')) continue;
         const resolved = posix.normalize(posix.join(posix.dirname(path), specifier));
         const target = sourceOfSpecifier(resolved);
@@ -1268,21 +1290,48 @@ function importsOfExcludedTests(
  * TypeScript's `import x = require('…')` — whose specifier hides in an
  * `ExternalModuleReference` and so belongs to neither of the first two shapes.
  */
-function moduleSpecifierOf(node: Syntax): string | undefined {
+function moduleSpecifierOf(
+  node: Syntax,
+  loadsAModule: (callee: Syntax) => boolean,
+): string | undefined {
   if (node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration) {
+    // A TYPE-ONLY declaration is ERASED: it cannot mount a router, so treating
+    // it as an import blocked CI over a module the build never loads.  Both
+    // spellings count — `import type { T } from …`, and a declaration whose
+    // every named binding carries its own `type`.
+    if (isTypeOnlyDeclaration(node)) return undefined;
     return staticString(node.moduleSpecifier);
   }
   if (node.kind === SyntaxKind.ImportEqualsDeclaration) {
+    if (node.isTypeOnly === true) return undefined;
     const reference = node.moduleReference;
     return reference === undefined ? undefined : staticString(reference.expression);
   }
   if (node.kind !== SyntaxKind.CallExpression) return undefined;
   const callee = unwrap(node.expression);
   if (callee === undefined) return undefined;
-  const loads =
-    callee.kind === SyntaxKind.ImportKeyword ||
-    (callee.kind === SyntaxKind.Identifier && nameOf(callee) === 'require');
-  return loads ? staticString((node.arguments ?? [])[0]) : undefined;
+  return loadsAModule(callee) ? staticString((node.arguments ?? [])[0]) : undefined;
+}
+
+/**
+ * Whether an import or export declaration is wholly TYPE-ONLY.
+ *
+ * `import type { T } from …` says so on the clause; `import { type T } from …`
+ * says it on each specifier, and the declaration is erased only when EVERY
+ * binding is type-only and no default or namespace binding survives.
+ */
+function isTypeOnlyDeclaration(node: Syntax): boolean {
+  if (node.isTypeOnly === true) return true;
+  const clause = node.importClause ?? node.exportClause;
+  if (clause === undefined) return false;
+  if (clause.isTypeOnly === true) return true;
+  // `import def, { type T } from …` still binds `def` at runtime.
+  if (clause.kind === SyntaxKind.ImportClause && clause.name !== undefined) return false;
+  const bindings = clause.namedBindings ?? clause;
+  if (bindings.kind === SyntaxKind.NamespaceImport) return false;
+  const elements = bindings.elements;
+  if (elements === undefined || elements.length === 0) return false;
+  return elements.every((each) => each.isTypeOnly === true);
 }
 
 /**

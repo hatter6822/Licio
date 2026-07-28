@@ -505,6 +505,59 @@ app.post('/rooms/:roomId/governance/vote', async (c) => c.json(await castVote())
     expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
   });
 
+  it('reports an ALIASED require of a test path', () => {
+    // Read from what the callee BINDS TO, not from how it is spelled.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "const load = require;\nconst secret = load('./secret.test.cjs');\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.cts':
+          'export const createSecretRoutes = () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
+  it.each([
+    ['a type-only declaration', "import type { Fixture } from './secret.test.js';"],
+    ['per-specifier type-only', "import { type Fixture } from './secret.test.js';"],
+    ['a type-only re-export', "export type { Fixture } from './secret.test.js';"],
+  ])('does NOT report %s — it is erased and mounts nothing', (_label, statement) => {
+    // Blocking CI over a module the build never loads is the failure direction
+    // that gets a gate switched off.
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      `${statement}\nimport { createAuthRoutes }`,
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.ts': 'export type Fixture = { a: 1 };',
+      }),
+      live,
+    );
+    expect(issues).not.toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
+  it('still reports a VALUE import beside a type-only one', () => {
+    const v1 = readRepo('apps/api/src/routes/v1.ts').replace(
+      'import { createAuthRoutes }',
+      "import make, { type Fixture } from './secret.test.js';\nimport { createAuthRoutes }",
+    );
+    const issues = runGovernanceKycGate(
+      withFiles({
+        'apps/api/src/routes/v1.ts': v1,
+        'apps/api/src/routes/secret.test.ts': 'export default () => new Hono();',
+      }),
+      live,
+    );
+    expect(issues).toContainEqual(expect.stringContaining('a TEST path the gate deliberately'));
+  });
+
   it("reports TypeScript's `import x = require(…)` of a test path", () => {
     // The specifier hides in an `ExternalModuleReference`, so it belongs to
     // neither the declaration nor the call shape.

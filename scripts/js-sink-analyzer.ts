@@ -485,7 +485,6 @@ function declarationOf(identifier: Syntax, project: Project): Syntax | undefined
  * see {@link foldabilityOf}.
  */
 const BINDS_ELSEWHERE: ReadonlySet<number> = new Set([
-  SyntaxKind.CatchClause,
   SyntaxKind.FunctionDeclaration,
   SyntaxKind.FunctionExpression,
   SyntaxKind.ArrowFunction,
@@ -516,7 +515,12 @@ type Foldability = 'const' | 'default' | 'no';
 function foldabilityOf(declaration: Syntax): Foldability {
   let owner: Syntax | undefined = declaration.parent;
   for (let hop = 0; owner !== undefined && hop <= MAX_HOPS; hop += 1) {
-    if (owner.kind === SyntaxKind.Parameter) return 'default';
+    // A parameter and a CATCH binding are the same case: the incoming value is
+    // supplied from outside and unfoldable, while the default beside it is
+    // written here and is what binds when that value omits the property.
+    if (owner.kind === SyntaxKind.Parameter || owner.kind === SyntaxKind.CatchClause) {
+      return 'default';
+    }
     if (owner.kind === SyntaxKind.VariableDeclarationList) {
       return /^const\b/.test(owner.getText()) ? 'const' : 'no';
     }

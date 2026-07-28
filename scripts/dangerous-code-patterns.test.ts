@@ -1296,6 +1296,9 @@ describe('the BOUNDED rule: `eval` and `Function` are never mentioned', () => {
       "const fn = ({ key } = { key: 'eval' }) => globalThis[key]('x'); fn();",
     ],
     ['a plain parameter default', "const fn = (key = 'eval') => globalThis[key]('x'); fn();"],
+    // A CATCH binding is the same case: the thrown value is supplied from
+    // outside and unfoldable, the default beside it is written here.
+    ['a catch-binding default', "try { x(); } catch ({ k = 'eval' }) { globalThis[k]('x'); }"],
     // A default applies when the property is ABSENT *or* explicitly undefined;
     // JavaScript makes no distinction.
     [
