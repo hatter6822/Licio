@@ -14,24 +14,39 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // unbounded app growth has a brake too.  The total is a RATCHET: it moves
 // only by an explicit, reviewed adjustment when an audited feature ships,
 // and always stays within ~3 KiB of the measured build so silent growth
-// keeps failing fast.  (Last adjusted for the WS-T challenge-policy pass:
-// measured 330.5 KiB — the standing endpoint's response schema + query, the
-// correction composer's pre-flight quota/target line with its pure copy
-// model, and the withdraw dialog's grace/penalized consequence; the initial
-// payload is unchanged at 164.2 KiB (all of it rides the lazy story-surface
-// chunks).  The standing policy echo was audited down to the CONSUMED subset
-// first (the client parses only opens_per_day / withdraw_grace_ms /
-// settle_threshold) — the residual growth is the composer/dialog copy and
-// gating, which is the feature.  Previous adjustments: the story-surface
-// pass (+3.0 KiB, 324.2 → 327.2 — live-debates modal, dispute-tinted card
-// edge, article card) and scoped search + the banner governance action
-// (+2.3 KiB).  Splitting the governance modal into its own chunk was
-// measured and REJECTED: its tree is shared with the room page, so the split
-// moved bytes between chunks and added boundary cost rather than removing
-// any — the same reasoning applies to the debate modal, which shares its
-// tree with both story surfaces.)
-const INITIAL_JS_BUDGET_BYTES = 200 * 1024;
-const TOTAL_JS_BUDGET_BYTES = 333 * 1024;
+// keeps failing fast.
+//
+// BOTH figures were re-based when the plane chunks were made genuinely lazy.
+// They had been measuring the wrong thing: rolldown's chunk groups capture
+// their members' dependencies recursively by default, so the two lazy planes
+// had absorbed `zod`, `@licio/shared` and the `@licio/lcap` core, every eager
+// chunk that needed those carried a STATIC import of a plane chunk, and
+// index.html preloaded both.  A first paint really downloaded ~433 KiB gz
+// while this file reported 164.4 KiB, because the plane exemption below ran
+// BEFORE the initial-payload accounting.  With the groups fixed
+// (`includeDependenciesRecursively: false` in apps/web/vite.config.ts) no
+// plane chunk is preloaded at all, and the honest numbers are:
+//
+//   initial 213.7 KiB gz — DOWN from a real 433 KiB, up from a reported 164;
+//                          the delta against the old report is the shared
+//                          cores (zod / @licio/shared / @licio/lcap), which
+//                          the eager app has always needed and which were
+//                          simply being billed to the plane budget;
+//   total   452.8 KiB gz — up from 331.2, of which ~104 KiB is the same
+//                          re-billing (the plane chunks fell 262 → 158 KiB)
+//                          and ~17 KiB is per-chunk duplication that not
+//                          capturing dependencies recursively costs.
+//
+// Previous adjustments (all still in force, measured against the old
+// accounting): the WS-T challenge-policy pass, the story-surface pass
+// (+3.0 KiB — live-debates modal, dispute-tinted card edge, article card) and
+// scoped search + the banner governance action (+2.3 KiB).  Splitting the
+// governance modal into its own chunk was measured and REJECTED: its tree is
+// shared with the room page, so the split moved bytes between chunks and added
+// boundary cost rather than removing any — the same reasoning applies to the
+// debate modal, which shares its tree with both story surfaces.
+const INITIAL_JS_BUDGET_BYTES = 216 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 456 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 // WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily
@@ -96,6 +111,8 @@ function check(): void {
   let privateChunkGzipped = 0;
   let privateChunkRaw = 0;
   const privateChunkFiles: string[] = [];
+  /** Plane chunks index.html actually preloads — the exemption's premise, broken. */
+  const eagerPlaneChunks: Array<{ name: string; gzipped: number }> = [];
   let largestChunk = { name: '', raw: 0, gzipped: 0 };
   const assets: Array<{ name: string; raw: number; gzipped: number }> = [];
 
@@ -107,14 +124,25 @@ function check(): void {
     assets.push({ name: file, raw: content.length, gzipped: gzipped.length });
 
     if (file.endsWith('.js')) {
-      // WS-S.2.1 — the lazily code-split private-p2p chunk is measured against
-      // its OWN budget and excluded from the core total / largest-chunk figures
-      // (it can never reach the initial load, which the CSP/route-split + the
-      // `check:lcap-p2p-split`-style dynamic-import discipline guarantee).
+      // WS-S.2.1 — the lazily code-split plane chunks are measured against
+      // their OWN budget and excluded from the core total / largest-chunk
+      // figures.  That exclusion rests ENTIRELY on one premise: a plane chunk
+      // never reaches the initial load.  The premise is checked below rather
+      // than assumed — it had silently stopped holding, because rolldown's
+      // chunk groups capture their members' dependencies recursively and the
+      // planes had thereby absorbed `zod`, `@licio/shared` and the
+      // `@licio/lcap` core, making both chunks static dependencies of the eager
+      // graph.  Since the `continue` here ran BEFORE the initial-payload
+      // accounting, 269 KiB gz of MLS/HPKE/curve and QR-decoder code rode the
+      // first paint while this gate reported 164 KiB and passed.  An exemption
+      // that cannot detect its own precondition failing is not a budget.
       if (PRIVATE_CHUNK_PATTERN.test(file)) {
         privateChunkRaw += content.length;
         privateChunkGzipped += gzipped.length;
         privateChunkFiles.push(file);
+        if (initialFiles.has(file)) {
+          eagerPlaneChunks.push({ name: file, gzipped: gzipped.length });
+        }
         continue;
       }
       totalJsRaw += content.length;
@@ -187,6 +215,21 @@ function check(): void {
   );
 
   const errors: string[] = [];
+  // The exemption's PREMISE, checked before the budgets that depend on it.
+  // A plane chunk index.html preloads is downloaded at first paint, so its
+  // bytes are initial payload no matter what the file name says — and the
+  // separate budget it enjoys is measuring the wrong thing.
+  for (const chunk of eagerPlaneChunks) {
+    errors.push(
+      `${chunk.name} is a lazy-plane chunk but index.html PRELOADS it: ` +
+        `${formatSize(chunk.gzipped)} gzipped rides the initial payload. ` +
+        'The separate plane budget assumes the plane is reached only through a ' +
+        'dynamic import; something in the eager graph now imports it statically ' +
+        '(check the modules `manualChunks` assigns to this chunk in ' +
+        'apps/web/vite.config.ts — the plane GLUE directories are the usual cause, ' +
+        'since the split gates only police the `@licio/*` package specifiers).',
+    );
+  }
   if (!report.initialJs.withinBudget) {
     errors.push(
       `Initial JS budget exceeded: ${formatSize(initialJsGzipped)} > ${formatSize(INITIAL_JS_BUDGET_BYTES)}`,
