@@ -332,6 +332,17 @@ export interface AttentionAggregateStore {
   anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number>;
   /** Delete an owner's rows older than the cutoff (preference `none`). */
   deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number>;
+  /**
+   * The same two operations over MANY owners sharing one cutoff.
+   *
+   * The retention sweep walks every identifiable owner and issues one to two
+   * statements per owner, serially, over a list with no bound — it is the whole
+   * user base, so the tick's cost grows with the platform.  The cutoff is a
+   * function of the owner's PREFERENCE, not of the owner, so the work
+   * partitions into a handful of groups that each need exactly one statement.
+   */
+  anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number>;
+  deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number>;
   /** Delete already-anonymized rows older than the hard cap. */
   deleteAnonymizedOlderThan(cutoffIso: string): Promise<number>;
   /** Compliance audit: identifiable rows older than the cutoff (expect 0). */
@@ -389,10 +400,19 @@ export class InMemoryAttentionAggregateStore implements AttentionAggregateStore 
   }
 
   async anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+    return this.anonymizeOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+    return this.deleteOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
     const cutoff = Date.parse(cutoffIso);
+    const wanted = new Set(owners);
     let changed = 0;
     for (const row of this.#rows.values()) {
-      if (row.user_id_or_privacy_bucket === owner && Date.parse(row.created_at) < cutoff) {
+      if (wanted.has(row.user_id_or_privacy_bucket) && Date.parse(row.created_at) < cutoff) {
         row.user_id_or_privacy_bucket = PRIVACY_BUCKET;
         row.privacy_level = 'minimum';
         changed += 1;
@@ -401,11 +421,12 @@ export class InMemoryAttentionAggregateStore implements AttentionAggregateStore 
     return changed;
   }
 
-  async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+  async deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
     const cutoff = Date.parse(cutoffIso);
+    const wanted = new Set(owners);
     let removed = 0;
     for (const [id, row] of this.#rows) {
-      if (row.user_id_or_privacy_bucket === owner && Date.parse(row.created_at) < cutoff) {
+      if (wanted.has(row.user_id_or_privacy_bucket) && Date.parse(row.created_at) < cutoff) {
         this.#rows.delete(id);
         removed += 1;
       }
@@ -1118,6 +1139,8 @@ export interface ActorBehaviorStore {
   deleteAuthenticityOlderThan(cutoffIso: string): Promise<number>;
   /** Deletion-path purge: behavior state never outlives the account. */
   purgeActor(actorRef: string): Promise<number>;
+  /** The same purge over many actors — see `anonymizeOwnedOlderThanMany`. */
+  purgeActors(actorRefs: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -1199,14 +1222,19 @@ export class InMemoryActorBehaviorStore implements ActorBehaviorStore {
   }
 
   async purgeActor(actorRef: string): Promise<number> {
+    return this.purgeActors([actorRef]);
+  }
+
+  async purgeActors(actorRefs: readonly string[]): Promise<number> {
+    const wanted = new Set(actorRefs);
     let removed = 0;
     for (const [key, row] of this.#windows) {
-      if (row.actorRef === actorRef) {
+      if (wanted.has(row.actorRef)) {
         this.#windows.delete(key);
         removed += 1;
       }
     }
-    if (this.#scores.delete(actorRef)) removed += 1;
+    for (const actorRef of wanted) if (this.#scores.delete(actorRef)) removed += 1;
     return removed;
   }
 

@@ -18,7 +18,7 @@ import {
   lcapObjects,
   lcapRecordClosure,
 } from '@licio/db';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   AcceptContributionResult,
@@ -44,6 +44,24 @@ export class DrizzleLcapServerStore implements LcapServerStore {
       .where(eq(lcapObjects.cid, cid))
       .limit(1);
     return rows.length > 0;
+  }
+
+  async hasObjects(cids: readonly string[]): Promise<Set<string>> {
+    const held = new Set<string>();
+    if (cids.length === 0) return held;
+    // De-duplicated, and chunked well under Postgres's 65535 bind-parameter
+    // ceiling: the caller's bound is 4096 today, but a store must not depend on
+    // its caller's cap staying where it is.
+    const unique = [...new Set(cids)];
+    const CHUNK = 1000;
+    for (let at = 0; at < unique.length; at += CHUNK) {
+      const rows = await this.#db
+        .select({ cid: lcapObjects.cid })
+        .from(lcapObjects)
+        .where(inArray(lcapObjects.cid, unique.slice(at, at + CHUNK)));
+      for (const row of rows) held.add(row.cid);
+    }
+    return held;
   }
 
   async getObject(cid: string): Promise<StoredObject | undefined> {

@@ -38,6 +38,28 @@ function contract(makeStore: () => LcapServerStore): void {
     expect(got && new Uint8Array(got.bytes)).toEqual(enc.encode('hello'));
   });
 
+  it('answers membership for MANY cids in one lookup, agreeing with hasObject', async () => {
+    // `POST /exchange` resolves the client pulse's referenced CIDs — up to 4096
+    // — into a `have` predicate.  Per-CID `hasObject` made that one round-trip
+    // apiece: a single well-formed request from an unauthenticated peer driving
+    // thousands of sequential queries, which is the amplifier the §27.1 cap
+    // bounds the COUNT of.
+    const store = makeStore();
+    await store.storeObject('h1', 'record', enc.encode('one'));
+    await store.storeObject('h2', 'record', enc.encode('two'));
+    const held = await store.hasObjects(['h1', 'missing', 'h2', 'also-missing']);
+    expect([...held].sort()).toEqual(['h1', 'h2']);
+    // Row for row with the single-CID reader, which is what the route's
+    // behaviour must be unchanged against.
+    for (const cid of ['h1', 'h2', 'missing', 'also-missing']) {
+      expect(held.has(cid)).toBe(await store.hasObject(cid));
+    }
+    // Duplicates collapse rather than double-count, and an empty ask is not a
+    // query at all.
+    expect([...(await store.hasObjects(['h1', 'h1', 'h1']))]).toEqual(['h1']);
+    expect((await store.hasObjects([])).size).toBe(0);
+  });
+
   it('appends acceptance with a monotonic per-room seq + isAccepted/roomSize/roomSeqOf', async () => {
     const store = makeStore();
     expect(await store.isAccepted('a')).toBe(false);

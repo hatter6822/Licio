@@ -123,6 +123,90 @@ describe('retention sweeps (WS-E.1.4)', () => {
     expect(report.anonymizedHardCapDeleted).toBeGreaterThanOrEqual(1);
   });
 
+  it('sweeps MIXED preferences in one pass, grouped by cutoff, without cross-contaminating', async () => {
+    // The sweep used to issue one to two statements PER OWNER, serially, over a
+    // list with no bound of its own — the whole user base — so a maintenance
+    // tick's cost grew with the platform.  The cutoff is a function of the
+    // PREFERENCE, not of the owner, so the work groups.  What has to survive the
+    // grouping is that each owner still gets their OWN policy: a `none` owner
+    // must be deleted at the ranking window and never merely anonymized, and a
+    // `default` owner must not be deleted because someone else chose `none`.
+    const now = Date.now();
+    const mk = async (preference: 'none' | 'minimal' | 'default') => {
+      const { userId } = await seedUserWithSession(fixture.identity, {
+        privacySettings: {
+          ...defaultPrivacySettings(),
+          attention_retention_preference: preference,
+        },
+      });
+      await fixture.events.attentionStore.insertMany([
+        {
+          aggregate_id: randomUUID(),
+          user_id_or_privacy_bucket: userId,
+          story_id: randomUUID(),
+          session_bucket: 's',
+          active_dwell_bucket: 'short',
+          source_opened: false,
+          context_opened: false,
+          branch_depth_bucket: 'none',
+          return_visit_count_bucket: 'none',
+          privacy_level: 'standard',
+          // Old enough that every policy's cutoff has passed.
+          created_at: new Date(now - 400 * DAY).toISOString(),
+        },
+      ]);
+      return userId;
+    };
+    // Two owners per group: a per-owner loop and a grouped statement agree on
+    // one owner per group, so only a second one can tell them apart.
+    const noneOwners = [await mk('none'), await mk('none')];
+    const minimalOwners = [await mk('minimal'), await mk('minimal')];
+    const defaultOwners = [await mk('default'), await mk('default')];
+
+    const counted = { anonymize: 0, delete: 0, purge: 0 };
+    const store = fixture.events.attentionStore;
+    const behavior = fixture.events.behaviorStore;
+    const realAnon = store.anonymizeOwnedOlderThanMany.bind(store);
+    const realDel = store.deleteOwnedOlderThanMany.bind(store);
+    const realPurge = behavior.purgeActors.bind(behavior);
+    store.anonymizeOwnedOlderThanMany = async (...a) => {
+      counted.anonymize += 1;
+      return realAnon(...a);
+    };
+    store.deleteOwnedOlderThanMany = async (...a) => {
+      counted.delete += 1;
+      return realDel(...a);
+    };
+    behavior.purgeActors = async (...a) => {
+      counted.purge += 1;
+      return realPurge(...a);
+    };
+
+    const report = await runRetentionSweeps(fixture.events, fixture.identity, now);
+
+    // Each `none` owner's row is GONE, not anonymized.
+    for (const owner of noneOwners) {
+      expect(await store.listByUser(owner)).toHaveLength(0);
+    }
+    // Each anonymizing owner's row is gone from THEIR view (moved to the
+    // privacy bucket) — the deletion count must not have swallowed them.
+    for (const owner of [...minimalOwners, ...defaultOwners]) {
+      expect(await store.listByUser(owner)).toHaveLength(0);
+    }
+    expect(report.aggregatesDeleted).toBeGreaterThanOrEqual(noneOwners.length);
+    expect(report.aggregatesAnonymized).toBeGreaterThanOrEqual(
+      minimalOwners.length + defaultOwners.length,
+    );
+
+    // The point of the change: a bounded number of statements, independent of
+    // the owner count.  One delete for the `none` group, one behaviour purge,
+    // and one anonymize per DISTINCT cutoff (minimal and default differ) — six
+    // owners, not six-to-twelve statements.
+    expect(counted.delete).toBe(1);
+    expect(counted.purge).toBe(1);
+    expect(counted.anonymize).toBeLessThanOrEqual(2);
+  });
+
   it('deletes per the CURRENT preference: `none` owners lose rows after the ranking window', async () => {
     const now = Date.now();
     const { userId } = await seedUserWithSession(fixture.identity, {

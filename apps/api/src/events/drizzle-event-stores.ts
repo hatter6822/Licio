@@ -414,30 +414,58 @@ export class DrizzleAttentionAggregateStore implements AttentionAggregateStore {
   }
 
   async anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
-    const updated = await this.#db
-      .update(attentionAggregates)
-      .set({ userIdOrPrivacyBucket: PRIVACY_BUCKET, privacyLevel: 'minimum' })
-      .where(
-        and(
-          eq(attentionAggregates.userIdOrPrivacyBucket, owner),
-          sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
-        ),
-      )
-      .returning({ aggregateId: attentionAggregates.aggregateId });
-    return updated.length;
+    return this.anonymizeOwnedOlderThanMany([owner], cutoffIso);
   }
 
   async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
-    const removed = await this.#db
-      .delete(attentionAggregates)
-      .where(
-        and(
-          eq(attentionAggregates.userIdOrPrivacyBucket, owner),
-          sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
-        ),
-      )
-      .returning({ aggregateId: attentionAggregates.aggregateId });
-    return removed.length;
+    return this.deleteOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
+    return this.#ownerChunks(owners, async (chunk) => {
+      const updated = await this.#db
+        .update(attentionAggregates)
+        .set({ userIdOrPrivacyBucket: PRIVACY_BUCKET, privacyLevel: 'minimum' })
+        .where(
+          and(
+            inArray(attentionAggregates.userIdOrPrivacyBucket, chunk),
+            sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
+          ),
+        )
+        .returning({ aggregateId: attentionAggregates.aggregateId });
+      return updated.length;
+    });
+  }
+
+  async deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
+    return this.#ownerChunks(owners, async (chunk) => {
+      const removed = await this.#db
+        .delete(attentionAggregates)
+        .where(
+          and(
+            inArray(attentionAggregates.userIdOrPrivacyBucket, chunk),
+            sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
+          ),
+        )
+        .returning({ aggregateId: attentionAggregates.aggregateId });
+      return removed.length;
+    });
+  }
+
+  /** Run `fn` over de-duplicated owner chunks, summing the counts.  Chunked well
+   *  under Postgres's 65535 bind-parameter ceiling: the owner list is the whole
+   *  user base and has no bound of its own. */
+  async #ownerChunks(
+    owners: readonly string[],
+    fn: (chunk: string[]) => Promise<number>,
+  ): Promise<number> {
+    const unique = [...new Set(owners)];
+    const CHUNK = 1000;
+    let total = 0;
+    for (let at = 0; at < unique.length; at += CHUNK) {
+      total += await fn(unique.slice(at, at + CHUNK));
+    }
+    return total;
   }
 
   async deleteAnonymizedOlderThan(cutoffIso: string): Promise<number> {
@@ -1278,15 +1306,26 @@ export class DrizzleActorBehaviorStore implements ActorBehaviorStore {
   }
 
   async purgeActor(actorRef: string): Promise<number> {
-    const windows = await this.#db
-      .delete(actorBehaviorWindows)
-      .where(eq(actorBehaviorWindows.actorRef, actorRef))
-      .returning({ actorRef: actorBehaviorWindows.actorRef });
-    const scores = await this.#db
-      .delete(actorAuthenticityScores)
-      .where(eq(actorAuthenticityScores.actorRef, actorRef))
-      .returning({ actorRef: actorAuthenticityScores.actorRef });
-    return windows.length + scores.length;
+    return this.purgeActors([actorRef]);
+  }
+
+  async purgeActors(actorRefs: readonly string[]): Promise<number> {
+    const unique = [...new Set(actorRefs)];
+    const CHUNK = 1000;
+    let total = 0;
+    for (let at = 0; at < unique.length; at += CHUNK) {
+      const chunk = unique.slice(at, at + CHUNK);
+      const windows = await this.#db
+        .delete(actorBehaviorWindows)
+        .where(inArray(actorBehaviorWindows.actorRef, chunk))
+        .returning({ actorRef: actorBehaviorWindows.actorRef });
+      const scores = await this.#db
+        .delete(actorAuthenticityScores)
+        .where(inArray(actorAuthenticityScores.actorRef, chunk))
+        .returning({ actorRef: actorAuthenticityScores.actorRef });
+      total += windows.length + scores.length;
+    }
+    return total;
   }
 
   async clear(): Promise<void> {

@@ -136,30 +136,51 @@ export async function runRetentionSweeps(
       preferenceByOwner.set(user.userId, user.privacySettings.attention_retention_preference);
     }
   }
+  // The cutoff is a function of the owner's PREFERENCE, not of the owner, so the
+  // sweep partitions into groups that each need exactly ONE statement.  It used
+  // to issue one to two statements per owner, serially, over a list with no
+  // bound of its own — the whole user base — so a maintenance tick's cost grew
+  // with the platform and one slow statement delayed every owner behind it.
+  const byCutoff = new Map<string, string[]>();
+  const purgeBehaviorFor: string[] = [];
+  const noneCutoff = new Date(now - RANKING_WINDOW_MS).toISOString();
+  const noneOwners: string[] = [];
   for (const owner of owners) {
     const preference = preferenceByOwner.get(owner) ?? 'default';
     if (preference === 'none') {
-      report.aggregatesDeleted += await events.attentionStore.deleteOwnedOlderThan(
-        owner,
-        new Date(now - RANKING_WINDOW_MS).toISOString(),
-      );
+      noneOwners.push(owner);
       // Bot-prevention layer 2: the derived behavior snapshots + authenticity
       // assessment are attention-derived state, so for a `none`-preference owner
       // (whose aggregates do not outlive the ranking window) they must NOT linger
       // to the 14-day BAI horizon — same coupling as reset/deletion
       // (`purgeUserAttention`). Honors the selected retention, and a `none` actor
       // simply never accrues a persisted BAI signature.
-      report.behaviorStatePurged += await events.behaviorStore.purgeActor(owner);
-    } else {
-      const windowDays = Math.min(
-        preference === 'minimal' ? aggregatedWindow.min : aggregatedWindow.max,
-        tierMaxDays,
-      );
-      report.aggregatesAnonymized += await events.attentionStore.anonymizeOwnedOlderThan(
-        owner,
-        isoDaysAgo(now, windowDays),
-      );
+      purgeBehaviorFor.push(owner);
+      continue;
     }
+    const windowDays = Math.min(
+      preference === 'minimal' ? aggregatedWindow.min : aggregatedWindow.max,
+      tierMaxDays,
+    );
+    const cutoff = isoDaysAgo(now, windowDays);
+    const bucket = byCutoff.get(cutoff);
+    if (bucket) bucket.push(owner);
+    else byCutoff.set(cutoff, [owner]);
+  }
+  if (noneOwners.length > 0) {
+    report.aggregatesDeleted += await events.attentionStore.deleteOwnedOlderThanMany(
+      noneOwners,
+      noneCutoff,
+    );
+  }
+  if (purgeBehaviorFor.length > 0) {
+    report.behaviorStatePurged += await events.behaviorStore.purgeActors(purgeBehaviorFor);
+  }
+  for (const [cutoff, group] of byCutoff) {
+    report.aggregatesAnonymized += await events.attentionStore.anonymizeOwnedOlderThanMany(
+      group,
+      cutoff,
+    );
   }
   // Anonymized rows persist only to the hard cap, then delete.
   report.anonymizedHardCapDeleted = await events.attentionStore.deleteAnonymizedOlderThan(
