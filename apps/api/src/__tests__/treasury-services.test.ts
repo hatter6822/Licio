@@ -385,6 +385,30 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     expect(await port.eligibleMemberCount(ROOM)).toBe(42);
   });
 
+  it('an UNKNOWN join is unjudgeable for the freeze, but still has an age', async () => {
+    // Every production writer of an active subscription stamps `joinedAt`, so a
+    // null is a row from before the field.  The two answers take the fallback
+    // differently on purpose: for the FREEZE, judging it by `requestedAt` would
+    // answer with the one instant already known to be wrong, so it reports
+    // unknown and the ballot gate admits it — as it admits a steward whose seat
+    // carries no join instant.  For the AGE, `requestedAt` is the pre-existing
+    // estimate; a null there fails a treasury-controlling vote CLOSED and would
+    // lock the member out entirely.
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    const port = buildMembershipFactsPort(
+      forumOf({
+        status: 'active',
+        requestedAt: new Date(fixture.knomosis.now() - 10 * 86_400_000).toISOString(),
+      }),
+      identityOf(true),
+      fixture.knomosis,
+    );
+    const facts = await port.memberFacts(ROOM, USER);
+    expect(facts?.memberSince ?? null).toBeNull();
+    expect(facts?.membershipDays).toBe(10);
+  });
+
   it('the basis is counted AS OF the freeze instant, not live beside it', async () => {
     // A count taken live and an instant stamped beside it are two answers to
     // one question, and the gap between them is the sweep's own runtime: a

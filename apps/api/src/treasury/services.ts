@@ -95,11 +95,21 @@ export function buildMembershipFactsPort(
     // could ask to join BEFORE an election opened, sit pending — and therefore
     // outside the frozen denominator — be approved after, and then pass the
     // cutoff on the strength of a timestamp that predates a membership it did
-    // not yet hold.  `joinedAt` is null only for a row that is not active,
-    // which this function has already refused above; the fallback keeps the
-    // read total rather than asserting that.
-    const memberSince = subscription.joinedAt ?? subscription.requestedAt;
-    const membershipDays = Math.floor((knomosis.now() - Date.parse(memberSince)) / 86_400_000);
+    // not yet hold.
+    //
+    // The two answers below take the fallback DIFFERENTLY, and deliberately.
+    // Every production writer of an active subscription stamps `joinedAt`
+    // (room creation, join approval, the direct-join path), so a null here is a
+    // row from before the field — and for the FREEZE the honest answer about
+    // such a row is "unknown", which the ballot gate admits, exactly as it
+    // admits a steward whose seat carries no join instant.  Judging it by
+    // `requestedAt` instead would answer with the one instant already known to
+    // be wrong.  For the AGE, the request instant is the pre-existing estimate
+    // and keeps the row eligible; a null there fails a treasury-controlling
+    // vote CLOSED and would lock the member out entirely.
+    const memberSince = subscription.joinedAt;
+    const ageFrom = memberSince ?? subscription.requestedAt;
+    const membershipDays = Math.floor((knomosis.now() - Date.parse(ageFrom)) / 86_400_000);
     return {
       membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
       contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId),
