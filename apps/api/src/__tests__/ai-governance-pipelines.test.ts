@@ -627,6 +627,76 @@ describe('WS-K.1.4a summary generation', () => {
       expect(order).toEqual(['examine', 'examine', 'commit']);
     });
 
+    it('does NOT advance past a thread that FAILED — it is retried next tick', async () => {
+      // The per-thread catch keeps one bad thread from costing the rest of the
+      // page, and letting the cursor advance past it turned a transient failure
+      // into a summary missing until the whole corpus wraps — days on a large
+      // installation.  Re-examining the successes after the failure costs one
+      // `getLatestForThread` each; skipping the failure costs its audit summary.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      // The SECOND thread on the page throws; the first succeeds.
+      let seen = 0;
+      const real = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      const spy = vi
+        .spyOn(f.ai.summaries, 'getLatestForThread')
+        .mockImplementation(async (id: string) => {
+          seen += 1;
+          if (seen === 2) throw new Error('transient');
+          return real(id);
+        });
+      const errors: string[] = [];
+      // A page of THREE with the failure in the MIDDLE, so a thread AFTER it
+      // succeeds: that is the only shape in which "stop at the last settled
+      // thread" differs from "remember whatever finished last".
+      await runSummarySweep(f.ai, (_e, threadId) => errors.push(threadId), 3);
+      spy.mockRestore();
+      expect(errors).toHaveLength(1);
+      const failedThread = errors[0] as string;
+
+      // The cursor stopped at the thread BEFORE the failure, so the next tick
+      // re-reads the failed one rather than starting beyond it — even though a
+      // LATER thread on the same page was processed successfully.
+      const cursor = await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR);
+      expect(cursor).not.toBeNull();
+      const next = await f.forum.ingestion.stories.listThreads(
+        cursor === null ? null : { createdAt: cursor.createdAt, threadId: cursor.ref },
+        3,
+      );
+      expect(next.map((t) => t.threadId)).toContain(failedThread);
+    });
+
+    it('leaves the cursor UNTOUCHED when the very first thread fails', async () => {
+      // The folded ternary this replaced read `lastSettled === null` the same as
+      // "tail reached" and WRAPPED — the opposite of retrying.
+      const f = wired();
+      for (let i = 0; i < 3; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const spy = vi
+        .spyOn(f.ai.summaries, 'getLatestForThread')
+        .mockRejectedValue(new Error('transient'));
+      await runSummarySweep(f.ai, () => {}, 2);
+      spy.mockRestore();
+      // Never advanced: null here means "start from the newest page", which is
+      // where it already was — the failed page is re-read, not skipped.
+      expect(await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR)).toBeNull();
+    });
+
     it('WRAPS to the newest page once the tail is exhausted', async () => {
       // A thread that only later crosses the activity threshold must still be
       // reachable, so the cursor resets rather than parking at the end.

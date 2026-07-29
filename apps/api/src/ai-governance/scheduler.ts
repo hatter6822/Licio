@@ -80,18 +80,35 @@ export async function runSummarySweep(
   );
   let generated = 0;
   let skipped = 0;
+  /** The last thread processed with NO failure before it — how far the cursor
+   *  may honestly advance.  Null ⇒ the very first thread failed, so the cursor
+   *  must not move at all. */
+  let lastSettled: { createdAt: string; threadId: string } | null = null;
+  let anyFailed = false;
   for (const thread of threads) {
     try {
       if ((await deps.aiSummaries.getLatestForThread(thread.threadId)) !== null) {
         skipped += 1;
-        continue;
+      } else {
+        const outcome = await generateThreadSummary(deps, thread.threadId);
+        // `insufficient_activity` is the common, expected answer for a young
+        // thread — it is a skip, not a failure, and must not read as one.
+        if (outcome.ok) generated += 1;
+        else skipped += 1;
       }
-      const outcome = await generateThreadSummary(deps, thread.threadId);
-      // `insufficient_activity` is the common, expected answer for a young
-      // thread — it is a skip, not a failure, and must not read as one.
-      if (outcome.ok) generated += 1;
-      else skipped += 1;
+      // Only extend the committable position while nothing has failed yet: past
+      // a failure the cursor must not advance, or the failed thread is skipped.
+      if (!anyFailed) lastSettled = { createdAt: thread.createdAt, threadId: thread.threadId };
     } catch (err) {
+      // A THREAD THAT FAILED IS NOT A THREAD THAT WAS PROCESSED.  The per-thread
+      // catch keeps one bad thread from costing the rest of the page, but
+      // letting the cursor advance past it turned a transient failure into a
+      // summary missing until the whole corpus wraps — days on a large
+      // installation.  The cursor now stops at the last thread BEFORE the first
+      // failure, so the next tick retries it.  Re-examining the successes after
+      // it costs one `getLatestForThread` each; skipping the failure costs its
+      // audit summary, and that asymmetry is the whole argument.
+      anyFailed = true;
       onThreadError(err, thread.threadId);
     }
   }
@@ -104,15 +121,32 @@ export async function runSummarySweep(
   // thread costs one `getLatestForThread`, and skipping one costs its summary
   // until the wrap.
   //
-  // Exhausted the tail ⇒ start again from the newest next tick, so a thread that
-  // only later crosses the activity threshold is eventually summarized.
-  const last = threads[threads.length - 1];
-  await ai.sweepCursors.set(
-    SUMMARY_SWEEP_CURSOR,
-    threads.length < limit || last === undefined
-      ? null
-      : { createdAt: last.createdAt, ref: last.threadId },
-  );
+  // Three outcomes, spelled out rather than folded into one ternary — the
+  // folded version silently WRAPPED when the very first thread failed
+  // (`lastSettled === null` reads the same as "tail reached"), which is the
+  // opposite of retrying it.
+  if (anyFailed) {
+    // A failure suppresses the wrap too: rewinding to the newest page would put
+    // the failed thread behind a whole traversal, which is what the retry
+    // exists to avoid.  With NOTHING settled before the failure the cursor is
+    // left exactly where it was, so the next tick re-reads this same page.
+    if (lastSettled !== null) {
+      await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, {
+        createdAt: lastSettled.createdAt,
+        ref: lastSettled.threadId,
+      });
+    }
+  } else {
+    // Exhausted the tail ⇒ start again from the newest next tick, so a thread
+    // that only later crosses the activity threshold is eventually summarized.
+    const last = threads[threads.length - 1];
+    await ai.sweepCursors.set(
+      SUMMARY_SWEEP_CURSOR,
+      threads.length < limit || last === undefined
+        ? null
+        : { createdAt: last.createdAt, ref: last.threadId },
+    );
+  }
   return { examined: threads.length, generated, skipped };
 }
 

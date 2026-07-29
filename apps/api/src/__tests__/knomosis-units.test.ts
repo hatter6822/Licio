@@ -23,6 +23,7 @@ import {
   writeReceipts,
 } from '../knomosis/receipts.js';
 import {
+  canExpandForRoom,
   canExpandTreasury,
   classifyDivergence,
   compareActorLedger,
@@ -281,6 +282,39 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     // The divergence blocks treasury expansion (§28.3) even though action states agree.
     const gate = await canExpandTreasury(fixture.knomosis, deploymentId);
     expect(gate.allowed).toBe(false);
+
+    // …but ONLY for a room bound to THAT deployment.  A production
+    // `TreasuryRecord` is bound to exactly one `deploymentId`, and the
+    // all-active-deployments read this replaced held every room in the
+    // installation until an unrelated deployment was repaired — a gate
+    // answering about the wrong deployment is not conservative, it is wrong.
+    const clean = crypto.randomUUID();
+    const scoped = {
+      reconciliation: fixture.knomosis.reconciliation,
+      deployments: fixture.knomosis.deployments,
+      treasuries: { getByRoom: async () => ({ deploymentId: clean }) },
+    };
+    expect((await canExpandForRoom(scoped, 'room-on-clean')).allowed).toBe(true);
+    // A room bound to the DIVERGED deployment is still held.
+    expect(
+      (
+        await canExpandForRoom(
+          { ...scoped, treasuries: { getByRoom: async () => ({ deploymentId }) } },
+          'room-on-diverged',
+        )
+      ).allowed,
+    ).toBe(false);
+    // An UNBOUND room has no deployment to judge, so it falls back to the
+    // all-active read — explicitly conservative, and no more permissive than
+    // the behaviour this replaced.
+    expect(
+      (
+        await canExpandForRoom(
+          { ...scoped, treasuries: { getByRoom: async () => null } },
+          'room-unbound',
+        )
+      ).allowed,
+    ).toBe(false);
   });
 
   it('EVENT_STATE_OF_TYPE covers EVERY known gateway event type (N6 parity)', () => {

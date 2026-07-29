@@ -48,7 +48,7 @@ import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import { authMethodInventory } from '../identity/services.js';
 import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
-import { canExpandAnyActiveDeployment } from '../knomosis/reconciliation.js';
+import { canExpandForRoom } from '../knomosis/reconciliation.js';
 import type { KnomosisServices } from '../knomosis/services.js';
 import type {
   MembershipFactsPort,
@@ -339,7 +339,7 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
   if (rooms === null || roomMode === null) {
     throw new Error('Treasury services need the room governance + mode ports wired first');
   }
-  return {
+  const services: TreasuryServices = {
     // WS-M stores (production boot swaps Drizzle adapters in by assignment).
     profiles: new InMemoryGovernanceProfileStore(),
     charters: new InMemoryCharterStore(),
@@ -374,7 +374,15 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
     // zero callers while five sibling comments reasoned about it as a live
     // control; this is the wiring that makes it one.  Unwired, the readiness
     // gate refuses expansion rather than skipping the check.
-    canExpandDeployment: async () => canExpandAnyActiveDeployment(knomosis),
+    // Scoped to the ROOM's own deployment: a divergence on another active
+    // deployment describes an expansion that is not this room's.
+    // Reads `services.treasuries` AT CALL TIME, never a captured instance: the
+    // production boot swaps the Drizzle adapter onto this field by assignment,
+    // so a closure over the constructor's in-memory store would answer from the
+    // discarded adapter — the same way the AI container's hand-assigned Drizzle
+    // stores were silently skipped.
+    canExpandDeployment: async (roomId) =>
+      canExpandForRoom({ ...knomosis, treasuries: services.treasuries }, roomId),
     // WS-K.2.2a §24.5 — the advisory pass over a newly published proposal.
     // `buildGovernanceAiDeps` was the one wiring builder with no production
     // caller, so `governance-ai.ts` (the whole §24.5 permitted-capability set:
@@ -427,6 +435,7 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
     // THIS, never the erasable actor_user_id, so erasure never breaks verify.
     opaqueRef: (id: string) => accountRef(knomosis.masterSecret, `governance-audit:${id}`),
   };
+  return services;
 }
 
 let singleton: TreasuryServices | null = null;

@@ -466,6 +466,33 @@ async function raiseDivergence(
  * about to happen, and including them would leave a retired deployment blocking
  * every room for ever.
  */
+/**
+ * §28.3 expansion gate FOR ONE ROOM: the room's own bound deployment.
+ *
+ * `canExpandAnyActiveDeployment` (below) treats an unresolved mismatch on ANY
+ * active deployment as blocking for EVERY room, but a production
+ * `TreasuryRecord` is bound to exactly one `deploymentId` — so a divergence on
+ * deployment B was refusing expansion to a room whose treasury lives on
+ * deployment A until B was repaired.  A gate answering about the wrong
+ * deployment is not a conservative gate, it is a wrong one: it holds rooms that
+ * nothing has diverged for.
+ *
+ * A room with NO treasury yet has no deployment to judge, so it falls back to
+ * the all-active-deployments read — explicitly conservative, and no more
+ * permissive than the behaviour this replaces.
+ */
+export async function canExpandForRoom(
+  deps: Pick<ReconciliationDeps, 'reconciliation'> & {
+    deployments: { list(): Promise<ReadonlyArray<{ deploymentId: string; status: string }>> };
+    treasuries: { getByRoom(roomId: string): Promise<{ deploymentId: string } | null> };
+  },
+  roomId: string,
+): Promise<{ allowed: boolean; blocking: number }> {
+  const treasury = await deps.treasuries.getByRoom(roomId);
+  if (treasury === null) return canExpandAnyActiveDeployment(deps);
+  return canExpandTreasury(deps, treasury.deploymentId);
+}
+
 export async function canExpandAnyActiveDeployment(
   deps: Pick<ReconciliationDeps, 'reconciliation'> & {
     deployments: { list(): Promise<ReadonlyArray<{ deploymentId: string; status: string }>> };
