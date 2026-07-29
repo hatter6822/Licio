@@ -45,6 +45,16 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // shared with the room page, so the split moved bytes between chunks and added
 // boundary cost rather than removing any — the same reasoning applies to the
 // debate modal, which shares its tree with both story surfaces.
+//
+// HEADROOM, as measured on the deep-audit branch: total 455.9 KiB against the
+// 456 KiB ceiling — about 100 bytes.  The ~3.1 KiB consumed since the 452.8
+// figure above is the review-round work (the governance-advisory route, the
+// visibility-cascade cursor, the field-error reader, the restricted-account
+// banner), and it is recorded here rather than absorbed into a quietly raised
+// number: the next change to the eager tree WILL fail this gate, and whoever
+// hits it should see what spent the room and decide deliberately.  Raising the
+// ceiling is a judgement about what the product is worth shipping, which
+// belongs to a maintainer and not to the change that happens to arrive first.
 const INITIAL_JS_BUDGET_BYTES = 216 * 1024;
 const TOTAL_JS_BUDGET_BYTES = 456 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
