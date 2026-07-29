@@ -145,14 +145,21 @@ export function createGovernanceRoutes() {
           // election id can't turn this endpoint into a membership oracle (it 404s
           // regardless of whether the candidate is a member).
           const eligible = await isRoomMember(roomId, auth.userId);
-          // When the voter joined, so `castVote` can enforce the electorate
+          // When the voter JOINED, so `castVote` can enforce the electorate
           // freeze: the denominator is snapshotted at open, and without this the
-          // numerator would not be.  Null for the steward-role arm (no
-          // subscription row) — `castVote` treats that as unjudgeable and lets
-          // it through rather than locking out a legitimate steward.
+          // numerator would not be.  `joinedAt`, never `requestedAt` — in an
+          // approval-gated room an account can ask to join before the open, sit
+          // pending (so outside the frozen denominator), be approved after, and
+          // then clear the cutoff on a timestamp that predates its membership.
+          // Null for the steward-role arm (no subscription row) — `castVote`
+          // treats that as unjudgeable and lets it through rather than locking
+          // out a legitimate steward.
+          const voterSubscription = await getForumServices().rooms.getSubscription(
+            roomId,
+            auth.userId,
+          );
           const voterMemberSince =
-            (await getForumServices().rooms.getSubscription(roomId, auth.userId))?.requestedAt ??
-            null;
+            voterSubscription?.joinedAt ?? voterSubscription?.requestedAt ?? null;
           if (!eligible) {
             return c.json(
               deny('not_member', 'Only room members may vote in a steward election.'),
@@ -175,7 +182,16 @@ export function createGovernanceRoutes() {
           );
           if (!result.ok) {
             const status =
-              result.code === 'not_found' ? 404 : result.code === 'invalid_candidate' ? 422 : 409;
+              result.code === 'not_found'
+                ? 404
+                : result.code === 'invalid_candidate'
+                  ? 422
+                  : // Not in this electorate is an AUTHORIZATION refusal, like
+                    // `not_member` two arms up — not a state conflict the caller
+                    // could resolve by retrying.
+                    result.code === 'joined_after_open'
+                    ? 403
+                    : 409;
             return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true });

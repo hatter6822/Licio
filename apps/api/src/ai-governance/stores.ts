@@ -542,6 +542,44 @@ export class InMemoryTranslationStore implements TranslationStore {
 
 // --- WS-K.2.2a governance proposal summaries -------------------------------
 
+/** Where a maintenance sweep resumes; null ⇒ start from the newest page. */
+export interface SweepCursor {
+  readonly createdAt: string;
+  readonly ref: string;
+}
+
+/**
+ * The durable position of a maintenance sweep (WS-K.1.4a).
+ *
+ * The hourly tick runs under a DISTRIBUTED lease, so an in-process cursor is
+ * lost to every restart, deploy, and lease handover — resetting the sweep to
+ * the newest page.  At one page an hour a large installation is reset long
+ * before it reaches the tail, so the older threads the sweep exists to
+ * summarize are never reached: the same permanent gap the cursor closed, one
+ * layer up.
+ */
+export interface SweepCursorStore {
+  get(sweepName: string): Promise<SweepCursor | null>;
+  /** `null` rewinds to the newest page (the tail was reached). */
+  set(sweepName: string, cursor: SweepCursor | null): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export class InMemorySweepCursorStore implements SweepCursorStore {
+  readonly #rows = new Map<string, SweepCursor>();
+  async get(sweepName: string): Promise<SweepCursor | null> {
+    const row = this.#rows.get(sweepName);
+    return row ? { ...row } : null;
+  }
+  async set(sweepName: string, cursor: SweepCursor | null): Promise<void> {
+    if (cursor === null) this.#rows.delete(sweepName);
+    else this.#rows.set(sweepName, { ...cursor });
+  }
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
+
 /**
  * The §24.5 governance ADVISORIES a steward reads before deciding.
  *

@@ -66,18 +66,27 @@ export async function runSummarySweep(
   // have drafts — or keep answering `insufficient_activity` — the sweep never
   // reaches an older one, so any deployment with more than `limit` threads
   // leaves the remainder permanently without the audit summaries this exists to
-  // produce.  The cursor is process-local and deliberately so: losing it on
-  // restart re-walks from the newest page, which is wasteful but not wrong,
-  // whereas persisting it would be a schema change for a maintenance job whose
-  // work is already idempotent.
-  const threads = await deps.stories.listThreads(sweepCursor, limit);
+  // produce.
+  //
+  // PERSISTED, because the tick runs under a distributed lease.  A cursor held
+  // in this process is lost to every restart, deploy, and lease handover to
+  // another pod — each one resetting the sweep to the newest page.  At one page
+  // an hour a large installation is reset long before it reaches the tail, so
+  // the older threads never come up: the same permanent gap, one layer up.
+  const stored = await ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR);
+  const threads = await deps.stories.listThreads(
+    stored === null ? null : { createdAt: stored.createdAt, threadId: stored.ref },
+    limit,
+  );
   // Exhausted the tail ⇒ start again from the newest next tick, so a thread that
   // only later crosses the activity threshold is eventually summarized.
   const last = threads[threads.length - 1];
-  sweepCursor =
+  await ai.sweepCursors.set(
+    SUMMARY_SWEEP_CURSOR,
     threads.length < limit || last === undefined
       ? null
-      : { createdAt: last.createdAt, threadId: last.threadId };
+      : { createdAt: last.createdAt, ref: last.threadId },
+  );
   let generated = 0;
   let skipped = 0;
   for (const thread of threads) {
@@ -98,14 +107,8 @@ export async function runSummarySweep(
   return { examined: threads.length, generated, skipped };
 }
 
-/** Where the next sweep resumes; null ⇒ the newest page.  Reset by
- *  {@link resetSummarySweepCursor} so a test can pin one pass deterministically. */
-let sweepCursor: { createdAt: string; threadId: string } | null = null;
-
-/** Restart the sweep from the newest page (tests; a fresh process starts here). */
-export function resetSummarySweepCursor(): void {
-  sweepCursor = null;
-}
+/** The sweep's row in the durable cursor store. */
+export const SUMMARY_SWEEP_CURSOR = 'ai_summary_sweep';
 
 /** One maintenance pass. Each task is isolated — one failure never blocks the
  *  others (each is reported through `onError`). */

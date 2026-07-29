@@ -922,9 +922,9 @@ export async function signProposal(
   const facts = await deps.membership.memberFacts(input.roomId, input.userId);
   // ELECTORATE FREEZE, enforced on the BALLOT as well as the denominator.
   //
-  // `eligibleBasisCount` is stamped at the `deliberation → open` transition —
-  // whose instant is `deliberationEndsAt` — so the denominator is the population
-  // as it stood then.  Eligibility, though, is checked live here, so a member
+  // `eligibleBasisCount` is stamped at the `deliberation → open` transition, and
+  // `eligibleBasisAt` records WHEN — so the denominator is the population as it
+  // stood at that instant.  Eligibility, though, is checked live here, so a member
   // who joined AFTER voting opened could record a ballot that raises
   // `distinctVoters` against a denominator they were never counted in: enough of
   // them satisfy quorum with people outside the recorded electorate.  Freezing
@@ -934,7 +934,12 @@ export async function signProposal(
   // cannot be judged, so it passes — refusing there would lock out a legitimate
   // long-standing steward to close a narrower hole than it opens.
   if (input.purpose === 'vote' && proposal.eligibleBasisCount != null) {
-    const frozenAt = proposal.deliberationEndsAt;
+    // THE INSTANT THE BASIS WAS COUNTED, falling back to the scheduled deadline
+    // only for rows opened before that instant was recorded — which is the
+    // behaviour those rows were opened under.  Reading the schedule while the
+    // count came from the transition let scheduler lag admit members to the
+    // denominator and refuse them the ballot.
+    const frozenAt = proposal.eligibleBasisAt ?? proposal.deliberationEndsAt;
     const joined = facts?.memberSince ?? null;
     if (frozenAt != null && joined !== null && Date.parse(joined) > Date.parse(frozenAt)) {
       return tgErr(
@@ -1294,7 +1299,13 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
         proposal.proposalId,
         'deliberation',
         'open',
-        eligibleBasisCount === null ? {} : { eligibleBasisCount },
+        // The count and the INSTANT it was counted at, stamped together.  The
+        // ballot cutoff used to read `deliberationEndsAt` — the SCHEDULED
+        // deadline — while this count is the membership as it stands NOW, and
+        // ordinary tick lag puts the two apart: everyone who joined in between
+        // raised the denominator and was refused a ballot, so enough of them
+        // made quorum unreachable however many eligible members voted.
+        eligibleBasisCount === null ? {} : { eligibleBasisCount, eligibleBasisAt: nowIso },
       );
       if (opened !== null) settled += 1;
       continue;

@@ -375,6 +375,11 @@ export const governanceProposals = knomosisSchema.table(
      *  unconditionally.  Mirrors `eligible_count` on the ratification vote and
      *  the steward election. */
     eligibleBasisCount: integer('eligible_basis_count'),
+    /** WHEN that basis was frozen (migration 0107) — the ACTUAL transition
+     *  instant, not the scheduled `deliberation_ends_at`.  The ballot cutoff
+     *  reads this so the denominator and the numerator answer to one instant;
+     *  scheduler lag between the two made quorum unreachable. */
+    eligibleBasisAt: tz('eligible_basis_at'),
     /** The settled tally snapshot (proposalTallyWireSchema) — recorded once at
      *  settle so later weight/eligibility changes cannot rewrite history. */
     tallySnapshot: jsonb('tally_snapshot'),

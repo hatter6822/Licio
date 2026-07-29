@@ -292,7 +292,7 @@ export function ModerationConsole({
  * owns, and a control that silently kept showing `available` after a failed
  * write would mislead the one person who needs to know.
  */
-function ReviewerStatusControl(): React.ReactElement {
+function ReviewerStatusControl(): React.ReactElement | null {
   const t = useT();
   const { toast } = useToast();
   // INITIALISED FROM THE SERVER, not from a local default.  A fixed
@@ -319,12 +319,22 @@ function ReviewerStatusControl(): React.ReactElement {
         tone: 'error',
       }),
   });
+  // THE SERVER'S ANSWER decides whether this control belongs here.  Both the
+  // status GET and its POST reject a steward who can reach neither the report
+  // nor the appeal queue — an evidence-only or integrity-only grant, which
+  // legitimately enters this console for its OWN tabs.  Rendering the control
+  // for them meant a 403 on open and a 403 on every change: a switch that can
+  // only fail.  Re-deriving the rule client-side from `steward_roles` would
+  // duplicate an authorization decision and drift from it; the refusal itself
+  // is the authoritative read, and nothing is rendered while it is in flight
+  // so the control never flashes in and out.
+  if (stored.isLoading || isForbidden(stored.error)) return null;
   return (
     <div className="flex items-center justify-end gap-2">
       <Select
         label={t('console.availability', 'My availability')}
         value={status}
-        disabled={update.isPending || stored.isLoading}
+        disabled={update.isPending}
         onValueChange={(v) => update.mutate(v as ReviewerAvailability)}
         options={REVIEWER_AVAILABILITY.map((value) => ({
           value,
@@ -612,13 +622,22 @@ function CaseReviewDialog({
   // mistaken sanction — a false entry in the one record that is supposed to
   // explain what a steward did and why.
   const [revertTarget, setRevertTarget] = useState<string | null>(null);
-  const [revertReason, setRevertReason] = useState<ModerationReasonCode>('MOD_HARASS_001');
+  // EMPTY until the steward chooses.  A pre-selected code plus an enabled
+  // confirm is a default the dialog can record without anyone deciding
+  // anything: open it on a mistaken spam sanction, click Revert, and the audit
+  // trail says the reversal was for harassment.  Asking the question is only
+  // asking it if an answer is required.
+  const [revertReason, setRevertReason] = useState<ModerationReasonCode | ''>('');
   // Keyed by the action being undone so only that row spins.
   const revert = useMutation({
-    mutationFn: (actionId: string) => revertModerationAction(actionId, revertReason),
+    // Unreachable with an empty reason — the confirm button is disabled until
+    // one is chosen — but typed so it stays that way.
+    mutationFn: (actionId: string) =>
+      revertModerationAction(actionId, revertReason as ModerationReasonCode),
     onSuccess: () => {
       toast({ message: t('console.revertDone', 'Action reverted.'), tone: 'success' });
       setRevertTarget(null);
+      setRevertReason('');
       void queryClient.invalidateQueries({ queryKey: queryKeys.modCase(caseId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.modAudit('default') });
     },
@@ -900,6 +919,7 @@ function CaseReviewDialog({
             <Select
               label={t('console.revertReason', 'Reversal reason')}
               value={revertReason}
+              placeholder={t('console.revertReasonPlaceholder', 'Choose a reason…')}
               onValueChange={(v) => setRevertReason(v as ModerationReasonCode)}
               options={REASON_OPTIONS}
             />
@@ -910,6 +930,7 @@ function CaseReviewDialog({
               <Button
                 variant="primary"
                 loading={revert.isPending}
+                disabled={revertReason === ''}
                 onClick={() => revert.mutate(revertTarget)}
               >
                 {t('console.revertConfirm', 'Revert action')}

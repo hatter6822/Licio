@@ -26,7 +26,7 @@ import {
   type PipelineDeps,
 } from '../ai-governance/pipelines.js';
 import { type RuntimeMonitorDeps, runtimeMonitorTick } from '../ai-governance/runtime-monitor.js';
-import { resetSummarySweepCursor, runSummarySweep } from '../ai-governance/scheduler.js';
+import { runSummarySweep, SUMMARY_SWEEP_CURSOR } from '../ai-governance/scheduler.js';
 import { seedAiGovernance } from '../ai-governance/seed.js';
 import {
   type AiGovernanceServices,
@@ -455,9 +455,9 @@ describe('WS-K.1.4a summary generation', () => {
       const f = fresh();
       f.ai.ingestion = f.forum.ingestion;
       f.ai.forum = f.forum.forum;
-      // The sweep cursor is process-local and persists across tests in a file;
-      // reset it so each case starts from the newest page deterministically.
-      resetSummarySweepCursor();
+      // The cursor lives in the fixture's own store, so each case already
+      // starts from the newest page — no cross-test reset needed now that it
+      // is not process-global.
       return f;
     }
 
@@ -551,6 +551,40 @@ describe('WS-K.1.4a summary generation', () => {
       expect(first.generated).toBe(2);
       expect(second.generated).toBe(2);
       // Every thread ended up with a draft — the property that matters.
+      for (const id of ids) {
+        expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
+      }
+    });
+
+    it('SURVIVES the process that held the cursor (lease handover, restart)', async () => {
+      // The tick runs under a distributed lease.  A cursor held in the process
+      // is lost to every restart, deploy, and handover to another pod — each
+      // one resetting the sweep to the newest page, so at one page an hour a
+      // large installation is reset long before it reaches the tail and the
+      // older threads it exists to summarize are never reached.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const first = await runSummarySweep(f.ai, () => {}, 2);
+      expect(first.generated).toBe(2);
+      // A DIFFERENT lease holder: fresh services over the SAME durable stores,
+      // exactly as the next pod sees them.
+      const next = {
+        ...f.ai,
+        sweepCursors: f.ai.sweepCursors,
+      } as typeof f.ai;
+      const stored = await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR);
+      expect(stored).not.toBeNull();
+      const second = await runSummarySweep(next, () => {}, 2);
+      expect(second.generated).toBe(2);
       for (const id of ids) {
         expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
       }

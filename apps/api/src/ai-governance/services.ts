@@ -43,6 +43,7 @@ import {
   InMemoryRiskAssessmentStore,
   InMemoryRuntimeMonitorStore,
   InMemorySummaryStore,
+  InMemorySweepCursorStore,
   InMemoryTranslationStore,
   type InventoryStore,
   type ModelRegistryStore,
@@ -50,6 +51,7 @@ import {
   type RiskAssessmentStore,
   type RuntimeMonitorStore,
   type SummaryStore,
+  type SweepCursorStore,
   type TranslationStore,
 } from './stores.js';
 
@@ -67,6 +69,7 @@ export interface AiGovernanceServices {
   summaries: SummaryStore;
   translations: TranslationStore;
   governanceAdvisories: GovernanceAdvisoryStore;
+  sweepCursors: SweepCursorStore;
   governanceSummaries: GovernanceSummaryStore;
   runtime: RuntimeMonitorStore;
   /** WS-U in-room moderation decision log (ADR-9; observability). */
@@ -135,6 +138,7 @@ export function createInMemoryAiGovernanceServices(
     summaries: new InMemorySummaryStore(),
     translations: new InMemoryTranslationStore(),
     governanceAdvisories: new InMemoryGovernanceAdvisoryStore(),
+    sweepCursors: new InMemorySweepCursorStore(),
     governanceSummaries: new InMemoryGovernanceSummaryStore(),
     runtime: new InMemoryRuntimeMonitorStore(),
     moderationLog: new InMemoryModerationDecisionLog(),

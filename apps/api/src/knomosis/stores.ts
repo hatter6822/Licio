@@ -180,6 +180,13 @@ export interface GovernanceProposalRecord {
    *  Null ⇒ no basis recorded (a row opened before it existed), and the tally
    *  falls back to the live membership count those rows always used. */
   eligibleBasisCount?: number | null;
+  /** WHEN that basis was frozen (migration 0107): the ACTUAL deliberation→open
+   *  transition instant, which scheduler lag puts AFTER the scheduled
+   *  `deliberationEndsAt`.  The ballot cutoff reads this so the denominator and
+   *  the numerator answer to one instant — otherwise members who joined during
+   *  the lag are counted in the basis and refused a ballot, and enough of them
+   *  make quorum unreachable.  Null on rows opened before the column existed. */
+  eligibleBasisAt?: string | null;
   /** The settled tally snapshot (proposalTallyWireSchema shape). */
   tallySnapshot?: Record<string, unknown> | null;
 }
@@ -661,6 +668,7 @@ export interface GovernanceProposalStore {
         | 'challengeWindowEndsAt'
         | 'votingEndsAt'
         | 'eligibleBasisCount'
+        | 'eligibleBasisAt'
         | 'tallySnapshot'
         | 'challengeState'
       >

@@ -89,14 +89,22 @@ export function buildMembershipFactsPort(
     const subscription = await forum.rooms.getSubscription(roomId, userId);
     if (subscription === null || subscription.status !== 'active') return null;
     const auth = await identity.store.getAuth(userId);
-    const membershipDays = Math.floor(
-      (knomosis.now() - Date.parse(subscription.requestedAt)) / 86_400_000,
-    );
+    // MEMBERSHIP STARTS AT `joinedAt`, NOT AT THE REQUEST.  In an
+    // approval-gated room the two can be far apart, and reading the request
+    // instant reopened the electorate freeze it was added to close: an account
+    // could ask to join BEFORE an election opened, sit pending — and therefore
+    // outside the frozen denominator — be approved after, and then pass the
+    // cutoff on the strength of a timestamp that predates a membership it did
+    // not yet hold.  `joinedAt` is null only for a row that is not active,
+    // which this function has already refused above; the fallback keeps the
+    // read total rather than asserting that.
+    const memberSince = subscription.joinedAt ?? subscription.requestedAt;
+    const membershipDays = Math.floor((knomosis.now() - Date.parse(memberSince)) / 86_400_000);
     return {
       membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
       contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId),
       verifiedIdentity: auth?.emailVerified === true,
-      memberSince: subscription.requestedAt,
+      memberSince,
     };
   };
   return {

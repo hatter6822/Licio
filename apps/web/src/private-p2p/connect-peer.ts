@@ -157,16 +157,25 @@ export type DeviceResolver = (
  */
 export interface RendezvousCapHooks {
   /**
-   * `signalingPublicKey` is the ephemeral dial identity this announcement will publish.
-   * The cap is BOUND to it, so a cap lifted out of a polled announcement cannot be
-   * re-published under someone else's dial info — which, because dedup is by pseudonym
-   * with first occurrence winning, would evict the honest device from discovery.
+   * The cap is BOUND to the announcement's DIAL-CRITICAL fields — the ephemeral
+   * signalling key AND the device id it claims — so a cap lifted out of a polled
+   * announcement cannot be re-published under someone else's dial info, which,
+   * because dedup is by pseudonym with first occurrence winning, would evict the
+   * honest device from discovery.
+   *
+   * Binding the signalling key alone was not enough: a hostile member could keep
+   * the honest key (so the proof still verified), swap `peerDeviceId`, and
+   * re-seal with a later expiry.  `selectFreshestCandidates` dedups by that key
+   * BEFORE cap verification, so the forgery replaced the honest record and the
+   * dial reached the honest peer, failed the §15.5 claimed-device check, and
+   * cooled its key down.
    */
   build(
     roomBlindId: string,
     epoch: number,
     bucket: number,
     signalingPublicKey: Uint8Array,
+    peerDeviceId: string,
   ): { proof: string; pseudonym: string } | null;
   /**
    * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
@@ -178,7 +187,12 @@ export interface RendezvousCapHooks {
   filterVerified(
     /** Each cap WITH the dial identity of the announcement it came from — the proof is
      *  verified against that key, never one the caller picks. */
-    caps: ReadonlyArray<{ proof: string; pseudonym: string; signalingPublicKey: Uint8Array }>,
+    caps: ReadonlyArray<{
+      proof: string;
+      pseudonym: string;
+      signalingPublicKey: Uint8Array;
+      peerDeviceId: string;
+    }>,
     roomBlindId: string,
     epoch: number,
     bucket: number,
@@ -388,7 +402,13 @@ export async function connectPrivatePeer(
   // `filterVerified`s by the verified pseudonym; the server sees only the per-device derived blind id
   // (one slot per device per bucket) and runs the §27 Tier-1 sample-poll.
   const cap =
-    params.rendezvousCap?.build(roomBlindId, epoch, timeBucket, ephemeral.publicKey) ?? undefined;
+    params.rendezvousCap?.build(
+      roomBlindId,
+      epoch,
+      timeBucket,
+      ephemeral.publicKey,
+      selfDeviceId,
+    ) ?? undefined;
   const selfPeerBlindId = await p2p.derivePeerBlindId(
     rendezvousKey,
     selfDeviceId,
@@ -693,6 +713,7 @@ export async function connectPrivatePeer(
           return {
             ...c,
             signalingPublicKey: p2p.fromBase64Url(o.ann.signaling_public_key),
+            peerDeviceId: o.ann.peer_device_id,
           };
         }),
         roomBlindId,

@@ -15,6 +15,7 @@ import {
 } from '../../sync/rendezvous.js';
 import {
   buildAnnouncementCap,
+  dialBinding,
   fromBase64Url,
   issuerKeyFromBytes,
   pseudonymFromBytes,
@@ -27,6 +28,7 @@ import {
 
 /** The announcement's dial identity a Tier-2 proof binds to (see `rendezvousPresentationHeader`). */
 const BIND = new Uint8Array(32).fill(9);
+const DEVICE = 'alice-dev';
 
 const EPOCH = 4;
 const BUCKET = 12345;
@@ -50,6 +52,7 @@ function capVerifies(
   roomBlindId: string,
   epoch: number,
   bucket: number,
+  deviceId = DEVICE,
 ): boolean {
   try {
     const epochBytes = enc(String(epoch));
@@ -60,7 +63,7 @@ function capVerifies(
       pseudonymFromBytes(fromBase64Url(cap.pseudonym)),
       epochBytes,
       context,
-      rendezvousPresentationHeader(BIND),
+      rendezvousPresentationHeader(dialBinding(BIND, deviceId)),
     );
   } catch {
     return false;
@@ -98,7 +101,7 @@ describe('Tier-2 announcement cap (sealed, end-to-end)', () => {
     enroll(alice, admin);
 
     const roomBlindId = await deriveRoomBlindId(rendezvousKey, EPOCH, BUCKET);
-    const cap = buildAnnouncementCap(alice, roomBlindId, EPOCH, BUCKET, BIND);
+    const cap = buildAnnouncementCap(alice, roomBlindId, EPOCH, BUCKET, BIND, DEVICE);
     expect(cap).not.toBeNull();
 
     const { opened } = await roundTrip(rendezvousKey, 'alice-dev', cap);
@@ -113,7 +116,7 @@ describe('Tier-2 announcement cap (sealed, end-to-end)', () => {
     const alice = new RendezvousMember();
     enroll(alice, admin);
     const roomBlindId = await deriveRoomBlindId(rendezvousKey, EPOCH, BUCKET);
-    const cap = buildAnnouncementCap(alice, roomBlindId, EPOCH, BUCKET, BIND);
+    const cap = buildAnnouncementCap(alice, roomBlindId, EPOCH, BUCKET, BIND, DEVICE);
     const { opened } = await roundTrip(rendezvousKey, 'alice-dev', cap);
     const wrongIssuer = RendezvousIssuer.generate(String(EPOCH));
     // biome-ignore lint/style/noNonNullAssertion: cap present
@@ -127,7 +130,7 @@ describe('Tier-2 announcement cap (sealed, end-to-end)', () => {
   it('a non-enrolled member produces no cap; a Tier-1 announcement carries none', async () => {
     const rendezvousKey = randomBytes(32);
     const stranger = new RendezvousMember();
-    expect(buildAnnouncementCap(stranger, 'room', EPOCH, BUCKET, BIND)).toBeNull();
+    expect(buildAnnouncementCap(stranger, 'room', EPOCH, BUCKET, BIND, DEVICE)).toBeNull();
     const { opened } = await roundTrip(rendezvousKey, 'stranger-dev', null);
     expect(opened.cap).toBeUndefined();
   });

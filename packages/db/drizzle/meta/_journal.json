@@ -743,6 +743,20 @@
       "when": 1783728000030,
       "tag": "0106_governance_advisories",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1783728000031,
+      "tag": "0107_proposal_basis_instant",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1783728000032,
+      "tag": "0108_ai_sweep_cursor",
+      "breakpoints": true
     }
   ]
 }

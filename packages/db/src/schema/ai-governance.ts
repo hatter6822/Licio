@@ -272,6 +272,21 @@ export const aiGovernanceAdvisories = pgTable(
   (t) => [index('ai_governance_advisories_proposal_idx').on(t.proposalRef)],
 );
 
+/**
+ * Durable position of a maintenance SWEEP (WS-K.1.4a), so progress survives the
+ * process holding it.  The tick runs under a distributed lease, so a restart or
+ * a lease handover to another pod used to reset an in-process cursor to the
+ * newest page — leaving a large installation's older threads permanently
+ * unreached.  Composite, because the sweep's order is `(created_at, id)` and a
+ * bare timestamp cannot break a tie.
+ */
+export const aiSweepCursors = pgTable('ai_sweep_cursors', {
+  sweepName: text('sweep_name').primaryKey(),
+  cursorCreatedAt: timestamp('cursor_created_at', { withTimezone: true }),
+  cursorRef: text('cursor_ref'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** Runtime AI monitoring metric time series (WS-K.1.2f). */
 export const aiRuntimeMetrics = pgTable(
   'ai_runtime_metrics',

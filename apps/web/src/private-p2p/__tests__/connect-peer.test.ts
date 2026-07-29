@@ -904,8 +904,8 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     if (!issuerKey) throw new Error('member not enrolled');
     const issuerPk = cap.issuerKeyFromBytes(issuerKey);
     const hooks = {
-      build: (rb: string, e: number, b: number, signalingPublicKey: Uint8Array) => {
-        const built = cap.buildAnnouncementCap(legitMember, rb, e, b, signalingPublicKey);
+      build: (rb: string, e: number, b: number, signalingPublicKey: Uint8Array, dev: string) => {
+        const built = cap.buildAnnouncementCap(legitMember, rb, e, b, signalingPublicKey, dev);
         if (built === null) return null;
         const key = legitMember.issuerKey(String(e));
         if (key === null) return null;
@@ -920,6 +920,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
           proof: string;
           pseudonym: string;
           signalingPublicKey: Uint8Array;
+          peerDeviceId: string;
         }>,
         rb: string,
         e: number,
@@ -933,7 +934,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
               proof: cap.fromBase64Url(c.proof),
               epoch: String(e),
               bucket: b,
-              binding: c.signalingPublicKey,
+              binding: cap.dialBinding(c.signalingPublicKey, c.peerDeviceId),
               value: i,
             })),
             issuerPk,
@@ -964,6 +965,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
       epoch,
       timeBucket,
       floodSigKey,
+      'flood-0',
     );
     if (!floodCap) throw new Error('flood cap not built');
 

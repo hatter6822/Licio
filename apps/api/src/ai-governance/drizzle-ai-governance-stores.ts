@@ -45,6 +45,7 @@ import {
   aiRuntimeMetrics,
   aiSummaryDrafts,
   aiSummaryReports,
+  aiSweepCursors,
   aiTranslationReports,
   aiTranslations,
   type createDbClient,
@@ -72,6 +73,8 @@ import type {
   RuntimeMonitorStore,
   SummaryDraftRecord,
   SummaryStore,
+  SweepCursor,
+  SweepCursorStore,
   TranslationStore,
 } from './stores.js';
 
@@ -991,6 +994,45 @@ export class DrizzleGovernanceSummaryStore implements GovernanceSummaryStore {
   }
 }
 
+export class DrizzleSweepCursorStore implements SweepCursorStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async get(sweepName: string): Promise<SweepCursor | null> {
+    const rows = await this.#db
+      .select()
+      .from(aiSweepCursors)
+      .where(eq(aiSweepCursors.sweepName, sweepName))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.cursorCreatedAt === null || row.cursorRef === null) return null;
+    return { createdAt: iso(row.cursorCreatedAt), ref: row.cursorRef };
+  }
+
+  async set(sweepName: string, cursor: SweepCursor | null): Promise<void> {
+    // UPSERT rather than delete-on-null: the row records that this sweep has a
+    // position at all, and a null pair is the honest spelling of "back at the
+    // newest page" — deleting it would make "never run" and "wrapped" the same
+    // state.
+    const values = {
+      cursorCreatedAt: cursor === null ? null : new Date(cursor.createdAt),
+      cursorRef: cursor?.ref ?? null,
+      updatedAt: new Date(),
+    };
+    await this.#db
+      .insert(aiSweepCursors)
+      .values({ sweepName, ...values })
+      .onConflictDoUpdate({ target: aiSweepCursors.sweepName, set: values });
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(aiSweepCursors);
+  }
+}
+
 export class DrizzleGovernanceAdvisoryStore implements GovernanceAdvisoryStore {
   readonly #db: Db;
 
@@ -1187,6 +1229,7 @@ export interface DrizzleAiGovernanceStores {
   summaries: SummaryStore;
   translations: TranslationStore;
   governanceAdvisories: GovernanceAdvisoryStore;
+  sweepCursors: SweepCursorStore;
   governanceSummaries: GovernanceSummaryStore;
   runtime: RuntimeMonitorStore;
   moderationLog: ModerationDecisionLogStore;
@@ -1210,6 +1253,7 @@ export function createDrizzleAiGovernanceStores(db: Db): DrizzleAiGovernanceStor
     summaries: new DrizzleSummaryStore(db),
     translations: new DrizzleTranslationStore(db),
     governanceAdvisories: new DrizzleGovernanceAdvisoryStore(db),
+    sweepCursors: new DrizzleSweepCursorStore(db),
     governanceSummaries: new DrizzleGovernanceSummaryStore(db),
     runtime: new DrizzleRuntimeMonitorStore(db),
     moderationLog: new DrizzleModerationDecisionLog(db),

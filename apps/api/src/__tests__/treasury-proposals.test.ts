@@ -142,7 +142,12 @@ interface TestHarness extends ProposalDeps {
   electionsOpened: string[];
   memberFactsOverride: Map<
     string,
-    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+    {
+      membershipDays: number | null;
+      contributionCount: number | null;
+      verifiedIdentity: boolean;
+      memberSince?: string;
+    }
   >;
 }
 
@@ -175,7 +180,12 @@ function buildHarness(): TestHarness {
   };
   const memberFactsOverride = new Map<
     string,
-    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+    {
+      membershipDays: number | null;
+      contributionCount: number | null;
+      verifiedIdentity: boolean;
+      memberSince?: string;
+    }
   >();
   const membership: MembershipFactsPort = {
     memberFacts: async (_r, userId) =>
@@ -1439,6 +1449,46 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(
       await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
     ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
+  });
+
+  it('a member the LAGGING open counted can still cast their ballot (WS-M.4.2c)', async () => {
+    // The denominator and the numerator have to answer to ONE instant.
+    // `eligibleBasisCount` is the membership at the actual deliberation→open
+    // transition, and the cutoff used to read the SCHEDULED
+    // `deliberationEndsAt` — so ordinary tick lag (or a room freeze) admitted
+    // members to the basis and refused them a ballot, and enough such joins
+    // made quorum unreachable however many eligible members voted.
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    const deadline = Date.parse(proposal.deliberationEndsAt ?? '');
+    // The scheduler runs an HOUR late…
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmDeliberationSeconds * 1000 + 1_000 + 3_600_000);
+    await settleDueProposals(deps, ROOM);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    expect(opened?.votingState).toBe('open');
+    // …so the basis was counted well after the scheduled deadline, and the
+    // instant is recorded rather than inferred from the schedule.
+    expect(Date.parse(opened?.eligibleBasisAt ?? '')).toBeGreaterThan(deadline);
+
+    // A member who joined between the deadline and the actual open was counted
+    // in that basis, so their ballot must count too.
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 60,
+      contributionCount: 10,
+      verifiedIdentity: true,
+      memberSince: new Date(deadline + 60_000).toISOString(),
+    });
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    expect('signature' in vote).toBe(true);
   });
 
   it('a delegated unit the CAP dropped is still the delegator’s to cast (WS-M.4.2c-3)', async () => {

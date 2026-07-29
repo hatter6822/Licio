@@ -167,8 +167,15 @@ export class RendezvousCapManager {
     const issuerKey = cap.issuerKeyFromBytes(issuerKeyBytes); // parse once, reuse per poll
     const roomBlindIdBytes = (s: string): Uint8Array => new TextEncoder().encode(s);
     return {
-      build: (roomBlindId, e, bucket, signalingPublicKey) => {
-        const built = cap.buildAnnouncementCap(member, roomBlindId, e, bucket, signalingPublicKey);
+      build: (roomBlindId, e, bucket, signalingPublicKey, peerDeviceId) => {
+        const built = cap.buildAnnouncementCap(
+          member,
+          roomBlindId,
+          e,
+          bucket,
+          signalingPublicKey,
+          peerDeviceId,
+        );
         // The cap rides SEALED inside the announcement only (PRIV-API-RENDEZVOUS-1: no top-level cap),
         // so `build` returns just the member-verifiable {proof, pseudonym} — no issuer key (the
         // verifier is a member who already holds the issuer key via the op log).
@@ -210,9 +217,11 @@ export class RendezvousCapManager {
             proof,
             epoch: String(e),
             bucket,
-            // The proof is bound to the announcement's dial identity; verifying against
-            // anything else would bind it to nothing.
-            binding: c.signalingPublicKey,
+            // The proof is bound to the announcement's DIAL-CRITICAL fields —
+            // the signalling key AND the device id it claims.  Verifying
+            // against the key alone let a member keep an honest key, swap the
+            // device id, and still pass.
+            binding: cap.dialBinding(c.signalingPublicKey, c.peerDeviceId),
             value: i,
           });
         }

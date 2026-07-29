@@ -965,6 +965,21 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     expect(api.revertModerationAction).not.toHaveBeenCalled();
     const dialog = await screen.findByText(/why is this action being undone/i);
     expect(dialog).toBeInTheDocument();
+    // NO PRE-SELECTED REASON, and confirmation is refused until one is chosen.
+    // A default plus an enabled button is a reason the dialog can record
+    // without anyone deciding anything: open it on a mistaken spam sanction,
+    // click Revert, and the audit trail says harassment.  Asking the question
+    // is only asking it if an answer is required.
+    const confirm = screen.getByRole('button', { name: /^revert action$/i });
+    // `aria-disabled`, not the native attribute — the design system keeps a
+    // refused control focusable and announced — and the handler refuses the
+    // activation, so this is the real block and not just a label.
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(confirm);
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
     // Choose a reversal reason DIFFERENT from the palette's default, and assert
     // that is what reaches the server: the server records this as the reason for
     // the reversal, so inheriting the palette's `MOD_HARASS_001` would write a
@@ -1043,6 +1058,23 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
         'offline',
       ),
     );
+  });
+
+  it('WS-J.2.1d: a steward who cannot be assigned sees NO availability control', async () => {
+    // Both the status GET and its POST reject a steward who can reach neither
+    // the report nor the appeal queue — an evidence-only or integrity-only
+    // grant, which legitimately opens this console for its OWN tabs.  Rendering
+    // the control for them meant a 403 on open and a 403 on every change: a
+    // switch that can only fail.  The refusal IS the authorization answer, so
+    // nothing here re-derives the rule from `steward_roles` and drifts from it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(
+      new ApiClientError('forbidden', 'Your role cannot set a reviewer status.', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    // The console itself still renders — this steward has tabs of their own.
+    expect(await screen.findByRole('tab', { name: /integrity/i })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
   });
 
   it('WS-J.2.1d: availability posts the chosen status', async () => {
