@@ -42,12 +42,12 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
 
 ## Export hygiene — the internal-only sweep
 
-**Tracked debt — 967 exported values used only inside their declaring file.**
+**Tracked debt — 726 exported values used only inside their declaring file.**
 `check:dead-exports` reports an exported value nothing references *anywhere*.
 The narrower question — "is the `export` keyword buying anything?" — is
 implemented in the same script (`findInternalOnlyExports`, surfaced by
 `pnpm survey:internal-exports`) but is **not** in CI, because the answer today
-is 967 declarations and they are not one defect repeated:
+is 726 declarations and they are not one defect repeated:
 
 | Share | Category | Is the export deliberate? |
 |-------|----------|---------------------------|
@@ -134,10 +134,10 @@ gate skipping it is a real blind spot: an entry nothing imports through the
 barrel is unused public surface.
 
 The enumeration now exists — `pnpm survey:barrel-reexports` (the resolver's
-`judgeRepublished`) — and reports **254** across the repository. It is NOT in
+`judgeRepublished`) — and reports **165** across the repository. It is NOT in
 CI, because the overwhelming majority are module barrels publishing their
-schemas and constants as the SSOT surface: 53 in `packages/lcap/src/schemas`,
-35 in `apps/web/src/offline`, 17 in `apps/web/src/update`. That is the same
+schemas and constants as the SSOT surface: 35 in `apps/web/src/offline`, 17 in
+`apps/web/src/update`, 16 in `apps/web/src/signals`. That is the same
 idiom the gate's own guidance names for `@licio/shared` and `@licio/db` —
 "whether or not a consumer exists today" — so failing CI on it would be failing
 on a convention, which is how a gate gets switched off rather than obeyed.
@@ -265,45 +265,59 @@ recorded here:
   **Closure target:** the four low-coverage pages, `security.tsx` first — it is
   the largest (194 statements) and hosts the MFA/session surfaces.
 
-- **WS-S mesh: a device advertises one live rendezvous slot PER DIAL** — diagnosed,
-  fix deferred to a maintainer decision.  Found by wiring `test:e2e:webrtc` into
-  CI (it ran in no workflow, so all five real-WebRTC specs had never executed;
-  the first run also surfaced a dead codec stub in the carrier spec, since fixed).
-  `private-mesh.realwebrtc.spec.ts` passes ~1 run in 3 and is `test.fixme`'d with
-  the full trace at the call site.
+- **WS-S mesh: a device advertises one live rendezvous slot PER `connectPrivatePeer`
+  CALL** — mechanism now fully pinned; the fix is designed and NOT yet landed.
+  Found by wiring `test:e2e:webrtc` into CI (it ran in no workflow, so all five
+  real-WebRTC specs had never executed; the first run also surfaced a dead codec stub
+  in the carrier spec, since fixed).  `private-mesh.realwebrtc.spec.ts` is
+  `test.fixme`'d with the trace at the call site.
 
-  **Mechanism** (instrumented per member, not inferred): `connectPrivatePeer`
-  mints a fresh ephemeral X25519 key per dial and drains only that key's inbound
-  queue; when the dial ends the queue goes unread, but the announcement it
-  published stays live for the §15.3.2 TTL (5-minute floor, 30-minute default)
-  with no retraction.  `InMemoryRendezvousStore.announce` keys presence by the
-  sealed CIPHERTEXT, so a re-announce ADDS a slot rather than replacing the
-  device's — contradicting `connect-peer.ts`'s own "one slot per device per
-  bucket", and the store's eviction loop even names its key `peerBlindId`.  At
-  `rePollIntervalMs: 1_500` against a 20s dial deadline each peer publishes ~a
-  dozen dead addresses a minute (observed: three live candidates for one device).
-  Because the signalling channel key is ECDH(self ephemeral, peer's ANNOUNCED
-  ephemeral), a handshake completes only when both sides happen to pick each
-  other's CURRENT announcement; every other pairing burns a full candidate
-  deadline on both sides, and an offer landing at a superseded address fails AEAD
-  open (the `skipped a signal` warnings, only on the joining member).
+  **Mechanism** (instrumented per member, not inferred).  `connectPrivatePeer` mints a
+  fresh ephemeral X25519 key per CALL and drains only that key's inbound queue
+  (`deriveSignalAddress` is keyed on the RECIPIENT's ephemeral alone).  A mesh member
+  runs the call CONCURRENTLY, once per peer — so device A dialling B and C has two live
+  ephemerals and two queues, and each announcement lingers for the §15.3.2 TTL
+  (5-minute floor) with no retraction.  A polling peer takes A's FRESHEST announcement,
+  which belongs to whichever of A's calls started last — the one dialling someone else.
+  That call's pump receives the offer, tries to open it with a channel key derived for a
+  DIFFERENT peer, and fails: the `skipped a signal` warnings, only on the joining
+  member.  A handshake completes only when both sides happen to pick announcements
+  belonging to the calls that are dialling each other.
+  `InMemoryRendezvousStore.announce` keys presence by the sealed CIPHERTEXT, so a
+  re-announce ADDS a slot rather than replacing the device's — contradicting
+  `connect-peer.ts`'s own "one slot per device per bucket", in a store whose eviction
+  loop even names its key `peerBlindId`.
 
-  **Why it is not fixed here.**  Each candidate fix trades a property the code
-  defends by name:
-  1. key the server slot by `peer_blind_id` — restores one-slot-per-device, but
-     any current-epoch member can derive another member's blind id, so it hands
-     over a targeted EVICTION vector: the sharper cousin of the DoS
-     `selectFreshestCandidates` explicitly refuses to enable
-     (PRIV-CARRIER-FRESHEST-NOSPOOF);
-  2. reuse one ephemeral per device per bucket — collapses the candidates, but
-     reintroduces the shared-queue stall that same comment documents;
-  3. keep answering at superseded addresses — adds NO new forgeability (a peer
-     only honours advertisements it published itself) and is the most likely
-     right answer, but it requires deferring the channel-key derivation until the
-     caller is known, i.e. a real change to the §15.5 handshake.
-  **Closure target:** option 3, with the handshake change reviewed on its own —
-  a launch-blocking E2EE plane should not take a rushed protocol edit, and a
-  retry count in CI would hide the defect rather than fix it.
+  **The fix — two halves, and neither works alone.**
+  1. **One ephemeral per device per `(room, epoch, time bucket)`**, derived
+     deterministically (HKDF over the rendezvous key + device id + epoch + bucket;
+     `x25519Pkcs8FromScalar` already exists for the import).  A device then has ONE
+     announced dial identity, `selectFreshestCandidates` collapses it to one candidate
+     by construction, and the coincidence is gone rather than made less likely.
+  2. **A PAIRWISE signalling address** — `deriveSignalAddress` keyed on the sender's
+     ephemeral as well as the recipient's.  This is what makes (1) safe: a single
+     ephemeral means a single inbound queue, and the signal drain is deliver-once, so
+     one session's pump would otherwise consume — and drop as un-openable — a signal
+     meant for another session's channel.  That stall is precisely why the per-call
+     ephemeral existed, so removing it requires replacing it.
+  Together they delete the mechanism instead of narrowing it.  The earlier mitigation
+  (dial `triable[0]` only, then re-poll) took the spec from ~1 run in 3 to 6 in 8 by
+  making each side more likely to pick the other's newest announcement — it lowers the
+  probability of the coincidence and does not remove it, which is why it is a
+  mitigation and this is the fix.
+
+  Three alternatives were considered and rejected: keying the SERVER slot by
+  `peer_blind_id` (any current-epoch member can derive another member's blind id, so it
+  hands over a targeted eviction vector — the sharper cousin of the DoS
+  `selectFreshestCandidates` refuses to enable, PRIV-CARRIER-FRESHEST-NOSPOOF); a CI
+  retry count (hides the defect rather than fixing it); and answering at superseded
+  addresses without (1), which needs the channel key resolved from `sender_blind_id`
+  after the fact and leaves the multi-ephemeral fan-out in place.
+
+  **Status: designed, not landed.**  It changes §15.5 signalling ADDRESSING on the
+  wire, on a launch-blocking plane, so it wants its own focused pass and review rather
+  than riding along with an audit sweep — the same reason the first mitigation stopped
+  where it did.  The `test.fixme` comes off in that change.
 
 - **`context canceled` noise from the TypeScript 7 native host** — blocked
   upstream. `new API(...)` in `scripts/ts-source.ts` /
