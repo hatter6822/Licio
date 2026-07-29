@@ -348,7 +348,9 @@ describe('runWsmTick (WS-M sweeps)', () => {
 });
 
 describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
-  const forumOf = (subscription: { status: string; requestedAt: string } | null): ForumServices =>
+  const forumOf = (
+    subscription: { status: string; requestedAt: string; joinedAt?: string } | null,
+  ): ForumServices =>
     ({
       rooms: {
         getSubscription: async () => subscription,
@@ -365,7 +367,7 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
       .mockResolvedValue(7);
     const joinedAt = new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString();
     const port = buildMembershipFactsPort(
-      forumOf({ status: 'active', requestedAt: joinedAt }),
+      forumOf({ status: 'active', requestedAt: joinedAt, joinedAt }),
       identityOf(true),
       fixture.knomosis,
     );
@@ -381,6 +383,31 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     });
     expect(countSpy).toHaveBeenCalledWith(ROOM, USER);
     expect(await port.eligibleMemberCount(ROOM)).toBe(42);
+  });
+
+  it('membership age and the freeze both read JOINED, not REQUESTED', async () => {
+    // In an approval-gated room the two are far apart, and reading the request
+    // instant makes both answers wrong in the same direction: a `minMembershipDays`
+    // of 30 is satisfied by an account that has been an actual member for a day,
+    // and the electorate freeze admits a ballot from someone who was still
+    // pending — and therefore outside the frozen denominator — when the vote
+    // opened.
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    const port = buildMembershipFactsPort(
+      forumOf({
+        status: 'active',
+        // Asked a year ago…
+        requestedAt: new Date(fixture.knomosis.now() - 365 * 86_400_000).toISOString(),
+        // …admitted yesterday.
+        joinedAt: new Date(fixture.knomosis.now() - 86_400_000).toISOString(),
+      }),
+      identityOf(true),
+      fixture.knomosis,
+    );
+    const facts = await port.memberFacts(ROOM, USER);
+    expect(facts?.membershipDays).toBe(1);
+    expect(Date.parse(facts?.memberSince ?? '')).toBe(fixture.knomosis.now() - 86_400_000);
   });
 
   it('returns null facts for a missing or inactive subscription (fail-closed)', async () => {
