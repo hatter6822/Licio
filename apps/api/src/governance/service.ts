@@ -348,7 +348,15 @@ export class GovernanceService {
    *  per-room guard still applies unconditionally. */
   async scheduleElection(
     roomId: string,
-    options: { force?: boolean; eligibleVoterCount?: (roomId: string) => Promise<number> } = {},
+    options: {
+      force?: boolean;
+      /** Counts the electorate AS OF `asOf` — the SAME instant recorded as the
+       *  election's `opensAt` and compared against by `castVote`.  A live count
+       *  taken beside a separately-read instant is two answers to one question,
+       *  and the gap between them admits or excludes exactly the members the
+       *  freeze exists to fix in place. */
+      eligibleVoterCount?: (roomId: string, asOf: string) => Promise<number>;
+    } = {},
   ): Promise<GovernanceResult<string>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat) return err('no_seat', 'Room has no steward seat.');
@@ -363,11 +371,17 @@ export class GovernanceService {
     // and fail an election that had met it — whereupon the fail-safe hands the
     // incumbent a full new term.  The ratification path has always snapshotted
     // its electorate at open; elections now match it.
+    // ONE INSTANT, taken BEFORE the count and passed into it.  Reading the
+    // clock after awaiting a live count put `opensAt` LATER than the population
+    // it recorded, so a member joining in between was outside the denominator
+    // and inside the ballot cutoff — turnout above 100% of the electorate the
+    // result is measured against, which is the half of the freeze this path
+    // already fixed on the other side.
+    const opensAt = this.deps.now();
     const eligibleCount = options.eligibleVoterCount
-      ? Math.max(0, await options.eligibleVoterCount(roomId))
+      ? Math.max(0, await options.eligibleVoterCount(roomId, opensAt.toISOString()))
       : 0;
     const electionId = this.deps.uuid();
-    const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     // The insert is the ATOMIC one-open-per-room guard (DB partial unique index /
     // in-memory check); the `seat.currentElectionId` check above is a fast-path
@@ -586,7 +600,7 @@ export class GovernanceService {
    * context (the pay-to-rank isolation boundary).
    */
   async runElectionLifecycle(
-    eligibleVoterCount: (roomId: string) => Promise<number>,
+    eligibleVoterCount: (roomId: string, asOf: string) => Promise<number>,
     nowMs: number = this.deps.now().getTime(),
     isRoomMember?: (roomId: string, userId: string) => Promise<boolean>,
   ): Promise<{ scheduled: number; settled: number }> {
@@ -608,7 +622,11 @@ export class GovernanceService {
         election.status === 'open' &&
         nowMs >= Date.parse(election.closesAt)
       ) {
-        const count = await eligibleVoterCount(seat.roomId);
+        // The FALLBACK basis (used only when the election recorded no count) is
+        // read AS OF the election's open, not live at settle: the ballots were
+        // gated on `opensAt`, so a denominator measured now would be answering
+        // a different question from the numerator it divides.
+        const count = await eligibleVoterCount(seat.roomId, election.opensAt);
         // Bind the membership reader to THIS election's room so the winner is
         // re-validated as a member of the room being elected for.
         const memberCheck = isRoomMember

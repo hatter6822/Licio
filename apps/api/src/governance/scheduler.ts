@@ -33,7 +33,7 @@ export type GovernanceSchedulerTask =
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
   /** Eligible voters for a room's election/ratification quorum (soft cross-context read). */
-  eligibleVoterCount: (roomId: string) => Promise<number>;
+  eligibleVoterCount: (roomId: string, asOf: string) => Promise<number>;
   /** Whether a user is currently a member of a room (soft cross-context read) — used
    *  to re-validate an election winner is still a member before seating them. */
   isRoomMember?: (roomId: string, userId: string) => Promise<boolean>;

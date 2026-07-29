@@ -2148,7 +2148,7 @@ startGovernanceScheduler(
     // The election quorum/turnout denominator is the SAME electorate that may vote
     // (active subscribers ∪ stewards, matching isRoomMember) — not just active
     // subscriptions — so a steward-role voter is counted.
-    eligibleVoterCount: (roomId) => forumServices.rooms.countEligibleVoters(roomId),
+    eligibleVoterCount: (roomId, asOf) => forumServices.rooms.countEligibleVoters(roomId, asOf),
     // Re-validate an election winner is still a room member before seating them
     // (active subscription OR steward role — mirrors the ratification/vote gate).
     isRoomMember: async (roomId, userId) => {

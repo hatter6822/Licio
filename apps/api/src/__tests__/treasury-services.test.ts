@@ -459,20 +459,26 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     // opened.
     const fixture = await freshKnomosisServices();
     vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    // ONE read of the clock.  `knomosis.now()` is live here, so calling it once
+    // to build the fixture and again to assert compares two different instants
+    // — which failed by a millisecond in CI, and is the very mistake the code
+    // under test exists to prevent.
+    const now = fixture.knomosis.now();
+    const joinedAt = new Date(now - 86_400_000).toISOString();
     const port = buildMembershipFactsPort(
       forumOf({
         status: 'active',
         // Asked a year ago…
-        requestedAt: new Date(fixture.knomosis.now() - 365 * 86_400_000).toISOString(),
+        requestedAt: new Date(now - 365 * 86_400_000).toISOString(),
         // …admitted yesterday.
-        joinedAt: new Date(fixture.knomosis.now() - 86_400_000).toISOString(),
+        joinedAt,
       }),
       identityOf(true),
       fixture.knomosis,
     );
     const facts = await port.memberFacts(ROOM, USER);
     expect(facts?.membershipDays).toBe(1);
-    expect(Date.parse(facts?.memberSince ?? '')).toBe(fixture.knomosis.now() - 86_400_000);
+    expect(facts?.memberSince).toBe(joinedAt);
   });
 
   it('returns null facts for a missing or inactive subscription (fail-closed)', async () => {

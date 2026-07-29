@@ -119,6 +119,30 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect((await h.svc.getSeat('r1'))?.bootstrap).toBe(false);
   });
 
+  it('the electorate is counted AS OF the instant recorded as opensAt', async () => {
+    // Reading the clock AFTER awaiting a live count put `opensAt` later than
+    // the population it recorded, so a member joining in between was outside
+    // the denominator and inside the ballot cutoff — turnout above 100% of the
+    // electorate the result is measured against, which is the same half of the
+    // freeze this path fixed on the other side.  The instant is taken first
+    // and passed INTO the count, so the two cannot disagree.
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const seen: string[] = [];
+    const sched = await h.svc.scheduleElection('r1', {
+      eligibleVoterCount: async (_room, asOf) => {
+        seen.push(asOf);
+        return 5;
+      },
+    });
+    expect(sched.ok).toBe(true);
+    const election = await h.stores.elections.get(sched.ok ? sched.value : '');
+    // The count was asked about EXACTLY the instant the election records as
+    // its open — not one read moments before or after it.
+    expect(seen).toEqual([election?.opensAt]);
+    expect(election?.eligibleCount).toBe(5);
+  });
+
   it('a voter who joined AFTER the election opened cannot cast a ballot', async () => {
     // The electorate freeze, on the NUMERATOR as well as the denominator.
     // `eligibleCount` is snapshotted when the election opens, so a member who
