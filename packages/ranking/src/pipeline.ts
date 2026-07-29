@@ -121,7 +121,7 @@ function isSensitiveItem(features: FeatureVector, sensitiveTopicIds: ReadonlySet
  * for unit tests; the pipeline applies it to every feasible candidate.
  */
 /** The profile version in which the §11.5 sensitive-freshness CAP took effect. */
-export const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
+const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
 
 /**
  * Whether a profile version scores sensitive items under the §11.5 conservative
@@ -132,7 +132,7 @@ export const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
  * recorded decision, and the safe reading of an unknown version is the one that
  * bounds sensitive content rather than the one that does not.
  */
-export function profileAppliesSensitiveFreshnessCap(profileVersion: string): boolean {
+function profileAppliesSensitiveFreshnessCap(profileVersion: string): boolean {
   const parts = profileVersion.split('.').map((p) => Number.parseInt(p, 10));
   if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n) || n < 0)) return true;
   const [major = 0, minor = 0, patch = 0] = parts;
