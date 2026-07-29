@@ -57,10 +57,27 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
 
     // The window is armed on CREATION only, so a later increment does not push
     // it out (`PEXPIRE` runs under `n == 1` inside the same script).
-    await store.increment('shortwindow', 40);
+    //
+    // ASK REDIS, do not race it.  This used to arm a 40 ms window and assert
+    // the second increment inside a 15 ms margin: on a loaded machine a
+    // delayed timer or round trip let the key expire first, and a CORRECT
+    // implementation returned 1 and failed the test.  A long window plus the
+    // server's own remaining TTL tests the same property — "not re-armed" —
+    // with no timing assumption at all.
+    await store.increment('longwindow', 60_000);
+    const firstTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    expect(firstTtl).toBeGreaterThan(0);
     await new Promise((r) => setTimeout(r, 25));
-    expect(await store.increment('shortwindow', 40)).toBe(2);
-    await new Promise((r) => setTimeout(r, 30));
+    expect(await store.increment('longwindow', 60_000)).toBe(2);
+    const secondTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    // Strictly smaller: the window kept counting down through the second
+    // increment rather than being pushed back out to the full 60 s.
+    expect(secondTtl).toBeLessThan(firstTtl);
+
+    // …and the window really does end, with a margin wide enough that only a
+    // broken expiry can fail it.
+    await store.increment('shortwindow', 40);
+    await new Promise((r) => setTimeout(r, 400));
     expect(await store.increment('shortwindow', 40)).toBe(1); // window elapsed
   });
 

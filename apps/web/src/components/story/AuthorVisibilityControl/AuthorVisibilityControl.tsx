@@ -76,7 +76,17 @@ export function AuthorVisibilityControl({
       )}
       {collisionStoryId !== null ? (
         <p className="text-ink text-sm">
-          {t('storyVisibility.collision', 'A public story already exists for this link:')}{' '}
+          {/* WHICH tier collided.  Narrowing lands on an IN-ROOM twin, and
+              rendering every collision as a public one told an owner reducing
+              their own reach the opposite of what happened. `target` is what
+              this control just asked for, so it names the tier without needing
+              the server to spell it. */}
+          {target === 'public'
+            ? t('storyVisibility.collision', 'A public story already exists for this link:')
+            : t(
+                'storyVisibility.collisionInRoom',
+                'An in-room story already exists for this link:',
+              )}{' '}
           <Link
             to="/stories/$storyId"
             params={{ storyId: collisionStoryId }}

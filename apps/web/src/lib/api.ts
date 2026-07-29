@@ -745,7 +745,12 @@ export async function changeStoryVisibility(
     // caller always sees a normalised ApiClientError, never a raw parser error.
     const raw: unknown = await response.json().catch(() => null);
     const body = storyDuplicateResponseSchema.safeParse(raw);
-    const message = 'A public story already exists for this link';
+    // The SERVER'S message, not a fabricated one.  Narrowing a public story
+    // into a room collides with an IN-ROOM twin, and the server says exactly
+    // that — this used to overwrite it with "A public story already exists",
+    // so an owner reducing their own reach was told the opposite of what
+    // happened and left the story public.
+    const message = body.success ? body.data.error.message : 'A story already exists for this link';
     throw body.success
       ? new DuplicateStoryError(message, body.data.existing_story_id)
       : new ApiClientError('duplicate_story', message, 409);

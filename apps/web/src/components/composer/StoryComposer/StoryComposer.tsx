@@ -25,6 +25,7 @@ import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
 import { fileInputClasses } from '../../../lib/controls.js';
+import { fieldErrorsFrom } from '../../../lib/form-errors.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
   type DraftStoryRecord,
@@ -462,15 +463,16 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       onSubmitted?.({ storyId: result.story_id, pendingScan });
     } catch (error) {
       const code = error instanceof ApiClientError ? error.code : 'unknown';
-      const message =
-        error instanceof ApiClientError
-          ? error.message
-          : t(
-              'storyComposer.err.generic',
-              'Could not submit — your draft is kept on this device. Try again when you are online.',
-            );
+      const fallback = t(
+        'storyComposer.err.generic',
+        'Could not submit — your draft is kept on this device. Try again when you are online.',
+      );
       setStatus('idle');
-      setErrors({ form: `${code}: ${message}` });
+      // The server's PER-FIELD refusals ride alongside the banner, so a
+      // rejected body points at the control it was rejected for instead of
+      // leaving the author to guess.
+      const fielded = fieldErrorsFrom(error, fallback);
+      setErrors({ ...fielded, form: `${code}: ${fielded['form'] ?? fallback}` });
     }
   }
 

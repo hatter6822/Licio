@@ -9,7 +9,7 @@
 import type { RoomCreateRequest } from '@licio/shared';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { ApiClientError } from '../../../lib/api.js';
+import { fieldErrorsFrom } from '../../../lib/form-errors.js';
 import { useCreateRoomMutation } from '../../../lib/queries.js';
 import { Button } from '../../ui/Button/index.js';
 import { Input } from '../../ui/Input/index.js';
@@ -68,12 +68,15 @@ export function RoomCreateForm({ onCreated }: RoomCreateFormProps): React.ReactE
     mutation.mutate(request, {
       onSuccess: (room) => onCreated?.(room.room_id),
       onError: (error) => {
-        setErrors({
-          form:
-            error instanceof ApiClientError
-              ? error.message
-              : t('roomCreate.err.generic', 'Could not create the room.'),
-        });
+        // ATTACH the server's per-field refusals to the inputs that failed.
+        // The BFF answers a rejected body with a field path → message map and
+        // this form rendered one banner over it, so a user was told the request
+        // was invalid and left to guess which control the server meant.
+        setErrors(
+          fieldErrorsFrom(error, t('roomCreate.err.generic', 'Could not create the room.'), {
+            initial_topics: 'topics',
+          }),
+        );
       },
     });
   }

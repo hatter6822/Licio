@@ -7,7 +7,7 @@
 // failure path, and assorted store reads.
 import { randomUUID } from 'node:crypto';
 import type { RegisteredModel } from '@licio/ai-governance';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   detectMissingFields,
   detectScamPatterns,
@@ -310,6 +310,12 @@ describe('WS-K scheduler tick', () => {
     // lease gate nor the stop it names was asserted.
     const { ai } = fresh();
     let checks = 0;
+    // `checks > 0` alone proves only that the lease was CONSULTED.  An
+    // implementation that asked and then ran config reload, monitoring and the
+    // accuracy recompute anyway would pass it — which is the whole fail-closed
+    // guarantee, and the thing that stops two instances doing the work twice.
+    // Spy on a tick stage and assert it stays UNTOUCHED.
+    const reload = vi.spyOn(ai, 'reloadConfig');
     const stop = startAiGovernanceScheduler(ai, () => {}, 5, {
       lease: {
         tryAcquire: async () => {
@@ -320,10 +326,12 @@ describe('WS-K scheduler tick', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(checks).toBeGreaterThan(0); // the gate is consulted
+    expect(reload).not.toHaveBeenCalled(); // …and the DENIAL actually stopped the tick
     stop();
     const afterStop = checks;
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(checks).toBe(afterStop); // …and stop() really halts it
+    reload.mockRestore();
   });
 });
 

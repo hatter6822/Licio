@@ -6,6 +6,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../../lib/api.js';
 import { checkA11y } from '../../../test/axe.js';
 import { RoomCreateForm } from './RoomCreateForm.js';
 
@@ -37,6 +38,30 @@ describe('RoomCreateForm (WS-Q.5.3c)', () => {
       join_model: 'open',
       initial_topics: ['water', 'rivers'],
     });
+  });
+
+  it('attaches a server field refusal to the control it names', async () => {
+    // The BFF answers a rejected body with a field path → message map; this
+    // form rendered one banner over it, so a user was told the request was
+    // invalid and left to guess which control the server meant.
+    const user = userEvent.setup();
+    mutate.mockImplementation((_request: unknown, opts: { onError: (e: unknown) => void }) =>
+      opts.onError(
+        new ApiClientError('validation_error', 'Invalid request json.', 400, {
+          name: 'Room names must be at least 3 characters.',
+          initial_topics: 'Add at least one topic.',
+        }),
+      ),
+    );
+    render(<RoomCreateForm />);
+    await fillRequired(user);
+    await user.click(screen.getByRole('button', { name: /create room/i }));
+    // On the NAMED input…
+    await waitFor(() => expect(screen.getByText(/at least 3 characters/i)).toBeInTheDocument());
+    // …under its own control, renamed from the server's path (`initial_topics`).
+    expect(screen.getByText(/add at least one topic/i)).toBeInTheDocument();
+    // …and the whole-form banner still carries the server's own summary.
+    expect(screen.getByText('Invalid request json.')).toBeInTheDocument();
   });
 
   it('allows request_approval for a PRIVATE room', async () => {

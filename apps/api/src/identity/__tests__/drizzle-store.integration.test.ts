@@ -96,6 +96,25 @@ describe.skipIf(!DB_URL)('Drizzle identity/audit store integration (WS-D)', () =
     });
   });
 
+  it('getUsersByIds reads a batch far past the bind-parameter limit', async () => {
+    // `inArray` spends one bind parameter per id and PostgreSQL's wire protocol
+    // caps a statement at 65535, so a large batch used to fail at the DRIVER
+    // rather than return rows.  One such batch is third-party-controlled — the
+    // room join-queue is populated by anyone who asks to join — which turned a
+    // sock-puppet flood into a queue no steward could ever open.  Only a real
+    // database can prove the chunking: the in-memory adapter has no protocol.
+    const real = await Promise.all(Array.from({ length: 3 }, () => store.createUser(userInput())));
+    // Well past 65535 parameters, with the known ids salted through the middle
+    // so a chunk boundary that dropped rows would show up.
+    const ids = [
+      ...Array.from({ length: 40_000 }, () => randomUUID()),
+      ...real.map((u) => u.userId),
+      ...Array.from({ length: 40_000 }, () => randomUUID()),
+    ];
+    const found = await store.getUsersByIds(ids);
+    expect(found.map((u) => u.userId).sort()).toEqual(real.map((u) => u.userId).sort());
+  });
+
   it('looks up handle and email case-insensitively; misses return null', async () => {
     const created = await store.createUser(
       userInput({ handle: 'CaseUser', email: 'Case@Example.com' }),

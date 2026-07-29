@@ -60,6 +60,11 @@ import type {
   StoredWebauthnCredential,
 } from './store.js';
 
+/** Ids per `getUsersByIds` statement.  PostgreSQL's wire protocol caps a
+ *  statement at 65535 bind parameters and `inArray` spends one per id; 500
+ *  mirrors the WS-E retention sweep's chunk. */
+const IDENTITY_BATCH_READ_CHUNK = 500;
+
 type Db = ReturnType<typeof createDbClient>;
 
 // uuid-keyed lookups guard their input so a malformed id behaves like the
@@ -219,7 +224,25 @@ export class DrizzleIdentityStore implements IdentityStore {
   async getUsersByIds(userIds: readonly string[]): Promise<StoredUser[]> {
     const validIds = userIds.filter((id) => isUuid(id));
     if (validIds.length === 0) return [];
-    const rows = await this.#db.select().from(users).where(inArray(users.userId, validIds));
+    // CHUNKED HERE, not at each call site.  `inArray` expands to one bind
+    // parameter per id, and PostgreSQL's protocol caps a statement at 65535 —
+    // so a caller handing over a large batch got a driver error instead of
+    // rows.  At least one such batch is third-party-controlled (the room
+    // join-queue is populated by anyone who asks to join), which turns a
+    // sock-puppet flood into a permanently unreadable queue.  A per-caller loop
+    // fixes one caller; the store fixing it is what makes the next batch read
+    // safe by default.
+    const rows: (typeof users.$inferSelect)[] = [];
+    for (let offset = 0; offset < validIds.length; offset += IDENTITY_BATCH_READ_CHUNK) {
+      rows.push(
+        ...(await this.#db
+          .select()
+          .from(users)
+          .where(
+            inArray(users.userId, validIds.slice(offset, offset + IDENTITY_BATCH_READ_CHUNK)),
+          )),
+      );
+    }
     return rows.map((row) => rowToUser(row));
   }
 

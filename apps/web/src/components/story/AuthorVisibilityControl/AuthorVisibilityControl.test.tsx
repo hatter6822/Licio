@@ -57,6 +57,25 @@ describe('AuthorVisibilityControl (WS-Q.5.4a)', () => {
     await user.click(screen.getByRole('button', { name: /make public/i }));
     const link = screen.getByRole('link', { name: /view it/i });
     expect(link).toHaveAttribute('href', '#existing-1');
+    // WIDENING collided with a public story, so that is what it says.
+    expect(screen.getByText(/a public story already exists/i)).toBeInTheDocument();
+  });
+
+  it('a NARROWING collision names the in-room twin, not a public story', async () => {
+    // Narrowing lands on the room_only tier, so the blocker is an in-room
+    // story.  Rendering every `duplicate_story` as a public collision told an
+    // owner reducing their own reach the opposite of what happened — and their
+    // story stayed public.
+    const err = new ApiClientError('duplicate_story', 'exists', 409);
+    (err as ApiClientError & { existingStoryId?: string }).existingStoryId = 'twin-1';
+    mutate.mockImplementation((_target: string, opts: { onError: (e: unknown) => void }) =>
+      opts.onError(err),
+    );
+    const user = userEvent.setup();
+    render(<AuthorVisibilityControl storyId="s1" visibility="public" roomVisibility="public" />);
+    await user.click(screen.getByRole('button', { name: /make in-room only/i }));
+    expect(screen.getByText(/an in-room story already exists/i)).toBeInTheDocument();
+    expect(screen.queryByText(/a public story already exists/i)).not.toBeInTheDocument();
   });
 
   it('has no accessibility violations (narrow + widen + locked states)', async () => {
