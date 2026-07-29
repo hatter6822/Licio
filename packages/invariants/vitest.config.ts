@@ -5,6 +5,8 @@
 // workspace into the unified run + coverage gate; both source the same project
 // settings from `vitest.shared.ts`.
 import { defineConfig } from 'vitest/config';
-import { nodeProjectTest } from '../../vitest.shared';
+import { nodeProjectTest, refuseWorkspaceCoverage } from '../../vitest.shared';
+
+refuseWorkspaceCoverage('invariants');
 
 export default defineConfig({ test: nodeProjectTest('invariants') });

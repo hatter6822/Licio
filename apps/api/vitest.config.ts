@@ -5,7 +5,9 @@
 // unified multi-project run + cross-workspace coverage gate used by `pnpm test`
 // and CI; both source the same project settings from `vitest.shared.ts`.
 import { defineConfig } from 'vitest/config';
-import { nodeProjectTest } from '../../vitest.shared';
+import { nodeProjectTest, refuseWorkspaceCoverage } from '../../vitest.shared';
+
+refuseWorkspaceCoverage('api');
 
 export default defineConfig({
   test: {
