@@ -453,6 +453,35 @@ async function raiseDivergence(
 }
 
 /**
+ * §28.3 expansion gate across EVERY ACTIVE deployment — the shape a caller that
+ * holds a room, not a deployment, actually needs.
+ *
+ * `requestWsmModeTransition` gates a ROOM's escalation into (or within) the
+ * production modes, and there is no room→deployment mapping: a room's real
+ * assets can move through any active deployment.  So the honest bound is the
+ * conservative one — an unexplained divergence ANYWHERE the room's funds could
+ * be flowing blocks expansion, which is the direction §28.3 asks a gate to fail
+ * in.  Inactive (frozen/retired) deployments are excluded: they accept no new
+ * submits, so an unresolved mismatch there cannot describe an expansion that is
+ * about to happen, and including them would leave a retired deployment blocking
+ * every room for ever.
+ */
+export async function canExpandAnyActiveDeployment(
+  deps: Pick<ReconciliationDeps, 'reconciliation'> & {
+    deployments: { list(): Promise<ReadonlyArray<{ deploymentId: string; status: string }>> };
+  },
+): Promise<{ allowed: boolean; blocking: number }> {
+  const deployments = await deps.deployments.list();
+  let blocking = 0;
+  for (const deployment of deployments) {
+    if (deployment.status !== 'active') continue;
+    const { blocking: count } = await canExpandTreasury(deps, deployment.deploymentId);
+    blocking += count;
+  }
+  return { allowed: blocking === 0, blocking };
+}
+
+/**
  * §28.3 expansion gate: treasury limits may expand ONLY when no unexplained
  * divergence exists for the deployment.
  */

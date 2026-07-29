@@ -666,7 +666,36 @@ export async function connectPrivatePeer(
     // A fresh candidate appeared — return to the responsive discovery cadence.
     discoveryPollBackoffMs = pollIntervalMs;
 
-    for (const candidate of triable) {
+    // ONE candidate per round — the FRESHEST — then re-poll (PRIV-CARRIER-FRESH-VIEW).
+    //
+    // A handshake needs BOTH peers to pick each OTHER'S CURRENT announcement: the
+    // signalling channel key is ECDH(own ephemeral, the peer's ANNOUNCED ephemeral),
+    // and each dial mints a fresh ephemeral whose inbound queue only THAT dial
+    // drains.  Every superseded announcement therefore names an address nobody
+    // answers at — and it stays live for the §15.3.2 TTL (5-minute floor), because
+    // there is no retraction and the store keys presence by the sealed ciphertext,
+    // so a re-announce ADDS a slot instead of replacing the device's.
+    //
+    // Draining the whole `triable` list before re-polling is what turned that into a
+    // LIVE-LOCK.  Each stale candidate costs a full per-candidate deadline, so a
+    // round could burn `candidates × deadline` against a view that was already out
+    // of date when the round began — while the peer, symmetrically stuck, kept
+    // announcing newer ephemerals this round would never see.  Measured on the
+    // three-browser mesh gate: one peer held THREE live candidates for a single
+    // device and the pair converged in roughly one run in three.
+    //
+    // Freshest-first ORDER was already correct; what was missing is that the choice
+    // must be made against a CURRENT view.  Taking one candidate per round makes the
+    // two sides' selections converge within a poll interval instead of a
+    // list-length multiple of the dial deadline.
+    //
+    // The anti-spoof property is unchanged (PRIV-CARRIER-FRESHEST-NOSPOOF): a spoof
+    // sealed with a later `expires_at` is still dialled FIRST, still rejected by the
+    // §15.5 mismatch check, and still suppressed by the ephemeral-keyed cooldown —
+    // the honest candidate is simply reached on the next round rather than later in
+    // the same one, and the cooldown guarantees the spoof is not retried ahead of it.
+    const candidate = triable[0];
+    if (candidate !== undefined) {
       throwIfAborted();
       const peer: DiscoveredPeer = {
         peerBlindId: candidate.record.peer_blind_id,
@@ -677,14 +706,16 @@ export async function connectPrivatePeer(
         return await dialCandidate(peer);
       } catch (error) {
         // An overall abort/deadline propagates (the whole connect is cancelled); otherwise THIS peer
-        // just failed — remember the typed error, cool the peer down, and try the next candidate.
+        // just failed — remember the typed error, cool the peer down, and re-poll for a fresher view.
         throwIfAborted();
         lastDialError = error;
         failedPeers.set(candidate.ann.signaling_public_key, nowMs() + failedPeerCooldownMs);
       }
     }
-    // Tried every fresh candidate this round; loop to re-poll (a new peer may appear, or all are now
-    // cooled down → the `triable.length === 0` branch above surfaces `lastDialError`).
+    // Loop to RE-POLL: the peer may have announced a newer ephemeral while this
+    // candidate was being dialled, and that newer one is the only address it now
+    // answers at.  (All cooled down → the `triable.length === 0` branch above
+    // surfaces `lastDialError` when the deadline runs out.)
   }
 }
 

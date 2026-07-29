@@ -24,6 +24,7 @@ import { accountRef } from '../identity/crypto.js';
 import type { IdentityServices } from '../identity/services.js';
 import { authMethodInventory } from '../identity/services.js';
 import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
+import { canExpandAnyActiveDeployment } from '../knomosis/reconciliation.js';
 import type { KnomosisServices } from '../knomosis/services.js';
 import type {
   MembershipFactsPort,
@@ -268,6 +269,11 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
     rooms,
     roomMode,
     identityAudit: knomosis.audit,
+    // §28.3 DEPLOYMENT-scope expansion gate.  `canExpandTreasury` shipped with
+    // zero callers while five sibling comments reasoned about it as a live
+    // control; this is the wiring that makes it one.  Unwired, the readiness
+    // gate refuses expansion rather than skipping the check.
+    canExpandDeployment: async () => canExpandAnyActiveDeployment(knomosis),
     masterSecret: knomosis.masterSecret,
     contractVerifier: knomosis.contractTypedDataVerifier,
     membership: inputs.membership,

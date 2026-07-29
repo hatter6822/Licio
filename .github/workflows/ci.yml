@@ -248,6 +248,17 @@ jobs:
       # the in-memory API e2e-server + the proxied preview itself — no extra
       # service containers needed (in-memory stores only).
       - run: pnpm --filter web test:e2e:bff
+      # WS-S LAUNCH GATE: the REAL-browser / REAL-rendezvous specs.  This entry
+      # point existed in `apps/web/package.json` and appeared in NO workflow, and
+      # the default config excludes the files by name
+      # (`testIgnore: /\.(bff|realwebrtc)\.spec\.ts$/`), so ~1100 lines of the
+      # most load-bearing E2E in the repo had never executed once.  Running them
+      # for the first time found a real defect immediately (an incomplete codec
+      # stub in the carrier spec that made the responder go silent).  The unit
+      # suites prove the state machines against a fake RTCPeerConnection; only
+      # these prove the fake and the browser still agree.  Chromium only; the
+      # config boots its own API + dev server.
+      - run: pnpm --filter web test:e2e:webrtc
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

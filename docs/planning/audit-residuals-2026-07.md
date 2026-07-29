@@ -265,6 +265,46 @@ recorded here:
   **Closure target:** the four low-coverage pages, `security.tsx` first — it is
   the largest (194 statements) and hosts the MFA/session surfaces.
 
+- **WS-S mesh: a device advertises one live rendezvous slot PER DIAL** — diagnosed,
+  fix deferred to a maintainer decision.  Found by wiring `test:e2e:webrtc` into
+  CI (it ran in no workflow, so all five real-WebRTC specs had never executed;
+  the first run also surfaced a dead codec stub in the carrier spec, since fixed).
+  `private-mesh.realwebrtc.spec.ts` passes ~1 run in 3 and is `test.fixme`'d with
+  the full trace at the call site.
+
+  **Mechanism** (instrumented per member, not inferred): `connectPrivatePeer`
+  mints a fresh ephemeral X25519 key per dial and drains only that key's inbound
+  queue; when the dial ends the queue goes unread, but the announcement it
+  published stays live for the §15.3.2 TTL (5-minute floor, 30-minute default)
+  with no retraction.  `InMemoryRendezvousStore.announce` keys presence by the
+  sealed CIPHERTEXT, so a re-announce ADDS a slot rather than replacing the
+  device's — contradicting `connect-peer.ts`'s own "one slot per device per
+  bucket", and the store's eviction loop even names its key `peerBlindId`.  At
+  `rePollIntervalMs: 1_500` against a 20s dial deadline each peer publishes ~a
+  dozen dead addresses a minute (observed: three live candidates for one device).
+  Because the signalling channel key is ECDH(self ephemeral, peer's ANNOUNCED
+  ephemeral), a handshake completes only when both sides happen to pick each
+  other's CURRENT announcement; every other pairing burns a full candidate
+  deadline on both sides, and an offer landing at a superseded address fails AEAD
+  open (the `skipped a signal` warnings, only on the joining member).
+
+  **Why it is not fixed here.**  Each candidate fix trades a property the code
+  defends by name:
+  1. key the server slot by `peer_blind_id` — restores one-slot-per-device, but
+     any current-epoch member can derive another member's blind id, so it hands
+     over a targeted EVICTION vector: the sharper cousin of the DoS
+     `selectFreshestCandidates` explicitly refuses to enable
+     (PRIV-CARRIER-FRESHEST-NOSPOOF);
+  2. reuse one ephemeral per device per bucket — collapses the candidates, but
+     reintroduces the shared-queue stall that same comment documents;
+  3. keep answering at superseded addresses — adds NO new forgeability (a peer
+     only honours advertisements it published itself) and is the most likely
+     right answer, but it requires deferring the channel-key derivation until the
+     caller is known, i.e. a real change to the §15.5 handshake.
+  **Closure target:** option 3, with the handshake change reviewed on its own —
+  a launch-blocking E2EE plane should not take a rushed protocol edit, and a
+  retry count in CI would hide the defect rather than fix it.
+
 - **`context canceled` noise from the TypeScript 7 native host** — blocked
   upstream. `new API(...)` in `scripts/ts-source.ts` /
   `scripts/resolve-export-references.ts` spawns the Go compiler as a child whose
