@@ -18,6 +18,7 @@ import type {
 } from '@licio/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n/I18nProvider.js';
@@ -56,6 +57,26 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchUrlVerdict: vi.fn(),
   decideAppeal: vi.fn(),
   resolveIncident: vi.fn(),
+  assignCase: vi.fn(),
+  revertModerationAction: vi.fn(),
+  setReviewerStatus: vi.fn(),
+  exportAudit: vi.fn(),
+}));
+
+// The self-assign control needs the signed-in reviewer's own id; nothing else
+// in these panels reads the auth store.
+const SELF_ID = '00000000-0000-4000-8000-00000000005e';
+vi.mock('../../stores/auth.js', () => ({
+  useAuthStore: (select: (s: { user: { id: string } | null }) => unknown) =>
+    select({ user: { id: SELF_ID } }),
+}));
+
+// `exportAudit` writes a file; capture the download instead of performing it.
+const savedBlobs: Array<{ filename: string; blob: Blob }> = [];
+vi.mock('../../lib/privacy-api.js', () => ({
+  saveBlob: (blob: Blob, filename: string) => {
+    savedBlobs.push({ filename, blob });
+  },
 }));
 
 const api = await import('../../lib/safety-api.js');
@@ -879,5 +900,159 @@ describe('console pagination (Load more)', () => {
     expect(await screen.findByText('remove')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /load more/i }));
     expect(await screen.findByText('restrict')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The four console calls that had live server routes and no surface at all
+// (`assignCase`, `revertModerationAction`, `setReviewerStatus`, `exportAudit`).
+// Each test drives the CONTROL, not the client function, so deleting the
+// control fails here rather than leaving a green suite over an unreachable
+// endpoint — which is the state these were found in.
+// ---------------------------------------------------------------------------
+describe('WS-J.2 console surfaces for the previously unreachable routes', () => {
+  it('WS-J.2.1d: a reviewer can take an unassigned case, and it posts their own id', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue(caseReview);
+    vi.mocked(api.assignCase).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Unassigned')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /take this case/i }));
+    await waitFor(() => expect(api.assignCase).toHaveBeenCalledWith(CASE_ID, SELF_ID));
+  });
+
+  it('WS-J.2.1d: a case already assigned to this reviewer offers no claim button', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({ ...caseReview, assigned_to_id: SELF_ID });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Assigned to you')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: a prior action can be reverted with the selected reason code', async () => {
+    const ACTION_ID = '00000000-0000-4000-8000-0000000000f1';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: ACTION_ID,
+            action: 'hide',
+            reason_code: 'MOD_HARASS_001',
+            created_at: NOW,
+            reverted: false,
+          },
+        ],
+      },
+    });
+    vi.mocked(api.revertModerationAction).mockResolvedValue({
+      revert_action_id: '00000000-0000-4000-8000-0000000000f2',
+      reverted_action_id: ACTION_ID,
+      notice_sent: true,
+      created_at: NOW,
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^revert$/i }));
+    await waitFor(() =>
+      expect(api.revertModerationAction).toHaveBeenCalledWith(ACTION_ID, 'MOD_HARASS_001'),
+    );
+    expect(await screen.findByText(/action reverted/i)).toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: an already-reverted action shows the badge and offers no second revert', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: '00000000-0000-4000-8000-0000000000f3',
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Reverted')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^revert$/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: availability posts the chosen status', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    // The design-system Select is a listbox combobox, not a native <select>.
+    await userEvent.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await userEvent.click(screen.getByRole('option', { name: 'busy' }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+    expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy');
+  });
+
+  it('WS-J.2.1d: a rejected availability change does not leave the control lying', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.setReviewerStatus).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    await userEvent.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await userEvent.click(screen.getByRole('option', { name: 'offline' }));
+    expect(await screen.findByText(/cannot set a reviewer status/i)).toBeInTheDocument();
+    // Still showing what the server actually believes, not the failed choice —
+    // this control is the only place a steward learns their own availability.
+    expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+      'available',
+    );
+  });
+
+  it('WS-J.2.5: the audit tab exports the transparency report VERBATIM', async () => {
+    savedBlobs.length = 0;
+    const report = {
+      generated_at: NOW,
+      period_start: '2026-04-01T00:00:00.000Z',
+      period_end: '2026-05-01T00:00:00.000Z',
+      suppression_threshold: 5,
+      by_action: [{ key: 'remove', count: 12, suppressed: false }],
+      by_reason_code: [{ key: 'MOD_HARASS_001', count: null, suppressed: true }],
+      by_severity: [{ key: 'moderate', count: 12, suppressed: false }],
+      total: { key: 'total', count: 12, suppressed: false },
+    };
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAudit).mockResolvedValue(auditList);
+    vi.mocked(api.exportAudit).mockResolvedValue(report);
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Audit log');
+    fireEvent.click(await screen.findByRole('button', { name: /export transparency report/i }));
+    await waitFor(() => expect(savedBlobs).toHaveLength(1));
+    const saved = savedBlobs[0];
+    if (!saved) throw new Error('no blob saved');
+    // The suppression flag must survive to the published file — an export that
+    // dropped it would publish a small cell as a plain absence.
+    const parsed: unknown = JSON.parse(await saved.blob.text());
+    expect(parsed).toEqual(report);
+    expect(saved.filename).toBe('moderation-transparency-2026-04-01-to-2026-05-01.json');
+  });
+
+  it('WS-J.2.5: a forbidden export says so instead of downloading an empty file', async () => {
+    savedBlobs.length = 0;
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAudit).mockResolvedValue(auditList);
+    vi.mocked(api.exportAudit).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Audit log');
+    fireEvent.click(await screen.findByRole('button', { name: /export transparency report/i }));
+    expect(await screen.findByText(/cannot export the audit log/i)).toBeInTheDocument();
+    expect(savedBlobs).toHaveLength(0);
   });
 });

@@ -431,6 +431,11 @@ export interface SummaryDraftRecord {
 export interface SummaryStore {
   putDraft(record: SummaryDraftRecord): Promise<void>;
   getDraft(summaryId: string): Promise<SummaryDraftRecord | null>;
+  /** The most recent draft for a thread, or null when it has never been
+   *  summarized.  The sweep reads this to decide whether a thread is due; the
+   *  `ai_summary_drafts_thread_idx` index that supports it already existed with
+   *  no query behind it. */
+  getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null>;
   putReport(report: SummaryReport): Promise<void>;
   listReports(summaryId: string): Promise<SummaryReport[]>;
   countReportsByReason(): Promise<Record<string, number>>;
@@ -446,6 +451,22 @@ export class InMemorySummaryStore implements SummaryStore {
   async getDraft(summaryId: string): Promise<SummaryDraftRecord | null> {
     const row = this.#drafts.get(summaryId);
     return row ? clone(row) : null;
+  }
+  async getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null> {
+    let latest: SummaryDraftRecord | null = null;
+    for (const row of this.#drafts.values()) {
+      if (row.threadId !== threadId) continue;
+      // Tie-break on summaryId so equal timestamps still give ONE answer —
+      // the same total-order discipline the Drizzle adapter's ORDER BY needs.
+      if (
+        latest === null ||
+        row.createdAt > latest.createdAt ||
+        (row.createdAt === latest.createdAt && row.summaryId > latest.summaryId)
+      ) {
+        latest = row;
+      }
+    }
+    return latest ? clone(latest) : null;
   }
   async putReport(report: SummaryReport): Promise<void> {
     this.#reports.push(clone(report));

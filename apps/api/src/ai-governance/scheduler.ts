@@ -11,12 +11,76 @@ import { AlwaysGrantJobLeaseStore, type JobLeaseStore } from '../identity/job-le
 import { accuracyMetrics } from './correction.js';
 import { runtimeMonitorTick } from './runtime-monitor.js';
 import type { AiGovernanceServices } from './services.js';
-import { buildCorrectionDeps, buildRuntimeMonitorDeps } from './wiring.js';
+import { generateThreadSummary } from './summaries.js';
+import { buildCorrectionDeps, buildRuntimeMonitorDeps, buildSummaryDeps } from './wiring.js';
 
 export const AI_GOVERNANCE_JOB_LEASE = 'ai_governance_hourly';
 export const AI_GOVERNANCE_SCHEDULER_INTERVAL_MS = 3_600_000;
 
-export type AiGovernanceSchedulerTask = 'config_reload' | 'runtime_monitor' | 'accuracy_recompute';
+/**
+ * Threads examined per summary sweep.
+ *
+ * A bound, not a target: the sweep walks the newest visible threads and stops.
+ * Unbounded enumeration inside an hourly lease is how a maintenance job becomes
+ * an outage, and a thread missed this hour is picked up the next.
+ */
+export const SUMMARY_SWEEP_THREAD_LIMIT = 50;
+
+export type AiGovernanceSchedulerTask =
+  | 'config_reload'
+  | 'runtime_monitor'
+  | 'accuracy_recompute'
+  | 'summary_sweep';
+
+/**
+ * WS-K.1.4a — generate the automated-draft summaries the pipeline exists to
+ * produce.
+ *
+ * `generateThreadSummary` had no production caller while `reportSummary`, from
+ * the same module, was routed at `POST /v1/ai/summaries/:id/report`: a summary
+ * could be REPORTED but never GENERATED, so the report route addressed drafts
+ * that could not exist and the module's own note that the pipeline "still
+ * evaluates + records it (AIOutputRecord + the AI draft store) for
+ * governance/audit" described a pipeline nothing ran.
+ *
+ * A thread is summarized at most ONCE. The §24.3 reader-facing Overview was
+ * removed, so a draft is an audit artifact rather than something a reader sees
+ * go stale; re-summarizing on every tick would mint a fresh AIOutputRecord per
+ * thread per hour — unbounded audit noise, and unbounded guard/LLM work — for
+ * no new governance signal. `getLatestForThread` answers "already done" against
+ * the `ai_summary_drafts_thread_idx` index, which existed with no query behind
+ * it.
+ *
+ * Per-thread failures are isolated: one thread that throws must not cost the
+ * rest of the page, because the next tick would start from the same place and
+ * never get past it.
+ */
+export async function runSummarySweep(
+  ai: AiGovernanceServices,
+  onThreadError: (err: unknown, threadId: string) => void = () => {},
+  limit: number = SUMMARY_SWEEP_THREAD_LIMIT,
+): Promise<{ examined: number; generated: number; skipped: number }> {
+  const deps = buildSummaryDeps(ai);
+  const threads = await deps.stories.listThreads(null, limit);
+  let generated = 0;
+  let skipped = 0;
+  for (const thread of threads) {
+    try {
+      if ((await deps.aiSummaries.getLatestForThread(thread.threadId)) !== null) {
+        skipped += 1;
+        continue;
+      }
+      const outcome = await generateThreadSummary(deps, thread.threadId);
+      // `insufficient_activity` is the common, expected answer for a young
+      // thread — it is a skip, not a failure, and must not read as one.
+      if (outcome.ok) generated += 1;
+      else skipped += 1;
+    } catch (err) {
+      onThreadError(err, thread.threadId);
+    }
+  }
+  return { examined: threads.length, generated, skipped };
+}
 
 /** One maintenance pass. Each task is isolated — one failure never blocks the
  *  others (each is reported through `onError`). */
@@ -41,6 +105,14 @@ export async function runAiGovernanceTick(
     }
   } catch (err) {
     onError(err, 'accuracy_recompute');
+  }
+  try {
+    await runSummarySweep(ai, (err) => onError(err, 'summary_sweep'));
+  } catch (err) {
+    // `buildSummaryDeps` throws when the forum/ingestion seam is unwired (a
+    // deployment without those services); that is a configuration fact, not a
+    // tick failure, and it must not stop the tasks above from having run.
+    onError(err, 'summary_sweep');
   }
 }
 

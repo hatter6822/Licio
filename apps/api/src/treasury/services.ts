@@ -16,6 +16,13 @@
 //  - `elections` adapts scheduleElection(force) for community-voted rotations.
 
 import { checkVoterEligibility } from '@licio/governance';
+import {
+  detectScamPatterns,
+  highlightConflictOfInterest,
+  summarizeProposal,
+} from '../ai-governance/governance-ai.js';
+import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
+import { buildGovernanceAiDeps } from '../ai-governance/wiring.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
@@ -274,6 +281,31 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
     // control; this is the wiring that makes it one.  Unwired, the readiness
     // gate refuses expansion rather than skipping the check.
     canExpandDeployment: async () => canExpandAnyActiveDeployment(knomosis),
+    // WS-K.2.2a §24.5 — the advisory pass over a newly published proposal.
+    // `buildGovernanceAiDeps` was the one wiring builder with no production
+    // caller, so `governance-ai.ts` (the whole §24.5 permitted-capability set:
+    // plain-language summary, missing required fields, conflict of interest,
+    // scam-pattern language) was reachable from nothing.  `tryGet…` rather than
+    // `get…`: a deployment with no AI wired keeps full governance and simply
+    // gets no advice, which is what "advisory" has to mean.
+    governanceAdvisor: async (input) => {
+      const ai = tryGetAiGovernanceServices();
+      if (ai === null) return;
+      const aiDeps = buildGovernanceAiDeps(ai);
+      await summarizeProposal(aiDeps, {
+        proposalRef: input.proposalRef,
+        fields: input.fields,
+      });
+      if (input.recipientRef !== null) {
+        await highlightConflictOfInterest(
+          aiDeps,
+          input.proposalRef,
+          input.proposerRef,
+          input.recipientRef,
+        );
+      }
+      await detectScamPatterns(aiDeps, input.proposalRef, input.text);
+    },
     masterSecret: knomosis.masterSecret,
     contractVerifier: knomosis.contractTypedDataVerifier,
     membership: inputs.membership,

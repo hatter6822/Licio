@@ -26,6 +26,7 @@ import {
   type PipelineDeps,
 } from '../ai-governance/pipelines.js';
 import { type RuntimeMonitorDeps, runtimeMonitorTick } from '../ai-governance/runtime-monitor.js';
+import { runSummarySweep } from '../ai-governance/scheduler.js';
 import { seedAiGovernance } from '../ai-governance/seed.js';
 import {
   type AiGovernanceServices,
@@ -392,6 +393,102 @@ describe('WS-K.1.4a summary generation', () => {
     const f = fresh();
     expect(await reportSummary(summaryDeps(f), 'nope', 'fake_citation', null)).toBeNull();
     expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10)).toHaveLength(0);
+  });
+
+  // The PRODUCTION caller.  `generateThreadSummary` had none while
+  // `reportSummary` — the same module — was routed, so a summary could be
+  // reported and never generated.  These drive the scheduler task, not the
+  // pipeline function, so removing the sweep fails here rather than leaving the
+  // pipeline tests above green over an unreachable producer.
+  describe('the hourly summary sweep (the production caller)', () => {
+    function wired(): Fixture {
+      const f = fresh();
+      f.ai.ingestion = f.forum.ingestion;
+      f.ai.forum = f.forum.forum;
+      return f;
+    }
+
+    it('generates a draft for a thread the sweep reaches', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      const result = await runSummarySweep(f.ai);
+      expect(result.generated).toBe(1);
+      expect(await f.ai.summaries.getLatestForThread(threadId)).not.toBeNull();
+    });
+
+    it('summarizes a thread ONCE — a second tick mints no second record', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      const first = await runSummarySweep(f.ai);
+      const draft = await f.ai.summaries.getLatestForThread(threadId);
+      const second = await runSummarySweep(f.ai);
+      expect(first.generated).toBe(1);
+      // Re-summarizing hourly would mint an AIOutputRecord per thread per tick:
+      // unbounded audit noise and unbounded guard work for no new signal.
+      expect(second.generated).toBe(0);
+      expect(second.skipped).toBe(1);
+      expect((await f.ai.summaries.getLatestForThread(threadId))?.summaryId).toBe(draft?.summaryId);
+    });
+
+    it('a thread below the activity threshold is a skip, not a failure', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, ['One comment only.']);
+      const errors: string[] = [];
+      const result = await runSummarySweep(f.ai, (_e, id) => errors.push(id));
+      expect(result).toEqual({ examined: 1, generated: 0, skipped: 1 });
+      expect(errors).toEqual([]);
+    });
+
+    it('one failing thread does not cost the rest of the page', async () => {
+      const f = wired();
+      const bad = await seedThread(f.forum);
+      const good = await seedThread(f.forum);
+      for (const id of [bad.threadId, good.threadId]) {
+        await seedRoots(f, id, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const realGet = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      f.ai.summaries.getLatestForThread = async (threadId: string) => {
+        if (threadId === bad.threadId) throw new Error('store outage');
+        return realGet(threadId);
+      };
+      const failed: string[] = [];
+      const result = await runSummarySweep(f.ai, (_e, id) => failed.push(id));
+      // The next tick would start from the same page, so a thread that throws
+      // must not be able to block every thread behind it forever.
+      expect(failed).toEqual([bad.threadId]);
+      expect(result.generated).toBe(1);
+      expect(await f.ai.summaries.getLatestForThread(good.threadId)).not.toBeNull();
+    });
+
+    it('the sweep is BOUNDED — it never walks more threads than its limit', async () => {
+      const f = wired();
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const result = await runSummarySweep(f.ai, () => {}, 2);
+      expect(result.examined).toBe(2);
+      expect(result.generated).toBe(2);
+    });
   });
 });
 

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Shadow-mode enforcement at the FALLBACK ranking boundary (WS-E.2.1e, SPEC
-// §30.5). Post-lift role: `rankFrontPageV0` is the WS-I SAFE FALLBACK's
-// ordering (freshness-only), and this guard is what makes the fallback
-// provably score-blind — it rejects an invariant output when its shadow_mode
-// flag is set OR when it is a PWAtt output AT ALL (belt and braces: the
-// fallback must ignore every PWAtt value even post-lift, so engaging the
-// kill switch instantly restores the pre-lift posture). The WS-I ranked
+// §30.5). Post-lift role: `rankFrontPageV0` orders through `@licio/ranking`'s
+// `chronologicalOrder` — the WS-I SAFE FALLBACK's own ordering (freshness-only)
+// — and this guard is what makes that ordering provably score-blind: it rejects
+// an invariant output when its shadow_mode flag is set OR when it is a PWAtt
+// output AT ALL (belt and braces: the fallback must ignore every PWAtt value
+// even post-lift, so engaging the kill switch instantly restores the pre-lift
+// posture). Sharing the sort is load-bearing rather than tidy — `rankFrontPageV0`
+// is what the shadow-equivalence proof runs, and a proof over a sort production
+// does not use would establish nothing about production. The WS-I ranked
 // pipeline is the SINGLE sanctioned PWAtt consumer, behind its own gates:
 // the §30.5 code-level lift (PWATT_V0_SHADOW_MODE in @licio/invariants), the
 // row-level `shadow_mode: false` check in ranking/features.ts, the WS-H

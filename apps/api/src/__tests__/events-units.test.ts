@@ -473,6 +473,30 @@ describe('small pure helpers', () => {
     expect(result.order).toEqual(['c', 'a', 'b']);
     expect(result.rejectedShadowInputs).toBe(0);
   });
+
+  it('rankFrontPageV0 stays a TOTAL order when a timestamp is unparseable', () => {
+    // The v0 sort used bare `Date.parse`, so a malformed instant produced NaN
+    // on both sides of the comparator.  A comparator that returns NaN is not a
+    // valid comparator — the resulting order is implementation-defined, in the
+    // one function whose contract is byte-exact determinism (it is what the
+    // §30.5 shadow-equivalence proof compares).  Ordering through
+    // `chronologicalOrder` parses via `parseTimestampOrZero`, so an unparseable
+    // instant sorts as epoch 0 (last) and ties break on id, as everywhere else.
+    const result = rankFrontPageV0([
+      { storyId: 'b', createdAt: 'not-a-timestamp' },
+      { storyId: 'a', createdAt: 'also-not-a-timestamp' },
+      { storyId: 'c', createdAt: '2026-06-10T11:00:00.000Z' },
+    ]);
+    expect(result.order).toEqual(['c', 'a', 'b']);
+    // And it is STABLE: the same input in a different arrival order is the
+    // same answer, which is what the equivalence comparison actually relies on.
+    const shuffled = rankFrontPageV0([
+      { storyId: 'c', createdAt: '2026-06-10T11:00:00.000Z' },
+      { storyId: 'a', createdAt: 'also-not-a-timestamp' },
+      { storyId: 'b', createdAt: 'not-a-timestamp' },
+    ]);
+    expect(shuffled.order).toEqual(result.order);
+  });
 });
 
 describe('remaining in-memory store surfaces (coverage headroom)', () => {

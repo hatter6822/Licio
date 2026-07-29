@@ -162,6 +162,27 @@ export interface ProposalDeps extends LawPackDeps, GrantDeps {
   };
   /** Operational alert sink (the container provides it; optional for tests). */
   alert?: (event: string, meta: Record<string, unknown>) => void;
+  /**
+   * WS-K.2.2a §24.5 advisory pass over a newly published proposal.
+   *
+   * A PORT, not an import: WS-M must not depend on WS-K (the advisory is
+   * decision-support for stewards, and the treasury domain has to stay
+   * runnable — and testable — with no AI wired at all). Optional for the same
+   * reason; absent means no advisory, never a failure.
+   *
+   * Advisory by construction: it returns nothing the proposal lifecycle reads.
+   * The §24.5 capabilities are permitted only as advice a steward may edit or
+   * ignore, so a port that could influence the outcome would be the prohibited
+   * shape rather than the permitted one.
+   */
+  governanceAdvisor?: (input: {
+    proposalRef: string;
+    roomId: string;
+    proposerRef: string;
+    recipientRef: string | null;
+    fields: Record<string, string>;
+    text: string;
+  }) => Promise<void>;
 }
 
 /** Real-asset modes where production proposals run (sim rooms use WS-L.4). */
@@ -679,7 +700,52 @@ export async function createProductionProposal(
     },
     proposalId,
   });
+  // §24.5 advisory pass, AFTER the audit entry and outside the success value.
+  // A failure here must never unpublish a proposal that is already recorded —
+  // advice is not a precondition of governance — so it is reported through
+  // `alert` and the proposal stands.
+  if (deps.governanceAdvisor !== undefined) {
+    try {
+      await deps.governanceAdvisor({
+        proposalRef: proposalId,
+        roomId: input.roomId,
+        proposerRef: input.userId,
+        recipientRef:
+          typeof input.create.requested_action['recipient'] === 'string'
+            ? input.create.requested_action['recipient']
+            : null,
+        fields: proposalAdvisoryFields(input.create),
+        text: `${input.create.title}\n${input.create.plain_language_summary}`,
+      });
+    } catch (error) {
+      deps.alert?.('governance.advisory.failed', {
+        proposal_id: proposalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   return { ok: true, proposal: record };
+}
+
+/**
+ * The §24.5 "missing budget fields, citations, or unclear recipients" input:
+ * the proposal's own fields, flattened to strings.
+ *
+ * `detectMissingFields` asks about `budget` / `recipient` / `citations` by
+ * those names, so the mapping from this domain's field names to those three is
+ * made here rather than left for each caller to guess.
+ */
+function proposalAdvisoryFields(create: ProductionProposalCreate): Record<string, string> {
+  const action = create.requested_action;
+  const asText = (value: unknown): string =>
+    typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+  return {
+    budget: create.requested_amount ?? '',
+    recipient: asText(action['recipient']),
+    citations: Array.isArray(action['citations'])
+      ? action['citations'].map(asText).join(', ')
+      : asText(action['citations']),
+  };
 }
 
 // ---------------------------------------------------------------------------

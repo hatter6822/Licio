@@ -10,14 +10,17 @@
 // notice.  No financial data appears on any surface.  The page header (title +
 // back button) belongs to the route page — this component renders the tabbed
 // workspace only, optionally controlled so the active tab can live in the URL.
-import type {
-  AppealQueueRow,
-  AppealReviewResponse,
-  CaseReviewResponse,
-  ConsoleAction,
-  EvidenceDecisionRequest,
-  ModerationCaseRow,
-  ModerationReasonCode,
+import {
+  type AppealQueueRow,
+  type AppealReviewResponse,
+  type CaseReviewResponse,
+  type ConsoleAction,
+  canonicalJson,
+  type EvidenceDecisionRequest,
+  type ModerationCaseRow,
+  type ModerationReasonCode,
+  REVIEWER_AVAILABILITY,
+  type ReviewerAvailability,
 } from '@licio/shared';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -25,11 +28,14 @@ import { useState } from 'react';
 import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { verifyTotp } from '../../lib/auth-api.js';
+import { saveBlob } from '../../lib/privacy-api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
   applyModerationAction,
+  assignCase,
   decideAppeal,
+  exportAudit,
   fetchAppeal,
   fetchAppealQueue,
   fetchAudit,
@@ -40,7 +46,10 @@ import {
   fetchReportQueue,
   fetchUrlVerdict,
   resolveIncident,
+  revertModerationAction,
+  setReviewerStatus,
 } from '../../lib/safety-api.js';
+import { useAuthStore } from '../../stores/auth.js';
 import { REPORT_REASONS_BY_CODE } from '../safety/report-reasons.js';
 import { Badge } from '../ui/Badge/index.js';
 import { Button } from '../ui/Button/index.js';
@@ -239,6 +248,7 @@ export function ModerationConsole({
   const t = useT();
   return (
     <section aria-label={t('console.title', 'Moderation console')} className="flex flex-col gap-4">
+      <ReviewerStatusControl />
       <Tabs
         label={t('console.tabs', 'Console sections')}
         {...(tab !== undefined ? { value: tab } : {})}
@@ -264,6 +274,51 @@ export function ModerationConsole({
         )}
       </Tabs>
     </section>
+  );
+}
+
+/**
+ * The reviewer's own availability (WS-J.2.1d).
+ *
+ * This is the input side of the assignment machinery the queue already reads:
+ * `/v1/moderation/queue?assignment=…` filters by assignee and the case row
+ * carries `assigned_to_handle`, but nothing let a steward say whether they were
+ * takingdocket work at all — the route and the client call both existed with no
+ * control in front of them, so the server's routing could only ever see every
+ * steward as equally available.
+ *
+ * Local optimistic state, reverted on failure: availability is a hint the server
+ * owns, and a control that silently kept showing `available` after a failed
+ * write would mislead the one person who needs to know.
+ */
+function ReviewerStatusControl(): React.ReactElement {
+  const t = useT();
+  const { toast } = useToast();
+  const [status, setStatus] = useState<ReviewerAvailability>('available');
+  const update = useMutation({
+    mutationFn: (next: ReviewerAvailability) => setReviewerStatus(next),
+    onSuccess: (_data, next) => setStatus(next),
+    onError: (e) =>
+      toast({
+        message: isForbidden(e)
+          ? t('console.statusForbidden', 'Your role cannot set a reviewer status.')
+          : t('console.statusFailed', 'Could not update your availability.'),
+        tone: 'error',
+      }),
+  });
+  return (
+    <div className="flex items-center justify-end gap-2">
+      <Select
+        label={t('console.availability', 'My availability')}
+        value={status}
+        disabled={update.isPending}
+        onValueChange={(v) => update.mutate(v as ReviewerAvailability)}
+        options={REVIEWER_AVAILABILITY.map((value) => ({
+          value,
+          label: t(`console.availability.${value}`, value),
+        }))}
+      />
+    </div>
   );
 }
 
@@ -536,6 +591,44 @@ function CaseReviewDialog({
       }),
   });
 
+  // WS-J.2.3b revert, keyed by the action being undone so only that row spins.
+  const revert = useMutation({
+    mutationFn: (actionId: string) => revertModerationAction(actionId, reasonCode),
+    onSuccess: () => {
+      toast({ message: t('console.revertDone', 'Action reverted.'), tone: 'success' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modCase(caseId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modAudit('default') });
+    },
+    onError: (e) =>
+      toast({
+        message: isForbidden(e)
+          ? t('console.revertForbidden', 'Your role cannot revert that action.')
+          : t('console.revertFailed', 'The action could not be reverted.'),
+        tone: 'error',
+      }),
+  });
+
+  // WS-J.2.1d self-assignment.  The route takes any `reviewer_id`, but the only
+  // id a console user can name without a reviewer directory is their own, so
+  // this is the "claim it" affordance the queue's `assignment=mine` filter has
+  // always been able to read and nothing could ever write.
+  const selfId = useAuthStore((s) => s.user?.id);
+  const claim = useMutation({
+    mutationFn: (reviewerId: string) => assignCase(caseId, reviewerId),
+    onSuccess: () => {
+      toast({ message: t('console.claimDone', 'Case assigned to you.'), tone: 'success' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modCase(caseId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modQueue('default') });
+    },
+    onError: (e) =>
+      toast({
+        message: isForbidden(e)
+          ? t('console.claimForbidden', 'Your role cannot take this case.')
+          : t('console.claimFailed', 'Could not assign this case to you.'),
+        tone: 'error',
+      }),
+  });
+
   return (
     <Dialog open onClose={onClose} title={t('console.reviewTitle', 'Review case')}>
       {review.isLoading ? (
@@ -552,6 +645,28 @@ function CaseReviewDialog({
       ) : null}
       {data ? (
         <div className="flex flex-col gap-4">
+          <section
+            aria-label={t('console.assignment', 'Assignment')}
+            className="flex items-center justify-between gap-2 text-xs"
+          >
+            <span className="text-ink-muted">
+              {data.assigned_to_id === null
+                ? t('console.unassigned', 'Unassigned')
+                : data.assigned_to_id === selfId
+                  ? t('console.assignedToYou', 'Assigned to you')
+                  : t('console.assignedToOther', 'Assigned to another reviewer')}
+            </span>
+            {selfId !== undefined && data.assigned_to_id !== selfId ? (
+              <Button
+                variant="ghost"
+                loading={claim.isPending}
+                onClick={() => claim.mutate(selfId)}
+              >
+                {t('console.claim', 'Take this case')}
+              </Button>
+            ) : null}
+          </section>
+
           <section aria-label={t('console.reports', 'Reports')}>
             <h3 className="text-xs font-semibold uppercase text-ink-muted">
               {t('console.reports', 'Reports')}
@@ -651,6 +766,39 @@ function CaseReviewDialog({
               {data.user_history.account_age_days ?? t('console.unknown', 'unknown')} ·{' '}
               {t('console.priorActions', 'prior actions')}: {data.user_history.past_actions.length}
             </p>
+            {/* The prior actions THEMSELVES, not just a count.  Each carries an
+                `action_id` and a `reverted` flag the payload has always sent,
+                and WS-J.2.3b's revert route was reachable from no surface — so
+                a wrongly-applied sanction could be seen (as a number) and never
+                undone.  Reverting uses the reason code selected in the palette
+                below, which is the same vocabulary the action itself carries. */}
+            {data.user_history.past_actions.length > 0 ? (
+              <ul className="mt-1 flex flex-col gap-1 text-xs">
+                {data.user_history.past_actions.map((entry) => (
+                  <li
+                    key={entry.action_id}
+                    className="flex items-center justify-between gap-2 rounded bg-surface p-2"
+                  >
+                    <span className="text-ink">
+                      {entry.action}
+                      {entry.reason_code ? ` · ${reasonLabel(entry.reason_code)}` : ''}
+                      <span className="text-ink-muted"> · {entry.created_at.slice(0, 10)}</span>
+                    </span>
+                    {entry.reverted ? (
+                      <Badge tone="neutral">{t('console.reverted', 'Reverted')}</Badge>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        loading={revert.isPending && revert.variables === entry.action_id}
+                        onClick={() => revert.mutate(entry.action_id)}
+                      >
+                        {t('console.revert', 'Revert')}
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </section>
 
           {data.side_by_side ? (
@@ -1355,6 +1503,7 @@ function IncidentsPanel(): React.ReactElement {
 
 function AuditPanel(): React.ReactElement {
   const t = useT();
+  const { toast } = useToast();
   const audit = useInfiniteQuery({
     queryKey: queryKeys.modAudit('default'),
     queryFn: ({ pageParam }) => fetchAudit(pageParam ? { cursor: pageParam } : {}),
@@ -1362,37 +1511,70 @@ function AuditPanel(): React.ReactElement {
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     retry: false,
   });
+  // WS-J.2.5 transparency export.  The endpoint and its small-cell suppression
+  // existed with no way to reach them, so the aggregate a steward is meant to
+  // publish could only be produced by hand from the paginated log — which is
+  // exactly how a suppression threshold gets forgotten.  Saved as the canonical
+  // JSON the server returned, unmodified, so what is published is what was
+  // computed.
+  const exporting = useMutation({
+    mutationFn: () => exportAudit(),
+    onSuccess: (report) => {
+      saveBlob(
+        new Blob([canonicalJson(report)], { type: 'application/json' }),
+        `moderation-transparency-${report.period_start.slice(0, 10)}-to-${report.period_end.slice(0, 10)}.json`,
+      );
+      toast({
+        message: t('console.exportDone', 'Transparency report downloaded.'),
+        tone: 'success',
+      });
+    },
+    onError: (e) =>
+      toast({
+        message: isForbidden(e)
+          ? t('console.exportForbidden', 'Your role cannot export the audit log.')
+          : t('console.exportFailed', 'Could not build the transparency report.'),
+        tone: 'error',
+      }),
+  });
   if (audit.isError) return <PanelError error={audit.error} onRetry={() => void audit.refetch()} />;
   const items = audit.data?.pages.flatMap((p) => p.items) ?? [];
   return (
-    <ul className="flex flex-col gap-1 text-sm">
-      {items.map((entry) => (
-        <li key={entry.audit_id} className="rounded bg-surface p-2">
-          <span className="font-medium text-ink">{entry.action}</span>
-          {entry.reason_code ? (
-            <span className="text-ink-muted"> · {reasonLabel(entry.reason_code)}</span>
-          ) : null}
-          <span className="text-ink-muted">
-            {' '}
-            · {entry.actor_handle ?? t('console.system', 'system')} ·{' '}
-            {entry.event_time.slice(0, 16)}
-          </span>
-        </li>
-      ))}
-      {audit.data && items.length === 0 ? (
-        <li className="text-ink-muted">{t('console.auditEmpty', 'No audit records yet.')}</li>
-      ) : null}
-      {audit.hasNextPage ? (
-        <li className="self-center">
-          <Button
-            variant="ghost"
-            loading={audit.isFetchingNextPage}
-            onClick={() => void audit.fetchNextPage()}
-          >
-            {t('console.loadMore', 'Load more')}
-          </Button>
-        </li>
-      ) : null}
-    </ul>
+    <>
+      <div className="flex justify-end">
+        <Button variant="ghost" loading={exporting.isPending} onClick={() => exporting.mutate()}>
+          {t('console.export', 'Export transparency report')}
+        </Button>
+      </div>
+      <ul className="flex flex-col gap-1 text-sm">
+        {items.map((entry) => (
+          <li key={entry.audit_id} className="rounded bg-surface p-2">
+            <span className="font-medium text-ink">{entry.action}</span>
+            {entry.reason_code ? (
+              <span className="text-ink-muted"> · {reasonLabel(entry.reason_code)}</span>
+            ) : null}
+            <span className="text-ink-muted">
+              {' '}
+              · {entry.actor_handle ?? t('console.system', 'system')} ·{' '}
+              {entry.event_time.slice(0, 16)}
+            </span>
+          </li>
+        ))}
+        {audit.data && items.length === 0 ? (
+          <li className="text-ink-muted">{t('console.auditEmpty', 'No audit records yet.')}</li>
+        ) : null}
+        {audit.hasNextPage ? (
+          <li className="self-center">
+            <Button
+              variant="ghost"
+              loading={audit.isFetchingNextPage}
+              onClick={() => void audit.fetchNextPage()}
+            >
+              {t('console.loadMore', 'Load more')}
+            </Button>
+          </li>
+        ) : null}
+      </ul>
+    </>
   );
 }

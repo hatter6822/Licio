@@ -723,6 +723,28 @@ export class DrizzleSummaryStore implements SummaryStore {
     };
   }
 
+  async getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(aiSummaryDrafts)
+      .where(eq(aiSummaryDrafts.threadId, threadId))
+      // `created_at DESC, summary_id DESC` is a TOTAL order: two drafts written
+      // in the same clock tick must still yield one deterministic answer, or
+      // the sweep's "is this thread due" question could flip between ticks.
+      .orderBy(desc(aiSummaryDrafts.createdAt), desc(aiSummaryDrafts.summaryId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      summaryId: row.summaryId,
+      threadId: row.threadId,
+      draft: row.draft,
+      outputId: row.outputId,
+      qualityPassed: row.qualityPassed,
+      createdAt: iso(row.createdAt),
+    };
+  }
+
   async putReport(report: SummaryReport): Promise<void> {
     await this.#db.insert(aiSummaryReports).values({
       reportId: report.report_id,

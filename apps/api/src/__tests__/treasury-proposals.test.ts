@@ -523,6 +523,60 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(chain.some((e) => e.actionType === 'proposal_published')).toBe(true);
   });
 
+  // WS-K.2.2a §24.5.  `buildGovernanceAiDeps` was the one wiring builder with no
+  // production caller, so the whole advisory module — plain-language summary,
+  // missing required fields, conflict of interest, scam-pattern language — was
+  // reachable from nothing.  These pin the port's CONTRACT: it receives the
+  // published proposal, and it can never change the outcome.
+  describe('the §24.5 advisory port (advisory means advisory)', () => {
+    it('runs over a published proposal with the fields the §24.5 checks name', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const seen: Array<Record<string, unknown>> = [];
+      deps.governanceAdvisor = async (input) => {
+        seen.push(input as unknown as Record<string, unknown>);
+      };
+      const proposal = await createProposal(deps);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        proposalRef: proposal.proposalId,
+        roomId: ROOM,
+        proposerRef: PROPOSER,
+        // `detectMissingFields` asks about budget/recipient/citations by those
+        // names, so the mapping from this domain's fields has to be made once,
+        // at the call site, rather than guessed per caller.
+        fields: expect.objectContaining({ budget: '4000' }),
+      });
+    });
+
+    it('a FAILING advisor never unpublishes an already-recorded proposal', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const alerts: string[] = [];
+      deps.alert = (event) => alerts.push(event);
+      deps.governanceAdvisor = async () => {
+        throw new Error('model unavailable');
+      };
+      const proposal = await createProposal(deps);
+      // Advice is not a precondition of governance: the proposal stands, the
+      // audit entry stands, and the failure is reported operationally.
+      expect(proposal.votingState).toBe('deliberation');
+      const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+      expect(chain.some((e) => e.actionType === 'proposal_published')).toBe(true);
+      expect(alerts).toContain('governance.advisory.failed');
+    });
+
+    it('an UNWIRED advisor is silence, not a failure', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      // A deployment with no AI wired keeps full governance — which is what
+      // "advisory" has to mean if it means anything.
+      expect(deps.governanceAdvisor).toBeUndefined();
+      const proposal = await createProposal(deps);
+      expect(proposal.votingState).toBe('deliberation');
+    });
+  });
+
   it('replays idempotently on the same (room, user, key)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);
