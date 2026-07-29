@@ -11,6 +11,7 @@
 // reporter-identity protection; SPEC §19.5).
 import { z } from 'zod';
 import { type ModerationReasonCode, REPORT_SEVERITIES } from '../constants/moderation.js';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 import { contributionReasonCodeSchema } from './contribution.js';
 import { enforcementActionTypeSchema } from './steward-roles.js';
@@ -23,7 +24,7 @@ export const reportSeveritySchema = z.enum(REPORT_SEVERITIES);
 export const evidenceUrlSchema = z
   .string()
   .url()
-  .max(2048)
+  .max(MAX_URL_LENGTH)
   .refine((value) => /^https:\/\//i.test(value), { message: 'evidence URL must be https' });
 
 // ---------------------------------------------------------------------------

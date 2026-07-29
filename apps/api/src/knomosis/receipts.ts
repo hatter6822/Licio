@@ -24,7 +24,7 @@
 // field.  Without the second check a stored or exported payload could have its
 // room, amount or state rewritten and still verify.
 
-import { getTypedDataStruct } from '@licio/shared';
+import { canonicalJson, getTypedDataStruct } from '@licio/shared';
 import { pairSummaryToPayload } from './preflight.js';
 import type {
   KnomosisActionRecordEntity,
@@ -111,20 +111,6 @@ export function buildPrivateReceiptPayload(
     failure_reason: record.failureReason,
     updated_at: updatedAt,
   };
-}
-
-/**
- * A canonical JSON encoding: object keys sorted at every depth, so two payloads
- * that differ only in key ORDER compare equal and any difference in VALUES
- * does not.
- */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-    a < b ? -1 : a > b ? 1 : 0,
-  );
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
 }
 
 export interface ReceiptDeps {

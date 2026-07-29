@@ -12,6 +12,7 @@
 //   • Reporter identity is carried only on the role-gated review projection,
 //     never on the queue rows or any user-facing shape (SPEC §19.5).
 import { z } from 'zod';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import {
   citationSchema,
@@ -143,7 +144,7 @@ export const caseReportDetailSchema = z
     report_id: uuidSchema,
     reason_code: contributionReasonCodeSchema,
     context: z.string().max(500).nullable(),
-    evidence_urls: z.array(z.string().max(2048)),
+    evidence_urls: z.array(z.string().max(MAX_URL_LENGTH)),
     created_at: isoTimestampSchema,
     /** Reporter handle — present ONLY for roles authorized to see it; else null
      *  (reporter-identity protection, SPEC §19.5). */
@@ -396,7 +397,7 @@ export const appealReviewResponseSchema = z
     original_reviewer_handle: z.string().min(1).nullable(),
     original_created_at: isoTimestampSchema,
     appellant_statement: z.string().max(2000),
-    new_evidence: z.array(z.string().max(2048)),
+    new_evidence: z.array(z.string().max(MAX_URL_LENGTH)),
     target_type: reportTargetTypeSchema,
     // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
     target_id: uuidSchema.nullable(),
@@ -677,7 +678,7 @@ export type IncidentResolveResponse = z.infer<typeof incidentResolveResponseSche
  *  (the fetch runs server-side over the SSRF-hardened WS-F fetcher). */
 export const urlVerdictRequestSchema = z
   .object({
-    url: z.string().url().max(2048),
+    url: z.string().url().max(MAX_URL_LENGTH),
   })
   .strict();
 export type UrlVerdictRequest = z.infer<typeof urlVerdictRequestSchema>;

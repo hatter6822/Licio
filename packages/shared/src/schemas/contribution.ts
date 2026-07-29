@@ -17,6 +17,7 @@
 // `metadata` from the designated fields.
 import { z } from 'zod';
 import { isModerationReasonCode } from '../constants/moderation.js';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ const DOI_PATTERN = /^doi:10\.\d{4,9}\/\S{1,200}$/i;
 export const citationUrlSchema = z
   .string()
   .min(1)
-  .max(2048)
+  .max(MAX_URL_LENGTH)
   .refine((value) => DOI_PATTERN.test(value) || /^https?:\/\/\S+$/i.test(value), {
     message: 'Citation must be an http(s) URL or a doi: reference',
   });
@@ -113,7 +114,7 @@ export const citationSchema = z
     url: citationUrlSchema,
     title: z.string().min(1).max(300).optional(),
     accessed_at: isoTimestampSchema.optional(),
-    archive_url: httpUrlSchema.max(2048).optional(),
+    archive_url: httpUrlSchema.optional(),
   })
   .strict();
 export type Citation = z.infer<typeof citationSchema>;

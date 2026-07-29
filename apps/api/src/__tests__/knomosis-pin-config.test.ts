@@ -6,6 +6,7 @@
 // fail-closed (defaults kept on invalid stored values; crypto never flips ON
 // on a read error).
 
+import { KNOMOSIS_SIGNED_ACTION_TYPES } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import {
@@ -31,15 +32,11 @@ describe('WS-L.1.1a pin loader', () => {
     expect(local?.chain_id).toBe(8357);
     expect(local?.l1_chain_id).toBe(11155111);
     // Every registered action type has a reversibility statement (WS-L.2.6a).
-    for (const actionType of [
-      'proposal_sign',
-      'treasury_deposit',
-      'grant_payout',
-      'charter_update',
-      'bounty_contribution',
-      'steward_rotation',
-    ]) {
-      expect(local?.reversibility[actionType as keyof typeof local.reversibility]).toBeDefined();
+    // Iterated from the registry tuple, not a hand-copy of it: a seventh signed
+    // action must make this loop demand a statement for it, which a literal
+    // list here could never do.
+    for (const actionType of KNOMOSIS_SIGNED_ACTION_TYPES) {
+      expect(local?.reversibility[actionType]).toBeDefined();
     }
   });
 

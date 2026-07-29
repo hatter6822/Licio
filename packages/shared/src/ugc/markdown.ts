@@ -13,6 +13,7 @@
 // The grammar is line-based and deliberately small: no raw-HTML blocks, no
 // images, no tables, no footnotes, no nested lists.  Malformed input degrades
 // to literal text — the parser is total (it never throws on any string).
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { tryParseUrl } from './whatwg-url.js';
 
 /** Inline AST nodes (the only phrasing content the serializer can emit). */
@@ -74,7 +75,7 @@ export function normalizeUgcLink(rawHref: string): string | null {
   // browser would see.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping scheme-obfuscation control bytes is the security point
   const compact = rawHref.replace(/[\s\u0000-\u001f\u007f]+/g, '');
-  if (compact.length === 0 || compact.length > 2048) return null;
+  if (compact.length === 0 || compact.length > MAX_URL_LENGTH) return null;
   if (compact.startsWith('//')) {
     return normalizeUgcLink(`https:${compact}`);
   }
@@ -111,22 +112,33 @@ export function normalizeUgcLink(rawHref: string): string | null {
 // `NEXT_SPECIAL_G` retries at EVERY delimiter, so a crafted run of `*`
 // characters was O(n²) (50KB blocked the main thread for ~4.8s). The bound caps
 // per-position work at a constant, restoring true O(n); emphasis never spans
-// more than EMPHASIS_MAX chars, well beyond any real span (matches the 2048-char
-// link/URL caps below).
+// more than EMPHASIS_MAX chars, well beyond any real span.
+//
+// EMPHASIS_MAX and the URL quantifiers below were both spelled `2048` inline —
+// so this comment named a constant that did not exist, and the link matchers
+// re-spelled `MAX_URL_LENGTH` a fourth time. Building the patterns from the two
+// named bounds makes the prose true and keeps the lexer's idea of "too long to
+// be a URL" equal to the one `normalizeUgcLink` and every URL schema enforce; a
+// lexer that accepted longer would hand the sanitizer a destination the
+// normalizer always rejects.
+const EMPHASIS_MAX = 2048;
 const CODE_Y = /`([^`\n]+)`/y;
 // Destination allows ONE level of balanced parens (Wikipedia-style URLs and
 // script-scheme `alert(1)` payloads both parse as destinations — the latter
 // is then dropped by scheme normalization, keeping the label).
-const LINK_Y = /\[([^\]\n]{0,512})\]\(((?:[^()\s]|\([^()\s]*\)){1,2048})\)/y;
-const ANGLE_Y = /<((?:https?:\/\/|mailto:)[^<>\s]{1,2048})>/iy;
-const BARE_URL_Y = /https?:\/\/[^\s<>"'`]{1,2048}/iy;
+const LINK_Y = new RegExp(
+  `\\[([^\\]\\n]{0,512})\\]\\(((?:[^()\\s]|\\([^()\\s]*\\)){1,${MAX_URL_LENGTH}})\\)`,
+  'y',
+);
+const ANGLE_Y = new RegExp(`<((?:https?://|mailto:)[^<>\\s]{1,${MAX_URL_LENGTH}})>`, 'iy');
+const BARE_URL_Y = new RegExp(`https?://[^\\s<>"'\`]{1,${MAX_URL_LENGTH}}`, 'iy');
 // Emphasis: lazy interiors with non-space edges; the closing run must not be
 // followed by another delimiter of the same kind, so `**bold *em***` closes
 // at the outermost run (nested emphasis parses) while `**a** and **b**` still
 // closes at the first candidate.
-const STRONG_Y = /\*\*(\S(?:[^\n]{0,2048}?\S)?)\*\*(?!\*)/y;
-const EM_STAR_Y = /\*(\S(?:[^*\n]{0,2048}?\S)?)\*(?!\*)/y;
-const EM_UNDERSCORE_Y = /_(\S(?:[^_\n]{0,2048}?\S)?)_(?!\w)/y;
+const STRONG_Y = new RegExp(`\\*\\*(\\S(?:[^\\n]{0,${EMPHASIS_MAX}}?\\S)?)\\*\\*(?!\\*)`, 'y');
+const EM_STAR_Y = new RegExp(`\\*(\\S(?:[^*\\n]{0,${EMPHASIS_MAX}}?\\S)?)\\*(?!\\*)`, 'y');
+const EM_UNDERSCORE_Y = new RegExp(`_(\\S(?:[^_\\n]{0,${EMPHASIS_MAX}}?\\S)?)_(?!\\w)`, 'y');
 /** Finds the next character that could begin a structured inline construct. */
 const NEXT_SPECIAL_G = /[`[<*_]|https?:\/\//gi;
 
