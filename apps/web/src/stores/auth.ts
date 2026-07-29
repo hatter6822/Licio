@@ -145,7 +145,18 @@ export const useAuthStore = create<AuthState>((set) => ({
 
 /** True only when authenticated with an active (non-suspended) account. */
 export function selectIsAuthenticated(state: AuthState): boolean {
-  return state.status === 'authenticated' && state.user?.account_state === 'active';
+  // "Has a live session", NOT "is unrestricted".  A `restricted` account (WS-J
+  // `restrict`) is allowed to sign in precisely so it can appeal, exercise data
+  // rights, and read its notices; requiring `active` here made `requireAuth`
+  // redirect it to /login on every one of those pages, so the server admitted a
+  // session the client refused to believe in.  What restriction costs is the
+  // WRITE paths, which the server denies per-route (403 `account_restricted`)
+  // and `selectIsRestricted` renders — it was never meant to cost access to the
+  // account itself.
+  return (
+    state.status === 'authenticated' &&
+    (state.user?.account_state === 'active' || state.user?.account_state === 'restricted')
+  );
 }
 
 /**

@@ -248,45 +248,52 @@ export class DrizzleStoryStore implements StoryStore {
       // cursor row reappear on the next page (gated-test-proven).
       const now = new Date();
       return await this.#db.transaction(async (tx) => {
+        // EVERY field of the create input, checked by the compiler.  Three had
+        // already gone missing here — `canonicalPublicStoryId` (the WS-Q
+        // cross-tier link, so a database-backed room_only story lost its
+        // pointer to the public conversation), `disputeStatus`, and `settledAt`
+        // — and the dimensions made four.  Hand-listing columns is how that
+        // happens, and the read path mapping a column back is no evidence the
+        // write path ever set it.  `satisfies Record<keyof StoryCreateInput,
+        // unknown>` turns the next omission into a build failure instead of a
+        // field that is silently null in production and correct in every
+        // in-memory test.
+        const columns = {
+          storyId: story.storyId,
+          canonicalUrl: story.canonicalUrl,
+          title: story.title,
+          titleHash: story.titleHash,
+          submittedBy: story.submittedBy,
+          sourceId: story.sourceId,
+          // WS-Q dual-write — every story insert stamps the home room + visibility.
+          roomId: story.roomId,
+          visibility: story.visibility,
+          canonicalPublicStoryId: story.canonicalPublicStoryId,
+          mediaUploadRef: story.mediaUploadRef,
+          // Server-parsed intrinsic dimensions (0103).
+          mediaWidth: story.mediaWidth ?? null,
+          mediaHeight: story.mediaHeight ?? null,
+          language: story.language,
+          topicIds: story.topicIds,
+          proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
+          locationScope: story.locationScope,
+          sensitivityLabels: story.sensitivityLabels,
+          lifecycleState: story.lifecycleState,
+          submissionType: story.submissionType,
+          submissionMetadata: story.submissionMetadata,
+          excerpt: story.excerpt,
+          publisher: story.publisher,
+          author: story.author,
+          publishedAt: dateOrNull(story.publishedAt),
+          mediaType: story.mediaType,
+          extractionState: story.extractionState,
+          hiddenState: story.hiddenState,
+          disputeStatus: story.disputeStatus,
+          settledAt: dateOrNull(story.settledAt ?? null),
+        } satisfies Record<keyof StoryCreateInput, unknown>;
         const inserted = await tx
           .insert(storiesTable)
-          .values({
-            storyId: story.storyId,
-            canonicalUrl: story.canonicalUrl,
-            title: story.title,
-            titleHash: story.titleHash,
-            submittedBy: story.submittedBy,
-            sourceId: story.sourceId,
-            // WS-Q dual-write — every story insert stamps the home room + visibility.
-            roomId: story.roomId,
-            visibility: story.visibility,
-            mediaUploadRef: story.mediaUploadRef,
-            // Server-parsed intrinsic dimensions (0103).  Omitting them here made
-            // the whole CLS fix a no-op against a real database: the columns
-            // existed, the submission path filled the record, and the insert
-            // dropped them — so `feedMediaOf` always saw null and the browser
-            // never got width/height.  The in-memory adapter kept every unit test
-            // green over it.
-            mediaWidth: story.mediaWidth ?? null,
-            mediaHeight: story.mediaHeight ?? null,
-            language: story.language,
-            topicIds: story.topicIds,
-            proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
-            locationScope: story.locationScope,
-            sensitivityLabels: story.sensitivityLabels,
-            lifecycleState: story.lifecycleState,
-            submissionType: story.submissionType,
-            submissionMetadata: story.submissionMetadata,
-            excerpt: story.excerpt,
-            publisher: story.publisher,
-            author: story.author,
-            publishedAt: dateOrNull(story.publishedAt),
-            mediaType: story.mediaType,
-            extractionState: story.extractionState,
-            hiddenState: story.hiddenState,
-            createdAt: now,
-            updatedAt: now,
-          })
+          .values({ ...columns, createdAt: now, updatedAt: now })
           .returning();
         const thread = await tx
           .insert(threadsTable)

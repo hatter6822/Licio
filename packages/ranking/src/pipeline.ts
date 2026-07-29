@@ -120,6 +120,30 @@ function isSensitiveItem(features: FeatureVector, sensitiveTopicIds: ReadonlySet
  * Score one feasible item given its (single) constraint evaluation. Exposed
  * for unit tests; the pipeline applies it to every feasible candidate.
  */
+/** The profile version in which the §11.5 sensitive-freshness CAP took effect. */
+export const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
+
+/**
+ * Whether a profile version scores sensitive items under the §11.5 conservative
+ * CAP (`>= 1.4.0`) or under the pre-cap formula.
+ *
+ * A version this cannot parse applies the cap: an operator-authored profile
+ * carrying a non-numeric version is a live configuration, not a replay of a
+ * recorded decision, and the safe reading of an unknown version is the one that
+ * bounds sensitive content rather than the one that does not.
+ */
+export function profileAppliesSensitiveFreshnessCap(profileVersion: string): boolean {
+  const parts = profileVersion.split('.').map((p) => Number.parseInt(p, 10));
+  if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n) || n < 0)) return true;
+  const [major = 0, minor = 0, patch = 0] = parts;
+  const [capMajor = 0, capMinor = 0, capPatch = 0] = SENSITIVE_FRESHNESS_CAP_MIN_VERSION.split(
+    '.',
+  ).map((p) => Number.parseInt(p, 10));
+  if (major !== capMajor) return major > capMajor;
+  if (minor !== capMinor) return minor > capMinor;
+  return patch >= capPatch;
+}
+
 export function scoreItem(
   candidate: Candidate,
   features: FeatureVector,
@@ -159,10 +183,20 @@ export function scoreItem(
   // unchanged, including the breaking curve's role as the fallback when WS-F
   // has not scored a story yet: this closes a hole in the sensitive-content
   // guard, and is deliberately not a re-tune of the whole feed.
+  //
+  // VERSIONED, because replay is a real consumer.  The scheduled
+  // replay-regression job re-scores historical decisions against the profile
+  // stored in their snapshot and reports a mismatch as a defect; a scoring
+  // change that keeps the same `profile_version` therefore turns every genuine
+  // old decision into a false alarm, and makes one version string denote two
+  // algorithms — which is exactly what the audit queries keying on it cannot
+  // survive.  The cap is gated on `SENSITIVE_FRESHNESS_CAP_MIN_VERSION`, so a
+  // 1.3.0 snapshot replays the formula it was actually decided under.
   const storedFreshness = features.freshness_decay;
-  const freshnessDecay = sensitiveTopic
-    ? Math.min(storedFreshness ?? 1, freshnessFromAge(ageMs, curve.half_life_hours))
-    : (storedFreshness ?? freshnessFromAge(ageMs, curve.half_life_hours));
+  const freshnessDecay =
+    sensitiveTopic && profileAppliesSensitiveFreshnessCap(profile.profile_version)
+      ? Math.min(storedFreshness ?? 1, freshnessFromAge(ageMs, curve.half_life_hours))
+      : (storedFreshness ?? freshnessFromAge(ageMs, curve.half_life_hours));
   const baseline = computeBaseline({
     freshnessDecay,
     sourceReliability: features.source_reliability,

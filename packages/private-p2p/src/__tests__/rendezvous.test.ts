@@ -8,9 +8,11 @@
 // round-trip + AAD-bound tamper rejection; TTL clamp + coarse buckets; and the
 // §15.3.2 mitigations (risk-tier discovery steering, announce jitter, cover
 // records the server cannot distinguish and no member can open).
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { x25519SharedSecret } from '../crypto/ecdh.js';
+import type { PrivateCryptoKeyPair } from '../crypto/runtime.js';
 import { randomBytes, toBase64Url } from '../crypto/runtime.js';
+import { generateDeviceSigningKeyPair } from '../crypto/signatures.js';
 import {
   allowedDiscoveryModes,
   type BlindRendezvousRecord,
@@ -167,16 +169,27 @@ describe('§15.4 PAIRWISE signal address (deriveSignalAddress — mesh de-collis
 });
 
 describe('§15.4 signalling identity (deriveSignalingKeyPair — one per device per bucket)', () => {
-  const key = randomBytes(32);
+  const room = randomBytes(32);
+  let deviceA: PrivateCryptoKeyPair;
+  let deviceB: PrivateCryptoKeyPair;
+
+  beforeAll(async () => {
+    deviceA = await generateDeviceSigningKeyPair();
+    deviceB = await generateDeviceSigningKeyPair();
+  });
 
   it('is DETERMINISTIC — the same (room, device, epoch, bucket) yields the same identity', async () => {
-    // The fix for the mesh flake.  `connectPrivatePeer` runs concurrently once per
-    // peer; a fresh-per-call ephemeral gave a device several live dial identities,
-    // and a polling peer took whichever announcement was freshest — belonging to
-    // the call dialling someone else.  One identity per bucket removes the
-    // coincidence rather than making it less likely.
-    const first = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
-    const second = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    // The fix for the announcement fan-out.  `connectPrivatePeer` runs concurrently
+    // once per peer; a fresh-per-call ephemeral gave a device several live dial
+    // identities, and a polling peer took whichever announcement was freshest —
+    // belonging to the call dialling someone else.  One identity per bucket removes
+    // the coincidence rather than making it less likely.
+    //
+    // This also PINS RFC 8032 determinism in the host runtime: the seed is an
+    // Ed25519 signature, so a runtime that randomized the nonce would silently go
+    // back to publishing a fresh slot per call.
+    const first = await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 100);
+    const second = await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 100);
     expect(second.publicKey).toEqual(first.publicKey);
   });
 
@@ -184,31 +197,44 @@ describe('§15.4 signalling identity (deriveSignalingKeyPair — one per device 
     // Determinism is worthless if the derived scalar does not produce a usable
     // key: the public bytes are read back through a JWK export, so this pins that
     // the exported public key really is the one the private scalar agrees under.
-    const a = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
-    const b = await deriveSignalingKeyPair(key, 'device-b', 3, 100);
+    const a = await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 100);
+    const b = await deriveSignalingKeyPair(deviceB.privateKey, room, 'device-b', 3, 100);
     expect(await x25519SharedSecret(a.privateKey, b.publicKey)).toEqual(
       await x25519SharedSecret(b.privateKey, a.publicKey),
     );
   });
 
-  it('differs per DEVICE, per epoch, and per time bucket', async () => {
-    const base = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+  it('differs per DEVICE, per room, per epoch, and per time bucket', async () => {
+    const base = await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 100);
     for (const other of [
-      await deriveSignalingKeyPair(key, 'device-b', 3, 100),
-      await deriveSignalingKeyPair(key, 'device-a', 4, 100),
-      await deriveSignalingKeyPair(key, 'device-a', 3, 101),
+      await deriveSignalingKeyPair(deviceB.privateKey, room, 'device-b', 3, 100),
+      // A DIFFERENT ROOM, same device: a member of both must not be able to link
+      // the device across them by its signalling public key.
+      await deriveSignalingKeyPair(deviceA.privateKey, randomBytes(32), 'device-a', 3, 100),
+      await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 4, 100),
+      await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 101),
     ]) {
       expect(other.publicKey).not.toEqual(base.publicKey);
     }
   });
 
-  it('is not derivable without the ROOM key (§15.3.1: the key is the capability)', async () => {
-    // An outsider who learns a device id still cannot compute — or correlate —
-    // that device's signalling identity.
-    const outsider = randomBytes(32);
-    const mine = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
-    const theirs = await deriveSignalingKeyPair(outsider, 'device-a', 3, 100);
-    expect(theirs.publicKey).not.toEqual(mine.publicKey);
+  it('is NOT derivable by another room MEMBER — the scalar is device-secret', async () => {
+    // The finding this derivation was rewritten for.  It used to be
+    // `HMAC(rendezvous_key, ["signal-key", device_id, epoch, bucket])`, and a member
+    // holds the rendezvous key while the sealed announcement hands them
+    // `peer_device_id`, `epoch` and the bucket — so any member could recompute
+    // another device's signalling PRIVATE key and decrypt, forge, or consume its
+    // deliver-once SDP/ICE before the §15.5 handshake ever ran.  A malicious member
+    // now has every public input and still cannot reach the scalar.
+    const mine = await deriveSignalingKeyPair(deviceA.privateKey, room, 'device-a', 3, 100);
+    const forged = await deriveSignalingKeyPair(deviceB.privateKey, room, 'device-a', 3, 100);
+    expect(forged.publicKey).not.toEqual(mine.publicKey);
+    // …and the room key itself — the one input a member definitely has — is not
+    // part of the derivation at all, so holding it buys nothing here.
+    expect(
+      (await deriveSignalingKeyPair(deviceA.privateKey, randomBytes(32), 'device-a', 3, 100))
+        .publicKey,
+    ).not.toEqual(mine.publicKey);
   });
 });
 

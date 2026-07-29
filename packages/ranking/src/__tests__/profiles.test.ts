@@ -178,8 +178,12 @@ describe('WS-I.2.3f deterministic profile selection', () => {
   });
 
   it('shipped-profile snapshot (unreviewed changes fail here)', () => {
-    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.3.0');
-    expect(EVERGREEN_PROFILE.profile_version).toBe('1.3.0');
+    // 1.4.0 — the §11.5 sensitive-freshness cap.  This assertion is the gate it
+    // was supposed to trip: a scoring change that leaves the version alone makes
+    // replay re-score old decisions under a formula they were never decided
+    // under, so the version has to move with the behaviour.
+    expect(BREAKING_NEWS_PROFILE.profile_version).toBe('1.4.0');
+    expect(EVERGREEN_PROFILE.profile_version).toBe('1.4.0');
     expect(BREAKING_NEWS_PROFILE.weights).toEqual({ wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 });
     expect(EVERGREEN_PROFILE.weights).toEqual({ wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 });
     expect(BREAKING_NEWS_PROFILE.baseline_weights).toEqual({

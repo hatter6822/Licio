@@ -32,8 +32,22 @@ export const PWATT_V0_SHADOW_MODE = false as const;
 
 /** Implementation version stamped on stored v0 outputs. */
 export const PWATT_V0_VERSION = 'v0' as const;
-/** Implementation version stamped on stored v1 outputs. */
-export const PWATT_V1_VERSION = 'v1' as const;
+/**
+ * Implementation version stamped on stored v1 outputs.
+ *
+ * IT MOVES WITH THE FORMULA, and that is not bookkeeping.  The invariant
+ * store's conflict key includes this string and `upsert` updates on conflict,
+ * so reprocessing a pre-deploy window under an unchanged version OVERWRITES the
+ * historical row with values the old algorithm never produced — the comparison
+ * and the audit reproducibility both go with it, silently, since nothing about
+ * the row says it was recomputed.  A new string makes the two revisions occupy
+ * two natural keys, which is the whole point of stamping one.
+ *
+ * `v1.1` is the WS-T sourced-contribution bonus (`v1-components.ts`): cited
+ * contributions scale a saturated `(1 + citationBonus)` multiplier, so a cited
+ * actor's participation differs from what `v1` scored.
+ */
+export const PWATT_V1_VERSION = 'v1.1' as const;
 
 /**
  * One actor's deduplicated signal summary for a single item within a single

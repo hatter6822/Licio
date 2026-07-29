@@ -14,6 +14,8 @@ import {
   DEFAULT_ANTI_SIGNAL_ATTENUATION,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
   type ItemAntiSignals,
+  PWATT_V0_VERSION,
+  PWATT_V1_VERSION,
   V1_CONTRIBUTION_WEIGHTS,
   validateAntiSignalAttenuation,
   validatePwattV1ComponentsConfig,
@@ -59,6 +61,18 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
     expect(sourced.value).toBeGreaterThan(unsourced.value);
     expect(sourced.annotations).toContain('sourced_contribution_weighted');
     expect(unsourced.annotations).not.toContain('sourced_contribution_weighted');
+  });
+
+  it('the stored implementation version moved with the formula', () => {
+    // The invariant store's conflict key includes this string and `upsert`
+    // updates on conflict, so shipping the sourced-contribution bonus under an
+    // unchanged `v1` would let a reprocessed pre-deploy window OVERWRITE its
+    // historical row with values the old algorithm never produced — losing the
+    // comparison and the audit reproducibility with no trace that it happened.
+    // This assertion is the gate: change the scoring above, and it fails until
+    // the version moves too.
+    expect(PWATT_V1_VERSION).toBe('v1.1');
+    expect(PWATT_V1_VERSION).not.toBe(PWATT_V0_VERSION);
   });
 
   it('per-user saturation: the Nth same-type contribution adds less than the (N-1)th', () => {

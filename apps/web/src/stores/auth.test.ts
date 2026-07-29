@@ -123,6 +123,17 @@ describe('auth selectors', () => {
     expect(selectIsRestricted(useAuthStore.getState())).toBe(false);
   });
 
+  it('treats a RESTRICTED account as authenticated — and restricted', async () => {
+    // The restrict sanction costs the write paths, not the account.  The server
+    // mints the session and `requireAuth` admits it precisely so the member can
+    // appeal and exercise data rights; a predicate that demanded `active` sent
+    // them to /login on every one of those pages instead.
+    const { useAuthStore, selectIsAuthenticated, selectIsRestricted } = await freshAuth();
+    useAuthStore.getState().setAuthenticated({ ...ACTIVE_USER, account_state: 'restricted' });
+    expect(selectIsAuthenticated(useAuthStore.getState())).toBe(true);
+    expect(selectIsRestricted(useAuthStore.getState())).toBe(true);
+  });
+
   it('treats a suspended account as restricted, not authenticated', async () => {
     const { useAuthStore, selectIsAuthenticated, selectIsRestricted } = await freshAuth();
     useAuthStore.getState().setAuthenticated(SUSPENDED_USER);

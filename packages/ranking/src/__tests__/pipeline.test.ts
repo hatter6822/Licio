@@ -16,7 +16,11 @@ import {
   SHADOW_RANKING_ENFORCEMENT,
 } from '../pipeline.js';
 import { FEATURE_SCHEMA_VERSION, type FeatureVector } from '../schemas/feature-vector.js';
-import { BREAKING_NEWS_PROFILE, EVERGREEN_PROFILE } from '../schemas/profile.js';
+import {
+  BREAKING_NEWS_PROFILE,
+  EVERGREEN_PROFILE,
+  type RankingProfileConfig,
+} from '../schemas/profile.js';
 import { makeCandidate, makeContext, makeFeatures, T0, uuidOf } from './fixtures.js';
 
 const FULL_ENFORCEMENT: RankingEnforcement = {
@@ -506,11 +510,15 @@ describe('WS-I §11.5 conservative freshness curve', () => {
   const sensitive = (over: Partial<FeatureVector> = {}): FeatureVector =>
     makeFeatures(1, { sensitivity_labels: ['self-harm'], ...over });
 
-  function freshnessOf(features: FeatureVector, nowMs: number): number {
+  function freshnessOf(
+    features: FeatureVector,
+    nowMs: number,
+    profile: RankingProfileConfig = BREAKING_NEWS_PROFILE,
+  ): number {
     const { selected } = rankFeasibleSet(
       [makeCandidate(1)],
       featureMap([features]),
-      BREAKING_NEWS_PROFILE,
+      profile,
       FULL_ENFORCEMENT,
       makeContext({ nowMs }),
     );
@@ -538,6 +546,31 @@ describe('WS-I §11.5 conservative freshness curve', () => {
     const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
     const ordinary = makeFeatures(1, { created_at: created, freshness_decay: 0.9 });
     expect(freshnessOf(ordinary, T0)).toBe(0.9);
+  });
+
+  it('a PRE-CAP snapshot replays the formula it was decided under', () => {
+    // Replay is a real consumer: the regression job re-scores historical
+    // decisions against the profile stored in their snapshot and reports a
+    // mismatch as a defect.  Shipping this cap under the unchanged `1.3.0`
+    // would have turned every genuine old sensitive decision into a false
+    // alarm, and made one version string denote two algorithms.
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const legacy: RankingProfileConfig = { ...BREAKING_NEWS_PROFILE, profile_version: '1.3.0' };
+    const features = sensitive({ created_at: created, freshness_decay: 0.9 });
+    expect(freshnessOf(features, T0, legacy)).toBe(0.9);
+    // …while the CURRENT profile caps the same item.
+    expect(freshnessOf(features, T0)).toBeLessThan(0.1);
+  });
+
+  it('an unparseable profile version applies the cap (the safe reading)', () => {
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const custom: RankingProfileConfig = {
+      ...BREAKING_NEWS_PROFILE,
+      profile_version: 'operator-a',
+    };
+    expect(
+      freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0, custom),
+    ).toBeLessThan(0.1);
   });
 
   it('with no stored score the curve is still the fallback for both kinds', () => {

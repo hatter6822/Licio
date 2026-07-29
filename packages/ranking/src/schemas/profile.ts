@@ -323,9 +323,13 @@ const DEFAULT_QUOTAS: z.infer<typeof profileQuotasSchema> = {
  */
 export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
   profile_id: 'breaking_news',
-  // 1.3.0: added the WS-T `vD` validation boost — a scoring-behavior change, so
-  // the version bumps (decision logs / audit queries key on profile_version).
-  profile_version: '1.3.0',
+  // 1.4.0: the §11.5 sensitive-freshness CAP binds (`scoreItem` gates on this —
+  // a 1.3.0 snapshot replays the pre-cap formula).  1.3.0 added the WS-T `vD`
+  // validation boost.  Every scoring-behaviour change bumps this: decision logs
+  // and audit queries key on `profile_version`, and the replay-regression job
+  // re-scores old decisions against the profile in their snapshot, so two
+  // algorithms under one version read as a fleet of false mismatches.
+  profile_version: '1.4.0',
   weights: { wA: 30, wP: 25, wE: 15, wS: 15, wC: 15 },
   penalties: { pM: 1.0, pT: 0.75, pR: 0.5, pD: 1.0, vD: 0.25 },
   constraints: DEFAULT_CONSTRAINTS,
@@ -358,8 +362,8 @@ export const BREAKING_NEWS_PROFILE: RankingProfileConfig = {
  */
 export const EVERGREEN_PROFILE: RankingProfileConfig = {
   profile_id: 'evergreen',
-  // 1.3.0: added the WS-T `vD` validation boost (see breaking_news above).
-  profile_version: '1.3.0',
+  // 1.4.0: the §11.5 sensitive-freshness cap (see breaking_news above).
+  profile_version: '1.4.0',
   weights: { wA: 20, wP: 40, wE: 15, wS: 15, wC: 10 },
   penalties: { pM: 1.0, pT: 0.75, pR: 0.75, pD: 1.0, vD: 0.25 },
   constraints: DEFAULT_CONSTRAINTS,

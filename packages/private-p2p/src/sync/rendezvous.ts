@@ -38,7 +38,8 @@ import {
 import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
 import { deriveX25519KeyPair, type X25519KeyPair } from '../crypto/ecdh.js';
 import { hkdfExpandLabel } from '../crypto/hkdf.js';
-import { fromBase64Url, hmacSha256, randomBytes, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, hmacSha256, randomBytes, sha256, toBase64Url } from '../crypto/runtime.js';
+import { signEd25519 } from '../crypto/signatures.js';
 import { base64UrlSchema, privateIdSchema } from '../schemas/common.js';
 
 // --- discovery modes + risk steering (§15.2, §15.3.2) -----------------------
@@ -137,42 +138,73 @@ export async function derivePeerBlindId(
 }
 
 /**
- * A device's §15.4 SIGNALLING IDENTITY for one `(room, epoch, time bucket)`, derived from the
- * rendezvous key: `seed = HMAC-SHA256(rendezvous_key, canonical(["signal-key", device_id, epoch,
- * time_bucket]))`, used as the X25519 private scalar.
+ * A device's §15.4 SIGNALLING IDENTITY for one `(room, epoch, time bucket)`, derived from a secret
+ * ONLY THIS DEVICE HOLDS: its long-term Ed25519 signing key.
  *
- * DETERMINISTIC, which fixes the ANNOUNCEMENT FAN-OUT.  `connectPrivatePeer` used to mint a FRESH
- * ephemeral per CALL, and a mesh member runs that call CONCURRENTLY, once per peer — so a device
- * dialling two peers published TWO live rendezvous slots, each lingering for the §15.3.2 TTL with no
- * retraction.  Measured: three live candidates for a single device, and roughly a dozen addresses a
- * minute that nobody answers at.  That contradicts `connect-peer.ts`'s own documented "one slot per
- * device per bucket" and fills the store with dead entries.  One identity per bucket makes the claim
- * true — `selectFreshestCandidates` collapses a device to one candidate by construction, and
- * re-announcing is idempotent.
+ *     seed = SHA-256(Ed25519-Sign(device_signing_key,
+ *                    canonical(["signal-key", room_id_commitment, device_id, epoch, time_bucket])))
+ *
+ * and that seed is the X25519 private scalar.
+ *
+ * THE KEY MUST NOT COME FROM THE RENDEZVOUS KEY.  This function first derived the scalar as
+ * `HMAC(rendezvous_key, ["signal-key", device_id, epoch, time_bucket])`, and every input to that is
+ * known to every current member: the rendezvous key is the room's shared discovery capability, and
+ * `peer_device_id`, `epoch` and the bucket are all in the room-key-sealed announcement.  Any member
+ * could therefore recompute ANOTHER device's signalling PRIVATE key, derive that pair's channel
+ * keys against the advertised peer public keys, and decrypt, forge, or — worst, because the
+ * `signal/poll` drain is deliver-once — CONSUME its SDP/ICE before the §15.5 membership handshake
+ * ever ran.  A private scalar has to be private; "only members can compute it" is the wrong bar
+ * when the attacker in the threat model IS a member.
+ *
+ * Ed25519 signing is DETERMINISTIC (RFC 8032 §5.1.6 derives the per-signature nonce from the
+ * private key and message), so the same device reproduces the same identity within a bucket without
+ * storing anything — which is what the ANNOUNCEMENT FAN-OUT fix needs.  `connectPrivatePeer` used
+ * to mint a FRESH ephemeral per CALL, and a mesh member runs that call CONCURRENTLY, once per peer,
+ * so a device dialling two peers published TWO live rendezvous slots, each lingering for the
+ * §15.3.2 TTL with no retraction.  Measured: three live candidates for a single device, and roughly
+ * a dozen addresses a minute that nobody answers at — contradicting `connect-peer.ts`'s own
+ * documented "one slot per device per bucket".  One identity per bucket makes that claim true;
+ * `selectFreshestCandidates` then collapses a device to one candidate by construction, and
+ * re-announcing is idempotent.  (The determinism is asserted, not assumed: the tests derive twice
+ * and compare, so a runtime with a non-conforming Ed25519 fails loudly instead of silently
+ * publishing a new slot per call again.)
+ *
+ * The PUBLIC half still reaches peers exactly as before — it rides in the sealed announcement's
+ * `signaling_public_key` — so no peer ever needs to derive it, and nothing about discovery changes.
  *
  * It is NOT what fixes the mesh flake; `deriveSignalAddress` carries that, and the split is measured
- * rather than assumed (the address change alone, with this per-call ephemeral still in place, passes
- * the mesh spec).  The two land together because this one is only SAFE alongside it.
+ * rather than assumed (the address change alone, with the old per-call ephemeral still in place,
+ * passes the mesh spec).  The two land together because this one is only SAFE alongside it.
  *
  * The dependency, concretely: with the old recipient-only address, one identity per device would
  * give a device a SINGLE inbound queue shared by every session it runs — the worst case of the
  * deliver-once destruction the address change exists to stop.
  *
- * It does NOT weaken §15.3 unlinkability: the key rotates with the time bucket exactly as
- * `derivePeerBlindId` does, it is derived under the room's rendezvous key (so only current-epoch
- * members can compute or correlate it), and cross-bucket values are unlinkable to the server for the
- * same reason the blind ids are.  Within a bucket a device was always linkable to itself anyway —
- * that IS the one-slot-per-device-per-bucket cap the Tier-2 pseudonym enforces.
+ * It does NOT weaken §15.3 unlinkability: the identity rotates with the time bucket exactly as
+ * `derivePeerBlindId` does, and the room-id commitment in the transcript keeps a device's identity
+ * in one room uncorrelatable with its identity in another — a member of BOTH rooms would otherwise
+ * see one public key in each and link the device across them.  Within a bucket a device was always
+ * linkable to itself anyway — that IS the one-slot-per-device-per-bucket cap the Tier-2 pseudonym
+ * enforces.
  */
 export async function deriveSignalingKeyPair(
-  rendezvousKey: Uint8Array,
+  deviceSigningKey: CryptoKey,
+  roomIdCommitment: Uint8Array,
   deviceId: string,
   epoch: number,
   timeBucket: number,
 ): Promise<X25519KeyPair> {
-  return deriveX25519KeyPair(
-    await blindId(rendezvousKey, ['signal-key', deviceId, epoch, timeBucket]),
-  );
+  const transcript = canonical([
+    'signal-key',
+    toBase64Url(roomIdCommitment),
+    deviceId,
+    epoch,
+    timeBucket,
+  ]);
+  // The signature is never published — only its hash, as a private scalar.  A member who knows the
+  // transcript AND this device's Ed25519 PUBLIC key can verify a candidate signature but cannot
+  // produce one, which is the whole difference from the derivation this replaced.
+  return deriveX25519KeyPair(await sha256(await signEd25519(deviceSigningKey, transcript)));
 }
 
 /**

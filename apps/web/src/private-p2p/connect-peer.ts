@@ -340,8 +340,8 @@ export async function connectPrivatePeer(
   //    the §27 Tier-1 sample-poll).  The cap's BBS `pseudonym` is DISTINCT from `peer_blind_id` (the
   //    latter is the HMAC-derived per-(device, epoch, bucket) id); a polling MEMBER opens the sealed
   //    cap and dedups by the verified pseudonym.
-  // ONE signalling identity per (room, epoch, time bucket), derived from the rendezvous key rather
-  // than freshly generated per call.  A mesh member runs `connectPrivatePeer` CONCURRENTLY, once per
+  // ONE signalling identity per (room, epoch, time bucket), derived DETERMINISTICALLY from this
+  // device's own signing key rather than freshly generated per call.  A mesh member runs `connectPrivatePeer` CONCURRENTLY, once per
   // peer, so a fresh-per-call ephemeral gave a device several live dial identities at once — and a
   // polling peer took whichever announcement was freshest, which belonged to the call dialling
   // SOMEONE ELSE.  That call's pump then failed to open the offer (a channel key for a different
@@ -349,7 +349,10 @@ export async function connectPrivatePeer(
   // calls dialling each other.  One identity removes the coincidence instead of narrowing it; see
   // `deriveSignalingKeyPair`.
   const ephemeral = await p2p.deriveSignalingKeyPair(
-    rendezvousKey,
+    // A DEVICE secret, not the room's.  Deriving this scalar from the rendezvous
+    // key made it computable by every member — see `deriveSignalingKeyPair`.
+    params.selfSigningKey,
+    roomIdCommitment,
     selfDeviceId,
     epoch,
     timeBucket,
