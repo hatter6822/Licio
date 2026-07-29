@@ -5,12 +5,18 @@
 // cross-tier linking, the item read bar, author visibility transitions, and
 // the per-event classification firewall for in-room content.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
+import {
+  COMMONS_ROOM_ID,
+  type RoomCreateRequest,
+  roomVisibilityConflictSchema,
+} from '@licio/shared';
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import { resolveRoomCreateAxes, roomContentVisibleToUser } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
+import { changeStoryVisibility } from '../ingestion/visibility.js';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   articleHtml,
@@ -618,14 +624,68 @@ describe('WS-Q.2.4 author visibility transitions', () => {
     );
     // A typed duplicate that names the incumbent — not a 500.
     expect(narrow.status).toBe(409);
+    // REQUIRED, not optional: `?? twinId` let the field go missing entirely and
+    // still pass, so the assertion could not enforce the contract it states.
     const body = (await narrow.json()) as {
       error: { code: string };
-      existing_story_id?: string;
+      existing_story_id: string;
     };
     expect(body.error.code).toBe('duplicate_story');
-    expect(body.existing_story_id ?? twinId).toBe(twinId);
+    expect(body.existing_story_id).toBe(twinId);
     // And the refusal left the story exactly as it was.
     expect((await fixture.ingestion.stories.getById(publicId))?.visibility).toBe('public');
+  });
+
+  it('a collision whose blocker VANISHED is retried, not blamed on the caller', async () => {
+    // The refusal and the lookup that names the winner are two statements, and
+    // between them the incumbent can be hidden, deleted, or moved to another
+    // tier — after which the write this refused would succeed.  Returning the
+    // caller's OWN story as the duplicate was false on its face, and for a
+    // NARROWING request it left the story public because of a blocker that no
+    // longer existed.
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'vanish' });
+    await joinAsMember(room, author.userId);
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/vanished-blocker', { room_id: room }),
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const storyId = ((await created.json()) as { story_id: string }).story_id;
+
+    // The FIRST update loses the race; nothing holds the constraint by the time
+    // the winner is looked up (there is no twin), so the retry must succeed.
+    const realUpdate = fixture.ingestion.stories.update.bind(fixture.ingestion.stories);
+    let refused = false;
+    const spy = vi
+      .spyOn(fixture.ingestion.stories, 'update')
+      .mockImplementation(async (id, patch) => {
+        if (!refused && patch.visibility === 'room_only') {
+          refused = true;
+          throw new UniqueViolationError('stories_canonical_url_room_uq');
+        }
+        return realUpdate(id, patch);
+      });
+    try {
+      const out = await changeStoryVisibility(
+        fixture.ingestion,
+        fixture.events,
+        fixture.identity,
+        fixture.forum,
+        author.userId,
+        storyId,
+        'room_only',
+      );
+      expect(out.ok).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(refused).toBe(true);
+    // The privacy-reducing operation ACTUALLY took effect.
+    expect((await fixture.ingestion.stories.getById(storyId))?.visibility).toBe('room_only');
   });
 
   it('widening a room_only LINK keeps its fetched (extracted) signature, not the thin submitted note', async () => {
@@ -1272,6 +1332,45 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
     expect(room?.visibility).toBe('private');
     expect(room?.joinModel).toBe('request_approval'); // open collapsed
   });
+
+  it('the 409 NAMES the blocking stories, so the steward can resolve them', async () => {
+    // The cascade identified every story a tier-unique collision refused to
+    // contain precisely so an operator could act on each one; the route
+    // serialized the generic `{ error }` and dropped the list, leaving the
+    // caller a count and no way to find them.
+    const { roomId, cookie } = await stewardOfNewRoom('public');
+    const url = 'https://example.com/route-409-twin';
+    const author = await seedUserWithSession(fixture.identity, { handle: 'r409' });
+    await joinAsMember(roomId, author.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: roomId, visibility: 'room_only' }),
+            author.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: roomId }), author.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    const res = await app().request(
+      new Request(`http://local/v1/rooms/${roomId}/visibility`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ visibility: 'private' }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    const body = roomVisibilityConflictSchema.parse(await res.json());
+    expect(body.error.code).toBe('duplicate_story');
+    expect(body.blocked_story_ids).toEqual([blockedId]);
+  });
 });
 
 describe('WS-Q room-axis coherence (a public room is always open-join)', () => {
@@ -1336,6 +1435,70 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
     const after = await fixture.forum.rooms.getById(room);
     expect(after?.visibility).toBe('private');
     expect(after?.joinModel).toBe('request_approval'); // open collapsed
+  });
+
+  it('the sweep pages PAST a full page of blocked stories, and names each once', async () => {
+    // Two failures the cumulative `converted === 0` guard could not see.  A
+    // blocked story stays public, so a cursor-less re-query returns the same
+    // rows for ever — and once ANY earlier page had converted something the
+    // guard could never fire again, so the request never returned.  While it
+    // spun it appended the same ids once per pass into a count the steward was
+    // supposed to act on.  With `sweepLimit: 1` the first page is entirely
+    // blocked, which is exactly the state that used to be unrecoverable: the
+    // convertible story sits BEHIND it and must still be contained.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/cascade-page-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+            twinAuthor.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    // The BLOCKED one is authored LAST, so it is newest and heads page one.
+    const cleanAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-clean' });
+    await joinAsMember(room, cleanAuthor.userId);
+    const clean = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/cascade-page-clean', { room_id: room }),
+        cleanAuthor.cookie,
+      ),
+    );
+    expect(clean.status).toBe(201);
+    const cleanId = ((await clean.json()) as { story_id: string }).story_id;
+    const pubAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-pub' });
+    await joinAsMember(room, pubAuthor.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), pubAuthor.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'cp-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+      1,
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok && out.status === 409) {
+      // Named ONCE, not once per pass.
+      expect(out.blockedStoryIds).toEqual([blockedId]);
+    }
+    // …and the story BEHIND the blocked page was still contained.
+    expect((await fixture.ingestion.stories.getById(cleanId))?.visibility).toBe('room_only');
   });
 
   it('a public story that collides with an in-room twin blocks the flip instead of 500-ing', async () => {

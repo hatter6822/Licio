@@ -25,6 +25,7 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
+import type { StoryPageCursor } from '../ingestion/stores.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ForumServices } from './services.js';
 
@@ -107,6 +108,9 @@ export async function changeRoomVisibility(
   actorUserId: string,
   roomId: string,
   target: RoomVisibility,
+  /** Page size for the per-story sweep.  Injectable so a test can drive the
+   *  PAGING (a 10k default page hides every boundary the cursor exists for). */
+  sweepLimit: number = CASCADE_SWEEP_LIMIT,
 ): Promise<RoomVisibilityOutcome> {
   const room = await forum.rooms.getById(roomId);
   if (room === null)
@@ -120,8 +124,10 @@ export async function changeRoomVisibility(
   if (room.visibility === target) return { ok: true, converted: 0 };
   const nowIso = new Date(forum.now()).toISOString();
   let converted = 0;
-  /** Public stories a tier-unique collision refused to contain (see below). */
-  const blocked: string[] = [];
+  /** Public stories a tier-unique collision refused to contain (see below).  A
+   *  SET, because a blocked story stays public: without the cursor below it
+   *  reappeared in every page and was reported once per pass. */
+  const blocked = new Set<string>();
 
   if (target === 'private') {
     // Per-story sweep: force every PUBLIC story room_only. PAGED until none
@@ -129,8 +135,9 @@ export async function changeRoomVisibility(
     // query, so each page is a fresh batch of the remaining public stories (a
     // room with >CASCADE_SWEEP_LIMIT public stories is fully converted, not just
     // its newest page). Idempotent: a crash mid-cascade resumes cleanly.
+    let cursor: StoryPageCursor | undefined;
     for (;;) {
-      const batch = await ingestion.stories.listByRoom(roomId, CASCADE_SWEEP_LIMIT, 'public');
+      const batch = await ingestion.stories.listByRoom(roomId, sweepLimit, 'public', cursor);
       if (batch.length === 0) break;
       for (const story of batch) {
         try {
@@ -152,7 +159,7 @@ export async function changeRoomVisibility(
           // short-circuit at the top would then answer a retry with
           // `{ ok: true, converted: 0 }` and the content would stay published.
           if (!isUniqueViolation(error)) throw error;
-          blocked.push(story.storyId);
+          blocked.add(story.storyId);
           ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
           continue;
         }
@@ -188,22 +195,32 @@ export async function changeRoomVisibility(
         converted += 1;
       }
       // A short page means no public stories remain — the sweep is complete.
-      if (batch.length < CASCADE_SWEEP_LIMIT) break;
-      // Every story in this page was blocked, so the next `listByRoom` returns
-      // the same rows: page forward would loop for ever.  Stop and report.
-      if (blocked.length >= batch.length && converted === 0) break;
+      if (batch.length < sweepLimit) break;
+      // ADVANCE PAST this page.  Converting a story drops it from the `public`
+      // filter, but a BLOCKED one stays public, so a cursor-less re-query
+      // returns those same rows for ever — and the old guard (`converted === 0`)
+      // could never fire once any earlier page had converted something, because
+      // that counter is cumulative.  Two failures in one: an unterminating
+      // request, and — while it spun — the same blocked ids appended once per
+      // pass into a count the steward was meant to act on.  The cursor visits
+      // each story exactly once, so the sweep converts everything it CAN even
+      // when a whole page ahead of them is blocked, and terminates in
+      // ceil(N / sweepLimit) passes.
+      const last = batch[batch.length - 1];
+      if (last === undefined) break;
+      cursor = { createdAt: last.createdAt, storyId: last.storyId };
     }
-    if (blocked.length > 0) {
+    if (blocked.size > 0) {
       return {
         ok: false,
         status: 409,
         code: 'duplicate_story',
         message:
-          `${blocked.length} public ${blocked.length === 1 ? 'story shares' : 'stories share'} ` +
+          `${blocked.size} public ${blocked.size === 1 ? 'story shares' : 'stories share'} ` +
           'a link with an existing in-room story and cannot be converted. Resolve the ' +
           'duplicates, then retry — the room is still public and every other story is ' +
           'already contained.',
-        blockedStoryIds: blocked,
+        blockedStoryIds: [...blocked],
       };
     }
     // Flip the room; collapse an `open` join model (incoherent once private →

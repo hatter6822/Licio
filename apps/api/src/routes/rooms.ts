@@ -30,6 +30,7 @@ import {
   roomSummarySchema,
   roomTypeSchema,
   roomVisibilityChangeRequestSchema,
+  roomVisibilityConflictSchema,
   storyLensesResponseSchema,
   uuidSchema,
 } from '@licio/shared';
@@ -738,7 +739,22 @@ export function createRoomsRoutes() {
             roomId,
             c.req.valid('json').visibility,
           );
-          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          if (!outcome.ok) {
+            // NAME the blockers.  The cascade identified every public story a
+            // tier-unique collision refused to contain precisely so a steward
+            // could resolve each one; serializing only `{ error }` handed back a
+            // count and no way to act on it.
+            if (outcome.code === 'duplicate_story') {
+              return c.json(
+                roomVisibilityConflictSchema.parse({
+                  ...deny(outcome.code, outcome.message),
+                  blocked_story_ids: outcome.blockedStoryIds,
+                }),
+                outcome.status,
+              );
+            }
+            return c.json(deny(outcome.code, outcome.message), outcome.status);
+          }
           return c.json({
             visibility: c.req.valid('json').visibility,
             converted: outcome.converted,

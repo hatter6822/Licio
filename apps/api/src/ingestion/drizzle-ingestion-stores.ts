@@ -51,6 +51,7 @@ import {
   isNull,
   lt,
   lte,
+  or,
   sql,
 } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
@@ -82,6 +83,7 @@ import type {
   StoryCreateInput,
   StoryCreateOutcome,
   StoryDedupTier,
+  StoryPageCursor,
   StoryRecord,
   StorySignatureRecord,
   StoryStore,
@@ -405,16 +407,30 @@ export class DrizzleStoryStore implements StoryStore {
     roomId: string,
     limit: number,
     visibility?: StoryVisibility,
+    before?: StoryPageCursor,
   ): Promise<StoryRecord[]> {
     const rows = await this.#db
       .select()
       .from(storiesTable)
       .where(
-        visibility === undefined
-          ? eq(storiesTable.roomId, roomId)
-          : and(eq(storiesTable.roomId, roomId), eq(storiesTable.visibility, visibility)),
+        and(
+          eq(storiesTable.roomId, roomId),
+          visibility === undefined ? undefined : eq(storiesTable.visibility, visibility),
+          // Strictly older than the cursor under the same order the query
+          // returns — the id breaks a createdAt tie, so a page boundary can
+          // neither skip a row nor hand one back twice.
+          before === undefined
+            ? undefined
+            : or(
+                lt(storiesTable.createdAt, new Date(before.createdAt)),
+                and(
+                  eq(storiesTable.createdAt, new Date(before.createdAt)),
+                  lt(storiesTable.storyId, before.storyId),
+                ),
+              ),
+        ),
       )
-      .orderBy(desc(storiesTable.createdAt))
+      .orderBy(desc(storiesTable.createdAt), desc(storiesTable.storyId))
       .limit(limit);
     return rows.map((row) => this.#toRecord(row));
   }

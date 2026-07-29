@@ -29,6 +29,11 @@ import { findNearDuplicates, loadStoredSignature, signatureStory } from './dedup
 import { submissionText } from './pipeline.js';
 import type { IngestionServices } from './services.js';
 
+/** Extra attempts when a tier-unique refusal names no readable winner — the
+ *  incumbent vanished between the refusal and the lookup, so the write can now
+ *  succeed. */
+const VISIBILITY_COLLISION_RETRIES = 2;
+
 export type VisibilityChangeOutcome =
   | { ok: true; changed: boolean; visibility: StoryVisibility }
   | { ok: false; status: 404; code: 'not_found'; message: string }
@@ -150,34 +155,51 @@ export async function changeStoryVisibility(
   // keep propagating rather than be relabelled.
   const tierUniques = ['stories_canonical_url_public_uq', 'stories_canonical_url_room_uq'];
   let updated: Awaited<ReturnType<typeof ingestion.stories.update>>;
-  try {
-    updated = await ingestion.stories.update(storyId, { visibility: target });
-  } catch (error) {
-    if (!isUniqueViolation(error) || !tierUniques.includes(uniqueViolationConstraint(error))) {
-      throw error;
+  // RETRY when the blocker turns out to be GONE.  The refusal and the lookup
+  // that names the winner are two statements, and between them the incumbent
+  // can be hidden, deleted, or moved to another tier — after which the write
+  // this refused would succeed.  Reporting the caller's OWN story as the
+  // duplicate (`winner?.storyId ?? storyId`) was false on its face and, for a
+  // narrowing request, left the story PUBLIC because of a blocker that no
+  // longer existed: a privacy-reducing operation failing for a stale reason,
+  // which is the direction that must never be quietly accepted.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      updated = await ingestion.stories.update(storyId, { visibility: target });
+      break;
+    } catch (error) {
+      if (!isUniqueViolation(error) || !tierUniques.includes(uniqueViolationConstraint(error))) {
+        throw error;
+      }
+      const widening = target === 'public';
+      const winner =
+        story.canonicalUrl === null
+          ? null
+          : await ingestion.stories.getByCanonicalUrl(
+              story.canonicalUrl,
+              widening
+                ? { visibility: 'public' }
+                : { visibility: 'room_only', roomId: story.roomId },
+            );
+      if (winner === null && attempt < VISIBILITY_COLLISION_RETRIES) continue;
+      ingestion.metrics.increment(
+        widening ? 'visibility.widen_url_collision' : 'visibility.narrow_url_collision',
+      );
+      // Still refused with no winner to name after the retries: the constraint
+      // is real but its holder is not readable here, so rethrow rather than
+      // invent an incumbent.  A 500 on an unexplainable refusal is honest; a
+      // 409 naming the caller's own story is not.
+      if (winner === null) throw error;
+      return {
+        ok: false,
+        status: 409,
+        code: 'duplicate_story',
+        message: widening
+          ? 'A public story already exists for this link'
+          : 'An in-room story already exists for this link',
+        existingStoryId: winner.storyId,
+      };
     }
-    const widening = target === 'public';
-    ingestion.metrics.increment(
-      widening ? 'visibility.widen_url_collision' : 'visibility.narrow_url_collision',
-    );
-    // The winner exists by definition — the index that refused us holds it —
-    // so the client still gets the id every other duplicate answer carries.
-    const winner =
-      story.canonicalUrl === null
-        ? null
-        : await ingestion.stories.getByCanonicalUrl(
-            story.canonicalUrl,
-            widening ? { visibility: 'public' } : { visibility: 'room_only', roomId: story.roomId },
-          );
-    return {
-      ok: false,
-      status: 409,
-      code: 'duplicate_story',
-      message: widening
-        ? 'A public story already exists for this link'
-        : 'An in-room story already exists for this link',
-      existingStoryId: winner?.storyId ?? storyId,
-    };
   }
   if (updated === null) {
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };

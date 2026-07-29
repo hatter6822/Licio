@@ -272,6 +272,19 @@ export interface EmbeddingRecord {
 // Store interfaces.
 // ---------------------------------------------------------------------------
 
+/** Strictly older than the cursor under `(createdAt DESC, storyId DESC)`. */
+function isOlderThan(story: StoryRecord, before: StoryPageCursor): boolean {
+  if (story.createdAt !== before.createdAt) return story.createdAt < before.createdAt;
+  return story.storyId < before.storyId;
+}
+
+/** A `(createdAt, storyId)` paging cursor over the most-recent-first story order.
+ *  The id breaks a createdAt tie, so no row is visited twice or skipped. */
+export interface StoryPageCursor {
+  readonly createdAt: string;
+  readonly storyId: string;
+}
+
 export interface StoryStore {
   /** Transactional story + thread-shell creation (WS-F.1.4d): both or neither.
    *  Returns the duplicate outcome when the canonical URL already exists —
@@ -287,8 +300,21 @@ export interface StoryStore {
    *  back-linking when a public story becomes canonical). */
   listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]>;
   /** WS-Q.3.4a — stories in a room (the room-visibility cascade sweep input),
-   *  most-recent first, bounded. */
-  listByRoom(roomId: string, limit: number, visibility?: StoryVisibility): Promise<StoryRecord[]>;
+   *  most-recent first, bounded.
+   *
+   *  `before` is a `(createdAt, storyId)` cursor that pages STRICTLY OLDER.  The
+   *  cascade needs it because converting a story removes it from the `public`
+   *  filter while a story a tier-unique collision REFUSES stays public — so a
+   *  cursor-less sweep re-reads the same blocked rows on every pass, never
+   *  reaches an older convertible story, and (before the per-page progress
+   *  check below) looped for ever once any earlier page had converted
+   *  something. */
+  listByRoom(
+    roomId: string,
+    limit: number,
+    visibility?: StoryVisibility,
+    before?: StoryPageCursor,
+  ): Promise<StoryRecord[]>;
   /** WS-S.9 — the LIVE (`hidden_state IS NULL`) stories in a room, most-recent first, bounded.
    *  The migration purge loop pages with THIS (not `listByRoom`+a JS filter): each pass hides a
    *  batch, which drops out of the next query, so the window advances and the loop drains every
@@ -715,12 +741,14 @@ export class InMemoryStoryStore implements StoryStore {
     roomId: string,
     limit: number,
     visibility?: StoryVisibility,
+    before?: StoryPageCursor,
   ): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
       .filter(
         (s) => s.roomId === roomId && (visibility === undefined || s.visibility === visibility),
       )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .filter((s) => before === undefined || isOlderThan(s, before))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.storyId.localeCompare(a.storyId))
       .slice(0, limit);
   }
 
