@@ -37,6 +37,19 @@ export const uploads = pgTable(
     /** Object-store key for the stored (already-stripped) bytes. */
     storageRef: text('storage_ref').notNull(),
     metadataStripped: boolean('metadata_stripped').notNull(),
+    /**
+     * Intrinsic pixel dimensions, read off the container header at upload
+     * (`imageDimensions`), so the renderer can reserve the image's real box and
+     * the LCP surface stops shifting on load.
+     *
+     * NULL together, never singly (a DB CHECK pins it): unknown for pre-0102
+     * rows, for video/caption uploads, and for AVIF — whose dimensions sit in
+     * an ISO-BMFF `ispe` property box, the same structure the metadata stripper
+     * declines to walk.  Unknown means the renderer reserves nothing, which is
+     * strictly better than reserving a guess.
+     */
+    imageWidth: integer('image_width'),
+    imageHeight: integer('image_height'),
     scanState: uploadScanStateEnum('scan_state').notNull().default('pending'),
     /**
      * WS-Q.5.2c — back-reference to the story whose media this upload is (main

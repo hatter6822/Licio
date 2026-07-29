@@ -203,6 +203,13 @@ export const feedMediaSchema = z.object({
   captions_url: mediaPathSchema.nullable().default(null),
   /** Read URL for a video poster image; null otherwise. */
   poster_url: mediaPathSchema.nullable().default(null),
+  /** Intrinsic pixel dimensions of `url`, so the renderer reserves the image's
+   *  real box and the LCP surface stops shifting on load.  NULL — never a
+   *  default — when unknown (video, AVIF, or a row predating the columns): an
+   *  image told the WRONG size shifts the layout just as badly, only wrongly,
+   *  so the renderer reserves nothing rather than reserving a guess. */
+  width: z.number().int().min(1).max(65_535).nullable().default(null),
+  height: z.number().int().min(1).max(65_535).nullable().default(null),
 });
 export type FeedMedia = z.infer<typeof feedMediaSchema>;
 

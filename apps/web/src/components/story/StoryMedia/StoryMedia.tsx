@@ -21,6 +21,22 @@ export interface StoryMediaProps {
   captionsUrl?: string | null;
   /** Server-minted read path for a video poster image. */
   posterUrl?: string | null;
+  /**
+   * Intrinsic pixel dimensions of the image, when the server could read them.
+   *
+   * Present ⇒ the element carries `width`/`height`, so the browser computes the
+   * aspect-ratio box BEFORE the bytes arrive and the image occupies its final
+   * space from first paint.  Without them a feed image resolved from zero
+   * height to its natural height on load — cumulative layout shift on the
+   * largest-contentful element, and the reader loses their place mid-scroll.
+   *
+   * Absent ⇒ genuinely unknown (video, AVIF, or a row predating the columns).
+   * Nothing is reserved in that case, deliberately: an image given a GUESSED
+   * size shifts the layout just as badly, only to a wrong place, and the CSS
+   * below already constrains it once loaded.
+   */
+  width?: number | null;
+  height?: number | null;
   /** Non-interactive preview (WS-Q.5.2c): used INSIDE a card link, where an
    *  interactive `<video controls>` subtree would nest controls in the link
    *  (invalid for assistive tech + click conflicts with navigation). A video
@@ -37,6 +53,8 @@ export function StoryMedia({
   captionsText,
   captionsUrl,
   posterUrl,
+  width,
+  height,
   preview = false,
   className,
 }: StoryMediaProps): React.ReactElement {
@@ -46,6 +64,12 @@ export function StoryMedia({
   const captionTrackSrc =
     captionsUrl !== undefined && captionsUrl !== null ? mediaSrc(captionsUrl) : null;
   const posterSrc = posterUrl !== undefined && posterUrl !== null ? mediaSrc(posterUrl) : null;
+  // Both or neither: half a dimension reserves nothing, and React would render
+  // a lone attribute the browser cannot use for an aspect box.
+  const intrinsic =
+    typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0
+      ? { width, height }
+      : null;
 
   if (failed) {
     return (
@@ -70,8 +94,13 @@ export function StoryMedia({
         alt={altText ?? ''}
         loading="lazy"
         decoding="async"
+        {...(intrinsic ?? {})}
         onError={() => setFailed(true)}
-        className={cn('max-h-[32rem] w-full rounded-md object-contain', className)}
+        // `h-auto` lets the intrinsic aspect box drive the height; without it
+        // the width rule alone would override the reservation the attributes
+        // just bought.  `max-h` still caps a very tall image, and
+        // `object-contain` keeps the aspect correct when it does.
+        className={cn('max-h-[32rem] h-auto w-full rounded-md object-contain', className)}
       />
     );
   }
@@ -86,8 +115,9 @@ export function StoryMedia({
         alt={altText ?? t('storymedia.videoPoster', 'Video preview')}
         loading="lazy"
         decoding="async"
+        {...(intrinsic ?? {})}
         onError={() => setFailed(true)}
-        className={cn('max-h-[32rem] w-full rounded-md bg-black object-contain', className)}
+        className={cn('max-h-[32rem] h-auto w-full rounded-md bg-black object-contain', className)}
       />
     ) : (
       <div

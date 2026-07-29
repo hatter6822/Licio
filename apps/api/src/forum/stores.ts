@@ -141,6 +141,11 @@ export interface UploadRecord {
   altText: string | null;
   storageRef: string;
   metadataStripped: boolean;
+  /** Intrinsic pixel dimensions (images only; both set or both null — see
+   *  `imageDimensions`). Null means UNKNOWN, never a default: the renderer
+   *  reserves nothing rather than reserving a guess. */
+  imageWidth: number | null;
+  imageHeight: number | null;
   scanState: 'pending' | 'clear' | 'flagged';
   /** WS-Q.5.2c — the story this upload is media for (main media, caption track,
    *  or poster); set at story submission, `null` for contribution attachments.
@@ -491,7 +496,14 @@ export interface UploadStore {
    *  upload is created unlinked; `ownerStoryId` defaults to null and is set
    *  later via {@link UploadStore.setOwnerStory} at story submission. */
   put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    // `imageWidth`/`imageHeight` are SERVER-DERIVED from the container header
+    // and unknown for video/caption uploads, so they are optional here and
+    // always present — null when unknown — on the stored record.
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord>;
   getRecord(uploadId: string): Promise<UploadRecord | null>;
@@ -1397,12 +1409,21 @@ export class InMemoryUploadStore implements UploadStore {
   }
 
   async put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    // `imageWidth`/`imageHeight` are SERVER-DERIVED from the container header
+    // and unknown for video/caption uploads, so they are optional here and
+    // always present — null when unknown — on the stored record.
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
     const full: UploadRecord = {
       ...record,
       ownerStoryId: record.ownerStoryId ?? null,
+      imageWidth: record.imageWidth ?? null,
+      imageHeight: record.imageHeight ?? null,
       createdAt: iso(this.#now),
     };
     this.#records.set(full.uploadId, full);

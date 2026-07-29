@@ -265,6 +265,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                       captionsText: data.media.captions_text,
                       captionsUrl: data.media.captions_url,
                       posterUrl: data.media.poster_url,
+                      width: data.media.width,
+                      height: data.media.height,
                     },
                   }
                 : {})}

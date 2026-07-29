@@ -122,6 +122,13 @@ export const uploadPublicSchema = z
     url: z.string().min(1).max(512),
     /** True once metadata stripping ran (images; EXIF/GPS removed). */
     metadata_stripped: z.boolean(),
+    /** Intrinsic pixel dimensions, so the renderer reserves the image's real
+     *  box and the LCP surface stops shifting on load.  ABSENT (not zero, not a
+     *  default) when unknown — video/caption uploads, AVIF, and rows written
+     *  before the columns existed — because an image told the wrong size shifts
+     *  the layout just as badly, only wrongly. */
+    image_width: z.number().int().min(1).max(65_535).optional(),
+    image_height: z.number().int().min(1).max(65_535).optional(),
     /** WS-J.2.6b gate: `pending` cannot attach or serve yet (flagged
      *  uploads are rejected at creation and never appear on the wire). */
     scan_state: z.enum(['clear', 'pending']),

@@ -334,49 +334,141 @@ const CLUSTER_HITS_PER_NODE = 16;
 const CLUSTER_JACCARD_THRESHOLD = 0.7;
 
 /**
- * The duplicate-cluster key: the MINIMUM story id over the near-duplicate
- * CONNECTED COMPONENT containing `storyId`, discovered by a bounded
- * breadth-first expansion over MinHash hits (hits-of-hits included, so
- * chains A↔B↔C share one key even when A and C are not mutual hits —
- * min-over-direct-hits split such chains and under-capped them). The
- * frontier is capped at {@link CLUSTER_MAX_NODES}: beyond that, every
- * discovered member still maps to the same minimum, so the per-page cap
- * stays consistent — exact matroid classes remain MERI's concern; this key
- * only feeds the WS-I.2.4a page cap. Returns null for unique items.
+ * How many times the anchor may move before the key is taken as final.
+ *
+ * See {@link duplicateClusterId}: each round strictly lowers the anchor, so
+ * this is a cost ceiling rather than a correctness bound — a component the
+ * bounded search can traverse settles well inside it.
  */
+const CLUSTER_MAX_ANCHOR_ROUNDS = 4;
+
+/** Near-duplicate adjacency: the stories that hit `storyId`, already bounded by
+ *  {@link CLUSTER_HITS_PER_NODE}. Separating this from the walk is what lets the
+ *  walk be tested over a known graph rather than over a MinHash store's
+ *  incidental hit ordering. */
+export type ClusterAdjacency = (storyId: string) => Promise<readonly string[]>;
+
+/** One bounded, min-first expansion around `origin`. Shares `hitsOf` with the
+ *  caller so re-anchoring re-reads no node. */
+async function exploreCluster(
+  origin: string,
+  hitsOf: ClusterAdjacency,
+): Promise<{ visited: Set<string>; sawAnyHit: boolean; truncated: boolean }> {
+  const visited = new Set<string>([origin]);
+  const frontier: string[] = [origin];
+  let sawAnyHit = false;
+  let truncated = false;
+  while (frontier.length > 0) {
+    if (visited.size >= CLUSTER_MAX_NODES) {
+      truncated = true;
+      break;
+    }
+    // Deterministic order: expand the smallest pending id first. Min-first is
+    // not only for determinism — it is what walks the search TOWARD the key.
+    frontier.sort();
+    const current = frontier.shift() as string;
+    for (const hit of await hitsOf(current)) {
+      sawAnyHit = true;
+      if (visited.has(hit)) continue;
+      if (visited.size >= CLUSTER_MAX_NODES) {
+        truncated = true;
+        break;
+      }
+      visited.add(hit);
+      frontier.push(hit);
+    }
+  }
+  return { visited, sawAnyHit, truncated };
+}
+
+/**
+ * The duplicate-cluster key: the MINIMUM story id over the near-duplicate
+ * CONNECTED COMPONENT containing `storyId`, discovered by a bounded min-first
+ * expansion over MinHash hits (hits-of-hits included, so chains A↔B↔C share one
+ * key even when A and C are not mutual hits — min-over-direct-hits split such
+ * chains and under-capped them).
+ *
+ * The key must be a function of the COMPONENT, not of where the walk started:
+ * `applyMatroidDedup` enforces `meri_max_per_cluster` by grouping on it, so two
+ * members that disagree are two clusters as far as the page cap is concerned,
+ * and the cap is exceeded once per extra key.
+ *
+ * A single bounded walk does not have that property, and this used to run one.
+ * Under {@link CLUSTER_MAX_NODES} the walk from A and the walk from Z visit
+ * different subsets of a larger component and each returns the minimum of its
+ * OWN subset — so a near-duplicate flood, the exact case the cap exists for,
+ * fragmented into several keys and every fragment got its own page allowance.
+ * The docstring asserted the opposite ("every discovered member still maps to
+ * the same minimum"), which holds only when the walk is not truncated at all.
+ *
+ * So the walk RE-ANCHORS: explore, take the smallest id seen, and if it is not
+ * the id we explored from, explore again from there. Each round strictly lowers
+ * the anchor, so it terminates; a component the bound can traverse reaches the
+ * same fixed point from every member, because the final round is a complete
+ * walk of it. Node hits are memoised across rounds, so re-anchoring costs
+ * queries only for nodes a previous round did not reach.
+ *
+ * The residual is honest and unchanged in kind: for a component too large for
+ * any single bounded walk, the fixed point is the smallest id min-first search
+ * reaches rather than the true minimum, so such a component may still carry
+ * more than one key. Min-first is what makes that rare — it is the strategy
+ * that walks toward the answer — and exact matroid classes remain MERI's
+ * concern; this key only feeds the WS-I.2.4a page cap.
+ *
+ * Returns null for unique items.
+ *
+ * The WALK is exported and the STORE READ is not: the algorithm is what needs
+ * proving over a known graph, and it cannot be proved through a MinHash store's
+ * incidental hit ordering.
+ */
+export async function resolveClusterAnchor(
+  origin: string,
+  hitsOf: ClusterAdjacency,
+): Promise<string | null> {
+  let anchor = origin;
+  let sawAnyHit = false;
+  for (let round = 0; round < CLUSTER_MAX_ANCHOR_ROUNDS; round += 1) {
+    const walk = await exploreCluster(anchor, hitsOf);
+    if (walk.sawAnyHit) sawAnyHit = true;
+    const smallest = [...walk.visited].sort()[0] as string;
+    // A complete walk has seen the whole component, so its minimum IS the key.
+    // Re-anchoring only ever matters when the bound cut the walk short.
+    const settled = smallest === anchor || !walk.truncated;
+    anchor = smallest;
+    if (settled) break;
+  }
+  return sawAnyHit ? anchor : null;
+}
+
 async function duplicateClusterId(
   ingestion: IngestionServices,
   storyId: string,
 ): Promise<string | null> {
-  const visited = new Set<string>([storyId]);
-  const frontier: string[] = [storyId];
-  let sawAnyHit = false;
-  while (frontier.length > 0 && visited.size < CLUSTER_MAX_NODES) {
-    // Deterministic order: expand the smallest pending id first.
-    frontier.sort();
-    const current = frontier.shift() as string;
-    const signature = await ingestion.signatures.getByStoryId(current);
-    if (signature === null) continue;
+  const hitCache = new Map<string, readonly string[]>();
+  const hitsOf: ClusterAdjacency = async (id) => {
+    const cached = hitCache.get(id);
+    if (cached !== undefined) return cached;
+    const signature = await ingestion.signatures.getByStoryId(id);
+    if (signature === null) {
+      hitCache.set(id, []);
+      return [];
+    }
     const hits = await findNearDuplicates(
       ingestion.signatures,
       // WS-Q.2.2c — the public near-dup cluster is scoped to public stories;
       // the feed only serves public content, so the cluster matches it.
       ingestion.stories,
-      current,
+      id,
       signature.minhash,
       lshBandHashes(signature.minhash),
       CLUSTER_JACCARD_THRESHOLD,
       CLUSTER_HITS_PER_NODE,
     );
-    for (const hit of hits) {
-      sawAnyHit = true;
-      if (visited.has(hit.storyId) || visited.size >= CLUSTER_MAX_NODES) continue;
-      visited.add(hit.storyId);
-      frontier.push(hit.storyId);
-    }
-  }
-  if (!sawAnyHit) return null;
-  return [...visited].sort()[0] as string;
+    const ids = hits.map((hit) => hit.storyId);
+    hitCache.set(id, ids);
+    return ids;
+  };
+  return resolveClusterAnchor(storyId, hitsOf);
 }
 
 /**

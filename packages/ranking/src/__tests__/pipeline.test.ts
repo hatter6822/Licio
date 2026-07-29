@@ -492,3 +492,60 @@ describe('WS-I.2.5b replay diff', () => {
     expect(diff).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §11.5 — the conservative decay curve on sensitive content.
+//
+// `features.freshness_decay ?? freshnessFromAge(…, curve)` made the profile's
+// curve an ALTERNATIVE to the stored WS-F score rather than a bound on it, so
+// for every story WS-F had scored — which is every story with a freshness row —
+// the sensitive/non-sensitive curve selection was dead and sensitive content
+// decayed exactly like breaking news.
+// ---------------------------------------------------------------------------
+describe('WS-I §11.5 conservative freshness curve', () => {
+  const sensitive = (over: Partial<FeatureVector> = {}): FeatureVector =>
+    makeFeatures(1, { sensitivity_labels: ['self-harm'], ...over });
+
+  function freshnessOf(features: FeatureVector, nowMs: number): number {
+    const { selected } = rankFeasibleSet(
+      [makeCandidate(1)],
+      featureMap([features]),
+      BREAKING_NEWS_PROFILE,
+      FULL_ENFORCEMENT,
+      makeContext({ nowMs }),
+    );
+    return selected[0]?.baseline.freshness_decay ?? Number.NaN;
+  }
+
+  it('an OLD sensitive story is capped by the conservative curve, not left at its stored score', () => {
+    // Four weeks old.  The evergreen half-life is one week, so the envelope is
+    // 2^-4 = 0.0625 — well under the 0.9 WS-F recorded.  Before the fix the
+    // stored score was taken verbatim and the curve never ran.
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const value = freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0);
+    expect(value).toBeLessThan(0.1);
+  });
+
+  it('the cap can only LOWER a sensitive item, never raise one', () => {
+    // A young story in a fast-cadence topic: WS-F says 0.2 while the flat
+    // evergreen envelope is ~1.  Substituting the curve outright would have
+    // PROMOTED it; the bound leaves WS-F's own assessment standing.
+    const created = new Date(T0 - 3_600_000).toISOString();
+    expect(freshnessOf(sensitive({ created_at: created, freshness_decay: 0.2 }), T0)).toBe(0.2);
+  });
+
+  it('non-sensitive scoring is untouched — this closed a guard, it did not re-tune the feed', () => {
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const ordinary = makeFeatures(1, { created_at: created, freshness_decay: 0.9 });
+    expect(freshnessOf(ordinary, T0)).toBe(0.9);
+  });
+
+  it('with no stored score the curve is still the fallback for both kinds', () => {
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const bare = makeFeatures(1, { created_at: created });
+    delete (bare as { freshness_decay?: number }).freshness_decay;
+    expect(freshnessOf(bare, T0)).toBeLessThan(0.01); // breaking, 6h half-life
+    const bareSensitive = { ...bare, sensitivity_labels: ['self-harm'] };
+    expect(freshnessOf(bareSensitive, T0)).toBeGreaterThan(freshnessOf(bare, T0));
+  });
+});

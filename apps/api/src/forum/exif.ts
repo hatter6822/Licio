@@ -403,3 +403,129 @@ export function stripUploadMetadata(contentType: string, bytes: Uint8Array): Str
       return { ok: false, reason: 'type_mismatch' };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Intrinsic dimensions (WS-C perf: the LCP surface reserves space).
+//
+// The feed and comment `<img>` elements carried no `width`/`height` and sat in
+// no aspect-ratio box, so every image resolved from zero height to its natural
+// height on load — cumulative layout shift on the largest-contentful element,
+// and the reader loses their place mid-scroll.
+//
+// The fix wants the image's REAL dimensions, and this module is already walking
+// each container's headers byte by byte to strip metadata, so they cost one
+// more read of bytes already in hand: no decode, no re-encode, no dependency,
+// and no second pass over the file.  Guessing an aspect box instead would trade
+// the shift for letterboxing on every image that does not match the guess.
+//
+// AVIF is deliberately absent.  Its dimensions live in an `ispe` property box
+// reached through the ISO-BMFF item-property tables, which is the same
+// structure this module declines to rewrite for metadata; `null` is honest, and
+// the renderer falls back to its unreserved behaviour for that one format
+// rather than being told a wrong size.
+// ---------------------------------------------------------------------------
+
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+/** JPEG: the first Start-Of-Frame segment carries height then width, u16-BE. */
+function jpegDimensions(bytes: Uint8Array): ImageDimensions | null {
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1] ?? 0;
+    // Standalone markers carry no length payload.
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      at += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null; // EOI / SOS: no SOF found
+    const length = readU16BE(bytes, at + 2);
+    // SOF0-SOF15 except the DHT/JPG/DAC markers interleaved in that range.
+    const isFrame =
+      marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isFrame) {
+      if (at + 9 > bytes.length) return null;
+      return { height: readU16BE(bytes, at + 5), width: readU16BE(bytes, at + 7) };
+    }
+    if (length < 2) return null;
+    at += 2 + length;
+  }
+  return null;
+}
+
+/** PNG: IHDR is always the first chunk — width then height, u32-BE. */
+function pngDimensions(bytes: Uint8Array): ImageDimensions | null {
+  if (bytes.length < 24) return null;
+  return { width: readU32BE(bytes, 16), height: readU32BE(bytes, 20) };
+}
+
+/** WebP: three sub-formats, three encodings of the same two numbers. */
+function webpDimensions(bytes: Uint8Array): ImageDimensions | null {
+  if (bytes.length < 30) return null;
+  const fourCc = String.fromCharCode(
+    bytes[12] ?? 0,
+    bytes[13] ?? 0,
+    bytes[14] ?? 0,
+    bytes[15] ?? 0,
+  );
+  if (fourCc === 'VP8X') {
+    // Canvas size is stored MINUS ONE, 24-bit little-endian.
+    const u24 = (at: number): number =>
+      (bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8) | ((bytes[at + 2] ?? 0) << 16);
+    return { width: u24(24) + 1, height: u24(27) + 1 };
+  }
+  if (fourCc === 'VP8 ') {
+    // Lossy: a 3-byte start code at +23, then two 14-bit values.
+    if (bytes[23] !== 0x9d || bytes[24] !== 0x01 || bytes[25] !== 0x2a) return null;
+    return { width: readU16LE(bytes, 26) & 0x3fff, height: readU16LE(bytes, 28) & 0x3fff };
+  }
+  if (fourCc === 'VP8L') {
+    // Lossless: signature byte, then 14 bits of width-1 and 14 of height-1
+    // packed little-endian across four bytes.
+    if (bytes[20] !== 0x2f) return null;
+    const packed =
+      (bytes[21] ?? 0) |
+      ((bytes[22] ?? 0) << 8) |
+      ((bytes[23] ?? 0) << 16) |
+      ((bytes[24] ?? 0) << 24);
+    return { width: (packed & 0x3fff) + 1, height: ((packed >>> 14) & 0x3fff) + 1 };
+  }
+  return null;
+}
+
+/** GIF: the logical screen descriptor, u16-LE at offsets 6 and 8. */
+function gifDimensions(bytes: Uint8Array): ImageDimensions | null {
+  if (bytes.length < 10) return null;
+  return { width: readU16LE(bytes, 6), height: readU16LE(bytes, 8) };
+}
+
+/**
+ * The image's intrinsic pixel dimensions, or null when this module cannot read
+ * them (AVIF, or a container whose header does not parse).
+ *
+ * Callers must treat null as "unknown", never as a default: an image told the
+ * wrong size is a worse defect than one told no size, because the layout
+ * reserves the wrong box and shifts anyway — with the shift now also wrong.
+ */
+export function imageDimensions(contentType: string, bytes: Uint8Array): ImageDimensions | null {
+  if (!matchesMagic(contentType, bytes)) return null;
+  const found =
+    contentType === 'image/jpeg'
+      ? jpegDimensions(bytes)
+      : contentType === 'image/png'
+        ? pngDimensions(bytes)
+        : contentType === 'image/webp'
+          ? webpDimensions(bytes)
+          : contentType === 'image/gif'
+            ? gifDimensions(bytes)
+            : null;
+  if (found === null) return null;
+  // A zero or absurd dimension is a parse that went wrong, not a real image;
+  // `null` keeps it out of the wire rather than putting nonsense in a layout.
+  if (found.width < 1 || found.height < 1) return null;
+  if (found.width > 65_535 || found.height > 65_535) return null;
+  return found;
+}

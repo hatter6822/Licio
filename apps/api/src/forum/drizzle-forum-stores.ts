@@ -1303,6 +1303,8 @@ export class DrizzleUploadStore implements UploadStore {
       altText: row.altText,
       storageRef: row.storageRef,
       metadataStripped: row.metadataStripped,
+      imageWidth: row.imageWidth,
+      imageHeight: row.imageHeight,
       scanState: row.scanState,
       ownerStoryId: row.ownerStoryId,
       createdAt: iso(row.createdAt),
@@ -1310,7 +1312,11 @@ export class DrizzleUploadStore implements UploadStore {
   }
 
   async put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
     const metadataValues = {
@@ -1321,6 +1327,8 @@ export class DrizzleUploadStore implements UploadStore {
       altText: record.altText,
       storageRef: record.storageRef,
       metadataStripped: record.metadataStripped,
+      imageWidth: record.imageWidth ?? null,
+      imageHeight: record.imageHeight ?? null,
       scanState: record.scanState,
       ownerStoryId: record.ownerStoryId ?? null,
     };

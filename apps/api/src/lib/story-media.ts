@@ -29,5 +29,10 @@ export function feedMediaOf(story: StoryRecord, mint: MediaUrlMinter): FeedMedia
     captions_text: isVideo ? (meta.captions_text ?? null) : null,
     captions_url: captionsRef === null ? null : mint(captionsRef, restricted),
     poster_url: posterRef === null ? null : mint(posterRef, restricted),
+    // Denormalized onto the story at submission precisely so this projection
+    // stays synchronous — reaching the upload row here would be one query per
+    // media story per feed page.
+    width: story.mediaWidth,
+    height: story.mediaHeight,
   };
 }

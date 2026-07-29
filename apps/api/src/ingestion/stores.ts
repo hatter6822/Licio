@@ -48,6 +48,11 @@ export interface StoryRecord {
   visibility: StoryVisibility;
   /** WS-Q.2.3 — scan-gated media upload (image/video posts); null otherwise. */
   mediaUploadRef: string | null;
+  /** Intrinsic dimensions of the media upload, copied at submission from the
+   *  SERVER-parsed value so the feed projection reserves the real box with no
+   *  per-story upload lookup. Both null when unknown. */
+  mediaWidth: number | null;
+  mediaHeight: number | null;
   /** WS-Q.2.2b — the canonical PUBLIC story for the same URL (room_only rows). */
   canonicalPublicStoryId: string | null;
   language: string | null;
@@ -106,8 +111,18 @@ export interface StoryRecord {
  */
 export type StoryCreateInput = Omit<
   StoryRecord,
-  'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt' | 'proposedTopicIds'
-> & { proposedTopicIds?: string[] };
+  | 'createdAt'
+  | 'updatedAt'
+  | 'lastMaterialUpdateAt'
+  | 'proposedTopicIds'
+  // Media dimensions are SERVER-DERIVED at submission (copied from the upload's
+  // parsed header) and unknown for every non-media story, so they are optional
+  // on the input and always present — null when unknown — on the stored record.
+  // A caller that had to write `mediaWidth: null` for a text story would be
+  // stating something it has no business knowing.
+  | 'mediaWidth'
+  | 'mediaHeight'
+> & { proposedTopicIds?: string[]; mediaWidth?: number | null; mediaHeight?: number | null };
 
 export interface ThreadShellRecord {
   threadId: string;
@@ -628,6 +643,10 @@ export class InMemoryStoryStore implements StoryStore {
       // Default proposals to the trusted topics when a caller omits them (only
       // the submission path sets them separately — author picks vs sentinel).
       proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
+      // Absent ⇒ unknown, which is null on the record. Only the submission path
+      // knows them (copied from the upload's parsed header).
+      mediaWidth: story.mediaWidth ?? null,
+      mediaHeight: story.mediaHeight ?? null,
       createdAt: at,
       updatedAt: at,
       lastMaterialUpdateAt: at,

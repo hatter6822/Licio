@@ -336,6 +336,12 @@ export async function submitStory(
   //    claimed; `flagged` ⇒ rejected; `pending` ⇒ the story is held for review
   //    (fail-toward-caution), never published-then-hidden.
   let mediaUploadRef: string | null = null;
+  // Copied from the upload's SERVER-parsed dimensions, never from the request
+  // body: a dimension the client can state is one the client can lie about,
+  // and an attacker-chosen reserved box is a layout the page cannot recover
+  // from. Denormalized onto the story so the feed projection needs no lookup.
+  let mediaWidth: number | null = null;
+  let mediaHeight: number | null = null;
   let mediaType: StoryRecord['mediaType'] = null;
   let extractionState: StoryRecord['extractionState'] = 'pending';
   let heldForScan = false;
@@ -386,6 +392,8 @@ export async function submitStory(
       };
     }
     mediaUploadRef = upload.uploadId;
+    mediaWidth = upload.imageWidth;
+    mediaHeight = upload.imageHeight;
     mediaType = wantImage ? 'image' : 'video';
     // Media is never URL-normalized or crawled — but it STILL runs the §14.2
     // pipeline's non-link path (which classifies the local text: title + alt
@@ -493,6 +501,8 @@ export async function submitStory(
       roomId: room.roomId,
       visibility,
       mediaUploadRef,
+      mediaWidth,
+      mediaHeight,
       canonicalPublicStoryId,
       language: request.language !== undefined ? canonicalizeBcp47(request.language) : null,
       // WS-K §24.1 — author picks are UNTRUSTED proposals. The trusted topic

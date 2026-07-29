@@ -144,8 +144,27 @@ export function scoreItem(
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
   const relevance = context.topicRelevanceByItem?.get(candidate.item_id);
+  // The §11.5 conservative curve BINDS on sensitive content.
+  //
+  // `features.freshness_decay ?? freshnessFromAge(…, curve)` made the curve an
+  // ALTERNATIVE to the stored WS-F score rather than a bound on it — so for
+  // every story WS-F had scored, which is every story with a freshness row, the
+  // curve selection above was dead and sensitive content decayed exactly like
+  // breaking news.  The comment two paragraphs up said the opposite.
+  //
+  // A sensitive item is now capped by the conservative envelope AND by WS-F's
+  // own cadence-relative assessment, so the cap can only ever LOWER a sensitive
+  // item's freshness — never raise one, which a bare curve substitution would
+  // do for a young item in a fast-cadence topic.  Non-sensitive scoring is
+  // unchanged, including the breaking curve's role as the fallback when WS-F
+  // has not scored a story yet: this closes a hole in the sensitive-content
+  // guard, and is deliberately not a re-tune of the whole feed.
+  const storedFreshness = features.freshness_decay;
+  const freshnessDecay = sensitiveTopic
+    ? Math.min(storedFreshness ?? 1, freshnessFromAge(ageMs, curve.half_life_hours))
+    : (storedFreshness ?? freshnessFromAge(ageMs, curve.half_life_hours));
   const baseline = computeBaseline({
-    freshnessDecay: features.freshness_decay ?? freshnessFromAge(ageMs, curve.half_life_hours),
+    freshnessDecay,
     sourceReliability: features.source_reliability,
     topicRelevance: relevance,
     personalizationEnabled: context.topicRelevanceByItem !== null,

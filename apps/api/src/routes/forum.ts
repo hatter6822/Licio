@@ -84,7 +84,7 @@ import {
 } from '../forum/debate.js';
 import { type DebateFrame, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import { buildDebateDeps } from '../forum/debate-scheduler.js';
-import { stripUploadMetadata } from '../forum/exif.js';
+import { imageDimensions, stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
 import {
@@ -1063,6 +1063,10 @@ export function createForumRoutes() {
             storedBytes = stripped.bytes;
             metadataStripped = stripped.stripped;
           }
+          // Read off the STORED bytes, not the upload: stripping rewrites the
+          // container, and the dimensions the renderer reserves must be the
+          // ones the served file actually has.
+          const dimensions = isImage ? imageDimensions(contentType, storedBytes) : null;
           const forum = getForumServices();
           // The injectable scanner runs AFTER the inline local checks
           // (magic, size, strip).  Default: local checks ARE the scan
@@ -1084,6 +1088,8 @@ export function createForumRoutes() {
               altText: isImage ? altText : null,
               storageRef: `uploads/${uploadId}`,
               metadataStripped: metadataStripped || isImage,
+              imageWidth: dimensions?.width ?? null,
+              imageHeight: dimensions?.height ?? null,
               scanState: scan.state,
               // Linked to its owning story at submission (WS-Q.5.2c); a
               // contribution attachment stays null and serves unrestricted.
@@ -1897,6 +1903,9 @@ function toUploadPublic(record: UploadRecord) {
     alt_text: record.altText,
     url: `/v1/uploads/${record.uploadId}`,
     metadata_stripped: record.metadataStripped,
+    ...(record.imageWidth !== null && record.imageHeight !== null
+      ? { image_width: record.imageWidth, image_height: record.imageHeight }
+      : {}),
     scan_state: record.scanState,
     created_at: record.createdAt,
   };

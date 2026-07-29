@@ -98,3 +98,59 @@ describe('StoryMedia (WS-Q.5.2c)', () => {
   // axe-core stalls on a <video> here (see test/axe.ts). The video's structural
   // a11y (controls, <track>, no autoplay) is asserted in the cases above.
 });
+
+describe('intrinsic dimensions (the LCP surface reserves its box)', () => {
+  it('renders width/height so the browser computes the aspect box before load', () => {
+    // Without these the image resolves from zero height to its natural height
+    // on load — cumulative layout shift on the largest-contentful element.
+    render(
+      <StoryMedia
+        url="/v1/uploads/abc"
+        kind="image"
+        altText="A reservoir gauge"
+        width={1600}
+        height={900}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'A reservoir gauge' });
+    expect(img).toHaveAttribute('width', '1600');
+    expect(img).toHaveAttribute('height', '900');
+    // `h-auto` has to be present or the width rule overrides the reservation
+    // the attributes just bought.
+    expect(img.className).toContain('h-auto');
+  });
+
+  it('reserves NOTHING when the dimensions are unknown', () => {
+    // An image given a guessed size shifts the layout just as badly, only to a
+    // wrong place — and the server sends null precisely when it could not read
+    // the header (video, AVIF, a row predating the columns).
+    render(<StoryMedia url="/v1/uploads/abc" kind="image" altText="Unknown size" />);
+    const img = screen.getByRole('img', { name: 'Unknown size' });
+    expect(img).not.toHaveAttribute('width');
+    expect(img).not.toHaveAttribute('height');
+  });
+
+  it('ignores a HALF dimension — one attribute reserves no box', () => {
+    render(<StoryMedia url="/v1/uploads/abc" kind="image" altText="Half known" width={800} />);
+    const img = screen.getByRole('img', { name: 'Half known' });
+    expect(img).not.toHaveAttribute('width');
+    expect(img).not.toHaveAttribute('height');
+  });
+
+  it('reserves the box on a video POSTER too (the card-link preview)', () => {
+    render(
+      <StoryMedia
+        url="/v1/uploads/vid"
+        kind="video"
+        altText={null}
+        preview
+        posterUrl="/v1/uploads/poster"
+        width={1280}
+        height={720}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'Video preview' });
+    expect(img).toHaveAttribute('width', '1280');
+    expect(img).toHaveAttribute('height', '720');
+  });
+});

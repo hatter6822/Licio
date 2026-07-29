@@ -46,6 +46,11 @@ export interface StoryMediaData {
   captionsText?: string | null;
   captionsUrl?: string | null;
   posterUrl?: string | null;
+  /** Intrinsic pixel dimensions, so the image reserves its real box before the
+   *  bytes arrive. Null/absent ⇒ genuinely unknown; nothing is reserved rather
+   *  than a guess being reserved (see StoryMedia). */
+  width?: number | null;
+  height?: number | null;
 }
 
 export interface StoryCardData {

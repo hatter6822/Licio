@@ -708,6 +708,20 @@
       "when": 1783728000025,
       "tag": "0101_invariant_latest_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1783728000026,
+      "tag": "0102_upload_dimensions",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1783728000027,
+      "tag": "0103_story_media_dimensions",
+      "breakpoints": true
     }
   ]
 }

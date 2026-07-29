@@ -31,6 +31,18 @@ describe.skipIf(!DB_URL)('DrizzleRoomStore.list `q` is a LITERAL substring searc
 
   /** Names/descriptions carrying every LIKE metacharacter, incl. the escape. */
   const NAMES = ['my\\secret room', '100% cotton room', 'snake_case room'] as const;
+  /**
+   * A run-unique token every fixture carries.
+   *
+   * `rooms.list` is a LIMIT-bounded query over the WHOLE shared table ordered
+   * by `created_at ASC`, and these fixtures are the newest rows in it — so a
+   * probe matching more rooms than the limit returns a page that cannot contain
+   * them, and the assertion fails for a reason that has nothing to do with LIKE
+   * escaping.  The plain-substring probe used to be the literal word "room",
+   * which 220 rooms in the live database now match.  Every probe below is
+   * therefore scoped to this token, which only these three rows carry.
+   */
+  const TAG = `wsglike${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 
   beforeAll(async () => {
     db = createDbClient(DB_URL as string, { onNotice: 'discard' });
@@ -53,7 +65,7 @@ describe.skipIf(!DB_URL)('DrizzleRoomStore.list `q` is a LITERAL substring searc
       const suffix = randomUUID().slice(0, 8);
       const outcome = await rooms.insert({
         roomId: randomUUID(),
-        name: `${name} ${suffix}`,
+        name: `${name} ${TAG} ${suffix}`,
         slug: `wsg-like-${suffix}`,
         description: 'Escape-character fixture.',
         roomType: 'global_topic',
@@ -117,14 +129,16 @@ describe.skipIf(!DB_URL)('DrizzleRoomStore.list `q` is a LITERAL substring searc
     // memberships through `roomMatchesQuery` instead of the store; the two must
     // return the same verdict or the directory splits by membership.
     const probes = [
-      '\\%room',
+      `\\%${TAG}`,
       '\\_ecret',
       'my\\secret',
       '100% cotton',
       'snake_case',
       'snake%case',
       '100_ cotton',
-      'room',
+      // The plain-substring probe: a token only these fixtures carry, so the
+      // result cannot be crowded out of the store's LIMIT by unrelated rows.
+      TAG,
       '%',
       '_',
       '\\',

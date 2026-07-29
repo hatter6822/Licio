@@ -122,6 +122,8 @@ export class DrizzleStoryStore implements StoryStore {
       roomId: row.roomId,
       visibility: row.visibility,
       mediaUploadRef: row.mediaUploadRef,
+      mediaWidth: null,
+      mediaHeight: null,
       canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,

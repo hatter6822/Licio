@@ -142,6 +142,18 @@ export const stories = pgTable(
       onDelete: 'set null',
     }),
     /**
+     * Intrinsic dimensions of `media_upload_ref`, copied at submission so the
+     * feed projection can reserve the image's real box without one upload
+     * lookup per media story per request.
+     *
+     * SERVER-parsed (`imageDimensions`), never taken from the submission body:
+     * a dimension the client can state is one the client can lie about, and an
+     * attacker-chosen reserved box is a layout the page cannot recover from.
+     * NULL together, never singly (a DB CHECK pins it).
+     */
+    mediaWidth: integer('media_width'),
+    mediaHeight: integer('media_height'),
+    /**
      * WS-Q.2.2b — cross-tier link: a `room_only` story for the same canonical
      * URL points at the canonical PUBLIC story (self-FK). Null when none / this
      * IS the public canonical. ON DELETE SET NULL so removing the public story
