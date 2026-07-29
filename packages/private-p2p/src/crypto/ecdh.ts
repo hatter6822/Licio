@@ -9,7 +9,8 @@
 // (`sync/secure-channel.ts`) consumes.  Keeping the HPKE KEM hermetic preserves
 // its RFC-vector pinning for a future audited-library swap.
 
-import { getSubtle, toBufferSource } from './runtime.js';
+import { x25519Pkcs8FromScalar } from './hpke.js';
+import { fromBase64Url, getSubtle, toBufferSource } from './runtime.js';
 
 /** An X25519 key pair: a (by default non-extractable) private key + raw public
  *  bytes (the 32-byte u-coordinate) to send to the peer. */
@@ -79,4 +80,46 @@ function isAllZero(bytes: Uint8Array): boolean {
   let acc = 0;
   for (const b of bytes) acc |= b;
   return acc === 0;
+}
+
+/**
+ * Derive an X25519 key pair DETERMINISTICALLY from a 32-byte seed.
+ *
+ * The same seed always yields the same pair, which is the point: a device's
+ * §15.4 signalling identity has to be reproducible within a `(room, epoch, time
+ * bucket)` so it advertises ONE dial identity there rather than a fresh one per
+ * `connectPrivatePeer` call.  See `deriveSignalingKeyPair`.
+ *
+ * The seed is HKDF output — uniformly random — so it is used as the private
+ * scalar directly; X25519 clamps it internally, and clamping is a function, so
+ * determinism is preserved.  The public key is read back through a JWK export
+ * (there is no WebCrypto "public from private" call), after which the private
+ * key is re-imported at the requested extractability so the raw scalar need not
+ * stay serializable — the same posture `generateX25519KeyPair` keeps.
+ */
+export async function deriveX25519KeyPair(
+  seed: Uint8Array,
+  extractable = false,
+): Promise<X25519KeyPair> {
+  if (seed.length !== X25519_PUBLIC_KEY_LENGTH) {
+    throw new RangeError(`X25519 seed must be ${X25519_PUBLIC_KEY_LENGTH} bytes`);
+  }
+  const pkcs8 = x25519Pkcs8FromScalar(seed);
+  const exportableKey = await getSubtle().importKey(
+    'pkcs8',
+    toBufferSource(pkcs8),
+    'X25519',
+    true,
+    ['deriveBits'],
+  );
+  const jwk = (await getSubtle().exportKey('jwk', exportableKey)) as { x?: string };
+  if (typeof jwk.x !== 'string') throw new Error('X25519 JWK export carried no public key');
+  const publicKey = fromBase64Url(jwk.x);
+  if (publicKey.length !== X25519_PUBLIC_KEY_LENGTH) {
+    throw new Error('X25519 JWK export carried a malformed public key');
+  }
+  const privateKey = extractable
+    ? exportableKey
+    : await getSubtle().importKey('pkcs8', toBufferSource(pkcs8), 'X25519', false, ['deriveBits']);
+  return { privateKey, publicKey };
 }

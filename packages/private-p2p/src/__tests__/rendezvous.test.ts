@@ -9,6 +9,7 @@
 // §15.3.2 mitigations (risk-tier discovery steering, announce jitter, cover
 // records the server cannot distinguish and no member can open).
 import { describe, expect, it } from 'vitest';
+import { x25519SharedSecret } from '../crypto/ecdh.js';
 import { randomBytes, toBase64Url } from '../crypto/runtime.js';
 import {
   allowedDiscoveryModes,
@@ -19,6 +20,7 @@ import {
   derivePeerBlindId,
   deriveRoomBlindId,
   deriveSignalAddress,
+  deriveSignalingKeyPair,
   isRendezvousRecordExpired,
   jitteredAnnounceTime,
   openRendezvousAnnouncement,
@@ -116,40 +118,97 @@ describe('blind-id derivation (§15.2)', () => {
   });
 });
 
-describe('§15.4 per-recipient signal address (deriveSignalAddress — mesh de-collision)', () => {
+describe('§15.4 PAIRWISE signal address (deriveSignalAddress — mesh de-collision)', () => {
   const key = randomBytes(32);
-  const eA = randomBytes(32); // one device's ephemeral signaling key (one dial)
-  const eB = randomBytes(32); // a peer's ephemeral signaling key
-  const eC = randomBytes(32); // a THIRD ephemeral (a concurrent mesh dial on the same device)
+  const eA = randomBytes(32); // device A's signalling identity for this bucket
+  const eB = randomBytes(32); // device B's
+  const eC = randomBytes(32); // device C's
 
-  it('is deterministic for (key, recipient, epoch, bucket)', async () => {
-    expect(await deriveSignalAddress(key, eA, 3, 100)).toBe(
-      await deriveSignalAddress(key, eA, 3, 100),
+  it('is deterministic for (key, sender, recipient, epoch, bucket)', async () => {
+    expect(await deriveSignalAddress(key, eA, eB, 3, 100)).toBe(
+      await deriveSignalAddress(key, eA, eB, 3, 100),
     );
   });
 
-  it('is DIRECTIONAL via distinct ephemerals — A drains addr(eA), C drains addr(eC) (no self-drain)', async () => {
-    // A→C is sent to addr(eC) (C's inbound); C→A is sent to addr(eA) (A's inbound).  Different keys ⇒
-    // a peer never drains the copy of a signal it itself sent.
-    expect(await deriveSignalAddress(key, eA, 3, 100)).not.toBe(
-      await deriveSignalAddress(key, eC, 3, 100),
+  it('BOTH peers compute the same address for a direction (no extra round-trip)', async () => {
+    // The sender addresses `A→B` from the two public keys it holds; the recipient
+    // derives the identical value from the same two.  This is what lets the pair
+    // meet without negotiating a queue name.
+    const asSender = await deriveSignalAddress(key, eA, eB, 3, 100);
+    const asRecipient = await deriveSignalAddress(key, eA, eB, 3, 100);
+    expect(asRecipient).toBe(asSender);
+  });
+
+  it('is DIRECTED — A→B and B→A are distinct queues, so a peer never drains its own signal', async () => {
+    expect(await deriveSignalAddress(key, eA, eB, 3, 100)).not.toBe(
+      await deriveSignalAddress(key, eB, eA, 3, 100),
     );
   });
 
-  it('is PER-DIAL — a device running two concurrent dials (fresh ephemeral each) gets distinct queues', async () => {
-    // A's live eA-dial and its concurrent eB-dial must drain DIFFERENT queues so the live pump cannot
-    // consume — and drop — the other dial's deliver-once handshake signals.
-    expect(await deriveSignalAddress(key, eA, 3, 100)).not.toBe(
-      await deriveSignalAddress(key, eB, 3, 100),
-    );
+  it("separates a device's CONCURRENT sessions even though it has ONE identity", async () => {
+    // The property the pairwise key exists for.  A device now advertises one
+    // signalling identity per bucket (`deriveSignalingKeyPair`), so the recipient
+    // key alone no longer distinguishes A↔B from A↔C — and the signal drain is
+    // deliver-once, so a shared inbound address would let A's B-session consume,
+    // and drop as un-openable, a signal meant for its C-session.  The SENDER's key
+    // is what separates them.
+    const inboundFromB = await deriveSignalAddress(key, eB, eA, 3, 100);
+    const inboundFromC = await deriveSignalAddress(key, eC, eA, 3, 100);
+    expect(inboundFromB).not.toBe(inboundFromC);
   });
 
   it('rotates with the epoch and the time bucket, and is domain-separated from peer/room ids', async () => {
-    const at = await deriveSignalAddress(key, eA, 3, 100);
-    expect(await deriveSignalAddress(key, eA, 4, 100)).not.toBe(at);
-    expect(await deriveSignalAddress(key, eA, 3, 101)).not.toBe(at);
+    const at = await deriveSignalAddress(key, eA, eB, 3, 100);
+    expect(await deriveSignalAddress(key, eA, eB, 4, 100)).not.toBe(at);
+    expect(await deriveSignalAddress(key, eA, eB, 3, 101)).not.toBe(at);
     expect(at).not.toBe(await deriveRoomBlindId(key, 3, 100));
     expect(at).not.toBe(await derivePeerBlindId(key, 'd1', 3, 100));
+  });
+});
+
+describe('§15.4 signalling identity (deriveSignalingKeyPair — one per device per bucket)', () => {
+  const key = randomBytes(32);
+
+  it('is DETERMINISTIC — the same (room, device, epoch, bucket) yields the same identity', async () => {
+    // The fix for the mesh flake.  `connectPrivatePeer` runs concurrently once per
+    // peer; a fresh-per-call ephemeral gave a device several live dial identities,
+    // and a polling peer took whichever announcement was freshest — belonging to
+    // the call dialling someone else.  One identity per bucket removes the
+    // coincidence rather than making it less likely.
+    const first = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    const second = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    expect(second.publicKey).toEqual(first.publicKey);
+  });
+
+  it('is a WORKING X25519 pair — both derivations agree on the shared secret', async () => {
+    // Determinism is worthless if the derived scalar does not produce a usable
+    // key: the public bytes are read back through a JWK export, so this pins that
+    // the exported public key really is the one the private scalar agrees under.
+    const a = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    const b = await deriveSignalingKeyPair(key, 'device-b', 3, 100);
+    expect(await x25519SharedSecret(a.privateKey, b.publicKey)).toEqual(
+      await x25519SharedSecret(b.privateKey, a.publicKey),
+    );
+  });
+
+  it('differs per DEVICE, per epoch, and per time bucket', async () => {
+    const base = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    for (const other of [
+      await deriveSignalingKeyPair(key, 'device-b', 3, 100),
+      await deriveSignalingKeyPair(key, 'device-a', 4, 100),
+      await deriveSignalingKeyPair(key, 'device-a', 3, 101),
+    ]) {
+      expect(other.publicKey).not.toEqual(base.publicKey);
+    }
+  });
+
+  it('is not derivable without the ROOM key (§15.3.1: the key is the capability)', async () => {
+    // An outsider who learns a device id still cannot compute — or correlate —
+    // that device's signalling identity.
+    const outsider = randomBytes(32);
+    const mine = await deriveSignalingKeyPair(key, 'device-a', 3, 100);
+    const theirs = await deriveSignalingKeyPair(outsider, 'device-a', 3, 100);
+    expect(theirs.publicKey).not.toEqual(mine.publicKey);
   });
 });
 
@@ -393,5 +452,64 @@ describe('§15.3.2 metadata mitigations', () => {
     expect(a.encrypted_announcement.length).toBe(real.encrypted_announcement.length);
     // A cover record is not a real seal; opening it fails closed.
     await expect(openRendezvousAnnouncement(a, key)).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The mesh defect, exhibited DETERMINISTICALLY.
+//
+// The E2E pass rate cannot carry this on its own: measured on an IDLE machine
+// the pre-fix code passes 5/5, and it only reproduces under load (0/2 at load
+// average ~15, matching where the original 1-in-3 figure was taken).  A test
+// that depends on machine load is not evidence, so this one exhibits the
+// mechanism directly and has no timing in it at all.
+// ---------------------------------------------------------------------------
+describe('§15.4 a SHARED signal queue destroys a third party’s offer', () => {
+  /** The rendezvous signal box, with the property that does the damage: a poll
+   *  DRAINS. (`InMemoryRendezvousStore.signalPoll` clears the box; so does the
+   *  server.) */
+  function signalBox() {
+    const boxes = new Map<string, string[]>();
+    return {
+      send: (addr: string, payload: string) =>
+        boxes.set(addr, [...(boxes.get(addr) ?? []), payload]),
+      drain: (addr: string) => {
+        const box = boxes.get(addr) ?? [];
+        boxes.set(addr, []);
+        return box;
+      },
+    };
+  }
+
+  const KEY = randomBytes(32);
+  const eA = randomBytes(32); // the member everyone dials at once
+  const eB = randomBytes(32);
+  const eC = randomBytes(32);
+
+  it('SHARED address: one drain takes both offers, and the un-openable one is GONE', () => {
+    // The counterfactual — what a recipient-only address produced.  B and C both
+    // address A's announcement, so both land in one deliver-once queue.  A's
+    // session for B opens B's offer and drops C's as un-openable; the poll has
+    // already cleared it, so C is not delayed, it is destroyed, and C waits out
+    // its dial deadline against a view that has moved on.
+    const box = signalBox();
+    const shared = 'addr(recipient=eA)';
+    box.send(shared, 'offer-from-B');
+    box.send(shared, 'offer-from-C');
+    expect(box.drain(shared)).toEqual(['offer-from-B', 'offer-from-C']);
+    expect(box.drain(shared)).toEqual([]); // C's offer cannot be re-read
+  });
+
+  it('PAIRWISE address: the two offers land in SEPARATE queues, so neither is lost', async () => {
+    const box = signalBox();
+    const fromB = await deriveSignalAddress(KEY, eB, eA, 3, 100);
+    const fromC = await deriveSignalAddress(KEY, eC, eA, 3, 100);
+    expect(fromB).not.toBe(fromC);
+    box.send(fromB, 'offer-from-B');
+    box.send(fromC, 'offer-from-C');
+    // A's session for B drains only B's queue…
+    expect(box.drain(fromB)).toEqual(['offer-from-B']);
+    // …and C's offer is still waiting for the session that can open it.
+    expect(box.drain(fromC)).toEqual(['offer-from-C']);
   });
 });

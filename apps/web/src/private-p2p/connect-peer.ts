@@ -340,7 +340,20 @@ export async function connectPrivatePeer(
   //    the §27 Tier-1 sample-poll).  The cap's BBS `pseudonym` is DISTINCT from `peer_blind_id` (the
   //    latter is the HMAC-derived per-(device, epoch, bucket) id); a polling MEMBER opens the sealed
   //    cap and dedups by the verified pseudonym.
-  const ephemeral = await p2p.generateX25519KeyPair();
+  // ONE signalling identity per (room, epoch, time bucket), derived from the rendezvous key rather
+  // than freshly generated per call.  A mesh member runs `connectPrivatePeer` CONCURRENTLY, once per
+  // peer, so a fresh-per-call ephemeral gave a device several live dial identities at once — and a
+  // polling peer took whichever announcement was freshest, which belonged to the call dialling
+  // SOMEONE ELSE.  That call's pump then failed to open the offer (a channel key for a different
+  // peer), and a handshake completed only when both sides happened to pick the announcements of the
+  // calls dialling each other.  One identity removes the coincidence instead of narrowing it; see
+  // `deriveSignalingKeyPair`.
+  const ephemeral = await p2p.deriveSignalingKeyPair(
+    rendezvousKey,
+    selfDeviceId,
+    epoch,
+    timeBucket,
+  );
   // The per-announcer cap rides SEALED INSIDE the announcement only (PRIV-API-RENDEZVOUS-1: the
   // server-visible top-level cap was removed because the server-held issuer key is a cross-bucket
   // linking handle).  A member-only verifier opens it from the polled announcement and
@@ -406,23 +419,28 @@ export async function connectPrivatePeer(
       p2p.CHANNEL_LABEL_SIGNALING,
     );
 
-    // Per-RECIPIENT §15.4 signaling addresses (keyed on the RECIPIENT's ephemeral signaling key, NOT
-    // the device-level `selfPeerBlindId`).  The rendezvous signal drain is deliver-once, so a
-    // device-level queue shared by every dial would let one session's pump consume — and drop as
-    // un-openable — a signal meant for another session's channel; that stalls the 2nd+ dial of a mesh.
-    // Each dial mints a fresh ephemeral ⇒ its own inbound queue (`selfSignalAddr`, derivable from our
-    // OWN ephemeral so we drain it from the START — before we have discovered the peer — so a first
-    // offer is never lost to a not-yet-draining answerer).  We send to the peer's inbound queue
-    // (`peerSignalAddr`, from its announced ephemeral).  The two directions use distinct ephemerals, so
-    // a peer never drains a signal it itself sent — no mutual-discovery round-trip.
+    // PAIRWISE, DIRECTED §15.4 signaling addresses.  The signal drain is deliver-once, so two live
+    // sessions on one device must never share an inbound address — the first pump to poll would
+    // consume, and drop as un-openable, a signal meant for the other session's channel.  A per-CALL
+    // ephemeral used to provide that separation; now that a device has ONE identity per bucket, the
+    // SENDER's key is what separates its sessions, so the address is keyed on both.  Directed
+    // (sender first) so A→B and B→A are distinct queues and a peer never drains its own signal.
+    //
+    // The cost is that this can only be derived AFTER discovering the peer, so draining starts one
+    // poll later than the old self-only address allowed.  Nothing is lost: the queue is a TTL'd
+    // server-side mailbox, not a live socket, and an offer sent before the answerer began draining
+    // is still waiting when it does — the property ICE candidates arriving ahead of their offer
+    // already depend on.
     const selfSignalAddr = await p2p.deriveSignalAddress(
       rendezvousKey,
+      peer.peerSignalingPublicKey,
       ephemeral.publicKey,
       epoch,
       timeBucket,
     );
     const peerSignalAddr = await p2p.deriveSignalAddress(
       rendezvousKey,
+      ephemeral.publicKey,
       peer.peerSignalingPublicKey,
       epoch,
       timeBucket,

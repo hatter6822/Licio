@@ -87,51 +87,55 @@ const MESH_OPTS = {
 };
 
 test.describe('private room MESH over the real rendezvous (three browsers, WS-S launch gate)', () => {
-  // QUARANTINED on a DIAGNOSED — and only PARTLY fixed — protocol defect.  The
-  // file now RUNS in CI; before this change `test:e2e:webrtc` appeared in no
-  // workflow, so all five real-WebRTC specs were dead letters.
+  // This file RUNS in CI; before the change that added it, `test:e2e:webrtc`
+  // appeared in no workflow, so all five real-WebRTC specs were dead letters.
   //
-  // Measured: 1 pass in 3 before the `connect-peer.ts` change below, 6 in 8
-  // after.  Better is not fixed, so it stays quarantined rather than retried.
+  // It was quarantined at ~1 pass in 3.  The MECHANISM, traced with per-member
+  // instrumentation: the §15.4 signal queue was keyed on the RECIPIENT's
+  // ephemeral alone, and the drain is DELIVER-ONCE.  In a 3-peer mesh everyone
+  // dials everyone at once and each addresses the SAME (freshest) announcement
+  // of the member it is dialling — so two offers land in ONE queue, the session
+  // that drains it can open only the one matching its channel key, and the other
+  // is dropped as un-openable AND already cleared from the box.  Not delayed:
+  // destroyed.  That peer then burns its dial deadline against a view that has
+  // moved on — the `skipped a signal` warnings, on the member everyone is
+  // dialling.  (The previous docstring on `deriveSignalAddress` CLAIMED this
+  // could not happen, "gives every pairwise channel its own queue"; that holds
+  // only while each session has its own recipient ephemeral, which stops being
+  // true the moment two peers pick the same announcement.)
   //
-  // ROOT CAUSE (traced with per-member dial instrumentation, not inferred).
-  // A handshake needs BOTH peers to select each OTHER'S CURRENT announcement,
-  // because the signalling channel key is ECDH(own ephemeral, the peer's
-  // ANNOUNCED ephemeral).  Each dial mints a fresh ephemeral and drains only
-  // that one's inbound queue, so every SUPERSEDED announcement names an address
-  // nobody answers at — and it stays live for the §15.3.2 TTL (5-minute floor)
-  // because there is no retraction and the store keys presence by the sealed
-  // ciphertext, so a re-announce ADDS a slot instead of replacing the device's.
-  // Observed: one peer holding THREE live candidates for a single device, and
-  // offers landing at dead addresses failing AEAD open — the `skipped a signal`
-  // warnings, only on the joining member.
+  // FIXED by `deriveSignalAddress` becoming PAIRWISE and DIRECTED — keyed on the
+  // sender's identity as well as the recipient's — so the two offers land in
+  // different queues and neither is destroyed.  `deriveSignalingKeyPair` (one
+  // signalling identity per device per bucket) lands with it: it fixes the
+  // separate announcement fan-out, and the pairwise address is what makes it
+  // safe.  Which half carries the flake is MEASURED, not assumed — the address
+  // change alone, with the old per-call ephemeral still in place, passes.
   //
-  // WHAT IS FIXED: the amplifier.  `connectPrivatePeer` used to grind through the
-  // whole candidate list before re-polling, spending `candidates × deadline`
-  // against a view that was already stale — while the peer, symmetrically stuck,
-  // announced newer ephemerals that round would never see.  It now dials the
-  // freshest candidate and RE-POLLS (PRIV-CARRIER-FRESH-VIEW), so the two sides'
-  // selections converge within a poll interval.
+  // MEASURED (2026-07-29), and the load condition is part of the result:
+  //   idle machine     pre-fix 5/5 pass,  fixed 10/10  ← does NOT reproduce idle
+  //   under load       pre-fix 0/2 pass,  fixed 13/14
+  // "Under load" = three Chromium instances against a looping api+web vitest run,
+  // load average 15-17.  That is well beyond CI, which runs this suite alone with
+  // one worker.  The single failure did not recur in a second six-run pass and its
+  // output was not captured, so its cause is unestablished rather than explained.
   //
-  // WHAT IS NOT: the residual coincidence.  Two peers can still pick
-  // each other's second-newest announcement in the same round.  The fix that
-  // removes it — and the only option that adds NO new forgeability — is for a
-  // peer to keep ANSWERING at every ephemeral it has advertised and not yet let
-  // expire, resolving the channel key from the signal's `sender_blind_id`
-  // (already on the wire) instead of from a peer pre-selected before the offer
-  // arrives.  That is a real change to the §15.5 handshake on the
-  // launch-blocking E2EE plane and is deliberately NOT rushed here.
+  // Because a pass rate depends on the machine, the load-independent evidence is
+  // the deterministic pair in `packages/private-p2p/src/__tests__/rendezvous.test.ts`
+  // ("a SHARED signal queue destroys a third party's offer"), which exhibits the
+  // destruction and its absence with no timing in it at all.
   //
-  // Rejected alternatives, with the property each would cost: keying the server
-  // slot by `peer_blind_id` restores one-slot-per-device but hands any
-  // current-epoch member a targeted EVICTION vector — the sharper cousin of the
-  // DoS `selectFreshestCandidates` refuses to enable (PRIV-CARRIER-FRESHEST-
-  // NOSPOOF); reusing one ephemeral per device reintroduces the shared-queue
-  // stall that same comment documents, because an established session's
-  // ICE-restart watcher keeps draining the address after its dial ends.
+  // An earlier mitigation (dial the freshest candidate and RE-POLL rather than
+  // grinding a stale list — PRIV-CARRIER-FRESH-VIEW) took this from 1-in-3 to
+  // 6-in-8.  It is kept: still the right dial strategy, and it lowers the cost of
+  // a miss.  It did not remove the mechanism, which is why it was a mitigation.
   //
-  // Tracked with this trace in `docs/planning/audit-residuals-2026-07.md`.
-  test.fixme('3 members converge to the byte-identical union, and the mesh survives a peer drop', async ({
+  // Rejected, with the property each would cost: keying the SERVER slot by
+  // `peer_blind_id` restores one-slot-per-device but hands any current-epoch
+  // member a targeted EVICTION vector — the sharper cousin of the DoS
+  // `selectFreshestCandidates` refuses to enable (PRIV-CARRIER-FRESHEST-NOSPOOF);
+  // a CI retry count would hide the defect rather than fix it.
+  test('3 members converge to the byte-identical union, and the mesh survives a peer drop', async ({
     browser,
     browserName,
   }: {

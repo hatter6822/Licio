@@ -265,59 +265,67 @@ recorded here:
   **Closure target:** the four low-coverage pages, `security.tsx` first — it is
   the largest (194 statements) and hosts the MFA/session surfaces.
 
-- **WS-S mesh: a device advertises one live rendezvous slot PER `connectPrivatePeer`
-  CALL** — mechanism now fully pinned; the fix is designed and NOT yet landed.
+- **WS-S mesh flake** — **FIXED**, and the quarantine is lifted.
   Found by wiring `test:e2e:webrtc` into CI (it ran in no workflow, so all five
   real-WebRTC specs had never executed; the first run also surfaced a dead codec stub
-  in the carrier spec, since fixed).  `private-mesh.realwebrtc.spec.ts` is
-  `test.fixme`'d with the trace at the call site.
+  in the carrier spec, since fixed).  `private-mesh.realwebrtc.spec.ts` passed ~1 run
+  in 3 and was `test.fixme`'d.
 
-  **Mechanism** (instrumented per member, not inferred).  `connectPrivatePeer` mints a
-  fresh ephemeral X25519 key per CALL and drains only that key's inbound queue
-  (`deriveSignalAddress` is keyed on the RECIPIENT's ephemeral alone).  A mesh member
-  runs the call CONCURRENTLY, once per peer — so device A dialling B and C has two live
-  ephemerals and two queues, and each announcement lingers for the §15.3.2 TTL
-  (5-minute floor) with no retraction.  A polling peer takes A's FRESHEST announcement,
-  which belongs to whichever of A's calls started last — the one dialling someone else.
-  That call's pump receives the offer, tries to open it with a channel key derived for a
-  DIFFERENT peer, and fails: the `skipped a signal` warnings, only on the joining
-  member.  A handshake completes only when both sides happen to pick announcements
-  belonging to the calls that are dialling each other.
-  `InMemoryRendezvousStore.announce` keys presence by the sealed CIPHERTEXT, so a
-  re-announce ADDS a slot rather than replacing the device's — contradicting
-  `connect-peer.ts`'s own "one slot per device per bucket", in a store whose eviction
-  loop even names its key `peerBlindId`.
+  **Mechanism** (instrumented per member, not inferred).  The §15.4 signal queue was
+  keyed on the RECIPIENT's ephemeral alone, and the drain is DELIVER-ONCE.  In a
+  3-peer mesh every member dials every other at once and each addresses the SAME
+  (freshest) announcement of the member it is dialling — so two offers land in ONE
+  queue.  The session that drains it can open only the one matching its channel key;
+  the other is dropped as un-openable AND the poll has already cleared it.  Not
+  delayed — destroyed.  That peer then burns its dial deadline against a view that has
+  moved on: the `skipped a signal` warnings, on the member everyone is dialling.
 
-  **The fix — two halves, and neither works alone.**
-  1. **One ephemeral per device per `(room, epoch, time bucket)`**, derived
-     deterministically (HKDF over the rendezvous key + device id + epoch + bucket;
-     `x25519Pkcs8FromScalar` already exists for the import).  A device then has ONE
-     announced dial identity, `selectFreshestCandidates` collapses it to one candidate
-     by construction, and the coincidence is gone rather than made less likely.
-  2. **A PAIRWISE signalling address** — `deriveSignalAddress` keyed on the sender's
-     ephemeral as well as the recipient's.  This is what makes (1) safe: a single
-     ephemeral means a single inbound queue, and the signal drain is deliver-once, so
-     one session's pump would otherwise consume — and drop as un-openable — a signal
-     meant for another session's channel.  That stall is precisely why the per-call
-     ephemeral existed, so removing it requires replacing it.
-  Together they delete the mechanism instead of narrowing it.  The earlier mitigation
-  (dial `triable[0]` only, then re-poll) took the spec from ~1 run in 3 to 6 in 8 by
-  making each side more likely to pick the other's newest announcement — it lowers the
-  probability of the coincidence and does not remove it, which is why it is a
-  mitigation and this is the fix.
+  The old docstring asserted this could not happen ("gives every pairwise channel its
+  own queue").  It holds only while every session has its own recipient ephemeral,
+  which stops being true the moment two peers pick the same announcement — the ordinary
+  case in a mesh, since they all sort freshest-first.
 
-  Three alternatives were considered and rejected: keying the SERVER slot by
-  `peer_blind_id` (any current-epoch member can derive another member's blind id, so it
-  hands over a targeted eviction vector — the sharper cousin of the DoS
-  `selectFreshestCandidates` refuses to enable, PRIV-CARRIER-FRESHEST-NOSPOOF); a CI
-  retry count (hides the defect rather than fixing it); and answering at superseded
-  addresses without (1), which needs the channel key resolved from `sender_blind_id`
-  after the fact and leaves the multi-ephemeral fan-out in place.
+  **The fix.**  `deriveSignalAddress` is now PAIRWISE and DIRECTED, keyed on the
+  sender's signalling identity as well as the recipient's, so those two offers land in
+  different queues and neither is destroyed.  `deriveSignalingKeyPair` lands with it —
+  ONE signalling identity per device per `(room, epoch, bucket)`, derived from the
+  rendezvous key — which fixes the separate announcement fan-out (three live candidates
+  for one device; ~a dozen dead addresses a minute) and makes `connect-peer.ts`'s own
+  "one slot per device per bucket" true.  Which half carries the flake is MEASURED, not
+  assumed: the address change alone, with the old per-call ephemeral still in place,
+  passes the spec.  The identity change is only SAFE alongside it — with a
+  recipient-only address, one identity per device would give a device a single queue
+  shared by all its sessions, the worst case of the same bug.
 
-  **Status: designed, not landed.**  It changes §15.5 signalling ADDRESSING on the
-  wire, on a launch-blocking plane, so it wants its own focused pass and review rather
-  than riding along with an audit sweep — the same reason the first mitigation stopped
-  where it did.  The `test.fixme` comes off in that change.
+  **Measured (2026-07-29)** — the load condition is part of the result:
+
+  | | pre-fix | fixed |
+  |---|---|---|
+  | idle machine | 5/5 pass | 10/10 |
+  | under load | 0/2 pass | 13/14 |
+
+  "Under load" is three Chromium instances against a looping api+web vitest run (load
+  average 15-17), well beyond CI, which runs this suite alone with one worker.  The
+  flake does NOT reproduce idle, so an idle pass rate is not evidence either way — the
+  earlier 1-in-3 and 6-in-8 figures were both taken while heavy parallel suites ran.
+  The single under-load failure did not recur in a second six-run pass and its output
+  was not captured, so its cause is unestablished rather than explained.
+
+  Because any pass rate depends on the machine, the load-independent evidence is a
+  deterministic pair in `packages/private-p2p/src/__tests__/rendezvous.test.ts` ("a
+  SHARED signal queue destroys a third party's offer"), which exhibits the destruction
+  and its absence with no timing in it at all.
+
+  An earlier mitigation (dial the freshest candidate and RE-POLL rather than grinding a
+  stale list — PRIV-CARRIER-FRESH-VIEW) moved this from 1-in-3 to 6-in-8 and is kept:
+  still the right dial strategy, and it lowers the cost of a miss.  It did not remove
+  the mechanism, which is why it was a mitigation and this is the fix.
+
+  Rejected, with the property each would cost: keying the SERVER slot by
+  `peer_blind_id` restores one-slot-per-device but hands any current-epoch member a
+  targeted EVICTION vector — the sharper cousin of the DoS `selectFreshestCandidates`
+  refuses to enable (PRIV-CARRIER-FRESHEST-NOSPOOF); a CI retry count would hide the
+  defect rather than fix it.
 
 - **`context canceled` noise from the TypeScript 7 native host** — blocked
   upstream. `new API(...)` in `scripts/ts-source.ts` /
