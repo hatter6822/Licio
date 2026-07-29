@@ -244,6 +244,27 @@ export interface ContributionStore {
       order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]>;
+  /**
+   * Direct children of MANY parents at once, each parent's own newest-first
+   * page bounded by `limitPerParent`.
+   *
+   * The comment page builds a reply forest: a page of roots, each with its
+   * bounded reply preview, each of those with theirs, `depth` deep.  Walking
+   * that with `listChildren` per node is one query per NODE — about 200 for a
+   * single `/stories/:id/comments` request — while the shape of the work is one
+   * query per LEVEL.
+   *
+   * Ordering within each parent is IDENTICAL to `listChildren`'s newest-first
+   * default (section rank, then created_at desc, then id desc), because the two
+   * feed the same rendered list and a reply that moved when the page batched
+   * differently would be a visible defect rather than an optimization.
+   *
+   * Returns a map keyed by parent id; a parent with no children is absent.
+   */
+  listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>>;
   /** Rows whose path contains `rootId` (the subtree, excluding the root),
    *  `(created_at, id)` ascending with keyset continuation — the WS-G.3.3
    *  lazy-loading contract holds for subtrees too. */
@@ -795,6 +816,33 @@ export class InMemoryContributionStore implements ContributionStore {
       // A nested `incorrect` reply sinks among its siblings too (WS-T).
       .sort((a, b) => bySectionThenOrder(a, b, order, null));
     return rows.slice(0, opts.limit);
+  }
+
+  async listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>> {
+    const states = opts.states ? new Set(opts.states) : null;
+    const wanted = new Set(parentContributionIds);
+    const byParent = new Map<string, ContributionRecord[]>();
+    for (const row of this.#rows.values()) {
+      const parent = row.parentContributionId;
+      if (parent === null || !wanted.has(parent)) continue;
+      if (states !== null && !states.has(row.moderationState)) continue;
+      const bucket = byParent.get(parent);
+      if (bucket) bucket.push(row);
+      else byParent.set(parent, [row]);
+    }
+    for (const [parent, rows] of byParent) {
+      // The SAME comparator `listChildren` uses, newest-first: the two feed one
+      // rendered list, and a reply that moved because the page batched
+      // differently would be a defect, not an optimization.
+      byParent.set(
+        parent,
+        rows.sort((a, b) => bySectionThenOrder(a, b, 'newest', null)).slice(0, opts.limitPerParent),
+      );
+    }
+    return byParent;
   }
 
   async countByType(

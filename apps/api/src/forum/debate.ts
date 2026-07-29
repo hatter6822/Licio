@@ -1127,17 +1127,39 @@ async function applyFinalizeOutcome(
   let targetEditRef: string | null | undefined;
   if (resolvedStatus === 'validated') {
     const threshold = effectiveChallengePolicy(deps).settleThreshold;
+    // TWO questions, two values.  `anchor` answers "since when do prior upheld
+    // defenses count", for which falling back to the target's creation is
+    // right.  The SUPERSESSION fence asks something else — "did a material edit
+    // land at or after the lock, so the verdict judged text that is no longer
+    // served" — and only an EDIT can make that true.
+    //
+    // They were one value, and the fallback leaked into the fence: an unedited
+    // target's anchor IS its `createdAt`, so a target created and locked inside
+    // the same millisecond compared `lockedAt <= anchor` as true and an UPHELD
+    // verdict silently resolved `none` — the challenger tagged `incorrect`, the
+    // defended comment left unmarked, half a verdict applied.  Millisecond
+    // collisions are not exotic: under load a burst of work runs inside one
+    // scheduler quantum and every `Date.now()` in it returns the same value,
+    // which is how this surfaced only in a loaded full-suite run.
+    //
+    // A STORY target cannot be superseded at all — there is no author-edit path
+    // for a story (`storyPolicyState` returns its creation instant, and
+    // `lastMaterialUpdateAt` is deliberately not used here), so the fence is
+    // comment-only by construction rather than by an anchor that happens to
+    // compare favourably.
     let anchor: string | null = null;
+    let materialEditAt: string | null = null;
     if (arena.targetType === 'comment' && arena.targetContributionId !== null) {
       const target = await deps.contributions.getById(arena.targetContributionId);
       if (target !== null) {
         targetEditRef = target.editHistoryRef;
-        anchor = (await deps.contributions.latestEditAt(target.contributionId)) ?? target.createdAt;
+        materialEditAt = await deps.contributions.latestEditAt(target.contributionId);
+        anchor = materialEditAt ?? target.createdAt;
       }
     } else if (arena.targetType === 'story') {
       anchor = (await deps.storyPolicyState?.(arena.storyId))?.createdAt ?? null;
     }
-    if (anchor !== null && arena.lockedAt !== null && arena.lockedAt <= anchor) {
+    if (materialEditAt !== null && arena.lockedAt !== null && arena.lockedAt <= materialEditAt) {
       resolvedStatus = 'none'; // the judged snapshot predates the served version
     } else if (anchor !== null && arena.lockedAt !== null) {
       const prior =

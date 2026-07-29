@@ -45,6 +45,7 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -368,6 +369,56 @@ export class DrizzleContributionStore implements ContributionStore {
       .orderBy(...sectionOrderBy(order, null))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>> {
+    const byParent = new Map<string, ContributionRecord[]>();
+    if (parentContributionIds.length === 0 || opts.limitPerParent <= 0) return byParent;
+    const conditions = [
+      inArray(contributionsTable.parentContributionId, [...parentContributionIds]),
+    ];
+    if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    // One query per LEVEL instead of one per NODE. `row_number()` partitioned by
+    // parent takes each parent's own top-N, so the per-parent bound is applied
+    // in the database rather than by fetching everything and slicing.
+    //
+    // The ORDER inside the window is `sectionOrderBy(newest)` restated — the
+    // same section rank, created_at desc, id desc that `listChildren` applies.
+    // The two feed one rendered list; a reply that moved because the page
+    // batched differently would be a defect, not an optimization.
+    //
+    // The columns are spread explicitly rather than projected as a nested table
+    // object: Drizzle cannot carry a table projection through a subquery alias
+    // (it looks for the base table in the outer FROM and does not find it).
+    const ranked = this.#db
+      .select({
+        ...getTableColumns(contributionsTable),
+        rn: sql<number>`row_number() over (
+          partition by ${contributionsTable.parentContributionId}
+          order by ${sectionRankExpr(null)} asc,
+                   ${contributionsTable.createdAt} desc,
+                   ${contributionsTable.contributionId} desc
+        )`.as('rn'),
+      })
+      .from(contributionsTable)
+      .where(and(...conditions))
+      .as('ranked');
+    const rows = await this.#db
+      .select()
+      .from(ranked)
+      .where(sql`${ranked.rn} <= ${opts.limitPerParent}`);
+    for (const entry of rows) {
+      const record = this.#toRecord(entry as unknown as typeof contributionsTable.$inferSelect);
+      const parent = record.parentContributionId;
+      if (parent === null) continue;
+      const bucket = byParent.get(parent);
+      if (bucket) bucket.push(record);
+      else byParent.set(parent, [record]);
+    }
+    return byParent;
   }
 
   async countByType(

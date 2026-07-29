@@ -134,24 +134,57 @@ interface RawNode {
   children: RawNode[];
 }
 
-async function fetchRawNode(
+/**
+ * Build the reply forest for a page of roots, ONE QUERY PER LEVEL.
+ *
+ * This used to recurse per node — `listChildren` for each root, then for each of
+ * its previewed replies, then for each of theirs — which is one query per NODE:
+ * about 200 for a single `/stories/:id/comments` request at a 20-root page and
+ * the default depth.  The work is per LEVEL, and now the reads are too: a page
+ * of any size costs `forestDepth` queries.
+ *
+ * `listChildrenForParents` applies the same per-parent bound and the same
+ * newest-first ordering `listChildren` did, so the rendered forest is
+ * unchanged; only the number of round-trips is.
+ */
+async function fetchForest(
   bundle: Bundle,
-  record: ContributionRecord,
+  roots: readonly ContributionRecord[],
   depth: number,
-): Promise<RawNode> {
-  if (depth <= 0) return { record, materialized: false, moreDirect: false, children: [] };
+): Promise<RawNode[]> {
+  const nodes = roots.map(
+    (record): RawNode => ({ record, materialized: false, moreDirect: false, children: [] }),
+  );
   // Reply previews stay newest-first (the "latest activity" snapshot), matching
   // the inline section; the focused list's chronological order is applied only
   // to the top level the caller paginates.
-  const childRows = await bundle.forum.contributions.listChildren(record.contributionId, {
-    states: RENDERABLE_STATES,
-    limit: REPLY_PREVIEW + 1,
-  });
-  const moreDirect = childRows.length > REPLY_PREVIEW;
-  const children = await Promise.all(
-    childRows.slice(0, REPLY_PREVIEW).map((child) => fetchRawNode(bundle, child, depth - 1)),
-  );
-  return { record, materialized: true, moreDirect, children };
+  let frontier = nodes;
+  for (let level = 0; level < depth && frontier.length > 0; level += 1) {
+    const byParent = await bundle.forum.contributions.listChildrenForParents(
+      frontier.map((node) => node.record.contributionId),
+      // One MORE than shown, per parent, so `moreDirect` is answered by the same
+      // read rather than by a second count.
+      { states: RENDERABLE_STATES, limitPerParent: REPLY_PREVIEW + 1 },
+    );
+    const next: RawNode[] = [];
+    for (const node of frontier) {
+      const childRows = byParent.get(node.record.contributionId) ?? [];
+      node.materialized = true;
+      node.moreDirect = childRows.length > REPLY_PREVIEW;
+      for (const child of childRows.slice(0, REPLY_PREVIEW)) {
+        const childNode: RawNode = {
+          record: child,
+          materialized: false,
+          moreDirect: false,
+          children: [],
+        };
+        node.children.push(childNode);
+        next.push(childNode);
+      }
+    }
+    frontier = next;
+  }
+  return nodes;
 }
 
 function collectRecords(node: RawNode, acc: ContributionRecord[]): void {
@@ -386,7 +419,7 @@ export async function commentPage(
   // subtrees would render it twice (once listed thread-wide, once nested). The
   // main + focused views keep their nested reply layers.
   const forestDepth = opts.filter === 'corrections' ? 0 : opts.depth;
-  const forest = await Promise.all(page.map((record) => fetchRawNode(bundle, record, forestDepth)));
+  const forest = await fetchForest(bundle, page, forestDepth);
   const allRecords: ContributionRecord[] = [];
   for (const node of forest) collectRecords(node, allRecords);
   if (anchorRecord) allRecords.push(anchorRecord);

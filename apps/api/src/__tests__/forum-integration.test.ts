@@ -329,6 +329,61 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     expect(afterHide.get(child.contribution.contributionId)).toBe(0);
   });
 
+  it('listChildrenForParents matches listChildren per parent, in ONE query', async () => {
+    // The comment page builds its reply forest one query per LEVEL now; the
+    // batched read has to agree with the per-parent one it replaced, or a reply
+    // moves in the rendered list because the page batched differently.  The
+    // window function's PARTITION + ORDER is the risky part and only a real
+    // Postgres can judge it.
+    const insertOk = async (
+      over: Parameters<typeof contributionInput>[0] = {},
+    ): Promise<string> => {
+      const outcome = await contributions.insert(contributionInput(over));
+      if (!outcome.ok) throw new Error('fixture insert failed');
+      return outcome.contribution.contributionId;
+    };
+    const parents = [await insertOk(), await insertOk()];
+    for (const parentId of parents) {
+      for (let i = 0; i < 5; i += 1) {
+        await insertOk({
+          parentContributionId: parentId,
+          path: [parentId],
+          body: `reply ${i} to ${parentId.slice(0, 4)}`,
+        });
+      }
+    }
+    const LIMIT = 4;
+    const batched = await contributions.listChildrenForParents(parents, {
+      states: ['published'],
+      limitPerParent: LIMIT,
+    });
+    for (const parentId of parents) {
+      const single = await contributions.listChildren(parentId, {
+        states: ['published'],
+        limit: LIMIT,
+      });
+      // Same rows, same order, same per-parent bound — row for row.
+      expect(batched.get(parentId)?.map((r) => r.contributionId)).toEqual(
+        single.map((r) => r.contributionId),
+      );
+      expect(single).toHaveLength(LIMIT); // the bound is per PARENT, not global
+    }
+
+    // A parent with no children is ABSENT, not an empty array: the caller
+    // distinguishes "asked and got nothing" by the map lookup.
+    const childless = await insertOk();
+    const none = await contributions.listChildrenForParents([childless], {
+      states: ['published'],
+      limitPerParent: LIMIT,
+    });
+    expect(none.has(childless)).toBe(false);
+
+    // No parents ⇒ no query at all.
+    expect(await contributions.listChildrenForParents([], { limitPerParent: LIMIT })).toEqual(
+      new Map(),
+    );
+  });
+
   it('snapshots edits append-only and tracks edit_history_ref', async () => {
     const created = await contributions.insert(contributionInput({ body: 'Original body.' }));
     expect(created.ok).toBe(true);

@@ -540,6 +540,79 @@ describe('WS-T debate arena lifecycle', () => {
     expect((await contributions.getById(correctionId))?.disputeStatus).toBe('incorrect');
   });
 
+  it('certifies an UPHELD target whose lock lands in the same millisecond as its creation', async () => {
+    // The supersession fence asks "did a material edit land at or after the
+    // lock, so the verdict judged text that is no longer served".  It used to
+    // read the ANCHOR — `latestEditAt ?? createdAt` — which for an UNEDITED
+    // target is its creation instant, so `lockedAt <= anchor` compared true
+    // whenever creation and lock shared a millisecond and an upheld verdict
+    // silently resolved `none`: the challenger tagged `incorrect`, the defended
+    // comment left unmarked, half a verdict applied.
+    //
+    // Every other test in this file advances `clock.ms` between the two, which
+    // is why nothing caught it; the collision surfaced only in a loaded
+    // full-suite run, where a burst of work inside one scheduler quantum makes
+    // every `Date.now()` return the same value.  This test does NOT move the
+    // clock — the collision is guaranteed, not hoped for.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    deps.runJudge = async () => ({
+      verdict: {
+        model_version: '1.0.0',
+        winner: 'incumbent',
+        verdict: 'upheld',
+        confidence: 0.9,
+        probabilities: { incumbent: 0.9, challenger: 0.07, inconclusive: 0.03 },
+        rationale: 'The incumbent account held up against the sources.',
+      },
+      outputId: `out:${randomUUID()}`,
+    });
+    const judged = await judgeDebateArena(deps, debateId);
+    expect(judged?.verdict).toBe('upheld');
+    // The collision the fence used to misread, stated explicitly.
+    expect(judged?.lockedAt).toBe((await contributions.getById(targetId))?.createdAt);
+    await finalizeDebate(deps, debateId);
+    // A target that has never been edited cannot have been superseded.
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('validated');
+    expect((await contributions.getById(correctionId))?.disputeStatus).toBe('incorrect');
+  });
+
+  it('still REFUSES to certify when a material edit lands at or after the lock', async () => {
+    // The half of the fence that must keep biting: a verdict may never certify
+    // text the adjudicator did not see.
+    const targetId = await seedComment(INCUMBENT, 'The vote passed 5-4.');
+    const correctionId = await seedCorrection(targetId);
+    const debateId = randomUUID();
+    await maybeEnterDebate(deps, correctionInput(correctionId, targetId), debateId);
+    deps.runJudge = async () => ({
+      verdict: {
+        model_version: '1.0.0',
+        winner: 'incumbent',
+        verdict: 'upheld',
+        confidence: 0.9,
+        probabilities: { incumbent: 0.9, challenger: 0.07, inconclusive: 0.03 },
+        rationale: 'The incumbent account held up against the sources.',
+      },
+      outputId: `out:${randomUUID()}`,
+    });
+    clock.ms += DEBATE_EDIT_WINDOW_MS + 1000;
+    expect((await judgeDebateArena(deps, debateId))?.verdict).toBe('upheld');
+    // A post-judgement material edit: the served text is no longer the judged
+    // text, so the certificate must not be issued.
+    clock.ms += 1000;
+    await contributions.applyEdit(
+      targetId,
+      { body: 'The vote passed 6-3, on review.' },
+      INCUMBENT,
+      randomUUID(),
+    );
+    clock.ms += DEBATE_OVERRIDE_WINDOW_MS + 1000;
+    await finalizeDebate(deps, debateId);
+    expect((await contributions.getById(targetId))?.disputeStatus).toBe('none');
+  });
+
   it('does NOT tag a SELF-targeted upheld arena `validated` (no boost farming)', async () => {
     const targetId = await seedComment(INCUMBENT, 'My own claim.');
     const debateId = randomUUID();
