@@ -41,7 +41,11 @@ export function parseRobotsTxt(body: string): RobotsPolicy {
         current = { userAgents: [], rules: [], crawlDelaySec: null };
         groups.push(current);
       }
-      current.userAgents.push(value.toLowerCase());
+      // A bare `User-agent:` still opens/continues a group (grouping is by
+      // consecutive user-agent lines), but it names NO product token — the
+      // empty string is not an agent, and recording it would make the group
+      // match everything (mirrors the empty-value skip for allow/disallow).
+      if (value.length > 0) current.userAgents.push(value.toLowerCase());
       lastWasUserAgent = true;
       continue;
     }
@@ -71,10 +75,15 @@ export function selectGroup(policy: RobotsPolicy, userAgent: string): RobotsGrou
   let bestLength = -1;
   let wildcard: RobotsGroup | null = null;
   for (const group of policy.groups) {
+    // `agent.length > 0` is load-bearing, not defensive noise: `includes('')`
+    // is always true and 0 out-ranks the initial -1, so an empty token would
+    // win outright and DISCARD the `*` group — the exact inversion of RFC 9309.
+    // `parseRobotsTxt` no longer records one; this keeps a policy built any
+    // other way from inverting the rule too.
     for (const agent of group.userAgents) {
       if (agent === '*') {
         wildcard = wildcard ?? group;
-      } else if (token.includes(agent) && agent.length > bestLength) {
+      } else if (agent.length > 0 && token.includes(agent) && agent.length > bestLength) {
         best = group;
         bestLength = agent.length;
       }

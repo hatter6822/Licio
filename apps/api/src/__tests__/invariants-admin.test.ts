@@ -832,3 +832,57 @@ describe('realtime-tier preview (WS-H.1.2f)', () => {
     expect(denied.status).toBe(403);
   });
 });
+
+describe('invariant-output dashboards read a BOUNDED slice (no full-table scan)', () => {
+  /** One GWEI/MFCI output row; distinct `targetId`s occupy distinct store slots. */
+  const output = (invariantType: 'MFCI' | 'GWEI', createdAt = new Date().toISOString()) => ({
+    invariantType,
+    targetType: 'story' as const,
+    targetId: randomUUID(),
+    timeWindow: hourWindow(new Date('2026-01-01T00:00:00.000Z').getTime()),
+    version: '1.0.0',
+    scoreVector: { gw2: 0.1 },
+    explanationSummary: null,
+    confidence: 0.9,
+    coverage: 1,
+    reasonCodes: [] as string[],
+    fallbackUsed: false,
+    versionMetadata: null,
+    shadowMode: true,
+    createdAt,
+  });
+
+  /** Poison `listAll` — the unpredicated, unlimited read.  `invariant_outputs`
+   *  is retained 365 days at ~2 rows per story per window per hour, so any
+   *  serving-path caller of it is an OOM waiting for a busy instance. */
+  function forbidFullTableScan(fixture: InvariantServicesFixture): void {
+    fixture.events.invariantStore.listAll = () => {
+      throw new Error('listAll() is a full-table scan and must not be on the serving path');
+    };
+  }
+
+  it('serves /mfci/dashboard, /gwei/dashboard and /gwei/transparency without listAll()', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.events.invariantStore.upsert(output('MFCI'));
+    await fixture.events.invariantStore.upsert(output('GWEI'));
+    forbidFullTableScan(fixture);
+
+    for (const path of ['/mfci/dashboard', '/gwei/dashboard', '/gwei/transparency']) {
+      const res = await adminRequest(fixture, steward.cookie, path);
+      expect([path, res.status]).toEqual([path, 200]);
+    }
+  });
+
+  it('caps /mfci/dashboard at 100 rows however many are retained', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    for (let i = 0; i < 120; i += 1) {
+      await fixture.events.invariantStore.upsert(output('MFCI'));
+    }
+    const res = await adminRequest(fixture, steward.cookie, '/mfci/dashboard');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { recent_outputs: unknown[] };
+    expect(body.recent_outputs).toHaveLength(100);
+  });
+});

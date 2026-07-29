@@ -12,7 +12,7 @@ import {
   UGC_TRUSTED_TYPES_POLICY_NAME,
 } from '../ugc/dompurify.js';
 import { renderUGC, renderUGCDetailed, type UgcSafeHtml } from '../ugc/render.js';
-import { jsdomDocument, jsdomWindow } from './jsdom-globals.js';
+import { jsdomDocument, jsdomWindow, type TestElement } from './jsdom-globals.js';
 
 afterEach(() => {
   resetUgcSanitizerForTests();
@@ -98,6 +98,73 @@ describe('WS-G.4.2a centralized DOMPurify configuration', () => {
     // No throw, and output is still sanitized (string form; the CSP sink
     // enforcement is the runtime backstop in real browsers).
     expect(String(renderUGC('**x**'))).toBe('<p><strong>x</strong></p>');
+  });
+});
+
+describe('WS-G.4.2a sanitizer is an INDEPENDENT second layer', () => {
+  // Every OTHER UGC test routes through `renderUGC`, whose stage-1 Markdown-lite
+  // parser already drops event handlers and non-http/mailto schemes — so those
+  // tests pass unchanged with the whole attribute half of `setConfig` deleted.
+  // These hand the sanitizer raw, parser-bypassing HTML (what a server-rendered
+  // summary, an imported LCAP body, or a migrated legacy post would look like)
+  // and pin the CONFIG VALUES, not merely the presence of the keys: deletion is
+  // already caught by `check:dead-exports` (the constants go unreferenced), so
+  // the regression left uncaught is WIDENING them back toward DOMPurify's
+  // permissive defaults.
+  function sanitizeToElement(html: string, selector: string): TestElement {
+    const template = jsdomDocument().createElement('template');
+    template.innerHTML = String(getUgcSanitizer()?.sanitize(html));
+    const element = template.content.querySelector(selector);
+    if (element === null) throw new Error(`sanitizer dropped the ${selector} element entirely`);
+    return element;
+  }
+
+  it('strips `style` from a surviving element (FORBID_ATTR + ALLOWED_ATTR)', () => {
+    // A full-viewport transparent overlay is a clickjacking primitive, and
+    // DOMPurify's DEFAULT ALLOWED_ATTR includes `style` — only this config's
+    // `href`-only allow-list plus FORBID_ATTR keeps it out.
+    const p = sanitizeToElement('<p style="position:fixed;inset:0;opacity:0">x</p>', 'p');
+    expect(p.getAttribute('style')).toBeNull();
+    expect(p.getAttributeNames()).toEqual([]);
+  });
+
+  it('drops an href whose scheme is outside http/https/mailto (ALLOWED_URI_REGEXP)', () => {
+    // DOMPurify's built-in default URI regexp PERMITS tel:/sms:/cid:/xmpp:; only
+    // `UGC_ALLOWED_URI_REGEXP` narrows the anchor target space to the web.  (A
+    // `javascript:` href is deliberately NOT asserted here — the library default
+    // already rejects it, so it cannot distinguish the configured layer.)
+    for (const href of ['tel:+15551234', 'sms:+15551234', 'cid:evil', 'xmpp:a@b']) {
+      const anchor = sanitizeToElement(`<a href="${href}">x</a>`, 'a');
+      expect(anchor.getAttribute('href')).toBeNull();
+    }
+    // …and the two non-http schemes the regexp DOES admit survive.
+    expect(sanitizeToElement('<a href="mailto:a@b.example">x</a>', 'a').getAttribute('href')).toBe(
+      'mailto:a@b.example',
+    );
+    expect(sanitizeToElement('<a href="http://a.example/p">x</a>', 'a').getAttribute('href')).toBe(
+      'http://a.example/p',
+    );
+  });
+
+  it('drops data-* and aria-* attributes (ALLOW_DATA_ATTR / ALLOW_ARIA_ATTR false)', () => {
+    // The two keys no static gate covers at all: DOMPurify defaults BOTH to
+    // true, so a widened config would let UGC inject `aria-label` (a screen-reader
+    // spoofing surface) and arbitrary `data-*` hooks into the app's own DOM.
+    const p = sanitizeToElement('<p data-x="1" aria-label="y">z</p>', 'p');
+    expect(p.getAttribute('data-x')).toBeNull();
+    expect(p.getAttribute('aria-label')).toBeNull();
+    expect(p.getAttributeNames()).toEqual([]);
+  });
+
+  it('keeps ONLY href plus the hook-added rel/target on an anchor (ALLOWED_ATTR)', () => {
+    // `id`/`title`/`class` are all in DOMPurify's default allow-list; the exact
+    // attribute set is the assertion, so a widened ALLOWED_ATTR fails here even
+    // when nothing dangerous is present in the sample.
+    const anchor = sanitizeToElement(
+      '<a href="https://ok.example" id="x" title="y" class="z">q</a>',
+      'a',
+    );
+    expect(anchor.getAttributeNames().sort()).toEqual(['href', 'rel', 'target']);
   });
 });
 

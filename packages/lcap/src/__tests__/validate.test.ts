@@ -353,6 +353,68 @@ describe('stage 3 — consensus (WS-R.8.2c)', () => {
     expect(result.state).toBe('authorized_provisional');
   });
 
+  it('does not reach checkpointed via a FOREIGN room checkpoint claiming this room in the proof', async () => {
+    // `proof.room_id` is an UNSIGNED field on a plain `inclusion_proof` record, so the
+    // only authenticated room name is `bundle.checkpoint.room_id`.  The attacker here
+    // controls room-evil (whose authority key a server legitimately registers), appends
+    // the VICTIM's record_cid as a leaf of its own log, signs a GENUINE checkpoint over
+    // it, and lies only in the unsigned `proof.room_id`.
+    const evilAuthority = await generateDeviceKey();
+    const evilLog = new RoomLog('RFC9162_SHA256', NET);
+    const evilLeaf = await evilLog.append(recordCid);
+    const evilBundle = await signCheckpoint({
+      authorityPrivateKey: evilAuthority.privateKey,
+      authoritySignerKeyId: 'room-authority-evil',
+      checkpoint: await buildCheckpoint(evilLog, {
+        roomId: 'room-evil',
+        treeSize: evilLog.size,
+        policyEpoch: 2,
+        revocationEpoch: 0,
+        issuedAtMs: NOW,
+        signerAuthorityId: 'auth-evil',
+      }),
+      networkId: NET,
+    });
+    const lifted = inclusionProofRecordV2Schema.parse({
+      record_version: 2,
+      kind: 'inclusion_proof',
+      room_id: 'room-1', // the lie
+      checkpoint_cid: await cidFor('record', evilBundle.body),
+      target_record_cid: recordCid,
+      leaf_index: evilLeaf,
+      tree_size: evilLog.size,
+      proof_hashes: await evilLog.inclusionProof(evilLeaf),
+    });
+    // A verifier that knows BOTH rooms' authority keys — the realistic server case.
+    const bothRooms: IdentityChainDeps = {
+      ...deps(),
+      resolveRoomAuthorityKey: (r) => {
+        if (r === 'room-1') return roomAuthority.publicKey;
+        return r === 'room-evil' ? evilAuthority.publicKey : undefined;
+      },
+    };
+    const result = await validate(
+      input({
+        identityDeps: bothRooms,
+        consensus: { inclusion: { proof: lifted, checkpoint: evilBundle } },
+      }),
+    );
+    expect(result.state).toBe('authorized_provisional');
+  });
+
+  it('does not reach checkpointed when the proof names a DIFFERENT checkpoint', async () => {
+    // `verifyInclusionProof` trusts the caller to have resolved the checkpoint the proof
+    // NAMES; `validate` must discharge that, not assume it.
+    const mismatched = {
+      ...inclusionProof,
+      checkpoint_cid: await cidFor('record', new Uint8Array([9, 9, 9])),
+    };
+    const result = await validate(
+      input({ consensus: { inclusion: { proof: mismatched, checkpoint: checkpointBundle } } }),
+    );
+    expect(result.state).toBe('authorized_provisional');
+  });
+
   it('does not downgrade an authorized record on a consistency failure for a DIFFERENT room', async () => {
     // A consistency proof over some OTHER room's checkpoints must not force THIS
     // record (room-1) into `conflicting`: a consistency proof is bound to its

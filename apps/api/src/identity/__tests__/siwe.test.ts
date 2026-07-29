@@ -37,6 +37,7 @@ async function mintMessage(
     chainId: number;
     issuedAt: Date;
     expirationTime: Date;
+    notBefore: Date;
   }> = {},
 ): Promise<string> {
   return createSiweMessage({
@@ -47,6 +48,8 @@ async function mintMessage(
     chainId: over.chainId ?? 1,
     nonce,
     issuedAt: over.issuedAt ?? new Date(NOW),
+    // Conditionally spread, never `?? undefined`: exactOptionalPropertyTypes.
+    ...(over.notBefore ? { notBefore: over.notBefore } : {}),
     ...(over.expirationTime ? { expirationTime: over.expirationTime } : {}),
   });
 }
@@ -162,11 +165,40 @@ describe('verifySiwe — anti-phishing binding and bounds', () => {
     });
   });
 
+  // The expiry comparison is `<= now`, so equality is EXPIRED. Both sides of
+  // that edge are pinned: a `<` mutant would accept the exact-equality case.
+  it('treats an expirationTime exactly equal to now as expired (the <= edge)', async () => {
+    expect(await attempt({ expirationTime: new Date(NOW) })).toEqual({
+      ok: false,
+      reason: 'expired',
+    });
+  });
+
+  it('accepts an expirationTime one second in the future', async () => {
+    expect((await attempt({ expirationTime: new Date(NOW + 1000) })).ok).toBe(true);
+  });
+
   it('rejects a not-yet-valid (future issued-at) message', async () => {
     expect(await attempt({ issuedAt: new Date(NOW + 10 * 60_000) })).toEqual({
       ok: false,
       reason: 'not_yet_valid',
     });
+  });
+
+  // `not_yet_valid` has TWO independent producers: the issuedAt+skew check above
+  // and the EIP-4361 `Not Before` field. Only the first was covered, so the
+  // notBefore clause could be dropped (e.g. in a parser upgrade) with CI green —
+  // and a signature the user declared inert until a future date would be usable
+  // the moment it was captured.
+  it('rejects a message whose notBefore is still in the future', async () => {
+    expect(await attempt({ notBefore: new Date(NOW + 60_000) })).toEqual({
+      ok: false,
+      reason: 'not_yet_valid',
+    });
+  });
+
+  it('accepts a message whose notBefore has already passed', async () => {
+    expect((await attempt({ notBefore: new Date(NOW - 1000) })).ok).toBe(true);
   });
 
   it('rejects a wrong/absent nonce', async () => {
@@ -225,6 +257,50 @@ describe('verifySiwe — contract wallet (EIP-1271/6492) via injected verifier',
       contractVerifier: async () => false,
     });
     expect(result).toEqual({ ok: false, reason: 'signature_invalid' });
+  });
+});
+
+describe('verifySiwe — the nonce burn is UNCONDITIONAL (pre-validation early returns)', () => {
+  // `verifySiwe` deliberately `take`s the nonce BEFORE the `!validated.ok`
+  // early return. Move that `take` below it — the natural-looking "don't hit
+  // the store when validation already failed" shape — and the 5-minute
+  // SINGLE-use window silently becomes a 5-minute MULTI-use one: an attacker
+  // who observes an issued nonce keeps it alive with junk submissions while
+  // phishing the victim for a signature over that exact nonce.
+  //
+  // Only the pure `validateSiweFields` was exercised for the failing-field
+  // cases, and it touches no store — so nothing pinned the ordering. These
+  // cases do, by asserting the SECOND (well-formed, correctly signed) call.
+  it.each([
+    ['malformed', null],
+    ['domain_mismatch', 'licio.app.evil.com'],
+  ] as const)('burns the nonce on a %s message', async (_reason, phishingDomain) => {
+    const store = new InMemoryEphemeralStore(() => NOW);
+    const { nonce } = await issueSiweNonce(store, ATTEMPT, {}, NOW);
+    const bad =
+      phishingDomain === null
+        ? 'not a siwe message'
+        : await mintMessage(accountA.address, nonce, { domain: phishingDomain });
+    expect(
+      (
+        await verifySiwe({
+          store,
+          attemptId: ATTEMPT,
+          message: bad,
+          signature: `0x${'0'.repeat(130)}`,
+          config: CONFIG,
+          now: NOW,
+        })
+      ).ok,
+    ).toBe(false);
+
+    // The nonce must be GONE: replaying it inside a message that would
+    // otherwise verify must fail on the nonce, not succeed.
+    const message = await mintMessage(accountA.address, nonce);
+    const signature = await accountA.signMessage({ message });
+    expect(
+      await verifySiwe({ store, attemptId: ATTEMPT, message, signature, config: CONFIG, now: NOW }),
+    ).toEqual({ ok: false, reason: 'nonce_invalid' });
   });
 });
 

@@ -8,6 +8,8 @@
 // StoryCard.no-applause.test.tsx.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { APPLAUSE_TOKEN_PATTERNS } from './applause-tokens.js';
+import { blankSourceComments } from './gate-comments.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const SCAN_DIRS = [
@@ -41,6 +43,11 @@ const FORBIDDEN: Array<{ pattern: RegExp; message: string }> = [
   { pattern: /\bthumbs[-_ ]?(?:up|down)\b/i, message: 'thumbs-up/thumbs-down icon' },
   { pattern: /\b\d+\s+(?:likes|votes|reactions)\b/i, message: '"X likes/votes/reactions" text' },
   { pattern: /name=["']heart["']/, message: 'heart icon' },
+  // …plus the SHARED applause vocabulary, which is where the snake_case wire
+  // spellings live.  Appended, never replacing: the UI-only patterns above
+  // (heart icon, thumbs, "12 likes" prose) are about RENDERED affordances and
+  // have no field-name equivalent.
+  ...APPLAUSE_TOKEN_PATTERNS,
 ];
 
 const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
@@ -58,28 +65,20 @@ function collect(dir: string): string[] {
   return out;
 }
 
-/**
- * Strip comments so doctrine may be DISCUSSED in prose (e.g. "never a downvote")
- * while real affordances in code still fail the scan. Removes inline JSX
- * comments, block comments, line comments, and lines that are part of a
- * doc-comment block (`*`-prefixed).
- */
-function stripComments(line: string): string {
-  const trimmed = line.trim();
-  if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) return '';
-  return line
-    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/.*$/, '');
-}
-
 function main(): void {
   const errors: string[] = [];
   const files = SCAN_DIRS.flatMap(collect);
   for (const file of files) {
-    const lines = readFileSync(file, 'utf-8').split('\n');
+    // Blank comments through the PARSER, whole-file, rather than per line with a
+    // regex: doctrine is DISCUSSED in prose all over this repository ("never a
+    // downvote"), and the old per-line stripper could not see a `/*` inside a
+    // string literal — it swallowed to the next real `*/`, hiding real
+    // affordances in between — nor a block comment spanning lines it was handed
+    // one at a time.  Blanking is length- and newline-preserving, so `i + 1`
+    // still names the real source line.
+    const lines = blankSourceComments(file, readFileSync(file, 'utf-8')).split('\n');
     lines.forEach((line, i) => {
-      const code = stripComments(line);
+      const code = line;
       if (!code.trim()) return;
       for (const { pattern, message } of FORBIDDEN) {
         if (pattern.test(code)) {

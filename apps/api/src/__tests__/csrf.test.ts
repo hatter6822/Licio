@@ -400,6 +400,32 @@ describe('RedisTokenStore', () => {
     expect(await store.get('sess-3')).toBeUndefined();
   });
 
+  // `consume` is the single-use step of the double-submit gate, and it is the
+  // PRODUCTION one: the middleware's own single-use test runs against
+  // `MemoryTokenStore`, which boot replaces with this class.  Both halves of the
+  // GETDEL contract are pinned here — that it removes, and that it removes
+  // ATOMICALLY — because a token that survives its own consumption is replayable
+  // for the full hour of its TTL.
+  it('consume() reads AND removes in one step (single-use)', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    await store.set('sess-c', { token: 'd'.repeat(64), expiresAt: Date.now() + 60_000 });
+    expect((await store.consume('sess-c'))?.token).toBe('d'.repeat(64));
+    expect(redis.map.size).toBe(0); // the read REMOVED it
+    expect(await store.consume('sess-c')).toBeUndefined(); // and it stays gone
+  });
+
+  it('two concurrent consumes yield the token to exactly one caller', async () => {
+    const redis = fakeRedis();
+    const store = new RedisTokenStore(asClient(redis));
+    await store.set('sess-race', { token: 'e'.repeat(64), expiresAt: Date.now() + 60_000 });
+    // A read-then-delete pair would yield to BOTH: the `await` between them
+    // hands the microtask queue to the second caller, whose GET still sees the
+    // value. One Redis command cannot be interleaved that way.
+    const [a, b] = await Promise.all([store.consume('sess-race'), store.consume('sess-race')]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+  });
+
   it('clear() removes only csrf-prefixed keys', async () => {
     const redis = fakeRedis();
     const store = new RedisTokenStore(asClient(redis));

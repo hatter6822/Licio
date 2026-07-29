@@ -15,8 +15,37 @@ import { assessLogin, deviceProfile, sendSecurityAlert } from '../identity/secur
 import type { IdentityServices } from '../identity/services.js';
 import { type CreatedSession, createSession } from '../identity/sessions.js';
 import { type ContractSignatureVerifier, createContractVerifier } from '../identity/siwe.js';
+import { createLogger } from '../lib/logger.js';
 
 export { deriveSessionRef };
+
+const logger = createLogger(process.env['LOG_LEVEL'] ?? 'info');
+
+/**
+ * Hand a transactional mail send off the response path, best-effort but LOGGED.
+ *
+ * One helper for one condition, because the two wrong treatments of it are
+ * mirror images.  Awaiting the send is wrong twice over: `SesMailer` THROWS on
+ * a non-2xx SES response and on a network fault, so an upstream hiccup 500s a
+ * request whose account-affecting work has already committed (leaving a flow
+ * the caller cannot finish or retry) — and the awaited HTTPS round trip makes
+ * send LATENCY an account-existence oracle wherever only one branch sends.
+ * Swallowing it silently (`.catch(() => {})`) is the other half of the mistake:
+ * a total SES outage then shows up nowhere at all.
+ *
+ * Only the error MESSAGE is logged, never the error object: `SesMailer`
+ * guarantees a status-only string ("SES send failed: 429"), whereas serializing
+ * an arbitrary error could drag the recipient address out of a fetch cause
+ * chain — and the recipient is exactly what §19.1 keeps out of logs.
+ */
+export function deliverMail(send: Promise<void>, kind: string): void {
+  void send.catch((error: unknown) => {
+    logger.warn(
+      { kind, reason: error instanceof Error ? error.message : 'unknown' },
+      'mail delivery failed',
+    );
+  });
+}
 
 /** Distinct short-lived attempt cookies per flow so concurrent flows never collide. */
 export const ATTEMPT_COOKIES = {
@@ -108,12 +137,22 @@ export type LoginFinalization =
   | { ok: false; code: 'account_suspended' | 'account_unavailable' };
 
 /**
- * Account-state gate at the session-mint chokepoint (fail closed).  A session is
- * created ONLY for an `active` account or a `deactivated` one inside its deletion
- * grace period (that session is restricted by the middleware to the deletion
- * status/cancel routes — the recovery path for a no-email account).  A suspended,
- * deleted, or otherwise non-active account never mints a session, even with a
- * valid credential.
+ * Account-state gate at the session-mint chokepoint (fail closed).  It MIRRORS
+ * the middleware's admission list (`middleware/auth.ts`) exactly, because a
+ * state the middleware admits on an existing session but the mint refuses is
+ * not a sanction — it is a lockout that arrives whenever the session happens to
+ * expire.  A session is created for:
+ *   - an `active` account;
+ *   - a `restricted` account (WS-J `restrict` sanction) — it may authenticate
+ *     and READ + self-serve (profile, data-rights, appeals, block/mute,
+ *     notices); its public-contribution attempts are denied downstream by
+ *     `requireUnrestricted()` and the narrow-but-not-widen rule in
+ *     `routes/stories.ts`, never here;
+ *   - a `deactivated` one inside its deletion grace period (that session is
+ *     restricted by the middleware to the deletion status/cancel routes — the
+ *     recovery path for a no-email account).
+ * A suspended, deleted, or otherwise non-active account never mints a session,
+ * even with a valid credential.
  */
 async function loginDenial(
   services: IdentityServices,
@@ -121,7 +160,7 @@ async function loginDenial(
 ): Promise<Extract<LoginFinalization, { ok: false }> | null> {
   const user = await services.store.getUser(userId);
   if (!user) return { ok: false, code: 'account_unavailable' };
-  if (user.accountState === 'active') return null;
+  if (user.accountState === 'active' || user.accountState === 'restricted') return null;
   if (
     user.accountState === 'deactivated' &&
     (await services.store.getDeletion(userId))?.state === 'grace_period'

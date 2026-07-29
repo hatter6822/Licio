@@ -7,10 +7,11 @@
 // throws a typed GovernanceLlmError (the GovernanceService falls back
 // deterministically) and never writes an output record.
 import type { AiInvocation } from '@licio/ai-governance';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProhibitedUseGuard } from '../ai-governance/guard.js';
 import { DEFAULT_GOVERNANCE_LLM_SETTINGS } from '../ai-governance/llm/config.js';
 import {
+  createAnthropicCompletion,
   createGovernanceLlmNlProvider,
   GovernanceLlmError,
   type LlmCompletionRequest,
@@ -354,5 +355,65 @@ describe('room hub adjudication model (WS-U model candidacy — the summariser r
       h.provider.summarizeProposal(request({ adjudicationRef: REF })),
     ).rejects.toMatchObject({ name: 'GovernanceLlmError', code: 'room_model_unavailable' });
     expect(h.requests).toHaveLength(0); // the lane completion was never consulted
+  });
+});
+
+describe('createAnthropicCompletion — the SDK logs through pino or not at all', () => {
+  // Left unconfigured, @anthropic-ai/sdk sinks to the global `console` and
+  // promotes its own level from ANTHROPIC_LOG; at `debug` it prints the
+  // outbound request BODY — the governed room content this module promises is
+  // never logged, on a path pino's redaction never sees.
+  const ROOM_CONTENT = 'CONFIDENTIAL-ROOM-PROPOSAL-TEXT';
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('emits nothing to console — and nothing at all — with ANTHROPIC_LOG=debug set', async () => {
+    vi.stubEnv('ANTHROPIC_LOG', 'debug');
+    const consoleCalls: unknown[][] = [];
+    for (const method of ['debug', 'info', 'log', 'warn', 'error'] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        consoleCalls.push(args);
+      });
+    }
+    // The SDK captures the global fetch at construction time.
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: DEFAULT_GOVERNANCE_LLM_SETTINGS.modelId,
+            content: [{ type: 'text', text: 'ok' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    const events: Array<{ event: string; meta: Record<string, unknown> }> = [];
+    const complete = createAnthropicCompletion(
+      'sk-ant-test-key',
+      DEFAULT_GOVERNANCE_LLM_SETTINGS,
+      (event, meta) => events.push({ event, meta }),
+    );
+    const result = await complete({
+      system: 'system prompt',
+      user: ROOM_CONTENT,
+      maxOutputTokens: 256,
+    });
+    expect(result).toEqual({ stopReason: 'end_turn', text: 'ok' });
+
+    // Nothing reached console…
+    expect(consoleCalls).toEqual([]);
+    // …and the pinned `warn` level meant nothing reached the pino hook either,
+    // so the request body has no route to ANY sink at debug.
+    expect(events).toEqual([]);
   });
 });

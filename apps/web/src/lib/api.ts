@@ -104,6 +104,25 @@ export class ApiClientError extends Error {
   }
 }
 
+/**
+ * A widen that collided with an existing public story for the same URL (WS-Q.2.4).
+ *
+ * The colliding story's id is a TYPED field rather than a property bolted onto a
+ * plain {@link ApiClientError}: producer and consumer previously agreed only by
+ * each supplying its own `as ApiClientError & { existingStoryId?: string }` cast,
+ * so a rename on either side compiled cleanly and silently dropped the "open the
+ * existing story" affordance. `instanceof DuplicateStoryError` narrows to a
+ * NON-optional id, which is what makes the drift a compile error.
+ */
+export class DuplicateStoryError extends ApiClientError {
+  readonly existingStoryId: string;
+  constructor(message: string, existingStoryId: string) {
+    super('duplicate_story', message, 409);
+    this.name = 'DuplicateStoryError';
+    this.existingStoryId = existingStoryId;
+  }
+}
+
 // --- Anti-CSRF token (single-use; §6.12.11) -------------------------------
 // The server issues ONE single-use nonce per session (a later GET overwrites the
 // prior). So mutations must be SERIALIZED — each fetches its own fresh token and
@@ -687,8 +706,9 @@ export type VisibilityChangeResult = z.infer<typeof visibilityChangeResponseSche
 /**
  * Narrow (public → room_only) or widen (room_only → public) a story's
  * visibility (author-only, WS-Q.2.4). A widen that collides with an existing
- * public story for the same URL throws an {@link ApiClientError} carrying the
- * existing story id (code `duplicate_story`).
+ * public story for the same URL throws a {@link DuplicateStoryError} carrying
+ * the existing story id — or, when the 409 body is unreadable, the plain
+ * {@link ApiClientError} with the same `duplicate_story` code and no id.
  */
 export async function changeStoryVisibility(
   storyId: string,
@@ -699,17 +719,14 @@ export async function changeStoryVisibility(
     json: { visibility },
   });
   if (response.status === 409) {
-    const body = storyDuplicateResponseSchema.safeParse(await response.json());
-    const existing = body.success ? body.data.existing_story_id : undefined;
-    const err = new ApiClientError(
-      'duplicate_story',
-      'A public story already exists for this link',
-      409,
-    );
-    if (existing !== undefined) {
-      (err as ApiClientError & { existingStoryId?: string }).existingStoryId = existing;
-    }
-    throw err;
+    // A non-JSON 409 body throws SyntaxError out of `json()`; catch it here so the
+    // caller always sees a normalised ApiClientError, never a raw parser error.
+    const raw: unknown = await response.json().catch(() => null);
+    const body = storyDuplicateResponseSchema.safeParse(raw);
+    const message = 'A public story already exists for this link';
+    throw body.success
+      ? new DuplicateStoryError(message, body.data.existing_story_id)
+      : new ApiClientError('duplicate_story', message, 409);
   }
   return parseResponse(response, visibilityChangeResponseSchema);
 }

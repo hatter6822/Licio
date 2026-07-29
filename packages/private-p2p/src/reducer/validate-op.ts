@@ -210,8 +210,22 @@ export async function openOp(
   // (3) signature verifies against the author's registered device key.
   const deviceKey = ctx.deviceSigningKey(envelope.author_device_id_blind);
   if (!deviceKey) return { ok: false, reason: 'unknown_device' };
+  // `signature` is the ONE envelope field excluded from its own signing input
+  // (`verifyEnvelopeSignature` destructures it away), so a relaying peer may
+  // re-encode it and the envelope still verifies.  An Ed25519 signature is 64
+  // bytes → 86 unpadded base64url characters whose final character carries 4
+  // IGNORED low bits, so 16 distinct strings decode to the same 64 bytes.  The
+  // engine keys device-fork resolution on the STRING, not the decoded bytes, so
+  // a non-canonical twin would be read as "two valid envelopes, same op_id,
+  // different signed content" — a FABRICATED §15 fork accusation against an
+  // honest author (and, for a lexicographically smaller twin, a stored-envelope
+  // overwrite that is then re-served).  Require the canonical encoding at
+  // intake: `toBase64Url` is injective, so re-encoding the decoded bytes and
+  // comparing pins the field to exactly one spelling per signature.
   const signatureBytes = tryFromBase64Url(envelope.signature);
-  if (!signatureBytes) return { ok: false, reason: 'malformed_encoding' };
+  if (!signatureBytes || toBase64Url(signatureBytes) !== envelope.signature) {
+    return { ok: false, reason: 'malformed_encoding' };
+  }
   if (!(await verifyEnvelopeSignature(deviceKey, envelope, signatureBytes))) {
     return { ok: false, reason: 'signature_invalid' };
   }

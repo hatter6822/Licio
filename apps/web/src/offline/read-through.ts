@@ -20,7 +20,13 @@ import type {
   ThreadSnapshotRecord,
 } from './schemas.js';
 import { RECORD_SCHEMA_VERSION } from './schemas.js';
-import { savedStories, signalLedger, storyComments, threadSnapshots } from './store.js';
+import {
+  type IntegrityStore,
+  savedStories,
+  signalLedger,
+  storyComments,
+  threadSnapshots,
+} from './store.js';
 
 /** Run a storage side-effect, swallowing any error (offline storage is best-effort). */
 async function bestEffort(op: () => Promise<unknown>): Promise<void> {
@@ -91,6 +97,61 @@ export async function readCachedSignalLedger(): Promise<SignalLedgerEntry[]> {
   }
 }
 
+// --- Snapshot count budgets (the OTHER growth bound) -----------------------
+
+/**
+ * Age is not a bound on its own. `cacheStoryCommentsSnapshot` keys on
+ * `${storyId}:${order,filter,root,depth}`, so a SINGLE story yields a distinct
+ * record — each holding the full comment tree — per sort order, per filter, per
+ * drill-down root and per depth. A reader opening 100 stories a day and toggling
+ * Newest/Oldest accumulates thousands of them well inside the 14-day
+ * {@link SNAPSHOT_MAX_AGE_MS} window, and what that pressure buys on a
+ * quota-tight origin (iOS Safari reclaims aggressively) is WHOLE-ORIGIN
+ * eviction — which takes `draft-contributions`, `draft-stories` and
+ * `pending-queue` with it, i.e. the reader's UNSENT writes. `offline/eviction.ts`
+ * detects that event; only a cap prevents this cache from causing it.
+ *
+ * Both stores are server-refetchable convenience mirrors, so a trim costs a
+ * network read at worst. The numbers mirror the entry caps the project already
+ * applies to its Workbox runtime caches (200 API / 100 image / 10 font).
+ */
+export const MAX_STORY_COMMENT_SNAPSHOTS = 200;
+export const MAX_THREAD_SNAPSHOTS = 200;
+
+/**
+ * Hysteresis. Breaching a cap trims back to this FRACTION of it, not to the cap
+ * itself: `cacheStoryCommentsSnapshot` is awaited inside the comments `queryFn`
+ * (lib/queries.ts), so the trim's scan sits on the render path — and that scan
+ * deserializes and zod-validates every cached comment TREE just to learn its
+ * key. Trimming to the cap exactly would re-run it on EVERY write once the cache
+ * is full; trimming to 90% amortises it over ~10% of the budget's writes.
+ */
+export const SNAPSHOT_TRIM_RATIO = 0.9;
+
+/**
+ * Drop the least-recently-cached records once `store` exceeds `budget`.
+ *
+ * `getAllByIndex('cachedAt')` returns INDEX order, so the oldest come first —
+ * an exact LRU trim needing no new index and no new store. The cheap `count()`
+ * guard runs first so an under-budget write never touches the records at all;
+ * the trim itself sizes off the returned LIST rather than that count, because a
+ * record that failed read validation is excluded from the list but still counted
+ * (it is evicted by the scan's own policy, so the next write sees it gone).
+ */
+async function trimToBudget<T>(
+  store: IntegrityStore<T>,
+  budget: number,
+  keyOf: (record: T) => IDBValidKey,
+): Promise<void> {
+  if ((await store.count()) <= budget) return;
+  const oldestFirst = await store.getAllByIndex('cachedAt');
+  const target = Math.floor(budget * SNAPSHOT_TRIM_RATIO);
+  const excess = Math.max(0, oldestFirst.length - target);
+  for (const record of oldestFirst.slice(0, excess)) {
+    await store.delete(keyOf(record));
+  }
+}
+
 // --- Story comment snapshots (first page, lossy offline fallback) ----------
 
 function stableOptionsKey(options: {
@@ -120,8 +181,8 @@ export async function cacheStoryCommentsSnapshot(
   response: StoryCommentsResponse,
 ): Promise<void> {
   const optionsKey = stableOptionsKey(options);
-  await bestEffort(() =>
-    storyComments.put({
+  await bestEffort(async () => {
+    await storyComments.put({
       schemaVersion: RECORD_SCHEMA_VERSION,
       cacheKey: commentCacheKey(storyId, options),
       storyId,
@@ -130,8 +191,11 @@ export async function cacheStoryCommentsSnapshot(
       nextCursor: response.next_cursor,
       overview: response.overview,
       cachedAt: Date.now(),
-    }),
-  );
+    });
+    // Inside the SAME bestEffort as the write, so the trim can never throw into
+    // the read path (the write already succeeded either way).
+    await trimToBudget(storyComments, MAX_STORY_COMMENT_SNAPSHOTS, (record) => record.cacheKey);
+  });
 }
 
 export async function readStoryCommentsSnapshot(
@@ -149,14 +213,15 @@ export async function readStoryCommentsSnapshot(
 
 /** Cache a thread's title for offline reading. */
 export async function cacheThreadSnapshot(detail: ThreadDetail): Promise<void> {
-  await bestEffort(() =>
-    threadSnapshots.put({
+  await bestEffort(async () => {
+    await threadSnapshots.put({
       schemaVersion: RECORD_SCHEMA_VERSION,
       threadId: detail.thread_id,
       title: detail.title,
       cachedAt: Date.now(),
-    }),
-  );
+    });
+    await trimToBudget(threadSnapshots, MAX_THREAD_SNAPSHOTS, (record) => record.threadId);
+  });
 }
 
 /** Read a cached thread summary; undefined when missing or unavailable. */

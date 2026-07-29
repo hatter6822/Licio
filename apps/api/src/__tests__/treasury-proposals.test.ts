@@ -2824,3 +2824,83 @@ describe('grants (WS-M.5.1a)', () => {
     expect(deps.executorCalls).toEqual([]);
   });
 });
+
+describe('reputation_bounded weight (§17.5: the fact has to be wired)', () => {
+  const REPUTATION_PACK: Partial<LawPack> = {
+    weightModel: 'reputation_bounded',
+    maxVotingWeightPerAccount: 10,
+  };
+
+  it('resolves the weight from the room-scoped participation count', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 3,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // min(score 3, cap 10) — NOT the hard-coded 0 every ballot used to carry.
+    expect(vote.signature.weightSnapshot).toBe('3');
+    expect(vote.signature.eligibilityReason).toContain('score 3');
+    expect(vote.tally.approve).toBe('3');
+  });
+
+  it('caps the score at the law-pack ceiling and settles a unanimous vote to passed', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 40, // above the cap: min(40, 10) = 10
+      verifiedIdentity: true,
+    });
+    deps.memberFactsOverride.set(VOTER_2, {
+      membershipDays: 90,
+      contributionCount: 4,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    const settled = await deps.proposals.getById(proposal.proposalId);
+    // With every snapshot at 0 this UNANIMOUS approval settled `rejected`:
+    // `decided` stayed '0', so the threshold branch never ran.
+    expect(settled?.votingState).toBe('passed');
+    expect(settled?.tallySnapshot).toMatchObject({ outcome: 'passed', approve: '14', reject: '0' });
+  });
+
+  it('refuses a zero-weight ballot instead of recording a vote that cannot count', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 0,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'zero_voting_weight' });
+    // Nothing recorded: a 0 adds nothing to the tally yet still counts toward
+    // QUORUM, so recording it would let a weightless electorate carry a room.
+    expect(await deps.proposalSignatures.listByProposal(proposal.proposalId)).toEqual([]);
+  });
+});

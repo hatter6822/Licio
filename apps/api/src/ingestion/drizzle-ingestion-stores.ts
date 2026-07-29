@@ -1552,6 +1552,21 @@ export function buildTsQuery(tokens: readonly string[], prefix: boolean): string
     .join(' & ');
 }
 
+/**
+ * Normalize a `timestamptz` read through the RAW `db.execute` path to ISO-8601.
+ * Unlike the query builder, that path hands the column back as Postgres's own
+ * output text — `2026-07-28 23:58:55.359+00`, not a `Date` — so `String(value)`
+ * produced a timestamp that `isoTimestampSchema` rejects.  Both consumers
+ * depend on the ISO form: the route re-validates the response through
+ * `searchResponseSchema` (a non-ISO `created_at` is a 500 on every non-empty
+ * search), and `encodeSearchCursor` embeds it in a keyset cursor that
+ * `decodeSearchCursor` must be able to read back.  It is also what makes the
+ * merge sort below compare the SAME strings the in-memory index compares.
+ */
+function isoTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
 export class PostgresSearchIndex implements SearchIndex {
   readonly #db: Db;
 
@@ -1615,7 +1630,9 @@ export class PostgresSearchIndex implements SearchIndex {
       title: string;
       snippet: string | null;
       relevance: number;
-      created_at: Date;
+      /** `db.execute` returns this as Postgres output TEXT, not a `Date` — see
+       *  `isoTimestamp`, which every read of it goes through. */
+      created_at: Date | string;
       /** `incorrect` never appears — every branch filters it out. */
       dispute_status: 'none' | 'under_debate' | 'validated';
     }> = [];
@@ -1805,8 +1822,8 @@ export class PostgresSearchIndex implements SearchIndex {
     // Merge with the SAME total order as the in-memory index, then page.
     rows.sort((a, b) => {
       if (b.relevance !== a.relevance) return b.relevance - a.relevance;
-      const at = a.created_at instanceof Date ? a.created_at.toISOString() : String(a.created_at);
-      const bt = b.created_at instanceof Date ? b.created_at.toISOString() : String(b.created_at);
+      const at = isoTimestamp(a.created_at);
+      const bt = isoTimestamp(b.created_at);
       return bt.localeCompare(at) || b.id.localeCompare(a.id);
     });
     const page = rows.slice(0, request.limit);
@@ -1817,8 +1834,7 @@ export class PostgresSearchIndex implements SearchIndex {
       title: row.title.slice(0, 1000),
       snippet: row.snippet === null ? null : row.snippet.slice(0, 2000),
       relevance: Number(row.relevance),
-      created_at:
-        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      created_at: isoTimestamp(row.created_at),
       dispute_status: row.dispute_status,
     }));
     const last = items.at(-1);

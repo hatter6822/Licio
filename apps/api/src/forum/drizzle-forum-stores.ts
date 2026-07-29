@@ -88,6 +88,21 @@ function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 
+/**
+ * Escape LIKE metacharacters for Postgres's DEFAULT `\` escape character.
+ * The backslash MUST be escaped in the SAME pass as `%`/`_`: escaping the
+ * metacharacters first leaves a caller-supplied `\` free to pair with the
+ * injected one (`\\` is a literal backslash), which re-arms the metacharacter
+ * that follows it.  `q = '\%room'` would otherwise build `%\\%room%` — "any
+ * text, a literal backslash, ANY text, 'room'" — turning a substring search
+ * into a wildcard search that also diverges from `roomMatchesQuery`'s plain
+ * `String.includes` semantics.  (`drizzle-moderation-stores.ts`'s reason-code
+ * prefix match uses the identical single-pass expression.)
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
 // WS-T: the section rank key (0 = pinned-top, 1 = normal, 2 = sunk).  Mirrors
 // `sectionRankOf` in the in-memory adapter EXACTLY: an `incorrect` row sinks to
 // the bottom (a debate's loser stays visible-but-sunk); the ONE `pinnedCorrectionId`
@@ -846,7 +861,7 @@ export class DrizzleRoomStore implements RoomStore {
       conditions.push(inArray(roomsTable.visibility, [...opts.visibilities]));
     }
     if (opts.query !== undefined) {
-      const needle = `%${opts.query.toLowerCase().replaceAll('%', '\\%').replaceAll('_', '\\_')}%`;
+      const needle = `%${escapeLikePattern(opts.query.toLowerCase())}%`;
       conditions.push(
         sql`(lower(${roomsTable.name}) like ${needle} or lower(coalesce(${roomsTable.description}, '')) like ${needle})`,
       );

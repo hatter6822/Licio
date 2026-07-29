@@ -22,6 +22,7 @@ import { createV1Routes, resetSettingsState } from '../routes/v1.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from '../telemetry/service.js';
 import { freshEventServices, legacyAggregate, seedUserWithSession } from './event-test-helpers.js';
 import { freshForumServices, seedThread } from './forum-test-helpers.js';
+import { freshRankingServices } from './ranking-helpers.js';
 
 // Mount the v1 router on a bare app: this unit-tests the contract handlers in
 // isolation. CSRF/CORS/security middleware is exercised by their own suites.
@@ -65,6 +66,43 @@ describe('v1 read models', () => {
     expect(res.status).toBe(200);
     const body = feedResponseSchema.parse(await res.json());
     expect(body.items.length).toBeGreaterThan(0);
+  });
+
+  it('issues NO fixture-probe query on a production feed request', async () => {
+    // The demo fixture is a DEV/TEST affordance, so in production the
+    // `listRecent(1)` probe that gates it can never change the answer — the env
+    // check is the free predicate and must run first, or every production feed
+    // request pays an unusable round trip (and `listRecent` uses `.select()`,
+    // so it drags the generated `search_tsv` back with it).
+    const fixture = freshRankingServices();
+    const stories = fixture.ingestion.stories;
+    const listRecent = stories.listRecent.bind(stories);
+    let probes = 0;
+    stories.listRecent = async (limit: number) => {
+      if (limit === 1) probes += 1; // the fixture probe; the ranking pool asks for many
+      return listRecent(limit);
+    };
+
+    const saved = process.env['NODE_ENV'];
+    try {
+      // Dev/test with an empty store: the probe runs and the fixture is served.
+      const dev = await app().request('/v1/feed');
+      expect(dev.status).toBe(200);
+      expect(feedResponseSchema.parse(await dev.json()).items.length).toBeGreaterThan(0);
+      expect(probes).toBe(1);
+
+      probes = 0;
+      process.env['NODE_ENV'] = 'production';
+      const prod = await app().request('/v1/feed');
+      expect(prod.status).toBe(200);
+      // Empty store in production ⇒ an empty feed, never demo data, and the
+      // probe that could only have chosen between them is never issued.
+      expect(feedResponseSchema.parse(await prod.json()).items).toEqual([]);
+      expect(probes).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = saved;
+    }
   });
 
   it('rejects a non-uuid story id with 400', async () => {

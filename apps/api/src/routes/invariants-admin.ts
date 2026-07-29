@@ -56,6 +56,24 @@ import { resolveItemSafetyState } from '../pwatt/scoring.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
+// --- Bounds on the invariant-output reads (serving path) --------------------
+// `invariant_outputs` grows at roughly two rows per story per window per hour
+// and is retained 365 days, so a dashboard must never reach it through
+// `listAll()` — that has no predicate and no LIMIT, and the filter/sort/slice
+// would then run in JavaScript AFTER every row (three jsonb columns each) had
+// been materialized into the Node heap.  `listByTypeSince` pushes the type
+// predicate, the `created_at DESC` ordering and the LIMIT into Postgres, and
+// the floor lets the planner walk `invariant_outputs_created_idx` backwards
+// instead of sorting the table.  These are RECENT-ACTIVITY views, so a window
+// is the right shape for them rather than a bound bolted onto "all of history".
+const DASHBOARD_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+const DASHBOARD_ROW_CAP = 100;
+// The public parity export emits ONE statement per row it reads, so its cap
+// bounds the RESPONSE as well as the query — it is the only one of the three
+// that previously kept (and mapped over) every retained row.
+const TRANSPARENCY_LOOKBACK_MS = 90 * 24 * 60 * 60_000;
+const TRANSPARENCY_ROW_CAP = 500;
+
 const invariantTypeSchema = z.enum(INVARIANT_TYPE_NAMES);
 
 const promotionBodySchema = z
@@ -182,10 +200,11 @@ export function createInvariantsAdminRoutes(
         const events = resolveEvents();
         const cases = await invariants.mfciCases.listOpen(50);
         const calibration = await invariants.calibrations.get('mfci:target_concentration');
-        const outputs = (await events.invariantStore.listAll())
-          .filter((row) => row.invariantType === 'MFCI')
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-          .slice(0, 100);
+        const outputs = await events.invariantStore.listByTypeSince(
+          'MFCI',
+          new Date(Date.now() - DASHBOARD_LOOKBACK_MS).toISOString(),
+          DASHBOARD_ROW_CAP,
+        );
         return c.json({ open_cases: cases, calibration, recent_outputs: outputs });
       })
 
@@ -248,18 +267,23 @@ export function createInvariantsAdminRoutes(
       })
 
       .get('/gwei/dashboard', async (c) => {
-        const rows = (await resolveEvents().invariantStore.listAll())
-          .filter((row) => row.invariantType === 'GWEI')
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-          .slice(0, 100);
+        const rows = await resolveEvents().invariantStore.listByTypeSince(
+          'GWEI',
+          new Date(Date.now() - DASHBOARD_LOOKBACK_MS).toISOString(),
+          DASHBOARD_ROW_CAP,
+        );
         return c.json({ comparisons: rows });
       })
 
       .get('/gwei/transparency', async (c) => {
         // Public-safe aggregate parity statements (WS-H.5.2d): no cohort
         // metrics, no suppressed-cell detail — parity vs under-review only.
-        const rows = (await resolveEvents().invariantStore.listAll()).filter(
-          (row) => row.invariantType === 'GWEI',
+        // Bounded to the transparency window: this route emits one statement
+        // per row, so an unbounded read would also be an unbounded response.
+        const rows = await resolveEvents().invariantStore.listByTypeSince(
+          'GWEI',
+          new Date(Date.now() - TRANSPARENCY_LOOKBACK_MS).toISOString(),
+          TRANSPARENCY_ROW_CAP,
         );
         const threshold = 0.5;
         const statements = rows.map((row) => {

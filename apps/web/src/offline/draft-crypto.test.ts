@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { decryptDraftValues, encryptDraftValues, resetDraftKeyCache } from './draft-crypto.js';
 
 function deleteDatabase(name: string): Promise<void> {
@@ -24,6 +24,43 @@ describe('draft-crypto', () => {
     if (!cipher) throw new Error('expected a cipher in a Web Crypto environment');
     expect(cipher.data).not.toContain('measured');
     expect(await decryptDraftValues(cipher)).toEqual(values);
+  });
+
+  // AES-GCM nonce reuse under one key is catastrophic, not degraded: two
+  // ciphertexts sharing an IV leak P1 ⊕ P2 and expose the GHASH authentication
+  // key, making the tag forgeable. `crypto.getRandomValues` on every encrypt is
+  // therefore load-bearing, and every OTHER assertion in this file passes with a
+  // hard-coded nonce — so it needs its own pin.
+  it('never reuses an AES-GCM IV, and pins the 96-bit width', async () => {
+    // Identical plaintext every round is deliberate: it also kills an SIV-style
+    // hash-of-plaintext IV, which would otherwise look "random enough".
+    const ivs = new Set<string>();
+    for (let i = 0; i < 50; i += 1) {
+      const cipher = await encryptDraftValues({ a: 'same-plaintext' });
+      if (!cipher) throw new Error('expected a cipher');
+      expect(atob(cipher.iv).length).toBe(12);
+      ivs.add(cipher.iv);
+    }
+    expect(ivs.size).toBe(50);
+  });
+
+  it('never reuses an IV across a reload (the nonce is not module state)', async () => {
+    // The loop above cannot see a counter that resets on reload, which is exactly
+    // what a module-level nonce becomes. Both lifetimes must start from FRESH
+    // module state, or the assertion silently depends on test order.
+    async function ivsFromFreshModule(): Promise<string[]> {
+      vi.resetModules();
+      const mod = await import('./draft-crypto.js');
+      const out: string[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        const cipher = await mod.encryptDraftValues({ a: 'same-plaintext' });
+        if (!cipher) throw new Error('expected a cipher');
+        out.push(cipher.iv);
+      }
+      return out;
+    }
+    const first = new Set(await ivsFromFreshModule());
+    for (const iv of await ivsFromFreshModule()) expect(first.has(iv)).toBe(false);
   });
 
   it('returns null when the ciphertext cannot be authenticated', async () => {

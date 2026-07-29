@@ -61,7 +61,13 @@ function snapshotPort(): ModerationContentPort {
 }
 
 let services: ModerationServices;
+// The in-memory case store stamps `createdAt` from the SAME injected clock, so a
+// test that needs cases at distinct creation times advances this between inserts
+// (the store's record type has no createdAt field to pass).  It resets to START
+// before every test.
+let nowMs = START;
 beforeEach(() => {
+  nowMs = START;
   services = createInMemoryModerationServices({
     content: snapshotPort(),
     users: {
@@ -92,7 +98,7 @@ beforeEach(() => {
         return null;
       },
     },
-    now: () => START,
+    now: () => nowMs,
   });
 });
 afterEach(async () => {
@@ -181,15 +187,134 @@ describe('buildReportQueue (filters + pagination + emergency section)', () => {
       assigneeId: SAFETY.userId,
     });
     expect(byReviewer.standard.length).toBe(1);
-    // severity + date-window filters (exercise the filter branches).
-    const sev = await buildReportQueue(services, SAFETY, { limit: 10, severity: ['critical'] });
-    expect(sev.emergency.length + sev.standard.length).toBeGreaterThanOrEqual(0);
-    await buildReportQueue(services, SAFETY, {
-      limit: 10,
-      createdAfter: new Date(START - 1000).toISOString(),
-      createdBefore: new Date(START + 1000).toISOString(),
-      status: ['new'],
+  });
+
+  // Severity / created-at / status are the three filters the queue forwards to
+  // the store verbatim.  The store's own honouring of them is pinned in
+  // moderation-stores.test.ts; what these three cases pin is the HOP — that
+  // buildReportQueue passes the caller's filter down at all, in BOTH sections
+  // and into `filtered_total`.  Each asserts a positive AND a negative arm,
+  // because a dropped filter and a matching one are indistinguishable from the
+  // positive arm alone.
+  it('narrows both sections and the total by severity, and never widens', async () => {
+    // Routing is by REASON CODE, not severity, so a critical case can sit in the
+    // standard section — that is the case a dropped severity filter buries,
+    // diluted among standard rows and pushed off a limit-capped page.
+    await insertCase({
+      caseId: 'cccccccc-0000-4000-9000-000000000001',
+      targetId: '00000000-0000-4000-8000-0000000000e1',
+      routedTo: 'emergency',
+      severity: 'critical',
     });
+    await insertCase({
+      caseId: 'cccccccc-0000-4000-9000-000000000002',
+      targetId: '00000000-0000-4000-8000-0000000000c2',
+      severity: 'critical', // critical but STANDARD-routed
+    });
+    for (let i = 1; i <= 2; i += 1) {
+      await insertCase({
+        caseId: `aaaaaaaa-0000-4000-9000-00000000000${i}`,
+        targetId: `00000000-0000-4000-8000-0000000000a${i}`,
+        severity: 'moderate',
+      });
+    }
+
+    const critical = await buildReportQueue(services, SAFETY, {
+      limit: 10,
+      severity: ['critical'],
+    });
+    expect(critical.emergency.map((r) => r.case_id)).toEqual([
+      'cccccccc-0000-4000-9000-000000000001',
+    ]);
+    expect(critical.standard.map((r) => r.case_id)).toEqual([
+      'cccccccc-0000-4000-9000-000000000002',
+    ]);
+    // The count is filtered by the same predicate — an unfiltered total silently
+    // misreports the console's badge even when the rows are right.
+    expect(critical.filtered_total).toBe(2);
+
+    // Limit 1: the emergency critical fills page 1, and the STANDARD critical —
+    // not the sooner-SLA'd moderate cases ahead of it — must be page 2.
+    const page1 = await buildReportQueue(services, SAFETY, { limit: 1, severity: ['critical'] });
+    expect(page1.next_cursor).not.toBeNull();
+    const page2 = await buildReportQueue(services, SAFETY, {
+      limit: 1,
+      severity: ['critical'],
+      ...(page1.next_cursor ? { cursor: page1.next_cursor } : {}),
+    });
+    expect(page2.standard.map((r) => r.case_id)).toEqual(['cccccccc-0000-4000-9000-000000000002']);
+
+    // Negative arm: a severity no case carries yields an EMPTY queue.  Without
+    // it, a filter that widens rather than narrows still passes above.
+    const minor = await buildReportQueue(services, SAFETY, { limit: 10, severity: ['minor'] });
+    expect(minor.emergency).toEqual([]);
+    expect(minor.standard).toEqual([]);
+    expect(minor.filtered_total).toBe(0);
+  });
+
+  it('restricts the queue to the created-at window the caller asked for', async () => {
+    const DAY = 86_400_000;
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      nowMs = START + i * DAY; // the store stamps createdAt from the clock
+      ids.push(
+        await insertCase({
+          caseId: `aaaaaaaa-0000-4000-9000-00000000000${i + 1}`,
+          targetId: `00000000-0000-4000-8000-0000000000a${i + 1}`,
+          slaDueAt: new Date(START + (i + 1) * 3_600_000).toISOString(),
+        }),
+      );
+    }
+    nowMs = START;
+
+    // A window around the MIDDLE case only: dropping either bound widens it to
+    // two cases, so each bound is pinned independently.
+    const middle = await buildReportQueue(services, SAFETY, {
+      limit: 10,
+      createdAfter: new Date(START + DAY - 1).toISOString(),
+      createdBefore: new Date(START + DAY + 1).toISOString(),
+    });
+    expect(middle.standard.map((r) => r.case_id)).toEqual([ids[1]]);
+    expect(middle.filtered_total).toBe(1);
+
+    // Windows that exclude every case must come back EMPTY — an ignored window
+    // is otherwise indistinguishable from a matching one.
+    const tooLate = await buildReportQueue(services, SAFETY, {
+      limit: 10,
+      createdAfter: new Date(START + 10 * DAY).toISOString(),
+    });
+    expect(tooLate.standard).toEqual([]);
+    expect(tooLate.filtered_total).toBe(0);
+    const tooEarly = await buildReportQueue(services, SAFETY, {
+      limit: 10,
+      createdBefore: new Date(START - 1).toISOString(),
+    });
+    expect(tooEarly.standard).toEqual([]);
+    expect(tooEarly.filtered_total).toBe(0);
+  });
+
+  it('honours a caller-supplied status filter over the open-cases default', async () => {
+    const open = await insertCase({
+      caseId: 'aaaaaaaa-0000-4000-9000-000000000001',
+      targetId: '00000000-0000-4000-8000-0000000000a1',
+    });
+    const resolved = await insertCase({
+      caseId: 'bbbbbbbb-0000-4000-9000-000000000001',
+      targetId: '00000000-0000-4000-8000-0000000000b1',
+      status: 'resolved',
+      resolvedActionId: null,
+    });
+
+    // Default: the three OPEN statuses — a resolved case is not queue work.
+    const dflt = await buildReportQueue(services, SAFETY, { limit: 10 });
+    expect(dflt.standard.map((r) => r.case_id)).toEqual([open]);
+    expect(dflt.filtered_total).toBe(1);
+
+    // Explicit: the caller's list REPLACES the default, so the resolved case is
+    // reachable and the open one is not.
+    const closed = await buildReportQueue(services, SAFETY, { limit: 10, status: ['resolved'] });
+    expect(closed.standard.map((r) => r.case_id)).toEqual([resolved]);
+    expect(closed.filtered_total).toBe(1);
   });
 
   it('decodes a malformed cursor as no cursor (defensive)', async () => {

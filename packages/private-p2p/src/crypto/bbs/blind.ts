@@ -29,6 +29,7 @@ import {
   type BbsSignature,
   bbsVerifyScalars,
   randomScalar,
+  signatureFromBytes,
   signatureToBytes,
 } from './signature.js';
 import {
@@ -52,7 +53,6 @@ import {
   ORDER,
   os2ip,
   P1,
-  SIGNATURE_LENGTH,
   scalarBytes,
 } from './suite.js';
 
@@ -240,10 +240,21 @@ export function verifyBlindCredential(
   header: Uint8Array,
 ): boolean {
   const layout = credentialLayout(pk, committedScalars.length, knownMessages, header);
-  const sig: BbsSignature = {
-    a: G1.fromBytes(signatureBytes.slice(0, OCTET_POINT_LENGTH)),
-    e: os2ip(signatureBytes.slice(OCTET_POINT_LENGTH, SIGNATURE_LENGTH)),
-  };
+  // Parse through the WIRE SSOT (`signatureFromBytes`), never a slice pair here: it
+  // asserts the exact `SIGNATURE_LENGTH` and the `e` range, so this cannot become a
+  // second, LOOSER signature parser than the one the show path uses.  That drift was
+  // real — hand-rolled `slice(0,48)`/`slice(48,80)` accepted an 81+-byte credential
+  // whose first 80 bytes were valid, so `installCredential` enrolled it while every
+  // subsequent announce THREW out of `signatureFromBytes`, hard-failing the whole
+  // dial instead of degrading to Tier-1 (TIER2-RENDEZVOUS-CAP.md §3 invariant 4).
+  // Returning `false` keeps the boolean contract, so the device forgets the epoch
+  // and rides Tier-1 — the documented behaviour.
+  let sig: BbsSignature;
+  try {
+    sig = signatureFromBytes(signatureBytes);
+  } catch {
+    return false;
+  }
   const scalars = credentialScalars(knownMessages, committedScalars, secretProverBlind);
   return bbsVerifyScalars(pk, sig, layout.q1, layout.msgGens, scalars, header);
 }

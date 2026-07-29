@@ -71,6 +71,27 @@ describe('Blind BBS — issuance composes with the vetted base (the anchor)', ()
     ).toBe(false);
   });
 
+  it('rejects an over-/under-long credential, so verify and SHOW agree on the wire length', () => {
+    // A credential whose first 80 bytes are a valid signature but which carries a
+    // trailing byte must NOT verify: `installCredential` would enrol it while every
+    // announce threw out of `signatureFromBytes`, losing ALL discovery instead of
+    // degrading to Tier-1 (TIER2-RENDEZVOUS-CAP.md §3 invariant 4).
+    const issuer = bbsKeyGen();
+    const nidScalar = messageToScalar(enc('device-nid'));
+    const epoch = enc('epoch-11');
+    const { commitmentWithProof, secretProverBlind } = blindCommit([nidScalar]);
+    const sig = blindSign(issuer, commitmentWithProof, 1, [], epoch);
+    const verify = (bytes: Uint8Array): boolean =>
+      verifyBlindCredential(issuer.pk, bytes, [], [nidScalar], secretProverBlind, epoch);
+
+    expect(verify(sig)).toBe(true);
+    const overLong = new Uint8Array(sig.length + 1);
+    overLong.set(sig);
+    expect(verify(overLong)).toBe(false);
+    expect(() => signatureFromBytes(overLong)).toThrow(/signature must be/);
+    expect(verify(sig.slice(0, sig.length - 1))).toBe(false);
+  });
+
   it('the issuer signs over a commitment it cannot open (structural blindness)', () => {
     // blindSign's signature accepts ONLY (commitment, committedCount, knownMessages) — there
     // is no parameter through which the committed scalar `nid` or `s'` could reach it.

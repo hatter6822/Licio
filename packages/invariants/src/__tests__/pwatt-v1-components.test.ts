@@ -128,6 +128,82 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
       },
     );
   });
+
+  it('property: the citation bonus keeps the score monotone at ANY saturation point', () => {
+    // The regression this pins: while the bonus multiplier read the sourced
+    // FRACTION (`cited / n`), an uncited contribution added to an already-
+    // SATURATED per-type value strictly LOWERED the actor's score — inside the
+    // window the docstring guarantees monotone.  Two configs reach that regime
+    // and are both schema-legal + runtime-settable through `pwatt_config`:
+    // a saturation point at or below `rapidThreshold`, and the `sigmoid` curve,
+    // which has no saturation point for a config validator to reject at all.
+    const curves = [
+      { kind: 'logarithmic' as const, scale: 1, saturationPoint: 2 },
+      { kind: 'logarithmic' as const, scale: 1, saturationPoint: 6 },
+      { kind: 'sigmoid' as const, scale: 1 },
+    ];
+    const types = ['correction', 'explanation', 'bridge_comment'] as const;
+    for (const contributionCurve of curves) {
+      // rapidThreshold far above the enumerated counts: the guarantee is
+      // explicitly scoped to totalContributions <= rapidThreshold, above which
+      // the §5.3 rapid-repetition dampening deliberately drops the value.
+      const config = {
+        ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+        contributionCurve,
+        rapidThreshold: 1_000,
+      };
+      const score = (type: (typeof types)[number], n: number, cited: number, uncited: number) =>
+        actorV1Contribution(
+          actor({
+            contributions: { [type]: n },
+            citedContributionsByType: { [type]: cited },
+            uncitedAccusationsByType: { [type]: uncited },
+          }),
+          config,
+        ).value;
+      for (const type of types) {
+        for (let n = 0; n <= 8; n += 1) {
+          for (let cited = 0; cited <= n; cited += 1) {
+            for (let uncited = 0; cited + uncited <= n; uncited += 1) {
+              const where = `${contributionCurve.kind} ${type} n=${n} cited=${cited} uncited=${uncited}`;
+              const before = score(type, n, cited, uncited);
+              // One more UNSOURCED contribution — the case the fraction broke.
+              expect(score(type, n + 1, cited, uncited), where).toBeGreaterThanOrEqual(before);
+              // One more SOURCED contribution.
+              expect(score(type, n + 1, cited + 1, uncited), where).toBeGreaterThanOrEqual(before);
+              // The WS-E.2.2b transparency remedy: sourcing an accusation.
+              if (uncited > 0) {
+                expect(score(type, n, cited + 1, uncited - 1), where).toBeGreaterThanOrEqual(
+                  before,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('a saturated per-type value is not lowered by an uncited contribution', () => {
+    // The reported instance, verbatim: saturationPoint 2 sits BELOW the
+    // rapidThreshold of 5, so `correction` saturates at n=2 while the
+    // documented monotone window runs to n=5.
+    const config = {
+      ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+      contributionCurve: { kind: 'logarithmic' as const, scale: 1, saturationPoint: 2 },
+      rapidThreshold: 5,
+    };
+    const value = (n: number) =>
+      actorV1Contribution(
+        actor({
+          contributions: { correction: n },
+          citedContributionsByType: { correction: 1 },
+        }),
+        config,
+      ).value;
+    expect(value(4)).toBeGreaterThanOrEqual(value(3));
+    expect(value(5)).toBeGreaterThanOrEqual(value(4));
+  });
 });
 
 describe('computePwattV1Components (item-level dominance cap)', () => {

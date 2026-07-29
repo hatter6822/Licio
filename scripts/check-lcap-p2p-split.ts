@@ -9,21 +9,21 @@
 // in apps/web/src (the "deliberately mis-placed import fails a gate" acceptance check).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { blankSourceComments } from './gate-comments.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const WEB_SRC = resolve(ROOT, 'apps/web/src');
 const SPECIFIER = '@licio/lcap-p2p';
 
-/** Strip block + line comments so the word "import" inside a comment cannot
- *  falsely pair with a later `from '…'` across newlines (the `[^;]*?` capture
- *  spans newlines for multi-line imports).  The `[^:]` guard preserves `://`. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
 /** Pure: the static-value-import violations in one source (importable for tests). */
 export function findStaticP2pImports(filename: string, rawContent: string): string[] {
-  const content = stripComments(rawContent);
+  // Blank comments through the PARSER, not a regex pair.  A regex has no notion
+  // of a string literal, so a `/*` inside one opened a fake block comment that
+  // swallowed every line up to the next real `*/` — and any JSDoc later in the
+  // file supplies one.  A static `import … from '@licio/…-p2p'` sitting in the
+  // swallowed span was invisible and the gate reported clean.  Blanking is
+  // length- and newline-preserving, so the reported line still names the real one.
+  const content = blankSourceComments(filename, rawContent);
   const issues: string[] = [];
   // Match `import … from '@licio/lcap-p2p'` and side-effect `import '@licio/lcap-p2p'`.
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');

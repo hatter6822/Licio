@@ -21,6 +21,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
+import { APPLAUSE_TOKENS } from './applause-tokens.js';
 import { type Source, type Syntax, walk, withParsedSources } from './ts-source.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -94,25 +95,10 @@ const FORBIDDEN_FIELD_TOKENS: ReadonlyArray<{ token: string; kind: string }> = [
     'coordinates',
   ].map((token) => ({ token, kind: 'network/location identifier' })),
   // Applause fields (§2.4, §5.1 — no likes/votes/karma/reactions/followers).
-  ...[
-    'like_count',
-    'likeCount',
-    'vote_count',
-    'voteCount',
-    'upvote',
-    'upvotes',
-    'downvote',
-    'downvotes',
-    'karma',
-    'reaction_count',
-    'reactionCount',
-    'reactions',
-    'follower_count',
-    'followerCount',
-    'followers',
-    'score_count',
-    'star_count',
-  ].map((token) => ({ token, kind: 'applause field' })),
+  // The vocabulary is SHARED with `check:no-applause` (`applause-tokens.ts`), so a
+  // spelling added for one gate arms the other — they used to keep two lists, and
+  // the other one could not see snake_case at all.
+  ...APPLAUSE_TOKENS.map((token) => ({ token, kind: 'applause field' })),
 ];
 
 function collect(dir: string): string[] {

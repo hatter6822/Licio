@@ -171,6 +171,123 @@ describe('runWsmTick (WS-M sweeps)', () => {
     );
   });
 
+  it('isolates ONE poison room: every room after it still settles', async () => {
+    const services = await wsmServices();
+    const POISON_ROOM = '99999999-9999-4999-8999-999999999999';
+    // The poison room is enumerated FIRST: the regression this pins is a room
+    // whose settlement throws aborting the sweep for every room ORDERED AFTER
+    // it — and since the next tick restarts at the same room, permanently.
+    for (const roomId of [POISON_ROOM, ROOM]) {
+      await services.profiles.upsert({
+        roomId,
+        lawPackId: null,
+        charterVersionId: null,
+        treasuryId: null,
+        quorumPolicyRef: null,
+        thresholdPolicyRef: null,
+        timelockPolicyRef: null,
+        freezeState: 'active',
+        freezeReason: null,
+        pauseFlags: { deposits: false, proposals: false, executions: false },
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const proposalId = randomUUID();
+    await services.proposals.insert({
+      proposalId,
+      roomId: ROOM,
+      proposerUserId: USER,
+      proposalType: 'capped_grant',
+      title: 'Settles behind the poison room',
+      plainLanguageSummary: 'Its deliberation window has closed.',
+      requestedAmount: null,
+      asset: null,
+      recipientRef: null,
+      conflictDisclosures: null,
+      riskAssessment: 'Low.',
+      requestedAction: {},
+      expectedDeliverable: 'None.',
+      preflightState: 'passed',
+      votingState: 'deliberation',
+      challengeState: 'none',
+      executionState: 'not_executed',
+      simulationMode: false,
+      executableAfter: null,
+      createdAt: new Date().toISOString(),
+      executedAt: null,
+      executionClaimedAt: null,
+      lawPackVersionId: null,
+      category: null,
+      deliberationEndsAt: new Date(Date.now() - 1_000).toISOString(),
+      votingEndsAt: new Date(Date.now() + 3_600_000).toISOString(),
+      challengeWindowEndsAt: null,
+      tallySnapshot: null,
+    });
+    // `settleDueProposals` reads the room's profile first, so a malformed row
+    // throws there — the shape of a single bad record, not of a dead store.
+    const realGet = services.profiles.get.bind(services.profiles);
+    services.profiles.get = async (roomId: string) => {
+      if (roomId === POISON_ROOM) throw new Error('malformed governance profile');
+      return realGet(roomId);
+    };
+
+    const failures: WsmSchedulerTask[] = [];
+    await runWsmTick(services, (_error, task) => failures.push(task));
+
+    // Reported once, for the one room that failed…
+    expect(failures).toEqual(['wsm_proposal_settle']);
+    // …and the healthy room behind it still reached its deadline.
+    expect((await services.proposals.getById(proposalId))?.votingState).toBe('open');
+  });
+
+  it('isolates ONE poison treasury: every treasury after it still reconciles', async () => {
+    const services = await wsmServices();
+    const POISON_TREASURY = randomUUID();
+    const HEALTHY_TREASURY = randomUUID();
+    // Distinct rooms AND distinct addresses: the store enforces one treasury
+    // per room and a unique address, so a shared fixture address silently
+    // inserts nothing.
+    for (const [index, treasuryId] of [POISON_TREASURY, HEALTHY_TREASURY].entries()) {
+      await services.treasuries.insert({
+        treasuryId,
+        roomId: randomUUID(),
+        deploymentId: randomUUID(),
+        treasuryAddress: `0x${String(index).repeat(40)}`,
+        acceptedAssets: ['USDC'],
+        balanceSnapshot: null,
+        balancesReconciledAt: null,
+        depositLimits: {
+          perUserPerPeriod: '1000',
+          perRoomPerPeriod: '5000',
+          perDepositMax: '100',
+          periodSeconds: 86_400,
+        },
+        freezeState: 'active',
+        freezeReason: null,
+        freezeCascade: false,
+        pauseFlags: { deposits: false, proposals: false, executions: false },
+        reconciliationState: 'pending',
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const realGetById = services.treasuries.getById.bind(services.treasuries);
+    services.treasuries.getById = async (treasuryId: string) => {
+      if (treasuryId === POISON_TREASURY) throw new Error('unreadable treasury row');
+      return realGetById(treasuryId);
+    };
+
+    const failures: WsmSchedulerTask[] = [];
+    await runWsmTick(services, (_error, task) => failures.push(task));
+
+    expect(failures).toEqual(['wsm_treasury_reconcile']);
+    // An unreconciled treasury blocks its room's new spend proposals, so the
+    // tail of the list must not inherit the poison row's failure.
+    const healthy = (await services.treasuries.listAll()).find(
+      (t) => t.treasuryId === HEALTHY_TREASURY,
+    );
+    expect(healthy?.reconciliationState).toBe('synced');
+  });
+
   it('reconciles every treasury and reports intent-sweep failures independently', async () => {
     const services = await wsmServices();
     await services.treasuries.insert({

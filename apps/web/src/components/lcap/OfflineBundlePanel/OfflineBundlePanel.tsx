@@ -192,6 +192,21 @@ export function OfflineBundlePanel({
   const [localRooms, setLocalRooms] = useState<readonly LocalRoom[]>([]);
   const [pickedRoom, setPickedRoom] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Envelopes the engine recognised but did NOT report as newly accepted OR as
+  // quarantined — i.e. an exact idempotent re-receive of an op the room already
+  // holds.  The engine reports it in neither list (`room-engine.ts`: `existingSig
+  // === envelope.signature` → `continue`), so the count has to be derived here.
+  // Clamped at 0: the three engine counts are independent reads, and a negative
+  // remainder would render as a nonsense claim rather than an omission.
+  const alreadyPresent =
+    importState.phase === 'private_done'
+      ? Math.max(
+          0,
+          importState.counts.recovered -
+            importState.counts.accepted -
+            importState.counts.quarantined,
+        )
+      : 0;
   // The room being exported: the explicit prop (mounted FROM a room) overrides the offline-page pick.
   const effectiveRoomHash = roomHash ?? (pickedRoom || undefined);
 
@@ -698,16 +713,36 @@ export function OfflineBundlePanel({
 
         {importState.phase === 'private_done' ? (
           <div className="flex flex-col gap-2">
+            {/*
+              Three outcomes, three sentences — and only the ones that happened.
+              The done line used to end "The rest were held back — they do not
+              verify against this room's keys" UNCONDITIONALLY, which is false
+              for the most likely thing a person does with a private bundle:
+              re-import their own backup into the room it came from.  The engine
+              treats an exact re-receive as idempotent (`existingSig ===
+              envelope.signature` → neither accepted nor quarantined), so that
+              import reads "Added 0 of 12" and then accuses all twelve of failing
+              verification — telling someone their intact backup is corrupt.
+            */}
             <p className="text-sm text-success-on-soft" role="status">
               {t(
                 'lcap.bundle.privateImportDone',
-                'Added {accepted} of {recovered} encrypted items to the room. The rest were held back — they do not verify against this room’s keys.',
+                'Added {accepted} of {recovered} encrypted items to the room.',
                 {
                   accepted: importState.counts.accepted,
                   recovered: importState.counts.recovered,
                 },
               )}
             </p>
+            {alreadyPresent > 0 ? (
+              <p className="text-sm text-ink-muted">
+                {t(
+                  'lcap.bundle.privateImportAlreadyPresent',
+                  '{present} item(s) were already in this room — nothing to add.',
+                  { present: alreadyPresent },
+                )}
+              </p>
+            ) : null}
             {importState.counts.quarantined > 0 || importState.counts.rejected > 0 ? (
               <p className="text-sm text-ink-muted">
                 {t(

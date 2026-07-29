@@ -1656,12 +1656,15 @@ if (governanceLlmDecision.enabled) {
   // key/URL live ONLY in these closures — never in the hashed identity config,
   // never in a log line. The per-runtime negotiation latches (effort rejected /
   // thinking exhausted) are operational signals — surface them in the boot log.
+  // BOTH backends take the same metadata-only hook, so neither the local
+  // negotiation nor the hosted SDK ever reaches a sink pino cannot redact.
+  const llmLaneLog = (event: string, meta: Record<string, unknown>): void => {
+    logger.warn(meta, event);
+  };
   const laneCompletion = (lane: GovernanceLlmLane): LlmCompletion =>
     lane.backend.kind === 'anthropic'
-      ? createAnthropicCompletion(lane.backend.apiKey, lane.settings)
-      : createLocalCompletion(lane.backend.baseUrl, lane.settings, fetch, (event, meta) =>
-          logger.warn(meta, event),
-        );
+      ? createAnthropicCompletion(lane.backend.apiKey, lane.settings, llmLaneLog)
+      : createLocalCompletion(lane.backend.baseUrl, lane.settings, fetch, llmLaneLog);
   const moderationComplete = laneCompletion(lanes.moderation);
   const adjudicationComplete = laneCompletion(lanes.adjudication);
 
@@ -1905,7 +1908,19 @@ setGovernanceService(
     onModerationDecided: (record) => {
       void aiGovernanceServices.moderationLog
         .append({ recordId: `moddec:${randomUUID()}`, ...record })
-        .catch(() => {});
+        .catch((err) => {
+          // The sink must not throw and must not block the moderation path
+          // (the durable trails — the immutable AIOutputRecord and the awaited
+          // agent-action audit row — already fail closed). But "record EVERY
+          // decided moderation" is an accountability claim, so a dropped row
+          // has to be diagnosable: log it, and count it so the transparency
+          // panel's under-count is visible rather than silent.
+          logger.error(
+            { err, roomId: record.roomId },
+            'WS-K moderation decision log append failed',
+          );
+          aiGovernanceServices.metrics.increment('ai.governance.moderation.log_append_failed');
+        });
     },
   }),
 );

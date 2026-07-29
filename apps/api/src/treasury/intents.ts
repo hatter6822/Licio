@@ -977,7 +977,9 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
           next === 'finalized' &&
           (updated.targetType === 'grant_payout' || updated.targetType === 'steward_compensation')
         ) {
-          await settleGrantPayout(deps, updated);
+          // `targetId` is the grant (a compensation intent that names no grant
+          // simply resolves to null and projects nothing).
+          await projectGrantPayout(deps, updated.targetId);
         }
         current = updated;
       }
@@ -988,17 +990,34 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
 }
 
 /**
- * A payout intent reached ON-CHAIN FINALITY: project the linked grant's payout
- * state from its milestones' intent finality — `paid` only when EVERY scheduled
- * milestone's intent finalized, `partially_paid` while some have (WS-M.5.1a;
- * scheduling alone never claims payment).
+ * Project a grant's payout state from its milestones' intent finality
+ * (WS-M.5.1a; scheduling alone never claims payment): `paid` once every
+ * milestone that can still pay has both a payout intent AND that intent's
+ * on-chain finality, `partially_paid` while only some have.
+ *
+ * The denominator is the PAYABLE milestone set, mirroring the liquidity
+ * encumbrance in `proposals.ts`: a terminally `rejected` milestone can never
+ * carry a `paymentIntentId` (only the `accepted` branch of
+ * `updateGrantMilestone` mints one, and `rejected` has no outgoing
+ * transition), so counting it in the denominator pinned a grant with any
+ * rejected tranche at `partially_paid` FOREVER — and an unsettled grant keeps
+ * `listUnsettledByRecipient` blocking the recipient's last wallet unlink.
+ *
+ * Keyed on the GRANT rather than on the settling intent, and exported, because
+ * finality is not the only event that changes this projection: a rejection
+ * landing AFTER the last payable tranche finalized moves the denominator with
+ * no intent left in flight, so `reconcileIntents` (which sweeps intent states)
+ * never sees it — the milestone-transition path has to re-project directly.
  */
-async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord): Promise<void> {
-  const grant = await deps.grants.getById(intent.targetId);
+export async function projectGrantPayout(deps: IntentDeps, grantId: string): Promise<void> {
+  const grant = await deps.grants.getById(grantId);
   if (grant === null || grant.payoutState === 'clawed_back') return;
   let finalized = 0;
   let scheduled = 0;
+  let payable = 0;
   for (const milestone of grant.milestones) {
+    if (milestone.state === 'rejected') continue;
+    payable += 1;
     if (milestone.paymentIntentId === null) continue;
     scheduled += 1;
     const linked = await deps.intents.getById(milestone.paymentIntentId);
@@ -1006,7 +1025,7 @@ async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord):
   }
   if (finalized === 0) return;
   const payoutState =
-    finalized === grant.milestones.length && scheduled === grant.milestones.length
+    finalized === payable && scheduled === payable
       ? ('paid' as const)
       : ('partially_paid' as const);
   if (payoutState === grant.payoutState) return;

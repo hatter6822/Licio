@@ -16,6 +16,7 @@
 //   Connection-level flood fairness (telling one flooding client apart from
 //   everyone else) is the EDGE/gateway's job, where packet routing already
 //   requires addresses; the application stays address-blind.
+import type { ApiError } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 
 export interface RateLimitOptions {
@@ -41,7 +42,17 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler {
     }
     if (count >= limit) {
       c.header('Retry-After', String(Math.max(1, Math.ceil((resetAt - now) / 1000))));
-      return c.json({ error: 'Rate limit exceeded' }, 429);
+      // The `apiErrorSchema` shape, and the SAME `rate_limited` code the
+      // in-handler limiters return (e.g. auth.ts's per-target cooldowns): the
+      // client switches on `error.code`, so a bare string here would leave the
+      // sign-in page rendering a raw "Too Many Requests" instead of its
+      // localised copy — two shapes for one class of failure on one route.
+      return c.json(
+        {
+          error: { code: 'rate_limited', message: 'Too many attempts. Try again later.' },
+        } satisfies ApiError,
+        429,
+      );
     }
     count += 1;
     await next();

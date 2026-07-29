@@ -28,6 +28,9 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
   let db: ReturnType<typeof createDbClient>;
   let authorId: string;
   let secondUserId: string;
+  /** An owner used by ONE test only, so the DSAR ordering assertion cannot be
+   *  perturbed by uploads another test happens to insert for a shared owner. */
+  let dsarOwnerId: string;
   let threadId: string;
   let claimId: string;
   let defaultRoomId: string;
@@ -156,6 +159,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     await migrate(db, { migrationsFolder: migrationsFolder() });
     authorId = await insertUser('author');
     secondUserId = await insertUser('second');
+    dsarOwnerId = await insertUser('dsar');
     contributions = new DrizzleContributionStore(db);
     roomsStore = new DrizzleRoomStore(db);
     lenses = new DrizzleLensStore(db);
@@ -204,7 +208,7 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
       await db.delete(dbSchema.uploads).where(inArray(dbSchema.uploads.uploadId, uploadIds));
     }
     const { users } = dbSchema;
-    await db.delete(users).where(inArray(users.userId, [authorId, secondUserId]));
+    await db.delete(users).where(inArray(users.userId, [authorId, secondUserId, dsarOwnerId]));
     const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
     await client.end();
   });
@@ -631,14 +635,70 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
         new Uint8Array([1]),
       ),
     ).rejects.toThrow();
-    // DSAR listing: the owner's records, oldest first (§19.3/GDPR Art. 15).
-    expect((await uploads.listByOwner(secondUserId)).map((row) => row.uploadId)).toEqual([
+    // The right-to-erasure tombstone: the record survives, the owner link does
+    // not, so the owner-scoped listing no longer reaches it.
+    expect((await uploads.listByOwner(secondUserId)).map((row) => row.uploadId)).toContain(
       uploadId,
-    ]);
+    );
     await uploads.anonymizeUser(secondUserId);
     expect((await uploads.getRecord(uploadId))?.ownerUserId).toBeNull();
     expect(await uploads.listByOwner(secondUserId)).toEqual([]);
     expect(await uploads.getRecord(randomUUID())).toBeNull();
+  });
+
+  // The DSAR export promises the owner's media "oldest first" (§19.3 / GDPR
+  // Art. 15).  A single-element expected array cannot tell that apart from
+  // newest-first, or from no ORDER BY at all — which in Postgres means heap
+  // order, so two exports of the same account can disagree after any UPDATE or
+  // VACUUM.  Own a FRESH owner and assert the WHOLE ordered list, tie-breaker
+  // included.
+  it('lists an owners uploads oldest first, tie-broken by upload id (DSAR order)', async () => {
+    const { uploads: uploadsTable } = await import('@licio/db');
+    const { eq } = await import('drizzle-orm');
+    // Two ids that share an instant below; sorted so the expected order is the
+    // ascending-uploadId one whichever way randomUUID happened to fall.
+    const [tieLow, tieHigh] = [randomUUID(), randomUUID()].sort() as [string, string];
+    const [oldest, middle, newest] = [randomUUID(), randomUUID(), randomUUID()];
+
+    // Insert in an order that differs from the chronological one, so a dropped
+    // ORDER BY cannot coincidentally return the right answer.
+    for (const id of [newest, tieHigh, middle, tieLow, oldest] as string[]) {
+      uploadIds.push(id);
+      await uploads.put(
+        {
+          uploadId: id,
+          ownerUserId: dsarOwnerId,
+          contentType: 'image/png',
+          byteSize: 1,
+          altText: null,
+          storageRef: `uploads/${id}`,
+          metadataStripped: true,
+          scanState: 'clear',
+        },
+        new Uint8Array([1]),
+      );
+    }
+    // `created_at` is NOT NULL DEFAULT now() and the put() record type omits it,
+    // so sequential puts only ever produce ascending order — the re-ordering and
+    // the same-instant tie both need a direct backdating write to exist at all.
+    const backdate = (uploadId: string, at: string): Promise<unknown> =>
+      db
+        .update(uploadsTable)
+        .set({ createdAt: new Date(at) })
+        .where(eq(uploadsTable.uploadId, uploadId));
+    await backdate(newest as string, '2026-01-03T00:00:00Z');
+    await backdate(oldest as string, '2026-01-01T00:00:00Z');
+    await backdate(middle as string, '2026-01-02T00:00:00Z');
+    await backdate(tieLow, '2026-01-04T00:00:00Z');
+    await backdate(tieHigh, '2026-01-04T00:00:00Z'); // the SAME instant
+
+    expect((await uploads.listByOwner(dsarOwnerId)).map((row) => row.uploadId)).toEqual([
+      oldest,
+      middle,
+      newest,
+      tieLow,
+      tieHigh,
+    ]);
   });
 
   // The batch read backs `resolveMedia`, which serves media for a WHOLE page of

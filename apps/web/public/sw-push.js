@@ -22,12 +22,29 @@
 //     true` is also present (the flag the client sets after a `trusted` verdict).
 // Fail-closed: a gated message missing the verified flag is REFUSED. No remote
 // code, no eval, no importScripts — the `check:sw` posture is unchanged.
+//
+// A bare `return` would NOT refuse anything. This file is pulled into the
+// Workbox-generated worker with `importScripts('sw-push.js')`, and that same
+// worker registers its OWN unconditional
+// `addEventListener('message', … 'SKIP_WAITING' === … self.skipWaiting())`
+// from the workbox-build template. Returning early only declines to activate
+// HERE; the co-resident generated listener then activates anyway, and the
+// unverified bundle takes control. `stopImmediatePropagation()` is what makes
+// the refusal binding: the template emits its `importScripts(…)` BEFORE its own
+// `addEventListener`, so this listener is always registered first on the same
+// target, and stopping immediate propagation suppresses the generated one. It
+// keeps working if workbox regenerates the file, which a build-time rewrite of
+// the emitted shape would not.
 self.addEventListener('message', (event) => {
-  if (event.origin && event.origin !== self.location.origin) return;
+  if (event.origin && event.origin !== self.location.origin) {
+    event.stopImmediatePropagation();
+    return;
+  }
   if (event.data && event.data.type === 'SKIP_WAITING') {
     // Refuse a silent takeover when the private surface is in play and the
     // incoming bundle has NOT been verified (fail-closed: missing flag ⇒ refuse).
     if (event.data.privateBundleGated === true && event.data.privateBundleVerified !== true) {
+      event.stopImmediatePropagation();
       return;
     }
     self.skipWaiting();

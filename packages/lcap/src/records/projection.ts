@@ -8,6 +8,10 @@
 //     chain is retained, and a deterministic tip is chosen on conflict;
 //   - a `tombstone` / `moderation_action` (`target_record_cid`) hides the whole
 //     logical contribution (the stricter visible state wins, §25.1);
+//   - an `edit` / `tombstone` is honoured ONLY over its own author's record;
+//     acting on another member's contribution is the `moderate` operation, i.e.
+//     a `moderation_action`.  A refused relation is retained and surfaced
+//     (`unauthorizedSupersedes`), never silently dropped (§25.2);
 //   - ordering follows the §12.4 precedence ladder, never trusting phone clocks
 //     for canonical order.
 // The projection output is independent of record arrival order.
@@ -170,6 +174,14 @@ export interface ProjectedContribution {
   readonly hidden: boolean;
   /** The CID of the tombstone/moderation record, when hidden. */
   readonly hiddenBy?: string;
+  /**
+   * CIDs of `edit` / `tombstone` records that named a record in this chain but
+   * were authored by someone ELSE — refused (they never move the tip or hide the
+   * contribution) yet RETAINED here, because §25.2 forbids silently discarding
+   * conflicting evidence.  Sorted, so the projection stays arrival-order
+   * independent.
+   */
+  readonly unauthorizedSupersedes?: readonly string[];
 }
 
 /**
@@ -196,13 +208,46 @@ function pickLatestEdit(edits: readonly ThreadRecord[]): ThreadRecord {
  * tombstones are resolved over the whole record set before ordering.
  */
 export function reduceThreadProjection(records: readonly ThreadRecord[]): ProjectedContribution[] {
+  const byCid = new Map(records.map((r) => [r.recordCid, r]));
   const editsByTarget = new Map<string, ThreadRecord[]>();
   const tombstoneByTarget = new Map<string, string>();
+  /** Refused cross-author (or unresolvable) supersessions, keyed by the target they named. */
+  const refusedByTarget = new Map<string, string[]>();
   const roots: ThreadRecord[] = [];
+
+  /**
+   * May `r` supersede/hide `targetCid`?  Only when it authored the target.
+   * `replaces_record_cid` / `target_record_cid` are author-supplied CIDs and NOTHING
+   * upstream binds them to the actor: `capabilityAuthorizes` checks that the
+   * capability's subject is the record's OWN author and has no notion of the target's
+   * author, and neither `validateIdentityChain` nor `validate()` reads
+   * `replaces_record_cid` at all.  So without this check a signed, fully-`authorized`
+   * `edit` by member B over member A's post is indistinguishable from A's own edit and
+   * takes the visible tip — content replacement in the deterministic projection.
+   * Acting on ANOTHER member's contribution is the distinct `moderate` operation, i.e.
+   * a `moderation_action` record, which stays ungated below.
+   *
+   * Compare `author_account_id`, NOT `author_device_key_id`: a member legitimately
+   * edits from a second device.  A target absent from this record set leaves the
+   * relation unresolvable, so it cannot be honoured either.
+   */
+  const ownsTarget = (r: ThreadRecord, targetCid: string): boolean => {
+    const target = byCid.get(targetCid);
+    if (target !== undefined && target.record.author_account_id === r.record.author_account_id) {
+      return true;
+    }
+    // Retain the refused record instead of dropping it (§25.2: conflicting evidence
+    // stays inspectable); it is surfaced on the projection it tried to act on.
+    const refused = refusedByTarget.get(targetCid) ?? [];
+    refused.push(r.recordCid);
+    refusedByTarget.set(targetCid, refused);
+    return false;
+  };
 
   for (const r of records) {
     const eventType = r.record.event_type;
     if (eventType === 'edit' && r.record.replaces_record_cid) {
+      if (!ownsTarget(r, r.record.replaces_record_cid)) continue;
       const list = editsByTarget.get(r.record.replaces_record_cid) ?? [];
       list.push(r);
       editsByTarget.set(r.record.replaces_record_cid, list);
@@ -210,6 +255,9 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       (eventType === 'tombstone' || eventType === 'moderation_action') &&
       r.record.target_record_cid
     ) {
+      // `moderation_action` is the SANCTIONED cross-author path (the `moderate`
+      // capability operation), so only the `tombstone` half is ownership-gated.
+      if (eventType === 'tombstone' && !ownsTarget(r, r.record.target_record_cid)) continue;
       const existing = tombstoneByTarget.get(r.record.target_record_cid);
       // The deterministically-smallest tombstone CID wins (stricter state, §25.1).
       if (existing === undefined || r.recordCid < existing) {
@@ -235,13 +283,16 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       tip = next;
     }
     let hiddenBy: string | undefined;
+    const refused: string[] = [];
     for (const cid of chain) {
       const tomb = tombstoneByTarget.get(cid);
-      if (tomb !== undefined) {
-        hiddenBy = tomb;
-        break;
-      }
+      if (tomb !== undefined && hiddenBy === undefined) hiddenBy = tomb;
+      const refusedHere = refusedByTarget.get(cid);
+      if (refusedHere !== undefined) refused.push(...refusedHere);
     }
+    // Sorted, not in arrival order — this field is part of the projection output and
+    // the §25.2 guarantee is that the whole output is input-order independent.
+    refused.sort();
     projectedByRoot.set(root.recordCid, {
       rootCid: root.recordCid,
       visibleCid: tip.recordCid,
@@ -249,6 +300,7 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       editChain: chain,
       hidden: hiddenBy !== undefined,
       ...(hiddenBy !== undefined ? { hiddenBy } : {}),
+      ...(refused.length > 0 ? { unauthorizedSupersedes: refused } : {}),
     });
   }
 

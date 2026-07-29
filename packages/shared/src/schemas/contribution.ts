@@ -33,6 +33,22 @@ export const CONTRIBUTION_BODY_LIMITS: Readonly<Record<ContributionType, number>
   correction: 2_000,
 };
 
+/**
+ * Wire bound for a body: the largest per-type cap, DERIVED rather than
+ * restated.  The coarse outer bound the update/public schemas carry (the exact
+ * per-type cap is re-checked server-side against the STORED type), so a literal
+ * here would 422 an edit and fail the read-side parse of a body the create
+ * schema had just accepted.  `Object.values` over the
+ * `Record<ContributionType, number>` means adding a type — or raising
+ * `correction` above `comment` — cannot leave the maximum stale.  Declared here
+ * rather than beside the schemas that use it because `contributionUpdateSchema`
+ * evaluates its initializer at module-evaluation time and would otherwise hit
+ * the `const` TDZ.
+ */
+export const MAX_CONTRIBUTION_BODY_WIRE_LENGTH = Math.max(
+  ...Object.values(CONTRIBUTION_BODY_LIMITS),
+);
+
 /** Moderation lifecycle of a contribution (WS-G.1.2a; auditable, WS-J). */
 export const CONTRIBUTION_MODERATION_STATES = [
   'published',
@@ -227,7 +243,7 @@ export type ContributionCreate = ContributionWriteCreate;
 export const contributionUpdateSchema = z
   .object({
     contribution_id: uuidSchema,
-    body: z.string().trim().min(1).max(5_000).optional(),
+    body: z.string().trim().min(1).max(MAX_CONTRIBUTION_BODY_WIRE_LENGTH).optional(),
     citations: z.array(citationSchema).max(MAX_CITATIONS).optional(),
   })
   .strict();
@@ -251,9 +267,6 @@ export const contributionMetadataSchema = z
   })
   .strict();
 export type ContributionMetadata = z.infer<typeof contributionMetadataSchema>;
-
-/** Wire bound for a body (the largest per-type cap). */
-export const MAX_CONTRIBUTION_BODY_WIRE_LENGTH = 5_000;
 
 export const contributionMediaSchema = z
   .object({

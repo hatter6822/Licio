@@ -1057,6 +1057,9 @@ describe.skipIf(!DB_URL)('WS-N compliance Drizzle adapters (live Postgres)', () 
 
 describe.skipIf(!REDIS_URL)('WS-N compliance Redis adapters (live Redis)', () => {
   const url = REDIS_URL as string;
+  /** The broadcaster's pub/sub channel (module-private there; this suite both
+   *  ACKs the subscription on it and publishes a malformed frame onto it). */
+  const INVALIDATION_CHANNEL = 'compliance:policy:invalidate';
   const openedClients: IORedis[] = [];
   const open = (): IORedis => {
     const client = new IORedis(url);
@@ -1136,15 +1139,22 @@ describe.skipIf(!REDIS_URL)('WS-N compliance Redis adapters (live Redis)', () =>
   it('policy invalidation crosses instances; a malformed message invalidates everything', async () => {
     const received: Array<string | null> = [];
     const publisherSide = new RedisPolicyInvalidationBroadcaster(open(), open());
-    const subscriberSide = new RedisPolicyInvalidationBroadcaster(open(), open());
+    // Redis pub/sub has NO replay: a frame published before the server has ACKed
+    // the SUBSCRIBE is dropped, never redelivered.  `subscribe()` fires the
+    // registration off without awaiting it, so ACK the channel on the very
+    // client the broadcaster will use FIRST — a wall-clock grace period is a
+    // race against connect+handshake under CI load, not a wait.
+    const subscriberClient = open();
+    await subscriberClient.subscribe(INVALIDATION_CHANNEL);
+    const subscriberSide = new RedisPolicyInvalidationBroadcaster(open(), subscriberClient);
+    // The 'message' listener is attached synchronously by this call, so nothing
+    // published below can slip between registration and delivery.
     subscriberSide.subscribe((invalidatedRegion) => received.push(invalidatedRegion));
-    // Subscription registration is asynchronous under the hood.
-    await new Promise((resolve) => setTimeout(resolve, 200));
 
     await publisherSide.publish('DE');
     await publisherSide.publish(null);
     // A hostile/corrupt frame on the channel — fail-closed maps it to null.
-    await open().publish('compliance:policy:invalidate', 'not-json');
+    await open().publish(INVALIDATION_CHANNEL, 'not-json');
     const deadline = Date.now() + 2_000;
     while (received.length < 3 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));

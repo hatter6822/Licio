@@ -39,7 +39,7 @@ import {
   DrizzleGovernanceProposalStore,
   DrizzleKnomosisActionStore,
 } from '../knomosis/drizzle-knomosis-stores.js';
-import type { GovernanceProposalRecord } from '../knomosis/stores.js';
+import type { GovernanceAuditRecord, GovernanceProposalRecord } from '../knomosis/stores.js';
 import { createDrizzleTreasuryStores } from '../treasury/drizzle-treasury-stores.js';
 import type {
   GovernanceProfileRecord,
@@ -131,8 +131,12 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
   let proposals: DrizzleGovernanceProposalStore;
   let audit: DrizzleGovernanceAuditStore;
   const roomId = randomUUID();
+  // A second room + actor, used only to prove the audit counters are scoped by
+  // BOTH (a decoy that a room-blind or actor-blind predicate would swallow).
+  const otherRoomId = randomUUID();
   const deploymentId = randomUUID();
   let userId: string;
+  let otherUserId: string;
   let treasury: TreasuryRecord;
   const proposalIds: string[] = [];
 
@@ -150,6 +154,7 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     proposals = new DrizzleGovernanceProposalStore(db);
     audit = new DrizzleGovernanceAuditStore(db);
     userId = await makeUser(db, 'wsm_it');
+    otherUserId = await makeUser(db, 'wsm_it_other');
     // A pinned deployment row (FK target for the treasury). A huge random
     // chain id dodges the (environment, chain) active-unique across runs.
     await db.insert(knomosisDeployments).values({
@@ -163,6 +168,22 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
       status: 'active',
     } as typeof knomosisDeployments.$inferInsert);
     treasury = treasuryOf(roomId, deploymentId);
+    // The treasury ROW and its reconciled baseline are fixture state, not one
+    // test's output: five later tests FK-reference `treasury.treasuryId` and the
+    // nullable-column test reads this snapshot back to prove a `divergent` tick
+    // preserves it.  Creating them here is what makes `-t '<name>'` usable on
+    // each of those tests instead of failing with an opaque FK violation.  Both
+    // are asserted so a broken adapter fails the fixture loudly rather than
+    // twelve unrelated tests obscurely.
+    expect(await stores.treasuries.insert(treasury)).not.toBeNull();
+    expect(
+      await stores.treasuries.setReconciliation(
+        treasury.treasuryId,
+        'synced',
+        { USDC: '1500000' },
+        NOW(),
+      ),
+    ).toBe(true);
   });
 
   /** Row-scoped delete from an append-only table (test cleanup only): the
@@ -213,10 +234,10 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     await deleteAppendOnly(
       '"knomosis"."governance_audit_log"',
       'governance_audit_no_mutate_trg',
-      `room_id = '${roomId}'`,
+      `room_id IN ('${roomId}', '${otherRoomId}')`,
     );
     await db.delete(knomosisDeployments).where(eq(knomosisDeployments.deploymentId, deploymentId));
-    await db.delete(users).where(eq(users.userId, userId));
+    await db.delete(users).where(inArray(users.userId, [userId, otherUserId]));
     const client = (db as unknown as { $client: { end: () => Promise<void> } }).$client;
     await client.end();
   });
@@ -295,8 +316,7 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
   // --- Treasury ----------------------------------------------------------------
 
   it('inserts the treasury once per room/address and column-scopes updates', async () => {
-    expect(await stores.treasuries.insert(treasury)).not.toBeNull();
-    // One treasury per room.
+    // One treasury per room (the fixture already inserted this room's).
     expect(await stores.treasuries.insert({ ...treasuryOf(roomId, deploymentId) })).toBeNull();
     // The address is globally unique.
     expect(
@@ -316,18 +336,11 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
         executions: false,
       }),
     ).toBe(true);
-    expect(
-      await stores.treasuries.setReconciliation(
-        treasury.treasuryId,
-        'synced',
-        { USDC: '1500000' },
-        NOW(),
-      ),
-    ).toBe(true);
     const stored = await stores.treasuries.getById(treasury.treasuryId);
     expect(stored?.freezeState).toBe('frozen');
     expect(stored?.freezeReason).toBe('divergence');
     expect(stored?.pauseFlags.deposits).toBe(true);
+    // Untouched by the freeze/pause writes above — each setter is column-scoped.
     expect(stored?.reconciliationState).toBe('synced');
     expect(stored?.balanceSnapshot).toEqual({ USDC: '1500000' });
     expect((await stores.treasuries.getByRoom(roomId))?.treasuryId).toBe(treasury.treasuryId);
@@ -1128,7 +1141,39 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     // The projection omits dedupeKey; the details payload identifies the row.
     expect(listed.filter((e) => e.actionDetails['via'] === 'itest')).toHaveLength(1);
     expect(await audit.countByRoom(roomId)).toBeGreaterThan(0);
-    expect(await audit.countQualifyingByRoomActor(roomId, userId)).toBeGreaterThanOrEqual(0);
+
+    // `countQualifyingByRoomActor` feeds `memberFacts.contributionCount`, which
+    // gates the `minContributions` eligibility rule — a predicate that silently
+    // returns 0 disenfranchises every member of a room with a contributions
+    // threshold.  Seed one row per arm of it: room, actor, and qualifying action
+    // type, plus the deliberate NON-arm — unlike the room-scoped sibling it does
+    // NOT filter `simulationMode`, because simulated practice IS the record the
+    // readiness rule counts.  The `proposal_published` row appended above is the
+    // non-qualifying decoy for this same (room, actor).
+    const qualifying = (over: Partial<GovernanceAuditRecord> = {}) =>
+      audit.append({
+        entryId: randomUUID(),
+        roomId,
+        actionType: 'vote_cast',
+        actorUserId: userId,
+        actionDetails: {},
+        simulationMode: false,
+        createdAt: NOW(),
+        ...over,
+      });
+    await qualifying();
+    await qualifying({ actionType: 'proposal_created' });
+    await qualifying({ simulationMode: true });
+    await qualifying({ actorUserId: otherUserId }); // another actor, same room
+    await qualifying({ roomId: otherRoomId }); // same actor, another room
+    expect(await audit.countQualifyingByRoomActor(roomId, userId)).toBe(3);
+    expect(await audit.countQualifyingByRoomActor(roomId, otherUserId)).toBe(1);
+    expect(await audit.countQualifyingByRoomActor(otherRoomId, userId)).toBe(1);
+    // The room-scoped sibling DOES demand `simulation_mode` — pinning the
+    // asymmetry from both sides, since either query drifting toward the other
+    // is one of the ways this silently returns the wrong number.
+    expect(await audit.countQualifyingByRoom(roomId)).toBe(1);
+
     // Cursor-paged read (the keyset arm).
     const newest = listed[0];
     if (newest !== undefined) {
@@ -1138,6 +1183,14 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
       });
       expect(page.every((e) => e.entryId !== newest.entryId)).toBe(true);
     }
+
+    // Last, so it perturbs none of the arms above: right-to-erasure NULLs
+    // `actor_user_id` in place (the rows survive; only the attribution goes), so
+    // the actor count must follow it to zero rather than keep matching a stale
+    // predicate on the erased id.
+    expect(await audit.anonymizeActor(userId)).toBeGreaterThan(0);
+    expect(await audit.countQualifyingByRoomActor(roomId, userId)).toBe(0);
+    expect(await audit.countByRoom(roomId)).toBeGreaterThan(0);
   });
 
   it('W3 surfaces: keyset pages, period deposits, per-asset reservations, unsettled query', async () => {

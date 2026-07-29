@@ -323,11 +323,16 @@ export function createV1Routes() {
       // legacy WS-C demo fixture serves unchanged — clearly fixture data,
       // outside the ranking pipeline, and logged as demo serving.
       .get('/feed', zValidator('query', feedQuerySchema), async (c) => {
-        const ingestion = getIngestionServices();
-        const hasStories = (await ingestion.stories.listRecent(1)).length > 0;
         // Fixture serving is a DEV/TEST affordance only: a production boot with
-        // an empty store serves an empty feed, never demo data.
-        if (!hasStories && process.env['NODE_ENV'] !== 'production') {
+        // an empty store serves an empty feed, never demo data — so the FREE
+        // predicate gates the store read rather than the other way round, and a
+        // production feed request issues no query that cannot change its answer.
+        // (`listRecent` uses `.select()`, so it also drags the row's generated
+        // `search_tsv` back with it.)
+        if (
+          process.env['NODE_ENV'] !== 'production' &&
+          (await getIngestionServices().stories.listRecent(1)).length === 0
+        ) {
           const response: FeedResponse = { items: [...DEMO_FEED], nextCursor: null };
           return c.json(feedResponseSchema.parse(response));
         }

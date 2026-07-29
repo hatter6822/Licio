@@ -247,10 +247,29 @@ export async function validate(input: ValidationInput): Promise<ValidationResult
       // would spuriously reach `checkpointed`.
       const { proof, checkpoint: bundle } = consensus.inclusion;
       const boundToRecord = proof.target_record_cid === input.recordCid;
-      const boundToRoom = facts.roomId === undefined || proof.room_id === facts.roomId;
+      // The AUTHENTICATED room name is `bundle.checkpoint.room_id`: `verifyCheckpoint`
+      // re-encodes the parsed checkpoint and byte-compares it to the signed `body`, so
+      // once `checkpointAuthentic` passes that field is covered by the room-authority
+      // signature.  `proof.room_id` is an UNSIGNED wire field on a plain
+      // `inclusion_proof` record — reading it here would let any room whose authority
+      // key the verifier has registered append a FOREIGN room's `record_cid` as a leaf
+      // of its own log and sign a genuine checkpoint over it, elevating that record to
+      // `checkpointed`.  Mirrors the consistency branch below.
+      const boundToRoom = facts.roomId === undefined || bundle.checkpoint.room_id === facts.roomId;
       if (boundToRecord && boundToRoom && (await checkpointAuthentic(bundle))) {
-        const included = await verifyInclusionProof(proof, bundle.checkpoint, input.ctx.networkId);
-        if (included.ok) achieved = maxPositive(achieved, 'checkpointed');
+        // `verifyInclusionProof`'s stated contract is that the caller has resolved the
+        // checkpoint the proof NAMES; discharge it rather than assume it, so a proof
+        // for checkpoint X cannot be verified against an unrelated checkpoint Y that
+        // happens to authenticate.
+        const boundToCheckpoint = proof.checkpoint_cid === (await cidFor('record', bundle.body));
+        if (boundToCheckpoint) {
+          const included = await verifyInclusionProof(
+            proof,
+            bundle.checkpoint,
+            input.ctx.networkId,
+          );
+          if (included.ok) achieved = maxPositive(achieved, 'checkpointed');
+        }
       }
     }
 

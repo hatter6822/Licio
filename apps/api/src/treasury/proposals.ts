@@ -32,6 +32,7 @@
 import { createHash } from 'node:crypto';
 import {
   checkVoterEligibility,
+  decCompare,
   type EligibilityRules,
   type LawPack,
   resolveVotingWeight,
@@ -485,7 +486,6 @@ export async function createProductionProposal(
     if (headroom === null) {
       return tgErr(409, 'no_cap_configured', `No spend cap for "${spendCategory}".`);
     }
-    const { decCompare } = await import('@licio/governance');
     // Per-ACTION cap preflight: a request above `perActionMax` can never be
     // reserved, so publishing it would only burn deliberation/voting time
     // before `reserveForProposal()` blocks it at approval.  Reject up front.
@@ -855,7 +855,21 @@ export async function signProposal(
       proposal.recipientRef === input.userId ||
       proposal.recipientRef === `user:${input.userId}`,
     roleClasses: (await deps.rooms.isSteward(input.roomId, input.userId)) ? ['steward'] : [],
-    reputationScore: 0,
+    // §17.5 `reputation_bounded` resolves weight = min(reputationScore, cap), so a
+    // hard-coded 0 made EVERY ballot in a room adopting that model weigh nothing:
+    // ten unanimous approvals tallied as `rejected`, because `decided` stayed '0'
+    // and the threshold branch never ran.  The score is the room-scoped count of
+    // QUALIFYING governance participation the eligibility gate already folds over
+    // (`countQualifyingByRoomActor`, surfaced as `contributionCount`) — the one
+    // reputation-shaped fact this platform computes.  Membership tenure is
+    // deliberately NOT mixed in: it is already a hard eligibility gate
+    // (`minMembershipDays`), and folding it into the weight would both
+    // double-count it and turn mere presence into power.  This quantity stays
+    // PRIVATE to one room's governance math — never a profile field, never a
+    // ranking input (SIG-PROH-KARMA bans a public aggregate reputation).
+    // Unknown facts stay 0 (the weakest true claim); the zero-weight refusal
+    // after weight resolution stops a 0 being recorded as if it were a ballot.
+    reputationScore: facts?.contributionCount ?? 0,
     tokenVoteUnits: 0,
     isDesignatedSigner: evalPack.multisig?.signers.includes(input.userId) ?? false,
   };
@@ -984,7 +998,11 @@ export async function signProposal(
             proposal.recipientRef === delegation.delegatorUserId ||
             proposal.recipientRef === `user:${delegation.delegatorUserId}`,
           roleClasses: [],
-          reputationScore: 0,
+          // The SAME projection as the direct voter's facts above.  Only the
+          // eligibility gate reads it on this path (a delegated unit is the
+          // literal `weight: 1` below, never a resolver output), but the two
+          // fact projections must not be allowed to drift apart.
+          reputationScore: delegatorFacts?.contributionCount ?? 0,
           tokenVoteUnits: 0,
           isDesignatedSigner: false,
         },
@@ -1026,6 +1044,24 @@ export async function signProposal(
   });
   if (!resolution.resolved) {
     return tgErr(409, resolution.code, resolution.reason);
+  }
+  // A zero-weight BALLOT is not a vote, and recording one as if it were is how a
+  // room loses a decision it thought it made: `tallyProposalVotes` sums the
+  // recorded snapshots, so a 0 adds nothing to approve/reject while still
+  // counting toward QUORUM — an electorate that all resolves to 0 shows
+  // unanimous approval and settles `rejected` (decided '0' never crosses the
+  // threshold bar).  Refuse it at signing with the resolver's own explanation
+  // instead.  Only the participation-denominated models can reach 0
+  // (`maxVotingWeightPerAccount` is `.positive()`, so every 1-per-account model
+  // resolves above zero), and approval/multisig co-signatures are counted by
+  // SIGNER rather than by weight, so neither is affected.
+  if (input.purpose === 'vote' && decCompare(resolution.weight, 0) <= 0) {
+    return tgErr(
+      409,
+      'zero_voting_weight',
+      `${resolution.eligibilityReason} A zero-weight ballot cannot affect the tally, ` +
+        'so it is not recorded.',
+    );
   }
 
   const record: GovernanceSignatureRecord = {

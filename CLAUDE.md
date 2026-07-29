@@ -408,12 +408,18 @@ write for a file the foreground agent may also touch.
     3. genuinely **vestigial** — delete it.
   Used only inside its own file?  Drop the `export`, keep the symbol —
   `pnpm survey:internal-exports` lists those, and is deliberately NOT in CI while
-  the ~969 standing cases are worked through
+  the standing cases are worked through
   (`docs/planning/audit-residuals-2026-07.md`).  An unchanged barrel re-export
   (`export { live } from './x.js'`) is judgeable too — publishing a name is not
-  consuming it — but the 254 standing cases are overwhelmingly module barrels
+  consuming it — but the standing cases there are overwhelmingly module barrels
   publishing their SSOT surface, so they are surveyed by
-  `pnpm survey:barrel-reexports` and tracked there rather than gated.
+  `pnpm survey:barrel-reexports` and tracked there rather than gated.  Neither
+  headline count is quoted here — run the survey; its own output is the number.
+  `resolve-export-references.ts` is under active change, and a resolver that
+  gets MORE PRECISE drops both figures without a line of debt being paid, so a
+  count frozen into this file reads as progress that never happened.  (The
+  pair that stood here before overstated the residue by a third for exactly
+  that reason.)
   **BOTH SIDES COME FROM THE COMPILER** (`scripts/resolve-export-references.ts`),
   never from parsing: the export list is the module's own export table, and
   references are resolved to the module BINDING rather than matched by name — so
@@ -611,22 +617,29 @@ for server-side logging.
 
 ## Key dependencies
 
+Versions name the **breaking-change line only** — the major, or for a
+pre-1.0 package the minor, since that is what a caret range pins there.
+That is the part a reader actually needs (it picks which changelog to
+read); the per-workspace `package.json` is the source of truth for the
+exact range, and dependabot moves the minor/patch weekly, so a figure
+finer than the line below would be stale before it was reviewed.
+
 | Package | Workspace | Role |
 |---------|-----------|------|
-| `react` / `react-dom` 19 | web | UI framework |
-| `@tanstack/react-router` ^1.93 | web | file-based routing (auto code-splitting) |
-| `@tanstack/react-query` ^5.62 | web | server-state (SWR, zod on every response) |
-| `zustand` ^5.0 | web | client-state (3 stores: auth, ui, feature-flags) |
-| `zod` ^4.4 | shared, web, api | schema validation at every trust boundary |
-| `dompurify` ^3.4 | shared, web | HTML sanitization (Trusted Types integration; the WS-G `licio-ugc` UGC sanitizer lives in `@licio/shared`) |
-| `hono` ^4.7 | web, api | typed RPC client (web) / BFF server (api) |
-| `tailwindcss` ^4.1 | web (dev) | utility-first CSS (static, zero JS runtime) |
-| `drizzle-orm` ^0.45 | db | type-safe SQL (parameterized queries only) |
-| `pino` ^10.3 | api | structured logging (redaction-aware) |
-| `ioredis` ^5.11 | api | Redis client (CSRF token store, sessions) |
-| `@simplewebauthn/server` ^13.3 | api | WebAuthn attestation/assertion verification (WS-D) |
-| `viem` ^2.52 | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
-| `@anthropic-ai/sdk` ^0.110 | api | WS-U ADR-9 governance LLM provider, Anthropic backend (explicit operator opt-in; production DEFAULTS to the loopback-local backend instead, which uses plain fetch; every governed surface fails closed per call to its deterministic path) |
+| `react` / `react-dom` 19.x | web | UI framework |
+| `@tanstack/react-router` 1.x | web | file-based routing (auto code-splitting) |
+| `@tanstack/react-query` 5.x | web | server-state (SWR, zod on every response) |
+| `zustand` 5.x | web | client-state (3 stores: auth, ui, feature-flags) |
+| `zod` 4.x | shared, web, api | schema validation at every trust boundary |
+| `dompurify` 3.x | shared, web | HTML sanitization (Trusted Types integration; the WS-G `licio-ugc` UGC sanitizer lives in `@licio/shared`) |
+| `hono` 4.x | web, api | typed RPC client (web) / BFF server (api) |
+| `tailwindcss` 4.x | web (dev) | utility-first CSS (static, zero JS runtime) |
+| `drizzle-orm` 0.45.x | db | type-safe SQL (parameterized queries only) |
+| `pino` 10.x | api | structured logging (redaction-aware) |
+| `ioredis` 5.x | api | Redis client (CSRF token store, sessions) |
+| `@simplewebauthn/server` 13.x | api | WebAuthn attestation/assertion verification (WS-D) |
+| `viem` 2.x | api | EIP-4361 / SIWE signature verification (WS-D wallet sign-in) |
+| `@anthropic-ai/sdk` 0.115.x | api | WS-U ADR-9 governance LLM provider, Anthropic backend (explicit operator opt-in; production DEFAULTS to the loopback-local backend instead, which uses plain fetch; every governed surface fails closed per call to its deterministic path) |
 
 No Lean or Rust toolchains.  This is a pure TypeScript monorepo.
 

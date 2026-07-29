@@ -9,8 +9,10 @@ import {
 import { useAuthStore } from '../stores/auth.js';
 import {
   ApiClientError,
+  changeStoryVisibility,
   createContribution,
   createLens,
+  DuplicateStoryError,
   fetchFeed,
   fetchRoomLenses,
   joinRoom,
@@ -400,5 +402,47 @@ describe('room lens client (WS-G.2.2)', () => {
     const result = await setRoomLens(ROOM_ID, LENS.lens_id);
     expect(result.lens_id).toBe(LENS.lens_id);
     expect(posted).toEqual({ lens_id: LENS.lens_id });
+  });
+});
+
+describe('changeStoryVisibility duplicate collision (WS-Q.2.4)', () => {
+  const STORY_ID = '44444444-4444-4444-8444-444444444444';
+  const EXISTING_ID = '55555555-5555-4555-8555-555555555555';
+
+  it('throws a TYPED DuplicateStoryError carrying the colliding story id', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: { code: 'duplicate_story', message: 'already public' },
+          existing_story_id: EXISTING_ID,
+        },
+        409,
+      );
+    });
+    const error = await changeStoryVisibility(STORY_ID, 'public').catch((err: unknown) => err);
+    // `instanceof` — not a cast — is what makes a rename of the field a COMPILE
+    // error on both sides rather than a silently dropped "open the existing
+    // story" affordance.
+    expect(error).toBeInstanceOf(DuplicateStoryError);
+    expect((error as DuplicateStoryError).existingStoryId).toBe(EXISTING_ID);
+    expect((error as DuplicateStoryError).code).toBe('duplicate_story');
+    expect((error as DuplicateStoryError).status).toBe(409);
+    // Still an ApiClientError, so every generic error surface keeps working.
+    expect(error).toBeInstanceOf(ApiClientError);
+  });
+
+  it('falls back to a plain ApiClientError when the 409 body is unreadable', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return new Response('<html>gateway</html>', {
+        status: 409,
+        headers: { 'content-type': 'text/html' },
+      });
+    });
+    const error = await changeStoryVisibility(STORY_ID, 'public').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error).not.toBeInstanceOf(DuplicateStoryError);
+    expect((error as ApiClientError).code).toBe('duplicate_story');
   });
 });

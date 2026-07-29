@@ -26,6 +26,7 @@ import {
   uuidSchema,
 } from '@licio/shared';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { getEventPipelineServices } from '../events/services.js';
 import { roomContentVisibleToUser, storyReadableByUser } from '../forum/rooms.js';
@@ -283,11 +284,23 @@ export function createStoriesRoutes() {
       )
 
       // --- Takedown intake (WS-F.1.4f): PUBLIC, structured, rate-limited ---
-      // A rights holder need not hold an account; the global budget bounds
-      // abuse and review (WS-J.2 seam) gates any action.
+      // A rights holder need not hold an account, so this is fully CSRF-exempt
+      // (middleware/csrf.ts) and unauthenticated — which puts it in the same
+      // class as /v1/telemetry and /api/security/csp-report and gives it the
+      // same two bounds, because each covers what the other cannot: the global
+      // identity-free budget (§19.1) bounds request COUNT, and `bodyLimit`
+      // bounds BYTES on the STREAM.  The rate limit alone is not a DoS bound —
+      // it counts requests, while `zValidator` buffers the ENTIRE body through
+      // `c.req.json()` before any schema field length applies, so 30 chunked
+      // (or Content-Length-less) bodies per minute could each buffer without
+      // limit.  Review (WS-J.2 seam) gates any action.
       .post(
         '/takedowns',
         rateLimit({ limit: 30, windowMs: 60_000 }),
+        bodyLimit({
+          maxSize: 64 * 1024,
+          onError: (c) => c.json(deny('payload_too_large', 'Payload too large'), 413),
+        }),
         zValidator('json', takedownCreateRequestSchema),
         async (c) => {
           const ingestion = getIngestionServices();

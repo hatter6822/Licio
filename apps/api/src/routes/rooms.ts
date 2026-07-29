@@ -383,17 +383,15 @@ export function createRoomsRoutes() {
         const summary = await toRoomSummary(forum, room, threadCount, userId, roles);
         const lenses = canReadContent ? await forum.lenses.listByRoom(roomId) : [];
         const stewards = await forum.rooms.listStewards(roomId);
+        // ONE read for the whole steward list, not a serial point lookup each:
+        // the batch getter already exists, and this is the room-shell path every
+        // visitor hits.  A steward whose account is gone is simply absent from
+        // the result and filtered out below, exactly as before.
         const resolveHandles = new Map<string, { handle: string; displayName: string | null }>();
-        for (const steward of stewards) {
-          if (!resolveHandles.has(steward.userId)) {
-            const user = await identity.store.getUser(steward.userId);
-            if (user) {
-              resolveHandles.set(steward.userId, {
-                handle: user.handle,
-                displayName: user.displayName,
-              });
-            }
-          }
+        for (const user of await identity.store.getUsersByIds(
+          stewards.map((steward) => steward.userId),
+        )) {
+          resolveHandles.set(user.userId, { handle: user.handle, displayName: user.displayName });
         }
         const subscription =
           userId !== null ? await forum.rooms.getSubscription(roomId, userId) : null;
@@ -596,9 +594,21 @@ export function createRoomsRoutes() {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
           const requests = await forum.rooms.listJoinRequests(roomId);
+          // ONE read for the whole queue: the pending set is populated by third
+          // parties (any account may request to join), so its size is
+          // attacker-influenceable — a serial `getUser` per row turns a sock-
+          // puppet flood into thousands of round trips holding a pooled
+          // connection.  A requester whose account is gone is absent from the
+          // batch and skipped, exactly as the per-row `if (!user) continue` did.
+          const users = new Map(
+            (await identity.store.getUsersByIds(requests.map((r) => r.userId))).map((user) => [
+              user.userId,
+              user,
+            ]),
+          );
           const items = [];
           for (const request of requests) {
-            const user = await identity.store.getUser(request.userId);
+            const user = users.get(request.userId);
             if (!user) continue;
             items.push(
               roomJoinRequestPublicSchema.parse({

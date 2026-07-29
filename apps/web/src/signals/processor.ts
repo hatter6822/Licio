@@ -107,6 +107,16 @@ export class SignalProcessor {
       this.dwell.reset();
       this.lastDwellMs = 0;
       this.returns.resetSession();
+      // The three trackers `captureAggregate` actually READS — capped dwell, the
+      // deduped source/context opens, and reply-depth traversal — must be cleared
+      // too, or attention captured BEFORE the opt-out survives it: `hasSignal`
+      // would still see the pre-opt-out cap/open on a later re-opt-in and emit an
+      // aggregate built entirely from data the reader withdrew consent for.
+      // Clearing `opens` also drops its in-flight `pending` map, so a close that
+      // arrives after the opt-out for an open started before it commits nothing.
+      this.cap.resetSession();
+      this.opens.resetSession();
+      this.traversal.resetSession();
       this.uploader.clear();
       // Also purge aggregates already DURABLY queued to IndexedDB (via a failed
       // flush or a page-hide flushDurable) — else the interval/visibility path would
@@ -245,11 +255,18 @@ export class SignalProcessor {
   /** Advance dwell/idle accounting. Called on an interval by {@link start}. */
   tick(): void {
     const wallNow = this.wallClock();
+    // Roll the session bucket over BEFORE the opted-out early return: an opt-out
+    // that spans a bucket boundary would otherwise freeze `sessionBucketLabel` at
+    // its pre-opt-out value, and the first aggregate after re-opting-in would be
+    // stamped with a session bucket hours in the past. Safe while opted out
+    // because `maybeRolloverSession` → `captureCurrent` only EMITS when
+    // `policy.collect` is true, so an opted-out rollover ages the session state
+    // out without producing an aggregate.
+    this.maybeRolloverSession(wallNow);
     if (!this.policy.collect) {
       this.dwell.setEngaged(false);
       return;
     }
-    this.maybeRolloverSession(wallNow);
     this.cadence.checkIdle(this.now());
     const engaged = this.engagement.isActive && this.cadence.cadence === 'reading';
     this.dwell.setEngaged(engaged);

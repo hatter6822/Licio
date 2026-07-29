@@ -15,10 +15,13 @@ import {
   expireOldSnapshots,
   isStorySaved,
   listSavedStories,
+  MAX_STORY_COMMENT_SNAPSHOTS,
+  MAX_THREAD_SNAPSHOTS,
   readCachedSignalLedger,
   readStoryCommentsSnapshot,
   readThreadSnapshot,
   SNAPSHOT_MAX_AGE_MS,
+  SNAPSHOT_TRIM_RATIO,
   saveStory,
   unsaveStory,
 } from './read-through.js';
@@ -155,6 +158,62 @@ describe('thread snapshot cache', () => {
 
   it('returns undefined for an uncached thread', async () => {
     expect(await readThreadSnapshot(THREAD.thread_id)).toBeUndefined();
+  });
+});
+
+describe('snapshot count caps (the bound age alone does not give)', () => {
+  /** A distinct valid UUID per index (the record schema requires one). */
+  function threadId(index: number): string {
+    return `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`;
+  }
+
+  /** Distinct, strictly increasing `cachedAt` values so LRU order is exact. */
+  function monotonicClock(): void {
+    let clock = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      clock += 1_000;
+      return clock;
+    });
+  }
+
+  it('caps story-comment snapshots and drops the OLDEST first', async () => {
+    monotonicClock();
+    // One story, many option keys — the real growth shape: each sort order /
+    // filter / drill-down root / depth mints its own full-tree record.
+    for (let i = 0; i <= MAX_STORY_COMMENT_SNAPSHOTS; i += 1) {
+      await cacheStoryCommentsSnapshot(STORY.story_id, { order: `o${i}` }, COMMENTS);
+    }
+    const target = Math.floor(MAX_STORY_COMMENT_SNAPSHOTS * SNAPSHOT_TRIM_RATIO);
+    expect(await storyComments.count()).toBe(target);
+    // The first write is gone; the last survives.
+    expect(await readStoryCommentsSnapshot(STORY.story_id, { order: 'o0' })).toBeUndefined();
+    expect(
+      await readStoryCommentsSnapshot(STORY.story_id, {
+        order: `o${MAX_STORY_COMMENT_SNAPSHOTS}`,
+      }),
+    ).toBeDefined();
+  });
+
+  it('caps thread snapshots and drops the OLDEST first', async () => {
+    monotonicClock();
+    for (let i = 0; i <= MAX_THREAD_SNAPSHOTS; i += 1) {
+      await cacheThreadSnapshot({ ...THREAD, thread_id: threadId(i) });
+    }
+    const target = Math.floor(MAX_THREAD_SNAPSHOTS * SNAPSHOT_TRIM_RATIO);
+    expect(await threadSnapshots.count()).toBe(target);
+    expect(await readThreadSnapshot(threadId(0))).toBeUndefined();
+    expect(await readThreadSnapshot(threadId(MAX_THREAD_SNAPSHOTS))).toBeDefined();
+  });
+
+  it('leaves an under-budget store completely alone', async () => {
+    await cacheStoryCommentsSnapshot(STORY.story_id, { order: 'oldest' }, COMMENTS);
+    await cacheStoryCommentsSnapshot(STORY.story_id, { order: 'newest' }, COMMENTS);
+    expect(await storyComments.count()).toBe(2);
+  });
+
+  it('is best-effort: a trim failure never throws into the read path', async () => {
+    vi.spyOn(storyComments, 'count').mockRejectedValueOnce(new Error('quota'));
+    await expect(cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS)).resolves.toBeUndefined();
   });
 });
 

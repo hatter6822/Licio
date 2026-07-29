@@ -135,6 +135,74 @@ describe('thread projection (WS-R.2.2)', () => {
     expect(projected[0]?.visibleCid).toBe('t-fresh');
   });
 
+  it('refuses a cross-author edit and keeps it inspectable (never the visible tip)', () => {
+    // `edit` authorizes acting on one's OWN contribution; superseding another
+    // member's requires `moderate`, i.e. a `moderation_action`.  The hostile edit
+    // carries the higher room-log seq, so only the ownership gate stops it winning.
+    const victim = tr('x-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const hostile = tr(
+      'x-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'x-post',
+      }),
+      { roomLogSeq: 5 },
+    );
+    const projected = reduceThreadProjection([victim, hostile]);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({ rootCid: 'x-post', visibleCid: 'x-post' });
+    expect(projected[0]?.editChain).toEqual(['x-post']);
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['x-edit']);
+  });
+
+  it('refuses a cross-author tombstone but honours a moderation_action', () => {
+    const victim = tr('y-post', mkRecord({ event_type: 'post' }));
+    const hostileTomb = tr(
+      'y-tomb',
+      mkRecord({
+        event_type: 'tombstone',
+        author_account_id: 'attacker',
+        target_record_cid: 'y-post',
+      }),
+    );
+    const notHidden = reduceThreadProjection([victim, hostileTomb]);
+    expect(notHidden[0]).toMatchObject({ hidden: false });
+    expect(notHidden[0]?.unauthorizedSupersedes).toEqual(['y-tomb']);
+
+    const moderation = tr(
+      'y-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'y-post',
+      }),
+    );
+    expect(reduceThreadProjection([victim, moderation])[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'y-mod',
+    });
+  });
+
+  it("still applies an edit made from the author's SECOND device", () => {
+    // Ownership is per ACCOUNT, not per device key — a member editing from another
+    // of their own devices must keep working.
+    const post = tr('z-post', mkRecord({ event_type: 'post', author_device_key_id: 'key-a' }));
+    const fromOtherDevice = tr(
+      'z-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_device_id: 'dev-2',
+        author_device_key_id: 'key-b',
+        replaces_record_cid: 'z-post',
+      }),
+    );
+    const projected = reduceThreadProjection([post, fromOtherDevice]);
+    expect(projected[0]?.visibleCid).toBe('z-edit');
+    expect(projected[0]?.unauthorizedSupersedes).toBeUndefined();
+  });
+
   it('is independent of record arrival order (property)', () => {
     const records = [post, edit1, edit2, tomb];
     const reference = JSON.stringify(

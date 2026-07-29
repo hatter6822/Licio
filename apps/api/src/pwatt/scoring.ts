@@ -39,6 +39,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { AggregationWindowSize } from '../events/stores.js';
 import { PRIVACY_BUCKET, PSEUDONYMOUS_USER_ID, type SignalLedgerRecord } from '../events/stores.js';
 import type { IdentityServices } from '../identity/services.js';
+import type { StoredUser } from '../identity/store.js';
 import {
   computeAggregationWindow,
   SCORING_TOPICS,
@@ -63,6 +64,20 @@ import { pwattRowForRanking } from './shadow.js';
 
 /** How many trailing windows condition the base rate (WS-E.2.2a, SPEC §8). */
 const BASE_RATE_TRAILING_WINDOWS = 6;
+
+/** Ids per batched identity read (mirrors the WS-E retention sweep's chunk). */
+const IDENTITY_READ_CHUNK = 500;
+
+/**
+ * The two actor keys that resolve to NO account: the coarse anonymity bucket
+ * and the deletion pseudonym. ONE predicate for every consumer — the profiled
+ * prefetch set, the account-age trust factor, and the owner-only Signal Ledger
+ * — because a key that cannot be linked to an owner must be skipped by all
+ * three or by none.
+ */
+function isUnlinkableActor(actorKey: string): boolean {
+  return actorKey === PRIVACY_BUCKET || actorKey === PSEUDONYMOUS_USER_ID;
+}
 
 /** The salting-resistant low quantile of an item's actor trust weights (the
  *  25th percentile; absent ⇒ 1, no effect). Sorting ascending and reading near
@@ -338,12 +353,25 @@ export async function runPwattWindow(
   const profiledActors = new Set<string>();
   for (const item of aggregation.items.values()) {
     for (const actorKey of item.actors.keys()) {
-      if (actorKey !== PRIVACY_BUCKET && actorKey !== PSEUDONYMOUS_USER_ID) {
-        profiledActors.add(actorKey);
-      }
+      if (!isUnlinkableActor(actorKey)) profiledActors.add(actorKey);
     }
   }
   const authenticityByActor = await events.behaviorStore.getAuthenticityMany([...profiledActors]);
+  // ONE batched identity read per WINDOW over that same actor set. Both
+  // consumers of the account row — the trust factor below and the Signal-Ledger
+  // population at the end of the item loop — read it from this map, so the job
+  // costs one chunked query instead of a point lookup per actor PER ITEM (a
+  // 10k-actor item alone used to serialize 10k round-trips inside the ledger
+  // branch, and the trust path fetched every one of them a second time).
+  // Chunked at 500, mirroring the WS-E retention sweep.
+  const userByActor = new Map<string, StoredUser>();
+  const profiledActorIds = [...profiledActors];
+  for (let offset = 0; offset < profiledActorIds.length; offset += IDENTITY_READ_CHUNK) {
+    const chunk = profiledActorIds.slice(offset, offset + IDENTITY_READ_CHUNK);
+    for (const user of await identity.store.getUsersByIds(chunk)) {
+      userByActor.set(user.userId, user);
+    }
+  }
   // An assessment is only trustworthy while its evidence is still in the active
   // evaluation window. An actor dormant PAST the behavior lookback is not
   // recomputed (no current windows) yet survives to the 14-day assessment cutoff,
@@ -351,13 +379,13 @@ export async function runPwattWindow(
   // assessment last computed before the lookback edge (WS-E BAI).
   const assessmentFreshFromIso = new Date(nowMs - BEHAVIOR_LOOKBACK_MS).toISOString();
   const trustCache = new Map<string, number>();
-  const actorTrust = async (actorKey: string): Promise<number> => {
+  const actorTrust = (actorKey: string): number => {
     // The anonymity bucket and the deletion pseudonym are NEVER profiled and
     // carry full trust (literal 1) — the same set the behavior fold skips.
-    if (actorKey === PRIVACY_BUCKET || actorKey === PSEUDONYMOUS_USER_ID) return 1;
+    if (isUnlinkableActor(actorKey)) return 1;
     const cached = trustCache.get(actorKey);
     if (cached !== undefined) return cached;
-    const user = await identity.store.getUser(actorKey);
+    const user = userByActor.get(actorKey);
     // An UNRESOLVABLE actor is fully trusted (literal 1) — no age, and no
     // authenticity applied: the behavior assessments are keyed by user id and
     // purged with the account, so an unresolvable actor has none, and the
@@ -414,7 +442,7 @@ export async function runPwattWindow(
     // trips detection sooner AND earns less distribution power).
     const trustByActor = new Map<string, number>();
     for (const actorKey of item.actors.keys()) {
-      trustByActor.set(actorKey, await actorTrust(actorKey));
+      trustByActor.set(actorKey, actorTrust(actorKey));
     }
     const trustFactor = lowQuantileTrust([...trustByActor.values()]);
 
@@ -525,6 +553,10 @@ export async function runPwattWindow(
       },
     };
     const v0 = computePwattV0(input, config.v0);
+    // Index the per-actor breakdowns ONCE: the ledger loop below is already
+    // O(actors), and a linear `find` per iteration made it O(actors²) in
+    // comparisons for the busiest items.
+    const breakdownByActor = new Map(v0.actorBreakdowns.map((b) => [b.actor, b]));
 
     // The INTEGRATED v1 stage (WS-E.2.3a/b) produces the two CONTENT components
     // — ActiveAttention and ConstructiveParticipation — with the contribution-
@@ -660,11 +692,16 @@ export async function runPwattWindow(
       continue;
     }
     for (const [actorKey, fold] of item.actors) {
-      if (actorKey === PRIVACY_BUCKET) continue; // pseudonymous: no ledger link
+      // The anonymity bucket AND the deletion pseudonym: neither resolves to a
+      // linkable owner, so neither can carry an owner-only ledger entry. The
+      // SAME predicate the prefetch and the trust factor use — when the two
+      // sets disagreed, the pseudonym (a well-formed UUID) reached the database
+      // on every scored window only to be dropped by the `!user` guard below.
+      if (isUnlinkableActor(actorKey)) continue;
       const summaryInput = toActorSummary(actorKey, fold);
-      const breakdown = v0.actorBreakdowns.find((b) => b.actor === actorKey);
+      const breakdown = breakdownByActor.get(actorKey);
       const annotations = [...(breakdown?.annotations ?? []), ...v0.annotations];
-      const user = await identity.store.getUser(actorKey);
+      const user = userByActor.get(actorKey);
       if (!user) continue;
       const preference = user.privacySettings.attention_retention_preference;
       ledgerEntries.push({
