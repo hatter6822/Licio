@@ -23,9 +23,9 @@ import {
   buildSummaryDeps,
   buildTranslationDeps,
 } from '../ai-governance/wiring.js';
-import { rateLimit } from '../lib/rate-limit.js';
+import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
 import { zValidator } from '../lib/validate.js';
-import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
+import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
@@ -53,14 +53,30 @@ const translationReportBodySchema = z
 /**
  * WS-K report-route budget (SPEC §19.1: never per-IP).
  *
- * A global fixed window over the two AI report routes.  They are the only
- * surfaces here that WRITE on behalf of an ordinary account, and they wrote
- * unboundedly: no limit and, until the pending-subject unique index, no
- * deduplication either.  Generous — a real reader reports a handful of things a
- * day — and shared by both routes, so a caller cannot spend the summary budget
- * and then the translation one.
+ * TWO limiters, because they answer different questions and only one of them is
+ * an abuse budget.
+ *
+ * The per-ACCOUNT window is the abuse control.  A single global window is a
+ * load-shedding ceiling that counts every caller into one bucket, so one
+ * authenticated account could spend the whole allowance — with invalid bodies
+ * too, since a limiter runs before validation — and every other user would
+ * receive 429 from BOTH report routes for the rest of the minute.  That lets one
+ * reporter disable reporting platform-wide, which is a worse failure than the
+ * unbounded writes the limit was added for.
+ *
+ * The global window stays underneath as a much higher process ceiling, so a
+ * broad distributed flood still cannot make these routes the most expensive
+ * thing the process does.  Both are shared by the two routes, so a caller cannot
+ * spend the summary budget and then the translation one.
  */
-const reportLimit = rateLimit({ limit: 60, windowMs: 60_000 });
+const reportAccountLimit = perAccountRateLimit({
+  limit: 20,
+  windowMs: 60_000,
+  // The routes run `authMiddleware()` first, so an authenticated caller always
+  // has an id here; an unauthenticated one is refused before this ever runs.
+  accountId: (c) => getAuth(c as unknown as Parameters<typeof getAuth>[0])?.userId ?? null,
+});
+const reportGlobalLimit = rateLimit({ limit: 600, windowMs: 60_000 });
 
 export function createAiGovernancePublicRoutes() {
   // Mounted at '/', so auth is applied PER-ROUTE (a `.use('*')` here would leak
@@ -119,7 +135,8 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/translations/:id/report',
         authMiddleware(),
-        reportLimit,
+        reportGlobalLimit,
+        reportAccountLimit,
         zValidator('json', translationReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();
@@ -137,7 +154,8 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/summaries/:id/report',
         authMiddleware(),
-        reportLimit,
+        reportGlobalLimit,
+        reportAccountLimit,
         zValidator('json', summaryReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();

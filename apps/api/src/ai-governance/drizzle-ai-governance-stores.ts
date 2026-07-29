@@ -643,11 +643,45 @@ export class DrizzleAiReviewQueueStore implements AiReviewQueueStore {
       )
       .limit(1);
     const existing = incumbent[0];
-    // Only the partial unique index can make the insert a no-op, so an absent
-    // incumbent means something else swallowed the write — never silently
-    // report success for a row that does not exist.
-    if (!existing) throw new Error('ai_review_queue insert returned no row');
-    return this.#toItem(existing);
+    if (existing) return this.#toItem(existing);
+    // The incumbent was RESOLVED between the conflicting insert and this read.
+    // The partial index only covers `pending`, so the row that blocked us is no
+    // longer in the way — retry once and the insert now succeeds.  Throwing here
+    // would 500 the reporting endpoint for a report already persisted, and leave
+    // no queue item for it: the steward never sees the post-resolution report.
+    const retried = await this.#db
+      .insert(aiReviewQueue)
+      .values({
+        reviewId: `airev-${randomUUID()}`,
+        kind: item.kind,
+        subjectRef: item.subjectRef,
+        context: item.context,
+        status: item.status,
+        resolution: item.resolution,
+        resolvedBy: item.resolvedBy,
+        createdAt: new Date(),
+        resolvedAt: null,
+      })
+      .onConflictDoNothing()
+      .returning();
+    const retriedRow = retried[0];
+    if (retriedRow) return this.#toItem(retriedRow);
+    // A THIRD party opened a pending item in the meantime — that is the
+    // dedup working, so return theirs rather than failing.
+    const raced = await this.#db
+      .select()
+      .from(aiReviewQueue)
+      .where(
+        and(
+          eq(aiReviewQueue.kind, item.kind),
+          eq(aiReviewQueue.subjectRef, item.subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .limit(1);
+    const racedRow = raced[0];
+    if (!racedRow) throw new Error('ai_review_queue insert returned no row');
+    return this.#toItem(racedRow);
   }
 
   async get(reviewId: string): Promise<AiReviewItem | null> {

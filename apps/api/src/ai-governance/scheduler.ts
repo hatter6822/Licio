@@ -61,7 +61,23 @@ export async function runSummarySweep(
   limit: number = SUMMARY_SWEEP_THREAD_LIMIT,
 ): Promise<{ examined: number; generated: number; skipped: number }> {
   const deps = buildSummaryDeps(ai);
-  const threads = await deps.stories.listThreads(null, limit);
+  // PAGE FORWARD from where the last tick stopped.  Reading `listThreads(null,
+  // limit)` every hour returns the same newest page forever: once those threads
+  // have drafts — or keep answering `insufficient_activity` — the sweep never
+  // reaches an older one, so any deployment with more than `limit` threads
+  // leaves the remainder permanently without the audit summaries this exists to
+  // produce.  The cursor is process-local and deliberately so: losing it on
+  // restart re-walks from the newest page, which is wasteful but not wrong,
+  // whereas persisting it would be a schema change for a maintenance job whose
+  // work is already idempotent.
+  const threads = await deps.stories.listThreads(sweepCursor, limit);
+  // Exhausted the tail ⇒ start again from the newest next tick, so a thread that
+  // only later crosses the activity threshold is eventually summarized.
+  const last = threads[threads.length - 1];
+  sweepCursor =
+    threads.length < limit || last === undefined
+      ? null
+      : { createdAt: last.createdAt, threadId: last.threadId };
   let generated = 0;
   let skipped = 0;
   for (const thread of threads) {
@@ -80,6 +96,15 @@ export async function runSummarySweep(
     }
   }
   return { examined: threads.length, generated, skipped };
+}
+
+/** Where the next sweep resumes; null ⇒ the newest page.  Reset by
+ *  {@link resetSummarySweepCursor} so a test can pin one pass deterministically. */
+let sweepCursor: { createdAt: string; threadId: string } | null = null;
+
+/** Restart the sweep from the newest page (tests; a fresh process starts here). */
+export function resetSummarySweepCursor(): void {
+  sweepCursor = null;
 }
 
 /** One maintenance pass. Each task is isolated — one failure never blocks the

@@ -59,3 +59,73 @@ export function rateLimit(options: RateLimitOptions): MiddlewareHandler {
     return;
   };
 }
+
+/** Max distinct accounts tracked in one window before the map is reset.
+ *  A bound, not a target: the map is per-endpoint and per-window, and a limiter
+ *  that can grow without one is itself the memory-exhaustion vector it exists
+ *  to prevent. */
+const MAX_TRACKED_ACCOUNTS = 10_000;
+
+export interface PerAccountRateLimitOptions extends RateLimitOptions {
+  /** Read the authenticated account id; return null to skip (unauthenticated
+   *  routes have no account to bill and belong on the global limiter). */
+  accountId: (c: Parameters<MiddlewareHandler>[0]) => string | null;
+}
+
+/**
+ * A per-ACCOUNT fixed-window budget (SPEC §19.1's first sanctioned form).
+ *
+ * The global limiter above is a load-shedding CEILING, not fairness: it counts
+ * every caller into one bucket, so a single authenticated account can spend the
+ * whole allowance — with invalid bodies too, since the limiter runs before
+ * validation — and every other user receives 429 for the rest of the window.
+ * For an authenticated abuse budget that is the wrong shape: it lets one
+ * reporter disable a feature platform-wide.
+ *
+ * Keyed on the ACCOUNT, never the network address: the account id is a
+ * first-party resource we already hold, so this stays inside the address-blind
+ * architecture the module header describes.  Pair it with a generous global
+ * ceiling when load shedding is also wanted — the two answer different
+ * questions.
+ */
+export function perAccountRateLimit(options: PerAccountRateLimitOptions): MiddlewareHandler {
+  const { limit, windowMs, accountId, now: clock = () => Date.now() } = options;
+  let counts = new Map<string, number>();
+  let resetAt = 0;
+
+  return async (c, next) => {
+    const now = clock();
+    if (now >= resetAt) {
+      counts = new Map();
+      resetAt = now + windowMs;
+    }
+    const account = accountId(c);
+    // No account ⇒ nothing to bill fairly.  Passing through is correct rather
+    // than lenient: such a route is either unauthenticated (the global limiter
+    // is its budget) or the auth middleware has already refused it.
+    if (account === null) {
+      await next();
+      return;
+    }
+    // Shed the whole window rather than grow without bound.  Losing a window's
+    // counts is a smaller failure than an unbounded map, and the global ceiling
+    // still applies underneath.
+    if (counts.size >= MAX_TRACKED_ACCOUNTS && !counts.has(account)) {
+      counts = new Map();
+      resetAt = now + windowMs;
+    }
+    const spent = counts.get(account) ?? 0;
+    if (spent >= limit) {
+      c.header('Retry-After', String(Math.max(1, Math.ceil((resetAt - now) / 1000))));
+      return c.json(
+        {
+          error: { code: 'rate_limited', message: 'Too many attempts. Try again later.' },
+        } satisfies ApiError,
+        429,
+      );
+    }
+    counts.set(account, spent + 1);
+    await next();
+    return;
+  };
+}

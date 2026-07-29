@@ -12,13 +12,20 @@
 import { decCompare, decSum } from '@licio/governance';
 import type { GovernanceProposalRecord, GovernanceProposalStore } from '../knomosis/stores.js';
 import { appendChainedAudit } from './audit-chain.js';
-import { abandonOpenIntent, createPaymentIntent, type IntentDeps } from './intents.js';
+import {
+  abandonOpenIntent,
+  createPaymentIntent,
+  type IntentDeps,
+  projectGrantPayout,
+} from './intents.js';
 import { assertGovernanceWritable, type TreasuryGovernanceError, tgErr } from './profile.js';
 import type { GrantMilestoneRecord, GrantRecord, GrantStore } from './stores.js';
 
 export interface GrantDeps extends IntentDeps {
   grants: GrantStore;
   proposals: GovernanceProposalStore;
+  /** Operational alert sink (the container provides it; optional for tests). */
+  alert?: (event: string, meta: Record<string, unknown>) => void;
 }
 
 /** Build the milestone plan from the proposal's requested action: an explicit
@@ -352,6 +359,26 @@ export async function updateGrantMilestone(
     },
     treasuryId: grant.treasuryId,
   });
+  // A REJECTION moves the payout denominator with no intent left in flight, so
+  // `reconcileIntents` — which sweeps intent states — never sees it.  If the
+  // last payable tranche had already finalized, the grant would otherwise sit at
+  // `partially_paid` forever and keep `listUnsettledByRecipient` blocking the
+  // recipient's last wallet unlink.  `projectGrantPayout` is exported and
+  // documented as needing this call site; it had none.
+  //
+  // AFTER the CAS and the audit entry, and non-fatal: the transition is already
+  // durable, and a projection failure must not turn a recorded rejection into a
+  // 409 the steward would retry.  The next intent finality re-projects anyway.
+  if (input.state === 'rejected') {
+    try {
+      await projectGrantPayout(deps, input.grantId);
+    } catch (error) {
+      deps.alert?.('treasury.grant_payout_projection_failed', {
+        grant_id: input.grantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   return { ok: true, grant: updated };
 }
 

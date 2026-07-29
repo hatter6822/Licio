@@ -26,7 +26,7 @@ import {
   type PipelineDeps,
 } from '../ai-governance/pipelines.js';
 import { type RuntimeMonitorDeps, runtimeMonitorTick } from '../ai-governance/runtime-monitor.js';
-import { runSummarySweep } from '../ai-governance/scheduler.js';
+import { resetSummarySweepCursor, runSummarySweep } from '../ai-governance/scheduler.js';
 import { seedAiGovernance } from '../ai-governance/seed.js';
 import {
   type AiGovernanceServices,
@@ -455,6 +455,9 @@ describe('WS-K.1.4a summary generation', () => {
       const f = fresh();
       f.ai.ingestion = f.forum.ingestion;
       f.ai.forum = f.forum.forum;
+      // The sweep cursor is process-local and persists across tests in a file;
+      // reset it so each case starts from the newest page deterministically.
+      resetSummarySweepCursor();
       return f;
     }
 
@@ -523,6 +526,49 @@ describe('WS-K.1.4a summary generation', () => {
       expect(failed).toEqual([bad.threadId]);
       expect(result.generated).toBe(1);
       expect(await f.ai.summaries.getLatestForThread(good.threadId)).not.toBeNull();
+    });
+
+    it('PAGES FORWARD — a second tick reaches threads the first never saw', async () => {
+      // Reading the newest page every hour returns the same threads forever:
+      // once they have drafts, or keep answering `insufficient_activity`, the
+      // sweep never reaches an older one and any deployment with more threads
+      // than the page size leaves the remainder permanently unsummarized.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      // Two threads per tick over four threads: without a cursor the second
+      // tick re-reads the same two and the older half is never summarized.
+      const first = await runSummarySweep(f.ai, () => {}, 2);
+      const second = await runSummarySweep(f.ai, () => {}, 2);
+      expect(first.generated).toBe(2);
+      expect(second.generated).toBe(2);
+      // Every thread ended up with a draft — the property that matters.
+      for (const id of ids) {
+        expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
+      }
+    });
+
+    it('WRAPS to the newest page once the tail is exhausted', async () => {
+      // A thread that only later crosses the activity threshold must still be
+      // reachable, so the cursor resets rather than parking at the end.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      // A short page (limit 2) over one thread ⇒ the tail is reached at once.
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(1);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      expect((await runSummarySweep(f.ai, () => {}, 2)).generated).toBe(1);
     });
 
     it('the sweep is BOUNDED — it never walks more threads than its limit', async () => {
