@@ -199,6 +199,14 @@ guard, the governed models, and a module singleton for routes.
   with no AI wired keeps full governance and simply gets no advice.
 - `runtime-monitor.ts` — runtime drift/report-rate alerts + rollback
   recommendation (WS-K.1.2f).
+- The hourly SUMMARY SWEEP pages with a DURABLE cursor (`ai_sweep_cursors`,
+  migration 0108).  The tick runs under a distributed lease, so a cursor held in
+  the process is lost to every restart, deploy, and handover to another pod —
+  each one resetting the sweep to the newest page, which at one page an hour
+  leaves a large installation's older threads permanently unsummarized.  The
+  cursor is composite (`created_at`, `thread_id`) because a bare timestamp
+  cannot break a tie, and a tie resolved the wrong way either skips a thread or
+  loops on one.
 - `config.ts` / `metrics.ts` / `scheduler.ts` / `services.ts` / `wiring.ts` —
   the fail-closed config, the counters, the lease-guarded hourly tick, the
   container + singleton, and the deps-builders + the durable

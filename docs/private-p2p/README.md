@@ -263,6 +263,15 @@ slice is closed on the convergence side:
   the room commitment in the transcript stops a member of two rooms linking a
   device across them.  The public half still rides in the sealed announcement,
   so discovery is unchanged.
+- The Tier-2 rendezvous cap is bound to the announcement's DIAL-CRITICAL fields
+  (`dialBinding`: the signalling key AND the claimed `peer_device_id`,
+  length-prefixed).  Binding the key alone left a targeted eviction: a member
+  could open an honest announcement, keep its signalling key so the proof still
+  verified, swap the device id, and re-seal with a later expiry — and
+  `selectFreshestCandidates` dedups by the signalling key BEFORE cap
+  verification, so the forgery replaced the honest record, the dial reached the
+  honest peer, failed the §15.5 claimed-device check, and cooled down that
+  device's (now deterministic) key.
 - Dial selection ALTERNATES between the freshest candidate and the most starved
   one (`pickDialCandidate`).  The failed-dial cooldown is keyed by the record's
   ephemeral key, so a member rotating it puts a fresh spoof at the head of every
