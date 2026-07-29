@@ -81,17 +81,75 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
 
     // the member is now enrolled → hooks present, build + filterVerified work
     const hooks = await memberMgr.hooks(EPOCH);
-    expect(hooks).toBeDefined();
+    if (!hooks) throw new Error('expected enrolled hooks');
     // Per-epoch bucket (-1) so the verify is clock-independent (the time-bucket window is
     // covered by poll-filter.test.ts). filterVerified returns the surviving candidate indices.
-    // biome-ignore lint/style/noNonNullAssertion: asserted defined
-    const cap = hooks!.build('room-blind', EPOCH, -1);
-    expect(cap).not.toBeNull();
-    // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.filterVerified([cap!], 'room-blind', EPOCH, -1, 0)).toEqual([0]);
+    const DIAL = new Uint8Array(32).fill(7); // the announcement's ephemeral signaling key
+    const cap = hooks.build('room-blind', EPOCH, -1, DIAL);
+    if (!cap) throw new Error('expected a built cap');
+    const bound = { ...cap, signalingPublicKey: DIAL };
+    expect(hooks.filterVerified([bound], 'room-blind', EPOCH, -1, 0)).toEqual([0]);
     // a wrong-context verify drops it (the proof binds the room blind id)
-    // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.filterVerified([cap!], 'other-room', EPOCH, -1, 0)).toEqual([]);
+    expect(hooks.filterVerified([bound], 'other-room', EPOCH, -1, 0)).toEqual([]);
+  });
+
+  it('a LIFTED cap cannot be re-published under another dial identity (no eviction)', async () => {
+    // The attack the binding closes.  Any member can poll, open an honest device's
+    // announcement, and lift its `(proof, pseudonym)` pair.  Dedup is by PSEUDONYM with
+    // first occurrence winning, so re-publishing that pair under the attacker's own dial
+    // info would take the honest device's one slot and evict it from discovery — a
+    // targeted eviction primitive available to every room member.
+    const engine = new FakeEngine();
+    const mgr = new RendezvousCapManager(memStorage());
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    const hooks = await mgr.hooks(EPOCH);
+    if (!hooks) throw new Error('expected enrolled hooks');
+
+    const honestDial = new Uint8Array(32).fill(1);
+    const attackerDial = new Uint8Array(32).fill(2);
+    const honestCap = hooks.build('room-blind', EPOCH, -1, honestDial);
+    if (!honestCap) throw new Error('expected a built cap');
+
+    // Bound to its own announcement: verifies.
+    expect(
+      hooks.filterVerified(
+        [{ ...honestCap, signalingPublicKey: honestDial }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([0]);
+
+    // The SAME proof + pseudonym, re-published under the attacker's dial identity: the
+    // proof verifies against nothing, so it never reaches the dedup step and cannot
+    // occupy the honest device's slot.
+    expect(
+      hooks.filterVerified(
+        [{ ...honestCap, signalingPublicKey: attackerDial }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([]);
+
+    // And with BOTH present — the attacker's lifted copy first, which is the ordering
+    // that would win the first-occurrence dedup — the honest record still survives.
+    expect(
+      hooks.filterVerified(
+        [
+          { ...honestCap, signalingPublicKey: attackerDial },
+          { ...honestCap, signalingPublicKey: honestDial },
+        ],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([1]);
   });
 
   it('a non-enrolled device gets no hooks (rides Tier-1)', async () => {
@@ -108,17 +166,20 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
     await mgr.sync(ctxFor(engine, 'dev', true)); // install
     const hooks = await mgr.hooks(EPOCH);
     if (!hooks) throw new Error('expected enrolled hooks');
-    const valid = hooks.build('room-blind', EPOCH, -1);
-    if (!valid) throw new Error('expected a built cap');
+    const DIAL = new Uint8Array(32).fill(3);
+    const built = hooks.build('room-blind', EPOCH, -1, DIAL);
+    if (!built) throw new Error('expected a built cap');
+    const valid = { ...built, signalingPublicKey: DIAL };
 
     // A hostile member floods malformed sealed caps around the one valid cap.  The OLD eager
     // decode threw out of the whole `.map` (a discovery DoS); the hardened filter SKIPS each
     // malformed cap and still returns the valid one's ORIGINAL index — and never throws.
     const batch = [
-      { proof: 'not-base64url!@#', pseudonym: '***' },
+      { proof: 'not-base64url!@#', pseudonym: '***', signalingPublicKey: DIAL },
       valid,
-      { proof: 'AAAA', pseudonym: 'AAAA' }, // decodes but is the wrong length / not a valid point
-      { proof: '', pseudonym: '' },
+      // decodes but is the wrong length / not a valid point
+      { proof: 'AAAA', pseudonym: 'AAAA', signalingPublicKey: DIAL },
+      { proof: '', pseudonym: '', signalingPublicKey: DIAL },
     ];
     let survivors: number[] = [];
     expect(() => {

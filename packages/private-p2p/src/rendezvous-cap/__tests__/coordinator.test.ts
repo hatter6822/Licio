@@ -20,6 +20,9 @@ import {
   type VerifiablePresence,
 } from '../index.js';
 
+/** The announcement's dial identity a Tier-2 proof binds to (see `rendezvousPresentationHeader`). */
+const BIND = new Uint8Array(32).fill(9);
+
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const ROOM = enc('room-blind-id');
 const NOW = 1_700_000_000_000;
@@ -49,13 +52,14 @@ describe('Tier-2 rendezvous-cap coordinator (full client flow)', () => {
     expect(alice.isEnrolled(String(EPOCH))).toBe(true);
 
     // Alice announces; Bob (a peer holding the same issuer key) verifies it.
-    const presence = alice.announce(ROOM, String(EPOCH), BUCKET);
+    const presence = alice.announce(ROOM, String(EPOCH), BUCKET, BIND);
     if (!presence) throw new Error('expected a presence announcement');
     const record: VerifiablePresence<string> = {
       pseudonym: pseudonymToBytes(presence.pseudonym),
       proof: presence.proof,
       epoch: String(EPOCH),
       bucket: BUCKET,
+      binding: BIND,
       value: 'alice',
     };
     const bobIssuerKey = bob.issuerKey(String(EPOCH));

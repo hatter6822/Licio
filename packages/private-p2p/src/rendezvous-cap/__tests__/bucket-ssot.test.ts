@@ -18,6 +18,9 @@ import {
   RendezvousMember,
 } from '../index.js';
 
+/** The announcement's dial identity a Tier-2 proof binds to (see `rendezvousPresentationHeader`). */
+const BIND = new Uint8Array(32).fill(9);
+
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 describe('Tier-2 bucket-width SSOT (cap ≡ rendezvous discovery bucket)', () => {
@@ -32,7 +35,7 @@ describe('Tier-2 bucket-width SSOT (cap ≡ rendezvous discovery bucket)', () =>
     const member = new RendezvousMember();
     member.installCredential('7', admin.issueForCommitment(member.commitment), admin.publicKey);
     const roomBlindId = enc('room-blind-id');
-    const presence = member.announce(roomBlindId, '7', bucket);
+    const presence = member.announce(roomBlindId, '7', bucket, BIND);
     expect(presence).not.toBeNull();
     const verified = filterVerifiedPresence(
       [
@@ -43,6 +46,7 @@ describe('Tier-2 bucket-width SSOT (cap ≡ rendezvous discovery bucket)', () =>
           proof: presence!.proof,
           epoch: '7',
           bucket,
+          binding: BIND,
           value: 'ok',
         },
       ],

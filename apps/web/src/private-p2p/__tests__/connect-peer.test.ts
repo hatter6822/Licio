@@ -904,8 +904,8 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     if (!issuerKey) throw new Error('member not enrolled');
     const issuerPk = cap.issuerKeyFromBytes(issuerKey);
     const hooks = {
-      build: (rb: string, e: number, b: number) => {
-        const built = cap.buildAnnouncementCap(legitMember, rb, e, b);
+      build: (rb: string, e: number, b: number, signalingPublicKey: Uint8Array) => {
+        const built = cap.buildAnnouncementCap(legitMember, rb, e, b, signalingPublicKey);
         if (built === null) return null;
         const key = legitMember.issuerKey(String(e));
         if (key === null) return null;
@@ -916,7 +916,11 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
         };
       },
       filterVerified: (
-        caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
+        caps: ReadonlyArray<{
+          proof: string;
+          pseudonym: string;
+          signalingPublicKey: Uint8Array;
+        }>,
         rb: string,
         e: number,
         b: number,
@@ -929,6 +933,7 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
               proof: cap.fromBase64Url(c.proof),
               epoch: String(e),
               bucket: b,
+              binding: c.signalingPublicKey,
               value: i,
             })),
             issuerPk,
@@ -949,10 +954,20 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     );
     const timeBucket = p2p.rendezvousTimeBucket(Date.now());
     const roomBlindId = await p2p.deriveRoomBlindId(rendezvousKey, epoch, timeBucket);
-    const floodCap = cap.buildAnnouncementCap(floodMember, roomBlindId, epoch, timeBucket);
+    // The flooder's cap is BOUND to the dial identity it will publish — so this
+    // exercises a well-formed, correctly-bound cap under the WRONG issuer, which is the
+    // property the test is about (issuer mismatch), not an incidentally-unbound one.
+    const floodSigKey = (await p2p.generateX25519KeyPair()).publicKey;
+    const floodCap = cap.buildAnnouncementCap(
+      floodMember,
+      roomBlindId,
+      epoch,
+      timeBucket,
+      floodSigKey,
+    );
     if (!floodCap) throw new Error('flood cap not built');
 
-    const sig = p2p.toBase64Url((await p2p.generateX25519KeyPair()).publicKey);
+    const sig = p2p.toBase64Url(floodSigKey);
     const rendezvous = inMemoryRendezvous();
     for (let i = 0; i < 20; i++) {
       await rendezvous.announce(

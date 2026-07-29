@@ -167,8 +167,8 @@ export class RendezvousCapManager {
     const issuerKey = cap.issuerKeyFromBytes(issuerKeyBytes); // parse once, reuse per poll
     const roomBlindIdBytes = (s: string): Uint8Array => new TextEncoder().encode(s);
     return {
-      build: (roomBlindId, e, bucket) => {
-        const built = cap.buildAnnouncementCap(member, roomBlindId, e, bucket);
+      build: (roomBlindId, e, bucket, signalingPublicKey) => {
+        const built = cap.buildAnnouncementCap(member, roomBlindId, e, bucket, signalingPublicKey);
         // The cap rides SEALED inside the announcement only (PRIV-API-RENDEZVOUS-1: no top-level cap),
         // so `build` returns just the member-verifiable {proof, pseudonym} — no issuer key (the
         // verifier is a member who already holds the issuer key via the op log).
@@ -186,6 +186,7 @@ export class RendezvousCapManager {
           proof: Uint8Array;
           epoch: string;
           bucket: number;
+          binding: Uint8Array;
           value: number;
         }> = [];
         // SAMPLE the capped set in a fresh random order each poll (PRIV-CAP-4), so the per-poll verify
@@ -204,7 +205,16 @@ export class RendezvousCapManager {
           } catch {
             continue; // malformed sealed cap — skip it (never throw out of the whole batch)
           }
-          decoded.push({ pseudonym, proof, epoch: String(e), bucket, value: i });
+          decoded.push({
+            pseudonym,
+            proof,
+            epoch: String(e),
+            bucket,
+            // The proof is bound to the announcement's dial identity; verifying against
+            // anything else would bind it to nothing.
+            binding: c.signalingPublicKey,
+            value: i,
+          });
         }
         return cap
           .filterVerifiedPresence(decoded, issuerKey, roomBlindIdBytes(roomBlindId), { nowMs })

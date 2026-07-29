@@ -21,15 +21,21 @@ export interface AnnouncementCap {
 
 /**
  * Build the cap to seal into an announcement for `member` at `(roomBlindId, epoch, bucket)`,
+ * BOUND to `signalingPublicKey` — the ephemeral dial identity this announcement publishes —
  * or `null` if the member is not enrolled for the epoch (the announcement then rides Tier-1).
+ *
+ * The binding is what stops a polled cap being lifted onto someone else's dial info and
+ * evicting the honest device from discovery by taking its pseudonym slot; see
+ * `rendezvousContext`.
  */
 export function buildAnnouncementCap(
   member: RendezvousMember,
   roomBlindId: string,
   epoch: number,
   bucket: number,
+  signalingPublicKey: Uint8Array,
 ): AnnouncementCap | null {
-  const presence = member.announce(enc(roomBlindId), String(epoch), bucket);
+  const presence = member.announce(enc(roomBlindId), String(epoch), bucket, signalingPublicKey);
   if (presence === null) return null;
   return {
     proof: toBase64Url(presence.proof),

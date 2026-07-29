@@ -156,10 +156,17 @@ export type DeviceResolver = (
  * candidates (defensive-decoded + per-poll-bounded against a flood, PR3b).
  */
 export interface RendezvousCapHooks {
+  /**
+   * `signalingPublicKey` is the ephemeral dial identity this announcement will publish.
+   * The cap is BOUND to it, so a cap lifted out of a polled announcement cannot be
+   * re-published under someone else's dial info — which, because dedup is by pseudonym
+   * with first occurrence winning, would evict the honest device from discovery.
+   */
   build(
     roomBlindId: string,
     epoch: number,
     bucket: number,
+    signalingPublicKey: Uint8Array,
   ): { proof: string; pseudonym: string } | null;
   /**
    * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
@@ -169,7 +176,9 @@ export interface RendezvousCapHooks {
    * SKIPPED (never crash the batch) and the per-poll verify count is bounded (PR3b).
    */
   filterVerified(
-    caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
+    /** Each cap WITH the dial identity of the announcement it came from — the proof is
+     *  verified against that key, never one the caller picks. */
+    caps: ReadonlyArray<{ proof: string; pseudonym: string; signalingPublicKey: Uint8Array }>,
     roomBlindId: string,
     epoch: number,
     bucket: number,
@@ -337,7 +346,8 @@ export async function connectPrivatePeer(
   // linking handle).  A member-only verifier opens it from the polled announcement and
   // `filterVerified`s by the verified pseudonym; the server sees only the per-device derived blind id
   // (one slot per device per bucket) and runs the §27 Tier-1 sample-poll.
-  const cap = params.rendezvousCap?.build(roomBlindId, epoch, timeBucket) ?? undefined;
+  const cap =
+    params.rendezvousCap?.build(roomBlindId, epoch, timeBucket, ephemeral.publicKey) ?? undefined;
   const selfPeerBlindId = await p2p.derivePeerBlindId(
     rendezvousKey,
     selfDeviceId,
@@ -627,7 +637,15 @@ export async function connectPrivatePeer(
       const capped = candidates.filter((o) => o.ann.cap !== undefined);
       const uncapped = candidates.filter((o) => o.ann.cap === undefined);
       const survivors = params.rendezvousCap.filterVerified(
-        capped.map((o) => o.ann.cap as { proof: string; pseudonym: string }),
+        capped.map((o) => {
+          const c = o.ann.cap as { proof: string; pseudonym: string };
+          // The dial identity from THIS announcement: the proof is bound to it, so a
+          // lifted cap verifies against nothing here.
+          return {
+            ...c,
+            signalingPublicKey: p2p.fromBase64Url(o.ann.signaling_public_key),
+          };
+        }),
         roomBlindId,
         epoch,
         timeBucket,

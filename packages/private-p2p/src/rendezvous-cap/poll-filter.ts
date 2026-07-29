@@ -18,6 +18,7 @@ import {
   DEFAULT_BUCKET_WIDTH_MS,
   pseudonymFromBytes,
   rendezvousContext,
+  rendezvousPresentationHeader,
   verifyRendezvousPresence,
 } from './credential.js';
 
@@ -41,6 +42,16 @@ export interface VerifiablePresence<T> {
   readonly bucket: number;
   /** The caller's payload (the decrypted announcement / signaling info). */
   readonly value: T;
+  /**
+   * The announcement's DIAL IDENTITY — the ephemeral signaling public key this record
+   * publishes, taken from the OPENED announcement.
+   *
+   * The proof is bound to it (see `rendezvousContext`), so a proof lifted from another
+   * device's record verifies against nothing here and cannot take that device's dedup
+   * slot.  It must be the key from THIS record: verifying against a key chosen by the
+   * caller would bind the proof to nothing at all.
+   */
+  readonly binding: Uint8Array;
 }
 
 export interface PollFilterOptions {
@@ -94,7 +105,21 @@ export function filterVerifiedPresence<T>(
     if (seen.has(key)) continue;
     const epochBytes = enc(record.epoch);
     const context = rendezvousContext(roomBlindId, epochBytes, record.bucket);
-    if (!verifyRendezvousPresence(issuerKey, record.proof, nym, epochBytes, context)) continue;
+    if (
+      !verifyRendezvousPresence(
+        issuerKey,
+        record.proof,
+        nym,
+        epochBytes,
+        context,
+        // Bound to THIS record's dial identity: a proof lifted from another
+        // device's announcement verifies against nothing here, so it never
+        // reaches the dedup below and cannot take that device's slot.
+        rendezvousPresentationHeader(record.binding),
+      )
+    ) {
+      continue;
+    }
     seen.add(key);
     out.push({ pseudonym: nym, value: record.value });
   }
