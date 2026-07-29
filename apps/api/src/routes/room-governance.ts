@@ -344,6 +344,32 @@ export function createRoomGovernanceSimRoutes() {
           const { roomId, proposalId } = c.req.valid('param');
           const gate = await simGate(services, roomId, auth.userId, false);
           if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // STEWARDS ONLY.  `simGate(..., false)` asks whether the caller may
+          // READ the room, which in a public production room is every
+          // authenticated account — and these records are decision support for
+          // the room's decision-makers: a COI flag naming the proposer, a
+          // scam-pattern hit on their wording.  Publishing an internal
+          // assessment of a member's proposal to that member's audience is not
+          // transparency, it is a different disclosure than the one the
+          // advisory pipeline was built for.  Platform staff pass without room
+          // stewardship, mirroring the mode-transition gate below.
+          const platformStaff =
+            denyCapability(
+              {
+                userId: auth.userId,
+                platformRoles: auth.roles,
+                stewardRoles: auth.stewardRoles,
+                mfaActive: auth.mfaActive,
+                mfaVerified: auth.mfaVerified,
+              },
+              'restrict',
+            ) === null;
+          if (
+            !platformStaff &&
+            (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId)))
+          ) {
+            return c.json(deny('not_found', 'Resource not found'), 404); // 404-over-403
+          }
           const proposal = await services.proposals.getById(proposalId);
           // 404-over-403 on a cross-room id: an outsider learns nothing about
           // which proposals exist elsewhere.

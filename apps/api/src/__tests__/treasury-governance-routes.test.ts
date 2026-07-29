@@ -629,6 +629,29 @@ describe('WS-M treasury + payment intents', () => {
       cookie,
     );
     expect(res.status).toBe(200);
+    // …and a NON-steward member of the same room gets a 404, not the findings.
+    // `simGate(..., false)` asks whether the caller may READ the room, which in
+    // a public production room is every authenticated account — and a COI flag
+    // naming the proposer, or a scam-pattern hit on their wording, is decision
+    // support for the room's decision-makers, not a disclosure to the
+    // proposer's audience.
+    const member = await seedUserWithSession(fixture.identity, { steward: false });
+    fixture.knomosis.rooms = {
+      ...(fixture.knomosis.rooms as object),
+      isSteward: async () => false,
+      isMember: async () => true,
+      contentVisibleToUser: async () => true,
+      roomGovernance: async () => ({ mode: 'testnet' as never, name: 'Governed Room' }),
+    } as typeof fixture.knomosis.rooms;
+    expect(
+      (
+        await req(
+          'GET',
+          `/rooms/${ROOM}/governance/proposals/${proposalId}/advisories`,
+          member.cookie,
+        )
+      ).status,
+    ).toBe(404);
     const body = (await res.json()) as {
       advisories: { kind: string; advisory_only: boolean }[];
     };

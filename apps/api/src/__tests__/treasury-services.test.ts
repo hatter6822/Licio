@@ -702,6 +702,32 @@ describe('buildStewardElectionPort (WS-M.4.3b rotation)', () => {
       ).openElection(ROOM),
     ).toBe(false);
   });
+
+  it('THREADS the freeze instant to the count, rather than dropping it', async () => {
+    // `scheduleElection` captures the instant it will record as `opensAt` and
+    // hands it to this callback.  A callback typed to take only `roomId`
+    // silently discards it and counts LIVE — so a member joining after
+    // `opensAt` but before the query returns lands in `eligibleCount` while
+    // `castElectionVote` refuses them for `joinedAt > opensAt`: a denominator
+    // padded with someone who cannot vote.  A forced rotation is exactly when a
+    // room is in flux, so it is the path least able to afford the gap.
+    const seen: Array<string | undefined> = [];
+    const service = {
+      scheduleElection: async (
+        roomId: string,
+        options: { eligibleVoterCount?: (room: string, asOf: string) => Promise<number> },
+      ) => {
+        await options.eligibleVoterCount?.(roomId, '2026-07-29T12:00:00.000Z');
+        return { ok: true } as const;
+      },
+    } as unknown as GovernanceService;
+    const port = buildStewardElectionPort(service, async (_room, asOf) => {
+      seen.push(asOf);
+      return 3;
+    });
+    expect(await port.openElection(ROOM)).toBe(true);
+    expect(seen).toEqual(['2026-07-29T12:00:00.000Z']);
+  });
 });
 
 describe('the treasury services singleton', () => {

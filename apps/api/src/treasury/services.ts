@@ -297,10 +297,19 @@ export function buildTreasuryExecutorPort(service: GovernanceService): TreasuryE
  *  governance scheduler injects.  A forced rotation opens a real election, so
  *  it must freeze the same turnout electorate a scheduled one does — omitting
  *  it would leave rotation-opened elections with the legacy live-read-at-settle
- *  behaviour this port exists downstream of. */
+ *  behaviour this port exists downstream of.
+ *
+ *  The `asOf` SECOND ARGUMENT is load-bearing and must be threaded, not
+ *  dropped.  `scheduleElection` captures the instant it will record as
+ *  `opensAt` and passes it here; a callback typed to take only `roomId`
+ *  silently discards it and counts live, so a member joining after `opensAt`
+ *  but before the query returns lands in `eligibleCount` while
+ *  `castElectionVote` refuses them for `joinedAt > opensAt` — a denominator
+ *  padded with someone who cannot vote.  A forced rotation is exactly when a
+ *  room is in flux, so this is the path least able to afford the gap. */
 export function buildStewardElectionPort(
   service: GovernanceService,
-  eligibleVoterCount?: (roomId: string) => Promise<number>,
+  eligibleVoterCount?: (roomId: string, asOf: string) => Promise<number>,
 ): StewardElectionPort {
   return {
     openElection: async (roomId) => {

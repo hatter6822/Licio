@@ -622,6 +622,16 @@ function CaseReviewDialog({
   // mistaken sanction — a false entry in the one record that is supposed to
   // explain what a steward did and why.
   const [revertTarget, setRevertTarget] = useState<string | null>(null);
+  /** ONE way to close this dialog, because there were three ways to leave the
+   *  reason behind.  Clearing it only on SUCCESS meant a steward could pick a
+   *  reason, cancel, open Revert on a DIFFERENT action, and find that reason
+   *  already selected with confirmation enabled — recording a justification
+   *  they never chose for that action.  A dialog that asks a question has to
+   *  forget the answer when it is dismissed. */
+  const closeRevert = (): void => {
+    setRevertTarget(null);
+    setRevertReason('');
+  };
   // EMPTY until the steward chooses.  A pre-selected code plus an enabled
   // confirm is a default the dialog can record without anyone deciding
   // anything: open it on a mistaken spam sanction, click Revert, and the audit
@@ -636,8 +646,7 @@ function CaseReviewDialog({
       revertModerationAction(actionId, revertReason as ModerationReasonCode),
     onSuccess: () => {
       toast({ message: t('console.revertDone', 'Action reverted.'), tone: 'success' });
-      setRevertTarget(null);
-      setRevertReason('');
+      closeRevert();
       void queryClient.invalidateQueries({ queryKey: queryKeys.modCase(caseId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.modAudit('default') });
     },
@@ -911,11 +920,7 @@ function CaseReviewDialog({
           audit trail, so inheriting the palette's pending new-action selection
           would write a reason the steward never chose. */}
       {revertTarget !== null ? (
-        <Dialog
-          open
-          onClose={() => setRevertTarget(null)}
-          title={t('console.revertTitle', 'Revert this action')}
-        >
+        <Dialog open onClose={closeRevert} title={t('console.revertTitle', 'Revert this action')}>
           <div className="flex flex-col gap-3">
             <p className="text-sm text-ink-muted">
               {t(
@@ -931,7 +936,7 @@ function CaseReviewDialog({
               options={REASON_OPTIONS}
             />
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setRevertTarget(null)}>
+              <Button variant="ghost" onClick={closeRevert}>
                 {t('common.cancel', 'Cancel')}
               </Button>
               <Button

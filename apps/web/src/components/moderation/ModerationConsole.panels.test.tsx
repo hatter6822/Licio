@@ -932,6 +932,64 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
   });
 
+  it('WS-J.2.3b: DISMISSING the revert dialog forgets the reason', async () => {
+    // Clearing the reason only on SUCCESS meant a steward could pick one,
+    // cancel, open Revert on a DIFFERENT action, and find that reason already
+    // selected with confirmation enabled — recording a justification they never
+    // chose for that action.  A dialog that asks a question has to forget the
+    // answer when it is dismissed.
+    const A = '00000000-0000-4000-8000-0000000000e1';
+    const B = '00000000-0000-4000-8000-0000000000e2';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: A,
+            action: 'hide',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+          {
+            action_id: B,
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // Open Revert on the FIRST action, pick a reason, then cancel.
+    const reverts = await screen.findAllByRole('button', { name: /^revert$/i });
+    fireEvent.click(reverts[0] as HTMLElement);
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    // The outer case dialog has a Cancel too — take the one inside the revert
+    // dialog, which is the last mounted.
+    const cancels = screen.getAllByRole('button', { name: /^cancel$/i });
+    fireEvent.click(cancels[cancels.length - 1] as HTMLElement);
+
+    // Open Revert on the SECOND action: no reason carried over, and confirmation
+    // is refused until this reversal gets its own answer.
+    const again = await screen.findAllByRole('button', { name: /^revert$/i });
+    fireEvent.click(again[1] as HTMLElement);
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
+    expect(screen.getByRole('button', { name: /^revert action$/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  });
+
   it('WS-J.2.1d: a case held by ANOTHER reviewer offers no silent claim', async () => {
     // The claim mutation overwrites the assignment and sends no reason, so the
     // audit entry records the handover with `notes: null`.  Offering it here
