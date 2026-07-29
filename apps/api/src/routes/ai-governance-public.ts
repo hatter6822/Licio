@@ -23,6 +23,7 @@ import {
   buildSummaryDeps,
   buildTranslationDeps,
 } from '../ai-governance/wiring.js';
+import { rateLimit } from '../lib/rate-limit.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 
@@ -48,6 +49,18 @@ const summaryReportBodySchema = z
 const translationReportBodySchema = z
   .object({ reason: z.enum(TRANSLATION_REPORT_REASONS) })
   .strict();
+
+/**
+ * WS-K report-route budget (SPEC §19.1: never per-IP).
+ *
+ * A global fixed window over the two AI report routes.  They are the only
+ * surfaces here that WRITE on behalf of an ordinary account, and they wrote
+ * unboundedly: no limit and, until the pending-subject unique index, no
+ * deduplication either.  Generous — a real reader reports a handful of things a
+ * day — and shared by both routes, so a caller cannot spend the summary budget
+ * and then the translation one.
+ */
+const reportLimit = rateLimit({ limit: 60, windowMs: 60_000 });
 
 export function createAiGovernancePublicRoutes() {
   // Mounted at '/', so auth is applied PER-ROUTE (a `.use('*')` here would leak
@@ -106,6 +119,7 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/translations/:id/report',
         authMiddleware(),
+        reportLimit,
         zValidator('json', translationReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();
@@ -123,6 +137,7 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/summaries/:id/report',
         authMiddleware(),
+        reportLimit,
         zValidator('json', summaryReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();

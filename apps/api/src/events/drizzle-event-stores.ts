@@ -656,6 +656,41 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    limit: number;
+  }): Promise<InvariantOutputRecord[]> {
+    const startExpr = sql`(${invariantOutputs.timeWindow}->>'start')::timestamptz`;
+    const endExpr = sql`(${invariantOutputs.timeWindow}->>'end')::timestamptz`;
+    const rows = await this.#db
+      .select()
+      .from(invariantOutputs)
+      .where(
+        and(
+          eq(invariantOutputs.invariantType, input.invariantType),
+          eq(invariantOutputs.targetId, input.targetId),
+          sql`${startExpr} < ${input.beforeStartIso}::timestamptz`,
+          // Same-size window. Milliseconds, matching the caller's arithmetic.
+          sql`extract(epoch from (${endExpr} - ${startExpr})) * 1000 = ${input.spanMs}`,
+          // The §30.5 boundary's row-level half, applied here so a shadow row
+          // never occupies a slot in the bounded page below. The degradation
+          // reason codes are re-checked in code (`pwattRowForRanking`), which
+          // is the single definition of "usable".
+          eq(invariantOutputs.shadowMode, false),
+        ),
+      )
+      .orderBy(
+        sql`${startExpr} DESC`,
+        desc(invariantOutputs.createdAt),
+        desc(invariantOutputs.version),
+      )
+      .limit(Math.max(0, input.limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async listByTypeSince(
     invariantType: string,
     sinceIso: string,

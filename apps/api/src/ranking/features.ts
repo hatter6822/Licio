@@ -37,7 +37,7 @@ import {
 } from '@licio/ranking';
 import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
-import type { InvariantOutputRecord } from '../events/stores.js';
+import type { InvariantOutputRecord, InvariantOutputStore } from '../events/stores.js';
 import type { ForumServices } from '../forum/services.js';
 import { findNearDuplicates } from '../ingestion/dedup.js';
 import type { IngestionServices } from '../ingestion/services.js';
@@ -288,39 +288,48 @@ export async function assembleFeatureVector(
  * velocity than it can feed a score. Null (feature ABSENT) with fewer than
  * two usable same-size windows or a missing component value.
  */
+/**
+ * How many candidate previous windows to consider before giving up.
+ *
+ * The store returns them newest-first with the shadow half of the §30.5 gate
+ * already applied, so this bounds only the tail of DEGRADED rows
+ * (`TIMEOUT` / `COMPUTE_ERROR` / `INSUFFICIENT_COVERAGE`) the code gate has to
+ * walk past. Thirty-two consecutive degraded windows for one target is an
+ * outage, and reporting no velocity through an outage is the honest answer —
+ * `attention_velocity` is an ABSENT feature, never a fabricated zero.
+ */
+const VELOCITY_CANDIDATE_LIMIT = 32;
+
 async function attentionVelocity(
-  store: { listForTarget(targetId: string): Promise<InvariantOutputRecord[]> },
+  store: Pick<InvariantOutputStore, 'previousWindow'>,
   current: InvariantOutputRecord,
 ): Promise<number | null> {
   const currentAttention = num(current.scoreVector['active_attention']);
   if (currentAttention === undefined) return null;
   const currentStart = Date.parse(current.timeWindow.start);
   const spanMs = Date.parse(current.timeWindow.end) - currentStart;
+  // The store answers the question — "the most recent usable same-size window
+  // strictly before this one" — rather than handing over every row this target
+  // has ever had for the caller to filter. That scan ran per CANDIDATE on the
+  // feed path: a story with a year of hourly windows cost thousands of rows to
+  // learn about one of them.
+  const candidates = await store.previousWindow({
+    invariantType: current.invariantType,
+    targetId: current.targetId,
+    beforeStartIso: current.timeWindow.start,
+    spanMs,
+    limit: VELOCITY_CANDIDATE_LIMIT,
+  });
+  // Ordering is the store's, and it is the same total order the hand-rolled
+  // scan applied (window start, then creation time, then version) — so the
+  // first row the §30.5 code gate accepts IS the previous window.
   let previous: InvariantOutputRecord | null = null;
-  for (const raw of await store.listForTarget(current.targetId)) {
-    if (raw.invariantType !== current.invariantType) continue;
+  for (const raw of candidates) {
     const row = pwattRowForRanking(raw);
-    if (row === null) continue;
-    const start = Date.parse(row.timeWindow.start);
-    if (Date.parse(row.timeWindow.end) - start !== spanMs) continue;
-    if (start >= currentStart) continue;
-    // Pick the latest same-size window strictly before `current`, by window
-    // start, then creation time, then — for two revisions written in the same
-    // instant — the lexicographically greatest `version`. The last tie-break
-    // makes the choice REPLAY-STABLE independent of the store's row order
-    // (`listForTarget` carries no inherent ordering); `version` is part of the
-    // record's natural key, so it is distinct within a (target, type, window).
-    if (previous !== null) {
-      const prevStart = Date.parse(previous.timeWindow.start);
-      if (start < prevStart) continue;
-      if (start === prevStart) {
-        const created = Date.parse(row.createdAt);
-        const prevCreated = Date.parse(previous.createdAt);
-        if (created < prevCreated) continue;
-        if (created === prevCreated && row.version <= previous.version) continue;
-      }
+    if (row !== null) {
+      previous = row;
+      break;
     }
-    previous = row;
   }
   if (previous === null) return null;
   const previousAttention = num(previous.scoreVector['active_attention']);

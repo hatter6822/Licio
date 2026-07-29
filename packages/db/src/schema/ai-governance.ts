@@ -308,6 +308,12 @@ export const aiReviewQueue = pgTable(
   (t) => [
     index('ai_review_queue_status_idx').on(t.status, t.createdAt),
     index('ai_review_queue_kind_idx').on(t.kind, t.createdAt),
+    // At most ONE pending item per subject: the report ROUTES are what write
+    // here, and an unbounded per-caller write would otherwise bury the queue.
+    // Partial on `pending` so a resolved item never blocks a later re-report.
+    uniqueIndex('ai_review_queue_pending_subject_uq')
+      .on(t.kind, t.subjectRef)
+      .where(sql`${t.status} = 'pending'`),
     check('ai_review_queue_status', sql`${t.status} in ('pending', 'resolved')`),
     check(
       'ai_review_queue_kind',

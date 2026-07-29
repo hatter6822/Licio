@@ -369,6 +369,21 @@ export class InMemoryAiReviewQueueStore implements AiReviewQueueStore {
   async insert(
     item: Omit<AiReviewItem, 'reviewId' | 'createdAt' | 'resolvedAt'>,
   ): Promise<AiReviewItem> {
+    // Mirrors `ai_review_queue_pending_subject_uq`: at most ONE pending item
+    // per (kind, subject).  The report routes are what write here, and an
+    // adapter more permissive than the database would let a defect pass every
+    // unit test and only surface against live Postgres.
+    if (item.status === 'pending') {
+      for (const existing of this.#rows.values()) {
+        if (
+          existing.status === 'pending' &&
+          existing.kind === item.kind &&
+          existing.subjectRef === item.subjectRef
+        ) {
+          return clone(existing);
+        }
+      }
+    }
     this.#seq += 1;
     const record: AiReviewItem = {
       ...item,

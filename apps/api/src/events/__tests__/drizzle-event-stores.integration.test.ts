@@ -31,7 +31,7 @@ import {
   DrizzlePwattConfigStore,
   DrizzleSignalLedgerStore,
 } from '../drizzle-event-stores.js';
-import { type NewStoredEvent, PRIVACY_BUCKET } from '../stores.js';
+import { InMemoryInvariantOutputStore, type NewStoredEvent, PRIVACY_BUCKET } from '../stores.js';
 
 const DB_URL = process.env['DATABASE_URL'];
 const IT_DB = 'licio_events_it';
@@ -313,6 +313,86 @@ describe.skipIf(!DB_URL)('Drizzle event-pipeline stores integration (WS-E.3.1)',
     expect((await invariants.latest('PWAtt_v0', targetId))?.version).toBe('v0');
     expect(await invariants.countOlderThan(new Date(Date.now() + 1_000).toISOString())).toBe(1);
     expect(await invariants.deleteOlderThan(new Date(Date.now() + 1_000).toISOString())).toBe(1);
+  });
+
+  it('previousWindow answers in SQL what a full-history scan used to answer in the heap', async () => {
+    // `attentionVelocity` used to call `listForTarget`, which loads EVERY row a
+    // target has ever had — all types, all windows, all history — and ran once
+    // per CANDIDATE on the feed path.  The store answers the actual question
+    // now, so this pins the parts SQL has to get right: the window-SPAN
+    // arithmetic, the strict `before` bound, and the total ordering that keeps
+    // serving and replay agreeing.
+    const targetId = randomUUID();
+    const hour = (h: number, spanHours = 1) => ({
+      start: new Date(Date.UTC(2026, 5, 10, h)).toISOString(),
+      end: new Date(Date.UTC(2026, 5, 10, h + spanHours)).toISOString(),
+    });
+    const row = (
+      timeWindow: { start: string; end: string },
+      over: Partial<{ version: string; shadowMode: boolean; invariantType: string }> = {},
+    ) => ({
+      invariantType: 'PWAtt_v1',
+      targetType: 'story',
+      targetId,
+      timeWindow,
+      version: 'v1',
+      scoreVector: { active_attention: 0.5 },
+      explanationSummary: null,
+      confidence: 0.6,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: false,
+      createdAt: new Date().toISOString(),
+      ...over,
+    });
+    await invariants.upsert(row(hour(9)));
+    await invariants.upsert(row(hour(10)));
+    await invariants.upsert(row(hour(11)));
+    // A DIFFERENT span, a different type, and a shadow row — each must be
+    // invisible to this query for its own reason.
+    await invariants.upsert(row(hour(10, 4), { version: 'v-4h' }));
+    await invariants.upsert(row(hour(10), { invariantType: 'MERI', version: 'v-meri' }));
+    await invariants.upsert(row(hour(10), { version: 'v-shadow', shadowMode: true }));
+
+    const found = await invariants.previousWindow({
+      invariantType: 'PWAtt_v1',
+      targetId,
+      beforeStartIso: hour(11).start,
+      spanMs: 3_600_000,
+      limit: 10,
+    });
+    // Newest-first, strictly before 11:00, one-hour spans only, no shadow rows,
+    // no other invariant type — so exactly the 10:00 and 09:00 windows.
+    expect(found.map((r) => r.timeWindow.start)).toEqual([hour(10).start, hour(9).start]);
+    expect(found.every((r) => r.shadowMode === false)).toBe(true);
+
+    // `before` is STRICT: a window starting exactly at the bound is the CURRENT
+    // window, and returning it would make every velocity zero.
+    const strict = await invariants.previousWindow({
+      invariantType: 'PWAtt_v1',
+      targetId,
+      beforeStartIso: hour(9).start,
+      spanMs: 3_600_000,
+      limit: 10,
+    });
+    expect(strict).toEqual([]);
+
+    // The in-memory adapter must agree row-for-row, or a defect passes every
+    // unit test and only appears against live Postgres.
+    const memory = new InMemoryInvariantOutputStore();
+    for (const r of await invariants.listForTarget(targetId)) await memory.upsert(r);
+    const fromMemory = await memory.previousWindow({
+      invariantType: 'PWAtt_v1',
+      targetId,
+      beforeStartIso: hour(11).start,
+      spanMs: 3_600_000,
+      limit: 10,
+    });
+    expect(fromMemory.map((r) => `${r.timeWindow.start}|${r.version}`)).toEqual(
+      found.map((r) => `${r.timeWindow.start}|${r.version}`),
+    );
   });
 
   it('signal ledger: owner-scoped keyset pagination and purge coupling', async () => {

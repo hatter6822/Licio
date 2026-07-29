@@ -590,6 +590,30 @@ export interface InvariantOutputStore {
   /** Latest output of a type for a target (by createdAt, then window start). */
   latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null>;
   /**
+   * The most recent SAME-SIZE window of `invariantType` for `targetId` that
+   * starts strictly before `beforeStartIso` — the `rising`-mode velocity's
+   * previous window.
+   *
+   * A dedicated query rather than a filter over `listForTarget`, which loads
+   * every row the target has ever had — all types, all windows, all history —
+   * into the heap.  That ran per CANDIDATE on the feed path, so a story with a
+   * year of hourly windows cost thousands of rows to answer a question about
+   * one of them.
+   *
+   * Ordering is `window start DESC, createdAt DESC, version DESC`: a total
+   * order, and the same tie-break the caller applied, so the answer is
+   * replay-stable independent of the store's physical row order.
+   */
+  previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    /** Rows to consider before giving up; each is re-checked against the §30.5
+     *  serving gate in code, which no SQL predicate can express in full. */
+    limit: number;
+  }): Promise<InvariantOutputRecord[]>;
+  /**
    * Paired outputs of two versions of one invariant over the same targets
    * (WS-H.1.1b A/B comparison), optionally bounded to a time window.
    */
@@ -638,6 +662,37 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
 
   async listForTarget(targetId: string): Promise<InvariantOutputRecord[]> {
     return [...this.#rows.values()].filter((r) => r.targetId === targetId);
+  }
+
+  async previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    limit: number;
+  }): Promise<InvariantOutputRecord[]> {
+    const before = Date.parse(input.beforeStartIso);
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.targetId === input.targetId &&
+          r.invariantType === input.invariantType &&
+          // The §30.5 boundary's row-level half, mirroring the Drizzle
+          // adapter's `shadow_mode = false`: an in-memory store more permissive
+          // than production lets a defect pass every unit test.
+          r.shadowMode === false &&
+          Date.parse(r.timeWindow.start) < before &&
+          Date.parse(r.timeWindow.end) - Date.parse(r.timeWindow.start) === input.spanMs,
+      )
+      .sort(
+        (a, b) =>
+          Date.parse(b.timeWindow.start) - Date.parse(a.timeWindow.start) ||
+          Date.parse(b.createdAt) - Date.parse(a.createdAt) ||
+          // A TOTAL order — two revisions written in the same instant must
+          // still have one answer, or serving and replay could disagree.
+          b.version.localeCompare(a.version),
+      )
+      .slice(0, Math.max(0, input.limit));
   }
 
   async listByTypeSince(

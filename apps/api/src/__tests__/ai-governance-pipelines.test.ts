@@ -389,6 +389,56 @@ describe('WS-K.1.4a summary generation', () => {
     expect(pending).toHaveLength(1);
   });
 
+  it('N reports of ONE summary leave ONE pending queue item', async () => {
+    // Both report routes are authenticated and were neither rate limited nor
+    // deduplicated, so a single account could mint an unbounded number of
+    // review-queue rows — and a steward queue in which one summary appears five
+    // hundred times is how a real item goes unseen.  The reports themselves are
+    // all still recorded; only the QUEUE is one-per-subject.
+    const f = fresh();
+    await f.ai.summaries.putDraft({
+      summaryId: 'sum-flood',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(f.ai.now()).toISOString(),
+    });
+    for (let i = 0; i < 25; i += 1) {
+      await reportSummary(summaryDeps(f), 'sum-flood', 'fake_citation', `report ${i}`);
+    }
+    expect(await f.ai.summaries.listReports('sum-flood')).toHaveLength(25);
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 100)).toHaveLength(1);
+  });
+
+  it('a RESOLVED item does not block a later re-report from opening a fresh one', async () => {
+    // The index is partial on `pending` precisely so a steward decision can be
+    // revisited: without that, one resolved item would silence a subject for good.
+    const f = fresh();
+    await f.ai.summaries.putDraft({
+      summaryId: 'sum-again',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(f.ai.now()).toISOString(),
+    });
+    await reportSummary(summaryDeps(f), 'sum-again', 'fake_citation', null);
+    const [pending] = await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10);
+    if (!pending) throw new Error('no queue item');
+    await f.ai.reviewQueue.resolve(
+      pending.reviewId,
+      'dismissed',
+      'steward-1',
+      new Date(f.ai.now()).toISOString(),
+    );
+    await reportSummary(summaryDeps(f), 'sum-again', 'fake_citation', null);
+    expect(
+      await f.ai.reviewQueue.list({ kind: 'reported_summary', status: 'pending' }, 10),
+    ).toHaveLength(1);
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10)).toHaveLength(2);
+  });
+
   it('refuses a report for a non-existent summary (no bogus-id pollution)', async () => {
     const f = fresh();
     expect(await reportSummary(summaryDeps(f), 'nope', 'fake_citation', null)).toBeNull();

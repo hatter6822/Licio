@@ -623,10 +623,31 @@ export class DrizzleAiReviewQueueStore implements AiReviewQueueStore {
         createdAt: new Date(),
         resolvedAt: null,
       })
+      // One PENDING item per (kind, subject) — `ai_review_queue_pending_subject_uq`.
+      // A repeat report is not an error and must not 500 the route; it adds to
+      // the report COUNT (recorded in the report tables) without adding a
+      // second queue entry a steward has to triage.
+      .onConflictDoNothing()
       .returning();
     const row = rows[0];
-    if (!row) throw new Error('ai_review_queue insert returned no row');
-    return this.#toItem(row);
+    if (row) return this.#toItem(row);
+    const incumbent = await this.#db
+      .select()
+      .from(aiReviewQueue)
+      .where(
+        and(
+          eq(aiReviewQueue.kind, item.kind),
+          eq(aiReviewQueue.subjectRef, item.subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .limit(1);
+    const existing = incumbent[0];
+    // Only the partial unique index can make the insert a no-op, so an absent
+    // incumbent means something else swallowed the write — never silently
+    // report success for a row that does not exist.
+    if (!existing) throw new Error('ai_review_queue insert returned no row');
+    return this.#toItem(existing);
   }
 
   async get(reviewId: string): Promise<AiReviewItem | null> {
