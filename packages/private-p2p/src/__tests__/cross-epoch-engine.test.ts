@@ -108,6 +108,19 @@ describe('WP-1 cross-epoch engine self-heal (§10.9)', () => {
     // in this room".
     expect(report.pending).toBe(1);
     expect(report.duplicate).toBe(0);
+    // BATCH-LOCAL: this batch left one pending, and the pool agrees because the
+    // engine had no backlog.  The two diverge once `load()` restores earlier
+    // retained envelopes — reporting the pool would attribute a room's whole
+    // backlog to whatever was just handed in.
+    expect(report.pendingPoolSize).toBe(1);
+    // A SECOND call that retains nothing OF ITS OWN still sees the backlog in
+    // the pool: `pending` is what THIS batch left, `pendingPoolSize` is
+    // everything the engine holds.  Reporting the pool as the batch's answer
+    // told a user that unrelated old items came from the file they just
+    // imported — and could report more pending than they submitted.
+    const backlogOnly = await bob.ingest([]);
+    expect(backlogOnly.pending).toBe(0);
+    expect(backlogOnly.pendingPoolSize).toBe(1);
 
     // The §10.9 commit effect: the epoch-1 key arrives → retryPending re-opens it.
     bob.addEpochKeys(Number(epoch1.epoch), heldKeysOf(epoch1));

@@ -102,6 +102,35 @@ describe('perAccountRateLimit (the abuse budget, not the load-shedding ceiling)'
     expect((await asAccount(app, 'quiet')).status).toBe(429);
   });
 
+  it('a refused ACCOUNT attempt never spends the global ceiling (order matters)', async () => {
+    // With the global limiter FIRST, an account already over its own budget
+    // still incremented the shared counter on every rejected attempt — so one
+    // caller could burn the whole ceiling with requests that were going to be
+    // refused anyway, and lock every other account out for the rest of the
+    // window.  That reinstates, through the ceiling, exactly the lockout the
+    // per-account budget exists to prevent.
+    const app = new Hono()
+      .use(
+        '*',
+        perAccountRateLimit({
+          limit: 1,
+          windowMs: 60_000,
+          accountId: (c) => c.req.header('x-test-account') ?? null,
+        }),
+      )
+      .use('*', rateLimit({ limit: 3, windowMs: 60_000 }))
+      .get('/', (c) => c.text('ok'));
+    const call = (account: string) => app.request('/', { headers: { 'x-test-account': account } });
+
+    expect((await call('noisy')).status).toBe(200); // spends 1 account + 1 global
+    // Five more refusals from the SAME account: each stops at the account
+    // limiter, so none of them reaches the global counter.
+    for (let i = 0; i < 5; i += 1) expect((await call('noisy')).status).toBe(429);
+    // The ceiling still has room, so other accounts are served.
+    expect((await call('quiet')).status).toBe(200);
+    expect((await call('third')).status).toBe(200);
+  });
+
   it('answers 429 in the shared apiErrorSchema shape with Retry-After', async () => {
     const app = appWith(0);
     const res = await asAccount(app, 'anyone');

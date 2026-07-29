@@ -78,15 +78,6 @@ export async function runSummarySweep(
     stored === null ? null : { createdAt: stored.createdAt, threadId: stored.ref },
     limit,
   );
-  // Exhausted the tail ⇒ start again from the newest next tick, so a thread that
-  // only later crosses the activity threshold is eventually summarized.
-  const last = threads[threads.length - 1];
-  await ai.sweepCursors.set(
-    SUMMARY_SWEEP_CURSOR,
-    threads.length < limit || last === undefined
-      ? null
-      : { createdAt: last.createdAt, ref: last.threadId },
-  );
   let generated = 0;
   let skipped = 0;
   for (const thread of threads) {
@@ -104,6 +95,24 @@ export async function runSummarySweep(
       onThreadError(err, thread.threadId);
     }
   }
+  // COMMIT THE POSITION ONLY NOW, after the page has actually been processed.
+  // Advancing the cursor before the loop meant a stop or crash between the two
+  // — precisely the restart the persistence exists to survive — left the next
+  // lease holder starting AFTER up to `limit` unexamined threads, which are
+  // then unreachable until the whole corpus wraps back to the newest page.  A
+  // cursor that can skip work is worse than one that repeats it: re-examining a
+  // thread costs one `getLatestForThread`, and skipping one costs its summary
+  // until the wrap.
+  //
+  // Exhausted the tail ⇒ start again from the newest next tick, so a thread that
+  // only later crosses the activity threshold is eventually summarized.
+  const last = threads[threads.length - 1];
+  await ai.sweepCursors.set(
+    SUMMARY_SWEEP_CURSOR,
+    threads.length < limit || last === undefined
+      ? null
+      : { createdAt: last.createdAt, ref: last.threadId },
+  );
   return { examined: threads.length, generated, skipped };
 }
 

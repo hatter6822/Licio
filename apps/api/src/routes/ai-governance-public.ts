@@ -68,6 +68,15 @@ const translationReportBodySchema = z
  * broad distributed flood still cannot make these routes the most expensive
  * thing the process does.  Both are shared by the two routes, so a caller cannot
  * spend the summary budget and then the translation one.
+ *
+ * ORDER MATTERS, and the first cut had it backwards: with the global limiter
+ * first, an account already over ITS budget still incremented the shared
+ * counter on every rejected attempt, so one caller could burn all 600 slots
+ * with requests that were going to be refused anyway and lock every other
+ * account out of both routes for the rest of the window — reinstating, through
+ * the ceiling, exactly the lockout the per-account budget was added to prevent.
+ * The account limiter runs FIRST so refused excess never spends the shared
+ * budget.
  */
 const reportAccountLimit = perAccountRateLimit({
   limit: 20,
@@ -135,8 +144,8 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/translations/:id/report',
         authMiddleware(),
-        reportGlobalLimit,
         reportAccountLimit,
+        reportGlobalLimit,
         zValidator('json', translationReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();
@@ -154,8 +163,8 @@ export function createAiGovernancePublicRoutes() {
       .post(
         '/ai/summaries/:id/report',
         authMiddleware(),
-        reportGlobalLimit,
         reportAccountLimit,
+        reportGlobalLimit,
         zValidator('json', summaryReportBodySchema),
         async (c) => {
           const ai = getAiGovernanceServices();

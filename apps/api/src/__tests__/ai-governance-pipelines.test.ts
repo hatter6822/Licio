@@ -6,7 +6,7 @@
 // + accuracy, governance AI (cited fields, uncertainty, COI/scam advisories,
 // prohibited capabilities blocked), and runtime monitoring.
 import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   accuracyMetrics,
   type CorrectionDeps,
@@ -588,6 +588,43 @@ describe('WS-K.1.4a summary generation', () => {
       for (const id of ids) {
         expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
       }
+    });
+
+    it('COMMITS the cursor only after the page has been processed', async () => {
+      // The cursor used to move before the loop, so a stop or crash between the
+      // two — precisely the restart the persistence exists to survive — left the
+      // next lease holder starting AFTER up to `limit` unexamined threads, which
+      // are then unreachable until the corpus wraps back to the newest page.  A
+      // cursor that can skip work is worse than one that repeats it: re-examining
+      // costs one lookup, skipping costs a summary until the wrap.
+      //
+      // Process death cannot be staged in-process, so this asserts the property
+      // that makes the crash safe: the write happens AFTER every thread on the
+      // page has been examined.
+      const f = wired();
+      for (let i = 0; i < 3; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const order: string[] = [];
+      const realGet = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      vi.spyOn(f.ai.summaries, 'getLatestForThread').mockImplementation(async (id: string) => {
+        order.push('examine');
+        return realGet(id);
+      });
+      const realSet = f.ai.sweepCursors.set.bind(f.ai.sweepCursors);
+      vi.spyOn(f.ai.sweepCursors, 'set').mockImplementation(async (name, cursor) => {
+        order.push('commit');
+        return realSet(name, cursor);
+      });
+      await runSummarySweep(f.ai, () => {}, 2);
+      vi.restoreAllMocks();
+      // Both threads on the page examined BEFORE the single commit.
+      expect(order).toEqual(['examine', 'examine', 'commit']);
     });
 
     it('WRAPS to the newest page once the tail is exhausted', async () => {

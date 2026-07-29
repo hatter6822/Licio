@@ -10,8 +10,10 @@
 //     (public→private forces every public story room_only). It is NOT a plain
 //     settings write — the settings endpoint rejects a visibility change.
 import type { RoomDetail, RoomJoinModel, RoomPostingPolicy } from '@licio/shared';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ApiClientError, RoomVisibilityBlockedError } from '../../../lib/api.js';
 import {
   useChangeRoomVisibilityMutation,
   useUpdateRoomSettingsMutation,
@@ -118,6 +120,35 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
               : t('roomSettings.makePublic', 'Make room public')}
           </Button>
         )}
+        {/* The cascade's refusal, WITH the stories to resolve.  The server
+            names every public story a canonical-URL collision refused to
+            contain precisely so a steward can act on each one; rendering a
+            count — or nothing at all, as this did — leaves them holding a
+            number and no way to find what it counts. */}
+        {cascade.error instanceof RoomVisibilityBlockedError ? (
+          <div role="alert" className="flex flex-col gap-1 text-sm">
+            <p className="text-error-on-soft">{cascade.error.message}</p>
+            <ul className="flex flex-col gap-1">
+              {cascade.error.blockedStoryIds.map((storyId) => (
+                <li key={storyId}>
+                  <Link
+                    to="/stories/$storyId"
+                    params={{ storyId }}
+                    className="text-primary-on-soft underline-offset-2 hover:underline"
+                  >
+                    {t('roomSettings.cascade.blockedStory', 'Resolve this duplicate')}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : cascade.error ? (
+          <p role="alert" className="text-error-on-soft text-sm">
+            {cascade.error instanceof ApiClientError
+              ? cascade.error.message
+              : t('roomSettings.cascade.failed', 'The visibility change could not be applied.')}
+          </p>
+        ) : null}
       </div>
 
       {/* WS-G.2.2 — interpretation lenses (steward-managed; server enforces role). */}

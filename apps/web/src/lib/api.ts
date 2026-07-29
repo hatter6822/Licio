@@ -55,6 +55,7 @@ import {
   roomLensSelectionSchema,
   roomListResponseSchema,
   roomSummarySchema,
+  roomVisibilityConflictSchema,
   type SignalLedgerResponse,
   type StoryCommentsResponse,
   type StoryCreateRequest,
@@ -132,6 +133,25 @@ export class ApiClientError extends Error {
  * existing story" affordance. `instanceof DuplicateStoryError` narrows to a
  * NON-optional id, which is what makes the drift a compile error.
  */
+/**
+ * The WS-Q.3.4 cascade's 409, with the stories a steward has to resolve.
+ *
+ * `normalizeError` projects every failure through `apiErrorSchema`, which has
+ * no room for a list — so the ids the route was changed to send were parsed off
+ * and dropped one layer below the UI, and the steward still saw a count with no
+ * way to act on it.  A typed error is what carries them past that projection;
+ * `instanceof` narrows to a NON-optional list, so the drift becomes a compile
+ * error rather than a silent empty render.
+ */
+export class RoomVisibilityBlockedError extends ApiClientError {
+  readonly blockedStoryIds: readonly string[];
+  constructor(message: string, blockedStoryIds: readonly string[]) {
+    super('duplicate_story', message, 409);
+    this.name = 'RoomVisibilityBlockedError';
+    this.blockedStoryIds = blockedStoryIds;
+  }
+}
+
 export class DuplicateStoryError extends ApiClientError {
   readonly existingStoryId: string;
   constructor(message: string, existingStoryId: string) {
@@ -794,6 +814,19 @@ export async function changeRoomVisibility(
     param: { roomId },
     json: { visibility },
   });
+  // The 409 is parsed HERE, before `parseResponse` hands it to `normalizeError`
+  // — that projection keeps only `{code, message}`, so the blocked ids the
+  // route sends would be dropped a layer below the UI that needs them.
+  if (response.status === 409) {
+    const raw: unknown = await response.json().catch(() => null);
+    const parsed = roomVisibilityConflictSchema.safeParse(raw);
+    if (parsed.success) {
+      throw new RoomVisibilityBlockedError(
+        parsed.data.error.message,
+        parsed.data.blocked_story_ids,
+      );
+    }
+  }
   const result = await parseResponse(
     response,
     z.object({ visibility: z.enum(['public', 'private']), converted: z.number().int().min(0) }),

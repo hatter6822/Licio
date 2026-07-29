@@ -698,7 +698,14 @@ function CaseReviewDialog({
                   ? t('console.assignedToYou', 'Assigned to you')
                   : t('console.assignedToOther', 'Assigned to another reviewer')}
             </span>
-            {selfId !== undefined && data.assigned_to_id !== selfId ? (
+            {/* CLAIMING is for an UNASSIGNED case.  Offering it while another
+                reviewer holds the case let any report reviewer silently take
+                their in-progress work — the mutation overwrites the assignment
+                and sends no reason, so the audit entry records the handover
+                with `notes: null`.  Taking a case off a colleague is a
+                reasoned reassignment, which is a different flow with a
+                different record; this control is not it. */}
+            {selfId !== undefined && data.assigned_to_id === null ? (
               <Button
                 variant="ghost"
                 loading={claim.isPending}

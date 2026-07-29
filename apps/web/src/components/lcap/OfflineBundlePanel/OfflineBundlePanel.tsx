@@ -113,6 +113,9 @@ async function ingestPrivateBundle(
     accepted: report.accepted.length,
     quarantined: report.quarantined.length,
     duplicate: report.duplicate,
+    // THIS BATCH's retained count, not the engine's whole pool: `load()`
+    // restores earlier retained envelopes, and reporting the pool would tell
+    // the user that unrelated old items came from the file they just imported.
     pending: report.pending,
   };
 }

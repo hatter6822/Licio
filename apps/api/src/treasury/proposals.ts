@@ -750,10 +750,17 @@ export async function createProductionProposal(
         proposalRef: proposalId,
         roomId: input.roomId,
         proposerRef: input.userId,
-        recipientRef:
-          typeof input.create.requested_action['recipient'] === 'string'
-            ? input.create.requested_action['recipient']
-            : null,
+        // THE CANONICAL FIELD.  The production contract carries the recipient
+        // in top-level `recipient_ref`, and an ordinary spend draft need not
+        // repeat it inside `requested_action` — so reading the action alone
+        // passed null for most proposals and the proposer-as-recipient check
+        // never fired on the ones it exists for.  Normalized past the accepted
+        // `user:<uuid>` form, which is how the COI recusal gate compares it
+        // (`proposal.recipientRef === \`user:\${userId}\``), so the advisor and
+        // the gate answer about the same party.
+        recipientRef: canonicalRecipientRef(
+          input.create.recipient_ref ?? input.create.requested_action['recipient'],
+        ),
         fields: proposalAdvisoryFields(input.create),
         text: `${input.create.title}\n${input.create.plain_language_summary}`,
       });
@@ -775,13 +782,22 @@ export async function createProductionProposal(
  * those names, so the mapping from this domain's field names to those three is
  * made here rather than left for each caller to guess.
  */
+/** A recipient reference as the COI gate compares it: the bare id, with the
+ *  accepted `user:<uuid>` prefix stripped.  Null when there is no recipient. */
+function canonicalRecipientRef(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value.startsWith('user:') ? value.slice('user:'.length) : value;
+}
+
 function proposalAdvisoryFields(create: ProductionProposalCreate): Record<string, string> {
   const action = create.requested_action;
   const asText = (value: unknown): string =>
     typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
   return {
     budget: create.requested_amount ?? '',
-    recipient: asText(action['recipient']),
+    // Same field, same reason: reading the action alone reported the recipient
+    // MISSING on every draft that carries it only at the top level.
+    recipient: asText(create.recipient_ref ?? action['recipient']),
     citations: Array.isArray(action['citations'])
       ? action['citations'].map(asText).join(', ')
       : asText(action['citations']),

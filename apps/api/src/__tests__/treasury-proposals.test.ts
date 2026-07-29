@@ -563,6 +563,27 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
       });
     });
 
+    it('reads the CANONICAL recipient, so proposer-as-recipient is seen', async () => {
+      // The production contract carries the recipient in top-level
+      // `recipient_ref`, and an ordinary spend draft need not repeat it inside
+      // `requested_action` — so reading the action alone passed null for most
+      // proposals and the conflict-of-interest check never fired on the ones it
+      // exists for, while the missing-fields check called the recipient absent.
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const seen: Array<Record<string, unknown>> = [];
+      deps.governanceAdvisor = async (input) => {
+        seen.push(input as unknown as Record<string, unknown>);
+      };
+      await createProposal(deps, { recipient_ref: `user:${PROPOSER}` });
+      // Normalized past the accepted `user:` form, which is how the COI recusal
+      // gate compares it — so the advisor and the gate name the same party.
+      const advised = seen[0];
+      if (advised === undefined) throw new Error('the advisor was not called');
+      expect(advised['recipientRef']).toBe(PROPOSER);
+      expect((advised['fields'] as Record<string, string>)['recipient']).toBe(`user:${PROPOSER}`);
+    });
+
     it('a FAILING advisor never unpublishes an already-recorded proposal', async () => {
       const deps = buildHarness();
       await prepareRoom(deps);

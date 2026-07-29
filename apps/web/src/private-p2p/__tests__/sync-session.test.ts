@@ -57,7 +57,7 @@ class FakeEngine implements SyncEngineSurface {
         accepted.push(env.__opId);
       }
     }
-    return { accepted, quarantined: [], duplicate: 0, pending: 0 };
+    return { accepted, quarantined: [], duplicate: 0, pending: 0, pendingPoolSize: 0 };
   }
   missingDependencies(): string[] {
     const missing = new Set<string>();
@@ -92,7 +92,13 @@ class FakeBlockEngine extends FakeEngine {
  *  `!importArchive` guard) — used to drive the held-pending → snapshot-request stuck path. */
 class FakeStuckEngine extends FakeEngine {
   async importArchive() {
-    return { accepted: [] as string[], quarantined: [], duplicate: 0, pending: 0 };
+    return {
+      accepted: [] as string[],
+      quarantined: [],
+      duplicate: 0,
+      pending: 0,
+      pendingPoolSize: 0,
+    };
   }
 }
 

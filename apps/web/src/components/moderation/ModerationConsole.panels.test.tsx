@@ -932,6 +932,23 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
   });
 
+  it('WS-J.2.1d: a case held by ANOTHER reviewer offers no silent claim', async () => {
+    // The claim mutation overwrites the assignment and sends no reason, so the
+    // audit entry records the handover with `notes: null`.  Offering it here
+    // let any report reviewer quietly take a colleague's in-progress case —
+    // taking a case off someone is a reasoned reassignment, a different flow
+    // with a different record, and this control is not it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      assigned_to_id: '99999999-9999-4999-8999-999999999999',
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Assigned to another reviewer')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
+  });
+
   it('WS-J.2.3b: a prior action can be reverted with the selected reason code', async () => {
     const ACTION_ID = '00000000-0000-4000-8000-0000000000f1';
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
