@@ -57,8 +57,26 @@ export const contributionCreatedEventSchema = z
      * rather than something each consumer has to re-derive — which is how the
      * divergence arose.  `thread_id` stays for the genuinely thread-scoped
      * consumers (the SCOI bridge attempt, thread-posture escalation).
+     *
+     * OPTIONAL ON THE WIRE, mandatory in the EMITTER — and the asymmetry is
+     * deliberate.  Events are persisted and replayed: `recoverEventPipeline`
+     * feeds every stored row back through `parseEvent` and SILENTLY DROPS what
+     * fails.  Making this field required while `EVENT_SCHEMA_VERSION` stays `1`
+     * would therefore make every `contribution.created` payload written by the
+     * previous release unparseable — so on a rolling upgrade they would vanish
+     * from the replay to `ingestion-signals` and `invariant-scoi-bridge`, from
+     * the real-time rebuild, and an existing dead letter would be deleted as
+     * corrupt.  A field cannot become required in-place on a schema whose old
+     * instances are still on disk.
+     *
+     * Optional does not mean unenforced: `emitContributionCreated` always sets
+     * it (pinned by a test), so every NEW event carries it and the fold key
+     * stays uniform.  A payload without it can only be pre-upgrade, and the one
+     * consumer that folds by story skips it with an explicit
+     * `pwatt.contribution.unresolved_story` metric rather than re-creating the
+     * phantom item — a counted omission that ages out, instead of a silent one.
      */
-    story_id: uuidSchema,
+    story_id: uuidSchema.optional(),
     user_id: uuidSchema,
     contribution_type: eventContributionTypeSchema,
     target_claim_id: uuidSchema.nullable(),

@@ -201,6 +201,39 @@ describe.skipIf(!DB_URL)('WS-F Drizzle adapters (live Postgres + pgvector)', () 
     ).toBe(1);
   });
 
+  it('media dimensions survive the round-trip through the REAL story row', async () => {
+    // The CLS fix was a no-op in production: the columns existed and the
+    // submission path filled the record, but the Drizzle insert dropped
+    // `mediaWidth`/`mediaHeight` and the row→record mapping hard-coded null.
+    // `feedMediaOf` therefore always saw null and the browser never received
+    // width/height — while every unit test stayed green against the in-memory
+    // adapter, which did carry them.  Only a real-database round-trip can catch
+    // that, which is why this test is here and not beside the others.
+    const created = await stories.createWithThread(
+      storyInput({
+        canonicalUrl: `https://example.org/dims-${randomUUID()}`,
+        mediaWidth: 1600,
+        mediaHeight: 900,
+      }),
+      randomUUID(),
+    );
+    if (!created.ok) throw new Error('fixture story insert failed');
+    const readBack = await stories.getById(created.story.storyId);
+    expect(readBack?.mediaWidth).toBe(1600);
+    expect(readBack?.mediaHeight).toBe(900);
+
+    // And a story with no media keeps them NULL rather than 0 — the renderer
+    // treats null as "unknown" and reserves nothing, which is the honest state.
+    const plain = await stories.createWithThread(
+      storyInput({ canonicalUrl: `https://example.org/nodims-${randomUUID()}` }),
+      randomUUID(),
+    );
+    if (!plain.ok) throw new Error('fixture story insert failed');
+    const plainBack = await stories.getById(plain.story.storyId);
+    expect(plainBack?.mediaWidth).toBeNull();
+    expect(plainBack?.mediaHeight).toBeNull();
+  });
+
   it('source upsert is idempotent under concurrency; observations accumulate', async () => {
     const domain = `upsert-${randomUUID().slice(0, 8)}.example`;
     const [a, b] = await Promise.all([

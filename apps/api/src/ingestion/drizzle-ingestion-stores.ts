@@ -122,8 +122,8 @@ export class DrizzleStoryStore implements StoryStore {
       roomId: row.roomId,
       visibility: row.visibility,
       mediaUploadRef: row.mediaUploadRef,
-      mediaWidth: null,
-      mediaHeight: null,
+      mediaWidth: row.mediaWidth,
+      mediaHeight: row.mediaHeight,
       canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,
@@ -261,7 +261,14 @@ export class DrizzleStoryStore implements StoryStore {
             roomId: story.roomId,
             visibility: story.visibility,
             mediaUploadRef: story.mediaUploadRef,
-            canonicalPublicStoryId: story.canonicalPublicStoryId,
+            // Server-parsed intrinsic dimensions (0103).  Omitting them here made
+            // the whole CLS fix a no-op against a real database: the columns
+            // existed, the submission path filled the record, and the insert
+            // dropped them — so `feedMediaOf` always saw null and the browser
+            // never got width/height.  The in-memory adapter kept every unit test
+            // green over it.
+            mediaWidth: story.mediaWidth ?? null,
+            mediaHeight: story.mediaHeight ?? null,
             language: story.language,
             topicIds: story.topicIds,
             proposedTopicIds: story.proposedTopicIds ?? story.topicIds,

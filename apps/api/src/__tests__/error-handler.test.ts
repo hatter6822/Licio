@@ -71,6 +71,50 @@ describe('the BFF terminal error handler', () => {
     expect(res.status).toBe(413);
   });
 
+  it('serializes a BARE HTTPException into the API error contract, not plain text', async () => {
+    // Asserting the status alone is what let this through: Hono's own
+    // `getResponse()` for a bare exception returns PLAIN TEXT, so the client's
+    // `normalizeError` could not parse it, fell back to `http_413`, and threw
+    // away the deliberate refusal message — the response-shape problem this
+    // handler exists to eliminate, in the one branch that looked already right.
+    const res = await appThatThrows(
+      new HTTPException(413, { message: 'Payload too large' }),
+    ).request('/boom');
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const parsed = apiErrorSchema.safeParse(await res.json());
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    // The status maps to the spelling the rest of the API already uses for it,
+    // so a client `switch` sees one vocabulary wherever the refusal came from.
+    expect(parsed.data.error.code).toBe('oversized_request');
+    expect(parsed.data.error.message).toBe('Payload too large');
+  });
+
+  it('passes a route-supplied response through UNCHANGED', async () => {
+    // A route that built its own body already chose its shape; the handler must
+    // not second-guess it.
+    const custom = new Response(JSON.stringify({ error: { code: 'teapot', message: 'no' } }), {
+      status: 418,
+      headers: { 'content-type': 'application/json' },
+    });
+    const res = await appThatThrows(new HTTPException(418, { res: custom })).request('/boom');
+    expect(res.status).toBe(418);
+    expect(await res.json()).toEqual({ error: { code: 'teapot', message: 'no' } });
+  });
+
+  it('falls back to http_<status> for an unmapped status rather than inventing one', async () => {
+    // Honest: that is exactly the code the client would have derived itself, so
+    // an unmapped status degrades to the old behaviour instead of to a code no
+    // consumer has ever heard of.
+    const res = await appThatThrows(
+      new HTTPException(402, { message: 'Payment required' }),
+    ).request('/boom');
+    expect(res.status).toBe(402);
+    const parsed = apiErrorSchema.safeParse(await res.json());
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.error.code).toBe('http_402');
+  });
+
   it('is REGISTERED by createApp, not merely exported', async () => {
     // A handler that exists but is never installed protects nothing, and no
     // ordinary probe distinguishes the two: every reachable route either

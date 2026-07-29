@@ -409,7 +409,14 @@ export class DrizzleContributionStore implements ContributionStore {
     const rows = await this.#db
       .select()
       .from(ranked)
-      .where(sql`${ranked.rn} <= ${opts.limitPerParent}`);
+      .where(sql`${ranked.rn} <= ${opts.limitPerParent}`)
+      // The window assigns the rank; only an outer ORDER BY makes the rows
+      // ARRIVE in it.  SQL guarantees no order without one, so without this the
+      // per-parent arrays could be built in any order and the reply previews
+      // would silently violate the newest-first / incorrect-last contract that
+      // `listChildren` and the in-memory adapter both keep — on the Drizzle path
+      // only, which is the half no unit test exercises.
+      .orderBy(sql`${ranked.parentContributionId}`, sql`${ranked.rn}`);
     for (const entry of rows) {
       const record = this.#toRecord(entry as unknown as typeof contributionsTable.$inferSelect);
       const parent = record.parentContributionId;

@@ -194,22 +194,27 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
     expect(await fixture.events.deadLetters.list()).toEqual([]);
   });
 
-  it('a THREAD-id target resolves to nothing — cascade targets are STORY ids', async () => {
+  it('a THREAD-id target still escalates — the LEGACY replay path', async () => {
     // A cascade target is a PWAtt fold item id (`pwatt/scoring.ts` emits
-    // `target_ids: [item.itemId]`), and every branch of the fold keys by the
+    // `target_ids: [item.itemId]`), and every branch of the fold now keys by the
     // owning story — including `contribution.created`, which used to key by
-    // `thread_id` and so produced a phantom item nothing downstream could
-    // reach.  This consumer therefore resolves by story id alone.
+    // `thread_id` and so produced a phantom item nothing downstream could reach.
+    // So a signal emitted by THIS release always names a story.
     //
-    // Asserting the thread id does NOT elevate is what keeps that honest: a
-    // regression to thread-keyed folding would make real cascades arrive here
-    // as thread ids, and a tolerant two-sided lookup would absorb them
-    // silently — which is exactly how the defect survived. Now it fails loudly
-    // at the aggregation tests instead.
+    // But `integrity.signal.detected` is durable and replayable, and a
+    // `harassment_cascade` emitted BEFORE the fold-key change still names a
+    // thread.  Dropping the thread lookup would silently skip those pending
+    // signals for the life of the retained window — a real escalation never
+    // applied.  Story-first with a thread fallback keeps them working.
+    //
+    // What keeps the fold-key fix honest is NOT this consumer being intolerant —
+    // it is `pwatt/aggregation.ts` folding by story and the tests there failing
+    // loudly on a regression.  Making the replay path lossy to police a
+    // different module's invariant costs real signals for no guarantee.
     await fixture.events.router.publish(cascadeSignal(threadId));
     await fixture.settleAll();
-    expect(await safetyState()).toBe('normal');
-    expect(await conversationState()).not.toBe('tense');
+    expect(await safetyState()).toBe('elevated');
+    expect(await conversationState()).toBe('tense');
   });
 
   it('ignores non-cascade signals and unknown targets', async () => {
