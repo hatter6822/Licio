@@ -13,6 +13,7 @@ import type {
   AiTranslation,
   BlockedInvocationRecord,
   DataLineageRecord,
+  GovernanceAdvisory,
   GovernanceProposalSummary,
   HarnessDecision,
   RegisteredModel,
@@ -540,6 +541,41 @@ export class InMemoryTranslationStore implements TranslationStore {
 }
 
 // --- WS-K.2.2a governance proposal summaries -------------------------------
+
+/**
+ * The §24.5 governance ADVISORIES a steward reads before deciding.
+ *
+ * `highlightConflictOfInterest` and `detectScamPatterns` produced a concrete
+ * advisory and the production caller discarded the value — no store, no route,
+ * no reader — so the advice the wiring claimed to provide reached nobody.
+ * "Advisory" only means anything when someone can see the advice and knowingly
+ * ignore it; unread advice is not restraint, it is absence.
+ */
+export interface GovernanceAdvisoryStore {
+  put(advisory: GovernanceAdvisory): Promise<void>;
+  listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryGovernanceAdvisoryStore implements GovernanceAdvisoryStore {
+  readonly #rows = new Map<string, GovernanceAdvisory>();
+  async put(advisory: GovernanceAdvisory): Promise<void> {
+    this.#rows.set(advisory.advisory_id, clone(advisory));
+  }
+  async listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]> {
+    return [...this.#rows.values()]
+      .filter((a) => a.proposal_ref === proposalRef)
+      .sort(
+        (a, b) =>
+          a.generated_at.localeCompare(b.generated_at) ||
+          a.advisory_id.localeCompare(b.advisory_id),
+      )
+      .map(clone);
+  }
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
 
 export interface GovernanceSummaryStore {
   put(summary: GovernanceProposalSummary): Promise<void>;

@@ -283,10 +283,29 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       tip = next;
     }
     let hiddenBy: string | undefined;
-    const refused: string[] = [];
     for (const cid of chain) {
       const tomb = tombstoneByTarget.get(cid);
       if (tomb !== undefined && hiddenBy === undefined) hiddenBy = tomb;
+    }
+    // REFUSED records are collected over the WHOLE authorized edit graph, not
+    // the visible chain.  With competing authorized edits, `pickLatestEdit`
+    // selects ONE branch — and a cross-author edit or tombstone aimed at the
+    // branch it did not select has a target CID that is absent from `chain`, so
+    // the refusal evidence vanished for exactly the conflict case this field
+    // exists to expose.  Hiding stays chain-scoped: a tombstone decides what a
+    // reader SEES, and that question is about the visible variant.
+    const branch = new Set<string>([root.recordCid]);
+    const frontier = [root.recordCid];
+    while (frontier.length > 0) {
+      const cid = frontier.pop() as string;
+      for (const edit of editsByTarget.get(cid) ?? []) {
+        if (branch.has(edit.recordCid)) continue; // cycle guard
+        branch.add(edit.recordCid);
+        frontier.push(edit.recordCid);
+      }
+    }
+    const refused: string[] = [];
+    for (const cid of branch) {
       const refusedHere = refusedByTarget.get(cid);
       if (refusedHere !== undefined) refused.push(...refusedHere);
     }

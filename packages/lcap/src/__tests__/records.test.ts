@@ -157,6 +157,49 @@ describe('thread projection (WS-R.2.2)', () => {
     expect(projected[0]?.unauthorizedSupersedes).toEqual(['x-edit']);
   });
 
+  it('keeps refusal evidence aimed at the branch the projection did NOT pick', () => {
+    // Two competing AUTHORIZED edits fork the record; `pickLatestEdit` selects
+    // one, so the loser's CID is absent from `editChain`.  A hostile
+    // cross-author edit aimed at that loser used to vanish from
+    // `unauthorizedSupersedes` entirely — the evidence disappeared for exactly
+    // the conflict case the field exists to expose.
+    const base = tr('b-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const branchA = tr(
+      'b-a',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'b-post' }),
+      { roomLogSeq: 1 },
+    );
+    const branchB = tr(
+      'b-b',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-B',
+        device_seq: 1,
+        replaces_record_cid: 'b-post',
+      }),
+      { roomLogSeq: 2 },
+    );
+    const hostile = tr(
+      'b-hostile',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        // Aimed at whichever branch loses below — both are asserted.
+        replaces_record_cid: 'b-a',
+      }),
+      { roomLogSeq: 9 },
+    );
+    const projected = reduceThreadProjection([base, branchA, branchB, hostile]);
+    expect(projected).toHaveLength(1);
+    const visible = projected[0]?.visibleCid;
+    // The refusal is retained WHICHEVER branch the projection selected — when
+    // it picks `b-a` the target is on the chain, and when it picks `b-b` it is
+    // not, and that second case is the one that used to lose the evidence.
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['b-hostile']);
+    expect(['b-a', 'b-b']).toContain(visible);
+  });
+
   it('refuses a cross-author tombstone but honours a moderation_action', () => {
     const victim = tr('y-post', mkRecord({ event_type: 'post' }));
     const hostileTomb = tr(

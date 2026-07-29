@@ -330,6 +330,38 @@ describe.skipIf(!DB_URL)('WS-K ai-governance Drizzle adapters (live Postgres)', 
     expect(await stores.governanceSummaries.listByProposal('prop-1')).toHaveLength(1);
   });
 
+  it('governance advisories round-trip and list oldest-first per proposal', async () => {
+    // The §24.5 advice a steward reads.  Only a real round-trip proves the
+    // adapter writes and reads it: the in-memory store keeps whole records, so
+    // a Drizzle store that dropped a column would stay green in every unit test.
+    const advisory = {
+      advisory_id: 'gadv-1',
+      proposal_ref: 'prop-adv',
+      kind: 'coi_highlight' as const,
+      detail: 'Proposer and recipient appear to be the same party.',
+      advisory_only: true as const,
+      output_id: 'out-adv-1',
+      generated_at: '2026-07-01T00:00:00.000Z',
+    };
+    await stores.governanceAdvisories.put(advisory);
+    // Idempotent: a re-run of the advisor must not duplicate the finding.
+    await stores.governanceAdvisories.put(advisory);
+    await stores.governanceAdvisories.put({
+      ...advisory,
+      advisory_id: 'gadv-2',
+      kind: 'scam_pattern' as const,
+      detail: 'Scam-associated language detected ("guaranteed returns").',
+      output_id: 'out-adv-2',
+      generated_at: '2026-07-02T00:00:00.000Z',
+    });
+    const listed = await stores.governanceAdvisories.listByProposal('prop-adv');
+    expect(listed.map((a) => a.advisory_id)).toEqual(['gadv-1', 'gadv-2']);
+    expect(listed[0]?.detail).toBe('Proposer and recipient appear to be the same party.');
+    expect(listed[0]?.advisory_only).toBe(true);
+    // Scoped by proposal.
+    expect(await stores.governanceAdvisories.listByProposal('prop-other')).toHaveLength(0);
+  });
+
   it('runtime metrics window since-inclusive and alerts list newest-first', async () => {
     await stores.runtime.recordMetric({
       modelName: 'topic-classifier',

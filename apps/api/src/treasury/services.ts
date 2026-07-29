@@ -361,15 +361,25 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
         proposalRef: input.proposalRef,
         fields: input.fields,
       });
-      if (input.recipientRef !== null) {
-        await highlightConflictOfInterest(
-          aiDeps,
-          input.proposalRef,
-          input.proposerRef,
-          input.recipientRef,
-        );
+      // PERSIST what the advisor found.  Both calls return a concrete advisory
+      // (proposer-is-recipient, scam-associated language) and this caller used
+      // to discard the value, so the advice reached no store, no route, and no
+      // steward — "advisory" only means anything when someone can read the
+      // advice and knowingly ignore it.
+      const advisories = [
+        input.recipientRef === null
+          ? null
+          : await highlightConflictOfInterest(
+              aiDeps,
+              input.proposalRef,
+              input.proposerRef,
+              input.recipientRef,
+            ),
+        await detectScamPatterns(aiDeps, input.proposalRef, input.text),
+      ];
+      for (const advisory of advisories) {
+        if (advisory !== null) await ai.governanceAdvisories.put(advisory);
       }
-      await detectScamPatterns(aiDeps, input.proposalRef, input.text);
     },
     masterSecret: knomosis.masterSecret,
     contractVerifier: knomosis.contractTypedDataVerifier,

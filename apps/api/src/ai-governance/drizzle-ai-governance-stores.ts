@@ -20,6 +20,7 @@ import type {
   AiTranslation,
   BlockedInvocationRecord,
   DataLineageRecord,
+  GovernanceAdvisory,
   GovernanceProposalSummary,
   HarnessDecision,
   RegisteredModel,
@@ -32,6 +33,7 @@ import {
   aiCorrections,
   aiDataLineage,
   aiEvaluations,
+  aiGovernanceAdvisories,
   aiGovernanceSummaries,
   aiInventoryVersions,
   aiModelCards,
@@ -57,6 +59,7 @@ import type {
   CorrectionStore,
   DataLineageStore,
   EvaluationStore,
+  GovernanceAdvisoryStore,
   GovernanceSummaryStore,
   InventoryStore,
   ModelRegistryStore,
@@ -988,6 +991,41 @@ export class DrizzleGovernanceSummaryStore implements GovernanceSummaryStore {
   }
 }
 
+export class DrizzleGovernanceAdvisoryStore implements GovernanceAdvisoryStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async put(advisory: GovernanceAdvisory): Promise<void> {
+    await this.#db
+      .insert(aiGovernanceAdvisories)
+      .values({
+        advisoryId: advisory.advisory_id,
+        proposalRef: advisory.proposal_ref,
+        kind: advisory.kind,
+        advisory: asJson(advisory),
+        outputId: advisory.output_id,
+        createdAt: new Date(advisory.generated_at),
+      })
+      .onConflictDoNothing();
+  }
+
+  async listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]> {
+    const rows = await this.#db
+      .select()
+      .from(aiGovernanceAdvisories)
+      .where(eq(aiGovernanceAdvisories.proposalRef, proposalRef))
+      .orderBy(asc(aiGovernanceAdvisories.createdAt), asc(aiGovernanceAdvisories.advisoryId));
+    return rows.map((row) => row.advisory as GovernanceAdvisory);
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(aiGovernanceAdvisories);
+  }
+}
+
 // --- WS-K.1.2f runtime monitoring --------------------------------------------
 
 export class DrizzleRuntimeMonitorStore implements RuntimeMonitorStore {
@@ -1148,6 +1186,7 @@ export interface DrizzleAiGovernanceStores {
   reviewQueue: AiReviewQueueStore;
   summaries: SummaryStore;
   translations: TranslationStore;
+  governanceAdvisories: GovernanceAdvisoryStore;
   governanceSummaries: GovernanceSummaryStore;
   runtime: RuntimeMonitorStore;
   moderationLog: ModerationDecisionLogStore;
@@ -1170,6 +1209,7 @@ export function createDrizzleAiGovernanceStores(db: Db): DrizzleAiGovernanceStor
     reviewQueue: new DrizzleAiReviewQueueStore(db),
     summaries: new DrizzleSummaryStore(db),
     translations: new DrizzleTranslationStore(db),
+    governanceAdvisories: new DrizzleGovernanceAdvisoryStore(db),
     governanceSummaries: new DrizzleGovernanceSummaryStore(db),
     runtime: new DrizzleRuntimeMonitorStore(db),
     moderationLog: new DrizzleModerationDecisionLog(db),

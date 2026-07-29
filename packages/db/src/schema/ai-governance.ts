@@ -256,6 +256,22 @@ export const aiGovernanceSummaries = pgTable(
   (t) => [index('ai_governance_summaries_proposal_idx').on(t.proposalRef)],
 );
 
+/** Governance ADVISORIES (WS-K §24.5) — the COI / scam-pattern flags a steward
+ *  reads, edits around, or knowingly ignores.  Advisory by construction: the
+ *  record exists so a human decides with it, never so the system acts on it. */
+export const aiGovernanceAdvisories = pgTable(
+  'ai_governance_advisories',
+  {
+    advisoryId: text('advisory_id').primaryKey(),
+    proposalRef: text('proposal_ref').notNull(),
+    kind: text('kind').notNull(),
+    advisory: jsonb('advisory').$type<Record<string, unknown>>().notNull(),
+    outputId: text('output_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('ai_governance_advisories_proposal_idx').on(t.proposalRef)],
+);
+
 /** Runtime AI monitoring metric time series (WS-K.1.2f). */
 export const aiRuntimeMetrics = pgTable(
   'ai_runtime_metrics',
@@ -362,6 +378,7 @@ export type AiSummaryReportRow = typeof aiSummaryReports.$inferSelect;
 export type AiTranslationRow = typeof aiTranslations.$inferSelect;
 export type AiTranslationReportRow = typeof aiTranslationReports.$inferSelect;
 export type AiGovernanceSummaryRow = typeof aiGovernanceSummaries.$inferSelect;
+export type AiGovernanceAdvisoryRow = typeof aiGovernanceAdvisories.$inferSelect;
 export type AiRuntimeMetricRow = typeof aiRuntimeMetrics.$inferSelect;
 export type AiRuntimeAlertRow = typeof aiRuntimeAlerts.$inferSelect;
 export type AiReviewQueueRow = typeof aiReviewQueue.$inferSelect;

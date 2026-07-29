@@ -38,6 +38,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import {
   checkGovernanceEligibility,
   requireGovernanceEligibility,
@@ -326,6 +327,39 @@ export function createRoomGovernanceSimRoutes() {
           }),
         );
       })
+      // The §24.5 AI advice ATTACHED to one proposal — the reader that made the
+      // advisory pipeline mean something.  `highlightConflictOfInterest` and
+      // `detectScamPatterns` produced concrete findings that the caller
+      // discarded, so nothing a steward could open ever showed them; advice
+      // nobody can read is not restraint, it is absence.  Advisory by
+      // construction (`advisory_only` is pinned true): this endpoint informs a
+      // decision, it never gates one.
+      .get(
+        '/rooms/:roomId/governance/proposals/:proposalId/advisories',
+        authMiddleware(),
+        proposalParams,
+        async (c) => {
+          const auth = requireAuth(c);
+          const services = getKnomosisServices();
+          const { roomId, proposalId } = c.req.valid('param');
+          const gate = await simGate(services, roomId, auth.userId, false);
+          if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          const proposal = await services.proposals.getById(proposalId);
+          // 404-over-403 on a cross-room id: an outsider learns nothing about
+          // which proposals exist elsewhere.
+          if (proposal === null || proposal.roomId !== roomId) {
+            return c.json(deny('not_found', 'Resource not found'), 404);
+          }
+          const ai = tryGetAiGovernanceServices();
+          // No AI wired ⇒ no advice, and full governance regardless.  That is
+          // what "advisory" has to mean.
+          const advisories =
+            ai === null ? [] : await ai.governanceAdvisories.listByProposal(proposalId);
+          const summaries =
+            ai === null ? [] : await ai.governanceSummaries.listByProposal(proposalId);
+          return c.json({ advisories, summaries });
+        },
+      )
       .post(
         '/rooms/:roomId/governance/proposals',
         authMiddleware(),

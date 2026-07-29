@@ -68,6 +68,10 @@ interface PrivateImportCounts {
   readonly rejected: number;
   readonly accepted: number;
   readonly quarantined: number;
+  /** Opened and already held — an exact re-receive of a backup this room has. */
+  readonly duplicate: number;
+  /** Retained awaiting an epoch key or device cert: NOT in room state yet. */
+  readonly pending: number;
 }
 
 /**
@@ -108,6 +112,8 @@ async function ingestPrivateBundle(
     rejected: recovered.rejected.length,
     accepted: report.accepted.length,
     quarantined: report.quarantined.length,
+    duplicate: report.duplicate,
+    pending: report.pending,
   };
 }
 
@@ -192,21 +198,14 @@ export function OfflineBundlePanel({
   const [localRooms, setLocalRooms] = useState<readonly LocalRoom[]>([]);
   const [pickedRoom, setPickedRoom] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Envelopes the engine recognised but did NOT report as newly accepted OR as
-  // quarantined — i.e. an exact idempotent re-receive of an op the room already
-  // holds.  The engine reports it in neither list (`room-engine.ts`: `existingSig
-  // === envelope.signature` → `continue`), so the count has to be derived here.
-  // Clamped at 0: the three engine counts are independent reads, and a negative
-  // remainder would render as a nonsense claim rather than an omission.
-  const alreadyPresent =
-    importState.phase === 'private_done'
-      ? Math.max(
-          0,
-          importState.counts.recovered -
-            importState.counts.accepted -
-            importState.counts.quarantined,
-        )
-      : 0;
+  // The engine now REPORTS what it did with everything it opened, so the panel
+  // no longer subtracts one count from another to guess.  The derived
+  // remainder (`recovered - accepted - quarantined`) counted a PENDING envelope
+  // — one retained because its epoch key or device cert has not arrived — as
+  // "already in this room", so a backup none of whose ops had entered room
+  // state was reported as an idempotent success.  Those are opposite answers.
+  const alreadyPresent = importState.phase === 'private_done' ? importState.counts.duplicate : 0;
+  const awaitingKeys = importState.phase === 'private_done' ? importState.counts.pending : 0;
   // The room being exported: the explicit prop (mounted FROM a room) overrides the offline-page pick.
   const effectiveRoomHash = roomHash ?? (pickedRoom || undefined);
 
@@ -740,6 +739,15 @@ export function OfflineBundlePanel({
                   'lcap.bundle.privateImportAlreadyPresent',
                   '{present} item(s) were already in this room — nothing to add.',
                   { present: alreadyPresent },
+                )}
+              </p>
+            ) : null}
+            {awaitingKeys > 0 ? (
+              <p className="text-sm text-ink-muted">
+                {t(
+                  'lcap.bundle.privateImportPending',
+                  '{pending} item(s) are waiting for a room key or device record and will appear once it arrives.',
+                  { pending: awaitingKeys },
                 )}
               </p>
             ) : null}

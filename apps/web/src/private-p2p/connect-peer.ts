@@ -299,6 +299,31 @@ export function selectFreshestCandidates<
 }
 
 /**
+ * Which candidate this round dials, given the freshest-first sample.
+ *
+ * FRESHEST-FIRST ALONE IS STARVABLE.  A hostile member can mint a fresh
+ * announcement whenever it likes: the cooldown that suppresses a failed dial is
+ * keyed by the record's ephemeral key, so rotating that key puts a NEW spoof at
+ * the head of every re-polled sample, and `triable[0]` hands it every dial
+ * attempt until the overall deadline expires.  The honest peer, sitting behind
+ * it, is never reached — and the old drain-the-whole-list loop, for all its
+ * live-lock cost, at least got there eventually.
+ *
+ * ALTERNATE: even rounds take the freshest (the fast path, and the ordering the
+ * §15.5 mismatch check + cooldown are designed around); odd rounds take the
+ * most starved — the OLDEST untried candidate, which is where an honest,
+ * non-rotating announcement settles as spoofs pile up in front of it.  A
+ * flooder can therefore occupy at most every OTHER dial no matter how fast it
+ * mints records, so an honest candidate is reached within two rounds of
+ * becoming triable, and the cost stays one dial per round rather than
+ * `candidates × deadline`.
+ */
+export function pickDialCandidate<C>(triable: readonly C[], round: number): C | undefined {
+  if (triable.length === 0) return undefined;
+  return round % 2 === 0 ? triable[0] : triable[triable.length - 1];
+}
+
+/**
  * Establish a live, membership-proven `PeerChannel` to another member of the room.
  * Resolves once the WebRTC data channel is open AND the §15.5 handshake has verified
  * the remote device; rejects (tearing the connection down) on timeout, abort, or a
@@ -626,6 +651,9 @@ export async function connectPrivatePeer(
   // the instant a FRESH candidate appears, so discovery stays fast when there is someone to dial.
   const maxDiscoveryPollBackoffMs = Math.max(pollIntervalMs, 4_000);
   let discoveryPollBackoffMs = pollIntervalMs;
+  /** Dial attempts made this connect — the alternation counter (see
+   *  `pickDialCandidate`). */
+  let dialRound = 0;
   for (;;) {
     // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
     // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
@@ -733,7 +761,12 @@ export async function connectPrivatePeer(
     // §15.5 mismatch check, and still suppressed by the ephemeral-keyed cooldown —
     // the honest candidate is simply reached on the next round rather than later in
     // the same one, and the cooldown guarantees the spoof is not retried ahead of it.
-    const candidate = triable[0];
+    //
+    // A flooder ROTATING its ephemeral defeats that cooldown, though — every
+    // re-poll hands it a fresh head-of-list record — so the round alternates
+    // between the freshest and the most starved candidate (`pickDialCandidate`).
+    const candidate = pickDialCandidate(triable, dialRound);
+    dialRound += 1;
     if (candidate !== undefined) {
       throwIfAborted();
       const peer: DiscoveredPeer = {

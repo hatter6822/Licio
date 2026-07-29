@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type ConnectPrivatePeerParams,
   connectPrivatePeer,
+  pickDialCandidate,
   type RtcDataChannelLike,
   type RtcIceCandidateInit,
   type RtcPeerConnectionLike,
@@ -595,7 +596,9 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
     // BOTH distinct ephemerals survive — the honest one is never dropped by the unproven claim.
     expect(out.map((c) => c.ann.signaling_public_key).sort()).toEqual(['E_h', 'E_s']);
     // Sorted freshest-first: the spoof (later expiry) is tried first (where the §15.5 mismatch check
-    // rejects it), then the honest candidate is dialed in the SAME round.
+    // rejects it), and the honest candidate is reached on a later round —
+    // guaranteed within two by `pickDialCandidate`'s alternation, even while the
+    // flooder keeps minting fresher records.
     expect(out[0]?.ann.signaling_public_key).toBe('E_s');
     expect(out[1]?.ann.signaling_public_key).toBe('E_h');
   });
@@ -615,5 +618,39 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
       cand('E3', 'z', 500),
     ]);
     expect(out.map((c) => c.ann.signaling_public_key)).toEqual(['E2', 'E3', 'E1']);
+  });
+});
+
+// --- Dial fairness: freshest-first alone is starvable -------------------------------------------
+describe('pickDialCandidate (a rotating flooder cannot own every dial)', () => {
+  it('alternates between the freshest and the most starved candidate', () => {
+    const sample = ['freshest', 'middle', 'oldest'];
+    expect(pickDialCandidate(sample, 0)).toBe('freshest');
+    expect(pickDialCandidate(sample, 1)).toBe('oldest');
+    expect(pickDialCandidate(sample, 2)).toBe('freshest');
+    expect(pickDialCandidate(sample, 3)).toBe('oldest');
+  });
+
+  it('reaches an honest peer within TWO rounds however fast spoofs are minted', () => {
+    // The cooldown is keyed by the record's ephemeral key, so a hostile member
+    // that rotates it puts a NEW spoof at the head of every re-polled sample —
+    // `triable[0]` would hand it every dial until the connect deadline expired
+    // and the honest peer behind it would never be reached.
+    const honest = 'E_honest';
+    const dialled: string[] = [];
+    for (let round = 0; round < 6; round += 1) {
+      // A fresh spoof each round, always ahead of the honest record.
+      const sample = [`E_spoof_${round}`, honest];
+      const pick = pickDialCandidate(sample, round);
+      if (pick !== undefined) dialled.push(pick);
+    }
+    expect(dialled).toContain(honest);
+    expect(dialled.indexOf(honest)).toBeLessThanOrEqual(1);
+  });
+
+  it('a single candidate is dialled on every round', () => {
+    expect(pickDialCandidate(['only'], 0)).toBe('only');
+    expect(pickDialCandidate(['only'], 1)).toBe('only');
+    expect(pickDialCandidate([], 0)).toBeUndefined();
   });
 });
