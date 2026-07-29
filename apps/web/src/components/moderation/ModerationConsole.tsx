@@ -44,6 +44,7 @@ import {
   fetchEvidenceQueue,
   fetchIncidents,
   fetchReportQueue,
+  fetchReviewerStatus,
   fetchUrlVerdict,
   resolveIncident,
   revertModerationAction,
@@ -294,10 +295,22 @@ export function ModerationConsole({
 function ReviewerStatusControl(): React.ReactElement {
   const t = useT();
   const { toast } = useToast();
-  const [status, setStatus] = useState<ReviewerAvailability>('available');
+  // INITIALISED FROM THE SERVER, not from a local default.  A fixed
+  // `available` told a reviewer they were in the auto-assignment pool while
+  // `availableIds()` still excluded them — and merely opening the console did
+  // not correct it, so the control stated the opposite of the truth for as long
+  // as the reviewer believed it.  `undefined` until the read lands, so the
+  // select shows the real value rather than flashing a wrong one.
+  const stored = useQuery({
+    queryKey: queryKeys.modReviewerStatus(),
+    queryFn: fetchReviewerStatus,
+    retry: false,
+  });
+  const [pending, setPending] = useState<ReviewerAvailability | null>(null);
+  const status: ReviewerAvailability = pending ?? stored.data?.status ?? 'offline';
   const update = useMutation({
     mutationFn: (next: ReviewerAvailability) => setReviewerStatus(next),
-    onSuccess: (_data, next) => setStatus(next),
+    onSuccess: (_data, next) => setPending(next),
     onError: (e) =>
       toast({
         message: isForbidden(e)
@@ -311,7 +324,7 @@ function ReviewerStatusControl(): React.ReactElement {
       <Select
         label={t('console.availability', 'My availability')}
         value={status}
-        disabled={update.isPending}
+        disabled={update.isPending || stored.isLoading}
         onValueChange={(v) => update.mutate(v as ReviewerAvailability)}
         options={REVIEWER_AVAILABILITY.map((value) => ({
           value,
@@ -591,11 +604,21 @@ function CaseReviewDialog({
       }),
   });
 
-  // WS-J.2.3b revert, keyed by the action being undone so only that row spins.
+  // WS-J.2.3b revert.  The reason is asked for SEPARATELY, never inherited from
+  // the action palette above: the server records this field as the reason for
+  // the REVERSAL in the action and the audit trail, so reusing the palette's
+  // pending new-action selection (which initialises to `MOD_HARASS_001`) would
+  // write "harassment" as the justification for undoing an unrelated spam or
+  // mistaken sanction — a false entry in the one record that is supposed to
+  // explain what a steward did and why.
+  const [revertTarget, setRevertTarget] = useState<string | null>(null);
+  const [revertReason, setRevertReason] = useState<ModerationReasonCode>('MOD_HARASS_001');
+  // Keyed by the action being undone so only that row spins.
   const revert = useMutation({
-    mutationFn: (actionId: string) => revertModerationAction(actionId, reasonCode),
+    mutationFn: (actionId: string) => revertModerationAction(actionId, revertReason),
     onSuccess: () => {
       toast({ message: t('console.revertDone', 'Action reverted.'), tone: 'success' });
+      setRevertTarget(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.modCase(caseId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.modAudit('default') });
     },
@@ -786,14 +809,22 @@ function CaseReviewDialog({
                     </span>
                     {entry.reverted ? (
                       <Badge tone="neutral">{t('console.reverted', 'Reverted')}</Badge>
-                    ) : (
+                    ) : entry.reversible ? (
                       <Button
                         variant="ghost"
                         loading={revert.isPending && revert.variables === entry.action_id}
-                        onClick={() => revert.mutate(entry.action_id)}
+                        onClick={() => setRevertTarget(entry.action_id)}
                       >
                         {t('console.revert', 'Revert')}
                       </Button>
+                    ) : (
+                      // Bans, lawful-basis removals and the workflow verbs are
+                      // recorded non-reversible and `revertAction` refuses them
+                      // with `not_reversible` — so offering the control here
+                      // would only ever produce an error toast.
+                      <span className="text-xs text-ink-muted">
+                        {t('console.notReversible', 'Not reversible')}
+                      </span>
                     )}
                   </li>
                 ))}
@@ -846,6 +877,44 @@ function CaseReviewDialog({
             </div>
           </section>
         </div>
+      ) : null}
+      {/* The reversal asks for its OWN reason.  The server records this field as
+          the justification for undoing the action, in the action row and the
+          audit trail, so inheriting the palette's pending new-action selection
+          would write a reason the steward never chose. */}
+      {revertTarget !== null ? (
+        <Dialog
+          open
+          onClose={() => setRevertTarget(null)}
+          title={t('console.revertTitle', 'Revert this action')}
+        >
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-ink-muted">
+              {t(
+                'console.revertBody',
+                'Why is this action being undone? This is recorded as the reason for the reversal.',
+              )}
+            </p>
+            <Select
+              label={t('console.revertReason', 'Reversal reason')}
+              value={revertReason}
+              onValueChange={(v) => setRevertReason(v as ModerationReasonCode)}
+              options={REASON_OPTIONS}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setRevertTarget(null)}>
+                {t('common.cancel', 'Cancel')}
+              </Button>
+              <Button
+                variant="primary"
+                loading={revert.isPending}
+                onClick={() => revert.mutate(revertTarget)}
+              >
+                {t('console.revertConfirm', 'Revert action')}
+              </Button>
+            </div>
+          </div>
+        </Dialog>
       ) : null}
     </Dialog>
   );

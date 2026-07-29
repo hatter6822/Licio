@@ -36,6 +36,7 @@ import {
   revertActionRequestSchema,
   revertActionResponseSchema,
   reviewerStatusRequestSchema,
+  reviewerStatusResponseSchema,
   stewardRolesCanAccessQueue,
   urlVerdictRequestSchema,
   urlVerdictResponseSchema,
@@ -421,6 +422,24 @@ export function createModerationConsoleRoutes() {
       })
 
       // --- Reviewer availability (WS-J.2.1d) ------------------------------
+      // The caller's own availability.  The console needs this to INITIALISE its
+      // control: a fixed local default told a reviewer they were `available`
+      // while `availableIds()` still excluded them, and merely opening the
+      // console did not correct it.  Same authorization bar as the write.
+      .get('/reviewer-status', async (c) => {
+        const actor = mustActor(c);
+        if (denyQueue(actor, 'report-queue') && denyQueue(actor, 'appeal-queue')) {
+          return c.json(
+            deny('forbidden', 'Only report or appeal reviewers can read availability'),
+            DENIAL_STATUS,
+          );
+        }
+        const mod = getModerationServices();
+        const record = await mod.reviewerStatus.get(actor.userId);
+        // Never stored ⇒ `offline`: a reviewer who has not opted in is not in
+        // the pool, and reporting `available` would be the same lie in reverse.
+        return c.json(reviewerStatusResponseSchema.parse({ status: record?.status ?? 'offline' }));
+      })
       .post('/reviewer-status', zValidator('json', reviewerStatusRequestSchema), async (c) => {
         const actor = mustActor(c);
         // Only an actual report/appeal reviewer may enter the auto-assignment

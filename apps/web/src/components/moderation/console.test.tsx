@@ -10,6 +10,8 @@ import { checkA11y } from '../../test/axe.js';
 import { ToastProvider } from '../ui/Toast/index.js';
 
 vi.mock('../../lib/safety-api.js', () => ({
+  fetchReviewerStatus: vi.fn(async () => ({ status: 'available' as const })),
+  setReviewerStatus: vi.fn(async () => ({ ok: true })),
   fetchReportQueue: vi.fn(),
   fetchCase: vi.fn(),
   fetchAppealQueue: vi.fn(),

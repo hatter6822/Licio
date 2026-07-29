@@ -319,6 +319,7 @@ export async function buildUserHistory(
       reason_code: (a.reasonCode as ModerationReasonCode | null) ?? null,
       created_at: a.createdAt,
       reverted: a.reverted,
+      reversible: a.reversible,
     }));
   return {
     user_id: subjectUserId,

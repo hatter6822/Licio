@@ -60,6 +60,7 @@ vi.mock('../../lib/safety-api.js', () => ({
   assignCase: vi.fn(),
   revertModerationAction: vi.fn(),
   setReviewerStatus: vi.fn(),
+  fetchReviewerStatus: vi.fn(),
   exportAudit: vi.fn(),
 }));
 
@@ -945,6 +946,7 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
             reason_code: 'MOD_HARASS_001',
             created_at: NOW,
             reverted: false,
+            reversible: true,
           },
         ],
       },
@@ -957,9 +959,21 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     });
     render(<ModerationConsole />, { wrapper: Providers });
     fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // Revert opens its OWN reason prompt rather than firing immediately with
+    // whatever the action palette happened to be showing.
     fireEvent.click(await screen.findByRole('button', { name: /^revert$/i }));
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+    const dialog = await screen.findByText(/why is this action being undone/i);
+    expect(dialog).toBeInTheDocument();
+    // Choose a reversal reason DIFFERENT from the palette's default, and assert
+    // that is what reaches the server: the server records this as the reason for
+    // the reversal, so inheriting the palette's `MOD_HARASS_001` would write a
+    // false justification into the action row and the audit trail.
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^revert action$/i }));
     await waitFor(() =>
-      expect(api.revertModerationAction).toHaveBeenCalledWith(ACTION_ID, 'MOD_HARASS_001'),
+      expect(api.revertModerationAction).toHaveBeenCalledWith(ACTION_ID, 'MOD_SPAM_001'),
     );
     expect(await screen.findByText(/action reverted/i)).toBeInTheDocument();
   });
@@ -977,6 +991,7 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
             reason_code: null,
             created_at: NOW,
             reverted: true,
+            reversible: true,
           },
         ],
       },
@@ -987,8 +1002,52 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     expect(screen.queryByRole('button', { name: /^revert$/i })).not.toBeInTheDocument();
   });
 
+  it('WS-J.2.3b: a NON-reversible action offers no control that could only fail', async () => {
+    // Bans, lawful-basis removals and the workflow verbs are recorded
+    // `reversible: false`, and `revertAction` refuses them with
+    // `not_reversible` — so a Revert button on them is a control whose only
+    // outcome is an error toast.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: '00000000-0000-4000-8000-0000000000f4',
+            action: 'suspend',
+            reason_code: 'MOD_HARASS_001',
+            created_at: NOW,
+            reverted: false,
+            reversible: false,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Not reversible')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^revert$/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: the control INITIALISES from the server, not a local default', async () => {
+    // A fixed `available` default told a reviewer they were in the
+    // auto-assignment pool while `availableIds()` still excluded them, and
+    // opening the console did not correct it — the control stated the opposite
+    // of the truth for as long as the reviewer believed it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'offline' });
+    render(<ModerationConsole />, { wrapper: Providers });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+        'offline',
+      ),
+    );
+  });
+
   it('WS-J.2.1d: availability posts the chosen status', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
     vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
     render(<ModerationConsole />, { wrapper: Providers });
     // The design-system Select is a listbox combobox, not a native <select>.
@@ -1000,6 +1059,7 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
 
   it('WS-J.2.1d: a rejected availability change does not leave the control lying', async () => {
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
     vi.mocked(api.setReviewerStatus).mockRejectedValue(
       new ApiClientError('insufficient_capability', 'no', 403),
     );

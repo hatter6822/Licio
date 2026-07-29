@@ -161,6 +161,19 @@ export const userHistoryActionSchema = z
     reason_code: contributionReasonCodeSchema.nullable(),
     created_at: isoTimestampSchema,
     reverted: z.boolean(),
+    /**
+     * Whether `revertAction` can actually undo this one.
+     *
+     * Bans, lawful-basis removals and the non-enforcement workflow verbs
+     * (`clear` / `escalate`) are recorded `reversible: false` and the revert
+     * route refuses them with `not_reversible`.  The projection used to drop
+     * this flag, so the console offered a Revert control on every un-reverted
+     * action — including every one that could only ever fail.  Defaulted so a
+     * row written before the field was carried reads as NOT reversible, which
+     * is the fail-closed direction: it hides a control rather than offering one
+     * that errors.
+     */
+    reversible: z.boolean().default(false),
   })
   .strict();
 export type UserHistoryAction = z.infer<typeof userHistoryActionSchema>;
@@ -328,6 +341,14 @@ export const reviewerStatusRequestSchema = z
   .object({ status: reviewerAvailabilitySchema })
   .strict();
 export type ReviewerStatusRequest = z.infer<typeof reviewerStatusRequestSchema>;
+
+/** The caller's OWN stored availability.  Without a read the console can only
+ *  guess, and it guessed `available` — telling a reviewer they were in the
+ *  auto-assignment pool while the server still had them `offline`. */
+export const reviewerStatusResponseSchema = z
+  .object({ status: reviewerAvailabilitySchema })
+  .strict();
+export type ReviewerStatusResponse = z.infer<typeof reviewerStatusResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Bulk actions (WS-J.2.1c) — per-item audit + reversible.
