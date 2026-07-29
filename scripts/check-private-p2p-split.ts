@@ -11,7 +11,7 @@
 // This gate fails the build on a static value import in apps/web/src.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { blankSourceComments } from './gate-comments.js';
+import { blankCommentsIn, blankSourceComments } from './gate-comments.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const WEB_SRC = resolve(ROOT, 'apps/web/src');
@@ -25,7 +25,12 @@ export function findStaticPrivateP2pImports(filename: string, rawContent: string
   // file supplies one.  A static `import … from '@licio/…-p2p'` sitting in the
   // swallowed span was invisible and the gate reported clean.  Blanking is
   // length- and newline-preserving, so the reported line still names the real one.
-  const content = blankSourceComments(filename, rawContent);
+  return scanBlankedPrivate(filename, blankSourceComments(filename, rawContent));
+}
+
+/** The scan itself, over content whose comments are ALREADY blanked (see `main`:
+ *  the sweep blanks the whole tree in ONE batch rather than per file). */
+function scanBlankedPrivate(filename: string, content: string): string[] {
   const issues: string[] = [];
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
   const sideEffect = new RegExp(`\\bimport\\s*['"]${SPECIFIER}['"]`, 'g');
@@ -64,10 +69,15 @@ function collect(dir: string): string[] {
 
 function main(): void {
   const errors: string[] = [];
-  for (const file of collect(WEB_SRC)) {
-    errors.push(
-      ...findStaticPrivateP2pImports(file.replace(ROOT, ''), readFileSync(file, 'utf-8')),
-    );
+  // ONE compiler host for the whole tree — the per-file helper spun up a
+  // TypeScript host for each of ~720 files and took this mandatory gate to 46
+  // seconds.  A gate slow enough to be killed is a gate that stops being run.
+  const files = collect(WEB_SRC);
+  const blanked = blankCommentsIn(
+    files.map((file) => ({ path: file.replace(ROOT, ''), content: readFileSync(file, 'utf-8') })),
+  );
+  for (const [filename, content] of blanked) {
+    errors.push(...scanBlankedPrivate(filename, content));
   }
   if (errors.length > 0) {
     console.error(

@@ -9,21 +9,34 @@
 // in apps/web/src (the "deliberately mis-placed import fails a gate" acceptance check).
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { blankSourceComments } from './gate-comments.js';
+import { blankCommentsIn, blankSourceComments } from './gate-comments.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const WEB_SRC = resolve(ROOT, 'apps/web/src');
 const SPECIFIER = '@licio/lcap-p2p';
 
-/** Pure: the static-value-import violations in one source (importable for tests). */
+/**
+ * Pure: the static-value-import violations in one source (importable for tests).
+ *
+ * Blanks ONE source, so it creates one compiler host — fine for a test, wrong
+ * for a sweep.  `main` blanks the whole tree in a single batch instead; see the
+ * note there.
+ */
 export function findStaticP2pImports(filename: string, rawContent: string): string[] {
-  // Blank comments through the PARSER, not a regex pair.  A regex has no notion
-  // of a string literal, so a `/*` inside one opened a fake block comment that
-  // swallowed every line up to the next real `*/` — and any JSDoc later in the
-  // file supplies one.  A static `import … from '@licio/…-p2p'` sitting in the
-  // swallowed span was invisible and the gate reported clean.  Blanking is
-  // length- and newline-preserving, so the reported line still names the real one.
-  const content = blankSourceComments(filename, rawContent);
+  return scanBlanked(filename, blankSourceComments(filename, rawContent));
+}
+
+/**
+ * The scan itself, over content whose comments are ALREADY blanked.
+ *
+ * Blanking goes through the PARSER, not a regex pair: a regex has no notion of a
+ * string literal, so a `/*` inside one opened a fake block comment that
+ * swallowed every line up to the next real `*​/` — and any JSDoc later in the
+ * file supplies one.  A static `import … from '@licio/…-p2p'` sitting in the
+ * swallowed span was invisible and the gate reported clean.  Blanking is length-
+ * and newline-preserving, so the reported line still names the real one.
+ */
+function scanBlanked(filename: string, content: string): string[] {
   const issues: string[] = [];
   // Match `import … from '@licio/lcap-p2p'` and side-effect `import '@licio/lcap-p2p'`.
   const staticFrom = new RegExp(`\\bimport\\b([^;]*?)\\bfrom\\s*['"]${SPECIFIER}['"]`, 'g');
@@ -62,8 +75,19 @@ function collect(dir: string): string[] {
 
 function main(): void {
   const errors: string[] = [];
-  for (const file of collect(WEB_SRC)) {
-    errors.push(...findStaticP2pImports(file.replace(ROOT, ''), readFileSync(file, 'utf-8')));
+  // ONE compiler host for the whole tree.  Calling the single-source helper per
+  // file spun up a TypeScript host for each of ~720 files under apps/web/src,
+  // which took this MANDATORY gate from a second to 46 (and longer on a cold
+  // cache — the reviewer's checkout had to kill it).  `blankCommentsIn` has
+  // always accepted a batch; the per-file convenience wrapper was simply the
+  // easiest thing to reach for, and a gate slow enough to be killed is a gate
+  // that stops being run.
+  const files = collect(WEB_SRC);
+  const blanked = blankCommentsIn(
+    files.map((file) => ({ path: file.replace(ROOT, ''), content: readFileSync(file, 'utf-8') })),
+  );
+  for (const [filename, content] of blanked) {
+    errors.push(...scanBlanked(filename, content));
   }
   if (errors.length > 0) {
     console.error('check:lcap-p2p-split FAILED — @licio/lcap-p2p must be dynamically imported:');

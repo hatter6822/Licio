@@ -9,7 +9,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { APPLAUSE_TOKEN_PATTERNS } from './applause-tokens.js';
-import { blankSourceComments } from './gate-comments.js';
+import { blankCommentsIn } from './gate-comments.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const SCAN_DIRS = [
@@ -68,15 +68,22 @@ function collect(dir: string): string[] {
 function main(): void {
   const errors: string[] = [];
   const files = SCAN_DIRS.flatMap(collect);
-  for (const file of files) {
-    // Blank comments through the PARSER, whole-file, rather than per line with a
-    // regex: doctrine is DISCUSSED in prose all over this repository ("never a
-    // downvote"), and the old per-line stripper could not see a `/*` inside a
-    // string literal — it swallowed to the next real `*/`, hiding real
-    // affordances in between — nor a block comment spanning lines it was handed
-    // one at a time.  Blanking is length- and newline-preserving, so `i + 1`
-    // still names the real source line.
-    const lines = blankSourceComments(file, readFileSync(file, 'utf-8')).split('\n');
+  // Blank comments through the PARSER, whole-file, rather than per line with a
+  // regex: doctrine is DISCUSSED in prose all over this repository ("never a
+  // downvote"), and the old per-line stripper could not see a `/*` inside a
+  // string literal — it swallowed to the next real `*/`, hiding real
+  // affordances in between — nor a block comment spanning lines it was handed
+  // one at a time.  Blanking is length- and newline-preserving, so `i + 1`
+  // still names the real source line.
+  //
+  // ONE BATCH, one compiler host.  Per-file blanking built a TypeScript host for
+  // each of ~1200 scanned files and took this mandatory gate to 75 seconds — the
+  // slowest in the suite, for a scan whose actual work is a regex sweep.
+  const blanked = blankCommentsIn(
+    files.map((file) => ({ path: file, content: readFileSync(file, 'utf-8') })),
+  );
+  for (const [file, content] of blanked) {
+    const lines = content.split('\n');
     lines.forEach((line, i) => {
       const code = line;
       if (!code.trim()) return;

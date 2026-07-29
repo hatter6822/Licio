@@ -528,8 +528,24 @@ export async function connectPrivatePeer(
       timeBucket,
     );
 
-    // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
-    const isOfferer = selfPeerBlindId < peer.peerBlindId;
+    // Deterministic role from the DIAL IDENTITIES, not from `peer_blind_id`.
+    //
+    // The blind id is a server-visible field on the record, chosen freely by
+    // whoever announces it and — unlike the signalling key and the claimed
+    // device id — outside the cap's binding.  A member could copy an honest
+    // capped announcement, keep the bound fields so the proof still verified,
+    // republish under an attacker-chosen blind id with a later expiry, and win
+    // the pre-verification dedup: the two honest peers then disagreed about who
+    // offers (both, or neither), the dial failed, and the honest signalling key
+    // was cooled down.  Binding the blind id too would close that, but the
+    // better answer is not to depend on it: the two SIGNALLING keys are the
+    // identities the dial actually uses, both sides hold both of them, and the
+    // signalling ADDRESS is already derived from exactly this pair — so the role
+    // is symmetric by construction and needs no extra field to be trustworthy.
+    // It also holds for a Tier-1 peer, where there is no cap to bind anything.
+    const selfDialId = p2p.toBase64Url(ephemeral.publicKey);
+    const peerDialId = p2p.toBase64Url(peer.peerSignalingPublicKey);
+    const isOfferer = selfDialId < peerDialId;
     const pc = factory({
       ...(params.iceServers ? { iceServers: params.iceServers } : {}),
       // relay-only ⇒ the browser gathers ONLY TURN candidates (never learns/leaks a host IP).

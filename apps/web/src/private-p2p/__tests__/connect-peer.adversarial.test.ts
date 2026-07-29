@@ -212,7 +212,26 @@ async function setupOffererHarness(): Promise<Harness> {
   const { created, epoch, rendezvousKey, timeBucket, aliceBlind, adversaryDeviceId } =
     await pickOffererRoom(p2p);
 
-  const advEphemeral = await p2p.generateX25519KeyPair();
+  // The offerer role is decided by the two DIAL IDENTITIES (the signalling
+  // public keys), not by `peer_blind_id` — that field is server-visible and
+  // outside the cap's binding, so a forged record could make the two honest
+  // peers disagree about who offers.  This harness needs ALICE to offer, so it
+  // picks an adversary ephemeral that sorts ABOVE her derived signalling key.
+  const aliceSignaling = await p2p.deriveSignalingKeyPair(
+    created.founder.signingKeyPair.privateKey,
+    created.roomIdCommitment,
+    'founder-dev',
+    epoch,
+    timeBucket,
+  );
+  const aliceDialId = p2p.toBase64Url(aliceSignaling.publicKey);
+  let advEphemeral = await p2p.generateX25519KeyPair();
+  for (let i = 0; i < 64 && p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId; i += 1) {
+    advEphemeral = await p2p.generateX25519KeyPair();
+  }
+  if (p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId) {
+    throw new Error('could not pick an adversary dial id above alice’s');
+  }
   const advSigning = await p2p.generateDeviceSigningKeyPair();
   const advSigningPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(advSigning.publicKey));
   const adversaryBlind = await p2p.derivePeerBlindId(
