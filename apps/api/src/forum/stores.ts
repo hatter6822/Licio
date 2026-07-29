@@ -485,11 +485,21 @@ export interface RoomStore {
   /** Distinct count of users ELIGIBLE TO VOTE in the room's governance — active
    *  subscribers ∪ stewards, the exact electorate `isRoomMember` admits (a steward
    *  role holder can vote without an active subscription). Used as the governance
-   *  quorum/turnout denominator so it matches who can actually cast a ballot. */
-  countEligibleVoters(roomId: string): Promise<number>;
+   *  quorum/turnout denominator so it matches who can actually cast a ballot.
+   *
+   *  `joinedBefore` counts the electorate AS OF an instant, which is what makes
+   *  a frozen denominator and a frozen ballot gate the SAME question.  Stamping
+   *  an instant beside a live count leaves a window — however small — in which a
+   *  member is inside the count and outside the cutoff, and that is precisely
+   *  the mismatch the freeze exists to remove; passing the instant in closes it
+   *  by construction instead of by proximity.  A member whose join instant is
+   *  unknown, and every steward (whose seat carries no join instant at all), is
+   *  UNJUDGEABLE and counted — matching the ballot gate, which lets a null
+   *  `memberSince` through rather than locking out a legitimate steward. */
+  countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number>;
   /** The SAME electorate as `countEligibleVoters`, as ids — WS-M applies the
    *  law-pack eligibility predicate per member for the quorum basis. */
-  listEligibleVoterIds(roomId: string): Promise<string[]>;
+  listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]>;
   listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]>;
   getJoinRequest(requestId: string): Promise<RoomSubscriptionRecord | null>;
   /** Remove every subscription and steward row for a user (WS-D.2.4
@@ -1351,17 +1361,25 @@ export class InMemoryRoomStore implements RoomStore {
     return count;
   }
 
-  async countEligibleVoters(roomId: string): Promise<number> {
-    return (await this.listEligibleVoterIds(roomId)).length;
+  async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
+    return (await this.listEligibleVoterIds(roomId, joinedBefore)).length;
   }
 
-  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+  async listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can
     // vote via their role without an active subscription).
     const ids = new Set<string>();
     for (const sub of this.#subscriptions.values()) {
-      if (sub.roomId === roomId && sub.status === 'active') ids.add(sub.userId);
+      if (sub.roomId !== roomId || sub.status !== 'active') continue;
+      // Only exclude a member we KNOW joined after the instant: an unknown join
+      // is unjudgeable, and the ballot gate lets that through too.
+      if (joinedBefore !== undefined && sub.joinedAt !== null && sub.joinedAt > joinedBefore) {
+        continue;
+      }
+      ids.add(sub.userId);
     }
+    // Stewards carry no join instant, so the cutoff cannot judge them — the
+    // same reason `castVote` admits a null `memberSince`.
     for (const steward of this.#stewards) {
       if (steward.roomId === roomId) ids.add(steward.userId);
     }

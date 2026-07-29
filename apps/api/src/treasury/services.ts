@@ -135,8 +135,10 @@ export function buildMembershipFactsPort(
           (eligibility.rules.minMembershipDays ?? 0) === 0 &&
           (eligibility.rules.minContributions ?? 0) === 0 &&
           eligibility.rules.requireVerifiedIdentity !== true);
-      if (trivial) return forum.rooms.countEligibleVoters(roomId);
-      const ids = await forum.rooms.listEligibleVoterIds(roomId);
+      // The electorate AS OF the freeze instant, on BOTH arms — a count taken
+      // live and an instant stamped beside it are two answers to one question.
+      if (trivial) return forum.rooms.countEligibleVoters(roomId, eligibility?.asOf);
+      const ids = await forum.rooms.listEligibleVoterIds(roomId, eligibility.asOf);
       let eligible = 0;
       for (const userId of ids) {
         // ROUTE-GATE PARITY for treasury-controlling counts (W13): production

@@ -129,6 +129,12 @@ export interface MembershipFactsPort {
       rules: EligibilityRules;
       treasuryControlling: boolean;
       weight?: { model: WeightModel; maxVotingWeightPerAccount: number };
+      /** Count the electorate AS OF this instant — the SAME instant the ballot
+       *  gate compares a voter's join against.  Stamping an instant beside a
+       *  live count leaves a window in which a member is inside the count and
+       *  outside the cutoff, which is the mismatch the freeze exists to
+       *  remove. */
+      asOf?: string;
     },
   ): Promise<number>;
 }
@@ -295,8 +301,13 @@ async function eligibleBasisFor(
   deps: ProposalDeps,
   proposal: GovernanceProposalRecord,
   pack: LawPack,
+  /** The instant the basis is frozen at, recorded as `eligibleBasisAt` and read
+   *  back by the ballot gate.  Omitted on the tally's live fallback, where
+   *  there is no frozen basis to agree with. */
+  asOf?: string,
 ): Promise<number> {
   return deps.membership.eligibleMemberCount(proposal.roomId, {
+    ...(asOf === undefined ? {} : { asOf }),
     rules: pack.eligibility ?? {
       minMembershipDays: 0,
       minContributions: 0,
@@ -1293,8 +1304,15 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       // No resolvable pack ⇒ no basis to record. The row stays null and the
       // tally falls back to the live read, which is what it did before — a
       // missing pack must not silently stamp a 0 and fail quorum outright.
+      // ONE instant, taken BEFORE the count and passed INTO it, so the
+      // denominator is the electorate as of exactly the moment the ballot gate
+      // will compare against.  Stamping `nowIso` beside a live count left a
+      // window — the sweep's own runtime — in which a member was inside the
+      // count and outside the cutoff: the same defect this stamp was added to
+      // fix, at a smaller scale.
+      const basisAt = new Date(deps.now()).toISOString();
       const eligibleBasisCount =
-        pack === undefined ? null : await eligibleBasisFor(deps, proposal, pack);
+        pack === undefined ? null : await eligibleBasisFor(deps, proposal, pack, basisAt);
       const opened = await deps.proposals.casVotingState(
         proposal.proposalId,
         'deliberation',
@@ -1305,7 +1323,7 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
         // ordinary tick lag puts the two apart: everyone who joined in between
         // raised the denominator and was refused a ballot, so enough of them
         // made quorum unreachable however many eligible members voted.
-        eligibleBasisCount === null ? {} : { eligibleBasisCount, eligibleBasisAt: nowIso },
+        eligibleBasisCount === null ? {} : { eligibleBasisCount, eligibleBasisAt: basisAt },
       );
       if (opened !== null) settled += 1;
       continue;

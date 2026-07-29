@@ -1165,15 +1165,32 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
-  async countEligibleVoters(roomId: string): Promise<number> {
+  /** The `joined_at` arm of the electorate filter: only a member we KNOW joined
+   *  after the instant is excluded, because an unknown join is unjudgeable and
+   *  the ballot gate lets that through too.  Empty when no instant is given. */
+  #joinedBeforeClause(joinedBefore: string | undefined) {
+    // The ISO STRING with an explicit cast, not a `Date`: these two queries go
+    // through raw `execute()`, whose parameter path takes the value as-is and
+    // rejects a Date instance outright (`ERR_INVALID_ARG_TYPE`).  The
+    // in-memory adapter has no parameter binding to disagree with, so only the
+    // gated live-Postgres suite can catch this.
+    return joinedBefore === undefined
+      ? sql``
+      : sql` AND (${roomSubscriptionsTable.joinedAt} IS NULL
+              OR ${roomSubscriptionsTable.joinedAt} <= ${joinedBefore}::timestamptz)`;
+  }
+
+  async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can vote
     // via their role without an active subscription). The UNION dedups in Postgres
     // and returns a SCALAR count — no materialising every member/steward user id.
+    // Stewards carry no join instant, so the cutoff cannot judge them.
     const rows = (await this.#db.execute(sql`
       SELECT count(*)::int AS value FROM (
         SELECT ${roomSubscriptionsTable.userId} FROM ${roomSubscriptionsTable}
           WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
             AND ${roomSubscriptionsTable.status} = 'active'
+            ${this.#joinedBeforeClause(joinedBefore)}
         UNION
         SELECT ${roomStewardsTable.userId} FROM ${roomStewardsTable}
           WHERE ${roomStewardsTable.roomId} = ${roomId}
@@ -1182,12 +1199,13 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
-  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+  async listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]> {
     const rows = (await this.#db.execute(sql`
       SELECT voters.user_id AS value FROM (
         SELECT ${roomSubscriptionsTable.userId} AS user_id FROM ${roomSubscriptionsTable}
           WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
             AND ${roomSubscriptionsTable.status} = 'active'
+            ${this.#joinedBeforeClause(joinedBefore)}
         UNION
         SELECT ${roomStewardsTable.userId} AS user_id FROM ${roomStewardsTable}
           WHERE ${roomStewardsTable.roomId} = ${roomId}

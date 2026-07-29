@@ -385,6 +385,47 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     expect(await port.eligibleMemberCount(ROOM)).toBe(42);
   });
 
+  it('the basis is counted AS OF the freeze instant, not live beside it', async () => {
+    // A count taken live and an instant stamped beside it are two answers to
+    // one question, and the gap between them is the sweep's own runtime: a
+    // member joining inside it lands in the denominator and outside the ballot
+    // cutoff, which is exactly the mismatch the freeze exists to remove.
+    // Passing the instant INTO the count closes it by construction.
+    const fixture = await freshKnomosisServices();
+    const asOf = new Date(fixture.knomosis.now()).toISOString();
+    const seen: Array<string | undefined> = [];
+    const port = buildMembershipFactsPort(
+      {
+        rooms: {
+          getSubscription: async () => null,
+          countEligibleVoters: async (_r: string, joinedBefore?: string) => {
+            seen.push(joinedBefore);
+            return 7;
+          },
+        },
+      } as unknown as ForumServices,
+      identityOf(true),
+      fixture.knomosis,
+    );
+    // The trivial arm (no rules) still carries the instant — it is the SAME
+    // denominator either way.
+    expect(await port.eligibleMemberCount(ROOM, undefined)).toBe(7);
+    expect(seen).toEqual([undefined]);
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: {
+          minMembershipDays: 0,
+          minContributions: 0,
+          requireVerifiedIdentity: false,
+          newWalletCoolingOffDays: 0,
+        },
+        treasuryControlling: false,
+        asOf,
+      }),
+    ).toBe(7);
+    expect(seen[1]).toBe(asOf);
+  });
+
   it('membership age and the freeze both read JOINED, not REQUESTED', async () => {
     // In an approval-gated room the two are far apart, and reading the request
     // instant makes both answers wrong in the same direction: a `minMembershipDays`

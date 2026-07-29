@@ -583,6 +583,18 @@ describe.skipIf(!DB_URL)('WS-G forum Drizzle adapters (live Postgres)', () => {
     // secondUserId (community_steward, no active subscription) = 2 distinct, so a
     // steward-role voter is counted even though countMembers (active only) is 1.
     expect(await roomsStore.countEligibleVoters(room.roomId)).toBe(2);
+    // AS OF an instant BEFORE this member joined: they drop out of the
+    // denominator, and the steward stays — a seat carries no join instant, so
+    // the cutoff cannot judge it, which is the same reason `castVote` admits a
+    // null `memberSince`.  This is what makes a frozen basis and a frozen
+    // ballot gate one question rather than two.
+    const beforeJoin = new Date(Date.parse(requestedAt) - 60_000).toISOString();
+    expect(await roomsStore.countEligibleVoters(room.roomId, beforeJoin)).toBe(1);
+    expect(await roomsStore.listEligibleVoterIds(room.roomId, beforeJoin)).toEqual([secondUserId]);
+    // …and as of NOW both are in it again.
+    expect(
+      await roomsStore.countEligibleVoters(room.roomId, new Date(Date.now() + 1000).toISOString()),
+    ).toBe(2);
     expect(await roomsStore.listJoinRequests(room.roomId)).toEqual([]);
     expect((await roomsStore.listSubscriptionsByUser(authorId)).map((s) => s.roomId)).toContain(
       room.roomId,
