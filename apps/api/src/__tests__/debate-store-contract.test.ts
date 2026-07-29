@@ -1008,6 +1008,22 @@ describe.skipIf(!DB_URL)('DrizzleDebateStore (contract, live Postgres)', () => {
   beforeAll(async () => {
     db = createDbClient(DB_URL as string, { onNotice: 'discard' });
     await migrate(db, { migrationsFolder: migrationsFolder() });
+    // Start from an EMPTY arena table, not just leave one behind.
+    //
+    // The sweep contracts below assert membership in globally-ordered,
+    // LIMIT-bounded queries — `listPastResolveDeadline(now, 10)` returns the ten
+    // arenas with the earliest `resolve_due_at`, and a case asserts its OWN
+    // arena is among them.  That only holds while the shared table is nearly
+    // empty.  Cleaning solely in `afterAll` made the suite depend on the
+    // previous run having finished: an interrupted or killed run leaves its
+    // arenas behind, and the next run's own row is crowded out of the window —
+    // a failure that reproduces only in the full suite and vanishes when the
+    // file is re-run alone (because that run's `afterAll` finally cleans up).
+    //
+    // The negative assertions are the worse half: crowding can only push a row
+    // OUT of the window, so `not.toContain(id)` starts passing for the wrong
+    // reason — reporting a contract it never checked.
+    await db.delete(debateArenas);
     stories = new DrizzleStoryStore(db);
     contributions = new DrizzleContributionStore(db);
     rooms = new DrizzleRoomStore(db);
