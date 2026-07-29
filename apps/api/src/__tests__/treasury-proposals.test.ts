@@ -1512,6 +1512,52 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect('signature' in vote).toBe(true);
   });
 
+  it('a delegator who joined AFTER the freeze confers NOTHING (WS-M.4.2c)', async () => {
+    // Delegation was the way around the electorate freeze.  The direct ballot
+    // refuses a signer whose join postdates `eligibleBasisAt`; the incoming-
+    // delegation fold applied the law-pack eligibility gate and nothing else,
+    // so one question — "is this member inside the population the denominator
+    // was counted over?" — was answered against a stamped instant for a direct
+    // voter and against LIVE membership for a delegated one.  Post-open joiners
+    // could hand their units to a delegate whose cap admits them all, and
+    // delegated weight is what the threshold arithmetic consumes.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = Date.parse(opened?.eligibleBasisAt ?? '');
+    expect(frozenAt).toBeGreaterThan(0);
+    // The delegator joined a minute AFTER the basis was frozen.
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 60,
+      contributionCount: 10,
+      verifiedIdentity: true,
+      memberSince: new Date(frozenAt + 60_000).toISOString(),
+    });
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // Own vote only — the post-freeze delegation conferred nothing…
+    expect(vote.signature.weightSnapshot).toBe('1');
+    // …and it is not recorded as consumed, so the unit is still the delegator's
+    // to cast on the NEXT proposal.
+    expect(vote.signature.countedDelegatorIds).toEqual([]);
+  });
+
   it('a delegated unit the CAP dropped is still the delegator’s to cast (WS-M.4.2c-3)', async () => {
     // Existence is not consumption.  The delegate's fold stops at the
     // per-account ceiling, so with a cap of 1 — the default when a law pack

@@ -905,7 +905,7 @@ export class GovernanceService {
     userId: string,
     modelId: string,
     lawPackId: string | null,
-    countEligibleVoters?: () => Promise<number>,
+    countEligibleVoters?: (asOf: string) => Promise<number>,
   ): Promise<GovernanceResult<{ voteId: string }>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat || seat.holderUserId !== userId) {
@@ -921,8 +921,16 @@ export class GovernanceService {
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     // Only NOW — after authorization + validation — read the electorate, so a
     // non-steward cannot force the count query by hammering the endpoint.
-    const eligibleCount = countEligibleVoters ? Math.max(0, await countEligibleVoters()) : 0;
+    //
+    // ONE INSTANT, taken BEFORE the count and passed into it, exactly as
+    // `scheduleElection` does.  Reading the clock AFTER an awaited live count
+    // put `opensAt` later than the population it recorded, so a member joining
+    // in between was outside the denominator and inside any cutoff measured
+    // against it.
     const opensAt = this.deps.now();
+    const eligibleCount = countEligibleVoters
+      ? Math.max(0, await countEligibleVoters(opensAt.toISOString()))
+      : 0;
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     const voteId = this.deps.uuid();
     // The insert is the ATOMIC one-open-per-room guard (DB partial unique index /
@@ -957,6 +965,10 @@ export class GovernanceService {
     voterUserId: string,
     choice: RatificationChoice,
     eligible: boolean,
+    /** When this voter JOINED, so the electorate freeze binds the NUMERATOR too.
+     *  Null is unjudgeable (a steward-role arm carries no subscription row) and
+     *  passes, matching `castVote` and the `joinedBefore` count. */
+    voterMemberSince: string | null = null,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote on ratification.');
     // WS-L.3.5e governance-voting kill switch (same semantics as castVote).
@@ -975,6 +987,22 @@ export class GovernanceService {
     // Reject after the published close time (status flips only on the tick).
     if (vote.status !== 'open' || this.deps.now().getTime() >= Date.parse(vote.closesAt)) {
       return err('not_open', 'Ratification vote is not open.');
+    }
+    // THE ELECTORATE FREEZE, on the numerator as well as the denominator.
+    // `eligibleCount` is snapshotted at the open while eligibility was checked
+    // live, so post-open joiners could each add to `distinctVoters` against a
+    // denominator they were never counted in — and `turnout` is
+    // `min(1, distinctVoters / eligibleCount)`, so enough of them satisfy any
+    // `minTurnout` outright.  This is the ONLY path to activating a room's
+    // in-room AI governance model, which makes it the last place a recruitment
+    // window belongs.  Elections and WS-M proposals already gate this; the
+    // ratification path is the third.
+    if (voterMemberSince !== null && Date.parse(voterMemberSince) > Date.parse(vote.opensAt)) {
+      return err(
+        'joined_after_open',
+        'The electorate for this ratification was fixed when it opened; ' +
+          'members who joined afterwards vote on the next one.',
+      );
     }
     const cast = await this.deps.stores.ratificationBallots.cast({
       voteId,

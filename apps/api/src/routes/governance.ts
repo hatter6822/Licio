@@ -158,8 +158,13 @@ export function createGovernanceRoutes() {
             roomId,
             auth.userId,
           );
-          const voterMemberSince =
-            voterSubscription?.joinedAt ?? voterSubscription?.requestedAt ?? null;
+          // `joinedAt` ONLY.  The `?? requestedAt` fallback that stood here
+          // answered the freeze with the one instant already established as
+          // wrong for it: an approval-gated joiner's request predates their
+          // membership.  Unknown is unjudgeable and passes on BOTH sides — the
+          // `joinedBefore` count admits it too — so it cannot create the
+          // mismatch the freeze exists to remove.
+          const voterMemberSince = voterSubscription?.joinedAt ?? null;
           if (!eligible) {
             return c.json(
               deny('not_member', 'Only room members may vote in a steward election.'),
@@ -308,7 +313,9 @@ export function createGovernanceRoutes() {
             auth.userId,
             c.req.param('modelId'),
             law_pack_id,
-            () => getForumServices().rooms.countEligibleVoters(roomId),
+            // AS OF the instant the vote records as its open — the same cutoff
+            // the ballot gate compares a voter's join against.
+            (asOf) => getForumServices().rooms.countEligibleVoters(roomId, asOf),
           );
           if (!result.ok) {
             return c.json(
@@ -333,16 +340,31 @@ export function createGovernanceRoutes() {
           const denial = await checkGovernanceEligibility(auth.userId);
           if (denial) return c.json({ error: denial }, 403);
           const eligible = await isRoomMember(c.req.param('roomId'), auth.userId);
+          // When the voter JOINED — `joinedAt`, never `requestedAt`: in an
+          // approval-gated room an account can ask before the open, sit pending
+          // (so outside the frozen denominator), be approved after, and clear
+          // the cutoff on a timestamp that predates its own membership.  Null
+          // for the steward-role arm (no subscription row), which the service
+          // treats as unjudgeable.
+          const ballotSubscription = await getForumServices().rooms.getSubscription(
+            c.req.param('roomId'),
+            auth.userId,
+          );
           const result = await getGovernanceService().castRatificationBallot(
             c.req.param('roomId'),
             c.req.param('voteId'),
             auth.userId,
             c.req.valid('json').choice,
             eligible,
+            ballotSubscription?.joinedAt ?? null,
           );
           if (!result.ok) {
             const status =
-              result.code === 'not_member' ? 403 : result.code === 'not_found' ? 404 : 409;
+              result.code === 'not_member' || result.code === 'joined_after_open'
+                ? 403
+                : result.code === 'not_found'
+                  ? 404
+                  : 409;
             return c.json(deny(result.code, result.message), status);
           }
           return c.json({ ok: true });

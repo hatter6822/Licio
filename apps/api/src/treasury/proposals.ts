@@ -1186,7 +1186,23 @@ export async function signProposal(
           clustersAlreadyVoted: new Set(),
         },
       );
-      delegatorEligible = verdict.eligible;
+      // THE ELECTORATE FREEZE APPLIES TO A DELEGATED UNIT TOO.  The direct
+      // ballot above refuses a signer whose `memberSince` postdates
+      // `eligibleBasisAt`; without the same test here, one question — "is this
+      // member inside the population `eligibleBasisCount` was counted over?" —
+      // was answered against a stamped instant for a direct voter and against
+      // LIVE membership for a delegated one.  Delegation is then the way around
+      // the freeze: post-open joiners grant their units to a delegate whose cap
+      // admits them all, and delegated weight is what the threshold arithmetic
+      // consumes.  Unknown (`null`) stays unjudgeable, as everywhere else.
+      const frozenAt = proposal.eligibleBasisAt ?? proposal.deliberationEndsAt;
+      const delegatorJoined = delegatorFacts?.memberSince ?? null;
+      const joinedAfterFreeze =
+        proposal.eligibleBasisCount != null &&
+        frozenAt != null &&
+        delegatorJoined !== null &&
+        Date.parse(delegatorJoined) > Date.parse(frozenAt);
+      delegatorEligible = verdict.eligible && !joinedAfterFreeze;
     }
     incoming.push({
       delegatorUserId: delegation.delegatorUserId ?? '',
