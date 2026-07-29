@@ -27,7 +27,11 @@ import {
 } from '../knomosis/stores.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { actionBudgetStatus } from '../treasury/budgets.js';
-import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
+import {
+  createDelegation,
+  delegatorsAlreadyConsumed,
+  revokeDelegation,
+} from '../treasury/delegations.js';
 import { setGrantReview, updateGrantMilestone } from '../treasury/grants.js';
 import { adoptLawPack, registerLawPack } from '../treasury/law-packs.js';
 import {
@@ -1435,6 +1439,107 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(
       await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
     ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
+  });
+
+  it('a delegated unit the CAP dropped is still the delegator’s to cast (WS-M.4.2c-3)', async () => {
+    // Existence is not consumption.  The delegate's fold stops at the
+    // per-account ceiling, so with a cap of 1 — the default when a law pack
+    // sets none — the delegate's own vote fills the cap and NO delegated unit
+    // is counted.  The guard used to read "a live delegation existed when they
+    // signed" and refuse the delegator anyway: the unit left the tally, and
+    // the delegator was refused the ballot that would have carried it.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 1 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    // The cap admitted the delegate's own vote and nothing else…
+    expect(delegateVote.signature.weightSnapshot).toBe('1');
+    // …and the ballot says so, which is what the guard below reads.
+    expect(delegateVote.signature.countedDelegatorIds).toEqual([]);
+    const direct = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in direct)) throw new Error(JSON.stringify(direct));
+    expect(direct.signature.weightSnapshot).toBe('1');
+  });
+
+  it('the cap admits delegators in a canonical order, and frees the rest (WS-M.4.2c-3)', async () => {
+    // Cap 2 with TWO delegators: the delegate's own vote plus exactly ONE
+    // delegated unit fits.  Which one is decided by the canonical fold order
+    // (delegator id) rather than by store iteration, and the delegator the cap
+    // left out is still free — `delegatorsAlreadyConsumed` is the predicate
+    // both ballot guards read, so asserting it directly asserts both.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    for (const delegatorUserId of [STEWARD, PROPOSER]) {
+      await createDelegation(deps, {
+        roomId: ROOM,
+        delegatorUserId,
+        delegateUserId: VOTER_2,
+        scope: { all: true },
+      });
+    }
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('2');
+    // PROPOSER sorts before STEWARD, so the ceiling admitted PROPOSER — even
+    // though STEWARD's delegation was created first.
+    expect(delegateVote.signature.countedDelegatorIds).toEqual([PROPOSER]);
+    const signatures = await deps.proposalSignatures.listByProposal(proposal.proposalId);
+    const voteTimeByUser = new Map(
+      signatures.filter((r) => r.purpose === 'vote').map((r) => [r.userId, r.createdAt]),
+    );
+    const countedByDelegate = new Map<string, ReadonlySet<string> | null>(
+      signatures
+        .filter((r) => r.purpose === 'vote')
+        .map((r) => [
+          r.userId,
+          r.countedDelegatorIds == null ? null : new Set<string>(r.countedDelegatorIds),
+        ]),
+    );
+    const consumed = await delegatorsAlreadyConsumed(
+      deps.delegations,
+      ROOM,
+      proposal.proposalType,
+      [PROPOSER, STEWARD],
+      voteTimeByUser,
+      null,
+      countedByDelegate,
+    );
+    expect(consumed.has(PROPOSER)).toBe(true);
+    expect(consumed.has(STEWARD)).toBe(false);
   });
 
   it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {

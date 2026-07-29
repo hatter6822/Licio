@@ -17,6 +17,9 @@ interface Harness {
   svc: GovernanceService;
   stores: GovernanceStores;
   advance: (ms: number) => void;
+  /** The harness clock, for tests that need to reason about an instant the
+   *  service recorded (e.g. an election's `opensAt`). */
+  now: () => number;
 }
 
 function makeService(cryptoEnabled = false, proposer?: ModerationProposer): Harness {
@@ -37,6 +40,7 @@ function makeService(cryptoEnabled = false, proposer?: ModerationProposer): Harn
     advance: (ms) => {
       t += ms;
     },
+    now: () => t,
   };
 }
 
@@ -113,6 +117,36 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect(settled.ok && settled.value.winnerUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.bootstrap).toBe(false);
+  });
+
+  it('a voter who joined AFTER the election opened cannot cast a ballot', async () => {
+    // The electorate freeze, on the NUMERATOR as well as the denominator.
+    // `eligibleCount` is snapshotted when the election opens, so a member who
+    // joins afterwards is still `eligible` at vote time and would raise
+    // `distinctVoters` against a denominator they were never counted in —
+    // enough of them satisfy `minTurnout` and decide a winner from outside the
+    // recorded electorate.  Freezing only the count is half a freeze.
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const openedAt = new Date(h.now()).toISOString();
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+
+    // A member who was there when it opened votes normally.
+    const before = new Date(Date.parse(openedAt) - 86_400_000).toISOString();
+    expect((await h.svc.castVote('r1', eid, 'v1', 'cand', true, true, before)).ok).toBe(true);
+
+    // One who joined a minute later is refused, with a code that says why.
+    h.advance(60_000);
+    const after = new Date(h.now()).toISOString();
+    const late = await h.svc.castVote('r1', eid, 'latecomer', 'cand', true, true, after);
+    expect(late.ok).toBe(false);
+    expect(late.ok === false && late.code).toBe('joined_after_open');
+
+    // An UNJUDGEABLE join instant (the steward-role arm carries no subscription
+    // row) still votes — refusing there would lock out a legitimate steward to
+    // close a narrower hole than it opens.
+    expect((await h.svc.castVote('r1', eid, 'steward', 'cand', true, true, null)).ok).toBe(true);
   });
 
   it('never seats an election winner who is no longer a room member (fail-safe to incumbent)', async () => {

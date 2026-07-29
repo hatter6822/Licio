@@ -18,6 +18,7 @@ import {
   delegationRecords,
   governanceChallenges,
   governanceProposals,
+  governanceSignatures,
   knomosisActionRecords,
   knomosisDeployments,
   migrationsFolder,
@@ -37,6 +38,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DrizzleGovernanceAuditStore,
   DrizzleGovernanceProposalStore,
+  DrizzleGovernanceSignatureStore,
   DrizzleKnomosisActionStore,
 } from '../knomosis/drizzle-knomosis-stores.js';
 import type { GovernanceAuditRecord, GovernanceProposalRecord } from '../knomosis/stores.js';
@@ -598,6 +600,70 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
     await db.delete(knomosisActionRecords).where(eq(knomosisActionRecords.roomId, roomId));
     await db.delete(walletAccounts).where(eq(walletAccounts.userId, steward));
     await db.delete(users).where(eq(users.userId, steward));
+  });
+
+  it('round-trips a delegated ballot’s CONSUMED delegator set (migration 0105)', async () => {
+    // The in-memory store keeps the whole record, so it cannot tell whether the
+    // Drizzle adapter actually writes and reads the column — exactly the shape
+    // of no-op that has shipped here before.  Only a live round-trip can.
+    const signatures = new DrizzleGovernanceSignatureStore(db);
+    const signer = await makeUser(db, 'wsm_sig_a');
+    const delegatorA = randomUUID();
+    const delegatorB = randomUUID();
+    const inserted = await db
+      .insert(walletAccounts)
+      .values({
+        userId: signer,
+        addressHash: Buffer.from(randomUUID().replaceAll('-', ''), 'hex'),
+        addressTruncated: '0xfeed…beef',
+        chainId: 1337,
+        walletType: 'eoa' as const,
+        unlinkState: 'active' as const,
+        riskState: 'normal' as const,
+      })
+      .returning();
+    const walletAccountId = (inserted[0] as { walletAccountId: string }).walletAccountId;
+    const proposalId = await makeProposal();
+    const base = {
+      proposalId,
+      userId: signer,
+      walletAccountId,
+      signatureType: 'eip712_ecdsa' as const,
+      typedDataHash: HEX32('d'),
+      signatureRef: `0x${'ab'.repeat(32)}`,
+      weightSnapshot: '2',
+      eligibilityReason: 'Delegated: own vote + 2 eligible delegations (1) capped at 2.',
+      createdAt: NOW(),
+      choice: 'approve' as const,
+      nonce: randomUUID(),
+    };
+    expect(
+      await signatures.insert({
+        ...base,
+        signatureId: randomUUID(),
+        purpose: 'vote',
+        countedDelegatorIds: [delegatorA, delegatorB],
+      }),
+    ).not.toBeNull();
+    const [voteRow] = await signatures.listByProposal(proposalId);
+    expect(voteRow?.countedDelegatorIds).toEqual([delegatorA, delegatorB]);
+    // A model that folds no delegations records NULL, and the reader must not
+    // turn that into an empty set — "not recorded" and "consumed nothing" are
+    // different answers, and the consumption guard branches on which it is.
+    expect(
+      await signatures.insert({
+        ...base,
+        signatureId: randomUUID(),
+        purpose: 'approval',
+        nonce: randomUUID(),
+        countedDelegatorIds: null,
+      }),
+    ).not.toBeNull();
+    const rows = await signatures.listByProposal(proposalId);
+    expect(rows.find((r) => r.purpose === 'approval')?.countedDelegatorIds ?? null).toBeNull();
+    await db.delete(governanceSignatures).where(eq(governanceSignatures.proposalId, proposalId));
+    await db.delete(walletAccounts).where(eq(walletAccounts.userId, signer));
+    await db.delete(users).where(eq(users.userId, signer));
   });
 
   // --- Grants ----------------------------------------------------------------------

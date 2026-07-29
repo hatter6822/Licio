@@ -211,6 +211,18 @@ export interface GovernanceSignatureRecord {
   choice?: ProposalVoteChoice | null;
   /** Per-proposal single-use nonce (anti-replay). */
   nonce?: string | null;
+  // --- WS-M.4.2c-3 (migration 0105). ----------------------------------------
+  /**
+   * Under the `delegated` model, the delegators whose unit this ballot's
+   * weight snapshot ACTUALLY consumed — the fold stops at the per-account cap,
+   * so a delegation can exist at signing time and still confer nothing.
+   *
+   * `null` for every other model, and for rows written before the column
+   * existed; readers fall back to the conservative "any live delegation was
+   * consumed" test there, which over-counts consumption but never
+   * double-counts weight.
+   */
+  countedDelegatorIds?: readonly string[] | null;
 }
 
 export interface SimTreasuryRecord {

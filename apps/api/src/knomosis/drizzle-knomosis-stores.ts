@@ -1692,6 +1692,7 @@ function mapSignature(row: typeof governanceSignatures.$inferSelect): Governance
     purpose: row.purpose as NonNullable<GovernanceSignatureRecord['purpose']>,
     choice: (row.choice as GovernanceSignatureRecord['choice']) ?? null,
     nonce: row.nonce,
+    countedDelegatorIds: row.countedDelegatorIds,
   };
 }
 
@@ -1715,6 +1716,13 @@ export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore
         purpose: record.purpose ?? 'vote',
         choice: record.choice ?? null,
         nonce: record.nonce ?? null,
+        // A delegated ballot's consumed set is frozen HERE, at signing time —
+        // reconstructing it later from delegations that have since been
+        // granted or revoked would answer a different question.
+        countedDelegatorIds:
+          record.countedDelegatorIds === null || record.countedDelegatorIds === undefined
+            ? null
+            : [...record.countedDelegatorIds],
       })
       .onConflictDoNothing()
       .returning({ signatureId: governanceSignatures.signatureId });

@@ -435,6 +435,19 @@ export class GovernanceService {
     // non-member candidate (defense-in-depth; the winner is also re-validated at
     // seat assignment). Defaults true so existing/internal callers are unaffected.
     candidateEligible = true,
+    /**
+     * When the voter joined the room (ISO), or null when it cannot be
+     * determined (a steward-role grant carries no subscription row).
+     *
+     * `eligibleCount` is snapshotted when the election OPENS, so the
+     * denominator is the population as it stood then.  Without this the
+     * numerator is not: a member who joins afterwards is `eligible` at vote time
+     * and raises `distinctVoters` against a denominator they were never counted
+     * in, so post-open entrants can satisfy `minTurnout` and decide a winner
+     * from outside the recorded electorate.  Freezing only the COUNT is half a
+     * freeze.
+     */
+    voterMemberSince: string | null = null,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
     // WS-L.3.5e: the governance-voting kill switch blocks NEW ballots only —
@@ -462,6 +475,15 @@ export class GovernanceService {
     // the endpoint is never a room-membership oracle for an invalid election.
     if (!candidateEligible) {
       return err('invalid_candidate', 'The candidate is not a member of this room.');
+    }
+    // The electorate was fixed at `opensAt`; a null join instant cannot be
+    // judged and passes, rather than locking out a legitimate steward.
+    if (voterMemberSince !== null && Date.parse(voterMemberSince) > Date.parse(election.opensAt)) {
+      return err(
+        'joined_after_open',
+        'The electorate for this election was fixed when it opened; ' +
+          'members who joined afterwards vote in the next one.',
+      );
     }
     const cast = await this.deps.stores.votes.cast({
       electionId,

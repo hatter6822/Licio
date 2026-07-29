@@ -332,7 +332,11 @@ describe('WS-U governance routes', () => {
     const outsider = await seedUserWithSession(forum.identity);
 
     // A controllable clock so a real election can be scheduled (term-elapsed).
-    let t = Date.parse('2026-06-19T00:00:00.000Z');
+    // It starts at the REAL now because the electorate freeze compares a
+    // subscription's join instant — stamped by the forum service's own clock —
+    // against the election's open; a pinned past date would put every join
+    // "after" the open and refuse ballots for a reason this test is not about.
+    let t = Date.now();
     resetGovernanceService();
     setGovernanceService(
       createGovernanceService({
@@ -342,14 +346,15 @@ describe('WS-U governance routes', () => {
     );
     const svc = getGovernanceService();
     await svc.bootstrapSeat('00000000-0000-4000-8000-000000000008', steward.userId);
+    // `member` and `candidate` are active room members; `outsider` is not.
+    // They join BEFORE the election opens: the electorate is frozen at the open
+    // alongside the turnout denominator, so a later joiner is not in it.
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', member.userId);
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', candidate.userId);
     t += 101_000; // the term has elapsed ⇒ an election can open
     const sched = await svc.scheduleElection('00000000-0000-4000-8000-000000000008');
     const electionId = sched.ok ? sched.value : '';
     expect(electionId).not.toBe('');
-
-    // `member` and `candidate` are active room members; `outsider` is not.
-    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', member.userId);
-    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', candidate.userId);
 
     const vote = (cookie: string, candidateUserId: string) =>
       app.request(

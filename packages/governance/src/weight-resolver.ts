@@ -9,7 +9,7 @@
 // are recorded as satisfied (fail-closed, §17.5).  All weight arithmetic is
 // exact decimal (`decimal.ts`) — capped fractional weights never float-drift.
 
-import { decAdd, decCompare } from './decimal.js';
+import { decAdd, decCompare, decSub } from './decimal.js';
 import type { EligibilityRules, WeightModel } from './schemas/law-pack.js';
 import { GATED_WEIGHT_MODELS } from './schemas/law-pack.js';
 import type {
@@ -219,20 +219,42 @@ export function resolveVotingWeight(input: WeightResolverInput): WeightResolutio
       // Own vote (1) plus eligible incoming delegations; an ineligible delegator
       // confers nothing, and the AGGREGATE is capped — a delegate cannot exceed
       // the per-account ceiling by accumulating delegations (WS-M.4.2c-3).
-      let delegated = '0';
-      let counted = 0;
+      //
+      // The fold STOPS at the ceiling, and names the delegators it consumed.
+      // Summing every delegation and capping the total afterwards produced the
+      // same weight but lost which units the cap had dropped, and the caller's
+      // double-count guard reads exactly that: a delegator whose unit the cap
+      // discarded was still treated as having voted through their delegate, so
+      // their weight vanished from the tally while they were refused a direct
+      // ballot.  With a cap of 1 — the default when a law pack sets none —
+      // EVERY delegated unit is discarded, which turned delegation into pure
+      // disenfranchisement.  Consumption is now decided here, by the same fold
+      // that decides the weight, and cannot drift from it.
+      //
+      // Fold order is the caller's order and is load-bearing: it decides which
+      // delegators the ceiling admits, so the caller must present a canonical,
+      // stable one.
+      let running = '1';
+      const countedDelegatorIds: string[] = [];
       for (const delegation of input.delegations) {
         if (!delegation.delegatorEligible) continue;
-        delegated = decAdd(delegated, delegation.weight);
-        counted += 1;
+        if (decCompare(running, cap) >= 0) break; // no headroom left to confer into
+        running = decAdd(running, delegation.weight);
+        // Partially absorbed still counts: the unit moved the resolved weight,
+        // so it IS in this snapshot and must not be spent twice.
+        countedDelegatorIds.push(delegation.delegatorUserId);
       }
-      const weight = decMin(decAdd(1, delegated), cap);
+      const weight = decMin(running, cap);
+      // The own vote is 1, so anything above it is delegated — unless the cap
+      // itself sits below 1, in which case no delegated unit fit at all.
+      const delegated = decCompare(weight, '1') > 0 ? decSub(weight, '1') : '0';
       return {
         resolved: true,
         weight,
         eligibilityReason:
-          `Delegated: own vote + ${counted} eligible delegations (${delegated}) capped at ` +
-          `${cap} ⇒ weight ${weight}.`,
+          `Delegated: own vote + ${countedDelegatorIds.length} eligible delegations ` +
+          `(${delegated}) capped at ${cap} ⇒ weight ${weight}.`,
+        countedDelegatorIds,
       };
     }
     case 'multisig_steward': {

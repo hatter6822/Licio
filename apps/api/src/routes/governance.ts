@@ -145,6 +145,14 @@ export function createGovernanceRoutes() {
           // election id can't turn this endpoint into a membership oracle (it 404s
           // regardless of whether the candidate is a member).
           const eligible = await isRoomMember(roomId, auth.userId);
+          // When the voter joined, so `castVote` can enforce the electorate
+          // freeze: the denominator is snapshotted at open, and without this the
+          // numerator would not be.  Null for the steward-role arm (no
+          // subscription row) — `castVote` treats that as unjudgeable and lets
+          // it through rather than locking out a legitimate steward.
+          const voterMemberSince =
+            (await getForumServices().rooms.getSubscription(roomId, auth.userId))?.requestedAt ??
+            null;
           if (!eligible) {
             return c.json(
               deny('not_member', 'Only room members may vote in a steward election.'),
@@ -163,6 +171,7 @@ export function createGovernanceRoutes() {
             candidate_user_id,
             eligible,
             candidateEligible,
+            voterMemberSince,
           );
           if (!result.ok) {
             const status =

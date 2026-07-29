@@ -15,7 +15,24 @@
 //    (kernel verdict + capability + kill switch) — WS-M is its production caller.
 //  - `elections` adapts scheduleElection(force) for community-voted rotations.
 
-import { checkVoterEligibility } from '@licio/governance';
+import type { WeightModel } from '@licio/governance';
+import { checkVoterEligibility, decCompare, resolveVotingWeight } from '@licio/governance';
+
+/**
+ * The weight models whose resolution can be ZERO for an otherwise-eligible
+ * member — the ones whose electorate therefore needs a per-member walk.
+ *
+ * `one_civic_account_one_vote` and `role_based_quorum` resolve `min(1, cap)` and
+ * the cap is `.positive()`, so they are always above zero.  The token models are
+ * §17.5-gated and refused wholesale at signing.  That leaves the
+ * participation-denominated one, which is exactly the case that starved quorum.
+ */
+const WEIGHT_MODELS_THAT_CAN_RESOLVE_ZERO: ReadonlySet<WeightModel> = new Set([
+  'reputation_bounded',
+  'capped_token',
+  'quadratic_capped',
+]);
+
 import {
   detectScamPatterns,
   highlightConflictOfInterest,
@@ -79,6 +96,7 @@ export function buildMembershipFactsPort(
       membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
       contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId),
       verifiedIdentity: auth?.emailVerified === true,
+      memberSince: subscription.requestedAt,
     };
   };
   return {
@@ -90,9 +108,22 @@ export function buildMembershipFactsPort(
       // Treasury-controlling votes NEVER take the shortcut: null member facts
       // fail closed at signing (a steward without an active subscription
       // cannot cast a spend ballot), so they must not count in the basis.
+      //
+      // A PARTICIPATION-DENOMINATED weight model also disqualifies the shortcut,
+      // because it is the other half of the ballot gate: `signProposal` refuses a
+      // zero-weight ballot, quorum counts DISTINCT RECORDED VOTERS, and under
+      // `reputation_bounded` a member with no qualifying contributions resolves
+      // to zero — so counting them here makes quorum unreachable no matter how
+      // many members vote.  Only the models whose weight can BE zero need the
+      // per-member walk; `one_civic_account_one_vote` and `role_based_quorum`
+      // resolve `min(1, cap)` with a positive cap, so they keep the fast count.
+      const zeroWeightPossible =
+        eligibility?.weight !== undefined &&
+        WEIGHT_MODELS_THAT_CAN_RESOLVE_ZERO.has(eligibility.weight.model);
       const trivial =
         eligibility === undefined ||
         (!eligibility.treasuryControlling &&
+          !zeroWeightPossible &&
           (eligibility.rules.minMembershipDays ?? 0) === 0 &&
           (eligibility.rules.minContributions ?? 0) === 0 &&
           eligibility.rules.requireVerifiedIdentity !== true);
@@ -133,7 +164,41 @@ export function buildMembershipFactsPort(
             clustersAlreadyVoted: new Set(),
           },
         );
-        if (verdict.eligible) eligible += 1;
+        if (!verdict.eligible) continue;
+        // The weight half of the ballot gate, applied with the SAME resolver
+        // `signProposal` uses — a member it would refuse with
+        // `zero_voting_weight` cannot record a ballot, and quorum counts
+        // recorded ballots, so they are not part of the electorate.
+        if (eligibility?.weight !== undefined) {
+          const resolved = resolveVotingWeight({
+            model: eligibility.weight.model,
+            facts: {
+              userId,
+              membershipDays: facts?.membershipDays ?? null,
+              contributionCount: facts?.contributionCount ?? null,
+              verifiedIdentity: facts?.verifiedIdentity ?? false,
+              newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
+              walletClusterId: null,
+              hasDisclosedConflict: false,
+              roleClasses: [],
+              reputationScore: facts?.contributionCount ?? 0,
+              tokenVoteUnits: 0,
+              isDesignatedSigner: false,
+            },
+            maxVotingWeightPerAccount: eligibility.weight.maxVotingWeightPerAccount,
+            // The gated models are refused wholesale at signing, so a room on
+            // one has no voters at all — mirror that rather than inventing a
+            // basis for ballots nobody can cast.
+            gates: {
+              sybilControlsVerified: false,
+              antiBriberyMonitoring: false,
+              legalReviewPassed: false,
+            },
+            delegations: [],
+          });
+          if (!resolved.resolved || decCompare(resolved.weight, 0) <= 0) continue;
+        }
+        eligible += 1;
       }
       return eligible;
     },

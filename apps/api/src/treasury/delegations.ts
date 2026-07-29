@@ -128,10 +128,21 @@ export async function revokeDelegation(
  *     in each delegate's snapshot.  The per-delegate dedup in
  *     `incomingDelegationsFor` cannot see this: it reads one delegate at a time.
  *
- * A delegation counts as consumed when it EXISTED at the delegate's vote
- * instant (`createdAt <= voteTime`) and was still live then
- * (`revokedAt === null || revokedAt > voteTime`) — a delegation created after,
- * or revoked before, was never in that snapshot and leaves the unit free.
+ * The AUTHORITATIVE answer is the delegate ballot's own record of what it
+ * consumed (`countedDelegatorIds`, frozen by the resolver's capped fold at
+ * signing time).  Existence is not consumption: the per-account cap stops the
+ * fold at the ceiling, so a delegation can be live at the delegate's vote
+ * instant and still confer nothing — and under the default cap of 1, EVERY
+ * delegated unit is dropped.  Reading existence there disenfranchised the
+ * delegator twice over: their weight never reached the tally, and this guard
+ * still refused them a direct ballot and refused a second delegate the unit.
+ *
+ * Rows written before that record existed (and every non-delegated model) carry
+ * `null`, and fall back to the older existence test: consumed when the
+ * delegation EXISTED at the vote instant (`createdAt <= voteTime`) and was
+ * still live then (`revokedAt === null || revokedAt > voteTime`).  That
+ * over-counts consumption but never double-counts weight — the safe direction
+ * for a legacy row whose fold cannot be recovered.
  *
  * `excludeDelegate` is the delegate whose ballot is being resolved right now:
  * their own incoming set is what the caller is building, so counting it here
@@ -144,6 +155,7 @@ export async function delegatorsAlreadyConsumed(
   candidates: readonly string[],
   voteTimeByUser: ReadonlyMap<string, string>,
   excludeDelegate: string | null,
+  countedByDelegate: ReadonlyMap<string, ReadonlySet<string> | null> = new Map(),
 ): Promise<Set<string>> {
   const consumed = new Set<string>();
   for (const delegatorUserId of new Set(candidates)) {
@@ -155,6 +167,16 @@ export async function delegatorsAlreadyConsumed(
       if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposalType}`) continue;
       const voteTime = voteTimeByUser.get(d.delegateUserId);
       if (voteTime === undefined) continue;
+      const counted = countedByDelegate.get(d.delegateUserId);
+      if (counted !== undefined && counted !== null) {
+        // The ballot itself says what its weight consumed.  A delegator the cap
+        // dropped is NOT in it, and their unit is still theirs to cast.
+        if (counted.has(delegatorUserId)) {
+          consumed.add(delegatorUserId);
+          break;
+        }
+        continue;
+      }
       if (d.createdAt > voteTime) continue; // granted after that ballot
       if (d.revokedAt !== null && d.revokedAt <= voteTime) continue; // already gone
       consumed.add(delegatorUserId);

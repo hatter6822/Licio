@@ -363,16 +363,22 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     const countSpy = vi
       .spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor')
       .mockResolvedValue(7);
+    const joinedAt = new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString();
     const port = buildMembershipFactsPort(
-      forumOf({
-        status: 'active',
-        requestedAt: new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString(),
-      }),
+      forumOf({ status: 'active', requestedAt: joinedAt }),
       identityOf(true),
       fixture.knomosis,
     );
     const facts = await port.memberFacts(ROOM, USER);
-    expect(facts).toEqual({ membershipDays: 60, contributionCount: 7, verifiedIdentity: true });
+    // `memberSince` is the INSTANT, not the derived age: an electorate frozen at
+    // an election's open compares join times against that open, and a day count
+    // taken "now" cannot answer that question after the fact.
+    expect(facts).toEqual({
+      membershipDays: 60,
+      contributionCount: 7,
+      verifiedIdentity: true,
+      memberSince: joinedAt,
+    });
     expect(countSpy).toHaveBeenCalledWith(ROOM, USER);
     expect(await port.eligibleMemberCount(ROOM)).toBe(42);
   });
@@ -654,6 +660,62 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
         treasuryControlling: true,
       }),
     ).toBe(1);
+  });
+
+  it('a ZERO-WEIGHT member leaves the basis, so reputation_bounded quorum stays reachable', async () => {
+    // The deadlock.  `signProposal` REFUSES a zero-weight ballot (a `0` adds
+    // nothing to approve/reject, so recording one would let an all-zero
+    // electorate read as unanimous approval), and quorum is measured in DISTINCT
+    // RECORDED VOTERS.  Under `reputation_bounded` a member with no qualifying
+    // contributions resolves to weight zero — yet still passes
+    // `checkVoterEligibility` when `minContributions` is 0, so they entered the
+    // frozen denominator.  Enough such members and quorum was unreachable even
+    // if every eligible member tried to vote.
+    const fixture = await freshKnomosisServices();
+    const now = fixture.knomosis.now();
+    const joined = new Date(now - 90 * 86_400_000).toISOString();
+    // `reputationScore` is the member's qualifying-contribution count.
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockImplementation(
+      async (_room: string, userId: string) => (userId === 'contributor' ? 5 : 0),
+    );
+    const port = buildMembershipFactsPort(
+      forumOf({ contributor: { requestedAt: joined }, lurker: { requestedAt: joined } }),
+      {
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
+        },
+      } as never,
+      fixture.knomosis,
+    );
+    const rules = {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    };
+    // Both members pass the law-pack predicate…
+    expect(await port.eligibleMemberCount(ROOM, { rules, treasuryControlling: false })).toBe(2);
+    // …but under `reputation_bounded` only the contributor can record a ballot,
+    // so only the contributor is the electorate.
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules,
+        treasuryControlling: false,
+        weight: { model: 'reputation_bounded', maxVotingWeightPerAccount: 10 },
+      }),
+    ).toBe(1);
+    // A model whose weight can never be zero keeps the whole membership, and
+    // keeps the fast count — the walk is only for the models that need it.
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules,
+        treasuryControlling: false,
+        weight: { model: 'one_civic_account_one_vote', maxVotingWeightPerAccount: 1 },
+      }),
+    ).toBe(2);
   });
 
   it('treasury-controlling counts skip the shortcut: null-facts members leave the basis (W9)', async () => {

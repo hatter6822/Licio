@@ -433,6 +433,10 @@ export const governanceSignatures = knomosisSchema.table(
     purpose: text('purpose').notNull().default('vote'), // vote|approval|multisig|delegation (CHECK)
     choice: text('choice'), // approve|reject|abstain for purpose=vote (CHECK)
     nonce: text('nonce'),
+    // --- WS-M.4.2c-3 (migration 0105).  The delegators whose unit this ballot's
+    // weight actually consumed; NULL = not recorded (pre-migration rows and
+    // every non-delegated model).
+    countedDelegatorIds: jsonb('counted_delegator_ids').$type<string[]>(),
   },
   (t) => [
     // One signature per (proposal, wallet, PURPOSE): a designated signer who
