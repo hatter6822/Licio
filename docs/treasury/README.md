@@ -70,7 +70,13 @@ apps/api/src/treasury/
 │                                   through the WS-U kernel executor
 ├── grants.ts                    -- WS-M.5.1a milestone grants (milestones sum EXACTLY
 │                                   to the amount; review-gated; clawback = platform)
-├── delegations.ts               -- WS-M.4.2c-3 one-active-delegation-per-scope
+├── delegations.ts               -- WS-M.4.2c-3 one-active-delegation-per-scope, and
+│                                   the shared "already consumed" predicate: a unit is
+│                                   spent only if the delegate's ballot RECORDED it
+│                                   (`counted_delegator_ids`, 0105) — the per-account
+│                                   cap discards delegations past the ceiling, and
+│                                   treating existence as consumption disenfranchised
+│                                   every delegator the cap dropped
 ├── budgets.ts                   -- WS-M.3.2a whole-period integer refill + CAS charge
 ├── prohibited-targets.ts        -- fail-closed action-kind classifier (denylist +
 │                                   per-type allowlist; unclassifiable ⇒ reject)

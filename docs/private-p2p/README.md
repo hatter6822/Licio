@@ -251,6 +251,24 @@ slice is closed on the convergence side:
   the epoch BEFORE any op frame is served (a `MessageInbox` queues so a fast peer's
   first frame is never dropped; a failed handshake tears the connection down and
   rejects — no op is ever served first).
+- **The §15.4 signalling identity is DEVICE-SECRET.**  `deriveSignalingKeyPair`
+  seeds the X25519 private scalar from `SHA-256(Ed25519-Sign(device_signing_key,
+  canonical(["signal-key", room_id_commitment, device_id, epoch, time_bucket])))`
+  — never from the rendezvous key, which every current member holds alongside a
+  sealed announcement carrying the device id, epoch and bucket, and which
+  therefore let ANY member recompute another device's signalling private key and
+  decrypt, forge, or consume its deliver-once SDP/ICE before the §15.5 handshake
+  ran.  Ed25519 determinism (RFC 8032 §5.1.6) keeps ONE identity per `(room,
+  epoch, bucket)` with nothing stored — the announcement-fan-out property — and
+  the room commitment in the transcript stops a member of two rooms linking a
+  device across them.  The public half still rides in the sealed announcement,
+  so discovery is unchanged.
+- Dial selection ALTERNATES between the freshest candidate and the most starved
+  one (`pickDialCandidate`).  The failed-dial cooldown is keyed by the record's
+  ephemeral key, so a member rotating it puts a fresh spoof at the head of every
+  re-polled sample; freshest-first alone would hand it every attempt until the
+  connect deadline.  Alternating bounds a flooder to every other dial, so an
+  honest candidate is reached within two rounds.
 - `apps/web/src/private-p2p/rendezvous-client.ts` (`httpRendezvousTransport`) is the
   zod-validated fetch transport over `POST /v1/private-rendezvous/{announce,poll,
   signal,signal/poll}` (blind ids + ciphertext + clamped TTL only; `poll` is never an

@@ -191,6 +191,12 @@ guard, the governed models, and a module singleton for routes.
 - `translation.ts` — the translation pipeline (WS-K.2.1a).
 - `correction.ts` — human-in-the-loop correction + accuracy metrics (WS-K.1.3c).
 - `governance-ai.ts` — the §24.5 governance summaries + advisories (WS-K.2.2a).
+  Both are PERSISTED (`ai_governance_summaries`, `ai_governance_advisories`) and
+  READ at `GET /rooms/:roomId/governance/proposals/:proposalId/advisories`: the
+  COI / scam-pattern findings were previously computed and discarded, and advice
+  nobody can open is not restraint.  `advisory_only` is pinned true — the
+  endpoint informs a steward's decision, it never gates one, and a deployment
+  with no AI wired keeps full governance and simply gets no advice.
 - `runtime-monitor.ts` — runtime drift/report-rate alerts + rollback
   recommendation (WS-K.1.2f).
 - `config.ts` / `metrics.ts` / `scheduler.ts` / `services.ts` / `wiring.ts` —

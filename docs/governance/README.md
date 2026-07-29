@@ -469,6 +469,14 @@ test):
   needs no snapshot — it comes from the vote's immutable bound law-pack). Membership
   churn during the window can no longer flip the outcome. `runRatificationLifecycle`
   no longer takes a live count.
+  A later review round closed the other half: the DENOMINATOR was frozen while
+  the ballot gate still read live membership, so a member who joined after the
+  open could vote and push turnout past 100% of the electorate it was measured
+  against — making the window between open and close a recruitment window.
+  `castVote` now takes the voter's join instant and refuses `joined_after_open`;
+  `signProposal` applies the same freeze against the proposal's
+  `deliberationEndsAt`, and `memberFacts` carries `memberSince` (the INSTANT —
+  a day count taken "now" cannot answer a question about a past open).
 - **L4 — one-open-election atomicity.** A `steward_election(room_id) WHERE
   status='open'` partial unique index (migration `0054`) + a nullable
   `ElectionStore.insert` (in-memory guard + Drizzle `onConflictDoNothing`) makes
