@@ -313,28 +313,62 @@ export function selectFreshestCandidates<
 }
 
 /**
- * Which candidate this round dials, given the freshest-first sample.
+ * Which candidate this round dials.
  *
- * FRESHEST-FIRST ALONE IS STARVABLE.  A hostile member can mint a fresh
- * announcement whenever it likes: the cooldown that suppresses a failed dial is
- * keyed by the record's ephemeral key, so rotating that key puts a NEW spoof at
- * the head of every re-polled sample, and `triable[0]` hands it every dial
- * attempt until the overall deadline expires.  The honest peer, sitting behind
- * it, is never reached — and the old drain-the-whole-list loop, for all its
- * live-lock cost, at least got there eventually.
+ * TWO POLICIES FAILED HERE BEFORE THIS ONE, both because they keyed on an order
+ * the attacker writes.
  *
- * ALTERNATE: even rounds take the freshest (the fast path, and the ordering the
- * §15.5 mismatch check + cooldown are designed around); odd rounds take the
- * most starved — the OLDEST untried candidate, which is where an honest,
- * non-rotating announcement settles as spoofs pile up in front of it.  A
- * flooder can therefore occupy at most every OTHER dial no matter how fast it
- * mints records, so an honest candidate is reached within two rounds of
- * becoming triable, and the cost stays one dial per round rather than
- * `candidates × deadline`.
+ *   1. `triable[0]` — freshest-first.  The failed-dial cooldown is keyed by the
+ *      record's ephemeral key, so a hostile member that rotates that key puts a
+ *      NEW record at the head of every re-polled sample and takes every dial
+ *      until the deadline.
+ *   2. Alternating head/tail.  `selectFreshestCandidates` sorts by
+ *      `record.expires_at`, and that value is ANNOUNCER-CHOSEN: the rendezvous
+ *      service accepts anything inside `(now, now + maxTtl + skew]`, while every
+ *      honest client uses exactly `now + 30min`.  An honest record's sort key is
+ *      therefore pinned to one point in the interior of a range the attacker
+ *      spans freely, so TWO records — one above, one below — bracket it, and the
+ *      endpoints-only policy never selects anything else.  The anti-starvation
+ *      mechanism became the starvation channel.
+ *
+ * Three mechanisms, and what each one is MEASURED to do (each was isolated by
+ * disabling it and watching which test went red — they are not
+ * interchangeable):
+ *
+ *   • THE CAP TIER FIRST.  A verified Tier-2 cap is deduped by verified
+ *     pseudonym — one slot per device per `(epoch, bucket)` — so a flooder
+ *     contributes exactly ONE capped candidate however many records it mints.
+ *     This is the only one of the three that bounds a FLOOD; ordering fixes
+ *     cannot, because ordering is the attacker's input.
+ *   • ROTATION over the selected subset (`round % length`).  Defeats a fixed
+ *     bracketing set on its own: every position is reachable, not just the ends.
+ *   • UNTRIED FIRST.  Also defeats bracketing on its own (the untried pool
+ *     shrinks each round until the bracketed candidate is all that is left), and
+ *     independently stops the rotation re-spending budget on a candidate this
+ *     connect already dialled.
+ *
+ * HONEST RESIDUAL, stated because the previous two policies both claimed a bound
+ * they did not have: in a room with NO Tier-2 cap configured, the Tier-1 subset
+ * is unbounded by construction, every flooded record is `untried`, and no
+ * selection policy here can promise to reach a specific peer within a bounded
+ * number of dials.  Bounding the flood is what the cap is for and this function
+ * is not a substitute for it.  What it does guarantee, with or without a cap, is
+ * that no ORDERING an attacker can author keeps a triable candidate permanently
+ * unselected.
  */
-export function pickDialCandidate<C>(triable: readonly C[], round: number): C | undefined {
+export function pickDialCandidate<
+  C extends { ann: { signaling_public_key: string; cap?: unknown } },
+>(triable: readonly C[], round: number, tried: ReadonlySet<string> = new Set()): C | undefined {
   if (triable.length === 0) return undefined;
-  return round % 2 === 0 ? triable[0] : triable[triable.length - 1];
+  // The capped tier is the bounded one — prefer it whenever it has anything.
+  const capped = triable.filter((c) => c.ann.cap !== undefined);
+  const pool = capped.length > 0 ? capped : triable;
+  // Not-yet-dialled first, so a rotation cannot re-spend the budget on a
+  // candidate already known to have failed this connect; if everything in the
+  // pool has been tried, rotate over all of it rather than giving up.
+  const untried = pool.filter((c) => !tried.has(c.ann.signaling_public_key));
+  const from = untried.length > 0 ? untried : pool;
+  return from[round % from.length];
 }
 
 /**
@@ -671,9 +705,14 @@ export async function connectPrivatePeer(
   // the instant a FRESH candidate appears, so discovery stays fast when there is someone to dial.
   const maxDiscoveryPollBackoffMs = Math.max(pollIntervalMs, 4_000);
   let discoveryPollBackoffMs = pollIntervalMs;
-  /** Dial attempts made this connect — the alternation counter (see
+  /** Dial attempts made this connect — the rotation counter (see
    *  `pickDialCandidate`). */
   let dialRound = 0;
+  /** Ephemerals already dialled this connect, so the rotation prefers candidates
+   *  it has not spent budget on yet.  Distinct from `failedPeers`, which EXPIRES:
+   *  a cooled-down candidate becomes triable again, and this remembers that it
+   *  was already given a turn. */
+  const triedEphemerals = new Set<string>();
   for (;;) {
     // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
     // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
@@ -786,8 +825,9 @@ export async function connectPrivatePeer(
     // A flooder ROTATING its ephemeral defeats that cooldown, though — every
     // re-poll hands it a fresh head-of-list record — so the round alternates
     // between the freshest and the most starved candidate (`pickDialCandidate`).
-    const candidate = pickDialCandidate(triable, dialRound);
+    const candidate = pickDialCandidate(triable, dialRound, triedEphemerals);
     dialRound += 1;
+    if (candidate !== undefined) triedEphemerals.add(candidate.ann.signaling_public_key);
     if (candidate !== undefined) {
       throwIfAborted();
       const peer: DiscoveredPeer = {

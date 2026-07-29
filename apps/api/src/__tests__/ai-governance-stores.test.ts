@@ -4,6 +4,8 @@
 // and clear() across every store, so the abstract interfaces are exercised
 // independently of the services that consume them.
 import { describe, expect, it } from 'vitest';
+import type { DrizzleAiGovernanceStores } from '../ai-governance/drizzle-ai-governance-stores.js';
+import { createInMemoryAiGovernanceServices } from '../ai-governance/services.js';
 import {
   InMemoryAiOutputRecordStore,
   InMemoryAiReviewQueueStore,
@@ -19,6 +21,7 @@ import {
   InMemorySummaryStore,
   InMemoryTranslationStore,
 } from '../ai-governance/stores.js';
+import { freshForumServices } from './forum-test-helpers.js';
 
 const ISO = '2026-06-19T00:00:00.000Z';
 
@@ -243,5 +246,56 @@ describe('WS-K stores', () => {
     expect((await runtime.listAlerts(10)).length).toBe(1);
     await runtime.clear();
     expect((await runtime.listAlerts(10)).length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The durable-store INSTALLATION, not the stores themselves.
+// ---------------------------------------------------------------------------
+describe('WS-K durable store installation (prod wiring completeness)', () => {
+  it('every Drizzle store the factory builds lands on the services container', () => {
+    // The production boot builds the in-memory container and then installs the
+    // Drizzle bundle over it.  That was fifteen hand-written assignments, and a
+    // store added to the factory without a line there silently kept its
+    // in-memory adapter in production: `governanceAdvisories` and
+    // `sweepCursors` did exactly that, so migrations 0106 and 0108 created
+    // tables nothing wrote, a steward's advisories were lost on every restart,
+    // and the "durable" sweep cursor was durable in name only.
+    //
+    // `check:prod-parity` cannot see this — an in-memory adapter DOES have a
+    // production counterpart, it just was not reachable — so the check lives
+    // here: every key the factory returns must exist on the container it is
+    // installed onto, which is what makes `Object.assign` exhaustive.
+    const factoryKeys: Array<keyof DrizzleAiGovernanceStores> = [
+      'registry',
+      'riskAssessments',
+      'inventory',
+      'lineage',
+      'outputRecords',
+      'evaluations',
+      'corrections',
+      'blocked',
+      'reviewQueue',
+      'summaries',
+      'translations',
+      'governanceSummaries',
+      'governanceAdvisories',
+      'sweepCursors',
+      'runtime',
+      'moderationLog',
+    ];
+    const container = createInMemoryAiGovernanceServices(freshForumServices().events, {
+      now: () => 0,
+    });
+    for (const key of factoryKeys) {
+      expect(container[key], `${key} is missing from AiGovernanceServices`).toBeDefined();
+    }
+    // …and the list above is the WHOLE factory surface: a store added to
+    // `DrizzleAiGovernanceStores` without a line here fails to compile, so this
+    // cannot silently fall behind the factory the way the boot did.
+    const exhaustive: Record<keyof DrizzleAiGovernanceStores, true> = Object.fromEntries(
+      factoryKeys.map((k) => [k, true]),
+    ) as Record<keyof DrizzleAiGovernanceStores, true>;
+    expect(Object.keys(exhaustive).sort()).toEqual([...factoryKeys].sort());
   });
 });

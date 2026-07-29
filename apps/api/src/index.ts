@@ -1151,20 +1151,20 @@ const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
 });
 if (db) {
   const aiStores = createDrizzleAiGovernanceStores(db);
-  aiGovernanceServices.registry = aiStores.registry;
-  aiGovernanceServices.riskAssessments = aiStores.riskAssessments;
-  aiGovernanceServices.inventory = aiStores.inventory;
-  aiGovernanceServices.lineage = aiStores.lineage;
-  aiGovernanceServices.outputRecords = aiStores.outputRecords;
-  aiGovernanceServices.evaluations = aiStores.evaluations;
-  aiGovernanceServices.corrections = aiStores.corrections;
-  aiGovernanceServices.blocked = aiStores.blocked;
-  aiGovernanceServices.reviewQueue = aiStores.reviewQueue;
-  aiGovernanceServices.summaries = aiStores.summaries;
-  aiGovernanceServices.translations = aiStores.translations;
-  aiGovernanceServices.governanceSummaries = aiStores.governanceSummaries;
-  aiGovernanceServices.runtime = aiStores.runtime;
-  aiGovernanceServices.moderationLog = aiStores.moderationLog;
+  // INSTALL THE WHOLE BUNDLE.  This was fifteen hand-written assignments, and a
+  // store added to the factory without a line here silently kept its in-memory
+  // adapter in production — which is exactly what happened to
+  // `governanceAdvisories` and `sweepCursors`: migrations 0106 and 0108 created
+  // tables nothing ever wrote, the advisories a steward reads were lost on
+  // every restart, and the "durable" sweep cursor was durable in name only.
+  // `check:prod-parity` did not catch it either: an in-memory adapter DOES have
+  // a production counterpart here, it just was not reachable.
+  //
+  // `Object.assign` over the factory's own return type makes the list
+  // exhaustive by construction — the next store is installed by existing
+  // (`satisfies` on the factory's side keeps the shapes compatible), and
+  // `ai-governance-stores.test.ts` asserts every key actually arrives.
+  Object.assign(aiGovernanceServices, aiStores);
   // The prohibited-use guard captured the in-memory blocked store at container
   // construction — REBUILD it over the durable store, or its audit rows would
   // keep flowing to the discarded in-memory adapter.

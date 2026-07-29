@@ -621,36 +621,99 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
   });
 });
 
-// --- Dial fairness: freshest-first alone is starvable -------------------------------------------
-describe('pickDialCandidate (a rotating flooder cannot own every dial)', () => {
-  it('alternates between the freshest and the most starved candidate', () => {
-    const sample = ['freshest', 'middle', 'oldest'];
-    expect(pickDialCandidate(sample, 0)).toBe('freshest');
-    expect(pickDialCandidate(sample, 1)).toBe('oldest');
-    expect(pickDialCandidate(sample, 2)).toBe('freshest');
-    expect(pickDialCandidate(sample, 3)).toBe('oldest');
+// --- Dial selection: neither ordering nor flooding may starve a candidate ------------------------
+describe('pickDialCandidate (an attacker-authored order cannot starve a peer)', () => {
+  const c = (key: string, capped = false) => ({
+    ann: capped
+      ? { signaling_public_key: key, cap: { proof: 'p', pseudonym: 'n' } }
+      : { signaling_public_key: key },
   });
 
-  it('reaches an honest peer within TWO rounds however fast spoofs are minted', () => {
-    // The cooldown is keyed by the record's ephemeral key, so a hostile member
-    // that rotates it puts a NEW spoof at the head of every re-polled sample —
-    // `triable[0]` would hand it every dial until the connect deadline expired
-    // and the honest peer behind it would never be reached.
-    const honest = 'E_honest';
-    const dialled: string[] = [];
-    for (let round = 0; round < 6; round += 1) {
-      // A fresh spoof each round, always ahead of the honest record.
-      const sample = [`E_spoof_${round}`, honest];
-      const pick = pickDialCandidate(sample, round);
-      if (pick !== undefined) dialled.push(pick);
+  it('BRACKETING no longer works — the honest record in the middle is reached', () => {
+    // The defect that killed the previous policy.  `selectFreshestCandidates`
+    // sorts by `record.expires_at`, and that value is ANNOUNCER-CHOSEN, while
+    // every honest client uses exactly `now + 30min`.  So a hostile member mints
+    // one record above and one below, the honest record sits between them, and a
+    // head/tail policy selects nothing else for the whole dial window.
+    const sample = [c('E_spoof_high'), c('E_honest'), c('E_spoof_low')];
+    const tried = new Set<string>();
+    const picked: string[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      const pick = pickDialCandidate(sample, round, tried);
+      if (pick === undefined) break;
+      picked.push(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
     }
-    expect(dialled).toContain(honest);
-    expect(dialled.indexOf(honest)).toBeLessThanOrEqual(1);
+    expect(picked).toContain('E_honest');
   });
 
-  it('a single candidate is dialled on every round', () => {
-    expect(pickDialCandidate(['only'], 0)).toBe('only');
-    expect(pickDialCandidate(['only'], 1)).toBe('only');
-    expect(pickDialCandidate([], 0)).toBeUndefined();
+  it('rotates over EVERY position, not just the two ends', () => {
+    const sample = [c('a'), c('b'), c('c'), c('d')];
+    const tried = new Set<string>();
+    const seen = new Set<string>();
+    for (let round = 0; round < 4; round += 1) {
+      const pick = pickDialCandidate(sample, round, tried);
+      if (pick === undefined) break;
+      seen.add(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
+    }
+    expect([...seen].sort()).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('prefers the CAPPED tier, which the Tier-2 cap bounds to one slot per device', () => {
+    // The ordering fix alone cannot bound anything — ordering is the attacker's
+    // input.  The bound comes from the cap: `filterVerified` dedups by verified
+    // pseudonym, so a flooder contributes exactly ONE capped candidate however
+    // many records it mints.  Selecting from that subset is what makes the
+    // rotation's coverage meaningful.
+    const sample = [c('E_flood_1'), c('E_flood_2'), c('E_flood_3'), c('E_capped', true)];
+    for (let round = 0; round < 4; round += 1) {
+      expect(pickDialCandidate(sample, round, new Set())?.ann.signaling_public_key).toBe(
+        'E_capped',
+      );
+    }
+  });
+
+  it('falls back to the whole pool once everything in it has been tried', () => {
+    const sample = [c('a'), c('b')];
+    const tried = new Set(['a', 'b']);
+    expect(pickDialCandidate(sample, 0, tried)?.ann.signaling_public_key).toBe('a');
+    expect(pickDialCandidate(sample, 1, tried)?.ann.signaling_public_key).toBe('b');
+  });
+
+  it('under a FLOOD, only the cap tier keeps the honest peer reachable', () => {
+    // The residual the docstring states, made concrete.  A flooder minting a
+    // fresh ephemeral every poll produces candidates that are all `untried`, so
+    // neither the rotation nor the untried-preference bounds anything — the
+    // honest peer is reached only because its CAPPED record is the one slot the
+    // Tier-2 cap admits per device.
+    const tried = new Set<string>();
+    let reached = false;
+    for (let round = 0; round < 5; round += 1) {
+      const flood = Array.from({ length: 50 }, (_unused, i) => c(`E_flood_${round}_${i}`));
+      const pick = pickDialCandidate([...flood, c('E_honest_capped', true)], round, tried);
+      if (pick === undefined) break;
+      tried.add(pick.ann.signaling_public_key);
+      if (pick.ann.signaling_public_key === 'E_honest_capped') reached = true;
+    }
+    expect(reached).toBe(true);
+
+    // WITHOUT a cap on that record, the same flood starves it — which is why the
+    // docstring names this a residual of the cap rather than a property of this
+    // function.  Asserted so the limit is recorded, not implied.
+    const triedNoCap = new Set<string>();
+    let reachedNoCap = false;
+    for (let round = 0; round < 5; round += 1) {
+      const flood = Array.from({ length: 50 }, (_unused, i) => c(`E_f_${round}_${i}`));
+      const pick = pickDialCandidate([...flood, c('E_honest_plain')], round, triedNoCap);
+      if (pick === undefined) break;
+      triedNoCap.add(pick.ann.signaling_public_key);
+      if (pick.ann.signaling_public_key === 'E_honest_plain') reachedNoCap = true;
+    }
+    expect(reachedNoCap).toBe(false);
+  });
+
+  it('an empty sample yields nothing', () => {
+    expect(pickDialCandidate([], 0, new Set())).toBeUndefined();
   });
 });
