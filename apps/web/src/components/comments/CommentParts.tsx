@@ -432,6 +432,13 @@ export function CommentMedia({ comment }: { comment: CommentItemType }): React.R
             alt={item.alt_text}
             loading="lazy"
             decoding="async"
+            // The intrinsic box, so the browser reserves the space BEFORE the
+            // bytes land and the thread below does not jump when they do (the
+            // same attributes `StoryMedia` applies).  Absent when the server
+            // does not know them — reserving a guess would move the layout
+            // twice instead of once.
+            {...(item.width !== undefined ? { width: item.width } : {})}
+            {...(item.height !== undefined ? { height: item.height } : {})}
             className={cn(
               'max-h-72 w-full object-contain',
               item.animatable && 'motion-reduce:hidden',

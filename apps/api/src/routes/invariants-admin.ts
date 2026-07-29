@@ -280,11 +280,15 @@ export function createInvariantsAdminRoutes(
         // metrics, no suppressed-cell detail — parity vs under-review only.
         // Bounded to the transparency window: this route emits one statement
         // per row, so an unbounded read would also be an unbounded response.
-        const rows = await resolveEvents().invariantStore.listByTypeSince(
-          'GWEI',
-          new Date(Date.now() - TRANSPARENCY_LOOKBACK_MS).toISOString(),
-          TRANSPARENCY_ROW_CAP,
-        );
+        const periodStart = new Date(Date.now() - TRANSPARENCY_LOOKBACK_MS).toISOString();
+        const store = resolveEvents().invariantStore;
+        const rows = await store.listByTypeSince('GWEI', periodStart, TRANSPARENCY_ROW_CAP);
+        // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
+        // per scheduler run, so the cap is reachable in an ordinary period —
+        // and a capped list with no denominator reads as a complete account of
+        // the window and cannot be reconciled against the logged outputs.  The
+        // count is the one fact the truncated read cannot supply about itself.
+        const total = await store.countByTypeSince('GWEI', periodStart);
         const threshold = 0.5;
         const statements = rows.map((row) => {
           const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
@@ -298,7 +302,15 @@ export function createInvariantsAdminRoutes(
                 : 'degradation_under_review',
           };
         });
-        return c.json({ generated_at: new Date().toISOString(), statements });
+        return c.json({
+          generated_at: new Date().toISOString(),
+          period_start: periodStart,
+          period_end: new Date().toISOString(),
+          // What the period HELD, against what this response carries.
+          total_outputs: total,
+          truncated: total > statements.length,
+          statements,
+        });
       })
 
       .get('/scoi/reports/:roomId', async (c) => {

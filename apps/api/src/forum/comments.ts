@@ -93,6 +93,12 @@ export function commentMediaOf(
     content_type: upload.contentType,
     alt_text: upload.altText,
     animatable: isAnimatableImage(upload.contentType),
+    // Both or neither: the upload row stores them that way, and half a pair
+    // reserves nothing useful.  `exactOptionalPropertyTypes` is why these are
+    // spread rather than set to undefined.
+    ...(upload.imageWidth !== null && upload.imageHeight !== null
+      ? { width: upload.imageWidth, height: upload.imageHeight }
+      : {}),
   };
 }
 

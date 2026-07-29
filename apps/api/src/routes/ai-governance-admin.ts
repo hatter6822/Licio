@@ -329,7 +329,27 @@ export function createAiGovernanceAdminRoutes() {
       .get('/review', requireSteward(), async (c) => {
         const ai = getAiGovernanceServices();
         const items = await ai.reviewQueue.list({ status: 'pending' }, 100);
-        return c.json({ items });
+        // EVERY report for the subject, not just the one that opened the item.
+        // A repeat report about a pending subject is deliberately deduped at the
+        // queue (`ai_review_queue_pending_subject_uq`) so a steward triages one
+        // entry — but the incumbent's `context` is a frozen snapshot of the
+        // FIRST report, so every later reason and correction text was persisted
+        // and then unreachable: the report stores had no production reader at
+        // all.  Reading them here keeps the dedup (one item) while giving the
+        // steward what they are triaging (all of it), and leaves the incumbent's
+        // own evidence unrewritten.
+        const enriched = await Promise.all(
+          items.map(async (item) => {
+            const reports =
+              item.kind === 'reported_summary'
+                ? await ai.summaries.listReports(item.subjectRef)
+                : item.kind === 'reported_translation'
+                  ? await ai.translations.listReports(item.subjectRef)
+                  : [];
+            return { ...item, report_count: reports.length, reports };
+          }),
+        );
+        return c.json({ items: enriched });
       })
       .post('/review/:id/resolve', requireSteward(), async (c) => {
         const ai = getAiGovernanceServices();

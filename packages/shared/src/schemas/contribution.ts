@@ -277,6 +277,15 @@ export const contributionMediaSchema = z
     content_type: z.string().min(1).max(128),
     alt_text: z.string().min(1).max(500),
     animatable: z.boolean(),
+    /** Intrinsic pixel dimensions, so the renderer can reserve the box BEFORE
+     *  the bytes arrive (the CLS half of WS-G.4.2b).  Both present or both
+     *  absent — the upload row stores them that way — and absent means UNKNOWN,
+     *  never a default: reserving a guess moves the layout twice instead of
+     *  once.  The upload response has always carried them; the projection that
+     *  serves the comment did not, so the fix stopped at the composer preview
+     *  and the posted image still reflowed the thread. */
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
   })
   .strict();
 export type ContributionMedia = z.infer<typeof contributionMediaSchema>;

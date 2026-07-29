@@ -367,15 +367,61 @@ describe('GWEI transparency export (WS-H.5.2d)', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       statements: Array<{ status: string }>;
+      period_start: string;
+      total_outputs: number;
+      truncated: boolean;
     };
     expect(body.statements).toHaveLength(2);
     expect(body.statements.map((s) => s.status).sort()).toEqual([
       'parity_within_threshold',
       'withheld_small_cohort',
     ]);
+    // The export STATES its coverage: the period it covers and how many
+    // outputs that period holds, against what this response carries.
+    expect(body.total_outputs).toBe(2);
+    expect(body.truncated).toBe(false);
+    expect(Date.parse(body.period_start)).toBeLessThan(Date.now());
     // No cohort keys or metric values leak into the export.
     expect(JSON.stringify(body)).not.toContain('locale:');
     expect(JSON.stringify(body)).not.toContain('sourceDiversity');
+  });
+
+  it('MARKS a period whose outputs exceed the row cap as truncated', async () => {
+    // GWEI emits one output per eligible cohort pair per scheduler run, so the
+    // cap is reachable in an ordinary period.  A capped list with no
+    // denominator reads as a complete account of the window and cannot be
+    // reconciled against the logged outputs — which is precisely what a
+    // transparency report exists to allow.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const window = { start: '2026-06-01T00:00:00.000Z', end: '2026-06-08T00:00:00.000Z' };
+    for (let i = 0; i < 502; i += 1) {
+      await fixture.events.invariantStore.upsert({
+        invariantType: 'GWEI',
+        targetType: 'cohort',
+        targetId: randomUUID(),
+        timeWindow: window,
+        version: '1.0.0',
+        scoreVector: { gw2: 0.1 },
+        explanationSummary: null,
+        confidence: 0.8,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const response = await adminRequest(fixture, steward.cookie, '/gwei/transparency');
+    const body = (await response.json()) as {
+      statements: unknown[];
+      total_outputs: number;
+      truncated: boolean;
+    };
+    expect(body.statements).toHaveLength(500); // the cap
+    expect(body.total_outputs).toBe(502); // …of this many
+    expect(body.truncated).toBe(true);
   });
 });
 

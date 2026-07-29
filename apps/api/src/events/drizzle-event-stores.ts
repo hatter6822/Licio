@@ -24,7 +24,20 @@ import {
   signalLedgerEntries,
 } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 import {
   type ActorAuthenticityRecord,
   type ActorBehaviorStore,
@@ -736,6 +749,19 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
       .orderBy(desc(invariantOutputs.createdAt))
       .limit(Math.max(0, limit));
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async countByTypeSince(invariantType: string, sinceIso: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ n: count() })
+      .from(invariantOutputs)
+      .where(
+        and(
+          eq(invariantOutputs.invariantType, invariantType),
+          gte(invariantOutputs.createdAt, new Date(sinceIso)),
+        ),
+      );
+    return row?.n ?? 0;
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {

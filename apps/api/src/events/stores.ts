@@ -652,6 +652,12 @@ export interface InvariantOutputStore {
     sinceIso: string,
     limit: number,
   ): Promise<InvariantOutputRecord[]>;
+  /** How many rows of ONE invariant type exist at/after `sinceIso` — the
+   *  DENOMINATOR a capped read cannot report about itself.  A transparency
+   *  export that silently drops everything past its cap reads as a complete
+   *  account of the period and cannot be reproduced from the logged outputs;
+   *  this is what lets it state its own coverage. */
+  countByTypeSince(invariantType: string, sinceIso: string): Promise<number>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -725,6 +731,14 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
       .filter((r) => r.invariantType === invariantType && r.createdAt >= sinceIso)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(0, limit));
+  }
+
+  async countByTypeSince(invariantType: string, sinceIso: string): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.invariantType === invariantType && row.createdAt >= sinceIso) count += 1;
+    }
+    return count;
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {

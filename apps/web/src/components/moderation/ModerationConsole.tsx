@@ -793,8 +793,10 @@ function CaseReviewDialog({
                 `action_id` and a `reverted` flag the payload has always sent,
                 and WS-J.2.3b's revert route was reachable from no surface — so
                 a wrongly-applied sanction could be seen (as a number) and never
-                undone.  Reverting uses the reason code selected in the palette
-                below, which is the same vocabulary the action itself carries. */}
+                undone.  Reverting asks for its OWN reason (the dialog below);
+                the palette's pending new-action selection is a different
+                decision and would write "harassment" as the justification for
+                undoing an unrelated sanction. */}
             {data.user_history.past_actions.length > 0 ? (
               <ul className="mt-1 flex flex-col gap-1 text-xs">
                 {data.user_history.past_actions.map((entry) => (

@@ -203,6 +203,57 @@ describe('WS-K routes', () => {
     ).toBe(200);
   });
 
+  it('the review queue carries EVERY report for a deduped subject', async () => {
+    // A repeat report about a pending subject is deliberately deduped at the
+    // queue so a steward triages one entry — but the incumbent's `context` is a
+    // frozen snapshot of the FIRST report, so every later reason and correction
+    // text was persisted and then unreachable (the report stores had no
+    // production reader at all).  The steward saw one reason and decided on it.
+    const reporterA = await seedUserWithSession(forum.identity);
+    const reporterB = await seedUserWithSession(forum.identity);
+    const steward = await seedUserWithSession(forum.identity, { steward: true });
+    await ai.summaries.putDraft({
+      summaryId: 'sum-dedup',
+      threadId: 'thread-dedup',
+      draft: {},
+      outputId: 'out-dedup',
+      qualityPassed: true,
+      createdAt: new Date(ai.now()).toISOString(),
+    });
+    for (const [reporter, reason, correction] of [
+      [reporterA, 'fake_citation', null],
+      [reporterB, 'factual_error', 'The vote was on Wednesday, not Tuesday.'],
+    ] as const) {
+      const res = await app.request(
+        jsonReq(
+          '/v1/ai/summaries/sum-dedup/report',
+          'POST',
+          correction === null ? { reason } : { reason, correction_text: correction },
+          reporter.cookie,
+        ),
+      );
+      expect(res.status).toBe(201);
+    }
+    const queue = await app.request(
+      jsonReq('/v1/ai/admin/review', 'GET', undefined, steward.cookie),
+    );
+    expect(queue.status).toBe(200);
+    const body = (await queue.json()) as {
+      items: {
+        subject_ref?: string;
+        subjectRef: string;
+        report_count: number;
+        reports: { reason: string }[];
+      }[];
+    };
+    const item = body.items.find((i) => i.subjectRef === 'sum-dedup');
+    // ONE queue entry — the dedup still holds…
+    expect(body.items.filter((i) => i.subjectRef === 'sum-dedup')).toHaveLength(1);
+    // …carrying BOTH reports.
+    expect(item?.report_count).toBe(2);
+    expect(item?.reports.map((r) => r.reason).sort()).toEqual(['factual_error', 'fake_citation']);
+  });
+
   it('translates content and accepts reports for any authenticated user', async () => {
     const user = await seedUserWithSession(forum.identity);
     const res = await app.request(

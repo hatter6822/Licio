@@ -193,6 +193,46 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     expect(correction.depth).toBe(0);
   });
 
+  it('a comment image carries its intrinsic dimensions to the renderer', async () => {
+    // The CLS fix stopped at the upload response.  The dimensions were parsed
+    // and stored, the upload echoed them, and the projection that SERVES the
+    // comment dropped them — so `<img>` rendered with no width/height and the
+    // thread below reflowed when the bytes landed.  A fix that only the
+    // composer preview can see is not the fix.
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const upload = await fixture.forum.uploads.put(
+      {
+        uploadId: randomUUID(),
+        ownerUserId: userId,
+        contentType: 'image/jpeg',
+        byteSize: 64,
+        altText: 'The reservoir gauge at noon',
+        storageRef: 'uploads/dims',
+        metadataStripped: true,
+        imageWidth: 1280,
+        imageHeight: 720,
+        scanState: 'clear',
+      },
+      new Uint8Array([1]),
+    );
+    await createOk({
+      ...contributionBody('comment', threadId),
+      attachment_ids: [upload.uploadId],
+    });
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { media?: { width?: number; height?: number }[] }[];
+    };
+    const media = body.comments.flatMap((c) => c.media ?? []);
+    expect(media).toHaveLength(1);
+    expect(media[0]?.width).toBe(1280);
+    expect(media[0]?.height).toBe(720);
+  });
+
   it('pins a live story-target correction to the TOP of the section (above newer comments)', async () => {
     const thread = await fixture.ingestion.stories.getThreadById(threadId);
     const storyId = thread?.storyId ?? '';
