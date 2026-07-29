@@ -5,7 +5,7 @@
 // the published support contact (WS-J.1.1e, UNAUTHENTICATED), and the user
 // moderation-notice inbox (WS-J.1.3d).  Reporter identity is never returned.
 // Every response is re-validated against the shared schema on egress.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   appealCreatedResponseSchema,
   appealEligibilityViewSchema,
@@ -27,6 +27,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getForumServices } from '../forum/services.js';
 import { getIdentityServices } from '../identity/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { checkEligibility, submitAppeal } from '../moderation/appeals.js';
 import { listNotices } from '../moderation/notices.js';

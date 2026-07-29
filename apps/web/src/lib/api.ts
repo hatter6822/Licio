@@ -96,11 +96,29 @@ const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export class ApiClientError extends Error {
   readonly code: string;
   readonly status: number | undefined;
-  constructor(code: string, message: string, status?: number) {
+  /**
+   * Field-level detail from `apiErrorSchema.error.details`, when the server
+   * sent any — a map of field path → message, for form surfaces to attach to
+   * the input that failed rather than showing one banner for the whole form.
+   *
+   * Empty for most errors by nature: only request VALIDATION produces per-field
+   * information.  It was dropped here entirely until the API started sending it
+   * (the 300-odd `zValidator` sites had no hook, so every validation failure
+   * arrived as an untyped `http_400`), which is why the documented channel had
+   * no reader.
+   */
+  readonly details: Readonly<Record<string, string>> | undefined;
+  constructor(
+    code: string,
+    message: string,
+    status?: number,
+    details?: Readonly<Record<string, string>>,
+  ) {
     super(message);
     this.name = 'ApiClientError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -212,16 +230,20 @@ export const client: ReturnType<typeof hc<AppType>> = hc<AppType>(API_BASE, { fe
 async function normalizeError(response: Response): Promise<ApiClientError> {
   let code = `http_${response.status}`;
   let message = response.statusText || 'Request failed';
+  let details: Readonly<Record<string, string>> | undefined;
   try {
     const parsed = apiErrorSchema.safeParse(await response.json());
     if (parsed.success) {
       code = parsed.data.error.code;
       message = parsed.data.error.message;
+      details = parsed.data.error.details;
     }
   } catch {
     // Non-JSON error body; keep the status-derived defaults.
   }
-  return new ApiClientError(code, message, response.status);
+  return details === undefined
+    ? new ApiClientError(code, message, response.status)
+    : new ApiClientError(code, message, response.status, details);
 }
 
 /**

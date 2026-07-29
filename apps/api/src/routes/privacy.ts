@@ -7,7 +7,6 @@
 // step-up-protected, expiring URL; account deletion runs a 30-day grace period
 // (cancellable by a remaining-method re-login OR an emailed token) then hard-purges.
 
-import { zValidator } from '@hono/zod-validator';
 import {
   attentionDeleteRequestSchema,
   clampPrivacySettingsToTeenFloor,
@@ -35,6 +34,7 @@ import { privateOwnershipOutcome } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, revokeAllForUser, validateSession } from '../identity/sessions.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

@@ -10,7 +10,6 @@
 // `auth-credentials.ts`, and steward MFA in `auth-mfa.ts` — all composed below.
 
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   authSessionResultSchema,
   authStatusResponseSchema,
@@ -48,6 +47,7 @@ import {
 import { hashAuthWalletAddress, issueSiweNonce, verifySiwe } from '../identity/siwe.js';
 import { createAuthenticationOptions, verifyAuthentication } from '../identity/webauthn.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { createCredentialRoutes } from './auth-credentials.js';
 import { createMfaRoutes } from './auth-mfa.js';

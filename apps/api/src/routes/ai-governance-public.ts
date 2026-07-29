@@ -7,7 +7,6 @@
 //     steward review queue + the model-improvement loop; reporter identity is
 //     never exposed).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   SUMMARY_REPORT_REASONS,
   TRANSLATION_REPORT_REASONS,
@@ -24,6 +23,7 @@ import {
   buildSummaryDeps,
   buildTranslationDeps,
 } from '../ai-governance/wiring.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;

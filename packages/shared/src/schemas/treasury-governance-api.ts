@@ -21,6 +21,9 @@ import {
   hash32Schema,
   lowercaseAddressSchema,
   minorUnitAmountSchema,
+  PROPOSAL_CHALLENGE_STATES,
+  PROPOSAL_EXECUTION_STATES,
+  PROPOSAL_VOTING_STATES,
   positiveMinorUnitAmountSchema,
   READINESS_REQUIREMENTS,
 } from './knomosis-api.js';
@@ -458,16 +461,17 @@ export const productionProposalSchema = z
     /** The law-pack version PINNED at publication (WS-M.1.3d). */
     law_pack_version_id: uuidSchema.nullable(),
     preflight_state: z.enum(['pending', 'passed', 'failed']),
-    voting_state: z.enum(['draft', 'deliberation', 'open', 'passed', 'rejected', 'quorum_not_met']),
-    challenge_state: z.enum(['none', 'open', 'upheld', 'dismissed', 'escalated']),
-    execution_state: z.enum([
-      'not_executed',
-      'timelocked',
-      'executing',
-      'executed',
-      'blocked',
-      'expired',
-    ]),
+    // The three lifecycle unions are DERIVED from the stored vocabularies, not
+    // restated.  They were three hand-copies that happened to agree
+    // value-for-value, and `toWireProductionProposal` cast across the
+    // voting-state one with `as` — so the copies could silently diverge and the
+    // cast would keep it compiling, which is exactly the divergence a wire
+    // schema exists to catch.  Derived, the projection needs no cast at all and
+    // a new stored state is a type error at the wire boundary until it is
+    // deliberately handled.
+    voting_state: z.enum(PROPOSAL_VOTING_STATES),
+    challenge_state: z.enum(PROPOSAL_CHALLENGE_STATES),
+    execution_state: z.enum(PROPOSAL_EXECUTION_STATES),
     tally: proposalTallyWireSchema.nullable(),
     deliberation_ends_at: isoTimestampSchema.nullable(),
     voting_ends_at: isoTimestampSchema.nullable(),

@@ -13,7 +13,7 @@
 // serve a deterministic in-memory demo dataset (see `lib/demo-data.ts`) so the PWA
 // has stable, structurally honest content to render — clearly fixture data, never
 // a fabricated production source of truth.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
@@ -84,6 +84,7 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { getUserSettingsStore } from '../lib/user-settings.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';

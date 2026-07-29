@@ -5,7 +5,6 @@
 // the email-factor verify/resend/add flows that let a registered or passkey-only
 // account confirm or attach an email.  Passwordless throughout.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   authSessionResultSchema,
   defaultPersonalizationSettings,
@@ -35,6 +34,7 @@ import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, readSessionToken, rotateSession } from '../identity/sessions.js';
 import { createRegistrationOptions, verifyRegistration } from '../identity/webauthn.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, requireStepUp } from '../middleware/auth.js';
 import {
   ATTEMPT_COOKIES,

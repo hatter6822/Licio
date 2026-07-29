@@ -6,7 +6,7 @@
 // interface (WS-J.2.4), and the audit viewer + transparency export (WS-J.2.5).
 // Every view/action is authorized by doctrine steward role + verified MFA, and
 // the reads/exports are themselves audited.  Financial data never appears.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   appealDecisionRequestSchema,
   appealDecisionResponseSchema,
@@ -44,6 +44,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { getIdentityServices } from '../identity/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { applyAction, revertAction } from '../moderation/actions.js';
 import { decideAppeal } from '../moderation/appeals.js';
@@ -776,18 +777,25 @@ export function createModerationConsoleRoutes() {
         }
         const mod = getModerationServices();
         const patch = c.req.valid('json');
-        const fields: Array<{ key: string; message: string }> = [];
+        // Per-key problems go in `apiErrorSchema`'s own `details` map — the
+        // field documented as "field-level details for form validation
+        // surfaces" — rather than in a `fields: [{key, message}]` array of this
+        // route's own invention.  The client validates every error body against
+        // that schema and keeps only what it declares, so the invented array
+        // was dropped on arrival: the console showed "Invalid config" and never
+        // which key was wrong, which is the entire content of the answer.
+        const details: Record<string, string> = {};
         for (const [key, value] of Object.entries(patch)) {
           if (!(MODERATION_CONFIG_KEYS as string[]).includes(key)) {
-            fields.push({ key, message: 'unknown key' });
+            details[key] = 'unknown key';
             continue;
           }
           const problem = validateModerationConfigValue(key, value);
-          if (problem) fields.push({ key, message: problem });
+          if (problem) details[key] = problem;
         }
-        if (fields.length > 0) {
+        if (Object.keys(details).length > 0) {
           return c.json(
-            { error: { code: 'validation_error', message: 'Invalid config', fields } },
+            { error: { code: 'validation_error', message: 'Invalid config', details } },
             422,
           );
         }

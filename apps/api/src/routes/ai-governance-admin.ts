@@ -9,7 +9,6 @@
 // Registration/versioning require a complete card; deploy runs the gate (card +
 // passing harness decision + resolved risk assessment); every write is validated.
 
-import { zValidator } from '@hono/zod-validator';
 import { modelCardSchema } from '@licio/ai-governance';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -28,6 +27,7 @@ import {
 } from '../ai-governance/registry.js';
 import { getAiGovernanceServices } from '../ai-governance/services.js';
 import { buildHarnessDeps, buildRegistryDeps } from '../ai-governance/wiring.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

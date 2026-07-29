@@ -8,7 +8,6 @@
 // Every response is re-validated against the shared schema on egress (the
 // WS-C.1.2 boundary guarantee); logs and metrics carry ids and counts only.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   type ContributionPublic,
   challengeStandingResponseSchema,
@@ -112,6 +111,7 @@ import {
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

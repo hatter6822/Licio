@@ -11,7 +11,6 @@
 // crypto gate); room membership gates participation; comprehension gates the
 // first action (enforced in the simulation service).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   comprehensionQuizResponseSchema,
   comprehensionSubmitRequestSchema,
@@ -20,12 +19,14 @@ import {
   governanceAuditLogResponseSchema,
   governanceProposalCreateSchema,
   governanceProposalListResponseSchema,
+  governanceProposalResponseSchema,
   governanceTabWithProductionSchema,
   modeTransitionRequestSchema,
   type ProductionProposal,
   productionProposalCreateSchema,
   productionProposalListResponseSchema,
   productionProposalResponseSchema,
+  proposalTallyWireSchema,
   proposalVoteRequestSchema,
   READINESS_TARGET_MODES,
   type ReadinessTargetMode,
@@ -67,6 +68,7 @@ import type {
   GovernanceProposalRecord,
   ProposalVoteStore,
 } from '../knomosis/stores.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -164,13 +166,17 @@ function toWireProductionProposal(record: GovernanceProposalRecord): ProductionP
     expected_deliverable: record.expectedDeliverable,
     law_pack_version_id: record.lawPackVersionId ?? null,
     preflight_state: record.preflightState,
-    voting_state:
-      record.votingState === 'open'
-        ? 'open'
-        : (record.votingState as ProductionProposal['voting_state']),
+    // No cast: the wire unions are derived from the same stored vocabularies
+    // these fields hold, so the assignment is proved rather than asserted.
+    voting_state: record.votingState,
     challenge_state: record.challengeState,
     execution_state: record.executionState,
-    tally: (record.tallySnapshot as ProductionProposal['tally']) ?? null,
+    // `tallySnapshot` is a `jsonb` column — genuinely `unknown` at this
+    // boundary, so it is PARSED rather than asserted.  The old cast claimed a
+    // shape of an untyped column, which is the one place a cast can be wrong
+    // without anything upstream having changed at all.
+    tally:
+      record.tallySnapshot === null ? null : proposalTallyWireSchema.parse(record.tallySnapshot),
     deliberation_ends_at: record.deliberationEndsAt ?? null,
     voting_ends_at: record.votingEndsAt ?? null,
     challenge_window_ends_at: record.challengeWindowEndsAt ?? null,
@@ -407,12 +413,26 @@ export function createRoomGovernanceSimRoutes() {
           // Same mode branch as the list: a production proposal opened by id
           // must carry its production shape (law-pack pin, windows, tally) —
           // never a simulated-shaped row with zero sim votes.
+          // Both branches parse through the EGRESS schema, as the list, create,
+          // vote and execute siblings all do.  This was the one proposal path
+          // that returned a hand-built object — so the schema that four other
+          // routes rely on to catch a projection drift did not run on the fifth,
+          // and the web client's `parseResponse` was the first thing in the
+          // system to look at the shape.
           if (gate.mode !== 'simulated') {
             if (proposal.simulationMode) return c.json(notFound, 404);
-            return c.json({ proposal: toWireProductionProposal(proposal) });
+            return c.json(
+              productionProposalResponseSchema.parse({
+                proposal: toWireProductionProposal(proposal),
+              }),
+            );
           }
           if (!proposal.simulationMode) return c.json(notFound, 404);
-          return c.json({ proposal: await toWireProposal(proposal, services.votes) });
+          return c.json(
+            governanceProposalResponseSchema.parse({
+              proposal: await toWireProposal(proposal, services.votes),
+            }),
+          );
         },
       )
       .post(

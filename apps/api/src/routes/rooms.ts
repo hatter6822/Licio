@@ -8,7 +8,6 @@
 // room join requests with steward decisions), and the SCOI lens read
 // (WS-G.2.4 — interpretation contexts, never scoreboards).
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   lensCreateRequestSchema,
   lensPublicSchema,
@@ -66,6 +65,7 @@ import type { Role } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

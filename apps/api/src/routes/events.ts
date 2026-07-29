@@ -11,7 +11,7 @@
 // privacy enforcement (204 silent discard) → durable store + publish (202 +
 // receipt). Logs and metrics carry event ids and the user id only — never an
 // attention value.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   attentionAggregateEventSchema,
   contentSavedAggregateEventSchema,
@@ -23,6 +23,7 @@ import { ingestAttentionEvents, ONLINE_ACCEPTANCE } from '../events/ingest.js';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
 import { accountRef } from '../identity/crypto.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { createEventsAdminRoutes } from './events-admin.js';
 

@@ -9,7 +9,6 @@
 // Steward-only writes are service-enforced; the platform-floor freeze is gated by
 // the WS-J `restrict` capability; treasury stays behind the fail-closed crypto flag.
 
-import { zValidator } from '@hono/zod-validator';
 import { uuidSchema } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -18,6 +17,7 @@ import { getForumServices } from '../forum/services.js';
 import { checkGovernanceEligibility } from '../governance/eligibility.js';
 import { getGovernanceService } from '../governance/services.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { denyCapability, stewardActorOf } from '../moderation/authz.js';
 

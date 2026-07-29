@@ -26,7 +26,6 @@
 //   GET  /v1/invariants/admin/regression        — on-demand drift report
 //     (WS-H.1.2d-2).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   INVARIANT_TARGET_TYPES,
   INVARIANT_TYPE_NAMES,
@@ -51,6 +50,7 @@ import {
   recomputeScoiFor,
 } from '../invariants/scoi-actions.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
 

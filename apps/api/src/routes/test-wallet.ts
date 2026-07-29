@@ -10,10 +10,10 @@
 // The fixture key is a WELL-KNOWN throwaway (the first Anvil/Hardhat dev
 // account) — never a secret, never valid anywhere real.
 
-import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { privateKeyToAccount } from 'viem/accounts';
 import { z } from 'zod';
+import { zValidator } from '../lib/validate.js';
 
 /** The canonical dev/test key (Anvil account #0 — public knowledge). */
 const TEST_WALLET_PRIVATE_KEY =

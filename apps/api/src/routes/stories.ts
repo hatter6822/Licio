@@ -8,7 +8,6 @@
 // stated boundary guarantee), and all error bodies use the house
 // `{ error: { code, message } }` shape.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   isSentinelTopicId,
   type SourcePublic,
@@ -39,6 +38,7 @@ import type { SourceRecord, StoryRecord } from '../ingestion/stores.js';
 import { submitStory } from '../ingestion/submission.js';
 import { changeStoryVisibility } from '../ingestion/visibility.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireUnrestricted } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });

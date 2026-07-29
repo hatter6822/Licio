@@ -7,7 +7,6 @@
 // replay-protected (the used time-step is remembered) and attempt-capped; ten
 // single-use recovery codes are issued once, hashed at rest.
 
-import { zValidator } from '@hono/zod-validator';
 import {
   totpConfirmRequestSchema,
   totpConfirmResponseSchema,
@@ -31,6 +30,7 @@ import {
   otpauthUri,
   verifyTotp,
 } from '../identity/totp.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, requireStepUp } from '../middleware/auth.js';
 import { err } from './auth-support.js';
 

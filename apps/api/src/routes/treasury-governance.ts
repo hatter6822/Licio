@@ -16,7 +16,6 @@
 // fail-closed: governance surfaces need `governanceEnabled`, fund-moving
 // surfaces additionally need `cryptoEnabled`.
 
-import { zValidator } from '@hono/zod-validator';
 import {
   accountingExportResponseSchema,
   challengeResolveRequestSchema,
@@ -39,7 +38,7 @@ import {
   treasuryPauseRequestSchema,
   uuidSchema,
 } from '@licio/shared';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { createCase } from '../compliance/cases.js';
 import { disclosureGate } from '../compliance/disclosures.js';
@@ -56,6 +55,7 @@ import {
 import { isCounsel } from '../identity/rbac.js';
 import { getKnomosisServices } from '../knomosis/services.js';
 import { createLogger } from '../lib/logger.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -103,11 +103,20 @@ const notFound = { error: { code: 'not_found', message: 'Resource not found' } }
 
 const roomParam = zValidator('param', z.object({ roomId: uuidSchema }));
 
-function tgError(
-  c: { json: (body: unknown, status: never) => Response },
-  error: TreasuryGovernanceError,
-) {
-  return c.json(deny(error.code, error.message), error.status as never);
+/**
+ * Answer a `TreasuryGovernanceError` on the wire.
+ *
+ * `c` is a real Hono `Context` and the status is passed through unchanged.  It
+ * used to be typed `{ json: (body: unknown, status: never) => Response }` with
+ * `error.status as never`, which type-checked by making the status parameter
+ * uninhabited — so for the ~21 error branches that route through here, the RPC
+ * client learned nothing about the body OR the status, and `deny`'s shape was
+ * unchecked at every one.  `TreasuryGovernanceError['status']` is already the
+ * narrow union `400 | 403 | 404 | 409 | 422 | 503`; every member is a
+ * `ContentfulStatusCode`, so nothing needed asserting.
+ */
+function tgError(c: Context<AuthEnv>, error: TreasuryGovernanceError) {
+  return c.json(deny(error.code, error.message), error.status);
 }
 
 /** Governance surfaces need the governance flag; fund movement needs crypto. */

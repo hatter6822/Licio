@@ -19,10 +19,10 @@
 //   GET  /v1/ranking/admin/profiles             — active validated profiles.
 //   GET  /v1/ranking/admin/health               — pipeline health snapshot.
 
-import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getIdentityServices } from '../identity/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 import { RANKING_CONFIG_KEYS, validateRankingConfigValue } from '../ranking/config.js';
 import { engageKillSwitch, readKillSwitchState, releaseKillSwitch } from '../ranking/killswitch.js';

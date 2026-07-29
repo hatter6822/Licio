@@ -14,12 +14,13 @@
 //
 // All routes require an authenticated steward with per-session MFA
 // (requireSteward, WS-D.1.5b) — the same bar as every other steward action.
-import { zValidator } from '@hono/zod-validator';
+
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { recoverEventPipeline, redriveDeadLetters } from '../events/recovery.js';
 import { type EventPipelineServices, getEventPipelineServices } from '../events/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 import { PWATT_CONFIG_KEYS, validatePwattConfigValue } from '../pwatt/config.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
