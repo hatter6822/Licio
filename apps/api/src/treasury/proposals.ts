@@ -148,7 +148,16 @@ export interface MembershipFactsPort {
     eligibility?: {
       rules: EligibilityRules;
       treasuryControlling: boolean;
-      weight?: { model: WeightModel; maxVotingWeightPerAccount: number };
+      weight?: {
+        model: WeightModel;
+        maxVotingWeightPerAccount: number;
+        /** The pinned pack's multisig signer set. The basis hard-coded
+         *  `isDesignatedSigner: false`, so under `multisig_steward` — where
+         *  `resolveVotingWeight` refuses every non-signer — it froze at ZERO and
+         *  quorum was unreachable however many signers voted, while the gate read the
+         *  same fact from the pack and let them sign. */
+        signers?: readonly string[];
+      };
       /** Count the electorate AS OF this instant — the SAME instant the ballot
        *  gate compares a voter's join against.  Stamping an instant beside a
        *  live count leaves a window in which a member is inside the count and
@@ -178,7 +187,16 @@ export interface MembershipFactsPort {
     eligibility?: {
       rules: EligibilityRules;
       treasuryControlling: boolean;
-      weight?: { model: WeightModel; maxVotingWeightPerAccount: number };
+      weight?: {
+        model: WeightModel;
+        maxVotingWeightPerAccount: number;
+        /** The pinned pack's multisig signer set. The basis hard-coded
+         *  `isDesignatedSigner: false`, so under `multisig_steward` — where
+         *  `resolveVotingWeight` refuses every non-signer — it froze at ZERO and
+         *  quorum was unreachable however many signers voted, while the gate read the
+         *  same fact from the pack and let them sign. */
+        signers?: readonly string[];
+      };
     },
   ): Promise<{ count: number; asOf: string }>;
 }
@@ -365,6 +383,7 @@ async function eligibleBasisFor(
     weight: {
       model: pack.weightModel ?? 'one_civic_account_one_vote',
       maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
+      ...(pack.multisig === undefined ? {} : { signers: pack.multisig.signers }),
     },
   });
 }
@@ -395,6 +414,7 @@ async function measureEligibleBasis(
     weight: {
       model: pack.weightModel ?? 'one_civic_account_one_vote',
       maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
+      ...(pack.multisig === undefined ? {} : { signers: pack.multisig.signers }),
     },
   });
 }

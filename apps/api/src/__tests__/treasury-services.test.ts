@@ -916,6 +916,66 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       },
     }) as unknown as ForumServices;
 
+  it('a multisig pack counts its SIGNERS, not zero and not the whole roster', async () => {
+    // Two halves of one bug, and each alone produces a different wrong answer.
+    //
+    // `resolveVotingWeight` refuses every NON-signer under `multisig_steward`, so the
+    // basis walk must know the signer set. It hard-coded `isDesignatedSigner: false`,
+    // which refused EVERY member and froze the basis at ZERO — quorum then unreachable
+    // however many signers cast a ballot the gate happily accepted, because the gate
+    // reads that same fact from the pinned pack.
+    //
+    // And `multisig_steward` was absent from the models that can resolve zero, so the
+    // pack took the FAST count instead of the walk: the whole roster, inflating the bar
+    // the other way. Fixing one without the other just swaps which direction is wrong.
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(5);
+    const old = new Date(fixture.knomosis.now() - 90 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({
+        signer_a: { requestedAt: old },
+        signer_b: { requestedAt: old },
+        bystander_c: { requestedAt: old },
+        bystander_d: { requestedAt: old },
+      }),
+      {
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
+        },
+      } as never,
+      fixture.knomosis,
+    );
+    const trivialRules = {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    };
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: trivialRules,
+        treasuryControlling: false,
+        weight: {
+          model: 'multisig_steward',
+          maxVotingWeightPerAccount: 1,
+          signers: ['signer_a', 'signer_b'],
+        },
+      }),
+    ).toBe(2);
+    // …and with NO signer set the honest answer is zero, not the roster: nobody can
+    // resolve a positive weight, so nobody is in the electorate.
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: trivialRules,
+        treasuryControlling: false,
+        weight: { model: 'multisig_steward', maxVotingWeightPerAccount: 1 },
+      }),
+    ).toBe(0);
+  });
+
   it('filters members who fail the law-pack predicate out of the denominator', async () => {
     const fixture = await freshKnomosisServices();
     vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(5);

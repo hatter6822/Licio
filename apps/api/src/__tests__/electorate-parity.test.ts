@@ -40,7 +40,8 @@ const CLASSIFICATION = {
   walletClusterId: 'basis_exclusion',
   hasDisclosedConflict: 'basis_exclusion',
   roleClasses: 'basis_exclusion',
-  isDesignatedSigner: 'basis_exclusion',
+  /** Sourced from the pinned pack's signer set on BOTH sides. */
+  isDesignatedSigner: 'per_member',
 } as const satisfies Record<keyof VoterFacts, Classification>;
 
 describe('the ballot predicate and the basis are one projection', () => {
@@ -71,6 +72,9 @@ describe('the ballot predicate and the basis are one projection', () => {
       userId: 'u1',
       facts: { membershipDays: 10, contributionCount: 3, verifiedIdentity: true },
       ...BASIS_EXCLUSIONS,
+      // Required explicitly now that it is per-member on both sides — which is the
+      // guard doing its job: it cannot be forgotten into a default any more.
+      isDesignatedSigner: false,
     });
     for (const [key, value] of Object.entries(BASIS_EXCLUSIONS)) {
       expect(facts[key as keyof VoterFacts], `exclusion ${key}`).toEqual(value);
@@ -90,7 +94,12 @@ describe('the ballot predicate and the basis are one projection', () => {
     // `null` facts mean no active membership. `membershipDays`/`contributionCount` must
     // stay NULL so the eligibility gate can treat them conservatively; only the
     // derived score falls back to 0, which is the weakest true claim.
-    const facts = buildVoterFacts({ userId: 'u2', facts: null, ...BASIS_EXCLUSIONS });
+    const facts = buildVoterFacts({
+      userId: 'u2',
+      facts: null,
+      ...BASIS_EXCLUSIONS,
+      isDesignatedSigner: false,
+    });
     expect(facts.membershipDays).toBeNull();
     expect(facts.contributionCount).toBeNull();
     expect(facts.verifiedIdentity).toBe(false);

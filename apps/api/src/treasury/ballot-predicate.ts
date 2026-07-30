@@ -109,15 +109,6 @@ export const BASIS_EXCLUSIONS = {
    * reason; `electorate-parity.test.ts` is where it will fail if it stops holding.
    */
   roleClasses: [],
-  /**
-   * The multisig signer set. The gate reads it from the pinned pack; the basis does not,
-   * which under a `multisig_steward` pack refuses every member and freezes the basis at
-   * ZERO — quorum then unreachable however many signers vote. This is the one exclusion
-   * that is NOT safe in the weakening direction, and it is declared here only so the
-   * guard can see it; the next slice sources it from the pack on both sides and removes
-   * it from this list.
-   */
-  isDesignatedSigner: false,
 } as const satisfies Partial<VoterFacts>;
 
 /** The verdict both callers reduce to: eligible AND resolving to positive weight. */

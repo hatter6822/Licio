@@ -32,6 +32,12 @@ const WEIGHT_MODELS_THAT_CAN_RESOLVE_ZERO: ReadonlySet<WeightModel> = new Set([
   'reputation_bounded',
   'capped_token',
   'quadratic_capped',
+  // `multisig_steward` resolves `resolved: false` for every NON-signer, which is a zero
+  // for basis purposes — so it needs the per-member walk too.  Without it the fast count
+  // returned the whole roster while only the m signers could vote, inflating the quorum
+  // bar; with the walk but without the signer set above it returned zero, making quorum
+  // unreachable.  The two halves of this fix are load-bearing together.
+  'multisig_steward',
 ]);
 
 import {
@@ -192,6 +198,11 @@ export function buildMembershipFactsPort(
             userId,
             facts: facts ?? null,
             ...BASIS_EXCLUSIONS,
+            // FROM THE PINNED PACK, exactly as the ballot gate reads it.  Hard-coding
+            // false here made `resolveVotingWeight` refuse every member under
+            // `multisig_steward` — a basis of ZERO, and quorum unreachable however many
+            // signers cast a ballot the gate happily accepted.
+            isDesignatedSigner: eligibility.weight?.signers?.includes(userId) ?? false,
           }),
           {
             rules: eligibility.rules,
