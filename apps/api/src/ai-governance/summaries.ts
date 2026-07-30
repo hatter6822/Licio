@@ -211,7 +211,20 @@ export async function generateThreadSummary(
     { rateThreshold: 0 },
   );
 
-  const summaryId = `sum-ai-${randomUUID()}`;
+  // DERIVED FROM THE THREAD, not random.
+  //
+  // The withheld path writes the steward-review entry first (so a draft-write failure
+  // cannot lose it), and the queue dedups pending items on `(kind, subjectRef)`.  With
+  // a random id per attempt that dedup could never fire: a transient draft failure
+  // made the retry mint a NEW subject, so each attempt left a pending review item
+  // pointing at a draft that does not exist — up to three per tick from the in-tick
+  // retries, and more on every later sweep, because `getLatestForThread` still finds
+  // nothing.  A thread-derived id makes the retry reuse the same subject, so the
+  // unique index collapses it and `putDraft` (an upsert on `summaryId`) overwrites
+  // rather than accumulating.  One summary per thread is already the sweep's own
+  // policy — `getLatestForThread` is what enforces it — so a stable id per thread
+  // says the same thing the id was previously only pretending to be unique about.
+  const summaryId = `sum-ai-${threadId}`;
   const passed = quality.passed && grounding.passed;
   const putDraft = (): Promise<void> =>
     deps.aiSummaries.putDraft({

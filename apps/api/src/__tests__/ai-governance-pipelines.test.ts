@@ -528,6 +528,7 @@ describe('WS-K.1.4a summary generation', () => {
         // summary is withheld rather than published.
         slurDenylist: () => ['zzzqterm'],
       };
+      const realPutDraft = f.ai.summaries.putDraft.bind(f.ai.summaries);
       f.ai.summaries.putDraft = async () => {
         throw new Error('draft store unavailable');
       };
@@ -537,6 +538,24 @@ describe('WS-K.1.4a summary generation', () => {
       // The review entry survived the draft failure, so a steward still sees it.
       const pending = await f.ai.reviewQueue.list({ status: 'pending' }, 50);
       expect(pending.some((r) => r.kind === 'flagged_hallucination')).toBe(true);
+
+      // …and EXACTLY ONE of them, however often the draft write fails.  A random
+      // `summaryId` per attempt meant the queue's `(kind, subjectRef)` dedup could
+      // never fire, so every retry left another pending item pointing at a draft
+      // that does not exist — three per tick from the in-tick retries, and more on
+      // each later sweep, since `getLatestForThread` still finds nothing.
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow();
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow();
+      const afterRetries = (await f.ai.reviewQueue.list({ status: 'pending' }, 50)).filter(
+        (r) => r.kind === 'flagged_hallucination',
+      );
+      expect(afterRetries).toHaveLength(1);
+
+      // …and once the store recovers, THAT subject gets its draft — no orphan left.
+      f.ai.summaries.putDraft = realPutDraft;
+      expect((await generateThreadSummary(deps, threadId)).ok).toBe(true);
+      const stored = await f.ai.summaries.getLatestForThread(threadId);
+      expect(stored?.summaryId).toBe(afterRetries[0]?.subjectRef);
     });
 
     it('generates a draft for a thread the sweep reaches', async () => {

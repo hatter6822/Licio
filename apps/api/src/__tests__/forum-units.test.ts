@@ -676,6 +676,80 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     ).toEqual({ ok: false, reason: 'malformed' });
   });
 
+  it('rejects an ANMF frame that carries only an alpha plane', () => {
+    // ALPH may PRECEDE the bitstream inside a frame, so accepting the frame as soon as
+    // its first nested chunk was one of the three legal FourCCs let an alpha-only
+    // frame stand in for pixels — the auxiliary/payload distinction the code stated in
+    // words and did not check.  The frame is now walked to a real VP8/VP8L.
+    const alphaOnly = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('ALPH', [0x00, 0x01, 0x02, 0x03, 0x04]),
+      ]),
+    ]);
+    expect(stripWebp(alphaOnly)).toEqual({ ok: false, reason: 'malformed' });
+    // …and ALPH BEFORE a bitstream is still fine, which is why the walk continues
+    // rather than refusing on the first ALPH.
+    const alphaThenImage = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('ALPH', [0x00, 0x01, 0x02, 0x03, 0x04]),
+        ...webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]),
+      ]),
+    ]);
+    expect(stripWebp(alphaThenImage).ok).toBe(true);
+  });
+
+  it('withholds dimensions for an ABSURD aspect ratio, whatever the container says', () => {
+    // The bound that ends the regress.  Every container check is a bound on what we
+    // can PROVE about the bytes, and that argument has no end short of decoding the
+    // image — each validated layer invites "but the layer inside it is still only
+    // declared".  This bounds what a wrong declaration can COST instead: the harm is
+    // always a reserved box the browser later abandons, and 65,535:1 is the version
+    // that wrecks a feed.  Null is UNKNOWN, so such an image reserves nothing —
+    // exactly what one with an unreadable header already does.
+    const gif = (w: number, h: number): Uint8Array =>
+      new Uint8Array([
+        ...[...'GIF89a'].map((c) => c.charCodeAt(0)),
+        w & 0xff,
+        (w >> 8) & 0xff,
+        h & 0xff,
+        (h >> 8) & 0xff,
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xff,
+        0xff,
+        0xff,
+        0x2c,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x02,
+        0x02,
+        0x4c,
+        0x01,
+        0x00,
+        0x3b,
+      ]);
+    // 65535 x 1 parses fine and is refused as a layout commitment.
+    expect(imageDimensions('image/gif', gif(65_535, 1))).toBeNull();
+    expect(imageDimensions('image/gif', gif(1, 65_535))).toBeNull();
+    // A generous panorama is well inside the bound and still published.
+    expect(imageDimensions('image/gif', gif(4000, 500))).toEqual({ width: 4000, height: 500 });
+  });
+
   it('rejects a WebP led by a metadata chunk', () => {
     // Distinct from the payload check above: this file HAS a VP8 payload, so the
     // image-data bound is satisfied and only the leading-chunk rule refuses it.  A
@@ -949,6 +1023,157 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
           0x00,
           0x00,
           0x00,
+        ],
+      },
+      {
+        type: 'image/png',
+        // A one-byte IDAT: a positive declared length that cannot even hold zlib's
+        // 2-byte header, let alone a deflate stream.
+        what: 'IDAT too small for a zlib header',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x01,
+          ...ascii('IDAT'),
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/png',
+        // A big-enough IDAT whose first two bytes are not a zlib header (RFC 1950:
+        // method must be 8 and `(CMF<<8|FLG) % 31` must be 0).
+        what: 'IDAT that is not a zlib stream',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x04,
+          ...ascii('IDAT'),
+          0xde,
+          0xad,
+          0xbe,
+          0xef,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/gif',
+        // An image DESCRIPTOR whose first LZW sub-block is zero-length: no compressed
+        // data at all, so the block is not an image however it is introduced.
+        what: 'image descriptor with empty LZW data',
+        bytes: [
+          ...ascii('GIF89a'),
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0x80,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0xff,
+          0x2c,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+          0x02,
+          0x00,
+          0x3b,
         ],
       },
       {

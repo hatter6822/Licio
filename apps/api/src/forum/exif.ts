@@ -217,7 +217,21 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
       sawIhdr = true;
       first = false;
     }
-    if (type === 'IDAT') idatBytes += length;
+    if (type === 'IDAT') {
+      // THE FIRST IDAT OPENS A ZLIB STREAM, and a positive declared length is not
+      // that.  A one-byte IDAT cannot even hold the 2-byte header, and arbitrary
+      // bytes there are not deflate.  RFC 1950: low nibble of CMF is the method (8 =
+      // deflate) and `(CMF << 8 | FLG) % 31 === 0` is the header check — cheap,
+      // exact, and not a decoder.
+      if (idatBytes === 0) {
+        if (length < 2) return { ok: false, reason: 'malformed' };
+        const cmf = bytes[at + 8] ?? 0;
+        const flg = bytes[at + 9] ?? 0;
+        if ((cmf & 0x0f) !== 8) return { ok: false, reason: 'malformed' };
+        if (((cmf << 8) | flg) % 31 !== 0) return { ok: false, reason: 'malformed' };
+      }
+      idatBytes += length;
+    }
     if (PNG_METADATA_CHUNKS.has(type)) {
       stripped = true;
     } else {
@@ -233,6 +247,33 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
     }
   }
   return { ok: false, reason: 'malformed' };
+}
+
+/**
+ * Does this ANMF frame payload actually reach a VP8/VP8L bitstream?
+ *
+ * `ALPH` may PRECEDE the bitstream inside a frame, and accepting the frame as soon as
+ * its first nested chunk was one of the three legal FourCCs meant an alpha-only frame
+ * counted as pixels — auxiliary structure standing in for the image, which the
+ * comment it replaced said in words while the code did not check.  So the frame's
+ * sub-chunks are walked until a real bitstream appears, with the same minimum sizes
+ * a top-level chunk must clear.
+ */
+function frameHasBitstream(bytes: Uint8Array, from: number, frameEnd: number): boolean {
+  let at = from;
+  while (at + 8 <= frameEnd) {
+    const cc = String.fromCharCode(
+      bytes[at] ?? 0,
+      bytes[at + 1] ?? 0,
+      bytes[at + 2] ?? 0,
+      bytes[at + 3] ?? 0,
+    );
+    const size = readU32LE(bytes, at + 4);
+    if (cc === 'VP8 ' || cc === 'VP8L') return size >= (cc === 'VP8 ' ? 10 : 5);
+    if (cc !== 'ALPH') return false; // only ALPH may sit before the bitstream
+    at += 8 + size + (size % 2);
+  }
+  return false;
 }
 
 /**
@@ -311,18 +352,8 @@ export function stripWebp(bytes: Uint8Array): StripOutcome {
       // image chunk.  Counting its declared size as pixels accepted a one-byte
       // `ANMF`, and then a 16-byte one, neither of which any decoder can use — the
       // container check has to reach the bitstream, not stop at the wrapper.
-      if (fourCc === 'ANMF') {
-        const nested = String.fromCharCode(
-          bytes[at + 8 + 16] ?? 0,
-          bytes[at + 9 + 16] ?? 0,
-          bytes[at + 10 + 16] ?? 0,
-          bytes[at + 11 + 16] ?? 0,
-        );
-        // `ALPH` may precede the bitstream inside a frame, so it counts as
-        // structure rather than as the payload itself.
-        if (nested !== 'VP8 ' && nested !== 'VP8L' && nested !== 'ALPH') {
-          return { ok: false, reason: 'malformed' };
-        }
+      if (fourCc === 'ANMF' && !frameHasBitstream(bytes, at + 8 + 16, at + 8 + size)) {
+        return { ok: false, reason: 'malformed' };
       }
       imageDataBytes += size;
     }
@@ -357,6 +388,11 @@ export type GifBlock =
   | { kind: 'header'; start: number; end: number }
   | { kind: 'global_color_table'; start: number; end: number }
   | { kind: 'image'; start: number; end: number }
+  /** An image DESCRIPTOR whose LZW sub-blocks are empty — no compressed data, so
+   *  nothing can decode from it.  Kept as a distinct span (the block list must still
+   *  tile the file) rather than reported as an `image`, which is what let a
+   *  descriptor-only GIF satisfy `stripGif`'s image requirement. */
+  | { kind: 'empty_image'; start: number; end: number }
   | { kind: 'extension'; label: number; appId?: string; start: number; end: number }
   | { kind: 'trailer'; start: number; end: number };
 
@@ -415,10 +451,14 @@ export function parseGifBlocks(bytes: Uint8Array): GifParseOutcome {
       }
       if (at >= bytes.length) return { ok: false, reason: 'malformed' };
       at += 1; // LZW minimum code size.
+      // A ZERO-LENGTH first sub-block is a descriptor with no compressed data behind
+      // it: `kind: 'image'` without an image.  `stripGif` requires an image block, so
+      // classifying this one as an image is what let it through.
+      const hasData = (bytes[at] ?? 0) !== 0;
       const end = readGifSubBlocks(bytes, at);
       if (end === null) return { ok: false, reason: 'malformed' };
       at = end;
-      blocks.push({ kind: 'image', start, end: at });
+      blocks.push({ kind: hasData ? 'image' : 'empty_image', start, end: at });
       continue;
     }
 
@@ -651,6 +691,15 @@ function gifDimensions(bytes: Uint8Array): ImageDimensions | null {
  * wrong size is a worse defect than one told no size, because the layout
  * reserves the wrong box and shifts anyway — with the shift now also wrong.
  */
+/**
+ * The widest proportion we will publish as a layout commitment (100:1).
+ *
+ * Generous by design — the widest commercial panoramic formats sit near 10:1 and
+ * extreme stitched panoramas near 20:1 — so this rejects only shapes that exist to
+ * break a layout, and it does so whatever the container claims.
+ */
+export const MAX_INTRINSIC_ASPECT_RATIO = 100;
+
 export function imageDimensions(contentType: string, bytes: Uint8Array): ImageDimensions | null {
   if (!matchesMagic(contentType, bytes)) return null;
   const found =
@@ -668,5 +717,21 @@ export function imageDimensions(contentType: string, bytes: Uint8Array): ImageDi
   // `null` keeps it out of the wire rather than putting nonsense in a layout.
   if (found.width < 1 || found.height < 1) return null;
   if (found.width > 65_535 || found.height > 65_535) return null;
+  // AN ABSURD ASPECT RATIO IS NOT A LAYOUT COMMITMENT.
+  //
+  // Every container check above is a bound on what we can PROVE about the bytes, and
+  // that argument has no end short of decoding the image: each layer validated
+  // invites "but the layer inside it is still declared, not verified" — a real IDAT
+  // opening a real zlib stream that inflates to nothing, a VP8 bitstream with invalid
+  // codes.  This is the bound on what a wrong declaration can COST, which needs no
+  // decoder: the reported harm is always a reserved box the browser later abandons,
+  // and a 65,535:1 box is the version of it that wrecks a feed.
+  //
+  // Null means UNKNOWN, not zero — the renderer's own contract — so an image whose
+  // proportions we decline to vouch for simply reserves nothing, exactly as one with
+  // an unreadable header already does.  A legitimately extreme panorama is well
+  // inside this; nothing a camera produces is not.
+  const ratio = Math.max(found.width / found.height, found.height / found.width);
+  if (ratio > MAX_INTRINSIC_ASPECT_RATIO) return null;
   return found;
 }
