@@ -209,7 +209,7 @@ function buildHarness(): TestHarness {
         }
       );
     },
-    eligibleMemberCount: async () => 3,
+    eligibleMemberCount: async () => ({ count: 3, asOf: new Date(0).toISOString() }),
     // The FREEZE reader reports the instant it measured at, and RECORDS it, so a
     // test can assert the stamp came from the measurement rather than from a clock
     // read beside it.
@@ -2143,9 +2143,12 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       // the assertion still read like it was covering the freeze.
       measureEligibleMembers: async (roomId, eligibility) => {
         if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
+        // The port now reports the SNAPSHOT's own instant, so this forwards it rather
+        // than stamping a clock reading beside the count.
+        const measured = await inner.eligibleMemberCount(roomId, eligibility);
         return {
-          count: await inner.eligibleMemberCount(roomId, eligibility),
-          asOf: new Date().toISOString(),
+          count: measured.count,
+          asOf: measured.asOf,
         };
       },
       eligibleMemberCount: (roomId, eligibility) => {

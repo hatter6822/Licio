@@ -58,7 +58,7 @@ async function wsmServices(): Promise<TreasuryServices> {
         contributionCount: 10,
         verifiedIdentity: true,
       }),
-      eligibleMemberCount: async () => 3,
+      eligibleMemberCount: async () => ({ count: 3, asOf: new Date(0).toISOString() }),
       measureEligibleMembers: async () => ({ count: 3, asOf: new Date().toISOString() }),
     },
     treasuryExecutor: { execute: async () => ({ accepted: true, code: null }) },
@@ -501,7 +501,7 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     // EVERY ballot, and a raw count cannot express them, so a count taken that way would
     // include members the ballot gate refuses and inflate the quorum bar by exactly the
     // population that is not allowed to turn up.
-    expect(await port.eligibleMemberCount(ROOM)).toBe(1);
+    expect((await port.eligibleMemberCount(ROOM)).count).toBe(1);
   });
 
   it('an UNKNOWN join is unjudgeable for the freeze, but still has an age', async () => {
@@ -579,16 +579,18 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
       }),
     );
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: {
-          minMembershipDays: 0,
-          minContributions: 0,
-          requireVerifiedIdentity: false,
-          newWalletCoolingOffDays: 0,
-        },
-        treasuryControlling: false,
-        asOf,
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: {
+            minMembershipDays: 0,
+            minContributions: 0,
+            requireVerifiedIdentity: false,
+            newWalletCoolingOffDays: 0,
+          },
+          treasuryControlling: false,
+          asOf,
+        })
+      ).count,
     ).toBe(1);
     expect(seen).toEqual([asOf]);
   });
@@ -1019,15 +1021,17 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       }),
     );
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: {
-          minMembershipDays: 30,
-          minContributions: 0,
-          requireVerifiedIdentity: false,
-          newWalletCoolingOffDays: 0,
-        },
-        treasuryControlling: false,
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: {
+            minMembershipDays: 30,
+            minContributions: 0,
+            requireVerifiedIdentity: false,
+            newWalletCoolingOffDays: 0,
+          },
+          treasuryControlling: false,
+        })
+      ).count,
     ).toBe(0);
   });
 
@@ -1092,7 +1096,9 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
           }),
         }),
       );
-      return port.eligibleMemberCount(ROOM, { rules: trivialRules, treasuryControlling: false });
+      return (
+        await port.eligibleMemberCount(ROOM, { rules: trivialRules, treasuryControlling: false })
+      ).count;
     };
 
     // The baseline member counts on an ORDINARY proposal…
@@ -1149,24 +1155,28 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       newWalletCoolingOffDays: 0,
     };
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: trivialRules,
-        treasuryControlling: false,
-        weight: {
-          model: 'multisig_steward',
-          maxVotingWeightPerAccount: 1,
-          signers: ['signer_a', 'signer_b'],
-        },
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: trivialRules,
+          treasuryControlling: false,
+          weight: {
+            model: 'multisig_steward',
+            maxVotingWeightPerAccount: 1,
+            signers: ['signer_a', 'signer_b'],
+          },
+        })
+      ).count,
     ).toBe(2);
     // …and with NO signer set the honest answer is zero, not the roster: nobody can
     // resolve a positive weight, so nobody is in the electorate.
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: trivialRules,
-        treasuryControlling: false,
-        weight: { model: 'multisig_steward', maxVotingWeightPerAccount: 1 },
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: trivialRules,
+          treasuryControlling: false,
+          weight: { model: 'multisig_steward', maxVotingWeightPerAccount: 1 },
+        })
+      ).count,
     ).toBe(0);
   });
 
@@ -1189,18 +1199,20 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       fixture.knomosis,
     );
     // Without rules: the raw electorate.
-    expect(await port.eligibleMemberCount(ROOM)).toBe(2);
+    expect((await port.eligibleMemberCount(ROOM)).count).toBe(2);
     // With a 30-day membership rule: the 2-day member leaves the denominator.
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: {
-          minMembershipDays: 30,
-          minContributions: 0,
-          requireVerifiedIdentity: false,
-          newWalletCoolingOffDays: 0,
-        },
-        treasuryControlling: true,
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: {
+            minMembershipDays: 30,
+            minContributions: 0,
+            requireVerifiedIdentity: false,
+            newWalletCoolingOffDays: 0,
+          },
+          treasuryControlling: true,
+        })
+      ).count,
     ).toBe(1);
   });
 
@@ -1239,24 +1251,30 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       newWalletCoolingOffDays: 0,
     };
     // Both members pass the law-pack predicate…
-    expect(await port.eligibleMemberCount(ROOM, { rules, treasuryControlling: false })).toBe(2);
+    expect(
+      (await port.eligibleMemberCount(ROOM, { rules, treasuryControlling: false })).count,
+    ).toBe(2);
     // …but under `reputation_bounded` only the contributor can record a ballot,
     // so only the contributor is the electorate.
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules,
-        treasuryControlling: false,
-        weight: { model: 'reputation_bounded', maxVotingWeightPerAccount: 10 },
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules,
+          treasuryControlling: false,
+          weight: { model: 'reputation_bounded', maxVotingWeightPerAccount: 10 },
+        })
+      ).count,
     ).toBe(1);
     // A model whose weight can never be zero keeps the whole membership, and
     // keeps the fast count — the walk is only for the models that need it.
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules,
-        treasuryControlling: false,
-        weight: { model: 'one_civic_account_one_vote', maxVotingWeightPerAccount: 1 },
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules,
+          treasuryControlling: false,
+          weight: { model: 'one_civic_account_one_vote', maxVotingWeightPerAccount: 1 },
+        })
+      ).count,
     ).toBe(2);
   });
 
@@ -1289,17 +1307,21 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
     };
     // Non-treasury votes keep the cheap shortcut (both ids count)…
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: trivialRules,
-        treasuryControlling: false,
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: trivialRules,
+          treasuryControlling: false,
+        })
+      ).count,
     ).toBe(2);
     // …but a treasury-controlling basis walks the fail-closed gate.
     expect(
-      await port.eligibleMemberCount(ROOM, {
-        rules: trivialRules,
-        treasuryControlling: true,
-      }),
+      (
+        await port.eligibleMemberCount(ROOM, {
+          rules: trivialRules,
+          treasuryControlling: true,
+        })
+      ).count,
     ).toBe(1);
   });
 });

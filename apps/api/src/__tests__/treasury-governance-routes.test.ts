@@ -120,7 +120,7 @@ async function wsmFixture(options: { steward?: boolean } = {}): Promise<WsmFixtu
         contributionCount: 10,
         verifiedIdentity: true,
       }),
-      eligibleMemberCount: async () => 3,
+      eligibleMemberCount: async () => ({ count: 3, asOf: new Date(0).toISOString() }),
       measureEligibleMembers: async () => ({ count: 3, asOf: new Date().toISOString() }),
     },
     treasuryExecutor: { execute: async () => ({ accepted: true, code: null }) },

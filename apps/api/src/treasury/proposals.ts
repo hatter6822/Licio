@@ -165,7 +165,16 @@ export interface MembershipFactsPort {
        *  remove. */
       asOf?: string;
     },
-  ): Promise<number>;
+  ): Promise<{
+    /** The electorate size. */
+    count: number;
+    /** The instant the count DESCRIBES — the snapshot's own clock, not a reading
+     *  taken beside it.  Returned rather than supplied so the caller need not take a
+     *  second read to learn it: two reads leave a window in which a member who leaves
+     *  between them is hard-deleted out of a count still claiming the earlier instant,
+     *  which makes quorum easier than the pack asks for. */
+    asOf: string;
+  }>;
   /**
    * The basis AND the instant it was measured at, for the FREEZE.
    *
@@ -368,7 +377,10 @@ async function eligibleBasisFor(
    *  there is no frozen basis to agree with. */
   asOf?: string,
 ): Promise<number> {
-  return deps.membership.eligibleMemberCount(proposal.roomId, {
+  // The COUNT only.  This path is the tally's fallback against a basis already
+  // recorded, so the instant is the one it was given — `measureEligibleBasis` is the
+  // caller that needs the snapshot's own instant reported back.
+  const { count } = await deps.membership.eligibleMemberCount(proposal.roomId, {
     ...(asOf === undefined ? {} : { asOf }),
     rules: pack.eligibility ?? {
       minMembershipDays: 0,
@@ -386,6 +398,7 @@ async function eligibleBasisFor(
       ...(pack.multisig === undefined ? {} : { signers: pack.multisig.signers }),
     },
   });
+  return count;
 }
 
 /**

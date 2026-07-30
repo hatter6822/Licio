@@ -277,7 +277,10 @@ export function buildMembershipFactsPort(
         if (!verdict.admitted) continue;
         eligible += 1;
       }
-      return eligible;
+      // The SNAPSHOT's own instant, which is what the count describes.  Returning it
+      // is what lets `measureEligibleMembers` stop taking a second read purely to
+      // learn the time.
+      return { count: eligible, asOf: snap.asOf };
     },
     measureEligibleMembers: async (roomId, eligibility) => {
       // THE INSTANT COMES FROM THE MEASUREMENT, for the reason the port documents.
@@ -290,13 +293,19 @@ export function buildMembershipFactsPort(
       // A member who leaves mid-walk can still lose their facts read and drop out of
       // the count; closing that needs the whole walk under one database snapshot,
       // which this port boundary does not offer (tracked in `docs/treasury/README.md`).
-      const measured = await forum.rooms.measureEligibleVoters(roomId);
-      if (eligibility === undefined) return measured;
-      const count = await port.eligibleMemberCount(roomId, {
-        ...eligibility,
-        asOf: measured.asOf,
-      });
-      return { count, asOf: measured.asOf };
+      // ONE READ when there are rules to apply: the basis statement fixes the roster
+      // and its own `now()` together, so the count and the instant it claims describe
+      // the same state by construction.
+      //
+      // It used to take TWO — `measureEligibleVoters` for the instant, then the basis
+      // as of that instant — and the seam between them was the last live window: a
+      // member who left in between is HARD-DELETED (`deleteSubscription`;
+      // `room_subscription_status` has no `left` state), so the second read cannot see
+      // them and they drop out of a count still stamped with the earlier instant.  The
+      // count came out SMALLER than the electorate at the instant it claims, and a
+      // denominator that is too small makes quorum easier than the law pack asks for.
+      if (eligibility === undefined) return forum.rooms.measureEligibleVoters(roomId);
+      return port.eligibleMemberCount(roomId, eligibility);
     },
   };
   return port;
