@@ -1060,6 +1060,56 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
   });
 
+  it('REFUSES the SECOND reasoned reassignment off the same holder', async () => {
+    // The claim path was a CAS; the reasoned-reassignment path was an
+    // unconditional `update`, so two reviewers taking a case off the same colleague
+    // both got 200 and last-writer-won — the same race, one branch along.  It also
+    // made the audit row lie: `priorState` came from a read taken before either
+    // write, so the trail recorded an edge no write performed, and a reader
+    // following the history ended at whichever append happened to land last rather
+    // than at the reviewer who actually holds the case.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const takerA = await safetyUser();
+    const takerB = await safetyUser();
+    const caseId = await openCase();
+    const assign = (reviewerId: string, reason?: string) =>
+      app().request(
+        post(
+          `/v1/moderation/cases/${caseId}/assign`,
+          { reviewer_id: reviewerId, ...(reason === undefined ? {} : { reason }) },
+          safety.cookie,
+        ),
+      );
+    expect((await assign(holder.userId)).status).toBe(200);
+    const stale = await getModerationServices().cases.getById(caseId);
+    if (!stale) throw new Error('expected the seeded case');
+    expect((await assign(takerA.userId, 'escalating to a specialist')).status).toBe(200);
+    // takerB's console is working from the snapshot it loaded BEFORE takerA moved
+    // the case — a 30-second-stale queue read, which is the whole scenario.  The
+    // route's own re-read cannot help: it is the read that is stale.
+    const mod = getModerationServices();
+    const realGetById = mod.cases.getById.bind(mod.cases);
+    mod.cases.getById = async (id: string) => (id === caseId ? stale : realGetById(id));
+    const second = await assign(takerB.userId, 'also escalating');
+    mod.cases.getById = realGetById;
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { error: { code: string } }).error.code).toBe(
+      'already_assigned',
+    );
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(takerA.userId);
+    // EVERY recorded assignment names an edge a write actually performed, so the
+    // history reconstructs by following those edges rather than by append order.
+    const trail = (await getModerationServices().audit.list({ limit: 50 })).filter(
+      (row) => row.action === 'assign',
+    );
+    const edges = new Map(trail.map((row) => [row.priorState, row.nextState]));
+    expect(edges.get('unassigned')).toBe(holder.userId);
+    expect(edges.get(holder.userId)).toBe(takerA.userId);
+    // …and no row claims a transition FROM the reviewer who lost the race.
+    expect(trail.some((row) => row.nextState === takerB.userId)).toBe(false);
+  });
+
   it('ALLOWS a reasoned reassignment, and records both holders', async () => {
     // Taking a case off a colleague is a legitimate flow — the console's own
     // comment describes it — but it is a REASONED one, and the audit row must say

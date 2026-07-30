@@ -288,6 +288,10 @@ export function createModerationConsoleRoutes() {
             // not a conflict, and a retried request must not become one.
             return c.json(okResponseSchema.parse({ ok: true }));
           }
+          // THE OBSERVED PRIOR HOLDER, from whichever CAS actually ran — not
+          // `theCase.assignedTo`, which is the read from before any of this and is
+          // what made the audit describe an edge that never existed.
+          let priorHolder: string | null;
           if (theCase.assignedTo === null) {
             // THE CAS decides, not the read above — that read is already stale by
             // the time this line runs, which is the whole defect.
@@ -298,6 +302,7 @@ export function createModerationConsoleRoutes() {
                 409,
               );
             }
+            priorHolder = null;
           } else if (reason === undefined) {
             // Held by someone else.  Taking a case off a colleague is a REASONED
             // reassignment — the flow the console's own comment describes — so it
@@ -308,7 +313,25 @@ export function createModerationConsoleRoutes() {
               409,
             );
           } else {
-            await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
+            // A CAS HERE TOO.  This was an unconditional `update`, so two reviewers
+            // taking the case off the same colleague both succeeded and
+            // last-writer-won — the race `claimIfUnassigned` closed for an
+            // unassigned case, left open one branch along.  With the expected holder
+            // in the predicate, every audit row below names an edge a write actually
+            // performed, so the trail reconstructs by FOLLOWING those edges even
+            // when two appends interleave.
+            const reassigned = await mod.cases.reassignIfHeldBy(
+              caseId,
+              theCase.assignedTo,
+              reviewer_id,
+            );
+            if (!reassigned) {
+              return c.json(
+                deny('already_assigned', 'Another reviewer moved this case first'),
+                409,
+              );
+            }
+            priorHolder = theCase.assignedTo;
           }
           await writeAudit(mod, {
             actorUserId: actor.userId,
@@ -321,7 +344,8 @@ export function createModerationConsoleRoutes() {
             // say who took the case or from whom — the takeover was unattributable,
             // not merely unexplained.
             subjectUserId: reviewer_id,
-            priorState: theCase.assignedTo ?? 'unassigned',
+            // The holder the CAS actually moved FROM, so this row is a true edge.
+            priorState: priorHolder ?? 'unassigned',
             nextState: reviewer_id,
             notes: reason ?? null,
           });

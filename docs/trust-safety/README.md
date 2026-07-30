@@ -356,6 +356,19 @@ moderation audit log).
 
 These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
 
+- **The assignment audit is not appended inside the assignment's transaction.**
+  Both assignment paths are now compare-and-set (`claimIfUnassigned`,
+  `reassignIfHeldBy`), so a case cannot be moved by a reviewer working from a stale
+  snapshot and every `assign` audit row names an edge a write actually performed —
+  which is what makes the trail reconstructable by FOLLOWING those edges.  What
+  remains is append ORDER: the CAS commits and the hash-chained row is appended
+  after it, so if one reviewer's request is delayed between those two steps, a later
+  reviewer's row can land first and a reader taking the LAST entry sees the wrong
+  holder.  Reading by edges is correct either way; reading by recency is not.
+  Closing it needs the audit append inside the same transaction as the state
+  change, which the chained-audit store cannot currently join (it computes the
+  previous hash through its own handle).  Closure: a transaction-scoped audit seam,
+  a WS-J.2.3 follow-up slice.
 - **BFF E2E** for the safety flows (report → console review → action → appeal),
   driven through the WS-P BFF-in-the-loop harness.
 - **Report affordances** are mounted on the feed card, the story page, and every

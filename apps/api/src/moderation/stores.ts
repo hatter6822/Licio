@@ -267,6 +267,22 @@ export interface ModerationCaseStore {
    * touch `assignedTo` and must not start paying for a precondition.
    */
   claimIfUnassigned(caseId: string, reviewerId: string): Promise<ModerationCaseRecord | null>;
+  /**
+   * REASSIGN only if the case is still held by `expectedAssignee`.
+   *
+   * The reasoned-reassignment path used an unconditional `update`, so two reviewers
+   * taking a case off the same colleague both succeeded and last-writer-won — the
+   * defect `claimIfUnassigned` already closed for the unassigned case, left open one
+   * branch along.  It also means the audit trail can name the holder this transition
+   * ACTUALLY came from: the route's read of `assignedTo` is stale by the time the
+   * write happens, and recording that stale value described an edge that never
+   * existed.  Null ⇒ someone else moved it first.
+   */
+  reassignIfHeldBy(
+    caseId: string,
+    expectedAssignee: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null>;
   list(filter: CaseQueueFilter): Promise<ModerationCaseRecord[]>;
   count(filter: Omit<CaseQueueFilter, 'limit'>): Promise<number>;
   countOpenByAssignee(userId: string): Promise<number>;
@@ -593,6 +609,25 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
     this.#rows.set(caseId, updated);
     return { ...updated };
   }
+  async reassignIfHeldBy(
+    caseId: string,
+    expectedAssignee: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle
+    // adapter's one-statement `UPDATE … WHERE assigned_to = $expected`.
+    const r = this.#rows.get(caseId);
+    if (!r || r.assignedTo !== expectedAssignee) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      assignedTo: reviewerId,
+      status: 'in_progress',
+      updatedAt: iso(this.#now),
+    };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
   async claimIfUnassigned(
     caseId: string,
     reviewerId: string,
