@@ -73,3 +73,35 @@ export function uniqueViolationConstraint(error: unknown): string {
   }
   return '';
 }
+
+/** The in-memory adapters' emulation of a CHECK / trigger refusal.
+ *
+ *  Same reasoning as `UniqueViolationError`: the house rule is that in-memory
+ *  adapters emulate every database protection, so a suite that never touches
+ *  Postgres still exercises the semantics production has.  Without this the
+ *  `stories_room_visibility` / `rooms_visibility_no_public_stories` triggers
+ *  (migration 0110) would hold in production and be invisible to every test —
+ *  the worst arrangement, since the behaviour the tests describe would be the
+ *  one production does NOT have. */
+export class CheckViolationError extends Error {
+  constructor(readonly constraintLabel: string) {
+    super(`check constraint violated: ${constraintLabel}`);
+    this.name = 'CheckViolationError';
+  }
+}
+
+/**
+ * Did this write hit a CHECK constraint or a trigger's `check_violation`
+ * (Postgres 23514), rather than fail?
+ *
+ * A refusal, not an outage — the caller must answer it with a 409 that tells the
+ * client what is in the way, never a 503 that invites a retry which cannot
+ * succeed.
+ */
+export function isCheckViolation(error: unknown): boolean {
+  if (error instanceof CheckViolationError) return true;
+  for (const link of causeChain(error)) {
+    if (link['code'] === '23514') return true;
+  }
+  return false;
+}

@@ -26,7 +26,7 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { StoryPageCursor } from '../ingestion/stores.js';
-import { isUniqueViolation } from '../lib/pg-errors.js';
+import { isCheckViolation, isUniqueViolation } from '../lib/pg-errors.js';
 import type { ForumServices } from './services.js';
 
 /** Bound for the cascade sweep (rooms are bounded by content count). */
@@ -97,7 +97,12 @@ export type RoomVisibilityOutcome =
       /** The public stories the sweep could not contain, so an operator can
        *  resolve each duplicate and retry. */
       blockedStoryIds: readonly string[];
-    };
+    }
+  /** A story became public between the last sweep read and the room flip, which
+   *  migration 0110's trigger refuses.  Distinct from `duplicate_story` because
+   *  the remedy is a plain retry and because that variant's wire schema requires
+   *  a NON-EMPTY blocker list. */
+  | { ok: false; status: 409; code: 'visibility_race'; message: string };
 
 /** WS-Q.3.4 — the audited public⇄private room-visibility cascade. */
 export async function changeRoomVisibility(
@@ -267,10 +272,40 @@ export async function changeRoomVisibility(
     }
     // Flip the room; collapse an `open` join model (incoherent once private →
     // a request-approval gate) — active memberships are retained.
-    await forum.rooms.update(roomId, {
-      visibility: 'private',
-      ...(room.joinModel === 'open' ? { joinModel: 'request_approval' as const } : {}),
-    });
+    //
+    // THE FLIP CAN NOW REFUSE, and that is the point.  Every read above happens
+    // before this write, so a story that becomes public in between — a fresh
+    // submission whose `deriveStoryVisibility` saw the room still public, or an
+    // author widen that read the room and then awaited two more queries — was
+    // never revisited and survived the flip.  Migration 0110's
+    // `rooms_visibility_no_public_stories` trigger makes that impossible: the
+    // room cannot go private while a public story remains.  A straggler
+    // therefore fails HERE, and the honest answer is the 409 this function
+    // already returns for blockers, not a 500.
+    try {
+      await forum.rooms.update(roomId, {
+        visibility: 'private',
+        ...(room.joinModel === 'open' ? { joinModel: 'request_approval' as const } : {}),
+      });
+    } catch (error) {
+      if (!isCheckViolation(error)) throw error;
+      // The straggler's id is deliberately not read back: doing so is another
+      // race, and the caller's remedy is the same either way — retry, which now
+      // sweeps the story that appeared.  The room is still public and every
+      // story converted so far stays converted, so the retry is cheap.
+      // A DISTINCT CODE, because it is a distinct condition and because
+      // `roomVisibilityConflictSchema` requires `blocked_story_ids` to be
+      // NON-EMPTY — reusing `duplicate_story` with an empty list would make the
+      // route's own `.parse()` throw and turn a clean 409 into a 500.
+      return {
+        ok: false,
+        status: 409,
+        code: 'visibility_race',
+        message:
+          'A story in this room became public while it was being converted. ' +
+          'The room is still public and every other story is already contained — retry to finish.',
+      };
+    }
   } else {
     // private → public: the room becomes readable by all; content is untouched
     // (every story stays room_only until its author widens it). A public room

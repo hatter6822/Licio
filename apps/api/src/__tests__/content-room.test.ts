@@ -1565,11 +1565,15 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
       'private',
       1,
     );
-    expect(out.ok).toBe(false);
-    if (!out.ok && out.status === 409) {
-      // Named ONCE, not once per pass.
-      expect(out.blockedStoryIds).toEqual([blockedId]);
-    }
+    // ASSERTED UNCONDITIONALLY, narrowed on the CODE.  Wrapping the id check in
+    // `if (!out.ok && out.status === 409)` meant it evaporated silently for any
+    // other failure — a 404 from the storageMode/not_found paths would have
+    // passed this test while proving nothing.
+    if (out.ok) throw new Error('expected the cascade to refuse');
+    expect(out.code).toBe('duplicate_story');
+    if (out.code !== 'duplicate_story') throw new Error('unreachable');
+    // Named ONCE, not once per pass.
+    expect(out.blockedStoryIds).toEqual([blockedId]);
     // …and the story BEHIND the blocked page was still contained.
     expect((await fixture.ingestion.stories.getById(cleanId))?.visibility).toBe('room_only');
   });
@@ -1695,11 +1699,10 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
       'private',
     );
 
-    expect(out.ok).toBe(false);
-    if (!out.ok && out.status === 409) {
-      expect(out.code).toBe('duplicate_story');
-      expect(out.blockedStoryIds).toEqual([blockedId]);
-    }
+    if (out.ok) throw new Error('expected the cascade to refuse');
+    expect(out.code).toBe('duplicate_story');
+    if (out.code !== 'duplicate_story') throw new Error('unreachable');
+    expect(out.blockedStoryIds).toEqual([blockedId]);
     // Everything containable WAS contained…
     expect((await fixture.ingestion.stories.getById(containedId))?.visibility).toBe('room_only');
     // …and the room stays PUBLIC, so the operator's retry re-runs the sweep

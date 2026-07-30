@@ -24,7 +24,11 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
-import { isUniqueViolation, uniqueViolationConstraint } from '../lib/pg-errors.js';
+import {
+  isCheckViolation,
+  isUniqueViolation,
+  uniqueViolationConstraint,
+} from '../lib/pg-errors.js';
 import { findNearDuplicates, loadStoredSignature, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import type { IngestionServices } from './services.js';
@@ -168,6 +172,24 @@ export async function changeStoryVisibility(
       updated = await ingestion.stories.update(storyId, { visibility: target });
       break;
     } catch (error) {
+      // THE ROOM WENT PRIVATE UNDER US.  The widen guard above read the room and
+      // then awaited two more queries before this write, so a room-visibility
+      // cascade landing in between used to leave the story PUBLIC in a now-private
+      // room — reachable by the Gate-19 public re-publisher, which derives
+      // eligibility from storage mode and story visibility and never reads room
+      // visibility.  Migration 0110's `stories_room_visibility` trigger refuses
+      // it, and the honest answer is the one the pre-check already gives for the
+      // same fact: the room is private, so the widen is refused.  Not a retry —
+      // the condition is stable, and retrying would only fail again.
+      if (isCheckViolation(error)) {
+        ingestion.metrics.increment('visibility.widen_room_went_private');
+        return {
+          ok: false,
+          status: 422,
+          code: 'private_room_widen',
+          message: 'A story in a private room cannot become public (§14.5.1)',
+        };
+      }
       if (!isUniqueViolation(error) || !tierUniques.includes(uniqueViolationConstraint(error))) {
         throw error;
       }

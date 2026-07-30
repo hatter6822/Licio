@@ -764,6 +764,13 @@
       "when": 1783728000033,
       "tag": "0109_grant_payout_closed",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1783728000034,
+      "tag": "0110_private_room_story_visibility",
+      "breakpoints": true
     }
   ]
 }
