@@ -749,6 +749,140 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     ]);
   }
 
+  it('EVERY format whose dimensions we publish refuses a container with no image data', () => {
+    // ONE TABLE, four formats, because this hole was reported FOUR times: PNG with
+    // no IEND, then PNG with no IDAT, then WebP with no VP8/VP8L/ANMF, then GIF with
+    // no image block — and JPEG had it too, unreported.  Each fix landed in the
+    // format in front of it, so the obligation all four share got closed
+    // three-quarters of the way, three times running.
+    //
+    // The obligation follows from `imageDimensions`: it publishes an
+    // attacker-controlled width and height for each of these types, `StoryMedia`
+    // reserves an aspect box from them (up to 65,535:1), and a failed strip is the
+    // 415 that keeps the file out of storage entirely.  A new format added to
+    // `imageDimensions` owes a row here.
+    const ascii = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
+    const headerOnly: ReadonlyArray<{ type: string; bytes: number[]; what: string }> = [
+      {
+        type: 'image/jpeg',
+        // SOI + SOF0 declaring 65535x65535 + EOI. No scan: no entropy-coded byte.
+        what: 'no SOS scan',
+        bytes: [
+          0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xff, 0xff, 0xff, 0xff, 0x03, 0x01, 0x11, 0x00,
+          0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9,
+        ],
+      },
+      {
+        type: 'image/png',
+        // Signature + a 13-byte IHDR + IEND. No IDAT.
+        what: 'no IDAT chunk',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // RIFF/WEBP + a 10-byte VP8X canvas. No VP8, VP8L or ANMF.
+        what: 'no VP8/VP8L/ANMF payload',
+        bytes: [
+          ...ascii('RIFF'),
+          0x16,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/gif',
+        // GIF89a + an attacker-chosen logical-screen descriptor + trailer.
+        what: 'no image block',
+        bytes: [
+          ...ascii('GIF89a'),
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0x80,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0xff,
+          0x3b,
+        ],
+      },
+    ];
+    for (const { type, bytes, what } of headerOnly) {
+      const upload = new Uint8Array(bytes);
+      // The dimension parser DOES read the attacker's numbers — that is the point:
+      // the container check is the only thing standing between them and a layout.
+      expect(imageDimensions(type, upload), `${type} (${what}) dimensions`).not.toBeNull();
+      // …and the strip refuses it, which the upload route answers with a 415, so the
+      // file is never stored and those numbers are never published.
+      expect(stripUploadMetadata(type, upload), `${type} (${what})`).toEqual({
+        ok: false,
+        reason: 'malformed',
+      });
+    }
+  });
+
   it('parses GIF block spans exactly and rejects truncations cleanly', () => {
     const gif = gifWithMetadata();
     const parsed = parseGifBlocks(gif);

@@ -127,17 +127,24 @@ export function stripJpeg(bytes: Uint8Array): StripOutcome {
   const out: Uint8Array[] = [bytes.subarray(0, 2)]; // SOI
   let at = 2;
   let stripped = false;
+  // NO SCAN, NO IMAGE — the fourth format in this class (see the note above
+  // `stripGif`).  `FF D8` + an SOF0 declaring 65535x65535 + `FF D9` parses as a
+  // well-formed JPEG with not one entropy-coded byte in it, and `jpegDimensions`
+  // reads that SOF.
+  let sawScan = false;
   while (at + 2 <= bytes.length) {
     if (bytes[at] !== 0xff) return { ok: false, reason: 'malformed' };
     const marker = bytes[at + 1] ?? 0;
     if (marker === 0xd9) {
       // EOI: the image ends here. Copy the 2-byte marker and DROP everything
       // after it (the trailer) — that is the metadata surgery this fix adds.
+      if (!sawScan) return { ok: false, reason: 'malformed' };
       out.push(bytes.subarray(at, at + 2));
       if (at + 2 < bytes.length) stripped = true; // a trailer was present + dropped
       return { ok: true, bytes: concat(out), stripped };
     }
     if (marker === 0xda) {
+      sawScan = true;
       // SOS: a scan header (2-byte length) then entropy-coded data with NO length
       // prefix. Keep the header + entropy up to the next real marker, then keep
       // walking (do not bail to end-of-file).
@@ -407,9 +414,29 @@ export function parseGifBlocks(bytes: Uint8Array): GifParseOutcome {
 }
 
 /** GIF: drop comment and XMP application extensions without re-encoding. */
+/**
+ * GIF: drop Comment and XMP application extensions.
+ *
+ * REQUIRES an image block, for the reason `stripPng` and `stripWebp` state: a
+ * container that cannot possibly decode must not be stored.  A `GIF89a` header, an
+ * attacker-chosen logical-screen descriptor and the trailer parse cleanly with no
+ * image data anywhere, and `gifDimensions` reads that descriptor — so `StoryMedia`
+ * reserved an aspect box up to 65,535:1 until the browser raised an image error.
+ *
+ * This was the THIRD format to have the same hole reported against it, after PNG
+ * (twice — no IEND, then no IDAT) and WebP (no VP8/VP8L/ANMF).  Each fix landed in
+ * the format in front of it, so the obligation the four formats share was closed
+ * three-quarters of the way each time.  `imageDimensions` publishes an
+ * attacker-controlled number for every one of them, so every one of them owes the
+ * same guarantee, and `exif.test.ts` now asserts it as a TABLE over all four rather
+ * than a case per format.
+ */
 export function stripGif(bytes: Uint8Array): StripOutcome {
   const parsed = parseGifBlocks(bytes);
   if (!parsed.ok) return { ok: false, reason: 'malformed' };
+  if (!parsed.blocks.some((block) => block.kind === 'image')) {
+    return { ok: false, reason: 'malformed' };
+  }
   const kept: Uint8Array[] = [];
   let stripped = false;
   for (const block of parsed.blocks) {
