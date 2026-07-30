@@ -67,7 +67,11 @@ import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
-import { delegatorsAlreadyConsumed, incomingDelegationsFor } from './delegations.js';
+import {
+  delegatorsAlreadyConsumed,
+  incomingDelegationsFor,
+  type PriorBallot,
+} from './delegations.js';
 import { createGrantFromProposal, type GrantDeps, hasValidMilestonePlan } from './grants.js';
 import {
   activeLawPack,
@@ -1066,16 +1070,18 @@ export async function signProposal(
     if (existing === undefined || s.createdAt < existing) voteTimeByUser.set(s.userId, s.createdAt);
   }
   const alreadyVoted = new Set(voteTimeByUser.keys());
-  // What each prior ballot's weight ACTUALLY consumed.  Keyed by the EARLIEST
-  // vote, matching `voteTimeByUser`, so the two answers describe one ballot.
-  const countedByDelegate = new Map<string, ReadonlySet<string> | null>();
+  // Each prior ballot's facts, keyed by its voter — ONE map rather than parallel
+  // ones for the time, the weight and the consumed set, which are three facts
+  // about a single ballot and can only disagree if they are stored apart.
+  const ballotByUser = new Map<string, PriorBallot>();
   for (const s of priorSignatures) {
     if (s.purpose !== 'vote' || s.weightSnapshot == null) continue;
     if (s.createdAt !== voteTimeByUser.get(s.userId)) continue;
-    countedByDelegate.set(
-      s.userId,
-      s.countedDelegatorIds == null ? null : new Set(s.countedDelegatorIds),
-    );
+    ballotByUser.set(s.userId, {
+      createdAt: s.createdAt,
+      weightSnapshot: s.weightSnapshot,
+      countedDelegatorIds: s.countedDelegatorIds == null ? null : new Set(s.countedDelegatorIds),
+    });
   }
   // The SYMMETRIC mitigation (WS-M.4.2c-1): the incoming-side guard above stops a
   // delegator-first double-count, but if the DELEGATE signed first, the
@@ -1097,9 +1103,8 @@ export async function signProposal(
       input.roomId,
       proposal.proposalType,
       [input.userId],
-      voteTimeByUser,
+      ballotByUser,
       null,
-      countedByDelegate,
     );
     if (consumed.has(input.userId)) {
       return tgErr(
@@ -1121,9 +1126,8 @@ export async function signProposal(
     input.roomId,
     proposal.proposalType,
     delegations.flatMap((d) => (d.delegatorUserId === null ? [] : [d.delegatorUserId])),
-    voteTimeByUser,
+    ballotByUser,
     input.userId,
-    countedByDelegate,
   );
   const incoming = [];
   for (const delegation of delegations) {

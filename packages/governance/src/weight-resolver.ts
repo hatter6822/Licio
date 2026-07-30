@@ -234,14 +234,33 @@ export function resolveVotingWeight(input: WeightResolverInput): WeightResolutio
       // Fold order is the caller's order and is load-bearing: it decides which
       // delegators the ceiling admits, so the caller must present a canonical,
       // stable one.
+      // A DELEGATED UNIT IS INDIVISIBLE — it is folded only if it fits WHOLE.
+      //
+      // Counting a partially-absorbed unit as consumed lost most of it.
+      // `maxVotingWeightPerAccount` is `z.number().positive()` with no integer
+      // constraint, and each delegated unit is the literal weight 1, so with a cap
+      // of 1.01 the boundary delegation folded (there was headroom), the resolved
+      // weight became 1.01, and that delegator was marked CONSUMED — 0.01 of their
+      // unit absorbed, 0.99 erased from the tally, and their own direct ballot
+      // refused 409 `delegated_weight_already_cast`.  A cap of 1.5 lost 0.5 the
+      // same way.
+      //
+      // Skipping it instead leaves that fraction of the ceiling unused, which is
+      // the right trade: a fraction of a member's vote is not a thing that can be
+      // conferred, and the delegator keeps the direct ballot that carries their
+      // whole unit.  The alternative — count them as unconsumed while their
+      // fraction still moved the weight — would double-count that fraction.
+      //
+      // `continue`, not `break`: a later delegation with a smaller weight may
+      // still fit the remaining headroom, and the caller's canonical order makes
+      // that deterministic.
       let running = '1';
       const countedDelegatorIds: string[] = [];
       for (const delegation of input.delegations) {
         if (!delegation.delegatorEligible) continue;
-        if (decCompare(running, cap) >= 0) break; // no headroom left to confer into
-        running = decAdd(running, delegation.weight);
-        // Partially absorbed still counts: the unit moved the resolved weight,
-        // so it IS in this snapshot and must not be spent twice.
+        const next = decAdd(running, delegation.weight);
+        if (decCompare(next, cap) > 0) continue; // would not fit whole
+        running = next;
         countedDelegatorIds.push(delegation.delegatorUserId);
       }
       const weight = decMin(running, cap);

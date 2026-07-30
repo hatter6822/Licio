@@ -30,6 +30,7 @@ import { actionBudgetStatus } from '../treasury/budgets.js';
 import {
   createDelegation,
   delegatorsAlreadyConsumed,
+  type PriorBallot,
   revokeDelegation,
 } from '../treasury/delegations.js';
 import { setGrantReview, updateGrantMilestone } from '../treasury/grants.js';
@@ -1635,15 +1636,17 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     // though STEWARD's delegation was created first.
     expect(delegateVote.signature.countedDelegatorIds).toEqual([PROPOSER]);
     const signatures = await deps.proposalSignatures.listByProposal(proposal.proposalId);
-    const voteTimeByUser = new Map(
-      signatures.filter((r) => r.purpose === 'vote').map((r) => [r.userId, r.createdAt]),
-    );
-    const countedByDelegate = new Map<string, ReadonlySet<string> | null>(
+    const ballotByUser = new Map<string, PriorBallot>(
       signatures
         .filter((r) => r.purpose === 'vote')
         .map((r) => [
           r.userId,
-          r.countedDelegatorIds == null ? null : new Set<string>(r.countedDelegatorIds),
+          {
+            createdAt: r.createdAt,
+            weightSnapshot: r.weightSnapshot,
+            countedDelegatorIds:
+              r.countedDelegatorIds == null ? null : new Set<string>(r.countedDelegatorIds),
+          },
         ]),
     );
     const consumed = await delegatorsAlreadyConsumed(
@@ -1651,12 +1654,55 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       ROOM,
       proposal.proposalType,
       [PROPOSER, STEWARD],
-      voteTimeByUser,
+      ballotByUser,
       null,
-      countedByDelegate,
     );
     expect(consumed.has(PROPOSER)).toBe(true);
     expect(consumed.has(STEWARD)).toBe(false);
+
+    // LEGACY ROW: `counted_delegator_ids` is null (written before migration 0105),
+    // so the check falls back to timestamps — but a recorded weight of exactly 1
+    // is positive proof that NO delegated unit was folded into that ballot,
+    // whatever the timestamps say.  Refusing the delegator then erased a vote on
+    // the strength of a delegation the tally never counted.
+    const legacyWeightOne = new Map<string, PriorBallot>(
+      [...ballotByUser].map(([userId, ballot]) => [
+        userId,
+        { ...ballot, weightSnapshot: '1', countedDelegatorIds: null },
+      ]),
+    );
+    expect(
+      await delegatorsAlreadyConsumed(
+        deps.delegations,
+        ROOM,
+        proposal.proposalType,
+        [PROPOSER, STEWARD],
+        legacyWeightOne,
+        null,
+      ),
+    ).toEqual(new Set());
+
+    // …and a legacy row whose weight EXCEEDS 1 still falls back to the timestamp
+    // test, because then a delegated unit really was folded and the row does not
+    // say which.  The conservative answer is the one that cannot double-count.
+    const legacyWeightTwo = new Map<string, PriorBallot>(
+      [...ballotByUser].map(([userId, ballot]) => [
+        userId,
+        { ...ballot, weightSnapshot: '2', countedDelegatorIds: null },
+      ]),
+    );
+    expect(
+      (
+        await delegatorsAlreadyConsumed(
+          deps.delegations,
+          ROOM,
+          proposal.proposalType,
+          [PROPOSER, STEWARD],
+          legacyWeightTwo,
+          null,
+        )
+      ).has(PROPOSER),
+    ).toBe(true);
   });
 
   it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {

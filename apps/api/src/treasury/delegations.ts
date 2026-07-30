@@ -7,6 +7,7 @@
 // weight model, which caps the AGGREGATE per account and ignores ineligible
 // delegators (the resolver enforces both).
 
+import { decCompare } from '@licio/governance';
 import type { DelegationCreateRequest } from '@licio/shared';
 import { type AuditChainDeps, appendChainedAudit } from './audit-chain.js';
 import {
@@ -16,6 +17,22 @@ import {
   tgErr,
 } from './profile.js';
 import type { DelegationRecordEntity, DelegationStore } from './stores.js';
+
+/**
+ * One prior ballot's facts, as `delegatorsAlreadyConsumed` needs them.
+ *
+ * `countedDelegatorIds` is null for a row written before migration 0105 added the
+ * column; `weightSnapshot` then still says how much weight that ballot carried,
+ * which is enough to rule out any delegated unit having been folded.
+ */
+export interface PriorBallot {
+  /** When the ballot was cast (the EARLIEST one for that voter). */
+  readonly createdAt: string;
+  /** The decimal weight the ballot recorded. */
+  readonly weightSnapshot: string | null;
+  /** Exactly which delegators that weight consumed; null ⇒ not recorded. */
+  readonly countedDelegatorIds: ReadonlySet<string> | null;
+}
 
 export interface DelegationDeps extends AuditChainDeps, ProfileDeps {
   delegations: DelegationStore;
@@ -153,9 +170,18 @@ export async function delegatorsAlreadyConsumed(
   roomId: string,
   proposalType: string,
   candidates: readonly string[],
-  voteTimeByUser: ReadonlyMap<string, string>,
+  /**
+   * Each prior voter's EARLIEST ballot: when it was cast, the weight it recorded,
+   * and which delegators that weight consumed (null on a row written before
+   * migration 0105 added the column).
+   *
+   * ONE map, because these three are three facts about ONE ballot and were three
+   * parallel maps built from the same filter — a shape that only stays correct
+   * while every builder keeps them in step, and that could not answer the legacy
+   * question below at all.
+   */
+  ballotByUser: ReadonlyMap<string, PriorBallot>,
   excludeDelegate: string | null,
-  countedByDelegate: ReadonlyMap<string, ReadonlySet<string> | null> = new Map(),
 ): Promise<Set<string>> {
   const consumed = new Set<string>();
   for (const delegatorUserId of new Set(candidates)) {
@@ -165,20 +191,26 @@ export async function delegatorsAlreadyConsumed(
     for (const d of granted) {
       if (d.delegateUserId === null || d.delegateUserId === excludeDelegate) continue;
       if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposalType}`) continue;
-      const voteTime = voteTimeByUser.get(d.delegateUserId);
-      if (voteTime === undefined) continue;
-      const counted = countedByDelegate.get(d.delegateUserId);
-      if (counted !== undefined && counted !== null) {
+      const ballot = ballotByUser.get(d.delegateUserId);
+      if (ballot === undefined) continue;
+      if (ballot.countedDelegatorIds !== null) {
         // The ballot itself says what its weight consumed.  A delegator the cap
         // dropped is NOT in it, and their unit is still theirs to cast.
-        if (counted.has(delegatorUserId)) {
+        if (ballot.countedDelegatorIds.has(delegatorUserId)) {
           consumed.add(delegatorUserId);
           break;
         }
         continue;
       }
-      if (d.createdAt > voteTime) continue; // granted after that ballot
-      if (d.revokedAt !== null && d.revokedAt <= voteTime) continue; // already gone
+      // LEGACY ROW (no `counted_delegator_ids`): fall back to timestamps — but a
+      // recorded weight of exactly 1 is positive proof that NO delegated unit was
+      // folded into that ballot, whatever the timestamps say.  Refusing the
+      // delegator then erased a vote on the strength of a delegation the tally
+      // never counted, which is the same loss the column was added to stop, just
+      // for rows written before it existed.
+      if (ballot.weightSnapshot !== null && decCompare(ballot.weightSnapshot, '1') <= 0) continue;
+      if (d.createdAt > ballot.createdAt) continue; // granted after that ballot
+      if (d.revokedAt !== null && d.revokedAt <= ballot.createdAt) continue; // already gone
       consumed.add(delegatorUserId);
       break;
     }
