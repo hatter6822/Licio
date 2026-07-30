@@ -17,7 +17,13 @@
 
 import type { GovernanceAdvisory } from '@licio/ai-governance';
 import type { WeightModel } from '@licio/governance';
-import { BASIS_EXCLUSIONS, ballotVerdict, buildVoterFacts } from './ballot-predicate.js';
+import {
+  BASIS_EXCLUSIONS,
+  ballotVerdict,
+  buildVoterFacts,
+  deriveMemberFacts,
+} from './ballot-predicate.js';
+import { type ElectorateBasisStore, InMemoryElectorateBasisStore } from './electorate-basis.js';
 
 /**
  * The weight models whose resolution can be ZERO for an otherwise-eligible
@@ -91,57 +97,86 @@ export function buildMembershipFactsPort(
   forum: ForumServices,
   identity: IdentityServices,
   knomosis: KnomosisServices,
+  /**
+   * The electorate snapshot, resolved LAZILY at each call.
+   *
+   * A thunk rather than the store, because the production boot constructs this port
+   * BEFORE it assigns the Drizzle adapters over the container — so a port that captured
+   * the store eagerly would capture the IN-MEMORY one and quietly serve it in production,
+   * the same way the AI container's hand-assigned Drizzle stores were once skipped.
+   *
+   * Omitted ⇒ an in-memory snapshot over this port's own readers, which is what every
+   * existing test harness gets without changing a line.
+   */
+  basis?: () => ElectorateBasisStore,
 ): MembershipFactsPort {
   const memberFacts = async (roomId: string, userId: string, asOf?: string) => {
     const subscription = await forum.rooms.getSubscription(roomId, userId);
-    if (subscription === null || subscription.status !== 'active') return null;
     const auth = await identity.store.getAuth(userId);
-    // MEMBERSHIP STARTS AT `joinedAt`, NOT AT THE REQUEST.  In an
-    // approval-gated room the two can be far apart, and reading the request
-    // instant reopened the electorate freeze it was added to close: an account
-    // could ask to join BEFORE an election opened, sit pending — and therefore
-    // outside the frozen denominator — be approved after, and then pass the
-    // cutoff on the strength of a timestamp that predates a membership it did
-    // not yet hold.
-    //
-    // The two answers below take the fallback DIFFERENTLY, and deliberately.
-    // Every production writer of an active subscription stamps `joinedAt`
-    // (room creation, join approval, the direct-join path), so a null here is a
-    // row from before the field — and for the FREEZE the honest answer about
-    // such a row is "unknown", which the ballot gate admits, exactly as it
-    // admits a steward whose seat carries no join instant.  Judging it by
-    // `requestedAt` instead would answer with the one instant already known to
-    // be wrong.  For the AGE, the request instant is the pre-existing estimate
-    // and keeps the row eligible; a null there fails a treasury-controlling
-    // vote CLOSED and would lock the member out entirely.
-    const memberSince = subscription.joinedAt;
-    const ageFrom = memberSince ?? subscription.requestedAt;
     // EVERY FACT AT ONE INSTANT.  `asOf` is the instant the electorate was frozen;
-    // reading `now()` for the age while the basis had been counted earlier is what
-    // let a member cross the tenure threshold mid-window and vote against a
-    // denominator they were never in.
-    const evaluatedAt = asOf === undefined ? knomosis.now() : Date.parse(asOf);
-    const membershipDays = Math.floor((evaluatedAt - Date.parse(ageFrom)) / 86_400_000);
-    return {
-      membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
-      contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(
-        roomId,
-        userId,
-        asOf,
-      ),
-      // UNKNOWN STAYS ADMISSIBLE, exactly as `memberSince` does above.  A null
-      // `emailVerifiedAt` is a row from before that field existed, so it cannot be
-      // shown to postdate the freeze — treating it as unverified would refuse every
-      // such member on a `requireVerifiedIdentity` pack, a governance lockout with no
-      // error they could act on.
-      verifiedIdentity:
-        auth?.emailVerified === true &&
-        (asOf === undefined ||
-          auth.emailVerifiedAt == null ||
-          Date.parse(auth.emailVerifiedAt) <= Date.parse(asOf)),
-      memberSince,
-    };
+    // reading `now()` for the age while the basis had been counted earlier is what let a
+    // member cross the tenure threshold mid-window and vote against a denominator they
+    // were never in.
+    //
+    // The DERIVATION itself lives in `ballot-predicate.ts` and is shared with the basis
+    // fold, which reads the same fields out of one snapshot instead of three stores.
+    // Written twice, the two came to disagree about the same member — which is the
+    // defect this area keeps producing.
+    return deriveMemberFacts(
+      {
+        subscribed: subscription !== null && subscription.status === 'active',
+        joinedAt: subscription?.joinedAt ?? null,
+        requestedAt: subscription?.requestedAt ?? null,
+        emailVerified: auth?.emailVerified === true,
+        emailVerifiedAt: auth?.emailVerifiedAt ?? null,
+        contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(
+          roomId,
+          userId,
+          asOf,
+        ),
+      },
+      asOf === undefined ? knomosis.now() : Date.parse(asOf),
+      asOf,
+    );
   };
+
+  /** The snapshot source: the injected one, or an in-memory fold over these readers. */
+  const resolveBasis: () => ElectorateBasisStore =
+    basis ??
+    (() =>
+      new InMemoryElectorateBasisStore({
+        roster: (roomId, asOf) => forum.rooms.listEligibleVoterIds(roomId, asOf),
+        subscription: async (roomId, userId) => {
+          const sub = await forum.rooms.getSubscription(roomId, userId);
+          return sub === null
+            ? null
+            : { status: sub.status, joinedAt: sub.joinedAt, requestedAt: sub.requestedAt };
+        },
+        account: async (userId) => {
+          const user = await identity.store.getUser(userId);
+          return user === null ? null : { accountState: user.accountState, ageBand: user.ageBand };
+        },
+        auth: async (userId) => {
+          const auth = await identity.store.getAuth(userId);
+          return auth === null
+            ? null
+            : { emailVerified: auth.emailVerified, emailVerifiedAt: auth.emailVerifiedAt };
+        },
+        hasVerifiedCredential: async (userId) =>
+          hasVerifiedCredential(await authMethodInventory(identity, userId)),
+        // The three compliance legs are NOT applied by this port yet — the exact-parity
+        // slice adds them to both sides at once.  Reporting them as "clear" here keeps
+        // this swap what it claims to be: a change of where the facts come from, not of
+        // which members the basis admits.
+        kycVerified: async () => true,
+        hasComplianceHold: async () => false,
+        hasHighRiskWallet: async () => false,
+        contributionCount: (roomId, userId, asOf) =>
+          knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId, asOf),
+        now: () => knomosis.now(),
+      }));
+  const basisStore = resolveBasis;
+
   const port: MembershipFactsPort = {
     memberFacts,
     eligibleMemberCount: async (roomId, eligibility) => {
@@ -173,21 +208,26 @@ export function buildMembershipFactsPort(
       // The electorate AS OF the freeze instant, on BOTH arms — a count taken
       // live and an instant stamped beside it are two answers to one question.
       if (trivial) return forum.rooms.countEligibleVoters(roomId, eligibility?.asOf);
-      const ids = await forum.rooms.listEligibleVoterIds(roomId, eligibility.asOf);
+      // ONE SNAPSHOT, not a fan-out.  This walked the roster and read three stores per
+      // member (seven on a treasury-controlling vote), each in its own snapshot — so the
+      // instant it stamped was not the instant its count described, and a member who left
+      // mid-walk dropped out of a count already stamped.  `snapshot` is one statement:
+      // every fact below describes one state, and its `asOf` IS that state's instant.
+      const snap = await basisStore().snapshot(roomId, eligibility.asOf);
       let eligible = 0;
-      for (const userId of ids) {
+      for (const row of snap.members) {
+        const userId = row.userId;
         // ROUTE-GATE PARITY for treasury-controlling counts (W13): production
         // ballots and delegations require a verified ADULT account, so members
         // who could never reach signProposal must not inflate the basis.
         if (eligibility?.treasuryControlling === true) {
-          const user = await identity.store.getUser(userId);
-          if (user?.ageBand !== 'adult') continue;
-          const inventory = await authMethodInventory(identity, userId);
-          if (!hasVerifiedCredential(inventory)) continue;
+          if (row.ageBand !== 'adult') continue;
+          if (!row.hasVerifiedCredential) continue;
         }
-        // The basis walk asks about the SAME instant it filters the roster at —
-        // it was mixing an as-of roster with live facts.
-        const facts = await memberFacts(roomId, userId, eligibility.asOf);
+        // The SAME derivation `memberFacts` uses, over the snapshot's row rather than
+        // three live reads — one spelling, so the basis and the ballot gate cannot come
+        // to disagree about a member.
+        const facts = deriveMemberFacts(row, Date.parse(snap.asOf), eligibility.asOf);
         // ONE PREDICATE, the same call `signProposal` makes.  The basis used to build
         // `VoterFacts` twice in this loop — `reputationScore: 0` for eligibility and
         // `contributionCount ?? 0` for the weight — so the two halves of one answer

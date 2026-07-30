@@ -31,6 +31,68 @@ export interface MemberFacts {
   readonly verifiedIdentity: boolean;
 }
 
+/** The raw row either source produces: the live stores, or the electorate snapshot. */
+export interface MemberFactsRow {
+  /** An ACTIVE subscription backs this member. A per-room steward grant alone is false. */
+  readonly subscribed: boolean;
+  readonly joinedAt: string | null;
+  readonly requestedAt: string | null;
+  readonly emailVerified: boolean;
+  readonly emailVerifiedAt: string | null;
+  readonly contributionCount: number;
+}
+
+/**
+ * Raw row → `MemberFacts`. The ONLY derivation, for both sources.
+ *
+ * `memberFacts` reads three stores per member and derives this; the basis folds the same
+ * derivation over one snapshot. Writing it twice is how the two would come to disagree
+ * about a member — which is the defect this whole area keeps producing — so it is written
+ * once and called from both.
+ *
+ * MEMBERSHIP STARTS AT `joinedAt`, NOT AT THE REQUEST. In an approval-gated room the two
+ * can be far apart, and reading the request instant reopens the electorate freeze: an
+ * account could ask to join BEFORE a vote opened, sit pending and outside the frozen
+ * denominator, be approved after, and then pass the cutoff on a timestamp predating a
+ * membership it did not hold.
+ *
+ * The two answers take the fallback DIFFERENTLY, and deliberately. Every production writer
+ * of an active subscription stamps `joinedAt`, so a null is a row from before the field —
+ * and for the FREEZE the honest answer about such a row is "unknown", which the ballot
+ * gate admits, exactly as it admits a steward whose grant carries no join instant. Judging
+ * it by `requestedAt` would answer with the one instant already known to be wrong. For the
+ * AGE the request instant is the pre-existing estimate and keeps the row eligible; a null
+ * there fails a treasury-controlling vote CLOSED and would lock the member out entirely.
+ */
+export function deriveMemberFacts(
+  row: MemberFactsRow,
+  evaluatedAt: number,
+  asOf?: string,
+): (MemberFacts & { readonly memberSince: string | null }) | null {
+  if (!row.subscribed) return null;
+  const memberSince = row.joinedAt;
+  const ageFrom = memberSince ?? row.requestedAt;
+  const membershipDays =
+    ageFrom === null ? null : Math.floor((evaluatedAt - Date.parse(ageFrom)) / 86_400_000);
+  return {
+    membershipDays:
+      membershipDays !== null && Number.isFinite(membershipDays)
+        ? Math.max(0, membershipDays)
+        : null,
+    contributionCount: row.contributionCount,
+    // UNKNOWN STAYS ADMISSIBLE, exactly as `memberSince` does. A null `emailVerifiedAt` is
+    // a row from before that field existed, so it cannot be shown to postdate the freeze —
+    // treating it as unverified would refuse every such member on a
+    // `requireVerifiedIdentity` pack, a governance lockout with no error they could act on.
+    verifiedIdentity:
+      row.emailVerified &&
+      (asOf === undefined ||
+        row.emailVerifiedAt === null ||
+        Date.parse(row.emailVerifiedAt) <= Date.parse(asOf)),
+    memberSince,
+  };
+}
+
 /** Everything the predicate needs that is NOT a room-membership fact. */
 export interface BallotFactsInput {
   readonly userId: string;

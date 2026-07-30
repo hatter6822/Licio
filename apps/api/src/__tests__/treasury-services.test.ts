@@ -916,6 +916,65 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
       },
     }) as unknown as ForumServices;
 
+  it("folds at the SNAPSHOT's instant, not a clock read beside it", async () => {
+    // The entire point of taking one snapshot is that the facts and the instant they are
+    // judged at come from the same read. Folding at `now()` instead would reintroduce the
+    // split this replaced — the count describing one moment and the stamp another — and
+    // no test could see it, because in the usual fixture the two are the same value.
+    //
+    // So they are made to differ: the snapshot reports an instant five days after this
+    // member joined, while the clock has moved a hundred days past it. Under a 30-day
+    // tenure rule the member is OUT at the snapshot's instant and IN at the clock's.
+    const fixture = await freshKnomosisServices();
+    const asOf = new Date(fixture.knomosis.now() - 100 * 86_400_000).toISOString();
+    const joinedAt = new Date(Date.parse(asOf) - 5 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ recent: { requestedAt: joinedAt } }),
+      {
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
+        },
+      } as never,
+      fixture.knomosis,
+      () => ({
+        snapshot: async () => ({
+          asOf,
+          members: [
+            {
+              userId: 'recent',
+              subscribed: true,
+              joinedAt,
+              requestedAt: joinedAt,
+              accountState: 'active',
+              ageBand: 'adult' as const,
+              emailVerified: true,
+              emailVerifiedAt: null,
+              hasVerifiedCredential: true,
+              kycVerified: true,
+              hasComplianceHold: false,
+              hasHighRiskWallet: false,
+              contributionCount: 0,
+            },
+          ],
+        }),
+      }),
+    );
+    expect(
+      await port.eligibleMemberCount(ROOM, {
+        rules: {
+          minMembershipDays: 30,
+          minContributions: 0,
+          requireVerifiedIdentity: false,
+          newWalletCoolingOffDays: 0,
+        },
+        treasuryControlling: false,
+      }),
+    ).toBe(0);
+  });
+
   it('a multisig pack counts its SIGNERS, not zero and not the whole roster', async () => {
     // Two halves of one bug, and each alone produces a different wrong answer.
     //

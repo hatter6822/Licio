@@ -327,6 +327,7 @@ import {
 } from './telemetry/drizzle-telemetry-stores.js';
 import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
+import { DrizzleElectorateBasisStore } from './treasury/drizzle-electorate-basis.js';
 import { createDrizzleTreasuryStores } from './treasury/drizzle-treasury-stores.js';
 import { buildWsmReadinessChecklistPort } from './treasury/readiness.js';
 import {
@@ -1988,7 +1989,16 @@ knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices,
 const treasuryServices = createInMemoryTreasuryServices({
   knomosis: knomosisServices,
   governanceStores,
-  membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
+  membership: buildMembershipFactsPort(
+    forumServices,
+    identityServices,
+    knomosisServices,
+    // LAZY, and deliberately so: this container is built BEFORE the Drizzle stores are
+    // assigned over it, so a port capturing the store eagerly would capture the
+    // in-memory one and serve it in production.  Resolving per call reads whatever the
+    // boot finished wiring.  With no `db` the in-memory default applies.
+    db ? () => new DrizzleElectorateBasisStore(db) : undefined,
+  ),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
   elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
     // ONE measurement reporting the count AND its instant: the election records

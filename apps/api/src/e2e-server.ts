@@ -336,6 +336,8 @@ knomosisServices.lawPacks = buildLawPackPort(governanceStores);
 const treasuryServices = createInMemoryTreasuryServices({
   knomosis: knomosisServices,
   governanceStores,
+  // No `db` in this harness: the electorate snapshot falls back to the in-memory fold,
+  // which the shared contract suite holds to the same answers as the statement.
   membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
   elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
