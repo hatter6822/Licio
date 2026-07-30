@@ -272,7 +272,8 @@ describe.skipIf(!DB_URL)('WS-K ai-governance Drizzle adapters (live Postgres)', 
       correction_text: 'cite the actual source',
       reported_at: '2026-07-03T00:00:00.000Z',
     });
-    expect(await stores.summaries.listReports('sum-1')).toHaveLength(2);
+    expect(await stores.summaries.countReports('sum-1')).toBe(2);
+    expect(await stores.summaries.listReports('sum-1', 10)).toHaveLength(2);
     expect(await stores.summaries.countReportsByReason()).toEqual({ fake_citation: 2 });
   });
 
@@ -305,7 +306,7 @@ describe.skipIf(!DB_URL)('WS-K ai-governance Drizzle adapters (live Postgres)', 
       reason: 'mistranslation',
       reported_at: '2026-07-02T00:00:00.000Z',
     });
-    expect((await stores.translations.listReports('tr-1'))[0]?.reason).toBe('mistranslation');
+    expect((await stores.translations.listReports('tr-1', 10))[0]?.reason).toBe('mistranslation');
   });
 
   it('governance summaries upsert (steward edits) and list by proposal', async () => {

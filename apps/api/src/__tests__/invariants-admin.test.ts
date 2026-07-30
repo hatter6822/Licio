@@ -410,7 +410,9 @@ describe('GWEI transparency export (WS-H.5.2d)', () => {
         fallbackUsed: false,
         versionMetadata: null,
         shadowMode: true,
-        createdAt: new Date().toISOString(),
+        // Staggered so the report's covered range is a real interval rather
+        // than 502 rows sharing one instant.
+        createdAt: new Date(Date.now() - i * 60_000).toISOString(),
       });
     }
     const response = await adminRequest(fixture, steward.cookie, '/gwei/transparency');
@@ -418,10 +420,29 @@ describe('GWEI transparency export (WS-H.5.2d)', () => {
       statements: unknown[];
       total_outputs: number;
       truncated: boolean;
+      period_start: string;
+      period_end: string;
+      covered_from: string | null;
+      covered_to: string | null;
     };
     expect(body.statements).toHaveLength(500); // the cap
     expect(body.total_outputs).toBe(502); // …of this many
     expect(body.truncated).toBe(true);
+    // AND IT SAYS WHICH PART OF THE PERIOD IT ACTUALLY COVERS.  `period_start`
+    // is unconditionally `generated_at - 90 days`, so a truncated report
+    // advertised the full period while carrying a suffix of it, and no field
+    // named the oldest row included.  Nothing else could stand in: the
+    // per-statement `window` is GWEI's own analysis window, while the cap and
+    // the ordering are on `created_at`.
+    expect(body.covered_from).not.toBeNull();
+    expect(body.covered_to).not.toBeNull();
+    // Newest-first, so coverage starts after the requested period does — that
+    // gap IS the truncation, and it is now visible.
+    expect(Date.parse(body.covered_from as string)).toBeGreaterThan(Date.parse(body.period_start));
+    expect(Date.parse(body.covered_to as string)).toBeLessThanOrEqual(Date.parse(body.period_end));
+    expect(Date.parse(body.covered_from as string)).toBeLessThanOrEqual(
+      Date.parse(body.covered_to as string),
+    );
   });
 });
 

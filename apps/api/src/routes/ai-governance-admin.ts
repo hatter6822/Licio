@@ -345,30 +345,40 @@ export function createAiGovernanceAdminRoutes() {
         // steward what they are triaging (all of it), and leaves the incumbent's
         // own evidence unrewritten.
         //
-        // BOUNDED PER ITEM.  The queue read is capped at 100 items, but each one
-        // expanded to a report list written by third parties — anyone may report
-        // a subject — so the response size became attacker-influenceable and the
-        // 100 no longer bounded anything.  The COUNT is the complete figure a
-        // steward triages on; the attached reports are the newest few, which is
-        // what a reviewer reads before opening the subject.
+        // BOUNDED PER ITEM — IN THE READ, not just in the response.  The queue
+        // read is capped at 100 items, but each one expanded to a report list
+        // written by third parties (anyone may report a subject), so the 100 no
+        // longer bounded anything.  Slicing the list AFTER loading it fixed the
+        // response size and left the read unbounded, which is where the cost
+        // actually is: 100 subjects loaded concurrently, nothing prunes
+        // `ai_summary_reports`/`ai_translation_reports`, and each summary report
+        // carries an 8,000-character `correction_text`.  Since this route is the
+        // ONLY reader of those tables, degrading it hides every report from every
+        // steward — so the count comes from a COUNT and the rows are limited by
+        // the query.
+        const reportReader = (item: (typeof items)[number]) =>
+          item.kind === 'reported_summary'
+            ? ai.summaries
+            : item.kind === 'reported_translation'
+              ? ai.translations
+              : null;
         const enriched = await Promise.all(
           items.map(async (item) => {
-            const reports =
-              item.kind === 'reported_summary'
-                ? await ai.summaries.listReports(item.subjectRef)
-                : item.kind === 'reported_translation'
-                  ? await ai.translations.listReports(item.subjectRef)
-                  : [];
-            const newestFirst = [...reports].sort((a, b) =>
-              b.reported_at.localeCompare(a.reported_at),
-            );
+            const store = reportReader(item);
+            const [reportCount, reports] = await Promise.all([
+              store === null ? 0 : store.countReports(item.subjectRef),
+              // One more than shown, purely to answer "is there more?" without a
+              // second count — still a constant, not a function of the attacker's
+              // report volume.
+              store === null ? [] : store.listReports(item.subjectRef, REVIEW_REPORTS_PER_ITEM + 1),
+            ]);
             return {
               ...item,
               // The TRUE total, never the length of the truncated list — the
               // steward's sense of scale must not shrink with the page size.
-              report_count: reports.length,
-              reports: newestFirst.slice(0, REVIEW_REPORTS_PER_ITEM),
-              reports_truncated: reports.length > REVIEW_REPORTS_PER_ITEM,
+              report_count: reportCount,
+              reports: reports.slice(0, REVIEW_REPORTS_PER_ITEM),
+              reports_truncated: reportCount > REVIEW_REPORTS_PER_ITEM,
             };
           }),
         );

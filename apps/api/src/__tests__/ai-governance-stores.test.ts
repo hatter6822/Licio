@@ -200,7 +200,8 @@ describe('WS-K stores', () => {
       correction_text: null,
       reported_at: ISO,
     });
-    expect((await summaries.listReports('s1')).length).toBe(1);
+    expect((await summaries.listReports('s1', 10)).length).toBe(1);
+    expect(await summaries.countReports('s1')).toBe(1);
     expect(await summaries.countReportsByReason()).toEqual({ bias: 1 });
     await summaries.clear();
     expect(await summaries.getDraft('s1')).toBeNull();
@@ -214,7 +215,8 @@ describe('WS-K stores', () => {
       reason: 'other',
       reported_at: ISO,
     });
-    expect((await translations.listReports('tr')).length).toBe(1);
+    expect((await translations.listReports('tr', 10)).length).toBe(1);
+    expect(await translations.countReports('tr')).toBe(1);
     await translations.clear();
     expect(await translations.get('tr')).toBeNull();
 

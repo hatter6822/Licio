@@ -383,7 +383,7 @@ describe('WS-K.1.4a summary generation', () => {
       createdAt: new Date(f.ai.now()).toISOString(),
     });
     await reportSummary(summaryDeps(f), 'sum-1', 'fake_citation', 'citation does not exist');
-    const reports = await f.ai.summaries.listReports('sum-1');
+    const reports = await f.ai.summaries.listReports('sum-1', 10);
     expect(reports[0]?.reason).toBe('fake_citation');
     const pending = await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10);
     expect(pending).toHaveLength(1);
@@ -407,7 +407,10 @@ describe('WS-K.1.4a summary generation', () => {
     for (let i = 0; i < 25; i += 1) {
       await reportSummary(summaryDeps(f), 'sum-flood', 'fake_citation', `report ${i}`);
     }
-    expect(await f.ai.summaries.listReports('sum-flood')).toHaveLength(25);
+    // The TOTAL comes from the count; the LIST is bounded by its own argument —
+    // an unbounded read of a flooded subject is the defect, not the measurement.
+    expect(await f.ai.summaries.countReports('sum-flood')).toBe(25);
+    expect(await f.ai.summaries.listReports('sum-flood', 5)).toHaveLength(5);
     expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 100)).toHaveLength(1);
   });
 

@@ -816,12 +816,17 @@ export class DrizzleSummaryStore implements SummaryStore {
     });
   }
 
-  async listReports(summaryId: string): Promise<SummaryReport[]> {
+  async listReports(summaryId: string, limit: number): Promise<SummaryReport[]> {
+    // NEWEST FIRST AND LIMITED IN SQL.  Ordering ascending and slicing in the
+    // caller still transfers every row, which is the whole defect: with nothing
+    // pruning `ai_summary_reports`, one subject's reports grow without bound and
+    // each carries an 8,000-character `correction_text`.
     const rows = await this.#db
       .select()
       .from(aiSummaryReports)
       .where(eq(aiSummaryReports.summaryId, summaryId))
-      .orderBy(asc(aiSummaryReports.createdAt), asc(aiSummaryReports.reportId));
+      .orderBy(desc(aiSummaryReports.createdAt), desc(aiSummaryReports.reportId))
+      .limit(Math.max(0, limit));
     return rows.map((row) => ({
       report_id: row.reportId,
       summary_id: row.summaryId,
@@ -829,6 +834,14 @@ export class DrizzleSummaryStore implements SummaryStore {
       correction_text: row.correctionText ?? null,
       reported_at: iso(row.createdAt),
     }));
+  }
+
+  async countReports(summaryId: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(aiSummaryReports)
+      .where(eq(aiSummaryReports.summaryId, summaryId));
+    return row?.total ?? 0;
   }
 
   async countReportsByReason(): Promise<Record<string, number>> {
@@ -920,18 +933,27 @@ export class DrizzleTranslationStore implements TranslationStore {
     });
   }
 
-  async listReports(translationId: string): Promise<TranslationReport[]> {
+  async listReports(translationId: string, limit: number): Promise<TranslationReport[]> {
     const rows = await this.#db
       .select()
       .from(aiTranslationReports)
       .where(eq(aiTranslationReports.translationId, translationId))
-      .orderBy(asc(aiTranslationReports.createdAt), asc(aiTranslationReports.reportId));
+      .orderBy(desc(aiTranslationReports.createdAt), desc(aiTranslationReports.reportId))
+      .limit(Math.max(0, limit));
     return rows.map((row) => ({
       report_id: row.reportId,
       translation_id: row.translationId,
       reason: row.reason as TranslationReport['reason'],
       reported_at: iso(row.createdAt),
     }));
+  }
+
+  async countReports(translationId: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(aiTranslationReports)
+      .where(eq(aiTranslationReports.translationId, translationId));
+    return row?.total ?? 0;
   }
 
   async clear(): Promise<void> {

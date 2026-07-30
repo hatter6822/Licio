@@ -281,6 +281,19 @@ describe('WS-K routes', () => {
       );
       expect(res.status).toBe(201);
     }
+    // THE READ IS BOUNDED TOO, which is where the cost actually was: slicing
+    // after loading fixed the payload while still transferring every row for up
+    // to 100 subjects at once — and nothing prunes these tables, so any
+    // authenticated account can grow one subject's reports without limit.  Since
+    // this route is the ONLY reader of them, degrading it hides every report from
+    // every steward.  Recorded via the store, so the assertion is about the query
+    // the route issues rather than about the shape of its answer.
+    const limits: number[] = [];
+    const realList = ai.summaries.listReports.bind(ai.summaries);
+    ai.summaries.listReports = async (summaryId: string, limit: number) => {
+      limits.push(limit);
+      return realList(summaryId, limit);
+    };
     const queue = await app.request(
       jsonReq('/v1/ai/admin/review', 'GET', undefined, steward.cookie),
     );
@@ -296,6 +309,9 @@ describe('WS-K routes', () => {
     expect(item?.report_count).toBe(30); // the whole truth…
     expect(item?.reports).toHaveLength(20); // …in a bounded payload
     expect(item?.reports_truncated).toBe(true);
+    // …read with a CONSTANT limit — not a function of how much was reported.
+    expect(limits.length).toBeGreaterThan(0);
+    for (const limit of limits) expect(limit).toBeLessThanOrEqual(21);
   });
 
   it('translates content and accepts reports for any authenticated user', async () => {

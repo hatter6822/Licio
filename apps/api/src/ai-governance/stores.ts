@@ -453,7 +453,22 @@ export interface SummaryStore {
    *  no query behind it. */
   getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null>;
   putReport(report: SummaryReport): Promise<void>;
-  listReports(summaryId: string): Promise<SummaryReport[]>;
+  /**
+   * The NEWEST `limit` reports for one summary.
+   *
+   * The limit is REQUIRED, and newest-first is the store's own order rather
+   * than the caller's, because the unbounded version was the defect: the review
+   * queue read every report row for up to 100 subjects concurrently just to
+   * report a count, so the response was bounded while the READ was not — and
+   * nothing prunes these tables, so any authenticated account could grow one
+   * subject's reports without limit and take the only surface that shows
+   * reports to a steward down permanently.  A caller that wants the total asks
+   * `countReports`.
+   */
+  listReports(summaryId: string, limit: number): Promise<SummaryReport[]>;
+  /** How many reports one summary has — the figure a steward triages on,
+   *  answered without materializing the rows. */
+  countReports(summaryId: string): Promise<number>;
   countReportsByReason(): Promise<Record<string, number>>;
   clear(): Promise<void>;
 }
@@ -487,8 +502,15 @@ export class InMemorySummaryStore implements SummaryStore {
   async putReport(report: SummaryReport): Promise<void> {
     this.#reports.push(clone(report));
   }
-  async listReports(summaryId: string): Promise<SummaryReport[]> {
-    return this.#reports.filter((r) => r.summary_id === summaryId).map(clone);
+  async listReports(summaryId: string, limit: number): Promise<SummaryReport[]> {
+    return this.#reports
+      .filter((r) => r.summary_id === summaryId)
+      .sort((x, y) => y.reported_at.localeCompare(x.reported_at))
+      .slice(0, Math.max(0, limit))
+      .map(clone);
+  }
+  async countReports(summaryId: string): Promise<number> {
+    return this.#reports.filter((r) => r.summary_id === summaryId).length;
   }
   async countReportsByReason(): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
@@ -508,7 +530,11 @@ export interface TranslationStore {
   get(translationId: string): Promise<AiTranslation | null>;
   findBySource(sourceRef: string, targetLang: string): Promise<AiTranslation | null>;
   putReport(report: TranslationReport): Promise<void>;
-  listReports(translationId: string): Promise<TranslationReport[]>;
+  /** The NEWEST `limit` reports for one translation — see
+   *  `SummaryStore.listReports` for why the bound is not optional. */
+  listReports(translationId: string, limit: number): Promise<TranslationReport[]>;
+  /** How many reports one translation has, without materializing the rows. */
+  countReports(translationId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -531,8 +557,15 @@ export class InMemoryTranslationStore implements TranslationStore {
   async putReport(report: TranslationReport): Promise<void> {
     this.#reports.push(clone(report));
   }
-  async listReports(translationId: string): Promise<TranslationReport[]> {
-    return this.#reports.filter((r) => r.translation_id === translationId).map(clone);
+  async listReports(translationId: string, limit: number): Promise<TranslationReport[]> {
+    return this.#reports
+      .filter((r) => r.translation_id === translationId)
+      .sort((x, y) => y.reported_at.localeCompare(x.reported_at))
+      .slice(0, Math.max(0, limit))
+      .map(clone);
+  }
+  async countReports(translationId: string): Promise<number> {
+    return this.#reports.filter((r) => r.translation_id === translationId).length;
   }
   async clear(): Promise<void> {
     this.#rows.clear();

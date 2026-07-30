@@ -310,6 +310,16 @@ export function createInvariantsAdminRoutes(
                 : 'degradation_under_review',
           };
         });
+        // THE RANGE ACTUALLY COVERED, which is not the range requested.
+        // `period_start`/`period_end` describe the 90-day window this report ASKS
+        // about, and they said so unconditionally — advertising the full period
+        // even when `truncated` was true, with no field naming the oldest row
+        // included.  Nothing else could stand in: the per-statement `window` is
+        // GWEI's own analysis window, while the cap and the ordering are on
+        // `created_at`, so it is not even a proxy.  These two bound what this
+        // page holds; the cursor reaches the rest.
+        const oldest = rows.at(-1)?.createdAt ?? null;
+        const newest = rows.at(0)?.createdAt ?? null;
         return c.json({
           generated_at: generatedAt.toISOString(),
           period_start: periodStart,
@@ -317,6 +327,8 @@ export function createInvariantsAdminRoutes(
           // What the period HELD, against what this response carries.
           total_outputs: total,
           truncated: total > statements.length,
+          covered_from: oldest,
+          covered_to: newest,
           statements,
         });
       })
