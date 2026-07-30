@@ -30,7 +30,11 @@ import type {
   ThreadConversationState,
   ThreadSafetyState,
 } from '@licio/shared';
-import { UniqueViolationError } from '../lib/pg-errors.js';
+import {
+  TIER_UNIQUE_PUBLIC_CONSTRAINT,
+  TIER_UNIQUE_ROOM_CONSTRAINT,
+  UniqueViolationError,
+} from '../lib/pg-errors.js';
 
 // ---------------------------------------------------------------------------
 // Records (the storage shape; ISO timestamps on this side of the boundary).
@@ -881,10 +885,13 @@ export class InMemoryStoryStore implements StoryStore {
     if (slot !== null) {
       const occupant = slot.map.get(slot.key);
       if (occupant !== undefined && occupant !== storyId) {
+        // The names come from the SHARED list, so this emulation and the callers
+        // that discriminate on it cannot drift — a literal here that no consumer
+        // recognises turns a duplicate into a 500.
         throw new UniqueViolationError(
           updated.visibility === 'public'
-            ? 'stories_canonical_url_public_uq'
-            : 'stories_canonical_url_room_uq',
+            ? TIER_UNIQUE_PUBLIC_CONSTRAINT
+            : TIER_UNIQUE_ROOM_CONSTRAINT,
         );
       }
     }

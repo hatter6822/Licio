@@ -26,17 +26,12 @@ import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import {
   isCheckViolation,
-  isUniqueViolation,
-  uniqueViolationConstraint,
+  isTierUniqueViolation,
+  TIER_COLLISION_RETRIES,
 } from '../lib/pg-errors.js';
 import { findNearDuplicates, loadStoredSignature, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import type { IngestionServices } from './services.js';
-
-/** Extra attempts when a tier-unique refusal names no readable winner — the
- *  incumbent vanished between the refusal and the lookup, so the write can now
- *  succeed. */
-const VISIBILITY_COLLISION_RETRIES = 2;
 
 export type VisibilityChangeOutcome =
   | { ok: true; changed: boolean; visibility: StoryVisibility }
@@ -157,7 +152,6 @@ export async function changeStoryVisibility(
   // rather than escaping as a 500.  Only the two canonical-URL tier uniques
   // mean "duplicate story"; any other constraint is a different bug and must
   // keep propagating rather than be relabelled.
-  const tierUniques = ['stories_canonical_url_public_uq', 'stories_canonical_url_room_uq'];
   let updated: Awaited<ReturnType<typeof ingestion.stories.update>>;
   // RETRY when the blocker turns out to be GONE.  The refusal and the lookup
   // that names the winner are two statements, and between them the incumbent
@@ -190,7 +184,7 @@ export async function changeStoryVisibility(
           message: 'A story in a private room cannot become public (§14.5.1)',
         };
       }
-      if (!isUniqueViolation(error) || !tierUniques.includes(uniqueViolationConstraint(error))) {
+      if (!isTierUniqueViolation(error)) {
         throw error;
       }
       const widening = target === 'public';
@@ -203,7 +197,7 @@ export async function changeStoryVisibility(
                 ? { visibility: 'public' }
                 : { visibility: 'room_only', roomId: story.roomId },
             );
-      if (winner === null && attempt < VISIBILITY_COLLISION_RETRIES) continue;
+      if (winner === null && attempt < TIER_COLLISION_RETRIES) continue;
       ingestion.metrics.increment(
         widening ? 'visibility.widen_url_collision' : 'visibility.narrow_url_collision',
       );

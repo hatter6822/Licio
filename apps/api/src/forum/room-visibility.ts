@@ -26,7 +26,11 @@ import type { EventPipelineServices } from '../events/services.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { StoryPageCursor } from '../ingestion/stores.js';
-import { isCheckViolation, isUniqueViolation } from '../lib/pg-errors.js';
+import {
+  isCheckViolation,
+  isTierUniqueViolation,
+  TIER_COLLISION_RETRIES,
+} from '../lib/pg-errors.js';
 import type { ForumServices } from './services.js';
 
 /** Bound for the cascade sweep (rooms are bounded by content count). */
@@ -145,29 +149,64 @@ export async function changeRoomVisibility(
    * Returns true when the story was contained, false when a tier-unique
    * collision refused it (recorded in `blocked`).
    */
-  const containStory = async (story: { storyId: string }): Promise<boolean> => {
-    try {
-      await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
-    } catch (error) {
-      // `stories_canonical_url_room_uq` is a partial unique on
-      // `(canonical_url, room_id) where visibility = 'room_only'`, and a room
-      // may legitimately hold BOTH a public story and a room_only one for the
-      // same link — `ingestion/submission.ts` records the cross-tier pointer
-      // for exactly that pair.  Converting the public copy then collides with
-      // its in-room twin.
-      //
-      // Unhandled, that 23505 escaped the loop as a 500 with the room still
-      // PUBLIC and an arbitrary prefix of its stories already converted — a
-      // containment failure reported as a server error.  Caught here so the
-      // sweep finishes every story it CAN contain, and the room flip is skipped:
-      // a room that still holds public content must not be marked private,
-      // because the `room.visibility === target` short-circuit at the top would
-      // then answer a retry with `{ ok: true, converted: 0 }` and the content
-      // would stay published.
-      if (!isUniqueViolation(error)) throw error;
-      blocked.add(story.storyId);
-      ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
-      return false;
+  const containStory = async (story: {
+    storyId: string;
+    canonicalUrl: string | null;
+  }): Promise<boolean> => {
+    // SYMMETRIC WITH `changeStoryVisibility`, which performs the identical write in
+    // the identical privacy-reducing direction.  That path discriminates on the
+    // CONSTRAINT NAME and retries a refusal whose incumbent has vanished; this one
+    // did neither, so:
+    //   • any unique violation was relabelled `duplicate_story` — a
+    //     `stories_media_upload_ref_uq` refusal was reported to a steward as "shares a
+    //     link with an existing in-room story", a claim the code never verified;
+    //   • a blocker that no longer existed left the story public and the ROOM public,
+    //     which is a privacy-reducing operation failing for a stale reason — at room
+    //     scale rather than one story.
+    // A blocked story is filtered out of the straggler sweep, so it is not
+    // re-attempted in this request either.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
+        break;
+      } catch (error) {
+        // `stories_canonical_url_room_uq` is a partial unique on
+        // `(canonical_url, room_id) where visibility = 'room_only'`, and a room
+        // may legitimately hold BOTH a public story and a room_only one for the
+        // same link — `ingestion/submission.ts` records the cross-tier pointer
+        // for exactly that pair.  Converting the public copy then collides with
+        // its in-room twin.
+        //
+        // Unhandled, that 23505 escaped the loop as a 500 with the room still
+        // PUBLIC and an arbitrary prefix of its stories already converted — a
+        // containment failure reported as a server error.  Caught here so the
+        // sweep finishes every story it CAN contain, and the room flip is skipped:
+        // a room that still holds public content must not be marked private,
+        // because the `room.visibility === target` short-circuit at the top would
+        // then answer a retry with `{ ok: true, converted: 0 }` and the content
+        // would stay published.
+        if (!isTierUniqueViolation(error)) throw error;
+        // A story with NO canonical URL occupies no URL slot, so it cannot have
+        // collided with a twin — reporting it to the steward as a link duplicate
+        // gave them nothing to resolve.
+        const twin =
+          story.canonicalUrl === null
+            ? null
+            : await ingestion.stories.getByCanonicalUrl(story.canonicalUrl, {
+                visibility: 'room_only',
+                roomId,
+              });
+        // The incumbent may have been hidden, deleted or moved between the refusal and
+        // this lookup, after which the write would succeed.
+        if (twin === null && attempt < TIER_COLLISION_RETRIES) continue;
+        // Still refused with no incumbent to name: the constraint is real but its
+        // holder is not readable here.  A 500 on an unexplainable refusal is honest; a
+        // blocker the steward can never resolve is not.
+        if (twin === null) throw error;
+        blocked.add(story.storyId);
+        ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
+        return false;
+      }
     }
     const event = contentVisibilityChangedEventSchema.parse({
       event_id: randomUUID(),

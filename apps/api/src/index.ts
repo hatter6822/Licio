@@ -261,6 +261,7 @@ import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { describeListenFailure, systemErrorCode } from './lib/listen-diagnostics.js';
 import { createLogger } from './lib/logger.js';
 import { assertProductionParity } from './lib/parity-guard.js';
+import { isTierUniqueViolation, TIER_COLLISION_RETRIES } from './lib/pg-errors.js';
 import { pgNoticeLogLevel } from './lib/pg-notices.js';
 import {
   getPreferences,
@@ -859,7 +860,44 @@ const moderationServices = createInMemoryModerationServices({
           await ingestionServices.stories.update(id, { hiddenState: 'safety' });
         }
       } else if (story.hiddenState === 'safety') {
-        await ingestionServices.stories.update(id, { hiddenState: null });
+        // UN-HIDING RE-ENTERS THE URL SLOT.  Both tier uniques are partial on
+        // `hidden_state IS NULL`, so clearing it puts the row back into the index —
+        // and if a re-submission took that slot while the story was hidden, the write
+        // raises 23505.  Unhandled, that surfaced as a 500 from the moderation
+        // reinstate port with the story still hidden and no explanation.
+        //
+        // Retried, because the occupant may have vanished (the actual race).  A LIVE
+        // occupant is a real conflict, so it is METERED and rethrown rather than
+        // swallowed: `performRevert` leaves the action un-reverted, which keeps the
+        // reinstate retryable once a steward resolves the duplicate — silently
+        // reporting success while the story stayed hidden would not.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await ingestionServices.stories.update(id, { hiddenState: null });
+            break;
+          } catch (error) {
+            if (!isTierUniqueViolation(error)) throw error;
+            const occupant =
+              story.canonicalUrl === null
+                ? null
+                : await ingestionServices.stories.getByCanonicalUrl(
+                    story.canonicalUrl,
+                    // The DISCRIMINATED tier — the union requires `roomId` on the
+                    // room_only arm and forbids it on the public one, so it cannot be
+                    // built by spreading.
+                    story.visibility === 'room_only'
+                      ? { visibility: 'room_only', roomId: story.roomId }
+                      : { visibility: 'public' },
+                  );
+            if (occupant === null && attempt < TIER_COLLISION_RETRIES) continue;
+            ingestionServices.metrics.increment('moderation.reinstate_url_collision');
+            logger.warn(
+              { storyId: id, canonicalUrl: story.canonicalUrl },
+              'story reinstate refused: its URL slot is occupied',
+            );
+            throw error;
+          }
+        }
       }
     },
     setAccountState: (userId, accountState) =>
