@@ -318,6 +318,57 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
 });
 
 describe('GWEI transparency export (WS-H.5.2d)', () => {
+  it('never reports an output created after the period it declares', async () => {
+    // The report captured `generated_at` and then ran two reads bounded only
+    // BELOW, so an output created while those queries were in flight landed in a
+    // period whose declared `period_end` predates it — and the separate count
+    // could observe a row the list did not, reporting truncation that had not
+    // happened.  A row stamped ahead of the request stands in for that race
+    // deterministically.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const window = hourWindow(Date.now());
+    const gweiRow = (createdAt: string) => ({
+      invariantType: 'GWEI' as const,
+      targetType: 'cohort' as const,
+      targetId: randomUUID(),
+      timeWindow: window,
+      version: '1.0.0',
+      scoreVector: { gw2: 0.2 },
+      explanationSummary: null,
+      confidence: 0.8,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt,
+    });
+    await fixture.events.invariantStore.upsert(gweiRow(new Date().toISOString()));
+    await fixture.events.invariantStore.upsert(
+      gweiRow(new Date(Date.now() + 60_000).toISOString()),
+    );
+
+    const response = await adminRequest(fixture, steward.cookie, '/gwei/transparency');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      statements: unknown[];
+      period_end: string;
+      total_outputs: number;
+      truncated: boolean;
+      covered_to: string | null;
+    };
+    // Only the in-period row, in BOTH the list and the count — so `truncated`
+    // stays false rather than inferring a cap that was never reached.
+    expect(body.statements).toHaveLength(1);
+    expect(body.total_outputs).toBe(1);
+    expect(body.truncated).toBe(false);
+    // And nothing the report names sits past the interval it prints.
+    if (body.covered_to !== null) {
+      expect(Date.parse(body.covered_to)).toBeLessThanOrEqual(Date.parse(body.period_end));
+    }
+  });
+
   it('publishes parity statements only — no cohort metrics, no suppressed detail', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });

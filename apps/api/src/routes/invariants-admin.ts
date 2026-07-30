@@ -289,14 +289,25 @@ export function createInvariantsAdminRoutes(
         const periodStart = new Date(
           generatedAt.getTime() - TRANSPARENCY_LOOKBACK_MS,
         ).toISOString();
+        // BOTH reads bounded by the SAME instant the report prints, for the same
+        // reason they share one clock read: an output created while these queries
+        // are in flight would otherwise land in a period whose declared
+        // `period_end` predates it, and the count could observe a row the list
+        // could not — reporting truncation that had not happened.
+        const periodEnd = generatedAt.toISOString();
         const store = resolveEvents().invariantStore;
-        const rows = await store.listByTypeSince('GWEI', periodStart, TRANSPARENCY_ROW_CAP);
+        const rows = await store.listByTypeSince(
+          'GWEI',
+          periodStart,
+          TRANSPARENCY_ROW_CAP,
+          periodEnd,
+        );
         // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
         // per scheduler run, so the cap is reachable in an ordinary period —
         // and a capped list with no denominator reads as a complete account of
         // the window and cannot be reconciled against the logged outputs.  The
         // count is the one fact the truncated read cannot supply about itself.
-        const total = await store.countByTypeSince('GWEI', periodStart);
+        const total = await store.countByTypeSince('GWEI', periodStart, periodEnd);
         const threshold = 0.5;
         const statements = rows.map((row) => {
           const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
@@ -323,7 +334,7 @@ export function createInvariantsAdminRoutes(
         return c.json({
           generated_at: generatedAt.toISOString(),
           period_start: periodStart,
-          period_end: generatedAt.toISOString(),
+          period_end: periodEnd,
           // What the period HELD, against what this response carries.
           total_outputs: total,
           truncated: total > statements.length,

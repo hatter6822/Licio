@@ -646,18 +646,26 @@ export interface InvariantOutputStore {
   ): Promise<InvariantOutputRecord[]>;
   /** Rows of ONE invariant type created at/after `sinceIso`, newest first,
    *  capped at `limit` (the WS-I GWEI-gate input — a targeted read, never a
-   *  full-table scan on the serving path). */
+   *  full-table scan on the serving path).
+   *
+   *  `untilIso` bounds the read ABOVE, and a caller that PRINTS the interval it
+   *  covers must pass it: the transparency export captured `generated_at`, then
+   *  ran two unbounded-above reads, so an output created while those queries were
+   *  in flight landed in a report whose declared `period_end` predates it.  The
+   *  same omission let the count observe a row the list could not, reporting
+   *  truncation that had not happened. */
   listByTypeSince(
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]>;
   /** How many rows of ONE invariant type exist at/after `sinceIso` — the
    *  DENOMINATOR a capped read cannot report about itself.  A transparency
    *  export that silently drops everything past its cap reads as a complete
    *  account of the period and cannot be reproduced from the logged outputs;
    *  this is what lets it state its own coverage. */
-  countByTypeSince(invariantType: string, sinceIso: string): Promise<number>;
+  countByTypeSince(invariantType: string, sinceIso: string, untilIso?: string): Promise<number>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -726,17 +734,29 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]> {
     return [...this.#rows.values()]
-      .filter((r) => r.invariantType === invariantType && r.createdAt >= sinceIso)
+      .filter(
+        (r) =>
+          r.invariantType === invariantType &&
+          r.createdAt >= sinceIso &&
+          (untilIso === undefined || r.createdAt <= untilIso),
+      )
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(0, limit));
   }
 
-  async countByTypeSince(invariantType: string, sinceIso: string): Promise<number> {
+  async countByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    untilIso?: string,
+  ): Promise<number> {
     let count = 0;
     for (const row of this.#rows.values()) {
-      if (row.invariantType === invariantType && row.createdAt >= sinceIso) count += 1;
+      if (row.invariantType !== invariantType || row.createdAt < sinceIso) continue;
+      if (untilIso !== undefined && row.createdAt > untilIso) continue;
+      count += 1;
     }
     return count;
   }

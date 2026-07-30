@@ -34,6 +34,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lte,
   ne,
   or,
   sql,
@@ -736,6 +737,7 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]> {
     const rows = await this.#db
       .select()
@@ -744,6 +746,7 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
         and(
           eq(invariantOutputs.invariantType, invariantType),
           gte(invariantOutputs.createdAt, new Date(sinceIso)),
+          ...(untilIso === undefined ? [] : [lte(invariantOutputs.createdAt, new Date(untilIso))]),
         ),
       )
       .orderBy(desc(invariantOutputs.createdAt))
@@ -751,7 +754,11 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
-  async countByTypeSince(invariantType: string, sinceIso: string): Promise<number> {
+  async countByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    untilIso?: string,
+  ): Promise<number> {
     const [row] = await this.#db
       .select({ n: count() })
       .from(invariantOutputs)
@@ -759,6 +766,7 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
         and(
           eq(invariantOutputs.invariantType, invariantType),
           gte(invariantOutputs.createdAt, new Date(sinceIso)),
+          ...(untilIso === undefined ? [] : [lte(invariantOutputs.createdAt, new Date(untilIso))]),
         ),
       );
     return row?.n ?? 0;
