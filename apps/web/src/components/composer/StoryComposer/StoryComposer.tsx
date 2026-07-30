@@ -471,7 +471,23 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       // The server's PER-FIELD refusals ride alongside the banner, so a
       // rejected body points at the control it was rejected for instead of
       // leaving the author to guess.
-      const fielded = fieldErrorsFrom(error, fallback);
+      //
+      // MAPPED, because several wire names are not the control names this component
+      // renders.  Without the map an over-long image description (`alt_text`),
+      // oversized caption text (`captions_text`), a rejected topic (`topic_ids`) or
+      // room (`room_id`) landed under a key nothing reads — the field message was
+      // parsed and then invisible behind the generic banner.  None of those is fully
+      // length-validated locally, so ordinary input reaches this path.
+      const fielded = fieldErrorsFrom(error, fallback, {
+        alt_text: 'altText',
+        media_alt_text: 'altText',
+        captions_text: 'captions',
+        captions_upload_id: 'captions',
+        topic_ids: 'topics',
+        room_id: 'room',
+        upload_id: 'file',
+        poster_upload_id: 'file',
+      });
       setErrors({ ...fielded, form: `${code}: ${fielded['form'] ?? fallback}` });
     }
   }
