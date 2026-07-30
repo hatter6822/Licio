@@ -111,7 +111,17 @@ async function softUserContext(
   // read paths never run authMiddleware's account-state check, and a
   // suspended account's still-valid session must not keep member/steward/
   // admin visibility the authenticated routes would refuse it.
-  if (user?.accountState !== 'active') return { userId: null, roles: [] };
+  //
+  // `restricted` IS ADMITTED, because the restrict sanction costs the WRITE
+  // paths and not the account: `authMiddleware` lets it through, `/auth/status`
+  // reports it authenticated, and the member is allowed in precisely so they can
+  // read, appeal, and exercise data rights.  Collapsing it to anonymous here
+  // hid member-only lenses and steward state from a member who still holds
+  // both — the authenticated routes and this soft resolver disagreeing about
+  // the same account.  Suspended, deleted, and deactivated stay anonymous.
+  if (user?.accountState !== 'active' && user?.accountState !== 'restricted') {
+    return { userId: null, roles: [] };
+  }
   return { userId, roles: user.roles };
 }
 

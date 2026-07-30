@@ -143,7 +143,12 @@ export interface GrantRecord {
   milestones: GrantMilestoneRecord[];
   milestoneState: GrantMilestoneRecord['state'];
   reviewState: 'pending' | 'independent_review' | 'cleared' | 'flagged';
-  payoutState: 'not_started' | 'scheduled' | 'partially_paid' | 'paid' | 'clawed_back';
+  /** `closed` (migration 0109) is terminal-but-unpaid: every milestone was
+   *  rejected, so nothing can ever pay.  Distinct from `paid` (money moved) and
+   *  `clawed_back` (money returned) because it is neither, and distinct from
+   *  `not_started` because it is FINISHED — the unsettled predicates exclude it,
+   *  so it no longer blocks the recipient's wallet unlink. */
+  payoutState: 'not_started' | 'scheduled' | 'partially_paid' | 'paid' | 'clawed_back' | 'closed';
   auditSummary: string | null;
   createdAt: string;
 }
@@ -1100,7 +1105,8 @@ export class InMemoryGrantStore implements GrantStore {
         (r) =>
           r.recipientRef === recipientRef &&
           r.payoutState !== 'paid' &&
-          r.payoutState !== 'clawed_back',
+          r.payoutState !== 'clawed_back' &&
+          r.payoutState !== 'closed',
       )
       .slice(0, limit)
       .map(clone);
@@ -1116,7 +1122,8 @@ export class InMemoryGrantStore implements GrantStore {
         (r) =>
           r.treasuryId === treasuryId &&
           r.payoutState !== 'paid' &&
-          r.payoutState !== 'clawed_back',
+          r.payoutState !== 'clawed_back' &&
+          r.payoutState !== 'closed',
       )
       .sort((a, b) => (a.grantId < b.grantId ? -1 : 1))
       .filter((r) => afterId === null || r.grantId > afterId)

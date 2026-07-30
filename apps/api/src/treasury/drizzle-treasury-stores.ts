@@ -1021,7 +1021,7 @@ export class DrizzleGrantStore implements GrantStore {
       .where(
         and(
           eq(treasuryGrants.recipientRef, recipientRef),
-          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back']),
+          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back', 'closed']),
         ),
       )
       .limit(limit);
@@ -1039,7 +1039,7 @@ export class DrizzleGrantStore implements GrantStore {
       .where(
         and(
           eq(treasuryGrants.treasuryId, treasuryId),
-          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back']),
+          notInArray(treasuryGrants.payoutState, ['paid', 'clawed_back', 'closed']),
           afterId === null ? undefined : gt(treasuryGrants.grantId, afterId),
         ),
       )

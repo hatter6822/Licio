@@ -2615,4 +2615,29 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
     expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
   });
+
+  it('a grant whose EVERY milestone is rejected settles closed, not not_started', async () => {
+    // The empty-payable-set case.  `projectGrantPayout` returned early on
+    // `finalized === 0`, so a grant with nothing payable sat at `not_started` for
+    // ever — and `listUnsettledByRecipient` counts every state except
+    // paid/clawed_back as an outstanding obligation, so tranches that can NEVER
+    // pay permanently blocked the recipient's last wallet unlink.
+    const { deps, inserted, recipientRef, payableId, refusedId } = await seedTwoTrancheGrant();
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    for (const milestoneId of [payableId, refusedId]) {
+      const rejected = await updateGrantMilestone(grantDeps, {
+        roomId: ROOM,
+        grantId: inserted.grantId,
+        milestoneId,
+        state: 'rejected',
+        actorUserId: USER,
+      });
+      if ('code' in rejected) throw new Error(rejected.message);
+    }
+    // `closed` says what happened: nothing paid, nothing reversed, nothing left
+    // to do — which is why it is neither `paid` nor `clawed_back`…
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('closed');
+    // …and why the recipient's wallet is released.
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+  });
 });

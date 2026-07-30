@@ -26,6 +26,16 @@ export const AI_GOVERNANCE_SCHEDULER_INTERVAL_MS = 3_600_000;
  */
 export const SUMMARY_SWEEP_THREAD_LIMIT = 50;
 
+/**
+ * Tries ONE thread gets within a single sweep tick before the cursor passes it.
+ *
+ * Bounded on purpose: retrying for ever lets one poison thread pin the whole
+ * sweep, and not retrying at all costs a transient failure its summary until the
+ * corpus wraps.  Three attempts in-tick covers a blip; anything surviving them
+ * is a durable fault an operator has to see (`ai.summary_sweep.poisoned_threads`).
+ */
+const MAX_THREAD_ATTEMPTS = 3;
+
 export type AiGovernanceSchedulerTask =
   | 'config_reload'
   | 'runtime_monitor'
@@ -80,72 +90,83 @@ export async function runSummarySweep(
   );
   let generated = 0;
   let skipped = 0;
-  /** The last thread processed with NO failure before it — how far the cursor
-   *  may honestly advance.  Null ⇒ the very first thread failed, so the cursor
-   *  must not move at all. */
+  /** How far the cursor may honestly advance: the last thread this tick actually
+   *  finished with — succeeded, skipped, or gave up on after its attempts.  Null
+   *  ⇒ the first thread is still unfinished, so the cursor must not move. */
   let lastSettled: { createdAt: string; threadId: string } | null = null;
-  let anyFailed = false;
+  /** Threads that exhausted their attempts this tick.  The cursor passes them —
+   *  otherwise one of them pins the sweep — so they are counted and reported
+   *  rather than left looking like successes. */
+  let poisoned = 0;
   for (const thread of threads) {
-    try {
-      if ((await deps.aiSummaries.getLatestForThread(thread.threadId)) !== null) {
-        skipped += 1;
-      } else {
-        const outcome = await generateThreadSummary(deps, thread.threadId);
-        // `insufficient_activity` is the common, expected answer for a young
-        // thread — it is a skip, not a failure, and must not read as one.
-        if (outcome.ok) generated += 1;
-        else skipped += 1;
+    for (let attempt = 1; attempt <= MAX_THREAD_ATTEMPTS; attempt += 1) {
+      try {
+        if ((await deps.aiSummaries.getLatestForThread(thread.threadId)) !== null) {
+          skipped += 1;
+        } else {
+          const outcome = await generateThreadSummary(deps, thread.threadId);
+          // `insufficient_activity` is the common, expected answer for a young
+          // thread — it is a skip, not a failure, and must not read as one.
+          if (outcome.ok) generated += 1;
+          else skipped += 1;
+        }
+        lastSettled = { createdAt: thread.createdAt, threadId: thread.threadId };
+        break;
+      } catch (err) {
+        // RETRY IN PLACE, then move on.  Two opposite failure modes meet here
+        // and only a bounded policy answers both:
+        //
+        //   • advance the cursor past a failed thread and a TRANSIENT fault
+        //     costs that thread its summary until the whole corpus wraps — days
+        //     on a large installation;
+        //   • hold the cursor until it succeeds and one POISON thread (malformed
+        //     stored data, say) pins the sweep for ever: every tick re-reads the
+        //     same page and no older page is ever reached again.
+        //
+        // Each thread therefore gets `MAX_THREAD_ATTEMPTS` tries within THIS
+        // tick — the transient case is handled where it actually occurs — and a
+        // thread still failing after them is settled so the cursor can pass it,
+        // metered and reported, never silently.  Neither failure mode can take
+        // the sweep down with it.
+        // Reported ONCE PER THREAD, on the attempt that gives up — not once per
+        // attempt.  A retry that succeeds is not a failure the caller needs to
+        // hear about, and three log lines for one blip reads as three faults.
+        if (attempt === MAX_THREAD_ATTEMPTS) {
+          onThreadError(err, thread.threadId);
+          poisoned += 1;
+          lastSettled = { createdAt: thread.createdAt, threadId: thread.threadId };
+        } else {
+          ai.metrics.increment('ai.summary_sweep.thread_retry');
+        }
       }
-      // Only extend the committable position while nothing has failed yet: past
-      // a failure the cursor must not advance, or the failed thread is skipped.
-      if (!anyFailed) lastSettled = { createdAt: thread.createdAt, threadId: thread.threadId };
-    } catch (err) {
-      // A THREAD THAT FAILED IS NOT A THREAD THAT WAS PROCESSED.  The per-thread
-      // catch keeps one bad thread from costing the rest of the page, but
-      // letting the cursor advance past it turned a transient failure into a
-      // summary missing until the whole corpus wraps — days on a large
-      // installation.  The cursor now stops at the last thread BEFORE the first
-      // failure, so the next tick retries it.  Re-examining the successes after
-      // it costs one `getLatestForThread` each; skipping the failure costs its
-      // audit summary, and that asymmetry is the whole argument.
-      anyFailed = true;
-      onThreadError(err, thread.threadId);
     }
   }
   // COMMIT THE POSITION ONLY NOW, after the page has actually been processed.
   // Advancing the cursor before the loop meant a stop or crash between the two
   // — precisely the restart the persistence exists to survive — left the next
-  // lease holder starting AFTER up to `limit` unexamined threads, which are
-  // then unreachable until the whole corpus wraps back to the newest page.  A
-  // cursor that can skip work is worse than one that repeats it: re-examining a
-  // thread costs one `getLatestForThread`, and skipping one costs its summary
-  // until the wrap.
-  //
-  // Three outcomes, spelled out rather than folded into one ternary — the
-  // folded version silently WRAPPED when the very first thread failed
-  // (`lastSettled === null` reads the same as "tail reached"), which is the
-  // opposite of retrying it.
-  if (anyFailed) {
-    // A failure suppresses the wrap too: rewinding to the newest page would put
-    // the failed thread behind a whole traversal, which is what the retry
-    // exists to avoid.  With NOTHING settled before the failure the cursor is
-    // left exactly where it was, so the next tick re-reads this same page.
-    if (lastSettled !== null) {
-      await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, {
-        createdAt: lastSettled.createdAt,
-        ref: lastSettled.threadId,
-      });
-    }
-  } else {
+  // lease holder starting AFTER up to `limit` unexamined threads, which are then
+  // unreachable until the whole corpus wraps back to the newest page.  A cursor
+  // that can skip work is worse than one that repeats it: re-examining a thread
+  // costs one `getLatestForThread`, and skipping one costs its summary until the
+  // wrap.
+  if (lastSettled === null) {
+    // Nothing on the page finished at all (the first thread is still failing
+    // after its attempts would have settled it — i.e. the page was empty).
+    // Leave the cursor untouched so the next tick re-reads this same page.
+  } else if (threads.length < limit) {
     // Exhausted the tail ⇒ start again from the newest next tick, so a thread
     // that only later crosses the activity threshold is eventually summarized.
-    const last = threads[threads.length - 1];
-    await ai.sweepCursors.set(
-      SUMMARY_SWEEP_CURSOR,
-      threads.length < limit || last === undefined
-        ? null
-        : { createdAt: last.createdAt, ref: last.threadId },
-    );
+    await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, null);
+  } else {
+    await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, {
+      createdAt: lastSettled.createdAt,
+      ref: lastSettled.threadId,
+    });
+  }
+  if (poisoned > 0) {
+    // A thread the sweep gave up on is a fact an operator needs: the cursor moved
+    // past it, so nothing will retry it until the corpus wraps.
+    ai.metrics.increment('ai.summary_sweep.poisoned_threads');
   }
   return { examined: threads.length, generated, skipped };
 }

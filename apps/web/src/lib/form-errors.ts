@@ -30,7 +30,14 @@ export function fieldErrorsFrom(
   if (!(error instanceof ApiClientError)) return { form: fallback };
   const errors: Record<string, string> = { form: error.message };
   for (const [path, message] of Object.entries(error.details ?? {})) {
-    errors[fieldNames[path] ?? path] = message;
+    // ARRAY ELEMENTS collapse onto their control.  Zod reports the path of the
+    // element that failed — `initial_topics.0` for a too-long topic — and an
+    // exact-key rename left that under a key no control renders, so the field
+    // message was parsed, mapped, and then still invisible behind the generic
+    // banner.  A form has one control for the whole list, so the whole list's
+    // errors belong on it.
+    const control = path.replace(/\.\d+(?=\.|$)/g, '');
+    errors[fieldNames[control] ?? fieldNames[path] ?? control] = message;
   }
   return errors;
 }

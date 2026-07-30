@@ -1,0 +1,12 @@
+-- WS-M.5.1a — a terminal payout state for a grant that can never pay.
+--
+-- When every milestone is rejected the payable set is EMPTY, so
+-- `projectGrantPayout` returned early on `finalized === 0` and the grant sat at
+-- `not_started` for ever.  `listUnsettledByRecipient` treats every state except
+-- `paid`/`clawed_back` as an outstanding obligation, so that grant permanently
+-- blocked the recipient from unlinking their last wallet — over tranches that
+-- can never pay.
+--
+-- `closed` is the honest name: nothing was paid (so not `paid`) and nothing was
+-- reversed (so not `clawed_back`), and the grant is finished either way.
+ALTER TYPE "knomosis"."grant_payout_state" ADD VALUE IF NOT EXISTS 'closed';

@@ -1023,6 +1023,19 @@ export async function projectGrantPayout(deps: IntentDeps, grantId: string): Pro
     const linked = await deps.intents.getById(milestone.paymentIntentId);
     if (linked?.executionState === 'finalized') finalized += 1;
   }
+  // EVERY MILESTONE REJECTED ⇒ terminal, not perpetually `not_started`.  With an
+  // empty payable set the old `finalized === 0` return left the grant unsettled
+  // for ever, and `listUnsettledByRecipient` counts every state except
+  // paid/clawed_back as an outstanding obligation — so a grant whose tranches
+  // can NEVER pay permanently blocked the recipient from unlinking their last
+  // wallet.  `closed` (migration 0109) says what happened: nothing paid, nothing
+  // reversed, nothing left to do.
+  if (payable === 0) {
+    if (grant.payoutState !== 'closed') {
+      await deps.grants.setPayoutState(grant.grantId, 'closed');
+    }
+    return;
+  }
   if (finalized === 0) return;
   const payoutState =
     finalized === payable && scheduled === payable

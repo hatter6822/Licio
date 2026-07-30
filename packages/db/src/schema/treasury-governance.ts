@@ -115,6 +115,12 @@ export const grantPayoutStateEnum = knomosisSchema.enum('grant_payout_state', [
   'scheduled',
   'partially_paid',
   'paid',
+  // TERMINAL-BUT-UNPAID (migration 0109): every milestone was rejected, so the
+  // payable set is empty and nothing can ever pay.  Neither `paid` (money moved)
+  // nor `clawed_back` (money returned), and no longer `not_started` — it is
+  // FINISHED, which is what lets the unsettled predicates stop counting it
+  // against the recipient's last wallet unlink.
+  'closed',
   'clawed_back',
 ]);
 
