@@ -16,7 +16,7 @@ import type {
   IncidentQueueResponse,
   ReportQueueResponse,
 } from '@licio/shared';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -1152,16 +1152,149 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
   });
 
-  it('WS-J.2.1d: availability posts the chosen status', async () => {
+  it('WS-J.2.1d: a NON-403 read failure shows no interactive control', async () => {
+    // The gate keyed off `isLoading || isForbidden`, so it failed OPEN for
+    // everything that is not a 403: with `retry: false` a single 502 left the
+    // error in place and `?? 'offline'` rendered a CONFIDENT `offline` the server
+    // had never said — fully interactive — to a reviewer the server still had in
+    // the auto-assignment pool.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(
+      new ApiClientError('http_502', 'bad gateway', 502),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: a bare network reject is not an ApiClientError, and still closes', async () => {
+    // `fetch` rejects with a plain TypeError that never passes through
+    // `normalizeError`, so `isForbidden` is false and the old gate let it through.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: OFFLINE renders no control and posts nothing', async () => {
+    // The case no flag-based predicate closes: the default `online` networkMode
+    // PAUSES the query, so `isLoading` is false AND `error` is null — the control
+    // rendered, was fully interactive, and the write was queued to replay on
+    // reconnect.  `isLoading` is `isPending && isFetching` and a paused query is
+    // pending-but-not-fetching, which is why the gate reads the DATA instead.
     vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
     vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
+    onlineManager.setOnline(false);
+    try {
+      render(<ModerationConsole />, { wrapper: Providers });
+      expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+      expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+      expect(api.setReviewerStatus).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it('WS-J.2.1d: a successful write survives UNMOUNT — it reaches the cache, not local state', async () => {
+    // The write recorded the new value in a `useState`, so navigating away and
+    // back inside the 30 s staleTime re-rendered the stale cached GET with no
+    // refetch: the reviewer saw `available` while the server had them `offline`.
+    // ONE QueryClient across both renders — `Providers` builds a fresh one per
+    // render, so a naive remount test starts from an empty cache and passes for
+    // the wrong reason (it passes against the live bug).
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const Shared = ({ children }: { children: ReactNode }): React.ReactElement => (
+      <I18nProvider locale="en">
+        <QueryClientProvider client={client}>
+          <ToastProvider>{children}</ToastProvider>
+        </QueryClientProvider>
+      </I18nProvider>
+    );
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'offline' });
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    const first = render(<ModerationConsole />, { wrapper: Shared });
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole('combobox', { name: /my availability/i }));
+    await user.click(await screen.findByRole('option', { name: /available/i }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('available'));
+    first.unmount();
+    render(<ModerationConsole />, { wrapper: Shared });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+        'available',
+      ),
+    );
+  });
+
+  it('WS-J.2.1d: a change made after the network DROPS fails now, not on reconnect', async () => {
+    // The control is rendered from cached data, so it can still be on screen when
+    // connectivity goes.  Under the default `online` networkMode the write would be
+    // PAUSED and replayed by `resumePausedMutations` — the reviewer sees no error,
+    // and the write lands minutes later, or surfaces its 403 then.  `networkMode:
+    // 'always'` makes the attempt happen now so the existing error toast fires.
+    //
+    // The distinguishing assertion is that the mutation function RAN: a paused
+    // mutation never calls it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'offline' });
+    vi.mocked(api.setReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    render(<ModerationConsole />, { wrapper: Providers });
+    const user = userEvent.setup();
+    const control = await screen.findByRole('combobox', { name: /my availability/i });
+    onlineManager.setOnline(false);
+    try {
+      await user.click(control);
+      await user.click(screen.getByRole('option', { name: 'busy' }));
+      await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+      expect(await screen.findByText(/could not update your availability/i)).toBeInTheDocument();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it('WS-J.2.1d: a FAILED post-write refetch does not roll the display back', async () => {
+    // Why the seed goes in BEFORE the invalidate.  react-query keeps the last data
+    // on a refetch error, so without `setQueryData` the display would fall back to
+    // the PRE-write value while the server had already accepted the new one — the
+    // control contradicting a write it had just made.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'offline' });
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await user.click(screen.getByRole('option', { name: 'busy' }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+    // The accepted value stands, even though the confirming read failed.
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy'),
+    );
+  });
+
+  it('WS-J.2.1d: availability posts the chosen status', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    // The display now comes from the CACHE, and a successful write invalidates it —
+    // so the mocked server has to agree with the write it just accepted.  Leaving
+    // it reporting `available` forever made the refetch contradict the POST, which
+    // is a mock inconsistency rather than a product defect.
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'available' });
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'busy' });
     vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
     render(<ModerationConsole />, { wrapper: Providers });
     // The design-system Select is a listbox combobox, not a native <select>.
     await userEvent.click(await screen.findByRole('combobox', { name: /my availability/i }));
     await userEvent.click(screen.getByRole('option', { name: 'busy' }));
     await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
-    expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy');
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy'),
+    );
   });
 
   it('WS-J.2.1d: a rejected availability change does not leave the control lying', async () => {

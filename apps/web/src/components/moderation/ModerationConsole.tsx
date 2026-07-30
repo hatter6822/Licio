@@ -306,11 +306,32 @@ function ReviewerStatusControl(): React.ReactElement | null {
     queryFn: fetchReviewerStatus,
     retry: false,
   });
-  const [pending, setPending] = useState<ReviewerAvailability | null>(null);
-  const status: ReviewerAvailability = pending ?? stored.data?.status ?? 'offline';
+  // THE CACHE, not mount-local state.  A successful write recorded the new value
+  // only in a `useState`, so navigating away and back inside the 30 s staleTime
+  // re-rendered the STALE cached GET with no refetch at all — the reviewer saw
+  // `available` while the server had them `offline` and `availableIds()` excluded
+  // them.  It was also never cleared, so after one write the control showed the
+  // local value for the rest of the mount and no background refetch could correct
+  // it.
+  //
+  // `setQueryData` BEFORE the invalidate, and from the mutation's `next` VARIABLE
+  // — never its result, which is `{ok: true}` and would seed a shape with no
+  // status at all.  Seeding first means a failed post-write refetch cannot roll
+  // the display back to the pre-write value; the invalidate keeps the server
+  // authoritative.
+  const queryClient = useQueryClient();
   const update = useMutation({
     mutationFn: (next: ReviewerAvailability) => setReviewerStatus(next),
-    onSuccess: (_data, next) => setPending(next),
+    // OFFLINE FAILS FAST rather than being queued.  The default `online` mode
+    // PAUSES the mutation and `resumePausedMutations` replays it on reconnect, so
+    // a reviewer could flip their availability offline, see no error, and have the
+    // write land minutes later — or, if their role cannot set it at all, get the
+    // 403 toast then.
+    networkMode: 'always',
+    onSuccess: (_data, next) => {
+      queryClient.setQueryData(queryKeys.modReviewerStatus(), { status: next });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.modReviewerStatus() });
+    },
     onError: (e) =>
       toast({
         message: isForbidden(e)
@@ -326,9 +347,35 @@ function ReviewerStatusControl(): React.ReactElement | null {
   // for them meant a 403 on open and a 403 on every change: a switch that can
   // only fail.  Re-deriving the rule client-side from `steward_roles` would
   // duplicate an authorization decision and drift from it; the refusal itself
-  // is the authoritative read, and nothing is rendered while it is in flight
-  // so the control never flashes in and out.
-  if (stored.isLoading || isForbidden(stored.error)) return null;
+  // is the authoritative read.
+  if (isForbidden(stored.error)) return null;
+  // GATED ON A CONFIRMED VALUE, not on a boolean flag.  Keying the absence off
+  // `isLoading` made the control fail OPEN for everything that is not a 403: a
+  // 502, an `invalid_response`, a bare network reject, and — worst — the OFFLINE
+  // case, where the default `online` networkMode PAUSES the query so `isLoading`
+  // is false and `error` is null.  Combined with the `?? 'offline'` fallback below
+  // it rendered a CONFIDENT `offline` that the server had never said, fully
+  // interactive, to a reviewer the server still had in the auto-assignment pool.
+  //
+  // `stored.data?.status === undefined` is the only formulation that closes all of
+  // them: `isLoading` is `isPending && isFetching`, and a paused query is
+  // pending-but-not-fetching, so any predicate built from those flags leaves the
+  // offline hole open. It also keeps a WORKING control through a failed
+  // background refetch, because the last good data is still there.
+  const status = stored.data?.status;
+  if (status === undefined) {
+    // Still on the first read: say nothing rather than flash a failure.
+    if (stored.isLoading) return null;
+    // Unknown, and honest about it — no fabricated value, and nothing to click.
+    return (
+      <p role="status" className="text-ink-muted text-sm">
+        {t(
+          'console.statusUnknown',
+          'Your availability could not be read — it is unchanged on the server.',
+        )}
+      </p>
+    );
+  }
   return (
     <div className="flex items-center justify-end gap-2">
       <Select
