@@ -395,10 +395,6 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
       const ai = tryGetAiGovernanceServices();
       if (ai === null) return;
       const aiDeps = buildGovernanceAiDeps(ai);
-      await summarizeProposal(aiDeps, {
-        proposalRef: input.proposalRef,
-        fields: input.fields,
-      });
       // PERSIST what the advisor found.  Both calls return a concrete advisory
       // (proposer-is-recipient, scam-associated language) and this caller used
       // to discard the value, so the advice reached no store, no route, and no
@@ -415,7 +411,24 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
       // temporarily unavailable must not cost the conflict-of-interest finding,
       // and vice versa.  They answer different questions and neither is the
       // other's precondition.
+      //
+      // THE SUMMARIZER IS ONE OF THEM.  It ran unguarded three lines above this
+      // loop, so its failure cost BOTH advisories — the identical loss the
+      // isolation was added to prevent, from the same function, and the summary
+      // is a §24.5 capability of its own with its own per-capability guard and its
+      // own store.  It reaches this list rather than a `try` of its own so there
+      // is one place where "a capability failed" is handled, and no fourth
+      // capability can be added outside it.  (`summarizeProposal` is now also
+      // total with respect to its input, so the attacker-triggerable throw is
+      // gone at the source; this is the containment, not the fix.)
       const checks: Array<() => Promise<GovernanceAdvisory | null>> = [
+        async () => {
+          await summarizeProposal(aiDeps, {
+            proposalRef: input.proposalRef,
+            fields: input.fields,
+          });
+          return null; // the summary has its own store; nothing to add here
+        },
         ...(input.recipientRef === null
           ? []
           : [

@@ -63,8 +63,23 @@ export function detectMissingFields(fields: Record<string, string>): string[] {
   );
 }
 
+/**
+ * How many proposal fields one summary quotes, and how much of each.
+ *
+ * Bounds on the SUMMARY, not on the proposal: the proposal keeps whatever it
+ * said, and the machine-generated précis of it stays a fixed size regardless.
+ * Chosen so the worst case (`SUMMARY_MAX_CITED_FIELDS` × (256 key + 300 value +
+ * separators)) sits comfortably under `proseSchema`'s 8,000, so the arithmetic
+ * cannot drift into a throw.
+ */
+const SUMMARY_MAX_CITED_FIELDS = 20;
+const SUMMARY_MAX_FIELD_CHARS = 300;
+
 /** Summarize a proposal in plain language (WS-K.2.2a). Cites the specific
- *  fields, flags material uncertainty, machine-generated, contestable. */
+ *  fields, flags material uncertainty, machine-generated, contestable.
+ *
+ *  TOTAL with respect to its input: no proposal value can make it throw (see the
+ *  truncation note in the body). */
 export async function summarizeProposal(
   deps: GovernanceAiDeps,
   input: ProposalSummaryInput,
@@ -80,16 +95,46 @@ export async function summarizeProposal(
   });
 
   const nowIso = new Date(deps.now()).toISOString();
-  const citedFields = Object.keys(input.fields).filter((k) => input.fields[k]?.trim() !== '');
+  // BOUNDED SO THE PARSE BELOW CANNOT BE MADE TO THROW BY ITS INPUT.
+  //
+  // `body` interpolated field values verbatim against `proseSchema`
+  // (max 8,000), and `cited_fields` interpolated the KEYS against
+  // `shortTextSchema` (max 256) with no cap on how many.  Those come from a
+  // proposal's `requested_action`, which is the one UNBOUNDED field of
+  // `productionProposalCreateSchema` (`z.record(z.string(), z.unknown())`, where
+  // every sibling is capped) and reaches here verbatim with no `bodyLimit` on the
+  // route.  So a proposer could make this function THROW on ordinary input by
+  // padding it — and the throw landed after `recordAiOutput` had already written
+  // the immutable record, leaving an assessment in the audit trail that no
+  // steward could read, and (before the isolation below) taking both advisories
+  // with it.  The proposer who is also the recipient could therefore silence
+  // their own conflict-of-interest flag by padding a field.
+  //
+  // Truncation is VISIBLE (an ellipsis) rather than silent: a steward reading a
+  // summary of a padded proposal must be able to tell that the source was longer
+  // than what is quoted.
+  const cite = (text: string, max: number): string =>
+    text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  const allCited = Object.keys(input.fields).filter((k) => input.fields[k]?.trim() !== '');
+  const citedFields = allCited.slice(0, SUMMARY_MAX_CITED_FIELDS).map((f) => cite(f, 256));
   const missing = detectMissingFields(input.fields);
   const uncertainty =
-    missing.length > 0 ? `Material uncertainty: missing or unclear ${missing.join(', ')}.` : null;
-  const body =
+    missing.length > 0
+      ? cite(`Material uncertainty: missing or unclear ${missing.join(', ')}.`, 8_000)
+      : null;
+  const overflow =
+    allCited.length > citedFields.length
+      ? ` (${allCited.length - citedFields.length} further field(s) not quoted.)`
+      : '';
+  const body = cite(
     citedFields.length > 0
-      ? `This proposal specifies: ${citedFields
-          .map((f) => `${f} — ${input.fields[f]}`)
-          .join('; ')}.`
-      : 'This proposal specifies no readable fields.';
+      ? `This proposal specifies: ${allCited
+          .slice(0, SUMMARY_MAX_CITED_FIELDS)
+          .map((f) => `${cite(f, 256)} — ${cite(input.fields[f] ?? '', SUMMARY_MAX_FIELD_CHARS)}`)
+          .join('; ')}.${overflow}`
+      : 'This proposal specifies no readable fields.',
+    8_000,
+  );
 
   const output = await recordAiOutput(deps.outputRecords, {
     modelName: GOVERNANCE_SUMMARIZER.name,

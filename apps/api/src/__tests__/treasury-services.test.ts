@@ -8,6 +8,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../ai-governance/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
@@ -25,6 +29,7 @@ import {
   treasuryServicesConfigured,
 } from '../treasury/services.js';
 import type { PaymentIntentRecord } from '../treasury/stores.js';
+import { freshForumServices } from './forum-test-helpers.js';
 import { freshKnomosisServices, resetKnomosisFixture } from './knomosis-test-helpers.js';
 
 const ROOM = '77777777-7777-4777-8777-777777777777';
@@ -883,5 +888,82 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
         treasuryControlling: true,
       }),
     ).toBe(1);
+  });
+});
+
+describe('governanceAdvisor (the SHIPPED closure, §24.5)', () => {
+  // Nothing drove this closure before: `treasury-proposals.test.ts` assigns a
+  // stub `deps.governanceAdvisor`, and this file never mentioned it — so the
+  // per-capability isolation it claims was untested as well as incomplete.
+  async function advisorFixture() {
+    const forum = freshForumServices();
+    const ai = createInMemoryAiGovernanceServices(forum.events, { now: () => Date.now() });
+    setAiGovernanceServices(ai);
+    return { ai, services: await wsmServices() };
+  }
+
+  const PROPOSER = 'user-a';
+  const SCAM_TEXT = 'guaranteed returns — send funds to me now';
+
+  it('persists BOTH advisories and the summary on ordinary input', async () => {
+    const { ai, services } = await advisorFixture();
+    await services.governanceAdvisor?.({
+      proposalRef: 'prop-1',
+      roomId: ROOM,
+      proposerRef: PROPOSER,
+      recipientRef: PROPOSER, // proposer IS recipient ⇒ conflict of interest
+      fields: { purpose: 'buy servers', amount: '100', recipient: PROPOSER },
+      text: SCAM_TEXT,
+    });
+    const advisories = await ai.governanceAdvisories.listByProposal('prop-1');
+    expect(advisories.map((a) => a.kind).sort()).toEqual(['coi_highlight', 'scam_pattern']);
+    expect(await ai.governanceSummaries.listByProposal('prop-1')).toHaveLength(1);
+  });
+
+  it('a PADDED field can no longer silence the advisories', async () => {
+    // The attack: `requested_action` is the one unbounded field of
+    // `productionProposalCreateSchema`, it reaches `summarizeProposal` verbatim,
+    // and the summary body was capped at 8,000 — so a long value made the
+    // summarizer throw from OUTSIDE the isolation loop and both advisories were
+    // lost.  The proposer who is also the recipient could suppress their own
+    // conflict-of-interest flag by padding a field.
+    const { ai, services } = await advisorFixture();
+    await expect(
+      services.governanceAdvisor?.({
+        proposalRef: 'prop-2',
+        roomId: ROOM,
+        proposerRef: PROPOSER,
+        recipientRef: PROPOSER,
+        fields: { purpose: 'buy servers', citations: 'x'.repeat(9_000), recipient: PROPOSER },
+        text: SCAM_TEXT,
+      }),
+    ).resolves.toBeUndefined();
+    const advisories = await ai.governanceAdvisories.listByProposal('prop-2');
+    expect(advisories.map((a) => a.kind).sort()).toEqual(['coi_highlight', 'scam_pattern']);
+    // …and the summary itself survived, truncated rather than refused.
+    const [summary] = await ai.governanceSummaries.listByProposal('prop-2');
+    expect(summary).toBeDefined();
+    expect(summary?.body.length).toBeLessThanOrEqual(8_000);
+    expect(summary?.body).toContain('…');
+  });
+
+  it('a summarizer failure no longer costs the advisories', async () => {
+    // The containment, independent of the input bound above: the summary is a
+    // §24.5 capability with its own guard and its own store, so it belongs in the
+    // isolation loop rather than three lines above it.
+    const { ai, services } = await advisorFixture();
+    ai.governanceSummaries.put = async () => {
+      throw new Error('summary store unavailable');
+    };
+    await services.governanceAdvisor?.({
+      proposalRef: 'prop-3',
+      roomId: ROOM,
+      proposerRef: PROPOSER,
+      recipientRef: PROPOSER,
+      fields: { purpose: 'buy servers', recipient: PROPOSER },
+      text: SCAM_TEXT,
+    });
+    const advisories = await ai.governanceAdvisories.listByProposal('prop-3');
+    expect(advisories.map((a) => a.kind).sort()).toEqual(['coi_highlight', 'scam_pattern']);
   });
 });
