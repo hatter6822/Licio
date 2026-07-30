@@ -19,6 +19,7 @@ import {
 import { FORUM_TO_EVENT_TYPE } from '../forum/contributions.js';
 import { InMemoryDebateBroadcaster, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import {
+  imageDimensions,
   matchesMagic,
   parseGifBlocks,
   stripGif,
@@ -407,6 +408,92 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       ...chunk('IEND', []),
     ]);
   }
+
+  it('REFUSES a PNG whose first chunk is not IHDR, and reads no dimensions from it', () => {
+    // The signature alone was treated as proof of the layout: `pngDimensions` read
+    // bytes 16–23 regardless, so a crafted file carrying the PNG magic and any other
+    // first chunk was stored with ATTACKER-CHOSEN width and height up to 2^32-1.
+    // `StoryMedia` reserves an aspect box from them, so the feed laid out a hole of
+    // the attacker's shape until the browser failed to decode it.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    // 13 payload bytes so the LENGTH check alone would pass — only the TYPE differs.
+    const fakeIhdr = [0, 0, 0xff, 0xff, 0, 0, 0xff, 0xff, 8, 6, 0, 0, 0];
+    const notIhdr = new Uint8Array([
+      ...SIG,
+      ...chunk('tEXt', fakeIhdr),
+      ...chunk('IDAT', [1]),
+      ...chunk('IEND', []),
+    ]);
+    expect(imageDimensions('image/png', notIhdr)).toBeNull();
+    // …while the genuine article still reads.
+    expect(imageDimensions('image/png', pngWithText())).not.toBeNull();
+  });
+
+  it('REFUSES a PNG that never reaches IEND', () => {
+    // `stripPng` fell out of the bottom of its loop when the chunks simply ran out,
+    // returning `ok: true` for a container with no IEND — so a fabricated or
+    // truncated file was accepted and stored.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0];
+    const noIend = new Uint8Array([...SIG, ...chunk('IHDR', ihdr), ...chunk('IDAT', [1])]);
+    expect(stripPng(noIend)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('REFUSES zero dimensions (guarded once, in imageDimensions, for every format)', () => {
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    // A zero would make every downstream aspect calculation divide by it.  The
+    // guard lives in `imageDimensions`, which bounds every format to [1, 65535] —
+    // this pins that it covers a well-formed IHDR carrying zeros, so nobody adds a
+    // second narrower copy inside the PNG reader.
+    const zeroIhdr = [0, 0, 0, 0, 0, 0, 0, 0, 8, 6, 0, 0, 0];
+    const zero = new Uint8Array([...SIG, ...chunk('IHDR', zeroIhdr), ...chunk('IEND', [])]);
+    expect(imageDimensions('image/png', zero)).toBeNull();
+  });
 
   it('strips PNG tEXt/eXIf chunks and keeps IHDR/IDAT/IEND', () => {
     const result = stripPng(pngWithText());

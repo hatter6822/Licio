@@ -194,9 +194,16 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
       out.push(bytes.subarray(at, at + total));
     }
     at += total;
-    if (type === 'IEND') break;
+    if (type === 'IEND') {
+      // A COMPLETE container, and nothing after it.  The loop used to fall out of
+      // the bottom on a file that simply ran out of chunks, returning `ok: true`
+      // for a PNG with no IEND at all — so a truncated or fabricated container was
+      // accepted and stored, and `pngDimensions` then read whatever sat at bytes
+      // 16–23.
+      return { ok: true, bytes: concat(out), stripped };
+    }
   }
-  return { ok: true, bytes: concat(out), stripped };
+  return { ok: false, reason: 'malformed' };
 }
 
 /** WebP: drop EXIF/XMP chunks, clear the VP8X flag bits, fix the RIFF size. */
@@ -456,9 +463,30 @@ function jpegDimensions(bytes: Uint8Array): ImageDimensions | null {
   return null;
 }
 
-/** PNG: IHDR is always the first chunk — width then height, u32-BE. */
+/**
+ * PNG: IHDR is always the first chunk — width then height, u32-BE.
+ *
+ * VERIFIED, not assumed.  "Always" is true of a valid PNG and says nothing about
+ * an upload: this read bytes 16–23 on the strength of the 8-byte signature alone,
+ * so a crafted file carrying that signature and any other first chunk was stored
+ * with ATTACKER-CHOSEN dimensions.  `StoryMedia` reserves an aspect box from them,
+ * so the feed laid out a hole of the attacker's shape until the browser failed to
+ * decode the image.
+ *
+ * The spec pins both facts this checks: the first chunk after the signature is
+ * IHDR, and its data length is exactly 13.
+ *
+ * It deliberately does NOT re-check for zero or absurd values.  `imageDimensions`
+ * already rejects anything outside [1, 65535] for every format, and a second,
+ * narrower copy of that rule here would be one more place for the two to disagree.
+ * (I wrote one; the mutation check found it had no failing test, because the outer
+ * guard already held.)
+ */
 function pngDimensions(bytes: Uint8Array): ImageDimensions | null {
   if (bytes.length < 24) return null;
+  if (readU32BE(bytes, 8) !== 13) return null; // IHDR data length
+  const type = String.fromCharCode(bytes[12] ?? 0, bytes[13] ?? 0, bytes[14] ?? 0, bytes[15] ?? 0);
+  if (type !== 'IHDR') return null;
   return { width: readU32BE(bytes, 16), height: readU32BE(bytes, 20) };
 }
 
