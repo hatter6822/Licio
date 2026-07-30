@@ -157,6 +157,60 @@ describe('thread projection (WS-R.2.2)', () => {
     expect(projected[0]?.unauthorizedSupersedes).toEqual(['x-edit']);
   });
 
+  it('keeps the DESCENDANTS of a refused supersession, not just its first link', () => {
+    // The hostile chain's second link.  B's cross-author edit of A's post is refused
+    // — but B's NEXT edit targets that refused record, whose author really is B, so
+    // `ownsTarget` passes it and it lands in `editsByTarget` under a record in no
+    // authorized branch.  No root's chain reaches that key and it was never refused,
+    // so it appeared in neither output field: half the chain, silently gone, in the
+    // one place §25.2 says evidence is never silently discarded.
+    const post = tr('h-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const hostile = (
+      cid: string,
+      target: string,
+      seq: number,
+      type: 'edit' | 'tombstone' = 'edit',
+    ) =>
+      tr(
+        cid,
+        mkRecord({
+          event_type: type,
+          author_account_id: 'attacker',
+          author_device_key_id: 'attacker-key',
+          ...(type === 'edit' ? { replaces_record_cid: target } : { target_record_cid: target }),
+        }),
+        { roomLogSeq: seq },
+      );
+    const first = hostile('h-1', 'h-post', 1);
+    const second = hostile('h-2', 'h-1', 2);
+    const third = hostile('h-3', 'h-2', 3);
+    // …and a tombstone the attacker aims at their own refused edit hides the same way.
+    const tomb = hostile('h-tomb', 'h-3', 4, 'tombstone');
+    const projection = reduceThreadProjection([post, first, second, third, tomb]);
+    expect(projection.contributions).toHaveLength(1);
+    expect(projection.contributions[0]?.unauthorizedSupersedes).toEqual([
+      'h-1',
+      'h-2',
+      'h-3',
+      'h-tomb',
+    ]);
+    // The post itself is untouched: none of this moved the tip or hid it.
+    expect(projection.contributions[0]).toMatchObject({
+      visibleCid: 'h-post',
+      hidden: false,
+    });
+    // The author's OWN edits stay out of the refusal evidence — the descendant rule
+    // follows `editsByTarget` only from a refused record, never from the branch.
+    const mine = tr(
+      'h-mine',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'h-post' }),
+      { roomLogSeq: 5 },
+    );
+    const withMine = reduceThreadProjection([post, mine, first, second]);
+    expect(withMine.contributions[0]?.unauthorizedSupersedes).toEqual(['h-1', 'h-2']);
+    expect(withMine.contributions[0]?.editChain).toEqual(['h-post', 'h-mine']);
+  });
+
   it('keeps refusal evidence whose TARGET has not arrived (partial replica)', () => {
     // The partial-replica case.  `ownsTarget` refuses an edit whose named target is
     // absent and files the evidence under that missing CID; the per-root walk seeds
@@ -185,24 +239,43 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 2 },
     );
-    const projection = reduceThreadProjection([post, orphanEdit, orphanTomb]);
+    // A descendant of a stranded refusal is no more reachable than its parent, so it
+    // has to ride along in the same report — otherwise the unresolved path retains
+    // half the chain exactly like the per-root path used to.
+    const orphanDescendant = tr(
+      'o-edit-2',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'o-edit',
+      }),
+      { roomLogSeq: 3 },
+    );
+    const projection = reduceThreadProjection([post, orphanEdit, orphanTomb, orphanDescendant]);
     // The unrelated post projects normally and claims none of this evidence…
     expect(projection.contributions).toHaveLength(1);
     expect(projection.contributions[0]?.unauthorizedSupersedes).toBeUndefined();
     // …and the refusals are reported against the target that did not arrive,
     // sorted, so the output stays arrival-order independent.
     expect(projection.unresolvedSupersedes).toEqual([
-      { targetCid: 'not-yet-synced', recordCids: ['o-edit', 'o-tomb'] },
+      { targetCid: 'not-yet-synced', recordCids: ['o-edit', 'o-edit-2', 'o-tomb'] },
     ]);
 
     // ONCE THE TARGET ARRIVES the refusal resolves the ordinary way: it belongs to
     // a contribution now, so it moves out of the unresolved list rather than being
     // reported twice.
     const arrived = tr('not-yet-synced', mkRecord({ event_type: 'post' }), { roomLogSeq: 3 });
-    const complete = reduceThreadProjection([post, orphanEdit, orphanTomb, arrived]);
+    const complete = reduceThreadProjection([
+      post,
+      orphanEdit,
+      orphanTomb,
+      orphanDescendant,
+      arrived,
+    ]);
     expect(complete.unresolvedSupersedes).toEqual([]);
     const target = complete.contributions.find((c) => c.rootCid === 'not-yet-synced');
-    expect(target?.unauthorizedSupersedes).toEqual(['o-edit', 'o-tomb']);
+    expect(target?.unauthorizedSupersedes).toEqual(['o-edit', 'o-edit-2', 'o-tomb']);
   });
 
   it('keeps refusal evidence aimed at the branch the projection did NOT pick', () => {

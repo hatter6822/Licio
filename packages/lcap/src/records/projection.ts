@@ -314,6 +314,45 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Thread
 
   /** Refused CIDs that a root's walk actually reached (the rest are unresolved). */
   const surfacedRefusals = new Set<string>();
+
+  /**
+   * The whole hostile chain hanging off some TARGET cids, transitively.
+   *
+   * Two kinds of edge, and the second is why this is a function rather than a loop
+   * over `refusedByTarget`.  From a target, the hostile records are the ones REFUSED
+   * against it.  From a refused record, they are also its AUTHORIZED descendants: a
+   * second edit by the same hostile author, aimed at their own already-refused edit,
+   * passes `ownsTarget` — its immediate target really is theirs — and lands in
+   * `editsByTarget` under a record that belongs to no authorized branch.  No root's
+   * chain reaches that key and the record was never refused, so it appeared in
+   * neither output field and half of the hostile chain went unrecorded.  A tombstone
+   * aimed at a refused record hides the same way, so both maps are followed.
+   *
+   * The `fromRefused` flag is load-bearing: following `editsByTarget` from the
+   * ANCHORS would pull the author's own legitimate edits into the refusal evidence,
+   * which is what `editChain` and `supersededEdits` are for.
+   */
+  const hostileChainFrom = (targets: Iterable<string>): Set<string> => {
+    const found = new Set<string>();
+    const frontier: Array<{ cid: string; fromRefused: boolean }> = [];
+    for (const cid of targets) frontier.push({ cid, fromRefused: false });
+    while (frontier.length > 0) {
+      const item = frontier.pop() as { cid: string; fromRefused: boolean };
+      const children = [...(refusedByTarget.get(item.cid) ?? [])];
+      if (item.fromRefused) {
+        for (const edit of editsByTarget.get(item.cid) ?? []) children.push(edit.recordCid);
+        const tomb = tombstoneByTarget.get(item.cid);
+        if (tomb !== undefined) children.push(tomb);
+      }
+
+      for (const child of children) {
+        if (found.has(child)) continue; // cycle guard
+        found.add(child);
+        frontier.push({ cid: child, fromRefused: true });
+      }
+    }
+    return found;
+  };
   const projectedByRoot = new Map<string, ProjectedContribution>();
   for (const root of roots) {
     const chain = [root.recordCid];
@@ -380,16 +419,7 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Thread
       const tomb = tombstoneByTarget.get(cid);
       if (tomb !== undefined) anchors.add(tomb);
     }
-    const refusedSet = new Set<string>();
-    const refusedFrontier = [...anchors];
-    while (refusedFrontier.length > 0) {
-      const cid = refusedFrontier.pop() as string;
-      for (const refusedCid of refusedByTarget.get(cid) ?? []) {
-        if (refusedSet.has(refusedCid)) continue; // cycle guard
-        refusedSet.add(refusedCid);
-        refusedFrontier.push(refusedCid);
-      }
-    }
+    const refusedSet = hostileChainFrom(anchors);
     // Sorted, not in arrival order — this field is part of the projection output and
     // the §25.2 guarantee is that the whole output is input-order independent.
     const refused = [...refusedSet].sort();
@@ -419,8 +449,13 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Thread
   // set but itself dropped for an absent target of its own strands the refusals
   // naming it just as thoroughly as a target that never arrived.
   const unresolvedSupersedes: UnresolvedSupersede[] = [];
-  for (const [targetCid, recordCids] of refusedByTarget) {
-    const stranded = recordCids.filter((cid) => !surfacedRefusals.has(cid)).sort();
+  for (const targetCid of refusedByTarget.keys()) {
+    // The stranded target's WHOLE chain, not just the refusals named against it
+    // directly — a descendant of a stranded refusal is no more reachable than its
+    // parent, and reporting one without the other retains half the evidence.
+    const stranded = [...hostileChainFrom([targetCid])]
+      .filter((cid) => !surfacedRefusals.has(cid))
+      .sort();
     if (stranded.length > 0) unresolvedSupersedes.push({ targetCid, recordCids: stranded });
   }
   // Sorted, like every other field here: the whole output is arrival-order
