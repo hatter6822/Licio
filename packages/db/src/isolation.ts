@@ -84,6 +84,10 @@ export const WALLET_CONTEXT_TABLES: ReadonlySet<Relation> = new Set([
   'knomosis.governance_proposal',
   'knomosis.governance_proposal_vote',
   'knomosis.governance_signature',
+  // WS-M.4.2c (migration 0114): one delegated unit, one ballot.  A financial-context
+  // table like every other row of this list — it names a proposal, a ballot and a
+  // delegator, so it is a BFS seed of the pay-to-rank isolation proof too.
+  'knomosis.governance_delegated_unit_claim',
   'knomosis.sim_treasury',
   'knomosis.sim_treasury_entry',
   'knomosis.governance_audit_log',

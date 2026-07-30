@@ -10,6 +10,7 @@ import {
   comprehensionResults,
   type createDbClient,
   governanceAuditLogs,
+  governanceDelegatedUnitClaims,
   governanceProposals,
   governanceProposalVotes,
   governanceSignatures,
@@ -53,6 +54,7 @@ import type {
   GovernanceAuditStore,
   GovernanceProposalRecord,
   GovernanceProposalStore,
+  GovernanceSignatureInsert,
   GovernanceSignatureRecord,
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
@@ -1704,37 +1706,99 @@ function mapSignature(row: typeof governanceSignatures.$inferSelect): Governance
   };
 }
 
+/**
+ * Thrown to unwind the ballot transaction when a delegated unit was claimed first.
+ *
+ * A thrown error is what rolls a Drizzle transaction back, and the losing delegator
+ * ids have to survive that unwinding to reach the caller — a plain `tx.rollback()`
+ * discards everything the callback computed, which would leave the route unable to
+ * say WHICH unit went elsewhere.
+ */
+class DelegatedUnitClaimConflict extends Error {
+  readonly delegatorUserIds: readonly string[];
+  constructor(delegatorUserIds: readonly string[]) {
+    super('a delegated unit was claimed by another ballot');
+    this.name = 'DelegatedUnitClaimConflict';
+    this.delegatorUserIds = delegatorUserIds;
+  }
+}
+
 export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore {
   constructor(private readonly db: Db) {}
 
-  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    const rows = await this.db
-      .insert(governanceSignatures)
-      .values({
-        signatureId: record.signatureId,
-        proposalId: record.proposalId,
-        userId: record.userId,
-        walletAccountId: record.walletAccountId,
-        signatureType: record.signatureType,
-        typedDataHash: record.typedDataHash,
-        signatureRef: record.signatureRef,
-        weightSnapshot: record.weightSnapshot,
-        eligibilityReason: record.eligibilityReason,
-        createdAt: new Date(record.createdAt),
-        purpose: record.purpose ?? 'vote',
-        choice: record.choice ?? null,
-        nonce: record.nonce ?? null,
-        // A delegated ballot's consumed set is frozen HERE, at signing time —
-        // reconstructing it later from delegations that have since been
-        // granted or revoked would answer a different question.
-        countedDelegatorIds:
-          record.countedDelegatorIds === null || record.countedDelegatorIds === undefined
-            ? null
-            : [...record.countedDelegatorIds],
+  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert> {
+    const wanted = [...new Set(record.countedDelegatorIds ?? [])];
+    // ONE TRANSACTION for the signature and its delegated-unit claims.  Two
+    // delegates can resolve weight from the same uncommitted view — a member who
+    // splits an `all` delegation to one and a `type:` delegation to another — so the
+    // pre-insert `delegatorsAlreadyConsumed` read narrows that window and cannot
+    // close it.  The (proposal, delegator) primary key from migration 0114 decides
+    // the race, and a lost claim rolls the SIGNATURE back with it: a ballot that
+    // persisted weight for a unit it did not win is the same double count, one row
+    // later.
+    return this.db
+      .transaction(async (tx) => {
+        const inserted = await tx
+          .insert(governanceSignatures)
+          .values({
+            signatureId: record.signatureId,
+            proposalId: record.proposalId,
+            userId: record.userId,
+            walletAccountId: record.walletAccountId,
+            signatureType: record.signatureType,
+            typedDataHash: record.typedDataHash,
+            signatureRef: record.signatureRef,
+            weightSnapshot: record.weightSnapshot,
+            eligibilityReason: record.eligibilityReason,
+            createdAt: new Date(record.createdAt),
+            purpose: record.purpose ?? 'vote',
+            choice: record.choice ?? null,
+            nonce: record.nonce ?? null,
+            // A delegated ballot's consumed set is frozen HERE, at signing time —
+            // reconstructing it later from delegations that have since been
+            // granted or revoked would answer a different question.
+            countedDelegatorIds:
+              record.countedDelegatorIds === null || record.countedDelegatorIds === undefined
+                ? null
+                : [...record.countedDelegatorIds],
+          })
+          .onConflictDoNothing()
+          .returning({ signatureId: governanceSignatures.signatureId });
+        if (inserted.length === 0)
+          return { ok: false as const, reason: 'duplicate_signature' as const };
+        if (wanted.length === 0) return { ok: true as const, record };
+        // `onConflictDoNothing` and a count comparison rather than catching 23505:
+        // the claims that landed come back NAMED, so the refusal can say which unit
+        // went elsewhere instead of classifying a driver error by code.
+        const claimed = await tx
+          .insert(governanceDelegatedUnitClaims)
+          .values(
+            wanted.map((delegatorUserId) => ({
+              proposalId: record.proposalId,
+              delegatorUserId,
+              signatureId: record.signatureId,
+              createdAt: new Date(record.createdAt),
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ delegatorUserId: governanceDelegatedUnitClaims.delegatorUserId });
+        if (claimed.length === wanted.length) return { ok: true as const, record };
+        const won = new Set(claimed.map((r) => r.delegatorUserId));
+        const lost = wanted.filter((id) => !won.has(id)).sort();
+        // `rollback()` throws to unwind the transaction, so the `return` after it is
+        // unreachable — the value is carried out through the catch below instead.
+        throw new DelegatedUnitClaimConflict(lost);
       })
-      .onConflictDoNothing()
-      .returning({ signatureId: governanceSignatures.signatureId });
-    return rows.length > 0 ? record : null;
+      .catch((error: unknown) => {
+        if (error instanceof DelegatedUnitClaimConflict) {
+          return {
+            ok: false as const,
+            reason: 'delegated_unit_claimed' as const,
+            delegatorUserIds: error.delegatorUserIds,
+          };
+        }
+        throw error;
+      });
   }
 
   async listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]> {

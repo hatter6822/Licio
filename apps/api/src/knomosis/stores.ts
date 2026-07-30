@@ -734,9 +734,39 @@ export interface ProposalVoteStore {
   clear(): Promise<void>;
 }
 
+/**
+ * The outcome of recording a ballot, with the two ways it can be refused kept
+ * APART.
+ *
+ * It used to be `record | null`, and one null meant "this wallet already signed".
+ * Adding the delegated-unit claim gives a second, unrelated refusal — a unit this
+ * ballot counted was won by a ballot that committed first — and collapsing the two
+ * would have made the route answer `already_signed` to a voter who had not signed,
+ * whose actual remedy is to re-submit against a view that now contains the winner.
+ */
+export type GovernanceSignatureInsert =
+  | { readonly ok: true; readonly record: GovernanceSignatureRecord }
+  /** A (proposal, wallet, purpose), one-vote-per-user, or nonce collision. */
+  | { readonly ok: false; readonly reason: 'duplicate_signature' }
+  /** Delegated units already claimed for this proposal by another ballot. */
+  | {
+      readonly ok: false;
+      readonly reason: 'delegated_unit_claimed';
+      readonly delegatorUserIds: readonly string[];
+    };
+
 export interface GovernanceSignatureStore {
-  /** Insert-once per (proposal, wallet); returns null on duplicate. */
-  insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null>;
+  /**
+   * Insert-once per (proposal, wallet, purpose).
+   *
+   * ATOMIC WITH THE DELEGATED-UNIT CLAIMS.  Every id in `countedDelegatorIds` is
+   * claimed as a row keyed (proposal, delegator) in the SAME transaction, so two
+   * delegates resolving weight from the same uncommitted view cannot both record
+   * the same unit — the read-then-write `delegatorsAlreadyConsumed` check could
+   * only narrow that race, never close it.  The loser rolls back whole rather
+   * than persisting weight it did not win.
+   */
+  insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert>;
   listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]>;
   /** Signatures by this wallet on proposals that are still open (obligations). */
   listOpenByWallet(walletAccountId: string): Promise<GovernanceSignatureRecord[]>;
@@ -1857,7 +1887,14 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     this.#proposals = proposals;
   }
 
-  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
+  /** (proposal, delegator) → the signature that claimed that unit (migration 0114). */
+  readonly #claims = new Map<string, string>();
+
+  static #claimKey(proposalId: string, delegatorUserId: string): string {
+    return `${proposalId}\u0000${delegatorUserId}`;
+  }
+
+  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert> {
     // Emulate ALL THREE unique indexes from migrations 0059 + 0082 + 0084 so
     // tests exercise database semantics: (proposal, wallet, PURPOSE) — a
     // designated signer who voted can still record the execution co-signature
@@ -1868,14 +1905,14 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
         row.walletAccountId === record.walletAccountId &&
         (row.purpose ?? 'vote') === (record.purpose ?? 'vote')
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
       if (
         (row.purpose ?? 'vote') === 'vote' &&
         (record.purpose ?? 'vote') === 'vote' &&
         row.userId === record.userId
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
       if (
         row.nonce !== undefined &&
@@ -1884,11 +1921,35 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
         record.nonce !== null &&
         row.nonce === record.nonce
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
     }
+    // …and the (proposal, delegator) primary key from migration 0114, ALL OR
+    // NOTHING like the transaction it stands for: a partially-claimed ballot would
+    // record weight for units it lost.
+    const wanted = [...new Set(record.countedDelegatorIds ?? [])];
+    const taken = wanted.filter((id) =>
+      this.#claims.has(InMemoryGovernanceSignatureStore.#claimKey(record.proposalId, id)),
+    );
+    if (taken.length > 0) {
+      return { ok: false, reason: 'delegated_unit_claimed', delegatorUserIds: taken.sort() };
+    }
+    for (const id of wanted) {
+      this.#claims.set(
+        InMemoryGovernanceSignatureStore.#claimKey(record.proposalId, id),
+        record.signatureId,
+      );
+    }
     this.#rows.set(record.signatureId, { ...record });
-    return { ...record };
+    return { ok: true, record: { ...record } };
+  }
+
+  /** ON DELETE CASCADE from `governance_signature`: a removed ballot RELEASES its
+   *  claims, or the delegator's unit is disenfranchised for that proposal for ever. */
+  #releaseClaims(signatureId: string): void {
+    for (const [key, owner] of this.#claims) {
+      if (owner === signatureId) this.#claims.delete(key);
+    }
   }
 
   async listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]> {
@@ -1912,6 +1973,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     for (const [key, row] of this.#rows) {
       if (row.signatureRef === actionRecordId) {
         this.#rows.delete(key);
+        this.#releaseClaims(row.signatureId);
         removed += 1;
       }
     }
@@ -1923,6 +1985,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     for (const [key, row] of this.#rows) {
       if (row.userId === userId) {
         this.#rows.delete(key);
+        this.#releaseClaims(row.signatureId);
         removed += 1;
       }
     }
@@ -1931,6 +1994,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
 
   async clear(): Promise<void> {
     this.#rows.clear();
+    this.#claims.clear();
   }
 }
 

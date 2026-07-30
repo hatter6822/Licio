@@ -1302,7 +1302,23 @@ export async function signProposal(
     nonce,
   };
   const inserted = await deps.proposalSignatures.insert(record);
-  if (inserted === null) {
+  if (!inserted.ok) {
+    if (inserted.reason === 'delegated_unit_claimed') {
+      // NOT `already_signed`: this voter has not signed.  A delegator split an
+      // `all` delegation to one delegate and a `type:` delegation to another, both
+      // resolved weight from the same uncommitted view, and the other ballot
+      // committed first — so this one's snapshot counted a unit it does not hold.
+      // The claim table refuses it whole rather than letting the tally count that
+      // unit twice, and the remedy is to re-submit: the winner is now visible to
+      // `delegatorsAlreadyConsumed`, so the next attempt resolves a weight that
+      // excludes it and succeeds.
+      return tgErr(
+        409,
+        'delegated_unit_claimed',
+        `${inserted.delegatorUserIds.length} delegated unit(s) were counted by another ` +
+          'ballot first. Re-submit to vote with the weight that remains.',
+      );
+    }
     return tgErr(409, 'already_signed', 'A signature by this user/wallet/nonce already exists.');
   }
   await appendChainedAudit(deps, {
@@ -1315,7 +1331,7 @@ export async function signProposal(
     proposalId: input.proposalId,
   });
   const tally = await tallyFor(deps, proposal, evalPack, false);
-  return { ok: true, signature: inserted, tally: wireTally(tally) };
+  return { ok: true, signature: inserted.record, tally: wireTally(tally) };
 }
 
 // ---------------------------------------------------------------------------

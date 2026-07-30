@@ -644,7 +644,7 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
         purpose: 'vote',
         countedDelegatorIds: [delegatorA, delegatorB],
       }),
-    ).not.toBeNull();
+    ).toMatchObject({ ok: true });
     const [voteRow] = await signatures.listByProposal(proposalId);
     expect(voteRow?.countedDelegatorIds).toEqual([delegatorA, delegatorB]);
     // A model that folds no delegations records NULL, and the reader must not
@@ -658,7 +658,7 @@ describe.skipIf(!DB_URL)('WS-M treasury Drizzle adapters (live Postgres)', () =>
         nonce: randomUUID(),
         countedDelegatorIds: null,
       }),
-    ).not.toBeNull();
+    ).toMatchObject({ ok: true });
     const rows = await signatures.listByProposal(proposalId);
     expect(rows.find((r) => r.purpose === 'approval')?.countedDelegatorIds ?? null).toBeNull();
     await db.delete(governanceSignatures).where(eq(governanceSignatures.proposalId, proposalId));

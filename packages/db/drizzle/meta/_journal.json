@@ -792,6 +792,13 @@
       "when": 1783728000037,
       "tag": "0113_delegation_delegator_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1783728000038,
+      "tag": "0114_governance_delegated_unit_claim",
+      "breakpoints": true
     }
   ]
 }

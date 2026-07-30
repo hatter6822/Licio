@@ -588,8 +588,14 @@ describe('InMemoryGovernanceProposalStore + votes + signatures', () => {
       eligibilityReason: 'member',
       createdAt: now(),
     };
-    expect(await store.insert(sig)).not.toBeNull();
-    expect(await store.insert({ ...sig, signatureId: crypto.randomUUID() })).toBeNull(); // dup
+    expect(await store.insert(sig)).toMatchObject({ ok: true });
+    // A duplicate is `duplicate_signature`, NOT the delegated-unit refusal: the two
+    // are different facts with different remedies, which is why `insert` reports a
+    // reason instead of one null.
+    expect(await store.insert({ ...sig, signatureId: crypto.randomUUID() })).toEqual({
+      ok: false,
+      reason: 'duplicate_signature',
+    });
     expect(await store.listByProposal(openProposal.proposalId)).toHaveLength(1);
     expect(await store.listOpenByWallet('w1')).toHaveLength(1);
   });

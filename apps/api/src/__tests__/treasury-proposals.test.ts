@@ -2643,6 +2643,63 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
     ).toMatchObject({ ok: true });
   });
 
+  it('two ballots cannot both count the SAME delegated unit (migration 0114)', async () => {
+    // The double-count race the pre-insert read could only narrow.  A member who
+    // splits an `all` delegation to one delegate and a `type:<proposal>` delegation
+    // to another lets both delegates resolve weight from the same uncommitted view:
+    // each `consumedElsewhere` check comes back empty and both signatures insert,
+    // because `governance_signature_unique_idx` is keyed on the WALLET and a JSONB
+    // array carries no cross-row uniqueness.  The claim rows are what refuse it.
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegator = crypto.randomUUID();
+    const ballot = (userId: string) => ({
+      signatureId: crypto.randomUUID(),
+      proposalId: proposal.proposalId,
+      userId,
+      walletAccountId: crypto.randomUUID(),
+      signatureType: 'eip712_ecdsa' as const,
+      typedDataHash: `0x${'3'.repeat(64)}`,
+      signatureRef: crypto.randomUUID(),
+      weightSnapshot: '2',
+      eligibilityReason: 'delegated',
+      createdAt: new Date(deps.now()).toISOString(),
+      purpose: 'vote' as const,
+      choice: 'approve' as const,
+      nonce: crypto.randomUUID(),
+      // BOTH ballots claim the same delegator, exactly as two concurrent
+      // resolutions of an uncommitted view would.
+      countedDelegatorIds: [delegator],
+    });
+    const first = await deps.proposalSignatures.insert(ballot(PROPOSER));
+    expect(first.ok).toBe(true);
+    const second = await deps.proposalSignatures.insert(ballot(VOTER_2));
+    expect(second).toEqual({
+      ok: false,
+      reason: 'delegated_unit_claimed',
+      delegatorUserIds: [delegator],
+    });
+    // …and the refusal is not `duplicate_signature`: the second voter has not
+    // signed, and answering `already_signed` would send them looking for a ballot
+    // they never cast instead of re-submitting.
+    expect(second.ok === false && second.reason).toBe('delegated_unit_claimed');
+    // The losing ballot left NOTHING behind — no row that a tally could count.
+    const recorded = await deps.proposalSignatures.listByProposal(proposal.proposalId);
+    expect(recorded).toHaveLength(1);
+
+    // REVERTING the winner RELEASES its claim, or the delegator's unit would be
+    // disenfranchised for this proposal for ever — a worse failure than the double
+    // count this table prevents.
+    expect(await deps.proposalSignatures.removeByAction(ballot(PROPOSER).signatureRef)).toBe(0);
+    const winner = recorded[0];
+    if (!winner) throw new Error('expected the winning ballot');
+    expect(await deps.proposalSignatures.removeByAction(winner.signatureRef)).toBe(1);
+    const retried = await deps.proposalSignatures.insert(ballot(VOTER_2));
+    expect(retried.ok).toBe(true);
+  });
+
   it('ledger-only signature rows (null snapshot) never tally or satisfy quorum (W8 review)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps);
