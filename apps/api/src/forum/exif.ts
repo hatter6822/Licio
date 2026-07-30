@@ -698,7 +698,7 @@ function gifDimensions(bytes: Uint8Array): ImageDimensions | null {
  * extreme stitched panoramas near 20:1 — so this rejects only shapes that exist to
  * break a layout, and it does so whatever the container claims.
  */
-export const MAX_INTRINSIC_ASPECT_RATIO = 100;
+const MAX_INTRINSIC_ASPECT_RATIO = 100;
 
 export function imageDimensions(contentType: string, bytes: Uint8Array): ImageDimensions | null {
   if (!matchesMagic(contentType, bytes)) return null;
