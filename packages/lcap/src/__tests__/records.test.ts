@@ -228,6 +228,123 @@ describe('thread projection (WS-R.2.2)', () => {
     });
   });
 
+  it('a moderated variant cannot be un-hidden by publishing a NEWER own edit', () => {
+    // The moderation bypass.  Hiding was scoped to the VISIBLE path, so the
+    // moderated author had a move available to no one else: publish a second
+    // authorized edit of the root at a higher room-log seq, the visible chain
+    // stops passing through the moderated variant, and the moderation record
+    // disappears from every output field.  §25.1's stricter visible state has to
+    // win over the whole logical contribution, which is what this file's header
+    // says a moderation_action hides.
+    const post = tr('m-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const v1 = tr(
+      'm-v1',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'm-post' }),
+      { roomLogSeq: 1 },
+    );
+    const moderated = tr(
+      'm-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'm-v1',
+      }),
+      { roomLogSeq: 2 },
+    );
+    expect(reduceThreadProjection([post, v1, moderated])[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'm-mod',
+    });
+    // …now the author's escape hatch: a SECOND authorized edit of the root.
+    const v2 = tr(
+      'm-v2',
+      mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'm-post' }),
+      { roomLogSeq: 3 },
+    );
+    const after = reduceThreadProjection([post, v1, moderated, v2]);
+    expect(after[0]?.visibleCid).toBe('m-v2'); // the tip did move…
+    expect(after[0]).toMatchObject({ hidden: true, hiddenBy: 'm-mod' }); // …the hiding did not lift
+    // And the passed-over variant is retained rather than dropped (§25.1).
+    expect(after[0]?.supersededEdits).toEqual(['m-v1']);
+  });
+
+  it("an author's OWN tombstone of a losing variant still deletes the contribution", () => {
+    // The same bypass from the other side: an offline-plane deletion aimed at a
+    // variant that later stops being visible silently did nothing on any peer
+    // holding both variants.
+    const post = tr('d-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const v1 = tr(
+      'd-v1',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'd-post' }),
+      { roomLogSeq: 1 },
+    );
+    const ownTomb = tr('d-tomb', mkRecord({ event_type: 'tombstone', target_record_cid: 'd-v1' }), {
+      roomLogSeq: 2,
+    });
+    const v2 = tr(
+      'd-v2',
+      mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'd-post' }),
+      { roomLogSeq: 3 },
+    );
+    expect(reduceThreadProjection([post, v1, ownTomb, v2])[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'd-tomb',
+    });
+  });
+
+  it('retains a hostile record aimed at an ALREADY-REFUSED hostile record', () => {
+    // Refusal evidence was collected one hop only, so whether a chain of hostile
+    // records survived depended on whether its earliest link happened to name an
+    // AUTHORIZED record.  §25.2 attaches no such condition to "never silently
+    // discarded".
+    const post = tr('h-post', mkRecord({ event_type: 'post' }));
+    const h1 = tr(
+      'h-1',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        replaces_record_cid: 'h-post',
+      }),
+    );
+    const h2 = tr(
+      'h-2',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker-2',
+        replaces_record_cid: 'h-1', // aimed at the refused record, not the post
+      }),
+    );
+    const projected = reduceThreadProjection([post, h1, h2]);
+    expect(projected[0]?.visibleCid).toBe('h-post');
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['h-1', 'h-2']);
+  });
+
+  it('retains a hostile record aimed at the MODERATION record itself', () => {
+    // The moderation/tombstone records acting on a contribution are part of it,
+    // so a record trying to supersede one is evidence about this contribution —
+    // and named a CID in neither the edit graph nor the refused set.
+    const post = tr('n-post', mkRecord({ event_type: 'post' }));
+    const mod = tr(
+      'n-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'n-post',
+      }),
+    );
+    const attackMod = tr(
+      'n-attack',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        replaces_record_cid: 'n-mod',
+      }),
+    );
+    const projected = reduceThreadProjection([post, mod, attackMod]);
+    expect(projected[0]).toMatchObject({ hidden: true, hiddenBy: 'n-mod' });
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['n-attack']);
+  });
+
   it("still applies an edit made from the author's SECOND device", () => {
     // Ownership is per ACCOUNT, not per device key — a member editing from another
     // of their own devices must keep working.
