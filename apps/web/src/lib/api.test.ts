@@ -9,6 +9,7 @@ import {
 import { useAuthStore } from '../stores/auth.js';
 import {
   ApiClientError,
+  changeRoomVisibility,
   changeStoryVisibility,
   createContribution,
   createLens,
@@ -17,6 +18,7 @@ import {
   fetchRoomLenses,
   joinRoom,
   parseResponse,
+  RoomVisibilityBlockedError,
   resetApiClientState,
   setRoomLens,
   uploadAttentionAggregates,
@@ -402,6 +404,54 @@ describe('room lens client (WS-G.2.2)', () => {
     const result = await setRoomLens(ROOM_ID, LENS.lens_id);
     expect(result.lens_id).toBe(LENS.lens_id);
     expect(posted).toEqual({ lens_id: LENS.lens_id });
+  });
+});
+
+describe('changeRoomVisibility 409 shapes (WS-Q.3.4)', () => {
+  const ROOM = '66666666-6666-4666-8666-666666666666';
+  const BLOCKED = '77777777-7777-4777-8777-777777777777';
+
+  it('keeps the BLOCKER ids so the steward can resolve each duplicate', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: { code: 'duplicate_story', message: '1 public story shares a link' },
+          blocked_story_ids: [BLOCKED],
+        },
+        409,
+      );
+    });
+    const error = await changeRoomVisibility(ROOM, 'private').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(RoomVisibilityBlockedError);
+    expect((error as RoomVisibilityBlockedError).blockedStoryIds).toEqual([BLOCKED]);
+  });
+
+  it('keeps the RETRY GUIDANCE of the second 409 shape, which carries no blockers', async () => {
+    // `visibility_race`: a story turned public mid-cascade, so the trigger refused
+    // the flip and the remedy is a plain retry.  Reading the body for the blocker
+    // shape CONSUMES it, so letting this fall through to `parseResponse` handed
+    // `normalizeError` an unreadable response and collapsed the whole thing to a
+    // generic `http_409` / "Conflict" — discarding the exact sentence that tells
+    // the steward what to do, one layer above the UI that shows it.
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: {
+            code: 'visibility_race',
+            message: 'A story in this room became public while it was being converted.',
+          },
+        },
+        409,
+      );
+    });
+    const error = await changeRoomVisibility(ROOM, 'private').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error).not.toBeInstanceOf(RoomVisibilityBlockedError);
+    expect((error as ApiClientError).code).toBe('visibility_race');
+    expect((error as ApiClientError).message).toContain('became public while it was being');
+    expect((error as ApiClientError).status).toBe(409);
   });
 });
 

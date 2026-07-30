@@ -826,6 +826,18 @@ export async function changeRoomVisibility(
         parsed.data.blocked_story_ids,
       );
     }
+    // READING THE BODY CONSUMED IT, so `parseResponse` below cannot re-read it.
+    // The route has a SECOND 409 shape — `visibility_race`, which carries no
+    // `blocked_story_ids` because a story turned public mid-cascade and the
+    // remedy is a plain retry — and letting that fall through reached
+    // `normalizeError` with an unreadable response, collapsing it to a generic
+    // `http_409` / "Conflict".  The retry guidance the server wrote was the whole
+    // point of that code, and it was being discarded one layer above the UI.
+    // Parse the ordinary envelope from the value already in hand.
+    const generic = apiErrorSchema.safeParse(raw);
+    if (generic.success) {
+      throw new ApiClientError(generic.data.error.code, generic.data.error.message, 409);
+    }
   }
   const result = await parseResponse(
     response,

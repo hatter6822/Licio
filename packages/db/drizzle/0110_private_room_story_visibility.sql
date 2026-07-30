@@ -36,9 +36,50 @@
 -- The backfill runs FIRST.  A trigger installed over violating rows lets them sit
 -- unnoticed until some unrelated update touches them, and this repo's precedent
 -- (0076) is to repair stored data rather than leave rows the code cannot process.
-UPDATE "stories" SET "visibility" = 'room_only'
-WHERE "visibility" = 'public'
-  AND "room_id" IN (SELECT "room_id" FROM "rooms" WHERE "visibility" = 'private');--> statement-breakpoint
+--
+-- AND IT MUST NOT BE ABLE TO ABORT, because an aborting statement HERE stops the
+-- whole chain: every later migration — including any follow-up written to repair
+-- this one — never runs, on precisely the installations whose inconsistent rows
+-- this exists to fix.  A private room may legitimately hold BOTH a public story
+-- and a `room_only` story for one canonical URL (`ingestion/submission.ts` records
+-- that cross-tier pair on purpose, and the two partial uniques permit it), so
+-- converting the public copy would move it into an occupied
+-- `(canonical_url, room_id)` slot and raise 23505.  Those rows are skipped and
+-- reported instead.
+--
+-- There is deliberately no automatic resolution for such a pair: the twin already
+-- carries that URL in-room, `story_hidden_state` has only `takedown` and `safety`
+-- — neither of which means "duplicate" — and deleting a story is not a
+-- migration's decision.  The live cascade answers the same condition with a 409
+-- that NAMES the blockers for a steward, which is the right shape for a
+-- judgement call.
+UPDATE "stories" AS s SET "visibility" = 'room_only'
+WHERE s."visibility" = 'public'
+  AND s."room_id" IN (SELECT "room_id" FROM "rooms" WHERE "visibility" = 'private')
+  AND (
+    -- Not in the destination index at all ⇒ cannot collide.
+    s."canonical_url" IS NULL
+    OR s."hidden_state" IS NOT NULL
+    OR NOT EXISTS (
+      SELECT 1 FROM "stories" t
+      WHERE t."room_id" = s."room_id"
+        AND t."canonical_url" = s."canonical_url"
+        AND t."visibility" = 'room_only'
+        AND t."hidden_state" IS NULL
+        AND t."story_id" <> s."story_id"
+    )
+  );--> statement-breakpoint
+
+DO $$
+DECLARE stranded bigint;
+BEGIN
+  SELECT count(*) INTO stranded FROM "stories" s
+    WHERE s."visibility" = 'public'
+      AND s."room_id" IN (SELECT "room_id" FROM "rooms" WHERE "visibility" = 'private');
+  IF stranded > 0 THEN
+    RAISE NOTICE 'WS-Q: % public story(ies) remain in private rooms - each shares a canonical URL with an in-room twin, so converting it would violate stories_canonical_url_room_uq. Resolve the duplicate (hide or remove one copy), then re-run the UPDATE in this migration.', stranded;
+  END IF;
+END $$;--> statement-breakpoint
 
 CREATE OR REPLACE FUNCTION "enforce_story_room_visibility"() RETURNS trigger AS $$
 DECLARE room_vis text;
