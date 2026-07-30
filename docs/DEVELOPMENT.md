@@ -1458,6 +1458,26 @@ locks) and mirror any invariant into the schema as a `CHECK`/trigger where
 possible — see the existing chain for the house style. All queries in the
 codebase use Drizzle's parameterized queries — never string-concatenated SQL.
 
+Three things about the chain that are easy to get wrong:
+
+- **EDITING AN ALREADY-APPLIED MIGRATION DOES NOTHING TO YOUR DATABASE.** The
+  migrator decides what to run from the journal's `when` timestamps, not from
+  the SQL's content, so a file you change is silently treated as already
+  applied.  CI builds from an empty database and does get the correction, so
+  the two can disagree — if you edit a migration you have already run, apply
+  the change by hand or recreate the local database.
+- **A STATEMENT THAT CAN ABORT STOPS EVERY LATER MIGRATION.** A repair written
+  as a follow-up file is therefore gated on the file it repairs succeeding;
+  when an early statement can fail on real data (a backfill moving rows into a
+  unique index, say), it has to be written so it cannot — skip what it cannot
+  convert and `RAISE NOTICE` the remainder.  0110 has a worked example.
+- **A TRIGGER THAT READS ANOTHER TABLE NEEDS A LOCK.** Two `BEFORE` triggers
+  that each check the other's subject do not serialize against each other under
+  READ COMMITTED: both transactions can observe a state the other is about to
+  change and both commit.  Take a row lock (`SELECT … FOR SHARE`) on the row
+  you are reading, and test it with two real connections — a single-session
+  test cannot observe a lock at all.
+
 **Name every object under 64 bytes.** Postgres does not reject an identifier
 longer than `NAMEDATALEN - 1` (63 bytes) — it silently **truncates** it and
 emits only a `NOTICE`, which scrolls past in migrate output. Two different
