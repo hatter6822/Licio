@@ -2121,7 +2121,7 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
     return rows[0]?.count ?? 0;
   }
 
-  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+  async countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number> {
     const rows = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(governanceAuditLogs)
@@ -2130,6 +2130,8 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
           eq(governanceAuditLogs.roomId, roomId),
           eq(governanceAuditLogs.actorUserId, userId),
           inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
+          // Bounded so the frozen electorate counts contributions as they stood.
+          ...(asOf === undefined ? [] : [lte(governanceAuditLogs.createdAt, new Date(asOf))]),
         ),
       );
     return rows[0]?.count ?? 0;

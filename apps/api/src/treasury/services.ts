@@ -86,7 +86,7 @@ export function buildMembershipFactsPort(
   identity: IdentityServices,
   knomosis: KnomosisServices,
 ): MembershipFactsPort {
-  const memberFacts = async (roomId: string, userId: string) => {
+  const memberFacts = async (roomId: string, userId: string, asOf?: string) => {
     const subscription = await forum.rooms.getSubscription(roomId, userId);
     if (subscription === null || subscription.status !== 'active') return null;
     const auth = await identity.store.getAuth(userId);
@@ -110,11 +110,29 @@ export function buildMembershipFactsPort(
     // vote CLOSED and would lock the member out entirely.
     const memberSince = subscription.joinedAt;
     const ageFrom = memberSince ?? subscription.requestedAt;
-    const membershipDays = Math.floor((knomosis.now() - Date.parse(ageFrom)) / 86_400_000);
+    // EVERY FACT AT ONE INSTANT.  `asOf` is the instant the electorate was frozen;
+    // reading `now()` for the age while the basis had been counted earlier is what
+    // let a member cross the tenure threshold mid-window and vote against a
+    // denominator they were never in.
+    const evaluatedAt = asOf === undefined ? knomosis.now() : Date.parse(asOf);
+    const membershipDays = Math.floor((evaluatedAt - Date.parse(ageFrom)) / 86_400_000);
     return {
       membershipDays: Number.isFinite(membershipDays) ? Math.max(0, membershipDays) : null,
-      contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId),
-      verifiedIdentity: auth?.emailVerified === true,
+      contributionCount: await knomosis.governanceAudit.countQualifyingByRoomActor(
+        roomId,
+        userId,
+        asOf,
+      ),
+      // UNKNOWN STAYS ADMISSIBLE, exactly as `memberSince` does above.  A null
+      // `emailVerifiedAt` is a row from before that field existed, so it cannot be
+      // shown to postdate the freeze — treating it as unverified would refuse every
+      // such member on a `requireVerifiedIdentity` pack, a governance lockout with no
+      // error they could act on.
+      verifiedIdentity:
+        auth?.emailVerified === true &&
+        (asOf === undefined ||
+          auth.emailVerifiedAt == null ||
+          Date.parse(auth.emailVerifiedAt) <= Date.parse(asOf)),
       memberSince,
     };
   };
@@ -161,7 +179,9 @@ export function buildMembershipFactsPort(
           const inventory = await authMethodInventory(identity, userId);
           if (!hasVerifiedCredential(inventory)) continue;
         }
-        const facts = await memberFacts(roomId, userId);
+        // The basis walk asks about the SAME instant it filters the roster at —
+        // it was mixing an as-of roster with live facts.
+        const facts = await memberFacts(roomId, userId, eligibility.asOf);
         const verdict = checkVoterEligibility(
           {
             userId,

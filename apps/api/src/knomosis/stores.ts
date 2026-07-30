@@ -828,7 +828,9 @@ export interface GovernanceAuditStore {
   /** WS-M.4.2c-2: one member's qualifying governance participation in a room —
    *  the `minContributions` eligibility basis (an in-context metric; never a
    *  cross-context content join). */
-  countQualifyingByRoomActor(roomId: string, userId: string): Promise<number>;
+  /** Qualifying contributions by one member in one room; `asOf` bounds on
+   *  `created_at` so the electorate freeze can count them as they stood. */
+  countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number>;
   /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
    *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
    *  anonymized. */
@@ -2102,12 +2104,13 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
     ).length;
   }
 
-  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+  async countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number> {
     return this.#rows.filter(
       (r) =>
         r.roomId === roomId &&
         r.actorUserId === userId &&
-        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType) &&
+        (asOf === undefined || r.createdAt <= asOf),
     ).length;
   }
 

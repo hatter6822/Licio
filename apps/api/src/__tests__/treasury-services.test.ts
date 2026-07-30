@@ -362,8 +362,17 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
         countEligibleVoters: async () => 42,
       },
     }) as unknown as ForumServices;
-  const identityOf = (emailVerified: boolean): IdentityServices =>
-    ({ store: { getAuth: async () => ({ emailVerified }) } }) as unknown as IdentityServices;
+  /** A boolean keeps the pre-freeze callers reading naturally; the object form
+   *  carries `emailVerifiedAt`, which is what the freeze compares against.  Note the
+   *  boolean form leaves it ABSENT — i.e. unknown, which the freeze admits. */
+  const identityOf = (
+    auth: boolean | { emailVerified: boolean; emailVerifiedAt: string | null } = true,
+  ): IdentityServices =>
+    ({
+      store: {
+        getAuth: async () => (typeof auth === 'boolean' ? { emailVerified: auth } : auth),
+      },
+    }) as unknown as IdentityServices;
 
   it('derives facts from the subscription age + in-context participation', async () => {
     const fixture = await freshKnomosisServices();
@@ -386,7 +395,9 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
       verifiedIdentity: true,
       memberSince: joinedAt,
     });
-    expect(countSpy).toHaveBeenCalledWith(ROOM, USER);
+    // `undefined` is the LIVE instant — the third argument is the electorate freeze's
+    // `asOf`, absent here because nothing froze.
+    expect(countSpy).toHaveBeenCalledWith(ROOM, USER, undefined);
     expect(await port.eligibleMemberCount(ROOM)).toBe(42);
   });
 
@@ -509,6 +520,78 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     const facts = await port.memberFacts(ROOM, USER);
     expect(facts?.verifiedIdentity).toBe(false);
     expect(facts?.membershipDays).toBe(0);
+  });
+
+  // The freeze covered only `memberSince`.  Tenure, contributions and identity were
+  // read LIVE, so a member the frozen basis EXCLUDED for any of those could satisfy
+  // the rule mid-window and then vote against a denominator they were never counted
+  // in — satisfying quorum, or turning a treasury decision, against a smaller frozen
+  // figure.
+  it('counts TENURE at the frozen instant, not at the ballot', async () => {
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    // Joined 10 days ago; the basis was frozen 5 days ago.
+    const joinedAt = new Date(fixture.knomosis.now() - 10 * 86_400_000).toISOString();
+    const frozenAt = new Date(fixture.knomosis.now() - 5 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ status: 'active', joinedAt, requestedAt: joinedAt }),
+      identityOf(),
+      fixture.knomosis,
+    );
+    expect((await port.memberFacts(ROOM, USER))?.membershipDays).toBe(10);
+    // AS OF the freeze the member had only 5 days of tenure — which is what a
+    // `minMembershipDays: 7` pack must judge them on.
+    expect((await port.memberFacts(ROOM, USER, frozenAt))?.membershipDays).toBe(5);
+  });
+
+  it('counts CONTRIBUTIONS at the frozen instant', async () => {
+    const fixture = await freshKnomosisServices();
+    const countSpy = vi
+      .spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor')
+      .mockResolvedValue(3);
+    const joinedAt = new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString();
+    const frozenAt = new Date(fixture.knomosis.now() - 5 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ status: 'active', joinedAt, requestedAt: joinedAt }),
+      identityOf(),
+      fixture.knomosis,
+    );
+    await port.memberFacts(ROOM, USER, frozenAt);
+    // The bound reaches the store, so contributions made after the freeze cannot
+    // qualify a member the frozen basis excluded.
+    expect(countSpy).toHaveBeenCalledWith(ROOM, USER, frozenAt);
+  });
+
+  it('treats identity verified AFTER the freeze as unverified then', async () => {
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    const joinedAt = new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString();
+    const frozenAt = new Date(fixture.knomosis.now() - 5 * 86_400_000).toISOString();
+    const verifiedAfter = new Date(fixture.knomosis.now() - 1 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ status: 'active', joinedAt, requestedAt: joinedAt }),
+      identityOf({ emailVerified: true, emailVerifiedAt: verifiedAfter }),
+      fixture.knomosis,
+    );
+    expect((await port.memberFacts(ROOM, USER))?.verifiedIdentity).toBe(true);
+    expect((await port.memberFacts(ROOM, USER, frozenAt))?.verifiedIdentity).toBe(false);
+  });
+
+  it('UNKNOWN stays admissible: a null emailVerifiedAt passes the freeze', async () => {
+    // A row from before that field existed cannot be shown to postdate the freeze.
+    // Treating it as unverified would refuse every such member on a
+    // `requireVerifiedIdentity` pack — a governance lockout with no error they could
+    // act on, and the same reasoning `memberSince` already uses for its own null.
+    const fixture = await freshKnomosisServices();
+    vi.spyOn(fixture.knomosis.governanceAudit, 'countQualifyingByRoomActor').mockResolvedValue(0);
+    const joinedAt = new Date(fixture.knomosis.now() - 60 * 86_400_000).toISOString();
+    const frozenAt = new Date(fixture.knomosis.now() - 5 * 86_400_000).toISOString();
+    const port = buildMembershipFactsPort(
+      forumOf({ status: 'active', joinedAt, requestedAt: joinedAt }),
+      identityOf({ emailVerified: true, emailVerifiedAt: null }),
+      fixture.knomosis,
+    );
+    expect((await port.memberFacts(ROOM, USER, frozenAt))?.verifiedIdentity).toBe(true);
   });
 });
 

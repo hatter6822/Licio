@@ -150,6 +150,8 @@ interface TestHarness extends ProposalDeps {
       memberSince?: string;
     }
   >;
+  /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
+  memberFactsAsOf: (string | null)[];
 }
 
 function buildHarness(): TestHarness {
@@ -179,6 +181,8 @@ function buildHarness(): TestHarness {
       return true;
     },
   };
+  /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
+  const memberFactsAsOf: (string | null)[] = [];
   const memberFactsOverride = new Map<
     string,
     {
@@ -189,14 +193,19 @@ function buildHarness(): TestHarness {
     }
   >();
   const membership: MembershipFactsPort = {
-    memberFacts: async (_r, userId) =>
-      members.has(userId)
-        ? (memberFactsOverride.get(userId) ?? {
-            membershipDays: 60,
-            contributionCount: 10,
-            verifiedIdentity: true,
-          })
-        : null,
+    memberFacts: async (_r, userId, asOf) => {
+      // Recorded so a test can assert WHICH instant the gate asked about — the whole
+      // defect was the gate asking about `now`.
+      memberFactsAsOf.push(asOf ?? null);
+      if (!members.has(userId)) return null;
+      return (
+        memberFactsOverride.get(userId) ?? {
+          membershipDays: 60,
+          contributionCount: 10,
+          verifiedIdentity: true,
+        }
+      );
+    },
     eligibleMemberCount: async () => 3,
   };
   const deps: ProposalDeps = {
@@ -263,6 +272,7 @@ function buildHarness(): TestHarness {
     executorAccepts,
     electionsOpened,
     memberFactsOverride,
+    memberFactsAsOf,
   });
 }
 
@@ -1736,6 +1746,70 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     expect(singleReads).toBe(0);
   });
 
+  it('asks for eligibility AS OF the frozen instant, not at the ballot', async () => {
+    // The freeze covered only `memberSince`.  Tenure, contributions and identity were
+    // read LIVE, so a member the frozen basis EXCLUDED for any of those could satisfy
+    // the rule mid-window and vote against a denominator they were never counted in —
+    // satisfying quorum, or turning a treasury decision, against a smaller frozen
+    // figure.  The whole defect was the gate asking about `now`.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'one_civic_account_one_vote' });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = opened?.eligibleBasisAt ?? '';
+    expect(Date.parse(frozenAt)).toBeGreaterThan(0);
+    deps.memberFactsAsOf.length = 0;
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // EVERY facts read on the ballot path used the frozen instant — none went live.
+    expect(deps.memberFactsAsOf.length).toBeGreaterThan(0);
+    expect([...new Set(deps.memberFactsAsOf)]).toEqual([frozenAt]);
+  });
+
+  it("asks for the DELEGATOR's eligibility at the frozen instant too", async () => {
+    // The delegated arm had the identical asymmetry: its JOIN test was already frozen
+    // while its eligibility verdict was live, so an ineligible delegator could become
+    // eligible mid-window and boost a delegate's ballot.  Delegation is otherwise the
+    // way around the freeze, and delegated weight is what the threshold arithmetic
+    // consumes.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = opened?.eligibleBasisAt ?? '';
+    expect(Date.parse(frozenAt)).toBeGreaterThan(0);
+    deps.memberFactsAsOf.length = 0;
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // At least TWO reads — the voter and the delegator — and every one frozen.
+    expect(deps.memberFactsAsOf.length).toBeGreaterThan(1);
+    expect([...new Set(deps.memberFactsAsOf)]).toEqual([frozenAt]);
+  });
+
   it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {
     // The guard used to read only ACTIVE delegations, so revoking erased its
     // evidence while the weight stayed inside the delegate's frozen
@@ -2039,7 +2113,10 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     const inner = deps.membership;
     const captured: boolean[] = [];
     deps.membership = {
-      memberFacts: (roomId, userId) => inner.memberFacts(roomId, userId),
+      // FORWARDS `asOf`.  A positional forward that drops it compiles cleanly and
+      // makes every test through this harness exercise the pre-freeze live-facts path
+      // while appearing to cover the frozen one.
+      memberFacts: (roomId, userId, asOf) => inner.memberFacts(roomId, userId, asOf),
       eligibleMemberCount: (roomId, eligibility) => {
         if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
         return inner.eligibleMemberCount(roomId, eligibility);

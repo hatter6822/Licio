@@ -102,6 +102,21 @@ export interface MembershipFactsPort {
   memberFacts(
     roomId: string,
     userId: string,
+    /**
+     * The facts AS THEY STOOD at this instant; omitted ⇒ live.
+     *
+     * The electorate freeze covered only the JOIN instant, so a member the frozen
+     * basis EXCLUDED for tenure, contributions or identity could satisfy those rules
+     * mid-window and then vote against a denominator they were never counted in —
+     * satisfying quorum, or turning a treasury decision, against a smaller frozen
+     * figure.  The numerator has to answer to the instant the denominator was
+     * counted at.
+     *
+     * UNKNOWN STAYS ADMISSIBLE: a fact whose history cannot be established (a
+     * pre-field row) is not evidence of ineligibility, and refusing it would lock
+     * every such member out of governance with no error they could act on.
+     */
+    asOf?: string,
   ): Promise<{
     membershipDays: number | null;
     contributionCount: number | null;
@@ -950,7 +965,20 @@ export async function signProposal(
   const evalPack: LawPack | null = pinned !== null ? (pinned.lawPack as LawPack) : pack;
   if (evalPack === null) return tgErr(409, 'no_law_pack', 'No law-pack applies to this proposal.');
 
-  const facts = await deps.membership.memberFacts(input.roomId, input.userId);
+  // THE INSTANT THE BASIS WAS COUNTED — hoisted, because the ballot gate, the facts
+  // read and the delegation fold each derived it separately and could drift.  Null
+  // when this proposal has no frozen basis (a legacy row), which keeps live behaviour.
+  const frozenAt =
+    proposal.eligibleBasisCount == null
+      ? undefined
+      : (proposal.eligibleBasisAt ?? proposal.deliberationEndsAt ?? undefined);
+  // EVERY ELIGIBILITY FACT AT THAT INSTANT, not just the join.  Freezing only
+  // `memberSince` left tenure, contributions and identity LIVE, so a member the
+  // frozen basis excluded for any of those could satisfy the rule mid-window and then
+  // vote against a denominator they were never counted in — satisfying quorum, or
+  // turning a treasury decision, against a smaller frozen figure.  Half a freeze is
+  // what the surrounding comment already warned about, one field over.
+  const facts = await deps.membership.memberFacts(input.roomId, input.userId, frozenAt);
   // ELECTORATE FREEZE, enforced on the BALLOT as well as the denominator.
   //
   // `eligibleBasisCount` is stamped at the `deliberation → open` transition, and
@@ -964,15 +992,9 @@ export async function signProposal(
   // A null `memberSince` (the steward-role arm carries no subscription row)
   // cannot be judged, so it passes — refusing there would lock out a legitimate
   // long-standing steward to close a narrower hole than it opens.
-  if (input.purpose === 'vote' && proposal.eligibleBasisCount != null) {
-    // THE INSTANT THE BASIS WAS COUNTED, falling back to the scheduled deadline
-    // only for rows opened before that instant was recorded — which is the
-    // behaviour those rows were opened under.  Reading the schedule while the
-    // count came from the transition let scheduler lag admit members to the
-    // denominator and refuse them the ballot.
-    const frozenAt = proposal.eligibleBasisAt ?? proposal.deliberationEndsAt;
+  if (input.purpose === 'vote' && frozenAt !== undefined) {
     const joined = facts?.memberSince ?? null;
-    if (frozenAt != null && joined !== null && Date.parse(joined) > Date.parse(frozenAt)) {
+    if (joined !== null && Date.parse(joined) > Date.parse(frozenAt)) {
       return tgErr(
         403,
         'joined_after_open',
@@ -1146,9 +1168,13 @@ export async function signProposal(
       // voter (membership age, contributions, identity) — otherwise ineligible
       // members boost a delegate's ballot they could never cast themselves.
       // Wallet arms are neutral here: delegating involves no wallet.
+      // The delegator's facts at the SAME frozen instant — its join test below was
+      // already frozen while its eligibility verdict was live, the identical
+      // asymmetry the direct arm had.
       const delegatorFacts = await deps.membership.memberFacts(
         input.roomId,
         delegation.delegatorUserId,
+        frozenAt,
       );
       const verdict = checkVoterEligibility(
         {
@@ -1199,11 +1225,12 @@ export async function signProposal(
       // the freeze: post-open joiners grant their units to a delegate whose cap
       // admits them all, and delegated weight is what the threshold arithmetic
       // consumes.  Unknown (`null`) stays unjudgeable, as everywhere else.
-      const frozenAt = proposal.eligibleBasisAt ?? proposal.deliberationEndsAt;
+      // The HOISTED instant — this used to re-derive its own copy, so the direct arm,
+      // the delegated arm and the facts read each had their own answer to "when was
+      // the basis counted".
       const delegatorJoined = delegatorFacts?.memberSince ?? null;
       const joinedAfterFreeze =
-        proposal.eligibleBasisCount != null &&
-        frozenAt != null &&
+        frozenAt !== undefined &&
         delegatorJoined !== null &&
         Date.parse(delegatorJoined) > Date.parse(frozenAt);
       delegatorEligible = verdict.eligible && !joinedAfterFreeze;
