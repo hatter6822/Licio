@@ -335,13 +335,13 @@ adapter.
 ├────────────────────────────────────────────────────────────────────────────┤
 │ Domain packages                                                            │
 │ @licio/shared schemas · @licio/invariants math · @licio/ranking            │
-│ @licio/ai-governance · @licio/governance · @licio/lcap                    │
-│ @licio/lcap-p2p · @licio/private-p2p                                      │
+│ @licio/ai-governance · @licio/governance · @licio/lcap                     │
+│ @licio/lcap-p2p · @licio/private-p2p                                       │
 ├────────────────────────────────────────────────────────────────────────────┤
 │ Storage, adapters, and the local AI runtime                                │
 │ PostgreSQL/Drizzle migrations and production stores · Redis session,       │
 │ replay, rate-limit, realtime, and lease stores · in-memory test/dev        │
-│ stores · loopback-only governance-LLM lane runtimes (vLLM default;        │
+│ stores · loopback-only governance-LLM lane runtimes (vLLM default;         │
 │ Ollama/llama.cpp/LM Studio alternatives)                                   │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
