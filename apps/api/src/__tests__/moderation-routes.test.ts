@@ -1226,6 +1226,36 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     expect((await mod.cases.getById(caseId))?.assignedTo).toBe(holder.userId);
   });
 
+  it('the AUTO-ROUTED assign row names its edge, like the console rows do', async () => {
+    // The first assign row on the common path — auto-routing runs for every newly
+    // opened case — carried neither `priorState` nor `nextState`, and `writeAudit`
+    // defaults both to null.  Following the trail by its edges, which is what makes
+    // the history correct regardless of append order, therefore met a null→null row
+    // at the head of every chain.
+    //
+    // Asserting this needs a reviewer marked AVAILABLE and `settle()`: without both,
+    // `autoAssignCase` returns null, no row is written, and an assertion over the
+    // trail passes without ever seeing the row it is about.  (It did — the first
+    // version of this check lived in the reassignment test, where neither holds.)
+    const routed = await safetyUser();
+    const mod = getModerationServices();
+    await mod.reviewerStatus.set(routed.userId, 'available', new Date().toISOString());
+    const reporter = await seedUser({ handle: `rep${randomUUID().slice(0, 6)}` });
+    await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    await mod.settle();
+    const caseId = (await mod.cases.list({ limit: 1 }))[0]?.caseId ?? '';
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(routed.userId);
+
+    const systemRows = (await mod.audit.list({ limit: 50 })).filter(
+      (r) => r.action === 'assign' && r.actorUserId === null,
+    );
+    expect(systemRows).toHaveLength(1);
+    // `unassigned` is guaranteed by the CAS predicate, and the next state is the
+    // holder the case actually ended up with.
+    expect(systemRows[0]?.priorState).toBe('unassigned');
+    expect(systemRows[0]?.nextState).toBe(routed.userId);
+  });
+
   it('AUTO-ROUTED cases are protected by the same guard as manual claims', async () => {
     // Auto-routing runs through `trackBackground` when a report opens a case, and
     // in practice it completes during the POST — so the interleaved ordering

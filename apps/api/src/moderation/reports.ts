@@ -52,6 +52,21 @@ async function autoAssignNewCase(
     targetType: theCase.targetType,
     targetId: theCase.targetId,
     subjectUserId: assignee,
+    // NAMES THE EDGE, like both console assignment rows do.
+    //
+    // This row carried neither state, and `writeAudit` defaults both to null — so the
+    // FIRST assign row on the common path (auto-routing runs for every newly opened
+    // case) said nothing about what changed.  Reading the trail by FOLLOWING its
+    // edges, which is what makes the history correct regardless of append order, then
+    // met a null-to-null row at the head of every chain: the system assignment was
+    // unattributable, not merely unexplained.
+    //
+    // Both values are known here without assuming anything.  `claimIfUnassigned`
+    // succeeds only against `assigned_to IS NULL`, so the prior state IS unassigned;
+    // the next state is read off the row the CAS RETURNED rather than the local it was
+    // asked for, which is the discipline the console path uses.
+    priorState: 'unassigned',
+    nextState: routed.assignedTo ?? assignee,
     notes: 'auto-assigned to the least-loaded available reviewer',
   });
   services.metrics.increment('moderation.auto_assign');
