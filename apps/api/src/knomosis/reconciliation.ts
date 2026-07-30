@@ -453,20 +453,6 @@ async function raiseDivergence(
 }
 
 /**
- * §28.3 expansion gate across EVERY ACTIVE deployment — the shape a caller that
- * holds a room, not a deployment, actually needs.
- *
- * `requestWsmModeTransition` gates a ROOM's escalation into (or within) the
- * production modes, and there is no room→deployment mapping: a room's real
- * assets can move through any active deployment.  So the honest bound is the
- * conservative one — an unexplained divergence ANYWHERE the room's funds could
- * be flowing blocks expansion, which is the direction §28.3 asks a gate to fail
- * in.  Inactive (frozen/retired) deployments are excluded: they accept no new
- * submits, so an unresolved mismatch there cannot describe an expansion that is
- * about to happen, and including them would leave a retired deployment blocking
- * every room for ever.
- */
-/**
  * §28.3 expansion gate FOR ONE ROOM: the room's own bound deployment.
  *
  * `canExpandAnyActiveDeployment` (below) treats an unresolved mismatch on ANY
@@ -480,6 +466,16 @@ async function raiseDivergence(
  * A room with NO treasury yet has no deployment to judge, so it falls back to
  * the all-active-deployments read — explicitly conservative, and no more
  * permissive than the behaviour this replaces.
+ *
+ * The bound deployment must also be ACTIVE, for the reason
+ * `canExpandAnyActiveDeployment` states and this path had dropped: a frozen or
+ * retired deployment accepts no new submits, so an unresolved mismatch on it cannot
+ * describe an imminent expansion — and scoping to it unconditionally left a room
+ * whose treasury sits on a retired deployment blocked FOR EVER, which is verbatim
+ * the failure the exclusion exists to prevent.  Narrowing from "any active
+ * deployment" to "the room's deployment" kept the room half of the rule and lost
+ * the active half.  An unknown deployment id is treated the same way, since a
+ * deployment the registry cannot describe is not one this gate can clear.
  */
 export async function canExpandForRoom(
   deps: Pick<ReconciliationDeps, 'reconciliation'> & {
@@ -489,10 +485,29 @@ export async function canExpandForRoom(
   roomId: string,
 ): Promise<{ allowed: boolean; blocking: number }> {
   const treasury = await deps.treasuries.getByRoom(roomId);
-  if (treasury === null) return canExpandAnyActiveDeployment(deps);
-  return canExpandTreasury(deps, treasury.deploymentId);
+  if (treasury !== null) {
+    const bound = (await deps.deployments.list()).find(
+      (d) => d.deploymentId === treasury.deploymentId,
+    );
+    if (bound?.status === 'active') return canExpandTreasury(deps, bound.deploymentId);
+  }
+  return canExpandAnyActiveDeployment(deps);
 }
 
+/**
+ * §28.3 expansion gate across EVERY ACTIVE deployment.
+ *
+ * The fallback for a caller with no single deployment to judge.  An unexplained
+ * divergence ANYWHERE the room's funds could be flowing blocks expansion, which is
+ * the direction §28.3 asks a gate to fail in.  Inactive (frozen/retired)
+ * deployments are excluded: they accept no new submits, so an unresolved mismatch
+ * there cannot describe an expansion that is about to happen, and including them
+ * would leave a retired deployment blocking every room for ever.
+ *
+ * (This docblock spent a revision stranded ABOVE `canExpandForRoom`'s own, where it
+ * documented that function to every reader and contradicted the block beneath it,
+ * while the function it describes carried none.)
+ */
 export async function canExpandAnyActiveDeployment(
   deps: Pick<ReconciliationDeps, 'reconciliation'> & {
     deployments: { list(): Promise<ReadonlyArray<{ deploymentId: string; status: string }>> };
