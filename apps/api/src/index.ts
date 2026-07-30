@@ -1093,6 +1093,20 @@ if (db) {
   moderationServices.reports = stores.reports;
   moderationServices.actions = stores.actions;
   moderationServices.audit = stores.audit;
+  // The chain follows the STORE.  Swapping `audit` without this would leave the chain
+  // deps pointing at the discarded in-memory store, so every production write would
+  // chain against an empty head and the durable trail would be a run of genesis rows —
+  // each individually valid, none linked to anything.
+  moderationServices.auditChain = {
+    store: stores.audit,
+    // Keyed from the identity master secret: repairing a doctored chain then needs a
+    // secret the database does not hold, which is the whole difference between
+    // tamper-EVIDENT and merely hashed.
+    key: accountRef(identityServices.config.masterSecret, 'moderation-audit-chain'),
+    // The same opaque-ref posture the compliance chains take: a chain hash must not
+    // double as an oracle for "was this person involved".
+    refOf: (id) => accountRef(identityServices.config.masterSecret, `moderation-audit:${id}`),
+  };
   moderationServices.blocks = stores.blocks;
   moderationServices.mutes = stores.mutes;
   moderationServices.appeals = stores.appeals;

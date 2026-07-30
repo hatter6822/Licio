@@ -461,7 +461,11 @@ export async function detectCoordination(
   // Automated, system-actor audit entry (WS-J.2.5a: every automated event).
   services.trackBackground(
     Promise.resolve().then(async () => {
-      await services.audit.append({
+      // Through the FUNNEL, like every other write.  This called `audit.append` directly
+      // while `writeAudit`'s header called itself "the single funnel" — harmless until
+      // the funnel gained the hash chain, at which point a direct append would have
+      // written an unchained row the verifier reports as tampering.
+      await writeAudit(services, {
         actorUserId: null,
         actorRole: null,
         action: 'coordination_delay',
@@ -473,9 +477,6 @@ export async function detectCoordination(
         priorState: 'enforcement_active',
         nextState: 'enforcement_delayed',
         reversible: true,
-        linkedActionId: null,
-        reportIds: [],
-        coApproverUserId: null,
         notes: 'Coordinated-report protection engaged pending integrity review (MFCI-2).',
       });
     }),

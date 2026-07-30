@@ -820,6 +820,13 @@
       "when": 1783728000041,
       "tag": "0117_moderation_audit_case_id",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1783728000042,
+      "tag": "0118_moderation_audit_chain",
+      "breakpoints": true
     }
   ]
 }

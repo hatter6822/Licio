@@ -234,6 +234,14 @@ export const moderationAudit = pgTable(
      *  trigger rejects those (migration 0117).  NULL means "not case-scoped" — a queue
      *  read, an automated block — never "case unknown but present". */
     caseId: uuid('case_id'),
+    /** The predecessor's `integrityHash`; NULL on the genesis entry AND on every row
+     *  written before migration 0118 (which are simply unchained — see there for why no
+     *  backfill can honestly chain the past). */
+    prevHash: text('prev_hash'),
+    /** Keyed MAC over this entry's substance and its parent.  Keyed, not a bare digest:
+     *  an unkeyed chain is recomputable by anyone who can rewrite the table, so it
+     *  detects corruption but not an adversary. */
+    integrityHash: text('integrity_hash'),
     reportIds: jsonb('report_ids').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     coApproverUserId: uuid('co_approver_user_id').references(() => users.userId, {
       onDelete: 'set null',

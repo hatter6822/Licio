@@ -8,6 +8,7 @@ import { hostname } from 'node:os';
 import type { ConsoleAction } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { accountStateFor, parseDurationDays, restoreStateFrom } from './actions.js';
+import { writeAudit } from './audit.js';
 import type { ModerationServices } from './services.js';
 
 export type ModerationSchedulerTask =
@@ -82,7 +83,9 @@ export async function runModerationTick(
         }
       }
       await services.actions.update(action.actionId, { reverted: true });
-      await services.audit.append({
+      // Through the FUNNEL (see the note in `reports.ts`): a direct append bypasses the
+      // hash chain and reads as an unchained row, i.e. as tampering.
+      await writeAudit(services, {
         actorUserId: null,
         actorRole: null,
         action: 'revert',
@@ -95,8 +98,6 @@ export async function runModerationTick(
         nextState: action.priorState,
         reversible: false,
         linkedActionId: action.actionId,
-        reportIds: [],
-        coApproverUserId: null,
         notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
       });
       lifted += 1;

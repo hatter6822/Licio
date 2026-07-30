@@ -5,9 +5,11 @@
 // boot.  Routes read the module singleton via `getModerationServices()`; the
 // production boot swaps Postgres adapters + real ports in by assignment;
 // tests build an in-memory container and `setModerationServices(...)`.
+import { createHash } from 'node:crypto';
 import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import type { AuditChainDeps } from './audit-chain.js';
 import {
   DEFAULT_MODERATION_CONFIG,
   loadModerationConfig,
@@ -77,6 +79,14 @@ export interface ModerationServices {
   reports: ModerationReportStore;
   actions: ModerationActionStore;
   audit: ModerationAuditStore;
+  /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
+   *
+   *  Present by DEFAULT — in dev and test as well as production — because a chain that
+   *  only the production wiring turns on is a chain no test exercises, and the first time
+   *  anyone runs the verifier would be the first time the code has ever run.  Production
+   *  derives the key from the identity master secret; the in-memory factory derives a
+   *  local one, so the SHAPE of every trail is the same everywhere. */
+  auditChain: AuditChainDeps;
   blocks: AccountBlockStore;
   mutes: AccountMuteStore;
   appeals: ModerationAppealStore;
@@ -114,6 +124,8 @@ export interface ModerationServices {
 }
 
 export interface InMemoryModerationOptions {
+  /** Override the audit chain's MAC key (production passes the derived one). */
+  auditChainKey?: string;
   config?: Partial<ModerationRuntimeConfig>;
   content?: ModerationContentPort;
   users?: ModerationUserPort;
@@ -137,11 +149,20 @@ export function createInMemoryModerationServices(
   const metrics = new ModerationMetrics();
   const log = options.log ?? ((): void => {});
 
+  const auditStore = new InMemoryModerationAuditStore(now);
   const services: ModerationServices = {
     cases: new InMemoryModerationCaseStore(now),
     reports: new InMemoryModerationReportStore(now),
     actions: new InMemoryModerationActionStore(now),
-    audit: new InMemoryModerationAuditStore(now),
+    audit: auditStore,
+    auditChain: {
+      store: auditStore,
+      // A LOCAL key, overridden at production boot from the identity master secret.  It
+      // exists so the chain runs everywhere: a tamper-evidence path that only production
+      // exercises is one whose first real execution is in production.
+      key: options.auditChainKey ?? 'licio-dev-moderation-audit-chain',
+      refOf: (id) => createHash('sha256').update(`moderation-audit-ref:${id}`).digest('hex'),
+    },
     blocks: new InMemoryAccountBlockStore(now),
     mutes: new InMemoryAccountMuteStore(now),
     appeals: new InMemoryModerationAppealStore(now),

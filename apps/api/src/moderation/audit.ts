@@ -14,6 +14,7 @@ import {
   reasonCodeSeverity,
   type TransparencyCell,
 } from '@licio/shared';
+import { appendChainedAudit } from './audit-chain.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationAuditRecord } from './stores.js';
 
@@ -47,7 +48,10 @@ export async function writeAudit(
   input: AuditWriteInput,
 ): Promise<string | null> {
   try {
-    const record = await services.audit.append({
+    // CHAINED, always.  This is the single funnel, so chaining here is what makes the
+    // trail tamper-evident rather than merely append-only — and what makes an unchained
+    // row a detectable anomaly instead of an ordinary write.
+    const record = await appendChainedAudit(services.auditChain, {
       actorUserId: input.actorUserId,
       actorRole: input.actorRole,
       action: input.action,

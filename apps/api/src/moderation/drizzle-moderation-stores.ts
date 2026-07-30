@@ -13,6 +13,8 @@
 //   • `moderation_reports.reporter_user_id` is the highest-sensitivity field —
 //     surfaced only through the role-gated console projection, never widened.
 //   • No financial column exists on any moderation table (enforced by ABSENCE).
+
+import { randomUUID } from 'node:crypto';
 import {
   accountBlocks,
   accountMutes,
@@ -50,6 +52,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { keysetAfterRow } from '../lib/keyset.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
 import type {
   AccountBlockRecord,
   AccountBlockStore,
@@ -166,6 +169,8 @@ function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditReco
     reversible: row.reversible,
     linkedActionId: row.linkedActionId,
     caseId: row.caseId,
+    prevHash: row.prevHash,
+    integrityHash: row.integrityHash,
     reportIds: row.reportIds,
     coApproverUserId: row.coApproverUserId,
     notes: row.notes,
@@ -771,7 +776,10 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
   }
 
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord> {
     const rows = await this.#db
       .insert(moderationAudit)
@@ -844,6 +852,80 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
       // legacy fallback when no cursor is supplied.
       .offset(keyset ? 0 : Math.max(0, filter.offset ?? 0));
     return rows.map(mapAudit);
+  }
+
+  async chainHead(): Promise<ModerationAuditRecord | null> {
+    // The greatest chained ordinal IS the head: the ordinal is a total order and the
+    // chain is appended along it, so there is no need to walk parent links to find the
+    // tip (the governance chain does, because its `created_at` order can tie).
+    const rows = await this.#db
+      .select()
+      .from(moderationAudit)
+      .where(isNotNull(moderationAudit.integrityHash))
+      .orderBy(desc(moderationAudit.ordinal))
+      .limit(1);
+    const row = rows[0];
+    return row === undefined ? null : mapAudit(row);
+  }
+
+  async appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null> {
+    // The ordinal is RESERVED before the insert, because the hash commits to it.  Taking
+    // it from the sequence by hand (rather than the column default) is what lets the
+    // staged row be hashed and then written unchanged.  A burned value on a losing retry
+    // is fine — the sequence was never gapless, and the chain is what proves nothing was
+    // removed.
+    const reserved = (await this.#db.execute(
+      sql`SELECT nextval('moderation_audit_ordinal_seq')::bigint AS ordinal, now() AS at`,
+    )) as unknown as Array<{ ordinal: string | number; at: Date }>;
+    const head = reserved[0];
+    if (head === undefined) throw new Error('failed to reserve a moderation audit ordinal');
+    // Millisecond resolution on BOTH sides: the driver hands back a millisecond `Date`,
+    // so hashing anything finer would produce a digest that can never be recomputed from
+    // a read row.
+    const eventTime = new Date(head.at).toISOString();
+    const staged: ModerationAuditRecord = {
+      ...entry,
+      auditId: randomUUID(),
+      ordinal: Number(head.ordinal),
+      eventTime,
+      createdAt: eventTime,
+    };
+    const full: ModerationAuditRecord = { ...staged, integrityHash: hashOf(staged) };
+    try {
+      await this.#db.insert(moderationAudit).values({
+        auditId: full.auditId,
+        ordinal: full.ordinal,
+        eventTime: new Date(full.eventTime),
+        createdAt: new Date(full.createdAt),
+        actorUserId: full.actorUserId,
+        actorRole: full.actorRole,
+        action: full.action,
+        reasonCode: full.reasonCode,
+        targetType: full.targetType,
+        targetId: full.targetId,
+        subjectUserId: full.subjectUserId,
+        priorState: full.priorState,
+        nextState: full.nextState,
+        reversible: full.reversible,
+        linkedActionId: full.linkedActionId,
+        caseId: full.caseId,
+        prevHash: full.prevHash,
+        integrityHash: full.integrityHash,
+        reportIds: full.reportIds,
+        coApproverUserId: full.coApproverUserId,
+        notes: full.notes,
+      });
+      return full;
+    } catch (error) {
+      // A collision on the fork-proof parent/genesis indexes means a concurrent writer
+      // took this slot: the caller re-reads the head and retries.  Anything else is a
+      // real failure and must not be swallowed as contention.
+      if (isUniqueViolation(error)) return null;
+      throw error;
+    }
   }
 
   async listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]> {

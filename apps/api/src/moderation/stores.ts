@@ -114,6 +114,11 @@ export interface ModerationAuditRecord {
   linkedActionId: string | null;
   /** The case this record belongs to; null when the event is not case-scoped. */
   caseId: string | null;
+  /** The predecessor's `integrityHash`; null on the genesis AND on any row written
+   *  before the chain existed (migration 0118). */
+  prevHash: string | null;
+  /** The keyed MAC over this entry and its parent; null ⇒ the row is not chained. */
+  integrityHash: string | null;
   reportIds: string[];
   coApproverUserId: string | null;
   notes: string | null;
@@ -388,9 +393,27 @@ export interface AuditQueryFilter {
 export interface ModerationAuditStore {
   /** Append-only: the only write path. */
   append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord>;
   list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]>;
+  /** The chain head — the chained entry with the greatest ordinal, or null before the
+   *  first chained append. */
+  chainHead(): Promise<ModerationAuditRecord | null>;
+  /**
+   * Append a CHAINED entry, returning null when the parent slot was taken by a
+   * concurrent writer (the caller re-reads the head and retries).
+   *
+   * `hashOf` is a callback rather than a value because the hash commits to the ordinal
+   * and the event time, and the STORE assigns both — computing the hash outside would
+   * either omit them or guess.
+   */
+  appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null>;
   listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]>;
   /** Records in [start, end) for the transparency export aggregation. */
   listInPeriod(startIso: string, endIso: string): Promise<ModerationAuditRecord[]>;
@@ -902,7 +925,10 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     this.#now = now;
   }
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord> {
     const at = iso(this.#now);
     const full: ModerationAuditRecord = {
@@ -911,7 +937,47 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
       ordinal: this.#nextOrdinal++,
       eventTime: at,
       createdAt: at,
+      // UNCHAINED.  `append` is the primitive fixtures use; production writes go through
+      // `writeAudit` → `appendChained`, and the verifier reports an unchained row after
+      // the genesis as exactly the anomaly it is.
+      prevHash: null,
+      integrityHash: null,
     };
+    this.#rows.push(full);
+    return { ...full };
+  }
+  async chainHead(): Promise<ModerationAuditRecord | null> {
+    let head: ModerationAuditRecord | null = null;
+    for (const r of this.#rows) {
+      if (r.integrityHash !== null && (head === null || r.ordinal > head.ordinal)) head = r;
+    }
+    return head === null ? null : { ...head };
+  }
+  async appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null> {
+    // The in-memory stand-in for the fork-proof partial unique.  A single-threaded fold
+    // cannot actually race, but the CONTRACT has to be the same one the SQL adapter
+    // offers, or the retry loop is exercised by only one of them.
+    if (entry.prevHash !== null && this.#rows.some((r) => r.prevHash === entry.prevHash)) {
+      return null;
+    }
+    if (
+      entry.prevHash === null &&
+      this.#rows.some((r) => r.integrityHash !== null && r.prevHash === null)
+    ) {
+      return null; // a second genesis
+    }
+    const at = iso(this.#now);
+    const staged: ModerationAuditRecord = {
+      ...entry,
+      auditId: randomUUID(),
+      ordinal: this.#nextOrdinal++,
+      eventTime: at,
+      createdAt: at,
+    };
+    const full: ModerationAuditRecord = { ...staged, integrityHash: hashOf(staged) };
     this.#rows.push(full);
     return { ...full };
   }
