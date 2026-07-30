@@ -432,16 +432,23 @@ export function createModerationConsoleRoutes() {
             // of it — bulk assign overwrote ANY case's assignee and did not even
             // forward the request's `reason_code`, so it could still silently steal
             // a colleague's in-progress case one page at a time.
-            if (theCase.assignedTo !== null && theCase.assignedTo !== reviewer_id) {
+            if (theCase.assignedTo === reviewer_id) {
+              // ALREADY HELD BY THIS REVIEWER: short-circuit exactly as the single
+              // route does, writing NO audit row.  My first version let this fall
+              // through to the write below, which recorded another assignment whose
+              // prior state was falsely `unassigned` — so an ordinary idempotent
+              // retry corrupted an append-only history.  A no-op is not an event.
+              results.push({ case_id: caseId, ok: true, error: null });
+              continue;
+            }
+            if (theCase.assignedTo !== null) {
               results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
               continue;
             }
-            if (theCase.assignedTo === null) {
-              const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
-              if (!claimed) {
-                results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
-                continue;
-              }
+            const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
+            if (!claimed) {
+              results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
+              continue;
             }
             await writeAudit(mod, {
               actorUserId: actor.userId,
@@ -452,7 +459,10 @@ export function createModerationConsoleRoutes() {
               // Named here too — the bulk path wrote the row with no identities and
               // no notes at all.
               subjectUserId: reviewer_id,
-              priorState: 'unassigned',
+              // Reached only via the CAS above, so the case WAS unassigned — but
+              // stated from the row rather than as a literal, because a literal is
+              // what made the retry path lie.
+              priorState: theCase.assignedTo ?? 'unassigned',
               nextState: reviewer_id,
               notes: reason_code ?? null,
             });

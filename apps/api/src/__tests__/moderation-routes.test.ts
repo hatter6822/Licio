@@ -1139,6 +1139,43 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
   });
 
+  it('a BULK retry by the SAME holder appends no audit row', async () => {
+    // My own defect, caught in review an hour after writing it: the guard permitted
+    // a retry for a case the reviewer already held, skipped the compare-and-set,
+    // and then wrote an audit row whose prior state was a hard-coded `unassigned`.
+    // An ordinary idempotent retry therefore corrupted an append-only history.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const caseId = await openCase();
+    const mod = getModerationServices();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: holder.userId }, safety.cookie),
+    );
+    const before = (await mod.audit.list({ limit: 100 })).filter(
+      (r) => r.action === 'assign',
+    ).length;
+    const res = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        {
+          case_ids: [caseId],
+          action: 'assign',
+          reason_code: 'MOD_SPAM_001',
+          reviewer_id: holder.userId,
+        },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { ok: boolean }[] };
+    expect(body.results[0]?.ok).toBe(true); // idempotent, not a conflict
+    const after = (await mod.audit.list({ limit: 100 })).filter(
+      (r) => r.action === 'assign',
+    ).length;
+    expect(after).toBe(before); // …and a no-op is not an event
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(holder.userId);
+  });
+
   it('AUTO-ROUTED cases are protected by the same guard as manual claims', async () => {
     // Auto-routing runs through `trackBackground` when a report opens a case, and
     // in practice it completes during the POST — so the interleaved ordering

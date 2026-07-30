@@ -184,11 +184,22 @@ export async function delegatorsAlreadyConsumed(
   excludeDelegate: string | null,
 ): Promise<Set<string>> {
   const consumed = new Set<string>();
-  for (const delegatorUserId of new Set(candidates)) {
-    // EVERY state: a revoked delegation is exactly the case the active-only
-    // read used to miss.
-    const granted = await delegations.listByDelegator(roomId, delegatorUserId);
-    for (const d of granted) {
+  const unique = [...new Set(candidates)];
+  // ONE QUERY for every candidate, not one per candidate.  A delegate can hold many
+  // incoming delegations, and this read must include REVOKED rows (a revocation
+  // after the delegate signed is exactly the case the active-only read used to
+  // miss) — which no existing index served, so each iteration was a sequential
+  // scan of a history a member can grow without limit by revoking and re-creating
+  // a delegation.  N attacker-sized scans per ballot.
+  const grantedByDelegator = new Map<string, DelegationRecordEntity[]>();
+  for (const d of await delegations.listByDelegators(roomId, unique)) {
+    if (d.delegatorUserId === null) continue;
+    const list = grantedByDelegator.get(d.delegatorUserId);
+    if (list === undefined) grantedByDelegator.set(d.delegatorUserId, [d]);
+    else list.push(d);
+  }
+  for (const delegatorUserId of unique) {
+    for (const d of grantedByDelegator.get(delegatorUserId) ?? []) {
       if (d.delegateUserId === null || d.delegateUserId === excludeDelegate) continue;
       if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposalType}`) continue;
       const ballot = ballotByUser.get(d.delegateUserId);

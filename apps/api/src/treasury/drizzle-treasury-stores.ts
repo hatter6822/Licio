@@ -1234,6 +1234,27 @@ export class DrizzleDelegationStore implements DelegationStore {
     return rows.map(mapDelegation);
   }
 
+  async listByDelegators(
+    roomId: string,
+    delegatorUserIds: readonly string[],
+  ): Promise<DelegationRecordEntity[]> {
+    if (delegatorUserIds.length === 0) return [];
+    // ONE indexed read for every candidate — `delegation_delegator_idx`
+    // (migration 0113) covers `(room_id, delegator_user_id)` across ALL states,
+    // which neither existing index could: the active partial unique excludes the
+    // revoked rows this predicate must see, and the other is keyed on the delegate.
+    const rows = await this.db
+      .select()
+      .from(delegationRecords)
+      .where(
+        and(
+          eq(delegationRecords.roomId, roomId),
+          inArray(delegationRecords.delegatorUserId, [...delegatorUserIds]),
+        ),
+      );
+    return rows.map(mapDelegation);
+  }
+
   async listByDelegator(
     roomId: string,
     delegatorUserId: string,

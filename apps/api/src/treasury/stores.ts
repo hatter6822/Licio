@@ -514,6 +514,21 @@ export interface DelegationStore {
    *  without erasing the counted weight — and the delegator could then cast the
    *  same unit again directly. */
   listByDelegator(roomId: string, delegatorUserId: string): Promise<DelegationRecordEntity[]>;
+  /**
+   * EVERY delegation granted by ANY of `delegatorUserIds`, in one query.
+   *
+   * The double-count guard called `listByDelegator` once per candidate, and a
+   * delegate can have many incoming delegations — so one ballot performed N
+   * sequential reads of a table that has no index for this predicate (the active
+   * partial unique cannot serve a read that must include REVOKED rows, and the
+   * other index is on the delegate).  A verified member can grow that history
+   * without limit by revoking and re-creating a delegation, so the cost is
+   * attacker-controlled, not merely proportional.
+   */
+  listByDelegators(
+    roomId: string,
+    delegatorUserIds: readonly string[],
+  ): Promise<DelegationRecordEntity[]>;
   listByRoom(roomId: string, limit: number): Promise<DelegationRecordEntity[]>;
   clear(): Promise<void>;
 }
@@ -1242,6 +1257,18 @@ export class InMemoryDelegationStore implements DelegationStore {
   ): Promise<DelegationRecordEntity[]> {
     return [...this.#rows.values()]
       .filter((r) => r.roomId === roomId && r.delegatorUserId === delegatorUserId)
+      .map(clone);
+  }
+  async listByDelegators(
+    roomId: string,
+    delegatorUserIds: readonly string[],
+  ): Promise<DelegationRecordEntity[]> {
+    if (delegatorUserIds.length === 0) return [];
+    const wanted = new Set(delegatorUserIds);
+    return [...this.#rows.values()]
+      .filter(
+        (r) => r.roomId === roomId && r.delegatorUserId !== null && wanted.has(r.delegatorUserId),
+      )
       .map(clone);
   }
 

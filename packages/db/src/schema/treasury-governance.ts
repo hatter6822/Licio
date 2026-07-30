@@ -428,6 +428,14 @@ export const delegationRecords = knomosisSchema.table(
       .on(t.roomId, t.delegatorUserId, t.scopeKey)
       .where(sql`${t.state} = 'active'`),
     index('delegation_delegate_idx').on(t.roomId, t.delegateUserId, t.state),
+    // The DOUBLE-COUNT guard's read: every delegation granted by a set of
+    // delegators in a room, across ALL states.  Neither index above serves it —
+    // `delegation_active_uq` is partial on `state = 'active'` and so cannot answer
+    // a query that must see revoked rows (a revocation after the delegate signed
+    // is precisely what the guard looks for), and the other is keyed on the
+    // DELEGATE.  Without this the guard scanned a history a member can grow
+    // without limit by revoking and re-creating a delegation.
+    index('delegation_delegator_idx').on(t.roomId, t.delegatorUserId),
   ],
 );
 export type DelegationRecordRow = typeof delegationRecords.$inferSelect;

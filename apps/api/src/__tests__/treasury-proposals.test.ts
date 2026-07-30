@@ -1705,6 +1705,37 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     ).toBe(true);
   });
 
+  it('resolves EVERY candidate in ONE store read, not one per candidate', async () => {
+    // A delegate can hold many incoming delegations, and this read must include
+    // REVOKED rows — so before batching, one ballot performed N sequential scans of
+    // a history a member can grow without limit by revoking and re-creating a
+    // delegation.  The cost was attacker-controlled, not proportional to the ballot.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    let singleReads = 0;
+    let batchReads = 0;
+    const realSingle = deps.delegations.listByDelegator.bind(deps.delegations);
+    const realBatch = deps.delegations.listByDelegators.bind(deps.delegations);
+    deps.delegations.listByDelegator = async (room: string, id: string) => {
+      singleReads += 1;
+      return realSingle(room, id);
+    };
+    deps.delegations.listByDelegators = async (room: string, ids: readonly string[]) => {
+      batchReads += 1;
+      return realBatch(room, ids);
+    };
+    await delegatorsAlreadyConsumed(
+      deps.delegations,
+      ROOM,
+      'treasury_spend',
+      [PROPOSER, STEWARD, VOTER_2],
+      new Map(),
+      null,
+    );
+    expect(batchReads).toBe(1);
+    expect(singleReads).toBe(0);
+  });
+
   it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {
     // The guard used to read only ACTIVE delegations, so revoking erased its
     // evidence while the weight stayed inside the delegate's frozen

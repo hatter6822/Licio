@@ -785,6 +785,13 @@
       "when": 1783728000036,
       "tag": "0112_private_room_story_visibility_serialize",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1783728000037,
+      "tag": "0113_delegation_delegator_idx",
+      "breakpoints": true
     }
   ]
 }
