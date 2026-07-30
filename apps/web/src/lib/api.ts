@@ -124,16 +124,6 @@ export class ApiClientError extends Error {
 }
 
 /**
- * A widen that collided with an existing public story for the same URL (WS-Q.2.4).
- *
- * The colliding story's id is a TYPED field rather than a property bolted onto a
- * plain {@link ApiClientError}: producer and consumer previously agreed only by
- * each supplying its own `as ApiClientError & { existingStoryId?: string }` cast,
- * so a rename on either side compiled cleanly and silently dropped the "open the
- * existing story" affordance. `instanceof DuplicateStoryError` narrows to a
- * NON-optional id, which is what makes the drift a compile error.
- */
-/**
  * The WS-Q.3.4 cascade's 409, with the stories a steward has to resolve.
  *
  * `normalizeError` projects every failure through `apiErrorSchema`, which has
@@ -152,6 +142,21 @@ export class RoomVisibilityBlockedError extends ApiClientError {
   }
 }
 
+/**
+ * A visibility change refused because the URL already exists in the target tier
+ * (WS-Q.2.4).
+ *
+ * EITHER DIRECTION: a widen collides with a public story, a narrow collides with
+ * an in-room twin.  It read "a widen" while sitting above the wrong class
+ * entirely, so it documented neither.
+ *
+ * The colliding story's id is a TYPED field rather than a property bolted onto a
+ * plain {@link ApiClientError}: producer and consumer previously agreed only by
+ * each supplying its own `as ApiClientError & { existingStoryId?: string }` cast,
+ * so a rename on either side compiled cleanly and silently dropped the "open the
+ * existing story" affordance. `instanceof DuplicateStoryError` narrows to a
+ * NON-optional id, which is what makes the drift a compile error.
+ */
 export class DuplicateStoryError extends ApiClientError {
   readonly existingStoryId: string;
   constructor(message: string, existingStoryId: string) {
