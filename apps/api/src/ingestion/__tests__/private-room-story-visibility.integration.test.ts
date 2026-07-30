@@ -134,6 +134,54 @@ describe.skipIf(!DB_URL)('private-room story visibility (live Postgres, migratio
     await expectRefused(setRoom(roomId, 'private'), /cannot go private/);
   });
 
+  it('SERIALIZES a concurrent story insert against a room privatisation', async () => {
+    // The two triggers each check the other's subject, so without a conflicting
+    // lock they are one guard checked twice: under READ COMMITTED the story
+    // trigger could read room = public while the room trigger could not see the
+    // uncommitted story, and BOTH transactions committed — recreating the exact
+    // state the pair exists to prevent.  Measured before the fix: two commits,
+    // zero errors, a private room holding a public story.
+    //
+    // `FOR SHARE` on the room row is what serializes it, so this needs two real
+    // connections; a single-session test cannot observe it at all.
+    const roomId = await makeRoom('public');
+    const other = createDbClient(DB_URL as string, { onNotice: 'discard' });
+    try {
+      // A: open a transaction that inserts a public story and holds it.
+      const inserting = other.transaction(async (tx) => {
+        await tx.execute(sql`
+          insert into stories
+            (story_id, room_id, title, title_hash, submitted_by, submission_type, visibility,
+             topic_ids, submission_metadata)
+          values (${randomUUID()}, ${roomId}, 'Race fixture', ${randomUUID()}, ${userId},
+                  'original_brief', 'public', ${sql`array[${topicId}]::uuid[]`}, '{}')
+        `);
+        await tx.execute(sql`select pg_sleep(1)`);
+      });
+      // B: while A holds it, try to privatise the room.  Exactly one of the two
+      // must fail — which one depends on arrival order, and either outcome is
+      // consistent; what must never happen is BOTH succeeding.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const privatising = setRoom(roomId, 'private');
+      const outcomes = await Promise.allSettled([inserting, privatising]);
+      expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(1);
+      // …and the committed state is coherent: never a private room with a public
+      // story in it.
+      const rows = await db.execute<{ room: string; public_stories: string }>(sql`
+        select r.visibility::text as room,
+               count(s.story_id) filter (where s.visibility = 'public')::text as public_stories
+        from rooms r left join stories s on s.room_id = r.room_id
+        where r.room_id = ${roomId}
+        group by r.visibility
+      `);
+      const state = rows[0];
+      expect(state).toBeDefined();
+      if (state?.room === 'private') expect(state.public_stories).toBe('0');
+    } finally {
+      await other.$client.end();
+    }
+  });
+
   it('ALLOWS the three legitimate shapes', async () => {
     // A trigger that refused everything would pass the three tests above.
     const publicRoom = await makeRoom('public');
