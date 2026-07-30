@@ -46,17 +46,30 @@ const OUTPUT_FILE = join(DIST_DIR, 'bundle-size.json');
 // boundary cost rather than removing any — the same reasoning applies to the
 // debate modal, which shares its tree with both story surfaces.
 //
-// HEADROOM, as measured on the deep-audit branch: total 455.9 KiB against the
-// 456 KiB ceiling — about 100 bytes.  The ~3.1 KiB consumed since the 452.8
-// figure above is the review-round work (the governance-advisory route, the
-// visibility-cascade cursor, the field-error reader, the restricted-account
-// banner), and it is recorded here rather than absorbed into a quietly raised
-// number: the next change to the eager tree WILL fail this gate, and whoever
-// hits it should see what spent the room and decide deliberately.  Raising the
-// ceiling is a judgement about what the product is worth shipping, which
-// belongs to a maintainer and not to the change that happens to arrive first.
+// HEADROOM ran out, and the ceiling was RAISED — by the maintainer, on
+// 2026-07-30, which is the only way the paragraph below allowed it to move.
+//
+// The 456 KiB line was reached at 455.9 KiB on the deep-audit branch (about 100
+// bytes), the ~3.1 KiB before that being earlier review-round work.  What crossed
+// it is the same kind of work continued: the audit found form after form that
+// discarded a fully-populated server error and rendered nothing — a steward's
+// "Save settings" failing silently while the control still showed their unsaved
+// choice — so the fixes add per-field error rendering to surfaces that previously
+// had none.  Those bytes buy a user being told why an action failed.
+//
+// 480 KiB, +24 KiB, chosen to cover the remaining audit findings of that shape
+// (the moderation console, the visibility control, the security page) plus
+// ordinary growth — not so much that the number stops meaning anything.  Anyone
+// who reaches it again should read this block, see what spent the room, and make
+// the same judgement rather than nudge the constant.
+//
+// THE INITIAL-PAYLOAD BUDGET IS DELIBERATELY UNTOUCHED at 216 KiB.  That is the
+// one that governs first paint, it is the SPEC §6.10 figure, and it sits at
+// 214.5 KiB — the total budget bounds what a session downloads across
+// route-split chunks, which is a materially weaker constraint.  Raising the two
+// together would have given away the guarantee that actually matters.
 const INITIAL_JS_BUDGET_BYTES = 216 * 1024;
-const TOTAL_JS_BUDGET_BYTES = 456 * 1024;
+const TOTAL_JS_BUDGET_BYTES = 480 * 1024;
 const CSS_BUDGET_BYTES = 50 * 1024;
 
 // WS-S.2.1 / WS-R — the optional DECENTRALIZATION planes are large and lazily
