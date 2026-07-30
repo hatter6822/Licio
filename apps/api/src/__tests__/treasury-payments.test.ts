@@ -36,6 +36,7 @@ import {
   markIntentSigned,
   preflightIntent,
   quoteIntent,
+  reconcileGrantPayouts,
   reconcileIntents,
   retryIntent,
 } from '../treasury/intents.js';
@@ -2615,6 +2616,50 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     // is finished and the wallet is released.
     expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
     expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+  });
+
+  it('the tick re-projects an all-rejected grant whose inline projection FAILED', async () => {
+    // The inline projection on the rejection path is deliberately non-fatal — the
+    // transition is already durable and a projection failure must not turn a
+    // recorded rejection into a 409 the steward retries.  Its comment justified
+    // that with "the next intent finality re-projects anyway", which is true for
+    // every grant that HAS an intent and false for the one case that most needs
+    // it: an all-rejected grant has no payment intent, so no finality arrives and
+    // `reconcileIntents` sweeps intents and never sees it.  The grant then sat
+    // outside paid/clawed_back for ever, blocking the recipient's last wallet
+    // unlink — the exact bug `closed` was introduced to end, reachable again
+    // through a single transient write failure.
+    const { deps, inserted, recipientRef, payableId, refusedId } = await seedTwoTrancheGrant();
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    // Break the projection's only write for the duration of both transitions.
+    const realSetPayoutState = deps.grants.setPayoutState.bind(deps.grants);
+    deps.grants.setPayoutState = async () => {
+      throw new Error('transient write failure');
+    };
+    for (const milestoneId of [payableId, refusedId]) {
+      const rejected = await updateGrantMilestone(grantDeps, {
+        roomId: ROOM,
+        grantId: inserted.grantId,
+        milestoneId,
+        state: 'rejected',
+        actorUserId: USER,
+      });
+      // The rejection still succeeds — that is the point of swallowing it.
+      if ('code' in rejected) throw new Error(rejected.message);
+    }
+    // Unsettled, and blocking, with nothing left that could ever pay.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('not_started');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).not.toEqual([]);
+
+    deps.grants.setPayoutState = realSetPayoutState;
+    // The sweep is what reaches it.
+    const grant = await deps.grants.getById(inserted.grantId);
+    if (!grant) throw new Error('grant missing');
+    expect(await reconcileGrantPayouts(deps, grant.treasuryId)).toBeGreaterThan(0);
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('closed');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+    // And it is idempotent: a second pass finds nothing unsettled to re-project.
+    expect(await reconcileGrantPayouts(deps, grant.treasuryId)).toBe(0);
   });
 
   it('a grant whose EVERY milestone is rejected settles closed, not not_started', async () => {

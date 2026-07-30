@@ -368,7 +368,11 @@ export async function updateGrantMilestone(
   //
   // AFTER the CAS and the audit entry, and non-fatal: the transition is already
   // durable, and a projection failure must not turn a recorded rejection into a
-  // 409 the steward would retry.  The next intent finality re-projects anyway.
+  // 409 the steward would retry.  What makes swallowing it safe is
+  // `reconcileGrantPayouts` on the WS-M tick, NOT the next intent finality — the
+  // reason this used to give.  An all-rejected grant has no payment intent, so no
+  // finality ever comes for it and `reconcileIntents` sweeps intents; the one case
+  // that most needs the retry was the one case the old justification did not cover.
   if (input.state === 'rejected') {
     try {
       await projectGrantPayout(deps, input.grantId);

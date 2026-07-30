@@ -157,6 +157,77 @@ describe('runWsmTick (WS-M sweeps)', () => {
     expect((await services.proposals.getById(proposalId))?.votingState).toBe('open');
   });
 
+  it('re-projects an all-rejected grant that nothing else can reach', async () => {
+    // The sweep existed and was tested; the TICK CALLING IT was not, which is the
+    // same shape of gap that let the bug in — a mechanism with no proof that
+    // production reaches it.  Replacing the call with a no-op left every other
+    // test green, so this is the assertion that holds the wiring.
+    //
+    // An all-rejected grant has no payment intent, so `reconcileIntents` sweeps
+    // intents and never sees it, no finality ever arrives to re-project it, and the
+    // milestone route's inline projection is deliberately non-fatal.  Without this
+    // sweep the grant stays outside paid/clawed_back for ever and
+    // `listUnsettledByRecipient` keeps blocking the recipient's last wallet unlink.
+    const services = await wsmServices();
+    const treasury = await services.treasuries.insert({
+      treasuryId: randomUUID(),
+      roomId: ROOM,
+      deploymentId: randomUUID(),
+      treasuryAddress: `0x${'a'.repeat(40)}`,
+      acceptedAssets: ['USDC'],
+      balanceSnapshot: { USDC: '0' },
+      balancesReconciledAt: new Date().toISOString(),
+      depositLimits: {
+        perUserPerPeriod: '1000',
+        perRoomPerPeriod: '10000',
+        perDepositMax: '500',
+        periodSeconds: 86_400,
+      },
+      freezeState: 'active',
+      freezeReason: null,
+      freezeCascade: false,
+      pauseFlags: { deposits: false, proposals: false, executions: false },
+      reconciliationState: 'synced',
+      createdAt: new Date().toISOString(),
+    });
+    if (treasury === null) throw new Error('fixture treasury collision');
+    const grantId = randomUUID();
+    const recipientRef = `user:${USER}`;
+    await services.grants.insert({
+      grantId,
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: randomUUID(),
+      recipientRef,
+      purpose: 'Every tranche refused',
+      amount: '100',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId: randomUUID(),
+          description: 'Refused tranche',
+          amount: '100',
+          state: 'rejected',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'rejected',
+      reviewState: 'cleared',
+      // The state a swallowed projection failure leaves behind.
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    expect(await services.grants.listUnsettledByRecipient(recipientRef, 10)).not.toEqual([]);
+
+    const onError = vi.fn();
+    await runWsmTick(services, onError);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect((await services.grants.getById(grantId))?.payoutState).toBe('closed');
+    expect(await services.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+  });
+
   it('isolates a failing sweep: the rest still run and the error is reported', async () => {
     const services = await wsmServices();
     const expired = intentOf();

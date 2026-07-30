@@ -13,7 +13,12 @@
 //    snapshot per treasury (divergence alerts + the §28.3 expansion block).
 
 import { mapBounded } from '../lib/concurrency.js';
-import { abandonExpiredReorgs, expireIntents, reconcileIntents } from './intents.js';
+import {
+  abandonExpiredReorgs,
+  expireIntents,
+  reconcileGrantPayouts,
+  reconcileIntents,
+} from './intents.js';
 import { settleDueProposals } from './proposals.js';
 import type { TreasuryServices } from './services.js';
 import { reconcileTreasury } from './treasury-reconciliation.js';
@@ -30,7 +35,8 @@ export type WsmSchedulerTask =
   | 'wsm_intent_reconcile'
   | 'wsm_intent_reorg_recovery'
   | 'wsm_proposal_settle'
-  | 'wsm_treasury_reconcile';
+  | 'wsm_treasury_reconcile'
+  | 'wsm_grant_payout_reconcile';
 
 export async function runWsmTick(
   services: TreasuryServices,
@@ -88,6 +94,17 @@ export async function runWsmTick(
       reconcileTreasury(services, treasury.treasuryId),
     )) {
       if (!outcome.ok) onError(outcome.error, 'wsm_treasury_reconcile');
+    }
+    // Grant payout re-projection, over the SAME treasury list and with the same
+    // per-treasury isolation.  The milestone route's inline projection is
+    // deliberately non-fatal, so this is where a swallowed failure lands — and it
+    // is the ONLY thing that reaches an all-rejected grant, which has no payment
+    // intent for `reconcileIntents` to find.  Until it existed, such a grant stayed
+    // unsettled for ever and kept blocking the recipient's last wallet unlink.
+    for (const outcome of await mapBounded(treasuries, WSM_SWEEP_CONCURRENCY, (treasury) =>
+      reconcileGrantPayouts(services, treasury.treasuryId),
+    )) {
+      if (!outcome.ok) onError(outcome.error, 'wsm_grant_payout_reconcile');
     }
   } catch (error) {
     onError(error, 'wsm_treasury_reconcile');

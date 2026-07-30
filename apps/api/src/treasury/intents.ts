@@ -1048,6 +1048,49 @@ export async function projectGrantPayout(deps: IntentDeps, grantId: string): Pro
 }
 
 /**
+ * Re-project every UNSETTLED grant of one treasury.
+ *
+ * `projectGrantPayout` is called inline from the milestone transition, and that
+ * call is non-fatal by design: the transition is already durable and a projection
+ * failure must not turn a recorded rejection into a 409 the steward retries.  The
+ * comment there used to justify swallowing it with "the next intent finality
+ * re-projects anyway", which is true for every grant that HAS an intent and false
+ * for the case that needs it most — an all-rejected grant has no payment intent, so
+ * no finality ever arrives, `reconcileIntents` sweeps intents and never sees it, and
+ * the grant sat outside `paid`/`clawed_back` for ever while
+ * `listUnsettledByRecipient` counted it as an outstanding obligation blocking the
+ * recipient's last wallet unlink.  A swallowed error needs somewhere for the work to
+ * land; this is it.
+ *
+ * The projection is a pure recomputation from the grant's own milestones and their
+ * linked intents, writing only when the state actually changes, so re-running it
+ * over a grant that needs nothing costs a read and is otherwise invisible.
+ *
+ * Keyset-paged by `grantId`, like the liquidity encumbrance walk: settling a grant
+ * removes it from the unsettled set, and paging by id rather than offset means a row
+ * dropping out cannot make the sweep skip the row after it.
+ */
+export async function reconcileGrantPayouts(
+  deps: IntentDeps,
+  treasuryId: string,
+  pageSize = 200,
+): Promise<number> {
+  let projected = 0;
+  let afterId: string | null = null;
+  for (;;) {
+    const page = await deps.grants.listUnsettledByTreasury(treasuryId, pageSize, afterId);
+    if (page.length === 0) break;
+    afterId = page[page.length - 1]?.grantId ?? null;
+    for (const grant of page) {
+      await projectGrantPayout(deps, grant.grantId);
+      projected += 1;
+    }
+    if (page.length < pageSize) break;
+  }
+  return projected;
+}
+
+/**
  * Abandon ONE intent still in a pre-submission timed state (the clawback
  * cancellation path, W9): same table-checked + audited transition the expiry
  * sweep uses.  Post-submission states are untouched — an on-chain movement in
