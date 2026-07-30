@@ -14,7 +14,7 @@ import {
   reasonCodeSeverity,
   type TransparencyCell,
 } from '@licio/shared';
-import { appendChainedAudit } from './audit-chain.js';
+import { type AuditChainDeps, appendChainedAudit } from './audit-chain.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationAuditRecord } from './stores.js';
 
@@ -38,10 +38,51 @@ export interface AuditWriteInput {
 }
 
 /**
- * Append one audit record.  Returns the record id, or null on failure (the
- * caller's action has already happened; the audit failure is metered + logged,
- * never propagated, so accountability degrades to an alert rather than blocking
- * enforcement).
+ * Append one CHAINED audit record, THROWING on failure.
+ *
+ * The throwing variant is what a transactional unit needs.  Inside
+ * `ModerationServices.transact`, the state change has NOT committed yet — so an audit
+ * failure must propagate and take the state change down with it.  That inverts the
+ * guarantee in the right direction: not "enforcement proceeds, accountability degrades to
+ * an alert", but "no state change without its record".
+ *
+ * The `chain` is passed rather than read off `services` because the transactional path
+ * binds a DIFFERENT one: a store on the open transaction handle, so the head it reads and
+ * the row it writes are inside the same transaction as the change they describe.
+ */
+export async function appendAudit(chain: AuditChainDeps, input: AuditWriteInput): Promise<string> {
+  const record = await appendChainedAudit(chain, {
+    actorUserId: input.actorUserId,
+    actorRole: input.actorRole,
+    action: input.action,
+    reasonCode: input.reasonCode ?? null,
+    targetType: input.targetType,
+    targetId: input.targetId ?? null,
+    subjectUserId: input.subjectUserId ?? null,
+    priorState: input.priorState ?? null,
+    nextState: input.nextState ?? null,
+    reversible: input.reversible ?? false,
+    linkedActionId: input.linkedActionId ?? null,
+    caseId: input.caseId ?? null,
+    reportIds: input.reportIds ?? [],
+    coApproverUserId: input.coApproverUserId ?? null,
+    notes: input.notes ?? null,
+  });
+  return record.auditId;
+}
+
+/**
+ * Append one audit record, BEST EFFORT.  Returns the record id, or null on failure.
+ *
+ * For events that are not a state change this transaction could roll back — a queue view,
+ * an export, a background reconciliation.  There the caller's action has already happened,
+ * so the audit failure is metered + logged rather than propagated, and accountability
+ * degrades to an alert instead of blocking a read.
+ *
+ * A state change should NOT use this.  Pair it with its change through
+ * `ModerationServices.transact`, where `tx.audit` throws and the change rolls back with
+ * it — otherwise the row can land after a later writer's and the trail's recency order
+ * stops matching the order things actually happened in.
  */
 export async function writeAudit(
   services: ModerationServices,

@@ -75,6 +75,12 @@ wins.
                             doctored chain needs a secret the database lacks
 
 apps/api/src/moderation/
+  transactor.ts    the UNIT OF WORK: a state change and its audit record commit
+                            together, so the trail's order is the order things
+                            happened in.  The in-memory twin serialises units and
+                            rolls back on a throw; production opens one Postgres
+                            transaction and rebinds every store — including the
+                            chained audit store — onto it
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
   drizzle-moderation-stores.ts  the gated production Postgres adapters (same
                             interfaces; the audit clear() is TRUNCATE, never a
@@ -327,6 +333,21 @@ These are structural guarantees the code holds (each covered by a test):
 - **The audit log audits its own reads.** Both the transparency export AND the
   `/audit` viewer write a meta-audit record (the query scope), so steward
   inspection of the accountability trail is itself accountable.
+- **A state change and its audit record are ONE unit.**  Assignment was already a
+  compare-and-set, so no case could be moved from a stale snapshot; what remained was the
+  gap between the CAS committing and the row being appended, in which a delayed reviewer's
+  row could land behind a later one's and leave the most recent entry naming the wrong
+  holder.  `ModerationTransactor` closes it: the CAS and the chained append commit
+  together, so a unit that depends on another's outcome cannot begin until that outcome —
+  audit row included — has committed.  The guarantee is VISIBILITY, not lock contention,
+  which is why it holds however the two requests are scheduled.  Applied to all three
+  assignment paths (auto-route, console assign, bulk assign), per case rather than per
+  batch so two bulk operations over overlapping sets cannot deadlock.
+- **No state change without its record.**  Inside a unit an audit failure aborts the
+  change rather than degrading to an alert — the deliberate inversion of `writeAudit`'s
+  best-effort posture, which remains correct for events that are NOT state changes (a
+  queue view, an export).  The failure that actually happens, a chain parent collision, is
+  absorbed beneath the seam by a savepoint and a retry and never reaches a unit.
 - **The trail is tamper-EVIDENT, not merely append-only.** Every record is
   MAC-chained to its predecessor over the append ordinal, so altering one
   invalidates every hash after it, and the chain is keyed from the identity master
@@ -407,19 +428,6 @@ moderation audit log).
 
 These are honest, tracked gaps — see `docs/planning/11-trust-and-safety.md`:
 
-- **The assignment audit is not appended inside the assignment's transaction.**
-  Both assignment paths are now compare-and-set (`claimIfUnassigned`,
-  `reassignIfHeldBy`), so a case cannot be moved by a reviewer working from a stale
-  snapshot and every `assign` audit row names an edge a write actually performed —
-  which is what makes the trail reconstructable by FOLLOWING those edges.  What
-  remains is append ORDER: the CAS commits and the hash-chained row is appended
-  after it, so if one reviewer's request is delayed between those two steps, a later
-  reviewer's row can land first and a reader taking the LAST entry sees the wrong
-  holder.  Reading by edges is correct either way; reading by recency is not.
-  Closing it needs the audit append inside the same transaction as the state
-  change, which the chained-audit store cannot currently join (it computes the
-  previous hash through its own handle).  Closure: a transaction-scoped audit seam,
-  a WS-J.2.3 follow-up slice.
 - **BFF E2E** for the safety flows (report → console review → action → appeal),
   driven through the WS-P BFF-in-the-loop harness.
 - **Report affordances** are mounted on the feed card, the story page, and every

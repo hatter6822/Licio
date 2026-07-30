@@ -1088,7 +1088,10 @@ if (db) {
   // Durable Postgres adapters (same interfaces as the in-memory stores; the
   // append-only audit log is the tamper-evident source of truth).  The
   // fail-closed config store is the deploy-free tuning surface.
-  const stores = createDrizzleModerationStores(db);
+  // The chain thunk, not a captured value: `auditChain` is rewired a few lines below
+  // with the master-secret-derived key, and a transactor holding a copy taken here would
+  // sign every production row with the DEV key.
+  const stores = createDrizzleModerationStores(db, () => moderationServices.auditChain);
   moderationServices.cases = stores.cases;
   moderationServices.reports = stores.reports;
   moderationServices.actions = stores.actions;
@@ -1097,6 +1100,10 @@ if (db) {
   // deps pointing at the discarded in-memory store, so every production write would
   // chain against an empty head and the durable trail would be a run of genesis rows —
   // each individually valid, none linked to anything.
+  // ONE UNIT: a state change and its audit row commit together or not at all
+  // (`moderation/transactor.ts`).  It arrives with the stores from one factory, so the
+  // Postgres stores cannot be installed beside the in-memory unit of work.
+  moderationServices.transactor = stores.transactor;
   moderationServices.auditChain = {
     store: stores.audit,
     // Keyed from the identity master secret: repairing a doctored chain then needs a

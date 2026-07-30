@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import { appendAudit } from './audit.js';
 import type { AuditChainDeps } from './audit-chain.js';
 import {
   DEFAULT_MODERATION_CONFIG,
@@ -59,6 +60,7 @@ import {
   type ModerationReportStore,
   type ReviewerStatusStore,
 } from './stores.js';
+import { InMemoryModerationTransactor, type ModerationTransactor } from './transactor.js';
 
 /** In-process counters (no PII; observability only, SPEC §18.2). */
 export class ModerationMetrics {
@@ -79,6 +81,15 @@ export interface ModerationServices {
   reports: ModerationReportStore;
   actions: ModerationActionStore;
   audit: ModerationAuditStore;
+  /**
+   * Run a state change and its audit record as ONE unit (WS-J.2.3, `transactor.ts`).
+   *
+   * Replaced at production boot by `DrizzleModerationTransactor`, which arrives from the
+   * same factory as the Postgres stores so the two cannot be half-wired.  Until then the
+   * in-memory twin serialises units and rolls back on a throw, so both sides answer the
+   * same question about what a failed unit leaves behind.
+   */
+  transactor: ModerationTransactor;
   /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
    *
    *  Present by DEFAULT — in dev and test as well as production — because a chain that
@@ -150,11 +161,24 @@ export function createInMemoryModerationServices(
   const log = options.log ?? ((): void => {});
 
   const auditStore = new InMemoryModerationAuditStore(now);
+  const caseStore = new InMemoryModerationCaseStore(now);
+  const actionStore = new InMemoryModerationActionStore(now);
   const services: ModerationServices = {
-    cases: new InMemoryModerationCaseStore(now),
+    cases: caseStore,
     reports: new InMemoryModerationReportStore(now),
-    actions: new InMemoryModerationActionStore(now),
+    actions: actionStore,
     audit: auditStore,
+    // The unit of work.  `audit` reads `services.auditChain` at CALL time rather than
+    // capturing it, so a boot that rewires the chain key does not leave the transactor
+    // signing with the dev one.
+    transactor: new InMemoryModerationTransactor(
+      {
+        cases: caseStore,
+        actions: actionStore,
+        audit: (input) => appendAudit(services.auditChain, input),
+      },
+      [caseStore, actionStore, auditStore],
+    ),
     auditChain: {
       store: auditStore,
       // A LOCAL key, overridden at production boot from the identity master secret.  It

@@ -5,6 +5,7 @@
 // wiring (the belt-and-braces for the static check:prod-parity gate).
 import { describe, expect, it } from 'vitest';
 import { assertProductionParity, findInMemoryAdapters } from '../lib/parity-guard.js';
+import { InMemoryModerationTransactor } from '../moderation/transactor.js';
 
 class InMemoryExampleStore {}
 class MemoryTokenStoreLike {}
@@ -45,6 +46,23 @@ describe('findInMemoryAdapters', () => {
     const containers = { identity: { objectStore: new InMemoryExampleStore() } };
     expect(findInMemoryAdapters(containers, { 'identity.objectStore': 'documented' })).toEqual([]);
     expect(findInMemoryAdapters(containers, {})).toHaveLength(1);
+  });
+});
+
+describe('the moderation unit of work', () => {
+  it('is VISIBLE to the guard — an un-swapped transactor refuses to serve', () => {
+    // The reason `ModerationTransactor` is an interface with named classes rather than a
+    // function-valued field: the guard identifies an in-memory adapter by CLASS NAME and
+    // skips anything that is not an object.  A closure would be invisible, and production
+    // could run the Postgres stores beside the in-memory unit of work — committing each
+    // write immediately, under a seam whose entire claim is that it does not.
+    const transactor = new InMemoryModerationTransactor(
+      { cases: {}, actions: {}, audit: async () => '' } as never,
+      [],
+    );
+    expect(findInMemoryAdapters({ moderation: { transactor } })).toEqual([
+      'moderation.transactor: InMemoryModerationTransactor',
+    ]);
   });
 });
 

@@ -65,16 +65,21 @@ describe.skipIf(!DB_URL)('keyset cursors under sub-millisecond timestamps', () =
     // seed comes out with row-level triggers disabled for this session.  Without it the
     // first DELETE throws and every later cleanup statement — including the room — is
     // skipped, leaking a fixture that then collides with the next run's unique name.
-    await db.execute(sql`SET session_replication_role = replica`);
-    await db.execute(sql`delete from knomosis.governance_audit_log where room_id = ${roomId}`);
-    await db.execute(sql`delete from rooms where room_id = ${roomId}`);
-    await db.execute(
-      sql`delete from coordinated_report_incidents where summary like 'keyset-microsecond%'`,
-    );
-    await db.execute(
-      sql`delete from evidence_decisions where reason_code like 'keyset-microsecond%'`,
-    );
-    await db.execute(sql`SET session_replication_role = origin`);
+    // ONE TRANSACTION: `session_replication_role` is a SESSION setting and the pool
+    // hands each statement whichever connection is free, so the `SET` and the deletes
+    // it covers can land on different connections and the append-only trigger fires
+    // anyway.  `SET LOCAL` is scoped to the transaction, i.e. to one connection.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`delete from knomosis.governance_audit_log where room_id = ${roomId}`);
+      await tx.execute(sql`delete from rooms where room_id = ${roomId}`);
+      await tx.execute(
+        sql`delete from coordinated_report_incidents where summary like 'keyset-microsecond%'`,
+      );
+      await tx.execute(
+        sql`delete from evidence_decisions where reason_code like 'keyset-microsecond%'`,
+      );
+    });
     await db.$client.end();
   });
 

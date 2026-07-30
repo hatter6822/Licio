@@ -88,13 +88,18 @@ describe.skipIf(!DB_URL)('WS-Q private-room story repair (migration 0119)', () =
     // trigger off — which is precisely what makes these rows HISTORICAL: they exist only
     // where they predate the enforcement.
     const strandedId = randomUUID();
-    await db.execute(sql`SET session_replication_role = replica`);
-    await db.execute(sql`
+    // ONE TRANSACTION: `session_replication_role` is a SESSION setting and the pool
+    // hands each statement whichever connection is free, so the `SET` and the deletes
+    // it covers can land on different connections and the append-only trigger fires
+    // anyway.  `SET LOCAL` is scoped to the transaction, i.e. to one connection.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`
       insert into stories (story_id, room_id, submitted_by, title, title_hash, canonical_url,
                            topic_ids, submission_type, submission_metadata, visibility)
       values (${strandedId}, ${roomId}::uuid, ${userId}::uuid, 'stranded', 'stranded-hash', ${url},
               array[gen_random_uuid()], 'link', '{}'::jsonb, 'public')`);
-    await db.execute(sql`SET session_replication_role = origin`);
+    });
 
     // 0110's own backfill predicate SKIPS this row: the twin occupies the destination.
     const skipped = (await db.execute(sql`

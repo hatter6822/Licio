@@ -19,7 +19,7 @@ import {
   accountBlocks,
   accountMutes,
   coordinatedReportIncidents,
-  type createDbClient,
+  type DbExecutor,
   evidenceDecisions,
   moderationActions,
   moderationAppeals,
@@ -53,6 +53,8 @@ import {
 } from 'drizzle-orm';
 import { keysetAfterRow } from '../lib/keyset.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
+import { appendAudit } from './audit.js';
+import type { AuditChainDeps } from './audit-chain.js';
 import type {
   AccountBlockRecord,
   AccountBlockStore,
@@ -80,8 +82,12 @@ import type {
   ReviewerStatusRecord,
   ReviewerStatusStore,
 } from './stores.js';
+import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction, the same seam the forum/ingestion adapters
+// take.  Without it these stores can only ever run standalone — which is what kept the
+// assignment CAS and its audit row in two separate transactions.
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d === null ? null : d.toISOString());
@@ -895,28 +901,45 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     };
     const full: ModerationAuditRecord = { ...staged, integrityHash: hashOf(staged) };
     try {
-      await this.#db.insert(moderationAudit).values({
-        auditId: full.auditId,
-        ordinal: full.ordinal,
-        eventTime: new Date(full.eventTime),
-        createdAt: new Date(full.createdAt),
-        actorUserId: full.actorUserId,
-        actorRole: full.actorRole,
-        action: full.action,
-        reasonCode: full.reasonCode,
-        targetType: full.targetType,
-        targetId: full.targetId,
-        subjectUserId: full.subjectUserId,
-        priorState: full.priorState,
-        nextState: full.nextState,
-        reversible: full.reversible,
-        linkedActionId: full.linkedActionId,
-        caseId: full.caseId,
-        prevHash: full.prevHash,
-        integrityHash: full.integrityHash,
-        reportIds: full.reportIds,
-        coApproverUserId: full.coApproverUserId,
-        notes: full.notes,
+      // A SAVEPOINT around the insert, which is what lets the retry loop survive when
+      // this store runs inside a wrapping transaction (the `transact` seam).  A unique
+      // violation aborts the transaction it happens in — so without the nested scope the
+      // parent collision would kill the OUTER transaction, taking the state change with
+      // it, and the retry's own `chainHead()` would fail with "current transaction is
+      // aborted".  Rolling back to the savepoint leaves the outer work intact.
+      //
+      // `#db.transaction` is a savepoint when `#db` is already a transaction and an
+      // ordinary transaction when it is the base client, so both callers get the scope
+      // they need from one spelling.
+      //
+      // The retry CONVERGES because the isolation level is READ COMMITTED: each
+      // statement takes a fresh snapshot, so the re-read of `chainHead()` sees the row
+      // the winner just committed.  Under REPEATABLE READ it would keep seeing the old
+      // head and burn the whole budget.
+      await this.#db.transaction(async (tx) => {
+        await tx.insert(moderationAudit).values({
+          auditId: full.auditId,
+          ordinal: full.ordinal,
+          eventTime: new Date(full.eventTime),
+          createdAt: new Date(full.createdAt),
+          actorUserId: full.actorUserId,
+          actorRole: full.actorRole,
+          action: full.action,
+          reasonCode: full.reasonCode,
+          targetType: full.targetType,
+          targetId: full.targetId,
+          subjectUserId: full.subjectUserId,
+          priorState: full.priorState,
+          nextState: full.nextState,
+          reversible: full.reversible,
+          linkedActionId: full.linkedActionId,
+          caseId: full.caseId,
+          prevHash: full.prevHash,
+          integrityHash: full.integrityHash,
+          reportIds: full.reportIds,
+          coApproverUserId: full.coApproverUserId,
+          notes: full.notes,
+        });
       });
       return full;
     } catch (error) {
@@ -1688,6 +1711,16 @@ export interface DrizzleModerationStores {
   reviewerStatus: DrizzleReviewerStatusStore;
   incidents: DrizzleCoordinatedReportIncidentStore;
   evidenceDecisions: DrizzleEvidenceDecisionStore;
+  /**
+   * The unit of work, returned from the SAME factory as the stores.
+   *
+   * Not a separate wiring step on purpose: the boot installs these stores with one
+   * assignment, and a transactor left behind would leave production running Postgres
+   * stores beside an in-memory unit of work — stores that commit immediately, under a
+   * seam whose whole claim is that they do not.  Coming out of one factory, that state
+   * is unreachable.
+   */
+  transactor: ModerationTransactor;
 }
 
 function mapEvidenceDecision(row: typeof evidenceDecisions.$inferSelect): EvidenceDecisionRecord {
@@ -1796,8 +1829,49 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
   }
 }
 
-export function createDrizzleModerationStores(db: Db): DrizzleModerationStores {
+/**
+ * The production `ModerationTransactor`: one Postgres transaction per unit.
+ *
+ * Every store the unit touches is rebuilt on the TRANSACTION handle — the moderation
+ * adapters take a `DbExecutor`, so one class serves an autocommit call and a unit alike.
+ * Rebinding the AUDIT store is the load-bearing half: on the outer handle it would read a
+ * chain head from outside the unit and write its row outside the change it describes,
+ * which is precisely the gap this closes.
+ */
+export class DrizzleModerationTransactor implements ModerationTransactor {
+  readonly #db: Db;
+  readonly #auditChain: () => AuditChainDeps;
+
+  constructor(db: Db, auditChain: () => AuditChainDeps) {
+    this.#db = db;
+    this.#auditChain = auditChain;
+  }
+
+  async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
+    return this.#db.transaction(async (tx) =>
+      work({
+        cases: new DrizzleModerationCaseStore(tx),
+        actions: new DrizzleModerationActionStore(tx),
+        audit: (input) =>
+          appendAudit({ ...this.#auditChain(), store: new DrizzleModerationAuditStore(tx) }, input),
+      }),
+    );
+  }
+}
+
+/**
+ * `auditChain` is a THUNK because the chain's key is derived at boot from the identity
+ * master secret, which is not necessarily resolved when the stores are built — and
+ * because the transactor must read it at CALL time, not capture a copy that a later
+ * rewire would leave stale.  Only `key` and `refOf` are taken from it; the store is
+ * replaced with one bound to the open transaction, which is the entire point.
+ */
+export function createDrizzleModerationStores(
+  db: Db,
+  auditChain: () => AuditChainDeps,
+): DrizzleModerationStores {
   return {
+    transactor: new DrizzleModerationTransactor(db, auditChain),
     cases: new DrizzleModerationCaseStore(db),
     reports: new DrizzleModerationReportStore(db),
     actions: new DrizzleModerationActionStore(db),

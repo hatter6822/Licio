@@ -12,6 +12,7 @@
 // transaction-derived + case-management data only, by construction.  Chained
 // audit records store NON-REVERSIBLE actor refs (WS-N.1.1g): erasure never
 // mutates a hashed column.
+
 import type {
   CaseResolution,
   CaseRetentionPolicy,
@@ -25,6 +26,7 @@ import type {
   LawfulAccessStatus,
   SarStatus,
 } from '@licio/shared';
+import type { InMemoryRollback as InMemoryRollbackContract } from '../lib/in-memory-rollback.js';
 import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
@@ -544,6 +546,10 @@ export class ChainContentionError extends Error {
   }
 }
 
+// The rollback contract moved to `lib/in-memory-rollback.ts` when WS-J needed the same
+// one — re-exported here so this module's consumers are unchanged, and so there is one
+// spelling of it rather than two that drift.
+export type { InMemoryRollback } from '../lib/in-memory-rollback.js';
 /**
  * The in-memory adapters raise the SHARED unique-violation error, so a caller
  * reads the same answer from them as from Postgres (`lib/pg-errors.ts` owns it,
@@ -551,16 +557,6 @@ export class ChainContentionError extends Error {
  * because this module's adapters are the ones that raise it.
  */
 export { UniqueViolationError };
-
-/**
- * The in-memory adapters' ROLLBACK (the house rule: they emulate every DB
- * protection, and a transaction is one).  Returning an undo CLOSURE keeps each
- * store's snapshot private — no row shape escapes through the transactor.
- */
-export interface InMemoryRollback {
-  /** Capture the current rows; the returned closure puts them back. */
-  beginRollback(): () => void;
-}
 
 /**
  * The in-memory `ComplianceTransactor`: snapshot → run → restore on ANY throw,
@@ -571,10 +567,10 @@ export interface InMemoryRollback {
  */
 export class InMemoryComplianceTransactor implements ComplianceTransactor {
   readonly #stores: ComplianceTxStores;
-  readonly #rollbacks: readonly InMemoryRollback[];
+  readonly #rollbacks: readonly InMemoryRollbackContract[];
   #depth = 0;
 
-  constructor(stores: ComplianceTxStores, rollbacks: readonly InMemoryRollback[]) {
+  constructor(stores: ComplianceTxStores, rollbacks: readonly InMemoryRollbackContract[]) {
     this.#stores = stores;
     this.#rollbacks = rollbacks;
   }
@@ -628,7 +624,9 @@ export interface PolicyInvalidationBroadcaster {
 // In-memory adapters.
 // ---------------------------------------------------------------------------
 
-export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore, InMemoryRollback {
+export class InMemoryJurisdictionPolicyStore
+  implements JurisdictionPolicyStore, InMemoryRollbackContract
+{
   readonly #rows: JurisdictionPolicyRow[] = [];
 
   beginRollback(): () => void {
@@ -675,7 +673,7 @@ export class InMemoryJurisdictionPolicyStore implements JurisdictionPolicyStore,
   }
 }
 
-export class InMemoryPolicyAuditStore implements PolicyAuditStore, InMemoryRollback {
+export class InMemoryPolicyAuditStore implements PolicyAuditStore, InMemoryRollbackContract {
   readonly #rows: PolicyAuditRecord[] = [];
 
   beginRollback(): () => void {
@@ -704,7 +702,7 @@ export class InMemoryPolicyAuditStore implements PolicyAuditStore, InMemoryRollb
   }
 }
 
-export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemoryRollback {
+export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemoryRollbackContract {
   readonly #rows = new Map<string, ComplianceCaseRecord>();
 
   beginRollback(): () => void {
@@ -955,7 +953,7 @@ export class InMemoryComplianceCaseStore implements ComplianceCaseStore, InMemor
   }
 }
 
-export class InMemoryCaseAuditStore implements CaseAuditStore, InMemoryRollback {
+export class InMemoryCaseAuditStore implements CaseAuditStore, InMemoryRollbackContract {
   readonly #rows: CaseAuditRecord[] = [];
 
   beginRollback(): () => void {
@@ -1170,7 +1168,7 @@ export class InMemoryDisclosureAckStore implements DisclosureAckStore {
   }
 }
 
-export class InMemoryWalletRiskPinStore implements WalletRiskPinStore, InMemoryRollback {
+export class InMemoryWalletRiskPinStore implements WalletRiskPinStore, InMemoryRollbackContract {
   readonly #rows: WalletRiskPinRecord[] = [];
 
   beginRollback(): () => void {
@@ -1223,7 +1221,7 @@ export class InMemoryWalletRiskPinStore implements WalletRiskPinStore, InMemoryR
   }
 }
 
-export class InMemorySarStore implements SarStore, InMemoryRollback {
+export class InMemorySarStore implements SarStore, InMemoryRollbackContract {
   readonly #rows = new Map<string, SarRecord>();
 
   beginRollback(): () => void {
@@ -1282,7 +1280,7 @@ export class InMemorySarStore implements SarStore, InMemoryRollback {
   }
 }
 
-export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRollback {
+export class InMemoryLawfulAccessStore implements LawfulAccessStore, InMemoryRollbackContract {
   readonly #rows = new Map<string, LawfulAccessRecord>();
 
   beginRollback(): () => void {

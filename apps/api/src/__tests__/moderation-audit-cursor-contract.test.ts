@@ -211,6 +211,11 @@ contract(
 
 describe.skipIf(!DB_URL)('moderation audit cursor — live Postgres', () => {
   let db: ReturnType<typeof createDbClient>;
+  /** The subjects THIS run created.  Cleanup keys on them rather than a handle prefix:
+   *  a prefix also matches a concurrently running copy of this file, and deleting its
+   *  users breaks its inserts with a foreign-key violation that reads like a defect in
+   *  the code under test. */
+  const subjects: string[] = [];
   let ran = false;
 
   beforeAll(async () => {
@@ -222,10 +227,19 @@ describe.skipIf(!DB_URL)('moderation audit cursor — live Postgres', () => {
     // The trail is APPEND-ONLY — a `BEFORE DELETE` trigger rejects row deletes — so the
     // seeded rows come out with the trigger disabled for this session.  TRUNCATE is not
     // an option here: it would take a developer's whole local trail, not just the seed.
-    await db.execute(sql`SET session_replication_role = replica`);
-    await db.execute(sql`DELETE FROM moderation_audit WHERE action LIKE 'contract_seed_%'`);
-    await db.execute(sql`DELETE FROM users WHERE handle LIKE 'mac_subject_%'`);
-    await db.execute(sql`SET session_replication_role = origin`);
+    // ONE TRANSACTION: `session_replication_role` is a SESSION setting and the pool
+    // hands each statement whichever connection is free, so the `SET` and the `DELETE`
+    // it covers can land on different connections.  `SET LOCAL` is scoped to the
+    // transaction, which is exactly one connection.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      for (const subject of subjects) {
+        await tx.execute(
+          sql`DELETE FROM moderation_audit WHERE subject_user_id = ${subject}::uuid`,
+        );
+        await tx.execute(sql`DELETE FROM users WHERE user_id = ${subject}::uuid`);
+      }
+    });
     await db.$client.end();
   });
 
@@ -255,6 +269,7 @@ describe.skipIf(!DB_URL)('moderation audit cursor — live Postgres', () => {
           (user_id, handle, display_name, privacy_settings, personalization_settings)
         values (${userId}, ${`mac_subject_${userId.slice(0, 8)}`}, 'Audit cursor subject',
                 '{}'::jsonb, '{}'::jsonb)`);
+      subjects.push(userId);
       return userId;
     },
     () => {

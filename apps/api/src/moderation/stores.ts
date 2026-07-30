@@ -23,6 +23,7 @@ import type {
   ReviewerAvailability,
   StewardRoleId,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 type Clock = () => number;
 const iso = (now: Clock): string => new Date(now()).toISOString();
@@ -599,7 +600,12 @@ function afterCreated<T extends { createdAt: string }>(rows: T[], after: string 
   return after === null ? rows : rows.filter((r) => r.createdAt < after);
 }
 
-export class InMemoryModerationCaseStore implements ModerationCaseStore {
+export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationCaseRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -841,7 +847,12 @@ export class InMemoryModerationReportStore implements ModerationReportStore {
   }
 }
 
-export class InMemoryModerationActionStore implements ModerationActionStore {
+export class InMemoryModerationActionStore implements ModerationActionStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationActionRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -916,7 +927,23 @@ export class InMemoryModerationActionStore implements ModerationActionStore {
   }
 }
 
-export class InMemoryModerationAuditStore implements ModerationAuditStore {
+export class InMemoryModerationAuditStore implements ModerationAuditStore, InMemoryRollback {
+  /** @see InMemoryRollback.
+   *
+   *  The ORDINAL COUNTER IS NOT REWOUND, deliberately.  Postgres assigns it from a
+   *  sequence, and `nextval` is not transactional — a rolled-back unit burns its value
+   *  for good.  A twin that rewound would be MORE contiguous than production, and the
+   *  first thing that costs is a test: assert contiguous ordinals, watch it pass
+   *  in-memory and fail against Postgres.  Nothing may read the ordinal as a gapless
+   *  counter; proving no row was removed is the chain's job. */
+  beginRollback(): () => void {
+    const saved = [...this.#rows];
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...saved);
+    };
+  }
+
   readonly #rows: ModerationAuditRecord[] = [];
   readonly #now: Clock;
   /** Mirrors the Postgres sequence: assigned on append, never reused. */

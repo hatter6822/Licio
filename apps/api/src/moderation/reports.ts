@@ -43,33 +43,41 @@ async function autoAssignNewCase(
   // claim, silently, with no audit row naming the person it displaced.  The
   // compare-and-set makes the outcome ordering-independent: whoever got there
   // first keeps it, and this simply does nothing.
-  const routed = await services.cases.claimIfUnassigned(theCase.caseId, assignee);
-  if (routed === null) return;
-  await writeAudit(services, {
-    actorUserId: null, // system routing
-    actorRole: null,
-    action: 'assign',
-    caseId: theCase.caseId,
-    targetType: theCase.targetType,
-    targetId: theCase.targetId,
-    subjectUserId: assignee,
-    // NAMES THE EDGE, like both console assignment rows do.
-    //
-    // This row carried neither state, and `writeAudit` defaults both to null — so the
-    // FIRST assign row on the common path (auto-routing runs for every newly opened
-    // case) said nothing about what changed.  Reading the trail by FOLLOWING its
-    // edges, which is what makes the history correct regardless of append order, then
-    // met a null-to-null row at the head of every chain: the system assignment was
-    // unattributable, not merely unexplained.
-    //
-    // Both values are known here without assuming anything.  `claimIfUnassigned`
-    // succeeds only against `assigned_to IS NULL`, so the prior state IS unassigned;
-    // the next state is read off the row the CAS RETURNED rather than the local it was
-    // asked for, which is the discipline the console path uses.
-    priorState: 'unassigned',
-    nextState: routed.assignedTo ?? assignee,
-    notes: 'auto-assigned to the least-loaded available reviewer',
+  // ONE UNIT: the CAS and its audit row commit together, so the row cannot land after a
+  // human reviewer's later claim and leave the most recent entry naming the wrong holder.
+  // Auto-routing runs for every newly opened case, so this is the row most likely to be
+  // the one a reader reaches first.
+  const routed = await services.transactor.run(async (tx) => {
+    const claimed = await tx.cases.claimIfUnassigned(theCase.caseId, assignee);
+    // A human got there first.  Nothing written, nothing to audit — the empty unit
+    // commits and auto-routing has, correctly, done nothing.
+    if (claimed === null) return false;
+    await tx.audit({
+      actorUserId: null, // system routing
+      actorRole: null,
+      action: 'assign',
+      caseId: theCase.caseId,
+      targetType: theCase.targetType,
+      targetId: theCase.targetId,
+      subjectUserId: assignee,
+      // NAMES THE EDGE, like both console assignment rows do.
+      //
+      // This row carried neither state, and `writeAudit` defaults both to null — so the
+      // FIRST assign row on the common path said nothing about what changed.  Reading
+      // the trail by FOLLOWING its edges then met a null-to-null row at the head of
+      // every chain: the system assignment was unattributable, not merely unexplained.
+      //
+      // Both values are known here without assuming anything.  `claimIfUnassigned`
+      // succeeds only against `assigned_to IS NULL`, so the prior state IS unassigned;
+      // the next state is read off the row the CAS RETURNED rather than the local it was
+      // asked for, which is the discipline the console path uses.
+      priorState: 'unassigned',
+      nextState: claimed.assignedTo ?? assignee,
+      notes: 'auto-assigned to the least-loaded available reviewer',
+    });
+    return true;
   });
+  if (!routed) return;
   services.metrics.increment('moderation.auto_assign');
 }
 

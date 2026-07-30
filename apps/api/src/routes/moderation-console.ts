@@ -75,6 +75,7 @@ import {
   buildReportQueue,
 } from '../moderation/review.js';
 import { getModerationServices } from '../moderation/services.js';
+import type { ModerationTx } from '../moderation/transactor.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
@@ -313,68 +314,78 @@ export function createModerationConsoleRoutes() {
             // not a conflict, and a retried request must not become one.
             return c.json(okResponseSchema.parse({ ok: true }));
           }
-          // THE OBSERVED PRIOR HOLDER, from whichever CAS actually ran — not
-          // `theCase.assignedTo`, which is the read from before any of this and is
-          // what made the audit describe an edge that never existed.
-          let priorHolder: string | null;
-          if (theCase.assignedTo === null) {
-            // THE CAS decides, not the read above — that read is already stale by
-            // the time this line runs, which is the whole defect.
-            const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
-            if (!claimed) {
-              return c.json(
-                deny('already_assigned', 'Another reviewer claimed this case first'),
-                409,
-              );
-            }
-            priorHolder = null;
-          } else if (reason === undefined) {
-            // Held by someone else.  Taking a case off a colleague is a REASONED
-            // reassignment — the flow the console's own comment describes — so it
-            // requires the `reason` the schema already carries.  Without one the
-            // answer is a refusal, not a silent handover.
+          // Held by someone else.  Taking a case off a colleague is a REASONED
+          // reassignment — the flow the console's own comment describes — so it requires
+          // the `reason` the schema already carries.  Without one the answer is a
+          // refusal, not a silent handover.  Checked BEFORE the unit: it is a validation
+          // of the request, not a write to roll back.
+          if (theCase.assignedTo !== null && reason === undefined) {
             return c.json(
               deny('already_assigned', 'This case is assigned to another reviewer'),
               409,
             );
-          } else {
-            // A CAS HERE TOO.  This was an unconditional `update`, so two reviewers
-            // taking the case off the same colleague both succeeded and
-            // last-writer-won — the race `claimIfUnassigned` closed for an
-            // unassigned case, left open one branch along.  With the expected holder
-            // in the predicate, every audit row below names an edge a write actually
-            // performed, so the trail reconstructs by FOLLOWING those edges even
-            // when two appends interleave.
-            const reassigned = await mod.cases.reassignIfHeldBy(
-              caseId,
-              theCase.assignedTo,
-              reviewer_id,
-            );
-            if (!reassigned) {
-              return c.json(
-                deny('already_assigned', 'Another reviewer moved this case first'),
-                409,
-              );
-            }
-            priorHolder = theCase.assignedTo;
           }
-          await writeAudit(mod, {
-            actorUserId: actor.userId,
-            actorRole: actor.stewardRoles[0] ?? null,
-            action: 'assign',
-            caseId: theCase.caseId,
-            targetType: theCase.targetType,
-            targetId: theCase.targetId,
-            // NAMES BOTH HOLDERS.  The row recorded an `assign` on the target with
-            // `subjectUserId: null` and no prior/next state, so the trail could not
-            // say who took the case or from whom — the takeover was unattributable,
-            // not merely unexplained.
-            subjectUserId: reviewer_id,
-            // The holder the CAS actually moved FROM, so this row is a true edge.
-            priorState: priorHolder ?? 'unassigned',
-            nextState: reviewer_id,
-            notes: reason ?? null,
+          // THE OBSERVED PRIOR HOLDER, from whichever CAS actually ran — not
+          // `theCase.assignedTo`, which is the read from before any of this and is
+          // what made the audit describe an edge that never existed.
+          // ONE UNIT (`moderation/transactor.ts`): the CAS and its audit row commit
+          // together, so a reviewer taking this case off the next one cannot observe the
+          // handover until the row recording it has landed too.  Appended after the
+          // commit instead, a delayed request could put its row behind a later
+          // reviewer's and the trail's most recent entry would name the wrong holder.
+          const outcome = await mod.transactor.run(async (tx: ModerationTx) => {
+            let priorHolder: string | null;
+            if (theCase.assignedTo === null) {
+              // THE CAS decides, not the read above — that read is already stale by
+              // the time this line runs, which is the whole defect.
+              const claimed = await tx.cases.claimIfUnassigned(caseId, reviewer_id);
+              // A refusal RETURNS rather than throws: nothing has been written, so the
+              // empty transaction commits and the caller answers 409.  What must never
+              // happen is falling through to the audit — a row for an act that did not
+              // occur, committed beside nothing.
+              if (!claimed) return 'already_assigned' as const;
+              priorHolder = null;
+            } else {
+              // A CAS HERE TOO.  This was an unconditional `update`, so two reviewers
+              // taking the case off the same colleague both succeeded and
+              // last-writer-won — the race `claimIfUnassigned` closed for an unassigned
+              // case, left open one branch along.
+              const reassigned = await tx.cases.reassignIfHeldBy(
+                caseId,
+                theCase.assignedTo,
+                reviewer_id,
+              );
+              if (!reassigned) return 'already_moved' as const;
+              priorHolder = theCase.assignedTo;
+            }
+            await tx.audit({
+              actorUserId: actor.userId,
+              actorRole: actor.stewardRoles[0] ?? null,
+              action: 'assign',
+              caseId: theCase.caseId,
+              targetType: theCase.targetType,
+              targetId: theCase.targetId,
+              // NAMES BOTH HOLDERS.  The row recorded an `assign` on the target with
+              // `subjectUserId: null` and no prior/next state, so the trail could not
+              // say who took the case or from whom — the takeover was unattributable,
+              // not merely unexplained.
+              subjectUserId: reviewer_id,
+              // The holder the CAS actually moved FROM, so this row is a true edge.
+              priorState: priorHolder ?? 'unassigned',
+              nextState: reviewer_id,
+              notes: reason ?? null,
+            });
+            return 'assigned' as const;
           });
+          if (outcome === 'already_assigned') {
+            return c.json(
+              deny('already_assigned', 'Another reviewer claimed this case first'),
+              409,
+            );
+          }
+          if (outcome === 'already_moved') {
+            return c.json(deny('already_assigned', 'Another reviewer moved this case first'), 409);
+          }
           mod.metrics.increment('moderation.assign');
           return c.json(okResponseSchema.parse({ ok: true }));
         },
@@ -495,28 +506,35 @@ export function createModerationConsoleRoutes() {
               results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
               continue;
             }
-            const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
-            if (!claimed) {
+            // ONE UNIT per case, as the single assign is — and per CASE rather than
+            // around the loop: locking many case rows in request order would let two
+            // bulk operations over overlapping sets deadlock on each other.
+            const assigned = await mod.transactor.run(async (tx: ModerationTx) => {
+              const claimed = await tx.cases.claimIfUnassigned(caseId, reviewer_id);
+              if (!claimed) return false;
+              await tx.audit({
+                actorUserId: actor.userId,
+                actorRole: actor.stewardRoles[0] ?? null,
+                action: 'assign',
+                caseId: theCase.caseId,
+                targetType: theCase.targetType,
+                targetId: theCase.targetId,
+                // Named here too — the bulk path wrote the row with no identities and
+                // no notes at all.
+                subjectUserId: reviewer_id,
+                // Reached only via the CAS above, so the case WAS unassigned — but
+                // stated from the row rather than as a literal, because a literal is
+                // what made the retry path lie.
+                priorState: theCase.assignedTo ?? 'unassigned',
+                nextState: reviewer_id,
+                notes: reason_code ?? null,
+              });
+              return true;
+            });
+            if (!assigned) {
               results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
               continue;
             }
-            await writeAudit(mod, {
-              actorUserId: actor.userId,
-              actorRole: actor.stewardRoles[0] ?? null,
-              action: 'assign',
-              caseId: theCase.caseId,
-              targetType: theCase.targetType,
-              targetId: theCase.targetId,
-              // Named here too — the bulk path wrote the row with no identities and
-              // no notes at all.
-              subjectUserId: reviewer_id,
-              // Reached only via the CAS above, so the case WAS unassigned — but
-              // stated from the row rather than as a literal, because a literal is
-              // what made the retry path lie.
-              priorState: theCase.assignedTo ?? 'unassigned',
-              nextState: reviewer_id,
-              notes: reason_code ?? null,
-            });
             results.push({ case_id: caseId, ok: true, error: null });
             continue;
           }

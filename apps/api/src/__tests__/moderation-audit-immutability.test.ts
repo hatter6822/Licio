@@ -62,10 +62,15 @@ describe.skipIf(!DB_URL)('moderation_audit is append-only in the DATABASE', () =
   });
 
   afterAll(async () => {
-    await db.execute(sql`SET session_replication_role = replica`);
-    await db.execute(sql`DELETE FROM moderation_audit WHERE action = 'immutability_probe'`);
-    await db.execute(sql`DELETE FROM users WHERE user_id = ${userId}::uuid`);
-    await db.execute(sql`SET session_replication_role = origin`);
+    // ONE TRANSACTION: `session_replication_role` is a SESSION setting and the pool
+    // hands each statement whichever connection is free, so the `SET` and the deletes
+    // it covers can land on different connections and the append-only trigger fires
+    // anyway.  `SET LOCAL` is scoped to the transaction, i.e. to one connection.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(sql`DELETE FROM moderation_audit WHERE action = 'immutability_probe'`);
+      await tx.execute(sql`DELETE FROM users WHERE user_id = ${userId}::uuid`);
+    });
     await db.$client.end();
   });
 
