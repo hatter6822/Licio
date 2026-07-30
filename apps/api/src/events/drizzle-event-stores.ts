@@ -1349,14 +1349,27 @@ export class DrizzleActorBehaviorStore implements ActorBehaviorStore {
     let total = 0;
     for (let at = 0; at < unique.length; at += CHUNK) {
       const chunk = unique.slice(at, at + CHUNK);
-      const windows = await this.#db
-        .delete(actorBehaviorWindows)
-        .where(inArray(actorBehaviorWindows.actorRef, chunk))
-        .returning({ actorRef: actorBehaviorWindows.actorRef });
-      const scores = await this.#db
-        .delete(actorAuthenticityScores)
-        .where(inArray(actorAuthenticityScores.actorRef, chunk))
-        .returning({ actorRef: actorAuthenticityScores.actorRef });
+      // ONE TRANSACTION per chunk.  As two independent statements, a transient failure
+      // on the second left the authenticity SCORE behind for up to `CHUNK` owners whose
+      // behaviour windows had already gone — and that residue is not self-healing.  The
+      // retention sweep deletes an owner's expired attention aggregates before calling
+      // this, and `listIdentifiableOwners()` discovers work only from the aggregates that
+      // remain, so an owner with none left never reappears in a later sweep: an
+      // attention-derived score would sit there indefinitely, which is the one outcome
+      // the retention path exists to prevent.
+      //
+      // Per CHUNK rather than around the whole loop, because the chunking exists to bound
+      // the lock footprint — atomicity is needed for the PAIR, not for the sweep.
+      const [windows, scores] = await this.#db.transaction(async (tx) => [
+        await tx
+          .delete(actorBehaviorWindows)
+          .where(inArray(actorBehaviorWindows.actorRef, chunk))
+          .returning({ actorRef: actorBehaviorWindows.actorRef }),
+        await tx
+          .delete(actorAuthenticityScores)
+          .where(inArray(actorAuthenticityScores.actorRef, chunk))
+          .returning({ actorRef: actorAuthenticityScores.actorRef }),
+      ]);
       total += windows.length + scores.length;
     }
     return total;
