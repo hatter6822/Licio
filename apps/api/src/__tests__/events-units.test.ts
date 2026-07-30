@@ -447,6 +447,82 @@ describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () =
     expect(window?.contributionCounts).toEqual({ explanation: 1 });
     expect(window?.antiSignalCounts).toEqual({ rage_loop: 1 });
   });
+
+  it('RESOLVES a pre-upgrade contribution with no story_id, instead of dropping it', async () => {
+    // `story_id` is optional on the wire because a payload written by the previous
+    // release cannot have it.  The fold used to SKIP such a payload, which cost
+    // every pre-upgrade contribution its place in the durable fold — half of
+    // ConstructiveParticipation — for the whole window horizon a rolling upgrade
+    // spans, and `scoring.ts` writes Signal Ledger entries only for folded actors,
+    // so those members' own ledgers lost the contributions too.  The sibling
+    // durable consumer of this same event already resolved thread → story.
+    const storyId = randomUUID();
+    const threadId = randomUUID();
+    fixture.events.storyIdForThread = async (id) => (id === threadId ? storyId : null);
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: IN_WINDOW,
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        // No `story_id` — exactly what the previous release wrote.
+        payload: {
+          thread_id: threadId,
+          user_id: randomUUID(),
+          contribution_type: 'explanation',
+          has_citation: false,
+          accusation_flag: false,
+        },
+        ownerUserId: null,
+        purgeAfter: null,
+      },
+    ]);
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    // Folded under the resolved STORY…
+    const window = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
+    expect(window?.contributionCounts).toEqual({ explanation: 1 });
+    // …and never under the thread id, which is the phantom item that made the
+    // original defect invisible.
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+  });
+
+  it('still SKIPS a contribution whose thread cannot be resolved — counted, never a phantom', async () => {
+    // The seam returning null must not become a licence to key by thread id: an
+    // `AggregationWindow` row for a `targetType: 'story'` that is not a story is
+    // worse than a counted omission.
+    const threadId = randomUUID();
+    fixture.events.storyIdForThread = async () => null;
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: IN_WINDOW,
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        payload: {
+          thread_id: threadId,
+          user_id: randomUUID(),
+          contribution_type: 'explanation',
+          has_citation: false,
+          accusation_flag: false,
+        },
+        ownerUserId: null,
+        purgeAfter: null,
+      },
+    ]);
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+    expect(fixture.events.metrics.counter('pwatt.contribution.unresolved_story')).toBeGreaterThan(
+      0,
+    );
+  });
 });
 
 describe('small pure helpers', () => {

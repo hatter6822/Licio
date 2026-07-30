@@ -29,6 +29,7 @@ import {
   type Citation,
   CONTRIBUTION_BODY_LIMITS,
   type ContributionCreate,
+  type ContributionCreatedEvent,
   type ContributionMetadata,
   type ContributionType,
   type ContributionUpdate,
@@ -906,7 +907,18 @@ export async function createContribution(
     request.type === 'comment' && classifyLowInfoReplyV0(request.body, hasCitation)
       ? 'low_info_reply'
       : baseType;
-  const created = contributionCreatedEventSchema.parse({
+  // THE EMITTER'S OBLIGATION, MADE STRUCTURAL.  `story_id` is optional on the
+  // WIRE — a payload written by the previous release cannot have it, and
+  // `recoverEventPipeline` feeds those back through `parseEvent` — but it is
+  // MANDATORY here, because `threads.story_id` is NOT NULL with a foreign key so
+  // the emitter always knows it, and the participation fold's key is only uniform
+  // while every new event carries it.
+  //
+  // The schema's docstring already claimed this was enforced.  It was not:
+  // `parse` takes `unknown`, so deleting the field below compiled and no test
+  // anywhere asserted an emitted payload's `story_id`.  Annotating the literal is
+  // what turns the claim into a compile error.
+  const draft: ContributionCreatedEvent & { story_id: string } = {
     event_id: randomUUID(),
     event_type: 'contribution.created',
     timestamp: contribution.createdAt,
@@ -922,7 +934,8 @@ export async function createContribution(
     accusation_flag: classifyAccusationV0(request.body),
     privacy_classification: 'public',
     retention_tier: 'public_contribution',
-  });
+  };
+  const created = contributionCreatedEventSchema.parse(draft);
   const createdEntry = TOPIC_REGISTRY['contribution.created'];
   const eventRows: NewStoredEvent[] = [
     {

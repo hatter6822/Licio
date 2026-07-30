@@ -69,12 +69,27 @@ export const contributionCreatedEventSchema = z
      * corrupt.  A field cannot become required in-place on a schema whose old
      * instances are still on disk.
      *
-     * Optional does not mean unenforced: `emitContributionCreated` always sets
-     * it (pinned by a test), so every NEW event carries it and the fold key
-     * stays uniform.  A payload without it can only be pre-upgrade, and the one
-     * consumer that folds by story skips it with an explicit
-     * `pwatt.contribution.unresolved_story` metric rather than re-creating the
-     * phantom item — a counted omission that ages out, instead of a silent one.
+     * Optional does not mean unenforced, and the enforcement is now real.  The
+     * emitter in `forum/contributions.ts` annotates its literal
+     * `ContributionCreatedEvent & { story_id: string }`, so removing the field is
+     * a COMPILE error — `parse` takes `unknown`, so before that annotation this
+     * paragraph claimed an enforcement that did not exist, and the "pinned by a
+     * test" it referred to was a static fixture in this package, which cannot see
+     * `apps/api`.  `forum-contributions.test.ts` now asserts the emitted payload
+     * carries the thread's own story id.
+     *
+     * A payload without it can only be pre-upgrade, and such rows are RESOLVED
+     * rather than dropped: migration 0111 backfills the stored payloads from
+     * `threads.story_id`, and the participation fold falls back to the same
+     * thread → story resolution its sibling consumer already used (only an
+     * unresolvable thread is skipped, counted by
+     * `pwatt.contribution.unresolved_story`, never folded under a thread id).
+     *
+     * Making the field REQUIRED is the contract step of an
+     * expand/migrate/contract and belongs in a later release — during a rolling
+     * upgrade an instance running the previous code is still emitting payloads
+     * without it, so a required field would reject live traffic, not just old
+     * rows.  Tracked in `docs/events/README.md`.
      */
     story_id: uuidSchema.optional(),
     user_id: uuidSchema,

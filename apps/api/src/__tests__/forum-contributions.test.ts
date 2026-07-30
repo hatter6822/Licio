@@ -122,6 +122,17 @@ describe('WS-T.3.2 — comment-first write surface', () => {
     for (const event of [...createdEvents, ...challengerEvents]) {
       expect(JSON.stringify(event.payload)).not.toContain('This is a comment in the thread.');
     }
+    // EVERY EMITTED PAYLOAD CARRIES `story_id`, and it is the thread's OWN story.
+    // The schema's docstring claimed this was "pinned by a test"; the only pin was
+    // over a static fixture in `@licio/shared`, a package that cannot see the
+    // emitter — so deleting the field compiled and nothing here failed.  The
+    // participation fold's key is only uniform while this holds, and a thread id
+    // and its story id are two independently minted uuids.
+    const storyId = await fixture.ingestion.stories.getStoryIdByThreadId(threadId);
+    expect(storyId).not.toBeNull();
+    for (const event of [...createdEvents, ...challengerEvents]) {
+      expect((event.payload as { story_id?: unknown }).story_id).toBe(storyId);
+    }
   });
 
   it('comment replies nest under comments (path + depth)', async () => {

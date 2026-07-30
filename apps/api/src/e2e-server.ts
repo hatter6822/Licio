@@ -134,6 +134,13 @@ await ingestionServices.reloadConfig();
 registerIngestionConsumers(eventServices, ingestionServices);
 setIngestionServices(ingestionServices);
 
+// The WS-E fold's thread → story fallback (see `storyIdForThread` on
+// `EventPipelineServices`).  Assigned AFTER the ingestion container exists, like
+// the story-title cache above: `eventServices` is built first, and the resolution
+// belongs to the story store.
+eventServices.storyIdForThread = (threadId) =>
+  ingestionServices.stories.getStoryIdByThreadId(threadId);
+
 const forumServices = createInMemoryForumServices({
   events: eventServices,
   ingestion: ingestionServices,

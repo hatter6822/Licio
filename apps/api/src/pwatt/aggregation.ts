@@ -200,6 +200,8 @@ export async function computeAggregationWindow(
     } else if (row.topic === 'contribution.created') {
       const payload = row.payload as {
         story_id?: string;
+        /** Always present — the fold falls back to it when `story_id` is not. */
+        thread_id: string;
         user_id: string;
         contribution_type: EventContributionType;
         has_citation: boolean;
@@ -211,17 +213,35 @@ export async function computeAggregationWindow(
       // lookup ever reached, because a thread id and its story id are two
       // independently minted uuids.
       //
-      // The field is REQUIRED by `contributionCreatedEventSchema`, so only a
-      // row written before it existed can be missing it.  Such a row is
-      // skipped rather than folded under the thread id: re-creating the
-      // phantom is what made the defect invisible, and an `AggregationWindow`
-      // row written for a `targetType: 'story'` that is not a story is worse
-      // than a counted omission.
-      if (payload.story_id === undefined) {
-        events.metrics.increment('pwatt.contribution.unresolved_story');
-        continue;
+      // The field is OPTIONAL on the wire (see the schema's own note: a field
+      // cannot become required in place while the previous release's payloads are
+      // still on disk and `recoverEventPipeline` feeds them back through
+      // `parseEvent`), so a pre-upgrade row can be missing it.
+      //
+      // RESOLVED, not dropped.  Skipping it cost every pre-upgrade contribution
+      // its place in the durable fold — half of ConstructiveParticipation — for
+      // the whole 1h/24h/7d window horizon a rolling upgrade spans, and
+      // `scoring.ts` writes Signal Ledger entries only for folded actors, so
+      // those members' contributions never appeared in their own ledger either.
+      // The resolution was avoidable the whole time: `threads.story_id` is NOT
+      // NULL with a foreign key and the SIBLING durable consumer of this exact
+      // event (`ingestion-signals`) already resolves it this way.
+      //
+      // Only the phantom is unacceptable: folding under the thread id produced an
+      // `AggregationWindow` row for a `targetType: 'story'` that is not a story,
+      // which is what made the original defect invisible.  So an unresolvable
+      // thread still skips, counted.
+      let storyId = payload.story_id;
+      if (storyId === undefined) {
+        const resolved = await events.storyIdForThread(payload.thread_id);
+        if (resolved === null) {
+          events.metrics.increment('pwatt.contribution.unresolved_story');
+          continue;
+        }
+        events.metrics.increment('pwatt.contribution.story_resolved_from_thread');
+        storyId = resolved;
       }
-      const item = itemOf(payload.story_id);
+      const item = itemOf(storyId);
       item.eventCount += 1;
       const actor = actorOf(item, payload.user_id);
       actor.eventCount += 1;

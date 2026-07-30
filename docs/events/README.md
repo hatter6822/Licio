@@ -429,6 +429,20 @@ REDIS_URL=redis://localhost:6379 pnpm test
 
 ## Deferred / interface-level (wired to follow-up workstreams)
 
+- **`contribution.created.story_id` — the CONTRACT step is outstanding.**  The
+  field is present on every emitted payload (enforced at the type level in
+  `forum/contributions.ts` and pinned by `forum-contributions.test.ts`), the
+  stored payloads written before it existed are backfilled from
+  `threads.story_id` by migration 0111, and the participation fold resolves
+  thread → story for anything the backfill could not reach.  It remains
+  **optional on the wire**, because that is an expand/migrate/**contract**
+  sequence and the contract step cannot ship in the same release as the
+  migrate: during a rolling upgrade an instance running the previous code is
+  still emitting payloads without the field, so requiring it would reject LIVE
+  traffic, not just old rows.  Close it in a release after 0111 has run
+  everywhere — make `story_id` required, then delete the fold's resolution
+  fallback and the `pwatt.contribution.unresolved_story` metric with it.
+  Closure target: the release after the one carrying migration 0111.
 - **WS-F (CLOSED)** — `content.submitted`/`content.normalized` are emitted
   by the real story-submission pipeline (`apps/api/src/ingestion/`,
   `docs/ingestion/README.md`), and ledger story titles resolve from the real
