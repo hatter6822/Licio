@@ -141,6 +141,44 @@ describe('visible-thread projection (WS-R.13.2)', () => {
     expect(a.find((c) => c.rootCid === 'r-a')?.trustState).toBe('witnessed');
   });
 
+  it('flags a conflict touching a SUPERSEDED edit, not just the visible chain', () => {
+    // Two authorized edits fork the record; `pickLatestEdit` picks one and §25.1
+    // retains the loser in `supersededEdits`.  This mapper tested only the visible
+    // `editChain`, so a device/checkpoint conflict naming the loser left the
+    // contribution `conflicting: false` — the overlay declining to flag exactly the
+    // evidence the projection kept for it.
+    const base: ThreadRecord = {
+      recordCid: 'c-post',
+      record: record({ event_type: 'post', device_seq: 0 }),
+    };
+    const branchA: ThreadRecord = {
+      recordCid: 'c-a',
+      record: record({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'c-post' }),
+    };
+    const branchB: ThreadRecord = {
+      recordCid: 'c-b',
+      record: record({
+        event_type: 'edit',
+        author_device_key_id: 'k2',
+        device_seq: 1,
+        replaces_record_cid: 'c-post',
+      }),
+    };
+    const all = [base, branchA, branchB];
+    const visible = projectVisibleThread(all, opts).contributions[0]?.visibleCid;
+    const loser = visible === 'c-a' ? 'c-b' : 'c-a';
+    // The loser is retained but NOT on the visible chain…
+    const projection = projectVisibleThread(all, opts).contributions[0];
+    expect(projection?.supersededEdits).toEqual([loser]);
+    expect(projection?.editChain).not.toContain(loser);
+    // …and a conflict naming it flags the contribution.
+    const flagged = projectVisibleThread(all, {
+      ...opts,
+      conflictingCids: new Set([loser]),
+    }).contributions[0];
+    expect(flagged?.conflicting).toBe(true);
+  });
+
   it('carries unresolved refusal evidence through the trust/safety overlay', () => {
     // The overlay layer's own header promises conflicting evidence "remains
     // INSPECTABLE (flagged, never dropped)".  It maps the projection's

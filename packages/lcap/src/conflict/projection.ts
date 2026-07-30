@@ -71,7 +71,13 @@ export function projectVisibleThread(
     const isConflicting =
       conflicting.has(projected.visibleCid) ||
       conflicting.has(projected.rootCid) ||
-      projected.editChain.some((cid) => conflicting.has(cid));
+      projected.editChain.some((cid) => conflicting.has(cid)) ||
+      // `supersededEdits` TOO.  `editChain` is only the VISIBLE path, so an
+      // authorized edit on the branch `pickLatestEdit` passed over was retained in
+      // the projection and then invisible to this test — a device or checkpoint
+      // conflict touching it left the contribution `conflicting: false`, which is
+      // the overlay declining to flag the very evidence §25.1 made it retain.
+      (projected.supersededEdits ?? []).some((cid) => conflicting.has(cid));
     const restrictedBySafety = safetyMode === 'strict' && !STRICT_VISIBLE.has(trustState);
     return {
       ...projected,
