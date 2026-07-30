@@ -80,6 +80,31 @@ export interface RankingRequestContext {
    * affect the ordering (WS-I.2.5b).
    */
   lensByItem: ReadonlyMap<string, string> | null;
+  /**
+   * Whether the §11.5 sensitive-freshness CAP binds for this evaluation.
+   *
+   * LIVE SERVING ALWAYS PASSES TRUE.  Replay passes what the decision it is
+   * reproducing actually recorded, which is why this is a request input and not
+   * a constant: the scheduled replay-regression job re-scores historical
+   * decisions and reports a mismatch as a defect, so a scoring change with no
+   * way to say "that decision predates me" turns every genuine old decision
+   * into a false alarm.
+   *
+   * It replaces a gate on `profile_snapshot.profile_version`, which conflated
+   * two different facts in one string.  `profile_version` is OPERATOR-WRITABLE
+   * — `rankingProfileConfigSchema` accepts any 1–32 characters, nothing
+   * inspects it, and `PUT /v1/ranking/admin/config` installs a profile set
+   * wholesale — so a house profile numbered `1.0.0`, the obvious shape for an
+   * operator numbering their own and the shape this repo's own fixtures use,
+   * read as "predates the cap" and served sensitive content UNCAPPED, with no
+   * rejection, warning or log.  It failed in the other direction too: an
+   * operator profile at `2.0.0` served before this deploy replayed under a cap
+   * it was never served with.  The platform's scoring epoch is not the
+   * operator's label for their profile, and asking the operator's label to
+   * answer for the platform's epoch cannot be made safe by comparing it more
+   * carefully.
+   */
+  sensitiveFreshnessCap: boolean;
 }
 
 export interface RankedSelection {
@@ -120,37 +145,6 @@ function isSensitiveItem(features: FeatureVector, sensitiveTopicIds: ReadonlySet
  * Score one feasible item given its (single) constraint evaluation. Exposed
  * for unit tests; the pipeline applies it to every feasible candidate.
  */
-/** The profile version in which the §11.5 sensitive-freshness CAP took effect. */
-const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
-
-/**
- * Whether a profile version scores sensitive items under the §11.5 conservative
- * CAP (`>= 1.4.0`) or under the pre-cap formula.
- *
- * A version this cannot parse applies the cap: an operator-authored profile
- * carrying a non-numeric version is a live configuration, not a replay of a
- * recorded decision, and the safe reading of an unknown version is the one that
- * bounds sensitive content rather than the one that does not.
- */
-function profileAppliesSensitiveFreshnessCap(profileVersion: string): boolean {
-  // WHOLLY numeric components, not `parseInt`'s prefix.  `parseInt('1beta', 10)`
-  // is 1, so `1beta.3.0` parsed as [1, 3, 0] and was treated as a VALID legacy
-  // version — silently disabling the §11.5 sensitive-freshness cap for an
-  // operator profile whose version string is malformed.  That is the opposite of
-  // the fail-closed reading an unknown version is supposed to get, and it fails
-  // closed in the direction that matters least: uncapped sensitive content.
-  const parts = profileVersion.split('.');
-  if (parts.length !== 3 || !parts.every((part) => /^\d+$/.test(part))) return true;
-  const numbers = parts.map((part) => Number.parseInt(part, 10));
-  const [major = 0, minor = 0, patch = 0] = numbers;
-  const [capMajor = 0, capMinor = 0, capPatch = 0] = SENSITIVE_FRESHNESS_CAP_MIN_VERSION.split(
-    '.',
-  ).map((p) => Number.parseInt(p, 10));
-  if (major !== capMajor) return major > capMajor;
-  if (minor !== capMinor) return minor > capMinor;
-  return patch >= capPatch;
-}
-
 export function scoreItem(
   candidate: Candidate,
   features: FeatureVector,
@@ -191,17 +185,16 @@ export function scoreItem(
   // has not scored a story yet: this closes a hole in the sensitive-content
   // guard, and is deliberately not a re-tune of the whole feed.
   //
-  // VERSIONED, because replay is a real consumer.  The scheduled
-  // replay-regression job re-scores historical decisions against the profile
-  // stored in their snapshot and reports a mismatch as a defect; a scoring
-  // change that keeps the same `profile_version` therefore turns every genuine
-  // old decision into a false alarm, and makes one version string denote two
-  // algorithms — which is exactly what the audit queries keying on it cannot
-  // survive.  The cap is gated on `SENSITIVE_FRESHNESS_CAP_MIN_VERSION`, so a
-  // 1.3.0 snapshot replays the formula it was actually decided under.
+  // RECORDED, not re-derived, because replay is a real consumer.  The scheduled
+  // replay-regression job re-scores historical decisions and reports a mismatch
+  // as a defect, so a scoring change with no way to say "that decision predates
+  // me" turns every genuine old decision into a false alarm.  What says it is
+  // `context.sensitiveFreshnessCap`, which the decision log carries verbatim
+  // from the serve that produced it — see that field for why the operator's
+  // `profile_version` cannot answer this question.
   const storedFreshness = features.freshness_decay;
   const freshnessDecay =
-    sensitiveTopic && profileAppliesSensitiveFreshnessCap(profile.profile_version)
+    sensitiveTopic && context.sensitiveFreshnessCap
       ? Math.min(storedFreshness ?? 1, freshnessFromAge(ageMs, curve.half_life_hours))
       : (storedFreshness ?? freshnessFromAge(ageMs, curve.half_life_hours));
   const baseline = computeBaseline({

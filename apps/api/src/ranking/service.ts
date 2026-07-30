@@ -834,6 +834,12 @@ export async function serveFeed(
     sensitiveTopicIds: services.sensitiveTopicIds(),
     maxSourceSharePctOverride: sourceShareOverride,
     lensByItem,
+    // LIVE SERVING ALWAYS CAPS.  Unconditional on purpose: the profile being
+    // served is a live configuration, whoever authored it and however they
+    // numbered it, so there is no such thing as serving today under a policy
+    // that predates today.  Only replay may answer otherwise, from what its
+    // decision actually recorded.
+    sensitiveFreshnessCap: true,
   };
   const ranked = rankFeasibleSet(safety.feasible, featuresById, profile, enforcement, context);
 
@@ -921,6 +927,7 @@ export async function serveFeed(
       max_source_share_pct_override: sourceShareOverride,
       surface_room_id: request.surfaceRoomId,
       lens_by_item: lensByItem === null ? null : Object.fromEntries(lensByItem),
+      sensitive_freshness_cap: context.sensitiveFreshnessCap,
     },
     retain_until: retentionDeadline(nowIso, config.decisionLogRetentionDays),
   });
@@ -1214,6 +1221,11 @@ export async function replayDecision(
       sensitiveTopicIds: services.sensitiveTopicIds(),
       maxSourceSharePctOverride: inputs.max_source_share_pct_override,
       lensByItem,
+      // Replay the POLICY the decision was served under, which the log carries.
+      // Defaulted false by the schema, so a pre-cap decision reproduces the
+      // formula it was actually decided with instead of being reported as a
+      // regression against a rule that did not exist yet.
+      sensitiveFreshnessCap: inputs.sensitive_freshness_cap,
     },
   );
   const actual = replayed.selected.map((item) => ({

@@ -30,8 +30,20 @@ import type {
  */
 export const PWATT_V0_SHADOW_MODE = false as const;
 
-/** Implementation version stamped on stored v0 outputs. */
-export const PWATT_V0_VERSION = 'v0' as const;
+/**
+ * Implementation version stamped on stored v0 outputs.
+ *
+ * `v0.1` is the SAME WS-T sourced-contribution bonus as `v1.1` below.  The
+ * change landed in `participation.ts`'s `actorParticipation`, which `v0.ts`
+ * folds into `participation` and thence into `score`, so both stored rows moved
+ * — and only one version string did.  The rationale under `PWATT_V1_VERSION`
+ * applies here verbatim and was simply not carried across: a pre-deploy v0
+ * window reprocessed today overwrote its historical row on an unchanged natural
+ * key with numbers the old formula never produced.  Measured on one actor with
+ * two corrections: participation 0.0963855 → 0.1150442, score 0.0792596 →
+ * 0.0885889, both stamped `v0`.
+ */
+export const PWATT_V0_VERSION = 'v0.1' as const;
 /**
  * Implementation version stamped on stored v1 outputs.
  *

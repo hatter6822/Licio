@@ -124,6 +124,17 @@ export const replayInputsSchema = z
      *  here because lens assignments affect the ordering. Defaulted for
      *  logs written before lens balancing carried real data. */
     lens_by_item: z.record(uuid, z.string().min(1).max(64)).nullable().default(null),
+    /**
+     * Whether the §11.5 sensitive-freshness CAP was in force at serve time.
+     *
+     * The POLICY, recorded alongside the inputs — not re-derived on replay from
+     * `profile_snapshot.profile_version`, which is an operator-writable label
+     * and so answers neither direction of this question reliably (see
+     * `RankingRequestContext.sensitiveFreshnessCap`).  Defaults to false so a
+     * decision logged before the cap existed replays the formula it was actually
+     * served under, which is the whole reason replay needs to know.
+     */
+    sensitive_freshness_cap: z.boolean().default(false),
   })
   .strict();
 export type ReplayInputs = z.infer<typeof replayInputsSchema>;

@@ -10,6 +10,7 @@ import {
   type ActorItemSummary,
   actorV1Contribution,
   antiSignalAttenuation,
+  computePwattV0,
   computePwattV1Components,
   DEFAULT_ANTI_SIGNAL_ATTENUATION,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
@@ -73,6 +74,28 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
     // the version moves too.
     expect(PWATT_V1_VERSION).toBe('v1.1');
     expect(PWATT_V1_VERSION).not.toBe(PWATT_V0_VERSION);
+  });
+
+  it('…and so did the V0 version, because the same bonus moved the v0 formula', () => {
+    // The bonus landed in `participation.ts`'s `actorParticipation`, which is the
+    // v0 path (`v0.ts` folds `itemParticipation` into `participation` and then
+    // into `score`), and `apps/api` upserts that row under ('PWAtt_v0', …,
+    // PWATT_V0_VERSION).  Both stored rows changed; only one version string did,
+    // so the v0 row was the one silently overwritten on reprocessing.
+    //
+    // Tied to the BEHAVIOUR, not just the literal: the pin is only meaningful
+    // while the v0 score actually responds to citations.
+    const base = { correction: 2 } as const;
+    const v0Input = (overrides: Partial<ActorItemSummary>) => ({
+      itemId: 'item-1',
+      actors: [actor(overrides)],
+      antiSignals: {},
+    });
+    const uncited = computePwattV0(v0Input({ contributions: base }));
+    const cited = computePwattV0(v0Input({ contributions: base, citedContributionsByType: base }));
+    expect(cited.participation).toBeGreaterThan(uncited.participation);
+    expect(cited.score).toBeGreaterThan(uncited.score);
+    expect(PWATT_V0_VERSION).toBe('v0.1');
   });
 
   it('per-user saturation: the Nth same-type contribution adds less than the (N-1)th', () => {

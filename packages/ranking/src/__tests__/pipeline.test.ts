@@ -514,13 +514,16 @@ describe('WS-I §11.5 conservative freshness curve', () => {
     features: FeatureVector,
     nowMs: number,
     profile: RankingProfileConfig = BREAKING_NEWS_PROFILE,
+    // Defaults to the LIVE-SERVING answer; replay tests pass what their decision
+    // recorded.
+    sensitiveFreshnessCap = true,
   ): number {
     const { selected } = rankFeasibleSet(
       [makeCandidate(1)],
       featureMap([features]),
       profile,
       FULL_ENFORCEMENT,
-      makeContext({ nowMs }),
+      makeContext({ nowMs, sensitiveFreshnessCap }),
     );
     return selected[0]?.baseline.freshness_decay ?? Number.NaN;
   }
@@ -548,27 +551,38 @@ describe('WS-I §11.5 conservative freshness curve', () => {
     expect(freshnessOf(ordinary, T0)).toBe(0.9);
   });
 
-  it('a PRE-CAP snapshot replays the formula it was decided under', () => {
+  it('a PRE-CAP DECISION replays the formula it was decided under', () => {
     // Replay is a real consumer: the regression job re-scores historical
-    // decisions against the profile stored in their snapshot and reports a
-    // mismatch as a defect.  Shipping this cap under the unchanged `1.3.0`
-    // would have turned every genuine old sensitive decision into a false
-    // alarm, and made one version string denote two algorithms.
+    // decisions and reports a mismatch as a defect, so shipping this cap with no
+    // way to say "that decision predates me" would have turned every genuine old
+    // sensitive decision into a false alarm.
+    //
+    // What says so is the POLICY the decision recorded, carried verbatim in
+    // `replay_inputs.sensitive_freshness_cap` and defaulted false for logs
+    // written before the cap existed.
     const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
-    const legacy: RankingProfileConfig = { ...BREAKING_NEWS_PROFILE, profile_version: '1.3.0' };
     const features = sensitive({ created_at: created, freshness_decay: 0.9 });
-    expect(freshnessOf(features, T0, legacy)).toBe(0.9);
-    // …while the CURRENT profile caps the same item.
+    expect(freshnessOf(features, T0, BREAKING_NEWS_PROFILE, false)).toBe(0.9);
+    // …while a decision served under the cap caps the same item.
     expect(freshnessOf(features, T0)).toBeLessThan(0.1);
   });
 
-  it('an unparseable profile version applies the cap (the safe reading)', () => {
+  it("NO profile_version buys an exemption — the cap is not the operator's to opt out of", () => {
+    // This is the whole reason the gate moved off `profile_version`.  That string
+    // is operator-writable: `rankingProfileConfigSchema` accepts any 1–32
+    // characters, nothing inspects it, and `PUT /v1/ranking/admin/config`
+    // installs a profile set wholesale.  A house profile numbered `1.0.0` — the
+    // obvious shape for an operator numbering their own, and the shape this
+    // repo's own fixtures use — read as "predates the cap" and served sensitive
+    // content UNCAPPED with no rejection, warning or log.  A malformed version
+    // did fail closed, and a plausible NUMERIC one failed open, which is the
+    // direction that matters.
     const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
-    // Including versions `parseInt` would PARTIALLY parse: `parseInt('1beta')`
-    // is 1, so `1beta.3.0` read as a valid legacy version and silently disabled
-    // the cap — fail-OPEN in the one direction that matters, uncapped sensitive
-    // content.
     for (const version of [
+      '1.0.0', // the live bypass: numeric, plausible, below any cap version
+      '1.3.0', // the exact predecessor version the old gate exempted
+      '0.9.9',
+      '2.0.0', // and the other direction: above, so it must not change anything
       'operator-a',
       '1beta.3.0',
       '1.3',
@@ -580,7 +594,7 @@ describe('WS-I §11.5 conservative freshness curve', () => {
       const custom: RankingProfileConfig = { ...BREAKING_NEWS_PROFILE, profile_version: version };
       expect(
         freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0, custom),
-        `version ${version} must fail closed and apply the cap`,
+        `version ${version} must not exempt sensitive content from the cap`,
       ).toBeLessThan(0.1);
     }
   });
