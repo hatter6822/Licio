@@ -8,7 +8,7 @@
 
 import { lawPackSchema, type TreasuryBounds } from '@licio/governance';
 import type { GovernanceMode } from '@licio/shared';
-import { isRoomSteward, roomContentVisibleToUser } from '../forum/rooms.js';
+import { isGovernanceMember, isRoomSteward, roomContentVisibleToUser } from '../forum/rooms.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceStores } from '../governance/stores.js';
 import type { IdentityServices } from '../identity/services.js';
@@ -42,15 +42,16 @@ export function buildRoomGovernancePort(
     },
     isMember: async (roomId, userId) => {
       if ((await serverRoom(roomId)) === null) return false;
-      const subscription = await forum.rooms.getSubscription(roomId, userId);
-      if (subscription !== null && subscription.status === 'active') return true;
-      // The governance-eligible set is active subscribers ∪ STEWARDS: a room steward
-      // may sign proposals, deposit, contribute bounties, and take simulated actions
-      // WITHOUT a separate active subscription — the same set the forum/governance
-      // routes use — so the preflight + simulation write gates must not reject them
-      // (WS-L.3.1a).
-      const user = await identity.store.getUser(userId);
-      return isRoomSteward(forum, roomId, userId, user?.roles ?? []);
+      // STAKE IN THE ROOM, not a platform role.
+      //
+      // This read `isRoomSteward`, whose first line returns true for any platform
+      // `admin` and (for any room it can see) any platform `steward` — so an admin was
+      // a governance member of every server room and could vote, propose, delegate and
+      // submit in all of them.  Admins do not vote.  A room steward still participates
+      // without a separate subscription (WS-L.3.1a); what changed is that the grant
+      // must be a PER-ROOM one, which is exactly the set the electorate roster
+      // enumerates.
+      return isGovernanceMember(forum, roomId, userId);
     },
     isSteward: async (roomId, userId) => {
       if ((await serverRoom(roomId)) === null) return false;

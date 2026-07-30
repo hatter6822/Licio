@@ -425,6 +425,40 @@ export async function setMembershipLens(
  *  cannot read, and a platform steward's private-room oversight path is the
  *  moderation console — so its blanket arm covers public rooms and rooms it
  *  is a member of, while per-room grants stay unconditional. */
+/**
+ * May this account PARTICIPATE IN GOVERNANCE in this room — vote, propose, delegate,
+ * or submit a knomosis action?
+ *
+ * Deliberately NOT `isRoomSteward`.  The governance membership check used to fall
+ * through to it, and its first line is an unconditional `platformRoles.includes('admin')`
+ * — so a platform admin was a member of every server room and could cast a ballot in
+ * all of them, which is not what the platform intends.  The platform-`steward` arm has
+ * the same effect for every room it can see, and `roomContentVisibleToUser` is true for
+ * every PUBLIC room.
+ *
+ * `isRoomSteward` is not the wrong function, it is the wrong QUESTION: it answers "may
+ * this account administer this room", where a platform-wide role is exactly the point
+ * (13 call sites depend on that, and admin reach is intentional).  Governance
+ * participation is a different question, and the answer is stake in the room: an active
+ * subscription, or a PER-ROOM steward grant — the latter because a room steward signs
+ * proposals and deposits without needing a separate subscription (WS-L.3.1a).
+ *
+ * This is the SAME SET the electorate roster enumerates (`listEligibleVoterIds`:
+ * `room_subscriptions WHERE status='active'` UNION `room_stewards`), which is what
+ * makes the ballot gate and the frozen quorum denominator agree by construction rather
+ * than by two lists kept in step by hand.  `governance-membership-parity.test.ts` holds
+ * the two together.
+ */
+export async function isGovernanceMember(
+  forum: ForumServices,
+  roomId: string,
+  userId: string,
+): Promise<boolean> {
+  const subscription = await forum.rooms.getSubscription(roomId, userId);
+  if (subscription !== null && subscription.status === 'active') return true;
+  return (await forum.rooms.stewardRolesFor(roomId, userId)).length > 0;
+}
+
 export async function isRoomSteward(
   forum: ForumServices,
   roomId: string,
