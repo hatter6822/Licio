@@ -132,9 +132,19 @@ export async function runSummarySweep(
         // attempt.  A retry that succeeds is not a failure the caller needs to
         // hear about, and three log lines for one blip reads as three faults.
         if (attempt === MAX_THREAD_ATTEMPTS) {
-          onThreadError(err, thread.threadId);
           poisoned += 1;
           lastSettled = { createdAt: thread.createdAt, threadId: thread.threadId };
+          // SETTLE FIRST, THEN REPORT, and never let the report undo the settling.
+          // `onThreadError` is caller-supplied: a logger that throws (a full disk,
+          // a serializer that chokes on `err`) used to propagate out of the sweep
+          // before the commit below, so the cursor stayed pinned and the next tick
+          // re-read the same page — the reporting path resurrecting the very
+          // livelock the attempt bound exists to prevent.
+          try {
+            onThreadError(err, thread.threadId);
+          } catch {
+            ai.metrics.increment('ai.summary_sweep.report_failed');
+          }
         } else {
           ai.metrics.increment('ai.summary_sweep.thread_retry');
         }
@@ -149,15 +159,23 @@ export async function runSummarySweep(
   // that can skip work is worse than one that repeats it: re-examining a thread
   // costs one `getLatestForThread`, and skipping one costs its summary until the
   // wrap.
-  if (lastSettled === null) {
-    // Nothing on the page finished at all (the first thread is still failing
-    // after its attempts would have settled it — i.e. the page was empty).
-    // Leave the cursor untouched so the next tick re-reads this same page.
-  } else if (threads.length < limit) {
+  //
+  // A SHORT PAGE IS THE TAIL, AND AN EMPTY PAGE IS THE MOST SHORT OF ALL.  The
+  // test is `threads.length < limit`, which must be reached for `length === 0`
+  // too: `listThreads` returns strictly older rows than the cursor, so an empty
+  // answer means nothing older is left.  Guarding the wrap behind "did any
+  // thread settle" instead put the emptiest possible page — the unambiguous
+  // tail — down the do-nothing branch, pinning the cursor at the oldest thread
+  // for the lifetime of the DURABLE row: every later tick re-read the same
+  // empty page, examined nothing, and returned `{examined: 0}` in silence, so
+  // no thread created afterwards was ever summarized again.  The bound on
+  // attempts is what makes this safe to write plainly — every thread on a
+  // non-empty page settles, so a page that yielded nothing had nothing on it.
+  if (threads.length < limit) {
     // Exhausted the tail ⇒ start again from the newest next tick, so a thread
     // that only later crosses the activity threshold is eventually summarized.
     await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, null);
-  } else {
+  } else if (lastSettled !== null) {
     await ai.sweepCursors.set(SUMMARY_SWEEP_CURSOR, {
       createdAt: lastSettled.createdAt,
       ref: lastSettled.threadId,
@@ -165,8 +183,10 @@ export async function runSummarySweep(
   }
   if (poisoned > 0) {
     // A thread the sweep gave up on is a fact an operator needs: the cursor moved
-    // past it, so nothing will retry it until the corpus wraps.
-    ai.metrics.increment('ai.summary_sweep.poisoned_threads');
+    // past it, so nothing will retry it until the corpus wraps.  Counted PER
+    // THREAD — one increment per tick reported a page where every thread was
+    // poisoned identically to a page with a single blip.
+    ai.metrics.increment('ai.summary_sweep.poisoned_threads', poisoned);
   }
   return { examined: threads.length, generated, skipped };
 }

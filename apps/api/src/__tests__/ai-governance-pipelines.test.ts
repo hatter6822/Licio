@@ -701,6 +701,99 @@ describe('WS-K.1.4a summary generation', () => {
       expect((await runSummarySweep(f.ai, () => {}, 2)).generated).toBe(1);
     });
 
+    it('WRAPS when the page comes back EMPTY, not just when it comes back short', async () => {
+      // The trigger the short-page test above cannot reach: a page that is
+      // exactly FULL, with nothing older behind it.  Four threads at limit 2
+      // means tick 2 fills its page and lands the cursor on the oldest thread,
+      // so tick 3 reads strictly older than that and gets nothing.
+      //
+      // An empty page IS the tail — the most unambiguous form of it — but the
+      // commit guarded the wrap behind "did any thread settle", which an empty
+      // page cannot satisfy.  The cursor stayed pinned at the oldest thread and
+      // every later tick re-read the same empty page: `{examined: 0}` for ever,
+      // with no metric and no error, so nothing created afterwards was ever
+      // summarized again.  And the pinned position is the DURABLE row, so a
+      // restart did not clear it either.
+      const f = wired();
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(2);
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(2);
+      // The tail tick: nothing older is left.
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(0);
+      expect(await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR)).toBeNull();
+      // The property that matters, and the one the parked cursor destroyed: a
+      // thread created after the tail was reached still gets summarized.
+      const { threadId: fresh } = await seedThread(f.forum);
+      await seedRoots(f, fresh, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      // Reached WITHIN a full traversal, not necessarily on the next tick: the
+      // fixture clock is fixed, so all five threads share a `created_at` and the
+      // DESC tiebreak falls to the random thread id — asserting the fresh thread
+      // lands in the very first page after the wrap is a 2-in-5 coin flip.  What
+      // the wrap actually guarantees is that it is reached at all, and three
+      // pages of two cover five threads.
+      for (let tick = 0; tick < 3; tick += 1) {
+        if ((await f.ai.summaries.getLatestForThread(fresh)) !== null) break;
+        await runSummarySweep(f.ai, () => {}, 2);
+      }
+      expect(await f.ai.summaries.getLatestForThread(fresh)).not.toBeNull();
+    });
+
+    it('a REPORTER that throws cannot cost the sweep its position', async () => {
+      // `onThreadError` is caller-supplied.  It was invoked before the thread was
+      // settled, so a logger that throws propagated out of the sweep ahead of the
+      // commit — the cursor stayed put and the next tick re-read the same page,
+      // the reporting path resurrecting the very livelock the attempt bound
+      // exists to prevent.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 2; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      // ASK which thread the first tick will read rather than assuming it.  The
+      // fixture clock is fixed, so every thread shares a `created_at` and the
+      // `(created_at, thread_id)` DESC order falls through to the id — which is
+      // random per thread.  Picking "the last one seeded" made this test a coin
+      // flip that passed alone and failed in the suite.
+      const [first] = await f.forum.ingestion.stories.listThreads(null, 1);
+      const poisoned = first?.threadId;
+      expect(ids).toContain(poisoned);
+      const realGetLatest = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      f.ai.summaries.getLatestForThread = async (threadId: string) => {
+        if (threadId === poisoned) throw new Error('poison');
+        return realGetLatest(threadId);
+      };
+      await expect(
+        runSummarySweep(
+          f.ai,
+          () => {
+            throw new Error('the logger itself is broken');
+          },
+          1,
+        ),
+      ).resolves.toMatchObject({ examined: 1 });
+      // The position moved past the poisoned thread despite the failed report,
+      // so the second thread is reachable on the next tick.
+      expect(await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR)).not.toBeNull();
+      expect((await runSummarySweep(f.ai, () => {}, 1)).generated).toBe(1);
+    });
+
     it('the sweep is BOUNDED — it never walks more threads than its limit', async () => {
       const f = wired();
       for (let i = 0; i < 4; i += 1) {

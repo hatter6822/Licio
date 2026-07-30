@@ -97,13 +97,29 @@ export const GRANT_MILESTONE_STATES = [
   'rejected',
 ] as const;
 export const GRANT_REVIEW_STATES = ['pending', 'independent_review', 'cleared', 'flagged'] as const;
+/**
+ * Every payout state the store can hold, INCLUDING the terminal ones a client
+ * never asks for.
+ *
+ * `closed` — every milestone rejected, so nothing is payable and the grant is
+ * settled without a transfer — is written by the payout projection, and adding
+ * it to the DB enum and the store's row type left this list behind.  Nothing
+ * caught it: the list reaches the wire through `z.enum`, `parse` takes
+ * `unknown`, so the compiler had nothing to disagree with.  The grants-list
+ * route parses the WHOLE list server-side, and a `ZodError` is not an
+ * `HTTPException`, so one closed grant answered every read of that room's
+ * grants with a 500 — permanently, since `closed` is terminal.  A state the
+ * store can produce must be spellable here.
+ */
 export const GRANT_PAYOUT_STATES = [
   'not_started',
   'scheduled',
   'partially_paid',
   'paid',
   'clawed_back',
+  'closed',
 ] as const;
+export type GrantPayoutState = (typeof GRANT_PAYOUT_STATES)[number];
 
 /** Reconciliation snapshot results (WS-M.5.2a — zero-or-explained). */
 export const RECONCILIATION_SNAPSHOT_RESULTS = ['synced', 'explained', 'divergent'] as const;

@@ -22,6 +22,7 @@
 
 import type {
   CharterSections,
+  GrantPayoutState,
   PauseFlags,
   PaymentIntentState,
   PaymentTargetType,
@@ -147,8 +148,14 @@ export interface GrantRecord {
    *  rejected, so nothing can ever pay.  Distinct from `paid` (money moved) and
    *  `clawed_back` (money returned) because it is neither, and distinct from
    *  `not_started` because it is FINISHED — the unsettled predicates exclude it,
-   *  so it no longer blocks the recipient's wallet unlink. */
-  payoutState: 'not_started' | 'scheduled' | 'partially_paid' | 'paid' | 'clawed_back' | 'closed';
+   *  so it no longer blocks the recipient's wallet unlink.
+   *
+   *  DERIVED from the wire vocabulary rather than re-spelled here.  This union
+   *  and `GRANT_PAYOUT_STATES` are the same set by definition — the route parses
+   *  these rows against that enum — and while both were hand-written they
+   *  drifted the moment one gained a state, with `z.parse(unknown)` leaving the
+   *  compiler nothing to object to. */
+  payoutState: GrantPayoutState;
   auditSummary: string | null;
   createdAt: string;
 }

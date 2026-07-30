@@ -6,6 +6,7 @@
 
 import type { TreasuryBounds } from '@licio/governance';
 import type { KnomosisSignedActionType, SubmissionState } from '@licio/shared';
+import { treasuryGrantSchema } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
 import { hashFinancialWalletAddress } from '../identity/siwe.js';
@@ -2639,5 +2640,29 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('closed');
     // …and why the recipient's wallet is released.
     expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+    // AND why it must be spellable on the wire.  A state the store can produce
+    // that `GRANT_PAYOUT_STATES` cannot name does not degrade the one grant — the
+    // grants route parses its WHOLE answer through this schema server-side, and a
+    // `ZodError` is not an `HTTPException`, so it turned every read of the room's
+    // grants into a 500.  Permanently, `closed` being terminal.
+    const grant = await deps.grants.getById(inserted.grantId);
+    expect(
+      treasuryGrantSchema.safeParse({
+        grant_id: grant?.grantId,
+        room_id: ROOM,
+        treasury_id: grant?.treasuryId,
+        proposal_id: grant?.proposalId,
+        recipient_ref: recipientRef,
+        purpose: grant?.purpose,
+        amount: grant?.amount,
+        asset: grant?.asset,
+        milestones: [],
+        milestone_state: grant?.milestoneState,
+        review_state: grant?.reviewState,
+        payout_state: grant?.payoutState,
+        audit_summary: grant?.auditSummary ?? null,
+        created_at: grant?.createdAt,
+      }).error?.issues ?? [],
+    ).toEqual([]);
   });
 });
