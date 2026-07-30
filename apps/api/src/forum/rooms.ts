@@ -21,6 +21,7 @@ import type {
 } from '@licio/shared';
 import { COMMONS_ROOM_ID, COMMONS_SLUG } from '@licio/shared';
 import type { Role } from '../identity/rbac.js';
+import type { StoryHiddenState } from '../ingestion/stores.js';
 import type { ForumServices } from './services.js';
 import type { RoomRecord, RoomSubscriptionRecord } from './stores.js';
 
@@ -302,7 +303,7 @@ export async function userMayPostTopLevel(
  */
 export async function storyReadableByUser(
   forum: ForumServices,
-  story: { hiddenState: 'takedown' | 'safety' | null; visibility: StoryVisibility },
+  story: { hiddenState: StoryHiddenState | null; visibility: StoryVisibility },
   room: RoomRecord,
   userId: string | null,
 ): Promise<boolean> {

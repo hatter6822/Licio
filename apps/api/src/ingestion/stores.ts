@@ -40,6 +40,16 @@ import {
 // Records (the storage shape; ISO timestamps on this side of the boundary).
 // ---------------------------------------------------------------------------
 
+/** Why a story is hidden.  Mirrors `story_hidden_state`; every reader that only asks
+ *  "is it hidden" tests for null, so this union is consulted by the few places that
+ *  care WHICH. */
+export type StoryHiddenState = 'takedown' | 'safety' | 'superseded';
+
+/** What a SOURCE-wide hide may set.  A narrower set on purpose, and derived rather than
+ *  respelled: `superseded` describes one row's relationship to its in-room twin, so it
+ *  can never be the reason an entire source was hidden. */
+export type SourceHideReason = Extract<StoryHiddenState, 'takedown' | 'safety'>;
+
 export interface StoryRecord {
   storyId: string;
   canonicalUrl: string | null;
@@ -90,7 +100,7 @@ export interface StoryRecord {
     | 'failed'
     | 'disallowed_robots'
     | 'not_applicable';
-  hiddenState: 'takedown' | 'safety' | null;
+  hiddenState: StoryHiddenState | null;
   /** WS-T dispute posture (a corrected-story debate outcome); absent ⇒ `none`.
    *  ORTHOGONAL to `hiddenState`: an `incorrect` story stays VISIBLE but is
    *  penalized to the bottom of the feed by ranking. */
@@ -438,7 +448,7 @@ export interface StoryStore {
    *  whose PRIMARY source is `sourceId` and drop its archived excerpt (the
    *  `noarchive` realization). Idempotent — already-hidden rows are skipped —
    *  and returns the number of stories newly hidden. */
-  hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number>;
+  hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -984,7 +994,7 @@ export class InMemoryStoryStore implements StoryStore {
     return [...(this.#sourceLinks.get(storyId) ?? [])];
   }
 
-  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+  async hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number> {
     let count = 0;
     for (const [storyId, record] of this.#stories) {
       if (record.sourceId !== sourceId || record.hiddenState !== null) continue;

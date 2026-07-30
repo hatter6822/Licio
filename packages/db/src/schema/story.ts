@@ -92,7 +92,16 @@ export const extractionStateEnum = pgEnum('story_extraction_state', [
 
 /** Hidden content states; null ⇒ visible. Takedown removal (WS-F.1.4f) and
  *  safety hiding both exclude the story from search and read surfaces. */
-export const storyHiddenStateEnum = pgEnum('story_hidden_state', ['takedown', 'safety']);
+export const storyHiddenStateEnum = pgEnum('story_hidden_state', [
+  'takedown',
+  'safety',
+  /** A duplicate of an in-room twin that already carries this canonical URL.  Hiding it
+   *  takes it out of the tier uniques (both are partial on `hidden_state IS NULL`), which
+   *  is what lets a public story trapped in a private room be converted at all — see
+   *  migration 0120.  NOT liftable by the moderation reinstate path, which names `safety`
+   *  explicitly: there is nothing to reinstate, the URL is served by the twin. */
+  'superseded',
+]);
 
 /**
  * WS-T dispute posture — the sourced-correction debate outcome, ORTHOGONAL to

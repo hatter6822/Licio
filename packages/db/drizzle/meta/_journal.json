@@ -827,6 +827,13 @@
       "when": 1783728000042,
       "tag": "0118_moderation_audit_chain",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1783728000043,
+      "tag": "0119_story_hidden_state_superseded",
+      "breakpoints": true
     }
   ]
 }

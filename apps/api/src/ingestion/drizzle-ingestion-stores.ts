@@ -78,6 +78,7 @@ import type {
   ReviewKind,
   ReviewQueueStore,
   SignatureStore,
+  SourceHideReason,
   SourceRecord,
   SourceStore,
   StoryCreateInput,
@@ -633,7 +634,7 @@ export class DrizzleStoryStore implements StoryStore {
     }));
   }
 
-  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+  async hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number> {
     // One set-based UPDATE; `isNull(hiddenState)` makes a re-action idempotent
     // and the count honest (only newly-hidden rows are returned).
     const rows = await this.#db
