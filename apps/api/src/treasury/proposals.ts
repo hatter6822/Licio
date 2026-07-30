@@ -65,6 +65,7 @@ import type {
 } from '../knomosis/stores.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
+import { buildVoterFacts, DEFAULT_ELIGIBILITY_RULES } from './ballot-predicate.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
 import {
@@ -1072,46 +1073,28 @@ export async function signProposal(
     Date.parse(wallet.linkedAt),
   );
   const walletAgeDays = Math.floor((deps.now() - newestLinkedAt) / 86_400_000);
-  const voterFacts: VoterFacts = {
+  // THE SAME ASSEMBLY THE BASIS USES.  These facts were built here and, separately,
+  // twice inside the basis walk — three spellings of one projection, which is how
+  // `isDesignatedSigner` came to be read from the pinned pack on this side and
+  // hard-coded false on the other.  `buildVoterFacts` is now the only place either
+  // builds one; what the basis deliberately substitutes is named in `BASIS_EXCLUSIONS`.
+  const voterFacts: VoterFacts = buildVoterFacts({
     userId: input.userId,
-    membershipDays: facts?.membershipDays ?? null,
-    contributionCount: facts?.contributionCount ?? null,
-    verifiedIdentity: facts?.verifiedIdentity ?? false,
+    facts: facts ?? null,
     newestWalletAgeDays: walletAgeDays,
     walletClusterId: null, // cluster heuristics: WS-N seam (null = no cluster)
-    // Conflicted voters: the proposer who disclosed a COI, AND the actual
-    // grant/bounty RECIPIENT — a member being paid by the proposal has the
-    // definitional stake, whether or not anyone disclosed it (WS-M.2.3d).
+    // Conflicted voters: the proposer who disclosed a COI, AND the actual grant/bounty
+    // RECIPIENT — a member being paid by the proposal has the definitional stake,
+    // whether or not anyone disclosed it (WS-M.2.3d).
     hasDisclosedConflict:
       (proposal.conflictDisclosures !== null && proposal.proposerUserId === input.userId) ||
       proposal.recipientRef === input.userId ||
       proposal.recipientRef === `user:${input.userId}`,
     roleClasses: (await deps.rooms.isSteward(input.roomId, input.userId)) ? ['steward'] : [],
-    // §17.5 `reputation_bounded` resolves weight = min(reputationScore, cap), so a
-    // hard-coded 0 made EVERY ballot in a room adopting that model weigh nothing:
-    // ten unanimous approvals tallied as `rejected`, because `decided` stayed '0'
-    // and the threshold branch never ran.  The score is the room-scoped count of
-    // QUALIFYING governance participation the eligibility gate already folds over
-    // (`countQualifyingByRoomActor`, surfaced as `contributionCount`) — the one
-    // reputation-shaped fact this platform computes.  Membership tenure is
-    // deliberately NOT mixed in: it is already a hard eligibility gate
-    // (`minMembershipDays`), and folding it into the weight would both
-    // double-count it and turn mere presence into power.  This quantity stays
-    // PRIVATE to one room's governance math — never a profile field, never a
-    // ranking input (SIG-PROH-KARMA bans a public aggregate reputation).
-    // Unknown facts stay 0 (the weakest true claim); the zero-weight refusal
-    // after weight resolution stops a 0 being recorded as if it were a ballot.
-    reputationScore: facts?.contributionCount ?? 0,
-    tokenVoteUnits: 0,
     isDesignatedSigner: evalPack.multisig?.signers.includes(input.userId) ?? false,
-  };
+  });
   const eligibility = checkVoterEligibility(voterFacts, {
-    rules: evalPack.eligibility ?? {
-      minMembershipDays: 0,
-      minContributions: 0,
-      requireVerifiedIdentity: false,
-      newWalletCoolingOffDays: 0,
-    },
+    rules: evalPack.eligibility ?? DEFAULT_ELIGIBILITY_RULES,
     treasuryControlling: spendControlling,
     recusalRequired:
       (evalPack.coiRequirements?.recusalRequired ?? false) &&

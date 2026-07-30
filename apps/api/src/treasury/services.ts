@@ -17,7 +17,7 @@
 
 import type { GovernanceAdvisory } from '@licio/ai-governance';
 import type { WeightModel } from '@licio/governance';
-import { checkVoterEligibility, decCompare, resolveVotingWeight } from '@licio/governance';
+import { BASIS_EXCLUSIONS, ballotVerdict, buildVoterFacts } from './ballot-predicate.js';
 
 /**
  * The weight models whose resolution can be ZERO for an otherwise-eligible
@@ -182,63 +182,28 @@ export function buildMembershipFactsPort(
         // The basis walk asks about the SAME instant it filters the roster at —
         // it was mixing an as-of roster with live facts.
         const facts = await memberFacts(roomId, userId, eligibility.asOf);
-        const verdict = checkVoterEligibility(
-          {
+        // ONE PREDICATE, the same call `signProposal` makes.  The basis used to build
+        // `VoterFacts` twice in this loop — `reputationScore: 0` for eligibility and
+        // `contributionCount ?? 0` for the weight — so the two halves of one answer
+        // disagreed about the same member.  What the basis deliberately does not mirror
+        // is now NAMED in `BASIS_EXCLUSIONS` rather than hard-coded here.
+        const verdict = ballotVerdict(
+          buildVoterFacts({
             userId,
-            membershipDays: facts?.membershipDays ?? null,
-            contributionCount: facts?.contributionCount ?? null,
-            verifiedIdentity: facts?.verifiedIdentity ?? false,
-            // Wallet arms are neutral for the basis: any member could link a
-            // sufficiently aged wallet before voting.
-            newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
-            walletClusterId: null,
-            hasDisclosedConflict: false,
-            roleClasses: [],
-            reputationScore: 0,
-            tokenVoteUnits: 0,
-            isDesignatedSigner: false,
-          },
+            facts: facts ?? null,
+            ...BASIS_EXCLUSIONS,
+          }),
           {
             rules: eligibility.rules,
             treasuryControlling: eligibility.treasuryControlling,
             recusalRequired: false,
-            clustersAlreadyVoted: new Set(),
+            weight: eligibility.weight ?? {
+              model: 'one_civic_account_one_vote',
+              maxVotingWeightPerAccount: 1,
+            },
           },
         );
-        if (!verdict.eligible) continue;
-        // The weight half of the ballot gate, applied with the SAME resolver
-        // `signProposal` uses — a member it would refuse with
-        // `zero_voting_weight` cannot record a ballot, and quorum counts
-        // recorded ballots, so they are not part of the electorate.
-        if (eligibility?.weight !== undefined) {
-          const resolved = resolveVotingWeight({
-            model: eligibility.weight.model,
-            facts: {
-              userId,
-              membershipDays: facts?.membershipDays ?? null,
-              contributionCount: facts?.contributionCount ?? null,
-              verifiedIdentity: facts?.verifiedIdentity ?? false,
-              newestWalletAgeDays: Number.MAX_SAFE_INTEGER,
-              walletClusterId: null,
-              hasDisclosedConflict: false,
-              roleClasses: [],
-              reputationScore: facts?.contributionCount ?? 0,
-              tokenVoteUnits: 0,
-              isDesignatedSigner: false,
-            },
-            maxVotingWeightPerAccount: eligibility.weight.maxVotingWeightPerAccount,
-            // The gated models are refused wholesale at signing, so a room on
-            // one has no voters at all — mirror that rather than inventing a
-            // basis for ballots nobody can cast.
-            gates: {
-              sybilControlsVerified: false,
-              antiBriberyMonitoring: false,
-              legalReviewPassed: false,
-            },
-            delegations: [],
-          });
-          if (!resolved.resolved || decCompare(resolved.weight, 0) <= 0) continue;
-        }
+        if (!verdict.admitted) continue;
         eligible += 1;
       }
       return eligible;
