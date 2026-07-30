@@ -10,7 +10,8 @@
 // race — every step is explicitly sequenced.
 //
 // alice is forced to be the OFFERER (so she `createDataChannel`s the channel the test controls) by
-// choosing an adversary device id whose blind id sorts AFTER alice's (the carrier's role tiebreak).
+// drawing an adversary SIGNALLING key that sorts after her own — the carrier's role tiebreak reads
+// the dial identities, never the blind id (`pickOffererRoom`, and `connect-peer.ts:581`).
 import { describe, expect, it } from 'vitest';
 import {
   type ConnectPrivatePeerParams,
@@ -25,6 +26,10 @@ import {
 import type { PresenceRecord, RendezvousTransport, WireSignal } from '../rendezvous-client.js';
 
 const PROFILE = { name: 'Adversarial Carrier Test', room_type: 'global_topic' } as const;
+/** Any device id that is not alice's.  Nothing in the carrier orders peers by device or blind id —
+ *  the offerer role reads the DIAL ids (`connect-peer.ts:598`) and self-exclusion is by equality
+ *  (`:795`) — so this needs to be distinct, and nothing more. */
+const ADVERSARY_DEVICE_ID = 'adversary-0';
 
 // --- a server-blind in-memory rendezvous (FIFO signal queue per recipient) ----------
 function inMemoryRendezvous(): RendezvousTransport & {
@@ -129,6 +134,26 @@ async function waitUntil(cond: () => boolean, label: string, budgetMs = 12_000):
   throw new Error(`waitUntil timed out: ${label}`);
 }
 
+/** Poll until `read()` stops changing — the same value across `QUIET_POLLS` consecutive ticks.
+ *  This is what an EXACT-count assertion over an async flush needs: a fixed settle tick asserts
+ *  "the flush fits in N ms", which is a bet on machine load, whereas quiescence asserts what the
+ *  test means — nothing more is coming.  Pair it with a `waitUntil` on the lower bound so a value
+ *  that has not started moving yet cannot read as quiet. */
+async function waitUntilQuiet(read: () => number, label: string, budgetMs = 12_000): Promise<void> {
+  const QUIET_POLLS = 8;
+  const deadline = Date.now() + budgetMs;
+  let last = read();
+  let quiet = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1));
+    const next = read();
+    quiet = next === last ? quiet + 1 : 0;
+    last = next;
+    if (quiet >= QUIET_POLLS) return;
+  }
+  throw new Error(`waitUntilQuiet timed out: ${label} still changing (last=${last})`);
+}
+
 /** The crypto context the adversary needs to seal signals alice will open (PRIV-CARRIER-7 ICE flood). */
 interface AdversaryCtx {
   readonly p2p: typeof import('@licio/private-p2p');
@@ -158,12 +183,20 @@ interface Harness {
 type P2P = typeof import('@licio/private-p2p');
 
 /**
- * Draw rooms until alice's blind id admits an adversary device id that sorts AFTER it ⇒ alice is the
- * OFFERER (the carrier's role tiebreak is the bytewise-smaller blind id).  Blind ids are random HMACs,
- * so for a given room MOST candidates sort after alice — but when alice's OWN blind id draws high,
- * every candidate can fall below it.  Searching many candidates AND redrawing the room (a fresh
- * rendezvousKey ⇒ a fresh alice blind id) makes the role assignment DETERMINISTIC: combined failure
- * ≈ (1/257)^25 ≈ 0, so the harness never flakes on the draw.
+ * Draw rooms until alice is the OFFERER — the role `connect-peer.ts` derives from
+ * `selfDialId < peerDialId`, comparing the two SIGNALLING public keys.  NOT the blind id: that
+ * field is server-visible and outside the cap's binding, so a forged record could make two honest
+ * peers disagree about who offers, and `connect-peer.ts:581` moved the tiebreak off it
+ * deliberately.  This search follows it — searching the blind ids instead would order a field the
+ * role no longer reads, and leave the one it does read to chance.
+ *
+ * Both dial ids are random, so a ONE-SIDED resample cannot bound the search: hold alice fixed and
+ * her own key can land near the top of the ordering, where every adversary draw falls below it and
+ * any budget runs out.  That is measured, not hypothetical — sampling 64 ephemerals against a fixed
+ * alice failed once per ~66 harness builds (∫₀¹ p⁶⁵ dp), which is the flake this loop removes.
+ * Redrawing the ROOM redraws alice too (a fresh founder signing key + room commitment ⇒ a fresh
+ * derived signalling key), so the sides are INDEPENDENT across attempts and the failures multiply:
+ * ≈ (1/65)^25 ≈ 0.
  */
 async function pickOffererRoom(p2p: P2P): Promise<{
   created: Awaited<ReturnType<P2P['createPrivateRoom']>>;
@@ -172,6 +205,7 @@ async function pickOffererRoom(p2p: P2P): Promise<{
   timeBucket: number;
   aliceBlind: string;
   adversaryDeviceId: string;
+  advEphemeral: Awaited<ReturnType<P2P['generateX25519KeyPair']>>;
 }> {
   for (let attempt = 0; attempt < 25; attempt++) {
     const created = await p2p.createPrivateRoom({
@@ -184,19 +218,26 @@ async function pickOffererRoom(p2p: P2P): Promise<{
     const rendezvousKey = created.epochState.keys.rendezvousKey;
     const timeBucket = p2p.rendezvousTimeBucket(Date.now());
     const aliceBlind = await p2p.derivePeerBlindId(rendezvousKey, 'founder-dev', epoch, timeBucket);
-    for (let i = 0; i < 256; i++) {
-      const candidate = `adversary-${i}`;
-      const blind = await p2p.derivePeerBlindId(rendezvousKey, candidate, epoch, timeBucket);
-      if (blind > aliceBlind) {
-        return {
-          created,
-          epoch,
-          rendezvousKey,
-          timeBucket,
-          aliceBlind,
-          adversaryDeviceId: candidate,
-        };
-      }
+    const aliceSignaling = await p2p.deriveSignalingKeyPair(
+      created.founder.signingKeyPair.privateKey,
+      created.roomIdCommitment,
+      'founder-dev',
+      epoch,
+      timeBucket,
+    );
+    const aliceDialId = p2p.toBase64Url(aliceSignaling.publicKey);
+    for (let i = 0; i < 64; i++) {
+      const advEphemeral = await p2p.generateX25519KeyPair();
+      if (p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId) continue;
+      return {
+        created,
+        epoch,
+        rendezvousKey,
+        timeBucket,
+        aliceBlind,
+        adversaryDeviceId: ADVERSARY_DEVICE_ID,
+        advEphemeral,
+      };
     }
   }
   throw new Error('could not force the offerer role in 25 room draws (astronomically unlikely)');
@@ -209,29 +250,11 @@ async function pickOffererRoom(p2p: P2P): Promise<{
  */
 async function setupOffererHarness(): Promise<Harness> {
   const p2p = await import('@licio/private-p2p');
-  const { created, epoch, rendezvousKey, timeBucket, aliceBlind, adversaryDeviceId } =
+  // `pickOffererRoom` has already settled the ordering that forces ALICE to offer — the adversary
+  // ephemeral it returns sorts ABOVE her derived signalling key, on the same draw as the room.
+  const { created, epoch, rendezvousKey, timeBucket, aliceBlind, adversaryDeviceId, advEphemeral } =
     await pickOffererRoom(p2p);
 
-  // The offerer role is decided by the two DIAL IDENTITIES (the signalling
-  // public keys), not by `peer_blind_id` — that field is server-visible and
-  // outside the cap's binding, so a forged record could make the two honest
-  // peers disagree about who offers.  This harness needs ALICE to offer, so it
-  // picks an adversary ephemeral that sorts ABOVE her derived signalling key.
-  const aliceSignaling = await p2p.deriveSignalingKeyPair(
-    created.founder.signingKeyPair.privateKey,
-    created.roomIdCommitment,
-    'founder-dev',
-    epoch,
-    timeBucket,
-  );
-  const aliceDialId = p2p.toBase64Url(aliceSignaling.publicKey);
-  let advEphemeral = await p2p.generateX25519KeyPair();
-  for (let i = 0; i < 64 && p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId; i += 1) {
-    advEphemeral = await p2p.generateX25519KeyPair();
-  }
-  if (p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId) {
-    throw new Error('could not pick an adversary dial id above alice’s');
-  }
   const advSigning = await p2p.generateDeviceSigningKeyPair();
   const advSigningPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(advSigning.publicKey));
   const adversaryBlind = await p2p.derivePeerBlindId(
@@ -446,11 +469,17 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
         ),
       );
 
+      // Wait for the flush to REACH the cap, then for it to go QUIET, and only then assert the
+      // exact count.  Neither half is sufficient alone: a fixed settle tick bets that 64 awaited
+      // `addIceCandidate` resolutions fit inside it (a bet a loaded box loses, and the failure
+      // would read as a cap regression), while `waitUntil(n === 64)` alone would be satisfied
+      // TRANSIENTLY by a broken cap on its way through 64 to 100.  Quiescence is what the
+      // equality actually needs.
       await waitUntil(
-        () => (h.peer()?.iceApplied.length ?? 0) > 0,
-        'answer flushed the ICE buffer',
+        () => (h.peer()?.iceApplied.length ?? 0) >= 64,
+        'ICE buffer flushed to the cap',
       );
-      await new Promise((r) => setTimeout(r, 20)); // let any further flush settle
+      await waitUntilQuiet(() => h.peer()?.iceApplied.length ?? 0, 'the ICE flush');
       // EXACTLY 64 of the 100 flooded candidates were buffered + applied — 36 dropped past the cap.
       expect(h.peer()?.iceApplied.length).toBe(64);
 
