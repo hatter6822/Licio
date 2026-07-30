@@ -300,7 +300,10 @@ function PasskeysSection({ gate }: { gate: StepUpGate }): React.ReactElement {
 
 // --- Email factor (WS-D.1.4a) -------------------------------------------------------
 
-function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
+/** Exported for its own unit suite, like `TotpSection` below — the email flow has
+ *  four states (unverified, staged, both, neither) and driving them through the
+ *  whole page would test the page instead of the flow. */
+export function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
   const t = useT();
   const queryClient = useQueryClient();
   const credentials = useAuthCredentialsQuery();
@@ -309,12 +312,31 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
   const [editing, setEditing] = useState(false);
   const [awaitingCode, setAwaitingCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Confirmation that a resend actually happened — see the Resend handler. */
+  const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = (): void => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.authCredentials() });
   };
   const fail = (err: unknown): void => setError(failureMessage(err, t));
   const state = credentials.data?.email;
+  /**
+   * ONE code-entry form for BOTH ways a code can be outstanding.
+   *
+   * There were two, and only the first carried a Resend button — guarded by
+   * `state.present && !state.verified`, which is exactly false for the case the
+   * server was just taught to allow.  Changing an ALREADY-VERIFIED email leaves
+   * `email.verified === true` while `pendingEmail` is staged, so the member landed
+   * in the second form: Confirm only, with an undelivered code and no advertised
+   * way to ask for another.  `grep resend apps/web/src` found one call site in the
+   * whole client.
+   *
+   * Consolidated rather than pasting a second button, because a member who is
+   * BOTH unverified and mid-change satisfies both conditions and would have got
+   * two forms and two Resend buttons.
+   */
+  const awaitingStagedChange = awaitingCode || credentials.data?.email?.change_pending === true;
+  const needsCode = awaitingStagedChange || (state?.present === true && state.verified === false);
 
   return (
     <Section title={t('security.email', 'Email sign-in')}>
@@ -337,7 +359,7 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
         </div>
       ) : null}
 
-      {state?.present && !state.verified ? (
+      {needsCode ? (
         <form
           className="flex flex-wrap items-end gap-2"
           onSubmit={(e) => {
@@ -345,12 +367,23 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
             setError(null);
             verifyEmail(code).then(() => {
               setCode('');
+              // The staged-change form's cleanup is a SUPERSET of the plain
+              // verification one, so the merged handler does both.
+              setAwaitingCode(false);
               refresh();
             }, fail);
           }}
         >
           <Input
             label={t('security.email.code', 'Verification code')}
+            {...(awaitingStagedChange
+              ? {
+                  helperText: t(
+                    'security.email.staged',
+                    'Your current email stays active until the new one is confirmed.',
+                  ),
+                }
+              : {})}
             autoComplete="one-time-code"
             value={code}
             onChange={(e) => setCode(e.target.value)}
@@ -365,7 +398,13 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
             variant="ghost"
             onClick={() => {
               setError(null);
-              resendEmailCode().then(() => undefined, fail);
+              setNotice(null);
+              // Success was swallowed (`() => undefined`), so the button looked
+              // inert even when a new code was on its way.
+              resendEmailCode().then(
+                () => setNotice(t('security.email.resent', 'A new code is on its way.')),
+                fail,
+              );
             }}
           >
             {t('security.email.resend', 'Resend code')}
@@ -419,37 +458,6 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
         </form>
       ) : null}
 
-      {awaitingCode ? (
-        <form
-          className="flex flex-wrap items-end gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            setError(null);
-            verifyEmail(code).then(() => {
-              setCode('');
-              setAwaitingCode(false);
-              refresh();
-            }, fail);
-          }}
-        >
-          <Input
-            label={t('security.email.code', 'Verification code')}
-            helperText={t(
-              'security.email.staged',
-              'Your current email stays active until the new one is confirmed.',
-            )}
-            autoComplete="one-time-code"
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            required
-            className="grow"
-          />
-          <Button type="submit" variant="secondary">
-            {t('security.email.confirm', 'Confirm')}
-          </Button>
-        </form>
-      ) : null}
-
       <div className="flex flex-wrap gap-2">
         <Button variant="ghost" onClick={() => setEditing((v) => !v)}>
           {state?.present
@@ -468,6 +476,11 @@ function EmailSection({ gate }: { gate: StepUpGate }): React.ReactElement {
           </Button>
         ) : null}
       </div>
+      {notice !== null ? (
+        <p role="status" className="text-ink-muted text-sm">
+          {notice}
+        </p>
+      ) : null}
       <ErrorLine message={error} />
     </Section>
   );

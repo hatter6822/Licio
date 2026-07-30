@@ -87,6 +87,8 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
             email: {
               present: !!(await services.store.getUser(auth.userId))?.email,
               verified: userAuth?.emailVerified ?? false,
+              // So the staged-change code form survives a reload — see the schema.
+              change_pending: userAuth?.pendingEmail != null,
             },
             totp: {
               enabled: userAuth?.mfaEnabled ?? false,
