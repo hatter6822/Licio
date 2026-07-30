@@ -50,6 +50,27 @@ describe('WS-S.1.5 check:no-private-cid-egress — public-gateway scan', () => {
     expect(v.map((x) => x.detail).join(' ')).toContain('ipfs.io');
   });
 
+  it('blanks a MIXED batch per file, and still reports the real line', () => {
+    // The sweeps blank the whole batch through one compiler host now, so the two
+    // things the per-file call gave away for free need pinning: the dialect is
+    // chosen per PATH (a `.tsx` source read as `.ts` parses to a tree with no
+    // comments in it, and an unblanked comment is a false positive), and blanking
+    // stays newline-preserving so a violation after a multi-line header — which is
+    // every file in this repo — is reported on its own line, not the header's.
+    const v = scanPublicGatewayEgress([
+      { path: 'plain.ts', content: '// never use ipfs.io\nconst a = 1;\n' },
+      { path: 'component.tsx', content: 'const el = <div>ok</div>;\n// nor ipfs.io here\n' },
+      {
+        path: 'offender.ts',
+        content: '/* header\n   spanning\n   lines */\nfetch("https://ipfs.io/ipfs/bafy");\n',
+      },
+    ]);
+    expect(v.map((x) => ({ file: x.file, line: x.line }))).toEqual([
+      { file: 'offender.ts', line: 4 },
+      { file: 'offender.ts', line: 4 },
+    ]);
+  });
+
   it('ignores a public-gateway reference inside a comment', () => {
     expect(
       scanPublicGatewayEgress([{ path: 'c.ts', content: '// never use ipfs.io for private CIDs' }]),
@@ -139,6 +160,23 @@ describe('WS-S.1.5 findMissingMarkers', () => {
   it('flags a missing file', () => {
     const v = findMissingMarkers([{ file: 'missing.ts', markers: ['x'] }], fakeSource);
     expect(v[0]?.detail).toBe('file not found');
+  });
+
+  it('an unreadable file does not stop the entries after it being judged', () => {
+    // Reading now happens in its own pass before the batch is blanked, so an entry
+    // that throws must neither abort the pass nor cost the later entries their
+    // check — the failure mode of a gate that stops early is silence.
+    const v = findMissingMarkers(
+      [
+        { file: 'present.ts', markers: ["storageMode === 'p2p'"] },
+        { file: 'missing.ts', markers: ['whatever'] },
+        { file: 'absent.ts', markers: ["storageMode === 'p2p'"] },
+      ],
+      fakeSource,
+    );
+    expect(v.map((x) => x.file).sort()).toEqual(['absent.ts', 'missing.ts']);
+    expect(v.find((x) => x.file === 'missing.ts')?.detail).toBe('file not found');
+    expect(v.find((x) => x.file === 'absent.ts')?.detail).toContain("storageMode === 'p2p'");
   });
 });
 

@@ -15,7 +15,7 @@ import {
   REMOTE_DYNAMIC_IMPORT_SINK,
   type SinkSpec,
 } from './dangerous-code-patterns.js';
-import { blankSourceComments } from './gate-comments.js';
+import { blankCommentsIn, blankSourceComments } from './gate-comments.js';
 
 export const ROOT = resolve(import.meta.dirname, '..');
 
@@ -64,6 +64,26 @@ export function stripComments(content: string, path = 'gate-source.ts'): string 
   return blankSourceComments(path, content);
 }
 
+/**
+ * A whole batch blanked through ONE compiler host.
+ *
+ * `stripComments` blanks a single source, so it builds a TypeScript program per
+ * call — correct for a marker check, wrong inside a loop over a tree.  The two
+ * whole-tree sweeps below called it per file, which is the same defect the
+ * `check:lcap-p2p-split` gate had already been fixed for, in the same shape, left
+ * standing in its sibling: the convenience wrapper is simply the easiest thing to
+ * reach for.  A gate slow enough to be killed is a gate that stops being run, and
+ * these two are part of the WS-S umbrella that gates a LAUNCH-BLOCKING workstream.
+ *
+ * Order is the caller's, not the map's, so a gate's output stays stable.
+ */
+function blankedBatch(
+  files: ReadonlyArray<{ path: string; content: string }>,
+): Array<{ path: string; code: string }> {
+  const blanked = blankCommentsIn(files);
+  return files.map(({ path, content }) => ({ path, code: blanked.get(path) ?? content }));
+}
+
 export interface GateViolation {
   file: string;
   line: number;
@@ -104,8 +124,7 @@ export function scanPublicGatewayEgress(
   files: Array<{ path: string; content: string }>,
 ): GateViolation[] {
   const violations: GateViolation[] = [];
-  for (const { path, content } of files) {
-    const code = stripComments(content, path);
+  for (const { path, code } of blankedBatch(files)) {
     code.split('\n').forEach((line, i) => {
       const lower = line.toLowerCase();
       for (const { token, detail } of FORBIDDEN_GATEWAY_SUBSTRINGS) {
@@ -204,8 +223,7 @@ export function scanNoServerRoomRecovery(
   files: Array<{ path: string; content: string }>,
 ): GateViolation[] {
   const violations: GateViolation[] = [];
-  for (const { path, content } of files) {
-    const code = stripComments(content, path);
+  for (const { path, code } of blankedBatch(files)) {
     code.split('\n').forEach((line, i) => {
       for (const { pattern, detail } of SERVER_ROOM_RECOVERY_PATTERNS) {
         if (pattern.test(line)) violations.push({ file: path, line: i + 1, detail });
@@ -241,14 +259,20 @@ export function findMissingMarkers(
   readApiSource: (relPath: string) => string,
 ): GateViolation[] {
   const violations: GateViolation[] = [];
-  for (const { file, markers } of required) {
-    let code: string;
+  // Read first, blank once: the per-file call built a compiler program for every
+  // marker entry, and this list grows with each guard the WS-S umbrella pins.
+  const sources: Array<{ path: string; content: string }> = [];
+  for (const { file } of required) {
     try {
-      code = stripComments(readApiSource(file), file);
+      sources.push({ path: file, content: readApiSource(file) });
     } catch {
       violations.push({ file, line: 0, detail: 'file not found' });
-      continue;
     }
+  }
+  const blanked = blankCommentsIn(sources);
+  for (const { file, markers } of required) {
+    const code = blanked.get(file);
+    if (code === undefined) continue; // unreadable: already reported above
     for (const marker of markers) {
       if (!code.includes(marker)) {
         violations.push({ file, line: 0, detail: `missing required guard marker: ${marker}` });
