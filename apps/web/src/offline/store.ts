@@ -16,12 +16,14 @@ import {
   type RawEntry,
   rawClear,
   rawCount,
+  rawCountByIndex,
   rawDelete,
   rawDeleteIf,
   rawGet,
   rawGetAllByIndexWithKeys,
   rawGetAllWithKeys,
   rawPut,
+  rawReapUnindexed,
   STORE,
   type StoreName,
 } from './db.js';
@@ -85,6 +87,15 @@ export interface IntegrityStore<T> {
   getAll(): Promise<T[]>;
   /** Read valid records via an index. */
   getAllByIndex(index: string, query?: IDBValidKey | IDBKeyRange): Promise<T[]>;
+  /** How many records `index` can see — NOT `count()`, see `rawCountByIndex`. */
+  countByIndex(index: string): Promise<number>;
+  /**
+   * Delete records `index` cannot see (they can never age out), returning the
+   * count.  A no-op returning 0 under the `quarantine` policy: an unreachable
+   * DRAFT is still the user's words, and losing them to a GC sweep is the outcome
+   * quarantining exists to prevent.
+   */
+  reapUnindexed(index: string): Promise<number>;
   delete(key: IDBValidKey): Promise<void>;
   clear(): Promise<void>;
   count(): Promise<number>;
@@ -164,6 +175,17 @@ function createStore<T>(
     delete: (key) => rawDelete(storeName, key),
     clear: () => rawClear(storeName),
     count: () => rawCount(storeName),
+    countByIndex: (index) => rawCountByIndex(storeName, index),
+    reapUnindexed: async (index) => {
+      if (policy.mode !== 'evict') return 0;
+      try {
+        const reaped = await rawReapUnindexed(storeName, index);
+        for (let i = 0; i < reaped; i += 1) recordRejection();
+        return reaped;
+      } catch {
+        return 0; // best-effort, like every other sweep in this layer
+      }
+    },
   };
 }
 

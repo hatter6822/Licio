@@ -25,7 +25,13 @@ import {
   saveStory,
   unsaveStory,
 } from './read-through.js';
-import { savedStories, signalLedger, storyComments, threadSnapshots } from './store.js';
+import {
+  draftContributions,
+  savedStories,
+  signalLedger,
+  storyComments,
+  threadSnapshots,
+} from './store.js';
 
 const STORY: StoryDetail = {
   story_id: '11111111-1111-4111-8111-111111111111',
@@ -211,8 +217,31 @@ describe('snapshot count caps (the bound age alone does not give)', () => {
     expect(await storyComments.count()).toBe(2);
   });
 
+  it('an index-invisible record does not steal the budget', async () => {
+    monotonicClock();
+    // A record with no `cachedAt` is omitted from the index, so the LRU trim can
+    // never list it — while `count()` counted it against the cap regardless.  The
+    // store therefore settled BELOW the budget in real snapshots and ABOVE it in
+    // records, and every write past the crossover re-ran the full scan that the
+    // 90% trim ratio exists to amortise.
+    const ORPHANS = 50;
+    for (let i = 0; i < ORPHANS; i += 1) {
+      await rawPut(STORE.storyComments, { cacheKey: `orphan-${i}` });
+    }
+    for (let i = 0; i < MAX_STORY_COMMENT_SNAPSHOTS; i += 1) {
+      await cacheStoryCommentsSnapshot(STORY.story_id, { order: `o${i}` }, COMMENTS);
+    }
+    // Every slot the budget promises is available to real snapshots.
+    expect(await storyComments.countByIndex('cachedAt')).toBe(MAX_STORY_COMMENT_SNAPSHOTS);
+    // The store as a whole is over budget, which is what the reap below is for.
+    expect(await storyComments.count()).toBe(MAX_STORY_COMMENT_SNAPSHOTS + ORPHANS);
+  });
+
   it('is best-effort: a trim failure never throws into the read path', async () => {
-    vi.spyOn(storyComments, 'count').mockRejectedValueOnce(new Error('quota'));
+    // `countByIndex`, not `count`: the guard counts the population the trim can
+    // actually see, and mocking the method it no longer calls made this pass
+    // without exercising a failure at all.
+    vi.spyOn(storyComments, 'countByIndex').mockRejectedValueOnce(new Error('quota'));
     await expect(cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS)).resolves.toBeUndefined();
   });
 });
@@ -233,6 +262,29 @@ describe('snapshot expiry (unbounded-growth control)', () => {
     // Explicit saves, the private ledger, and the pending queue are untouched.
     expect(await isStorySaved(STORY.story_id)).toBe(true);
     expect(await readCachedSignalLedger()).toHaveLength(1);
+  });
+
+  it('reaps snapshots the cachedAt index cannot see, and never user data', async () => {
+    // Invisible to the age sweep AND the LRU trim: nothing could remove these, so
+    // they held their share of the quota until the browser evicted the whole
+    // database — which takes the reader's UNSENT drafts with it.  Both snapshot
+    // stores are server-refetchable, so dropping them costs a refetch.
+    await rawPut(STORE.storyComments, { cacheKey: 'orphan-comments' });
+    await rawPut(STORE.threadSnapshots, { threadId: 'orphan-thread' });
+    await cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS);
+    // User data with no indexable `updatedAt` — equally unreachable, and NOT ours
+    // to delete: an unreachable draft is still the user's words.
+    await rawPut(STORE.draftContributions, { draftId: 'orphan-draft' });
+
+    await expireOldSnapshots();
+
+    expect(await storyComments.count()).toBe(1);
+    expect(await readStoryCommentsSnapshot(STORY.story_id, {})).toBeDefined();
+    expect(await threadSnapshots.count()).toBe(0);
+    expect(await draftContributions.count()).toBe(1);
+    // And the quarantine policy refuses the reap outright, not just in this sweep.
+    expect(await draftContributions.reapUnindexed('updatedAt')).toBe(0);
+    expect(await draftContributions.count()).toBe(1);
   });
 
   it('leaves fresh snapshots in place', async () => {

@@ -132,18 +132,27 @@ export const SNAPSHOT_TRIM_RATIO = 0.9;
  * Drop the least-recently-cached records once `store` exceeds `budget`.
  *
  * `getAllByIndex('cachedAt')` returns INDEX order, so the oldest come first —
- * an exact LRU trim needing no new index and no new store. The cheap `count()`
- * guard runs first so an under-budget write never touches the records at all;
- * the trim itself sizes off the returned LIST rather than that count, because a
- * record that failed read validation is excluded from the list but still counted
- * (it is evicted by the scan's own policy, so the next write sees it gone).
+ * an exact LRU trim needing no new index and no new store. The cheap count guard
+ * runs first so an under-budget write never touches the records at all; the trim
+ * itself sizes off the returned LIST rather than that count, because a record that
+ * failed read validation is excluded from the list but still counted (it is
+ * evicted by the scan's own policy, so the next write sees it gone).
+ *
+ * That guard counts the INDEX, not the store. `count()` counts every record;
+ * IndexedDB omits a record from an index when its index key is absent or invalid,
+ * so the two measure different populations and the budget stopped meaning what it
+ * says the moment they diverged: an index-invisible record was counted against the
+ * cap it could never be trimmed from, so the store settled ABOVE budget and every
+ * subsequent write re-ran the full scan the 90% trim ratio exists to amortise. The
+ * self-healing the paragraph above describes is real, and reaches only records the
+ * scan RETURNS — which is precisely not these. `expireOldSnapshots` reaps them.
  */
 async function trimToBudget<T>(
   store: IntegrityStore<T>,
   budget: number,
   keyOf: (record: T) => IDBValidKey,
 ): Promise<void> {
-  if ((await store.count()) <= budget) return;
+  if ((await store.countByIndex('cachedAt')) <= budget) return;
   const oldestFirst = await store.getAllByIndex('cachedAt');
   const target = Math.floor(budget * SNAPSHOT_TRIM_RATIO);
   const excess = Math.max(0, oldestFirst.length - target);
@@ -263,6 +272,13 @@ export async function expireOldSnapshots(now: number = Date.now()): Promise<void
     for (const record of staleThreads) {
       await threadSnapshots.delete(record.threadId);
     }
+    // A snapshot with no indexable `cachedAt` is invisible to BOTH sweeps above
+    // and to the LRU trim, so nothing could ever remove it — it would hold its
+    // share of the quota until the whole database was evicted, taking the
+    // reader's unsent drafts with it. Both stores are server-refetchable, so the
+    // next online read repopulates whatever this drops.
+    await storyComments.reapUnindexed('cachedAt');
+    await threadSnapshots.reapUnindexed('cachedAt');
   });
 }
 

@@ -411,6 +411,67 @@ export async function rawClear(store: StoreName): Promise<void> {
   await txComplete(tx);
 }
 
+/**
+ * Count the records an INDEX can see, which is not the same number as
+ * `rawCount`.
+ *
+ * IndexedDB omits a record from an index when its index key is absent or not a
+ * valid key, so `objectStore.count()` and `index.getAll()` measure two different
+ * populations.  Any budget that guards on the first and trims from the second
+ * silently stops meaning what it says — see `trimToBudget` in `read-through.ts`.
+ */
+export async function rawCountByIndex(store: StoreName, index: string): Promise<number> {
+  const db = await getDb();
+  const tx = db.transaction(store, 'readonly');
+  const result = await promisifyRequest<number>(tx.objectStore(store).index(index).count());
+  await txComplete(tx);
+  return result;
+}
+
+/**
+ * Delete the records `index` cannot see, and report how many went.
+ *
+ * A record missing an indexable value for `index` is invisible to every
+ * index-ordered sweep: the LRU trim never lists it, the age sweep never lists it,
+ * and it holds its share of the quota for ever — the "immortal record the GC sweep
+ * cannot see" that `store.ts`'s evict policy exists to rule out.  The evict policy
+ * only reaches records a scan RETURNS, so it cannot reach these; the one field the
+ * sweep depends on is the one whose absence hides the record from it.
+ *
+ * ONE readwrite transaction over both key lists, so a concurrent write-through
+ * refresh in another tab cannot be clobbered: it either commits before this
+ * transaction (and its key appears in the index list) or queues behind it.
+ *
+ * A key this function cannot compare is KEPT — deleting on an uncertain match
+ * would be a worse failure than leaving a record behind.
+ */
+export async function rawReapUnindexed(store: StoreName, index: string): Promise<number> {
+  const db = await getDb();
+  const tx = db.transaction(store, 'readwrite');
+  const objectStore = tx.objectStore(store);
+  const [allKeys, indexedKeys] = await Promise.all([
+    promisifyRequest<IDBValidKey[]>(objectStore.getAllKeys()),
+    // Index `getAllKeys` yields PRIMARY keys, so these are directly comparable.
+    promisifyRequest<IDBValidKey[]>(objectStore.index(index).getAllKeys()),
+  ]);
+  const comparable = (key: IDBValidKey): string | null =>
+    typeof key === 'string' ? `s:${key}` : typeof key === 'number' ? `n:${key}` : null;
+  const visible = new Set<string>();
+  for (const key of indexedKeys) {
+    const id = comparable(key);
+    if (id !== null) visible.add(id);
+  }
+  let reaped = 0;
+  for (const key of allKeys) {
+    const id = comparable(key);
+    if (id === null || visible.has(id)) continue;
+    objectStore.delete(key);
+    reaped += 1;
+  }
+  await txComplete(tx);
+  return reaped;
+}
+
 export async function rawCount(store: StoreName): Promise<number> {
   const db = await getDb();
   const tx = db.transaction(store, 'readonly');
