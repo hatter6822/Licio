@@ -64,15 +64,32 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     // implementation returned 1 and failed the test.  A long window plus the
     // server's own remaining TTL tests the same property — "not re-armed" —
     // with no timing assumption at all.
-    await store.increment('longwindow', 60_000);
+    const WINDOW_MS = 60_000;
+    const ELAPSE_MS = 250;
+    await store.increment('longwindow', WINDOW_MS);
     const firstTtl = await (redis as IORedis).pttl('test-eph:longwindow');
     expect(firstTtl).toBeGreaterThan(0);
-    await new Promise((r) => setTimeout(r, 25));
-    expect(await store.increment('longwindow', 60_000)).toBe(2);
+    await new Promise((r) => setTimeout(r, ELAPSE_MS));
+    expect(await store.increment('longwindow', WINDOW_MS)).toBe(2);
     const secondTtl = await (redis as IORedis).pttl('test-eph:longwindow');
-    // Strictly smaller: the window kept counting down through the second
-    // increment rather than being pushed back out to the full 60 s.
-    expect(secondTtl).toBeLessThan(firstTtl);
+    // AN ABSOLUTE BOUND, not a comparison between the two reads.
+    //
+    // `secondTtl < firstTtl` replaced a 40 ms/15 ms race with a SUB-MILLISECOND
+    // one, inverted in direction: both `pttl` reads routinely land on the same
+    // integer millisecond, so the comparison was decided by whether the second
+    // round trip happened to be slower than the first — not by whether the window
+    // was re-armed.  Measured against a deliberately broken script (the `n == 1`
+    // guard removed, so `PEXPIRE` runs on every call), that assertion passed 8
+    // times in 40.  It used to fail a correct implementation; it had come to pass
+    // a broken one.
+    //
+    // The window was armed once at creation, so after `ELAPSE_MS` a correct
+    // implementation has strictly less than `WINDOW_MS - ELAPSE_MS` left, while a
+    // re-armed one is back at ~`WINDOW_MS`.  Jitter and scheduling delay only make
+    // the remaining TTL SMALLER, which is the safe direction — so the margin can
+    // never fail a correct implementation, however loaded the machine.
+    expect(secondTtl).toBeLessThanOrEqual(WINDOW_MS - ELAPSE_MS + 50);
+    expect(secondTtl).toBeGreaterThan(0);
 
     // …and the window really does end, with a margin wide enough that only a
     // broken expiry can fail it.
