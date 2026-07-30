@@ -253,6 +253,20 @@ export interface ModerationCaseStore {
     caseId: string,
     patch: Partial<ModerationCaseRecord>,
   ): Promise<ModerationCaseRecord | null>;
+  /**
+   * COMPARE-AND-SET: take the case only while it is unassigned.  Null ⇒ someone
+   * else holds it, or there is no such case.
+   *
+   * A read-then-`update` cannot express this.  The route's pre-read and the write
+   * are two statements, so two reviewers could both see `assigned_to === null`
+   * and both write — last writer wins, both told 200, and the loser's audit row
+   * records a handover naming neither holder.  The client's own check is worse
+   * still: it reads a 30-second-stale snapshot.  Only one statement that both
+   * tests and writes closes it, which is why this is its own method rather than a
+   * predicate bolted onto `update` — the other six `cases.update` callers do not
+   * touch `assignedTo` and must not start paying for a precondition.
+   */
+  claimIfUnassigned(caseId: string, reviewerId: string): Promise<ModerationCaseRecord | null>;
   list(filter: CaseQueueFilter): Promise<ModerationCaseRecord[]>;
   count(filter: Omit<CaseQueueFilter, 'limit'>): Promise<number>;
   countOpenByAssignee(userId: string): Promise<number>;
@@ -576,6 +590,24 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
     const r = this.#rows.get(caseId);
     if (!r) return null;
     const updated: ModerationCaseRecord = { ...r, ...patch, updatedAt: iso(this.#now) };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+  async claimIfUnassigned(
+    caseId: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them — on a single-threaded
+    // event loop that is as atomic as the Drizzle adapter's one-statement
+    // `UPDATE … WHERE assigned_to IS NULL`, which is the semantics this emulates.
+    const r = this.#rows.get(caseId);
+    if (!r || r.assignedTo !== null) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      assignedTo: reviewerId,
+      status: 'in_progress',
+      updatedAt: iso(this.#now),
+    };
     this.#rows.set(caseId, updated);
     return { ...updated };
   }

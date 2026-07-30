@@ -310,6 +310,23 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
     return row === undefined ? null : mapCase(row);
   }
 
+  async claimIfUnassigned(
+    caseId: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT.  The `assigned_to IS NULL` predicate lives in the UPDATE, so
+    // Postgres decides the winner of a concurrent claim; an empty `returning()`
+    // means someone else already held it.  A read-then-write here would leave the
+    // race exactly where it was, just with more code around it.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ assignedTo: reviewerId, status: 'in_progress', updatedAt: new Date() })
+      .where(and(eq(moderationCases.caseId, caseId), isNull(moderationCases.assignedTo)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
   async update(
     caseId: string,
     patch: Partial<ModerationCaseRecord>,

@@ -1028,6 +1028,155 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     return cases[0]?.caseId ?? '';
   }
 
+  it('REFUSES a claim on a case another reviewer already holds', async () => {
+    // The route wrote `assignedTo` unconditionally: `theCase.assignedTo` was
+    // fetched and never read, and there is no `If-Match` or version on the wire,
+    // so any report-queue steward performed a silent takeover with one POST.
+    // Hiding the client's button narrowed the UI and left the route open — and
+    // that button reads a 30-second-stale snapshot anyway.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/cases/${caseId}/assign`,
+            { reviewer_id: first.userId },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const stolen = await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: second.userId }, safety.cookie),
+    );
+    expect(stolen.status).toBe(409);
+    expect(((await stolen.json()) as { error: { code: string } }).error.code).toBe(
+      'already_assigned',
+    );
+    // …and the holder is unchanged.
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
+  });
+
+  it('ALLOWS a reasoned reassignment, and records both holders', async () => {
+    // Taking a case off a colleague is a legitimate flow — the console's own
+    // comment describes it — but it is a REASONED one, and the audit row must say
+    // who lost it.  The row used to carry `subjectUserId: null` and no
+    // prior/next state, so the takeover was unattributable, not merely
+    // unexplained.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: first.userId }, safety.cookie),
+    );
+    const res = await app().request(
+      post(
+        `/v1/moderation/cases/${caseId}/assign`,
+        { reviewer_id: second.userId, reason: 'first reviewer is on leave' },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(second.userId);
+    const audit = await getModerationServices().audit.list({ limit: 50 });
+    const row = audit.find((r) => r.action === 'assign' && r.nextState === second.userId);
+    expect(row?.priorState).toBe(first.userId);
+    expect(row?.subjectUserId).toBe(second.userId);
+    expect(row?.notes).toContain('on leave');
+  });
+
+  it('is IDEMPOTENT for the holder re-claiming', async () => {
+    // A retried request must not become a conflict.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const caseId = await openCase();
+    for (const expected of [200, 200]) {
+      expect(
+        (
+          await app().request(
+            post(
+              `/v1/moderation/cases/${caseId}/assign`,
+              { reviewer_id: holder.userId },
+              safety.cookie,
+            ),
+          )
+        ).status,
+      ).toBe(expected);
+    }
+  });
+
+  it('the BULK path enforces the same guard', async () => {
+    // Bulk assign overwrote any case's assignee and did not even forward the
+    // request's `reason_code`, so it was a complete bypass of the single-assign
+    // guard — a silent steal, one page at a time.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: first.userId }, safety.cookie),
+    );
+    const res = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        {
+          case_ids: [caseId],
+          action: 'assign',
+          reason_code: 'MOD_SPAM_001',
+          reviewer_id: second.userId,
+        },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { ok: boolean; error: string | null }[] };
+    expect(body.results[0]?.ok).toBe(false);
+    expect(body.results[0]?.error).toBe('already_assigned');
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
+  });
+
+  it('AUTO-ROUTED cases are protected by the same guard as manual claims', async () => {
+    // Auto-routing runs through `trackBackground` when a report opens a case, and
+    // in practice it completes during the POST — so the interleaved ordering
+    // (human claims first, routing lands second) is not reachable from outside the
+    // route.  What IS reachable, and is the harm, is the other direction: once
+    // routing has assigned a case, a second reviewer must not be able to take it
+    // silently.
+    const safety = await safetyUser();
+    const autoTarget = await safetyUser();
+    const other = await safetyUser();
+    const mod = getModerationServices();
+    await mod.reviewerStatus.set(autoTarget.userId, 'available', new Date().toISOString());
+    const reporter = await seedUser({ handle: `rep${randomUUID().slice(0, 6)}` });
+    await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    await mod.settle();
+    const caseId = (await mod.cases.list({ limit: 1 }))[0]?.caseId ?? '';
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(autoTarget.userId);
+    const stolen = await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: other.userId }, safety.cookie),
+    );
+    expect(stolen.status).toBe(409);
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(autoTarget.userId);
+  });
+
+  it('the store CAS refuses a claim on an assigned case, in either arrival order', async () => {
+    // The guarantee `autoAssignNewCase` relies on to be ordering-independent.  It is
+    // asserted at the STORE because that is where the atomicity lives — the
+    // in-memory adapter's read-test-write with no `await` between, and Postgres's
+    // one-statement `UPDATE … WHERE assigned_to IS NULL`.
+    const holder = await safetyUser();
+    const late = await safetyUser();
+    const caseId = await openCase();
+    const mod = getModerationServices();
+    expect(await mod.cases.claimIfUnassigned(caseId, holder.userId)).not.toBeNull();
+    expect(await mod.cases.claimIfUnassigned(caseId, late.userId)).toBeNull();
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(holder.userId);
+  });
+
   it('assigns a case (ok / case-404 / reviewer-404 / reviewer-ineligible)', async () => {
     const safety = await safetyUser();
     const caseId = await openCase();

@@ -270,14 +270,59 @@ export function createModerationConsoleRoutes() {
               400,
             );
           }
-          await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
+          // THE ASSIGNMENT IS NOW LIMITED, not just the button that offers it.
+          //
+          // This wrote `assignedTo` unconditionally: `theCase.assignedTo` was
+          // fetched above and never read, there is no `If-Match` and no version on
+          // the wire to echo, so two reviewers could both claim one case and both
+          // be told 200 — last writer wins.  Hiding the client's claim button when
+          // the case looks assigned narrowed the UI and left the route open, and
+          // that button reads a 30-second-stale snapshot anyway, so a colleague
+          // claiming mid-review still produced a silent takeover with ONE POST.
+          //
+          // Placed AFTER the assignee lookups on purpose: a precondition ahead of
+          // them would answer 409 where the honest answer is 404
+          // `reviewer_not_found` or 400 `reviewer_ineligible`.
+          if (theCase.assignedTo === reviewer_id) {
+            // Idempotent re-claim: the holder asking for what they already have is
+            // not a conflict, and a retried request must not become one.
+            return c.json(okResponseSchema.parse({ ok: true }));
+          }
+          if (theCase.assignedTo === null) {
+            // THE CAS decides, not the read above — that read is already stale by
+            // the time this line runs, which is the whole defect.
+            const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
+            if (!claimed) {
+              return c.json(
+                deny('already_assigned', 'Another reviewer claimed this case first'),
+                409,
+              );
+            }
+          } else if (reason === undefined) {
+            // Held by someone else.  Taking a case off a colleague is a REASONED
+            // reassignment — the flow the console's own comment describes — so it
+            // requires the `reason` the schema already carries.  Without one the
+            // answer is a refusal, not a silent handover.
+            return c.json(
+              deny('already_assigned', 'This case is assigned to another reviewer'),
+              409,
+            );
+          } else {
+            await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
+          }
           await writeAudit(mod, {
             actorUserId: actor.userId,
             actorRole: actor.stewardRoles[0] ?? null,
             action: 'assign',
             targetType: theCase.targetType,
             targetId: theCase.targetId,
-            subjectUserId: null,
+            // NAMES BOTH HOLDERS.  The row recorded an `assign` on the target with
+            // `subjectUserId: null` and no prior/next state, so the trail could not
+            // say who took the case or from whom — the takeover was unattributable,
+            // not merely unexplained.
+            subjectUserId: reviewer_id,
+            priorState: theCase.assignedTo ?? 'unassigned',
+            nextState: reviewer_id,
             notes: reason ?? null,
           });
           mod.metrics.increment('moderation.assign');
@@ -383,13 +428,33 @@ export function createModerationConsoleRoutes() {
               results.push({ case_id: caseId, ok: false, error: 'reviewer_required' });
               continue;
             }
-            await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
+            // THE SAME GUARD AS THE SINGLE ASSIGN, or this is a complete bypass
+            // of it — bulk assign overwrote ANY case's assignee and did not even
+            // forward the request's `reason_code`, so it could still silently steal
+            // a colleague's in-progress case one page at a time.
+            if (theCase.assignedTo !== null && theCase.assignedTo !== reviewer_id) {
+              results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
+              continue;
+            }
+            if (theCase.assignedTo === null) {
+              const claimed = await mod.cases.claimIfUnassigned(caseId, reviewer_id);
+              if (!claimed) {
+                results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
+                continue;
+              }
+            }
             await writeAudit(mod, {
               actorUserId: actor.userId,
               actorRole: actor.stewardRoles[0] ?? null,
               action: 'assign',
               targetType: theCase.targetType,
               targetId: theCase.targetId,
+              // Named here too — the bulk path wrote the row with no identities and
+              // no notes at all.
+              subjectUserId: reviewer_id,
+              priorState: 'unassigned',
+              nextState: reviewer_id,
+              notes: reason_code ?? null,
             });
             results.push({ case_id: caseId, ok: true, error: null });
             continue;

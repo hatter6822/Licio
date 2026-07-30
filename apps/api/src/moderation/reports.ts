@@ -37,7 +37,14 @@ async function autoAssignNewCase(
 ): Promise<void> {
   const assignee = await autoAssignCase(services);
   if (assignee === null) return;
-  await services.cases.update(theCase.caseId, { assignedTo: assignee });
+  // AUTO-ROUTING LOSES TO A HUMAN.  This runs in the BACKGROUND
+  // (`services.trackBackground`), so it can land after a reviewer has already
+  // claimed the case manually — and a plain `update` would then overwrite that
+  // claim, silently, with no audit row naming the person it displaced.  The
+  // compare-and-set makes the outcome ordering-independent: whoever got there
+  // first keeps it, and this simply does nothing.
+  const routed = await services.cases.claimIfUnassigned(theCase.caseId, assignee);
+  if (routed === null) return;
   await writeAudit(services, {
     actorUserId: null, // system routing
     actorRole: null,
