@@ -21,6 +21,7 @@
 //     §13.6) — enforced by the ABSENCE of the column, not by hiding it.
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -203,6 +204,17 @@ export const moderationAudit = pgTable(
   'moderation_audit',
   {
     auditId: uuid('audit_id').primaryKey().defaultRandom(),
+    /** The APPEND ORDER, and the only sound keyset cursor over this table.  `event_time`
+     *  cannot serve: it is microsecond-resolution `timestamptz` that the driver truncates
+     *  to a millisecond JS `Date` on read, so a cursor built from a read row lands BELOW
+     *  the row it names and the next page skips everything sharing that millisecond
+     *  (migration 0115 has the measurement).  Sequence-assigned, so not gapless — proving
+     *  nothing was DELETED is the chain's job, not the ordinal's. */
+    ordinal: bigint('ordinal', { mode: 'number' })
+      .notNull()
+      // The sequence assigns it — declared here so the insert type does not demand a
+      // value the writer must not invent.
+      .default(sql`nextval('moderation_audit_ordinal_seq')`),
     eventTime: timestamp('event_time', { withTimezone: true }).notNull().defaultNow(),
     /** Null actor ⇒ `system` (automated block). */
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),

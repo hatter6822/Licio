@@ -43,6 +43,7 @@ import {
   isNotNull,
   isNull,
   like,
+  lt,
   lte,
   or,
   type SQL,
@@ -150,6 +151,7 @@ function mapAction(row: typeof moderationActions.$inferSelect): ModerationAction
 function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditRecord {
   return {
     auditId: row.auditId,
+    ordinal: row.ordinal,
     eventTime: iso(row.eventTime),
     actorUserId: row.actorUserId,
     actorRole: row.actorRole as ModerationAuditRecord['actorRole'],
@@ -767,7 +769,7 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
   }
 
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
   ): Promise<ModerationAuditRecord> {
     const rows = await this.#db
       .insert(moderationAudit)
@@ -809,17 +811,30 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     if (filter.createdBefore !== undefined) {
       c.push(lte(moderationAudit.eventTime, new Date(filter.createdBefore)));
     }
-    const keyset = filter.afterEventTime !== undefined && filter.afterAuditId !== undefined;
-    if (keyset) {
+    // The cursor is the ORDINAL, never a timestamp.  `event_time` is microsecond
+    // `timestamptz` that the driver truncates to a millisecond `Date` on read, so the
+    // old `(event_time, audit_id) < (…)` predicate compared the true stored value
+    // against a rounded-DOWN copy of itself and skipped every row in the cursor row's
+    // millisecond (migration 0115 carries the measurement).
+    let keyset = false;
+    if (filter.afterOrdinal !== undefined) {
+      c.push(lt(moderationAudit.ordinal, filter.afterOrdinal));
+      keyset = true;
+    } else if (filter.afterAuditId !== undefined) {
+      // LEGACY cursor: the id is exact, so the row's own ordinal is the true position.
+      // A scalar subquery keeps it one round trip; an id that no longer resolves yields
+      // NULL, the predicate is unknown, and the page comes back empty — the safe
+      // direction for an accountability read (no silent re-listing from the head).
       c.push(
-        sql`(${moderationAudit.eventTime}, ${moderationAudit.auditId}) < (${new Date(filter.afterEventTime as string).toISOString()}::timestamptz, ${filter.afterAuditId as string}::uuid)`,
+        sql`${moderationAudit.ordinal} < (SELECT a2.ordinal FROM ${moderationAudit} a2 WHERE a2.audit_id = ${filter.afterAuditId}::uuid)`,
       );
+      keyset = true;
     }
     const rows = await this.#db
       .select()
       .from(moderationAudit)
       .where(c.length > 0 ? and(...c) : undefined)
-      .orderBy(desc(moderationAudit.eventTime), desc(moderationAudit.auditId))
+      .orderBy(desc(moderationAudit.ordinal))
       .limit(Math.max(0, filter.limit))
       // Keyset supersedes offset (stable under concurrent inserts); offset is the
       // legacy fallback when no cursor is supplied.
@@ -832,7 +847,10 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
       .select()
       .from(moderationAudit)
       .where(eq(moderationAudit.subjectUserId, userId))
-      .orderBy(desc(moderationAudit.eventTime))
+      // Ordinal DESC, as `list` — `event_time` alone leaves tied rows unordered, so the
+      // `limit` could cut a burst differently on each call and the two adapters could
+      // disagree about which records a subject's history contains.
+      .orderBy(desc(moderationAudit.ordinal))
       .limit(Math.max(0, limit));
     return rows.map(mapAudit);
   }

@@ -91,6 +91,31 @@ function decodeKeysetCursor(cursor: string | undefined): [string, string] | [und
   }
   return [time, id];
 }
+
+/** The audit cursor is the append ORDINAL — an integer, so it survives the wire round
+ *  trip exactly.  A timestamp cannot: the driver truncates `timestamptz` to a
+ *  millisecond `Date`, so the encoded value named a position BELOW the row it came
+ *  from and the next page dropped the remainder of that millisecond (migration 0115). */
+const encodeAuditCursor = (ordinal: number): string =>
+  Buffer.from(`o|${ordinal}`, 'utf-8').toString('base64url');
+
+/** Decode an audit cursor into the store filter fragment.  Accepts BOTH the ordinal
+ *  form and the legacy `timestamp|uuid` form, so a console page opened before this
+ *  deploy still pages correctly — the legacy id is exact, and the store resolves that
+ *  row's own ordinal from it.  A malformed cursor restarts from the head (defensive:
+ *  never a 500 from a failed cast inside a store). */
+function decodeAuditCursor(
+  cursor: string | undefined,
+): { afterOrdinal: number } | { afterAuditId: string } | Record<string, never> {
+  if (!cursor) return {};
+  const raw = Buffer.from(cursor, 'base64url').toString('utf-8');
+  if (raw.startsWith('o|')) {
+    const ordinal = Number(raw.slice(2));
+    return Number.isSafeInteger(ordinal) && ordinal > 0 ? { afterOrdinal: ordinal } : {};
+  }
+  const [, id] = decodeKeysetCursor(cursor);
+  return id === undefined ? {} : { afterAuditId: id };
+}
 const uuidParam = <K extends string>(name: K) =>
   z.object({ [name]: uuidSchema } as Record<K, typeof uuidSchema>);
 
@@ -791,10 +816,13 @@ export function createModerationConsoleRoutes() {
         }
         const q = c.req.valid('query');
         const mod = getModerationServices();
-        // Keyset cursor on (eventTime, auditId) DESC — stable when the
-        // `audit_view` meta-record below is inserted between page reads (an
-        // offset cursor would shift, duplicating/skipping rows).
-        const [curTime, curId] = decodeKeysetCursor(q.cursor);
+        // Keyset cursor on the append ORDINAL — stable when the `audit_view`
+        // meta-record below is inserted between page reads (an offset cursor would
+        // shift, duplicating/skipping rows), and EXACT across the wire round trip,
+        // which the previous `(eventTime, auditId)` pair was not: the timestamp came
+        // back from the driver already truncated to the millisecond, so each page
+        // silently dropped the rest of the cursor row's millisecond (migration 0115).
+        const cursor = decodeAuditCursor(q.cursor);
         const limit = q.limit ?? 50;
         const records = await mod.audit.list({
           ...(q.actor_id ? { actorUserId: q.actor_id } : {}),
@@ -803,7 +831,7 @@ export function createModerationConsoleRoutes() {
           ...(q.reason_code ? { reasonCode: q.reason_code } : {}),
           ...(q.created_after ? { createdAfter: q.created_after } : {}),
           ...(q.created_before ? { createdBefore: q.created_before } : {}),
-          ...(curTime && curId ? { afterEventTime: curTime, afterAuditId: curId } : {}),
+          ...cursor,
           limit: limit + 1,
         });
         const page = records.slice(0, limit);
@@ -819,10 +847,7 @@ export function createModerationConsoleRoutes() {
         for (const id of actorIds) handles.set(id, resolved.get(id)?.handle ?? null);
         const items = page.map((r) => auditToView(r, handles, true));
         const last = page[page.length - 1];
-        const nextCursor =
-          records.length > limit && last
-            ? Buffer.from(`${last.eventTime}|${last.auditId}`, 'utf-8').toString('base64url')
-            : null;
+        const nextCursor = records.length > limit && last ? encodeAuditCursor(last.ordinal) : null;
         // The audit log is itself an accountability surface — every successful
         // read is meta-audited with its query scope (parity with /audit/export
         // below), so steward inspection of the trail is never invisible.

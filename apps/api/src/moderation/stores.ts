@@ -95,6 +95,11 @@ export interface ModerationActionRecord {
 
 export interface ModerationAuditRecord {
   auditId: string;
+  /** The APPEND ORDER — strictly increasing, and the ONLY sound pagination key here.
+   *  `eventTime` cannot be one: Postgres stores it to the microsecond and the driver
+   *  truncates to a millisecond `Date`, so a cursor built from a read row sits below the
+   *  row it names and the next page drops that whole millisecond (migration 0115). */
+  ordinal: number;
   eventTime: string;
   actorUserId: string | null;
   actorRole: StewardRoleId | null;
@@ -362,10 +367,15 @@ export interface AuditQueryFilter {
   reasonCode?: string;
   createdAfter?: string;
   createdBefore?: string;
-  /** Keyset cursor on the (eventTime, auditId) DESC order (exclusive).  Preferred
-   *  over `offset`: stable when new audit rows are inserted between page reads
-   *  (e.g. the `audit_view` meta-record the viewer itself writes). */
-  afterEventTime?: string;
+  /** Keyset cursor on the `ordinal` DESC order (exclusive).  Preferred over `offset`:
+   *  stable when new audit rows are inserted between page reads (e.g. the `audit_view`
+   *  meta-record the viewer itself writes).  An integer, so it survives the round trip
+   *  through the wire cursor EXACTLY — which the old `(eventTime, auditId)` pair did
+   *  not, and that cost whole milliseconds of the trail per page (migration 0115). */
+  afterOrdinal?: number;
+  /** The LEGACY cursor form, still honoured so a page open across the deploy does not
+   *  break: the id is exact, so the store resolves that row's own ordinal and pages from
+   *  there.  Ignored when `afterOrdinal` is present. */
   afterAuditId?: string;
   limit: number;
   offset?: number;
@@ -374,7 +384,7 @@ export interface AuditQueryFilter {
 export interface ModerationAuditStore {
   /** Append-only: the only write path. */
   append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
   ): Promise<ModerationAuditRecord>;
   list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]>;
   listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]>;
@@ -882,16 +892,19 @@ export class InMemoryModerationActionStore implements ModerationActionStore {
 export class InMemoryModerationAuditStore implements ModerationAuditStore {
   readonly #rows: ModerationAuditRecord[] = [];
   readonly #now: Clock;
+  /** Mirrors the Postgres sequence: assigned on append, never reused. */
+  #nextOrdinal = 1;
   constructor(now: Clock = Date.now) {
     this.#now = now;
   }
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<ModerationAuditRecord, 'auditId' | 'ordinal' | 'eventTime' | 'createdAt'>,
   ): Promise<ModerationAuditRecord> {
     const at = iso(this.#now);
     const full: ModerationAuditRecord = {
       ...record,
       auditId: randomUUID(),
+      ordinal: this.#nextOrdinal++,
       eventTime: at,
       createdAt: at,
     };
@@ -908,15 +921,25 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     return true;
   }
   async list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]> {
+    // DESC by the append ORDINAL — a total order, so it needs no tiebreaker and admits
+    // an exact cursor.  Ordering by eventTime cannot: rows tie there constantly (an
+    // action burst lands inside one millisecond) and the tie is unresolvable from a
+    // read row, because the driver has already dropped the microseconds.
     const matched = this.#rows
       .filter((r) => this.#matches(r, filter))
-      // Stable DESC order with an id tiebreaker (rows can share an eventTime).
-      .sort((a, b) => b.eventTime.localeCompare(a.eventTime) || b.auditId.localeCompare(a.auditId));
-    if (filter.afterEventTime !== undefined && filter.afterAuditId !== undefined) {
-      const at = filter.afterEventTime;
-      const ai = filter.afterAuditId;
+      .sort((a, b) => b.ordinal - a.ordinal);
+    // The legacy `(eventTime, auditId)` cursor is resolved through the row it names —
+    // the id is exact, so its own ordinal is the true position.
+    if (filter.afterOrdinal !== undefined || filter.afterAuditId !== undefined) {
+      const after =
+        filter.afterOrdinal ??
+        this.#rows.find((r) => r.auditId === filter.afterAuditId)?.ordinal ??
+        // An id that resolves to nothing ends the walk, matching the SQL adapter (its
+        // scalar subquery yields NULL ⇒ unknown ⇒ no rows).  Restarting from the head
+        // instead would loop a paging reader forever while looking like progress.
+        0;
       return matched
-        .filter((r) => r.eventTime < at || (r.eventTime === at && r.auditId < ai))
+        .filter((r) => r.ordinal < after)
         .slice(0, filter.limit)
         .map((r) => ({ ...r }));
     }
@@ -924,11 +947,15 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     return matched.slice(offset, offset + filter.limit).map((r) => ({ ...r }));
   }
   async listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]> {
-    return this.#rows
-      .filter((r) => r.subjectUserId === userId)
-      .sort((a, b) => b.eventTime.localeCompare(a.eventTime))
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+    return (
+      this.#rows
+        .filter((r) => r.subjectUserId === userId)
+        // Ordinal DESC, as `list` — sorting on eventTime alone left tied rows in an
+        // arbitrary order, so a `limit` could cut the tie differently on each call.
+        .sort((a, b) => b.ordinal - a.ordinal)
+        .slice(0, limit)
+        .map((r) => ({ ...r }))
+    );
   }
   async listInPeriod(startIso: string, endIso: string): Promise<ModerationAuditRecord[]> {
     return this.#rows
