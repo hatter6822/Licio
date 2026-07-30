@@ -251,19 +251,35 @@ export async function generateThreadSummary(
     //
     // Withhold publication; route to steward review (never publish a summary
     // that fails the quality or grounding gate — §24.3).
+    const evidence = {
+      thread_id: threadId,
+      quality_failures: quality.constraints.filter((c) => !c.passed).map((c) => c.constraint),
+      hallucination_rate: grounding.hallucination_rate,
+      output_id: output.output_id,
+    };
     await deps.reviewQueue.insert({
       kind: 'flagged_hallucination',
       subjectRef: summaryId,
-      context: {
-        thread_id: threadId,
-        quality_failures: quality.constraints.filter((c) => !c.passed).map((c) => c.constraint),
-        hallucination_rate: grounding.hallucination_rate,
-        output_id: output.output_id,
-      },
+      context: evidence,
       status: 'pending',
       resolution: null,
       resolvedBy: null,
     });
+    // THE ITEM FOLLOWS THE DRAFT.
+    //
+    // `summaryId` is stable per thread, so a retry after a failed draft write reuses
+    // the subject and the queue's `(kind, subjectRef)` dedup returns the INCUMBENT —
+    // deliberately, because for a repeat report that first context is an independent
+    // event worth keeping.  A re-evaluated summary is the opposite: the retry re-ran
+    // the whole pipeline and minted a fresh `output_id` with fresh quality failures and
+    // a fresh hallucination rate, and `putDraft` upserts to exactly that.  Leaving the
+    // item on the first attempt's evidence would show a steward one evaluation while
+    // they read the draft of another, and let them accept or correct the wrong
+    // immutable output record — worse the more the thread changed in between.
+    //
+    // A no-op on the insert-fresh path (the context is already this), so it costs one
+    // statement on the branch that is already the slow one.
+    await deps.reviewQueue.refreshPendingContext('flagged_hallucination', summaryId, evidence);
     await putDraft();
     deps.metrics.increment('ai.summary.withheld');
     deps.log('summary.quality.evaluated', { thread_id: threadId, passed: false });

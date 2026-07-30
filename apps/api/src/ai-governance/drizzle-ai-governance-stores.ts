@@ -690,6 +690,28 @@ export class DrizzleAiReviewQueueStore implements AiReviewQueueStore {
     return this.#toItem(racedRow);
   }
 
+  async refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null> {
+    // ONE STATEMENT scoped by the same predicate the pending-subject unique uses, so
+    // it cannot touch a resolved item (whose evidence is the record of what a steward
+    // actually decided on) or a second subject.
+    const rows = await this.#db
+      .update(aiReviewQueue)
+      .set({ context })
+      .where(
+        and(
+          eq(aiReviewQueue.kind, kind),
+          eq(aiReviewQueue.subjectRef, subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toItem(rows[0]) : null;
+  }
+
   async get(reviewId: string): Promise<AiReviewItem | null> {
     const rows = await this.#db
       .select()

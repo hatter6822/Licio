@@ -350,6 +350,27 @@ export interface AiReviewItem {
 
 export interface AiReviewQueueStore {
   insert(item: Omit<AiReviewItem, 'reviewId' | 'createdAt' | 'resolvedAt'>): Promise<AiReviewItem>;
+  /**
+   * Replace the PENDING item's context for (kind, subject) — the re-evaluation case.
+   *
+   * `insert` deliberately keeps the incumbent's context on conflict, because for a
+   * REPORT the second report is an independent event and overwriting the first one's
+   * reason would destroy it (the per-subject reports are read alongside the item).
+   *
+   * A withheld SUMMARY is the opposite: its subject is stable per thread, and a retry
+   * re-runs the whole evaluation, minting a fresh `output_id` with fresh quality
+   * failures and a fresh hallucination rate.  The draft upserts to that new evaluation.
+   * If the queue item keeps the first attempt's evidence, the steward reviews one
+   * evaluation while reading the draft of another — and can correct or accept the wrong
+   * immutable output record, which is worse the more the thread changed between
+   * attempts.  Both must describe ONE evaluation, so this is the call that makes the
+   * item follow the draft.  Returns null when no pending item exists.
+   */
+  refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null>;
   get(reviewId: string): Promise<AiReviewItem | null>;
   list(
     filter: { status?: AiReviewItem['status']; kind?: AiReviewKind },
@@ -394,6 +415,21 @@ export class InMemoryAiReviewQueueStore implements AiReviewQueueStore {
     };
     this.#rows.set(record.reviewId, clone(record));
     return clone(record);
+  }
+
+  async refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null> {
+    for (const [id, existing] of this.#rows) {
+      if (existing.status !== 'pending') continue;
+      if (existing.kind !== kind || existing.subjectRef !== subjectRef) continue;
+      const updated: AiReviewItem = { ...existing, context };
+      this.#rows.set(id, clone(updated));
+      return clone(updated);
+    }
+    return null;
   }
   async get(reviewId: string): Promise<AiReviewItem | null> {
     const row = this.#rows.get(reviewId);

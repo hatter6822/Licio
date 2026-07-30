@@ -556,6 +556,16 @@ describe('WS-K.1.4a summary generation', () => {
       expect((await generateThreadSummary(deps, threadId)).ok).toBe(true);
       const stored = await f.ai.summaries.getLatestForThread(threadId);
       expect(stored?.summaryId).toBe(afterRetries[0]?.subjectRef);
+
+      // THE ITEM DESCRIBES THE SAME EVALUATION AS THE DRAFT.  The stable subject makes
+      // the dedup return the incumbent, so without a refresh the steward would read the
+      // FIRST attempt's evidence — a different `output_id`, different quality failures,
+      // a different hallucination rate — beside a draft upserted from the LAST attempt,
+      // and could accept or correct the wrong immutable output record.
+      const settledItem = (await f.ai.reviewQueue.list({ status: 'pending' }, 50)).find(
+        (r) => r.subjectRef === stored?.summaryId,
+      );
+      expect(settledItem?.context['output_id']).toBe(stored?.outputId);
     });
 
     it('generates a draft for a thread the sweep reaches', async () => {
