@@ -24,6 +24,58 @@ import {
   privateServerTables,
 } from '../private-room-guard.js';
 
+/**
+ * Every table a migration statement CREATES, whatever spelling it used.
+ *
+ * The gate's entire value is seeing what no Drizzle enumeration can, so a legal
+ * spelling it cannot read is not a small gap — it is a green gate over a table it
+ * never judged.  The pattern this replaces was
+ * `CREATE TABLE (?:IF NOT EXISTS )?"(private_…)"`, and it missed:
+ *
+ *  - SCHEMA-QUALIFIED names.  `CREATE TABLE "public"."private_room_ops"` puts
+ *    `public` where the capture group looks, so it does not match `private_` and
+ *    the statement vanishes entirely.  This is not hypothetical — the chain
+ *    already carries `CREATE TABLE "compliance"."…"` statements, so the spelling
+ *    is in use in this very directory.
+ *  - UNQUOTED identifiers.  `CREATE TABLE private_room_ops (…)` is valid SQL and
+ *    is what a hand-authored migration written from memory looks like.
+ *  - lower- or mixed-case `create table`, which Postgres accepts.
+ *  - `UNLOGGED` / `TEMPORARY` and any extra whitespace or newline between the
+ *    keywords.
+ *
+ * So: match the statement generically, take the LAST identifier (the table, not
+ * its schema), and let the caller filter by prefix.  Unquoted identifiers fold to
+ * lower case exactly as Postgres folds them; quoted ones keep their case.
+ *
+ * Comments are deliberately NOT stripped.  A commented-out `CREATE TABLE
+ * "private_x"` would be reported and fail the parity assertion, which is the safe
+ * direction: the alternative is a stripper whose own bugs hide a real statement.
+ */
+const CREATE_TABLE_STATEMENT = new RegExp(
+  [
+    'CREATE\\s+',
+    '(?:(?:GLOBAL|LOCAL)\\s+)?',
+    '(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?',
+    'TABLE\\s+',
+    '(?:IF\\s+NOT\\s+EXISTS\\s+)?',
+    // Optional schema qualifier, quoted or bare, discarded.
+    '(?:(?:"[^"]+"|[A-Za-z_][\\w$]*)\\s*\\.\\s*)?',
+    // The table name itself.
+    '("[^"]+"|[A-Za-z_][\\w$]*)',
+  ].join(''),
+  'gi',
+);
+
+function tablesCreatedBy(sql: string): string[] {
+  const created: string[] = [];
+  for (const match of sql.matchAll(CREATE_TABLE_STATEMENT)) {
+    const raw = match[1];
+    if (raw === undefined) continue;
+    created.push(raw.startsWith('"') ? raw.slice(1, -1) : raw.toLowerCase());
+  }
+  return created;
+}
+
 /** Every `private_*` table the FULL migration chain creates. */
 async function privateTablesInMigrations(): Promise<string[]> {
   const drizzleDir = join(import.meta.dirname, '../../drizzle');
@@ -31,12 +83,58 @@ async function privateTablesInMigrations(): Promise<string[]> {
   for (const file of await readdir(drizzleDir)) {
     if (!file.endsWith('.sql')) continue;
     const sql = await readFile(join(drizzleDir, file), 'utf8');
-    for (const match of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"(private_[^"]+)"/g)) {
-      if (match[1]) created.add(match[1]);
+    for (const name of tablesCreatedBy(sql)) {
+      if (name.startsWith('private_')) created.add(name);
     }
   }
   return [...created].sort();
 }
+
+describe("the migration reader, which is this gate's premise", () => {
+  // A corpus-only assertion cannot prove the reader handles a spelling the corpus
+  // does not yet contain, and "not yet" is exactly when a gate has to hold.
+  it('reads every legal spelling of a CREATE TABLE', () => {
+    expect(tablesCreatedBy('CREATE TABLE "private_room_stubs" (a int);')).toEqual([
+      'private_room_stubs',
+    ]);
+    // The spelling that vanished completely: the schema went where the table name
+    // was expected, so the statement matched nothing at all.
+    expect(tablesCreatedBy('CREATE TABLE "public"."private_room_ops" (a int);')).toEqual([
+      'private_room_ops',
+    ]);
+    expect(tablesCreatedBy('CREATE TABLE public.private_room_ops (a int);')).toEqual([
+      'private_room_ops',
+    ]);
+    expect(tablesCreatedBy('create table if not exists private_room_ops (a int);')).toEqual([
+      'private_room_ops',
+    ]);
+    expect(tablesCreatedBy('CREATE  UNLOGGED\n  TABLE\n  "private_room_ops" (a int);')).toEqual([
+      'private_room_ops',
+    ]);
+    // Unquoted folds like Postgres folds it; quoted keeps its case.
+    expect(tablesCreatedBy('CREATE TABLE Private_Room_Ops (a int);')).toEqual(['private_room_ops']);
+    expect(tablesCreatedBy('CREATE TABLE "Private_Room_Ops" (a int);')).toEqual([
+      'Private_Room_Ops',
+    ]);
+    // And it does not invent tables out of adjacent DDL.
+    expect(tablesCreatedBy('ALTER TABLE "private_room_stubs" ADD COLUMN a int;')).toEqual([]);
+    expect(tablesCreatedBy('CREATE INDEX ON "private_room_stubs" (a);')).toEqual([]);
+  });
+
+  it('finds the schema-qualified creates already in the chain', async () => {
+    // Proof against the real corpus that qualified statements are read at all:
+    // the compliance schema uses them, and the old pattern could not see one.
+    const drizzleDir = join(import.meta.dirname, '../../drizzle');
+    const names = new Set<string>();
+    for (const file of await readdir(drizzleDir)) {
+      if (!file.endsWith('.sql')) continue;
+      for (const name of tablesCreatedBy(await readFile(join(drizzleDir, file), 'utf8'))) {
+        names.add(name);
+      }
+    }
+    expect(names.has('financial_compliance_case')).toBe(true);
+  });
+});
 
 describe('WS-S.1.5 private-room server tables are enrolled, not remembered', () => {
   it('guards exactly the private_* tables the FULL migration chain creates', async () => {
