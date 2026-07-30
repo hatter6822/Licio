@@ -1990,10 +1990,11 @@ const treasuryServices = createInMemoryTreasuryServices({
   governanceStores,
   membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
-  elections: buildStewardElectionPort(getGovernanceService(), (roomId, asOf) =>
-    // AS OF the instant the election will record as its open — the same cutoff
-    // `castElectionVote` compares a voter's join against.
-    forumServices.rooms.countEligibleVoters(roomId, asOf),
+  elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
+    // ONE measurement reporting the count AND its instant: the election records
+    // that instant as its open, and `castElectionVote` compares a voter's join
+    // against it.
+    forumServices.rooms.measureEligibleVoters(roomId),
   ),
 });
 if (db) {
@@ -2202,7 +2203,11 @@ startGovernanceScheduler(
     // The election quorum/turnout denominator is the SAME electorate that may vote
     // (active subscribers ∪ stewards, matching isRoomMember) — not just active
     // subscriptions — so a steward-role voter is counted.
+    // The SETTLE fallback: a count AS OF the election's already-recorded open, which
+    // is a different question from the freeze below and rightly a different read.
     eligibleVoterCount: (roomId, asOf) => forumServices.rooms.countEligibleVoters(roomId, asOf),
+    // The FREEZE: the count and the instant it was measured at, together.
+    measureElectorate: (roomId) => forumServices.rooms.measureEligibleVoters(roomId),
     // Re-validate an election winner is still a room member before seating them
     // (active subscription OR steward role — mirrors the ratification/vote gate).
     isRoomMember: async (roomId, userId) => {

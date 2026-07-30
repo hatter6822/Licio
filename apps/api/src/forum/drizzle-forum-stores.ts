@@ -1180,6 +1180,31 @@ export class DrizzleRoomStore implements RoomStore {
               OR ${roomSubscriptionsTable.joinedAt} <= ${joinedBefore}::timestamptz)`;
   }
 
+  async measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }> {
+    // ONE statement: `now()` is the statement's own transaction timestamp and the
+    // snapshot is fixed at statement start, so the count and the instant it is
+    // stamped with describe the SAME state.  A concurrent leave either committed
+    // before that snapshot (absent from the count, and absent at `asOf` too) or
+    // after it (counted, and a member at `asOf` — later churn, which the freeze
+    // deliberately ignores).  A concurrent join is symmetric.  Splitting these into
+    // a clock read and a live count is what left a window in either direction.
+    const rows = (await this.#db.execute(sql`
+      SELECT count(*)::int AS value, now()::text AS as_of FROM (
+        SELECT ${roomSubscriptionsTable.userId} FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+            AND (${roomSubscriptionsTable.joinedAt} IS NULL
+                 OR ${roomSubscriptionsTable.joinedAt} <= now())
+        UNION
+        SELECT ${roomStewardsTable.userId} FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: number; as_of: string }>;
+    const row = rows[0];
+    if (!row) return { count: 0, asOf: new Date().toISOString() };
+    return { count: row.value, asOf: new Date(row.as_of).toISOString() };
+  }
+
   async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can vote
     // via their role without an active subscription). The UNION dedups in Postgres

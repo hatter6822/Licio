@@ -49,6 +49,12 @@ export interface GovernanceSchedulerDeps {
   applyDeferredRemoderation?: DeferredRemoderationApplier | null;
   /** Max deferred re-moderation items drained per tick (default REMODERATION_SWEEP_LIMIT). */
   remoderationSweepLimit?: number;
+  /** The FREEZE reader for a newly scheduled election: the electorate count AND the
+   *  instant it was measured at, from one read.  Distinct from `eligibleVoterCount`,
+   *  which answers about an election's ALREADY-RECORDED open for the settle
+   *  fallback — a different question, and rightly a different read.  Absent ⇒ a
+   *  scheduled election freezes a zero denominator, as before. */
+  measureElectorate?: (roomId: string) => Promise<{ count: number; asOf: string }>;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
 }
@@ -64,6 +70,7 @@ export async function runGovernanceTick(
       deps.eligibleVoterCount,
       nowMs,
       deps.isRoomMember,
+      deps.measureElectorate,
     );
     if (scheduled > 0 || settled > 0) {
       deps.log('governance.election_lifecycle', { scheduled, settled });

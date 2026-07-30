@@ -330,13 +330,13 @@ export function buildTreasuryExecutorPort(service: GovernanceService): TreasuryE
  *  room is in flux, so this is the path least able to afford the gap. */
 export function buildStewardElectionPort(
   service: GovernanceService,
-  eligibleVoterCount?: (roomId: string, asOf: string) => Promise<number>,
+  measureElectorate?: (roomId: string) => Promise<{ count: number; asOf: string }>,
 ): StewardElectionPort {
   return {
     openElection: async (roomId) => {
       const result = await service.scheduleElection(roomId, {
         force: true,
-        ...(eligibleVoterCount ? { eligibleVoterCount } : {}),
+        ...(measureElectorate ? { measureElectorate } : {}),
       });
       // An already-open election satisfies the rotation intent (idempotent).
       return result.ok || result.code === 'election_open';

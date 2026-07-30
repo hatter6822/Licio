@@ -119,27 +119,25 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect((await h.svc.getSeat('r1'))?.bootstrap).toBe(false);
   });
 
-  it('the electorate is counted AS OF the instant recorded as opensAt', async () => {
-    // Reading the clock AFTER awaiting a live count put `opensAt` later than
-    // the population it recorded, so a member joining in between was outside
-    // the denominator and inside the ballot cutoff — turnout above 100% of the
-    // electorate the result is measured against, which is the same half of the
-    // freeze this path fixed on the other side.  The instant is taken first
-    // and passed INTO the count, so the two cannot disagree.
+  it('opensAt IS the instant the electorate was measured at', async () => {
+    // Neither ordering of "read the clock" and "count the electorate" is sound.
+    // Instant first leaks a DEPARTURE: the leaver is hard-deleted from the rows the
+    // count reads, so the denominator is smaller than the electorate at the instant
+    // it claims — turnout inflated, and an election can settle that missed its
+    // `minTurnout` floor.  Instant second leaks a JOIN: the joiner is outside the
+    // count and inside the cutoff.  One measurement reporting both leaks in neither,
+    // which is why `opensAt` is now taken FROM the measurement.
     await h.svc.bootstrapSeat('r1', 'creator');
     h.advance(YEAR_MS);
-    const seen: string[] = [];
+    const measuredAt = '2026-07-29T12:00:00.000Z';
     const sched = await h.svc.scheduleElection('r1', {
-      eligibleVoterCount: async (_room, asOf) => {
-        seen.push(asOf);
-        return 5;
-      },
+      measureElectorate: async () => ({ count: 5, asOf: measuredAt }),
     });
     expect(sched.ok).toBe(true);
     const election = await h.stores.elections.get(sched.ok ? sched.value : '');
-    // The count was asked about EXACTLY the instant the election records as
-    // its open — not one read moments before or after it.
-    expect(seen).toEqual([election?.opensAt]);
+    // The recorded open IS the measurement's instant — not a clock read beside it,
+    // which is what a `deps.now()` fallback would have produced.
+    expect(election?.opensAt).toBe(measuredAt);
     expect(election?.eligibleCount).toBe(5);
   });
 
@@ -334,7 +332,10 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     h.advance(YEAR_MS);
     // THREE eligible voters at open — recorded on the row.
     const sched = await h.svc.scheduleElection('r1', {
-      eligibleVoterCount: async () => 3,
+      // The harness clock, because that is what stands in for the database's
+      // `now()` here — a wall-clock instant would put `opensAt` (and the window
+      // computed from it) a year away from the clock `castVote` reads.
+      measureElectorate: async () => ({ count: 3, asOf: new Date(h.now()).toISOString() }),
     });
     const eid = sched.ok ? sched.value : '';
     await h.svc.castVote('r1', eid, 'v1', 'challenger', true);

@@ -313,9 +313,10 @@ export function createGovernanceRoutes() {
             auth.userId,
             c.req.param('modelId'),
             law_pack_id,
-            // AS OF the instant the vote records as its open — the same cutoff
-            // the ballot gate compares a voter's join against.
-            (asOf) => getForumServices().rooms.countEligibleVoters(roomId, asOf),
+            // ONE measurement reporting the count AND the instant it measured at:
+            // the vote records that instant as its open, and the ballot gate
+            // compares a voter's join against it, so the two cannot disagree.
+            () => getForumServices().rooms.measureEligibleVoters(roomId),
           );
           if (!result.ok) {
             return c.json(

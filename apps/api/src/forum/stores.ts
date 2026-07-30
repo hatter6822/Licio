@@ -497,6 +497,26 @@ export interface RoomStore {
    *  UNJUDGEABLE and counted — matching the ballot gate, which lets a null
    *  `memberSince` through rather than locking out a legitimate steward. */
   countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number>;
+  /**
+   * The electorate AND the instant it was measured at, from ONE read.
+   *
+   * Every caller that FREEZES a turnout denominator needs this rather than
+   * `countEligibleVoters`.  Those callers used to take a clock reading and pass it
+   * into a live count, and no ordering of those two steps is sound: with the instant
+   * FIRST, a member who leaves in between is deleted from the current rows the count
+   * reads, so the denominator is smaller than the electorate at the instant it
+   * claims — turnout inflated, and an election can settle that missed its
+   * participation floor.  With the instant SECOND, a member who joins in between is
+   * outside the count and inside the cutoff, which is the same hole facing the other
+   * way.  Membership is HARD-DELETED on leave (`deleteSubscription`, and
+   * `room_subscription_status` has no `left` state), so no as-of query can
+   * reconstruct a departure after the fact.
+   *
+   * Returning both from one measurement is what removes the window: the count and
+   * the cutoff describe one state by construction, not by being written next to each
+   * other.
+   */
+  measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }>;
   /** The SAME electorate as `countEligibleVoters`, as ids — WS-M applies the
    *  law-pack eligibility predicate per member for the quorum basis. */
   listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]>;
@@ -1363,6 +1383,14 @@ export class InMemoryRoomStore implements RoomStore {
 
   async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
     return (await this.listEligibleVoterIds(roomId, joinedBefore)).length;
+  }
+
+  async measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }> {
+    // Single-threaded and synchronous over a Map: nothing can interleave between the
+    // count and the stamp here, which is exactly the property the Drizzle adapter
+    // buys with one statement.
+    const asOf = new Date().toISOString();
+    return { count: (await this.listEligibleVoterIds(roomId, asOf)).length, asOf };
   }
 
   async listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]> {

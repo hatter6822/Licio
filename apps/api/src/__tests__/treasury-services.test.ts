@@ -870,22 +870,26 @@ describe('buildStewardElectionPort (WS-M.4.3b rotation)', () => {
     // `castElectionVote` refuses them for `joinedAt > opensAt`: a denominator
     // padded with someone who cannot vote.  A forced rotation is exactly when a
     // room is in flux, so it is the path least able to afford the gap.
-    const seen: Array<string | undefined> = [];
+    const seen: string[] = [];
     const service = {
       scheduleElection: async (
         roomId: string,
-        options: { eligibleVoterCount?: (room: string, asOf: string) => Promise<number> },
+        options: {
+          measureElectorate?: (room: string) => Promise<{ count: number; asOf: string }>;
+        },
       ) => {
-        await options.eligibleVoterCount?.(roomId, '2026-07-29T12:00:00.000Z');
+        await options.measureElectorate?.(roomId);
         return { ok: true } as const;
       },
     } as unknown as GovernanceService;
-    const port = buildStewardElectionPort(service, async (_room, asOf) => {
-      seen.push(asOf);
-      return 3;
+    const port = buildStewardElectionPort(service, async (room) => {
+      seen.push(room);
+      return { count: 3, asOf: '2026-07-29T12:00:00.000Z' };
     });
     expect(await port.openElection(ROOM)).toBe(true);
-    expect(seen).toEqual(['2026-07-29T12:00:00.000Z']);
+    // The forced rotation passes the FREEZE reader through, so the election it opens
+    // records a denominator measured at a real instant rather than a zero.
+    expect(seen).toEqual([ROOM]);
   });
 });
 

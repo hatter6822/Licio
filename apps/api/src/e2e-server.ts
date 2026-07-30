@@ -338,10 +338,11 @@ const treasuryServices = createInMemoryTreasuryServices({
   governanceStores,
   membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
-  elections: buildStewardElectionPort(getGovernanceService(), (roomId, asOf) =>
-    // AS OF the instant the election will record as its open — the same cutoff
-    // `castElectionVote` compares a voter's join against.
-    forumServices.rooms.countEligibleVoters(roomId, asOf),
+  elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
+    // ONE measurement reporting the count AND its instant: the election records
+    // that instant as its open, and `castElectionVote` compares a voter's join
+    // against it.
+    forumServices.rooms.measureEligibleVoters(roomId),
   ),
 });
 setTreasuryServices(treasuryServices);

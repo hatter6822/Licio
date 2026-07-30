@@ -88,9 +88,20 @@ describe('runElectionLifecycle', () => {
     const { svc, advance, now } = make(100, 50);
     await svc.bootstrapSeat('r', 'creator');
     advance(101_000);
-    // THREE eligible voters at open — the scheduler must pass its reader
-    // through to `scheduleElection` so the count lands on the row.
-    await svc.runElectionLifecycle(async () => 3, now());
+    // THREE eligible voters at open — the scheduler must pass its FREEZE reader
+    // through to `scheduleElection` so the count lands on the row.  The freeze
+    // reader is a separate argument from the settle-fallback count on purpose: that
+    // one answers about an election's already-recorded open, which is a different
+    // question, and passing only it left the denominator at zero.
+    await svc.runElectionLifecycle(
+      async () => 3,
+      now(),
+      undefined,
+      async () => ({
+        count: 3,
+        asOf: new Date(now()).toISOString(),
+      }),
+    );
     const electionId = await openElectionId(svc, 'r');
     expect((await svc.getElection(electionId))?.eligibleCount).toBe(3);
 
@@ -128,7 +139,13 @@ describe('runGovernanceTick', () => {
     await svc.bootstrapSeat('r', 'creator');
     advance(101_000);
     const log = vi.fn();
-    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 3, log, now });
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 3,
+      measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+      log,
+      now,
+    });
     expect(log).toHaveBeenCalledWith('governance.election_lifecycle', { scheduled: 1, settled: 0 });
   });
 
@@ -152,6 +169,7 @@ describe('runGovernanceTick', () => {
     await runGovernanceTick({
       service: svc,
       eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
       loadModerationContext,
       applyDeferredRemoderation: apply,
       log,
@@ -175,6 +193,7 @@ describe('runGovernanceTick', () => {
     await runGovernanceTick({
       service: svc,
       eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
       log: () => {},
       now: () => 0,
     });
@@ -189,7 +208,13 @@ describe('runGovernanceTick', () => {
       reEvaluateStuckAdmissions: reEval,
     } as unknown as GovernanceService;
     const log = vi.fn();
-    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 0, log, now: () => 0 });
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
+      log,
+      now: () => 0,
+    });
     expect(reEval).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith('governance.admission_retry', { retried: 2, resolved: 1 });
   });
@@ -202,7 +227,13 @@ describe('runGovernanceTick', () => {
     } as unknown as GovernanceService;
     const onError = vi.fn();
     await runGovernanceTick(
-      { service: failing, eligibleVoterCount: async () => 0, log: () => {}, now: () => 0 },
+      {
+        service: failing,
+        eligibleVoterCount: async () => 0,
+        measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
+        log: () => {},
+        now: () => 0,
+      },
       onError,
     );
     expect(onError).toHaveBeenCalledWith(expect.any(Error), 'election_lifecycle');
@@ -216,7 +247,13 @@ describe('runGovernanceTick', () => {
       advance(101_000); // term elapsed ⇒ the next tick opens an election
       const log = vi.fn();
       const stop = startGovernanceScheduler(
-        { service: svc, eligibleVoterCount: async () => 3, log, now },
+        {
+          service: svc,
+          eligibleVoterCount: async () => 3,
+          measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+          log,
+          now,
+        },
         () => {},
         10,
       );
@@ -251,7 +288,13 @@ describe('runGovernanceTick', () => {
       const log = vi.fn();
       const onError = vi.fn();
       const stop = startGovernanceScheduler(
-        { service: svc, eligibleVoterCount: async () => 3, log, now },
+        {
+          service: svc,
+          eligibleVoterCount: async () => 3,
+          measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+          log,
+          now,
+        },
         onError,
         10,
         {
