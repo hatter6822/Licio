@@ -224,11 +224,29 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
   return { ok: false, reason: 'malformed' };
 }
 
-/** WebP: drop EXIF/XMP chunks, clear the VP8X flag bits, fix the RIFF size. */
+/**
+ * WebP: drop EXIF/XMP chunks, clear the VP8X flag bits, fix the RIFF size.
+ *
+ * Like `stripPng`, this REQUIRES the container to hold decodable image data.  It
+ * used to accept the signature plus "some chunks", so a RIFF/WEBP header and a
+ * 10-byte `VP8X` chunk — no `VP8 `, no `VP8L`, no `ANMF`, no pixels anywhere —
+ * returned `ok`, and a bare 12-byte header with no chunks at all returned `ok`
+ * too.  `webpDimensions` then read the attacker's declared canvas from the VP8X
+ * chunk and `StoryMedia` reserved an aspect box up to 65,535:1 in the feed until
+ * the browser gave up on an undecodable file.  That is the same hole the PNG path
+ * closed one round earlier, in the same shape, unclosed here: fixing the format
+ * in front of me rather than the obligation both formats share.
+ */
 export function stripWebp(bytes: Uint8Array): StripOutcome {
   const kept: Uint8Array[] = [];
   let at = 12; // past RIFF....WEBP
   let stripped = false;
+  // `VP8 ` (lossy) and `VP8L` (lossless) are still-image payloads; `ANMF` carries
+  // an animation frame, which holds its own VP8/VP8L sub-chunk.  `ALPH` and `ANIM`
+  // are auxiliary — an alpha plane or a loop count is not an image.
+  const IMAGE_DATA = new Set(['VP8 ', 'VP8L', 'ANMF']);
+  let imageDataBytes = 0;
+  let first = true;
   while (at + 8 <= bytes.length) {
     const fourCc = String.fromCharCode(
       bytes[at] ?? 0,
@@ -254,8 +272,19 @@ export function stripWebp(bytes: Uint8Array): StripOutcome {
       }
       kept.push(chunk);
     }
+    if (first) {
+      // VP8X, when present, is the first chunk (the extended-format header); a
+      // simple file leads with its image payload.  Anything else leading is a
+      // container this parser has no business rewriting.
+      if (fourCc !== 'VP8X' && !IMAGE_DATA.has(fourCc)) return { ok: false, reason: 'malformed' };
+      first = false;
+    }
+    if (IMAGE_DATA.has(fourCc)) imageDataBytes += size;
     at = end;
   }
+  // No pixels, no upload — including the zero-chunk case, where the loop above
+  // never ran and `kept` is empty.
+  if (imageDataBytes === 0) return { ok: false, reason: 'malformed' };
   const payloadSize = kept.reduce((sum, c) => sum + c.length, 0) + 4; // + 'WEBP'
   const header = new Uint8Array(12);
   header.set([0x52, 0x49, 0x46, 0x46]); // RIFF

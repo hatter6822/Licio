@@ -593,26 +593,22 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     expect(text).toContain('IEND');
   });
 
-  /** Minimal WebP: RIFF/WEBP + VP8X (EXIF+XMP flags) + VP8 + EXIF chunk. */
-  function webpWithExif(): Uint8Array {
-    const fourCc = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
-    const chunk = (cc: string, payload: number[]): number[] => {
-      const len = payload.length;
-      return [
-        ...fourCc(cc),
-        len & 0xff,
-        (len >> 8) & 0xff,
-        (len >> 16) & 0xff,
-        (len >> 24) & 0xff,
-        ...payload,
-        ...(len % 2 === 1 ? [0] : []),
-      ];
-    };
-    const body = [
-      ...chunk('VP8X', [0b0000_1100, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // EXIF+XMP flags
-      ...chunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
-      ...chunk('EXIF', fourCc('GPSLatitude 51.5')),
+  const fourCc = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
+  /** One RIFF chunk: FourCC, u32-LE size, payload, even-pad. */
+  const webpChunk = (cc: string, payload: number[]): number[] => {
+    const len = payload.length;
+    return [
+      ...fourCc(cc),
+      len & 0xff,
+      (len >> 8) & 0xff,
+      (len >> 16) & 0xff,
+      (len >> 24) & 0xff,
+      ...payload,
+      ...(len % 2 === 1 ? [0] : []),
     ];
+  };
+  /** A RIFF/WEBP container around the given chunk bytes, with a correct size. */
+  function webpFile(body: readonly number[]): Uint8Array {
     const size = body.length + 4;
     return new Uint8Array([
       ...fourCc('RIFF'),
@@ -622,6 +618,15 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       (size >> 24) & 0xff,
       ...fourCc('WEBP'),
       ...body,
+    ]);
+  }
+
+  /** Minimal WebP: RIFF/WEBP + VP8X (EXIF+XMP flags) + VP8 + EXIF chunk. */
+  function webpWithExif(): Uint8Array {
+    return webpFile([
+      ...webpChunk('VP8X', [0b0000_1100, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // EXIF+XMP flags
+      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
+      ...webpChunk('EXIF', fourCc('GPSLatitude 51.5')),
     ]);
   }
 
@@ -640,6 +645,56 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       ((result.bytes[6] ?? 0) << 16) |
       ((result.bytes[7] ?? 0) << 24);
     expect(riffSize).toBe(result.bytes.length - 8);
+  });
+
+  it('rejects a WebP with a VP8X canvas but NO image payload', () => {
+    // The reported attack: a valid RIFF/WEBP header and a 10-byte VP8X chunk
+    // declaring an attacker-chosen canvas — no VP8, no VP8L, no ANMF, no pixels.
+    // `stripWebp` accepted it, so the upload stored and `webpDimensions` read the
+    // declared canvas, and the feed reserved an aspect box up to 65,535:1 until the
+    // browser rejected the file.  Same hole the PNG path closed a round earlier.
+    const canvasOnly = webpFile(
+      // Canvas 65535x65535 (stored minus one, 24-bit LE at payload +4 and +7).
+      webpChunk('VP8X', [0, 0, 0, 0, 0xfe, 0xff, 0x00, 0xfe, 0xff, 0x00]),
+    );
+    expect(stripWebp(canvasOnly)).toEqual({ ok: false, reason: 'malformed' });
+    // The zero-chunk case is the same defect with even less to it.
+    expect(stripWebp(webpFile([]))).toEqual({ ok: false, reason: 'malformed' });
+    // An alpha plane and a loop count are not an image either.
+    expect(
+      stripWebp(
+        webpFile([
+          ...webpChunk('VP8X', [0b0001_0000, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+          ...webpChunk('ALPH', [0x00, 0x01]),
+          ...webpChunk('ANIM', [0, 0, 0, 0, 0, 0]),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('rejects a WebP led by a metadata chunk', () => {
+    // Distinct from the payload check above: this file HAS a VP8 payload, so the
+    // image-data bound is satisfied and only the leading-chunk rule refuses it.  A
+    // conformant container starts with VP8X (extended) or its image payload
+    // (simple); EXIF is legal only after the image data.  Rewriting a container
+    // whose structure we cannot account for is how the previous two holes started.
+    const metadataFirst = webpFile([
+      ...webpChunk('EXIF', fourCc('GPSLatitude 51.5')),
+      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
+    ]);
+    expect(stripWebp(metadataFirst)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('accepts the WebP shapes that DO carry pixels', () => {
+    // The bound has to admit every real encoding, or it is a different bug.
+    const lossless = webpFile(webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]));
+    expect(stripWebp(lossless).ok).toBe(true);
+    const animated = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANIM', [0, 0, 0, 0, 0, 0]),
+      ...webpChunk('ANMF', [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    ]);
+    expect(stripWebp(animated).ok).toBe(true);
   });
 
   function gifExtension(label: number, payloads: readonly number[][]): number[] {
