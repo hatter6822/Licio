@@ -1676,9 +1676,20 @@ export class PostgresSearchIndex implements SearchIndex {
     ) =>
       cursor === null
         ? sql`true`
-        : sql`(${rank} < ${cursor.relevance}
-            or (${rank} = ${cursor.relevance} and ${createdAt} < ${cursor.createdAt}::timestamptz)
-            or (${rank} = ${cursor.relevance} and ${createdAt} = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
+        : // MILLISECONDS on the column side, matching the resolution the cursor can
+          // actually carry.  `created_at` is microsecond `timestamptz`, but the value
+          // that reaches `encodeSearchCursor` came back from the driver as a JS `Date`
+          // and the cross-corpus merge below re-sorts on that same rounded string — so
+          // the order the caller sees IS the millisecond order.  Comparing a rounded
+          // cursor against the unrounded column instead made the `=` arm unreachable
+          // for any row in the cursor's own millisecond: the equality never held, the
+          // `<` arm excluded them, and the `id` tiebreaker that was supposed to separate
+          // them was never consulted.  Truncating both sides puts the predicate, the
+          // per-corpus ORDER BY (which reads this same alias) and the merge on one
+          // total order.
+          sql`(${rank} < ${cursor.relevance}
+            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) < ${cursor.createdAt}::timestamptz)
+            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
 
     // A story-scoped query searches the story's CONVERSATION: the story record
     // itself is the page the reader is already on, so its corpus is skipped
@@ -1707,7 +1718,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'story' as result_type, s.story_id as id, s.story_id as story_id,
                s.title as title, s.excerpt as snippet,
                ${storyRank} as relevance,
-               s.created_at as created_at,
+               date_trunc('milliseconds', s.created_at) as created_at,
                s.dispute_status as dispute_status
         from stories s
         where ${sql.join(filters, sql` and `)}
@@ -1738,7 +1749,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'claim' as result_type, c.claim_id as id, c.story_id as story_id,
                c.canonical_text as title, null as snippet,
                ts_rank_cd(c.search_tsv, ${match})::float8 as relevance,
-               c.created_at as created_at,
+               date_trunc('milliseconds', c.created_at) as created_at,
                'none' as dispute_status
         from claims c
         where ${sql.join(filters, sql` and `)}
@@ -1796,7 +1807,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'comment' as result_type, c.contribution_id as id, t.story_id as story_id,
                s.title as title, left(c.body, ${SEARCH_COMMENT_SNIPPET_LENGTH}) as snippet,
                ${commentRank} as relevance,
-               c.created_at as created_at,
+               date_trunc('milliseconds', c.created_at) as created_at,
                c.dispute_status as dispute_status
         from contributions c
         join threads t on t.thread_id = c.thread_id
@@ -1840,7 +1851,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'room' as result_type, r.room_id as id, null as story_id,
                r.name as title, r.description as snippet,
                ${roomRank} as relevance,
-               r.created_at as created_at,
+               date_trunc('milliseconds', r.created_at) as created_at,
                'none' as dispute_status
         from rooms r
         where ${sql.join(filters, sql` and `)}

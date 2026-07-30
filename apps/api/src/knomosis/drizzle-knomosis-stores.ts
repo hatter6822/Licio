@@ -42,6 +42,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { keysetAfterRow } from '../lib/keyset.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ActionNonceStore } from './services.js';
 import type {
@@ -2136,13 +2137,23 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
           ? eq(governanceAuditLogs.roomId, roomId)
           : and(
               eq(governanceAuditLogs.roomId, roomId),
-              // Row-value keyset comparison over the STRICT (createdAt, entryId)
-              // total order — the entryId tiebreaker makes same-millisecond rows
-              // page without skips/duplicates (WS-L.4.1f).  The timestamp binds
-              // as an ISO STRING + explicit cast: postgres.js cannot serialize a
-              // raw Date inside a row-value fragment (it threw on every second
-              // page until the treasury contract test caught it).
-              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.entryId}::uuid)`,
+              // Row-value keyset over the STRICT (createdAt, entryId) total order,
+              // resolved from the ENTRY ID (WS-L.4.1f).
+              //
+              // The `entryId` tiebreaker was supposed to make same-millisecond rows page
+              // without skips — and could not, because it only engages once the
+              // timestamps compare EQUAL, and a cursor timestamp never equals the value
+              // it came from.  `created_at` is microsecond `timestamptz`; the driver
+              // returns a millisecond `Date`; the cursor is therefore rounded down and
+              // the strict `<` skips the rest of its own millisecond before the
+              // tiebreaker is ever consulted.  The id is exact, so the row supplies its
+              // own position instead.
+              keysetAfterRow(
+                governanceAuditLogs.createdAt,
+                governanceAuditLogs.entryId,
+                before.entryId,
+                'desc',
+              ),
             ),
       )
       .orderBy(desc(governanceAuditLogs.createdAt), desc(governanceAuditLogs.entryId))

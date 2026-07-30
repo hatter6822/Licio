@@ -49,6 +49,7 @@ import {
   type SQL,
   sql,
 } from 'drizzle-orm';
+import { keysetAfterRow } from '../lib/keyset.js';
 import type {
   AccountBlockRecord,
   AccountBlockStore,
@@ -1523,9 +1524,18 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
   ): Promise<CoordinatedReportIncidentRecord[]> {
     const conditions = [eq(coordinatedReportIncidents.status, 'open')];
     if (after) {
-      // Keyset on (createdAt, incidentId) ascending — stable under inserts.
+      // Keyset on (createdAt, incidentId) ASCENDING — stable under inserts, and resolved
+      // from the id rather than the cursor's rounded-down timestamp.  Ascending is the
+      // worse direction to get wrong: a rounded-DOWN cursor re-serves rows already shown,
+      // and a page whose rows all share one millisecond never advances at all — the
+      // integrity queue would page forever without reaching the end.
       conditions.push(
-        sql`(${coordinatedReportIncidents.createdAt}, ${coordinatedReportIncidents.incidentId}) > (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.incidentId}::uuid)`,
+        keysetAfterRow(
+          coordinatedReportIncidents.createdAt,
+          coordinatedReportIncidents.incidentId,
+          after.incidentId,
+          'asc',
+        ),
       );
     }
     const rows = await this.#db
@@ -1679,8 +1689,16 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
   }): Promise<EvidenceDecisionRecord[]> {
     const conditions: SQL[] = [];
     if (opts.after) {
+      // The cursor's TIMESTAMP is ignored on purpose — it arrives already rounded down to
+      // the millisecond, and comparing it to the microsecond column drops the rest of
+      // that millisecond.  The id is exact, so the row states its own position.
       conditions.push(
-        sql`(${evidenceDecisions.createdAt}, ${evidenceDecisions.decisionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.decisionId}::uuid)`,
+        keysetAfterRow(
+          evidenceDecisions.createdAt,
+          evidenceDecisions.decisionId,
+          opts.after.decisionId,
+          'desc',
+        ),
       );
     }
     const rows = await this.#db
