@@ -444,6 +444,93 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     expect(imageDimensions('image/png', pngWithText())).not.toBeNull();
   });
 
+  it('REFUSES a PNG with NO IMAGE DATA — IHDR then IEND', () => {
+    // The shape that survived the first IHDR/IEND fix: a valid signature, a 13-byte
+    // IHDR declaring attacker-chosen dimensions, and an immediate IEND.  The scanner
+    // cleared it, `pngDimensions` read the declared size, and `StoryMedia` reserved
+    // that aspect box until the browser rejected an undecodable image.  My own
+    // zero-dimension fixture below was exactly this shape, which is how it slipped
+    // past me.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const bigIhdr = [0, 0, 0xff, 0xff, 0, 0, 0xff, 0xff, 8, 6, 0, 0, 0];
+    const noIdat = new Uint8Array([...SIG, ...chunk('IHDR', bigIhdr), ...chunk('IEND', [])]);
+    expect(stripPng(noIdat)).toEqual({ ok: false, reason: 'malformed' });
+    // An EMPTY IDAT is no better than none.
+    const emptyIdat = new Uint8Array([
+      ...SIG,
+      ...chunk('IHDR', bigIhdr),
+      ...chunk('IDAT', []),
+      ...chunk('IEND', []),
+    ]);
+    expect(stripPng(emptyIdat)).toEqual({ ok: false, reason: 'malformed' });
+    // And IEND carries NO data — a payload there means the container was built by
+    // hand, not by an encoder.
+    const fatIend = new Uint8Array([
+      ...SIG,
+      ...chunk('IHDR', bigIhdr),
+      ...chunk('IDAT', [1]),
+      ...chunk('IEND', [0]),
+    ]);
+    expect(stripPng(fatIend)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('REFUSES a PNG whose FIRST chunk is not a 13-byte IHDR', () => {
+    // Enforced in the stripper too, not only in the dimension reader — the stripper
+    // is what decides whether the bytes are stored at all.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const thirteen = [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0];
+    expect(
+      stripPng(
+        new Uint8Array([
+          ...SIG,
+          ...chunk('tEXt', thirteen), // right length, wrong type
+          ...chunk('IDAT', [1]),
+          ...chunk('IEND', []),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+    expect(
+      stripPng(
+        new Uint8Array([
+          ...SIG,
+          ...chunk('IHDR', [0, 0, 0, 1]), // right type, wrong length
+          ...chunk('IDAT', [1]),
+          ...chunk('IEND', []),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+  });
+
   it('REFUSES a PNG that never reaches IEND', () => {
     // `stripPng` fell out of the bottom of its loop when the chunks simply ran out,
     // returning `ok: true` for a container with no IEND — so a fabricated or

@@ -178,6 +178,18 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
   const out: Uint8Array[] = [bytes.subarray(0, 8)]; // signature
   let at = 8;
   let stripped = false;
+  // THE CRITICAL CHUNKS, in order.  Accepting the signature plus "some chunks" is
+  // what let a fabricated container through: first a file with no IEND at all, and
+  // then — once IEND was required — a file with a 13-byte IHDR declaring
+  // attacker-chosen dimensions followed immediately by IEND and no image data.
+  // `pngDimensions` reads the declared size, and `StoryMedia` reserves an aspect box
+  // from it, so the feed laid out a hole of the attacker's shape until the browser
+  // rejected an undecodable image.  A PNG that cannot possibly decode must not be
+  // stored, so the minimum the spec requires is checked here: IHDR first, at least
+  // one non-empty IDAT, IEND last and empty.
+  let sawIhdr = false;
+  let idatBytes = 0;
+  let first = true;
   while (at + 12 <= bytes.length) {
     const length = readU32BE(bytes, at);
     const type = String.fromCharCode(
@@ -188,6 +200,13 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
     );
     const total = 12 + length;
     if (at + total > bytes.length) return { ok: false, reason: 'malformed' };
+    if (first) {
+      // IHDR is the first chunk and carries exactly 13 bytes.
+      if (type !== 'IHDR' || length !== 13) return { ok: false, reason: 'malformed' };
+      sawIhdr = true;
+      first = false;
+    }
+    if (type === 'IDAT') idatBytes += length;
     if (PNG_METADATA_CHUNKS.has(type)) {
       stripped = true;
     } else {
@@ -195,11 +214,10 @@ export function stripPng(bytes: Uint8Array): StripOutcome {
     }
     at += total;
     if (type === 'IEND') {
-      // A COMPLETE container, and nothing after it.  The loop used to fall out of
-      // the bottom on a file that simply ran out of chunks, returning `ok: true`
-      // for a PNG with no IEND at all — so a truncated or fabricated container was
-      // accepted and stored, and `pngDimensions` then read whatever sat at bytes
-      // 16–23.
+      // IEND carries no data, and by here the image must actually have some.
+      if (length !== 0 || !sawIhdr || idatBytes === 0) {
+        return { ok: false, reason: 'malformed' };
+      }
       return { ok: true, bytes: concat(out), stripped };
     }
   }
