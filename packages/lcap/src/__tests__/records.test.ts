@@ -92,14 +92,14 @@ describe('thread projection (WS-R.2.2)', () => {
   );
 
   it('resolves the edit chain to the latest visible tip', () => {
-    const projected = reduceThreadProjection([post, edit1, edit2]);
+    const projected = reduceThreadProjection([post, edit1, edit2]).contributions;
     expect(projected).toHaveLength(1);
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', visibleCid: 'r-e2', hidden: false });
     expect(projected[0]?.editChain).toEqual(['r-o', 'r-e1', 'r-e2']);
   });
 
   it('hides a tombstoned contribution but retains its chain', () => {
-    const projected = reduceThreadProjection([post, edit1, edit2, tomb]);
+    const projected = reduceThreadProjection([post, edit1, edit2, tomb]).contributions;
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', hidden: true, hiddenBy: 'r-t' });
   });
 
@@ -130,7 +130,7 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 2 },
     );
-    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]);
+    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]).contributions;
     expect(projected).toHaveLength(1);
     expect(projected[0]?.visibleCid).toBe('t-fresh');
   });
@@ -150,11 +150,59 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 5 },
     );
-    const projected = reduceThreadProjection([victim, hostile]);
+    const projected = reduceThreadProjection([victim, hostile]).contributions;
     expect(projected).toHaveLength(1);
     expect(projected[0]).toMatchObject({ rootCid: 'x-post', visibleCid: 'x-post' });
     expect(projected[0]?.editChain).toEqual(['x-post']);
     expect(projected[0]?.unauthorizedSupersedes).toEqual(['x-edit']);
+  });
+
+  it('keeps refusal evidence whose TARGET has not arrived (partial replica)', () => {
+    // The partial-replica case.  `ownsTarget` refuses an edit whose named target is
+    // absent and files the evidence under that missing CID; the per-root walk seeds
+    // from projected chains, so no root could ever reach the entry and the refusal
+    // was dropped from every output field.  §25.2 forbids silently discarding
+    // conflicting evidence and makes no exception for a target that merely has not
+    // synced yet, which is the ordinary state of a partial replica.
+    const post = tr('o-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const orphanEdit = tr(
+      'o-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'not-yet-synced',
+      }),
+      { roomLogSeq: 1 },
+    );
+    const orphanTomb = tr(
+      'o-tomb',
+      mkRecord({
+        event_type: 'tombstone',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        target_record_cid: 'not-yet-synced',
+      }),
+      { roomLogSeq: 2 },
+    );
+    const projection = reduceThreadProjection([post, orphanEdit, orphanTomb]);
+    // The unrelated post projects normally and claims none of this evidence…
+    expect(projection.contributions).toHaveLength(1);
+    expect(projection.contributions[0]?.unauthorizedSupersedes).toBeUndefined();
+    // …and the refusals are reported against the target that did not arrive,
+    // sorted, so the output stays arrival-order independent.
+    expect(projection.unresolvedSupersedes).toEqual([
+      { targetCid: 'not-yet-synced', recordCids: ['o-edit', 'o-tomb'] },
+    ]);
+
+    // ONCE THE TARGET ARRIVES the refusal resolves the ordinary way: it belongs to
+    // a contribution now, so it moves out of the unresolved list rather than being
+    // reported twice.
+    const arrived = tr('not-yet-synced', mkRecord({ event_type: 'post' }), { roomLogSeq: 3 });
+    const complete = reduceThreadProjection([post, orphanEdit, orphanTomb, arrived]);
+    expect(complete.unresolvedSupersedes).toEqual([]);
+    const target = complete.contributions.find((c) => c.rootCid === 'not-yet-synced');
+    expect(target?.unauthorizedSupersedes).toEqual(['o-edit', 'o-tomb']);
   });
 
   it('keeps refusal evidence aimed at the branch the projection did NOT pick', () => {
@@ -190,7 +238,7 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 9 },
     );
-    const projected = reduceThreadProjection([base, branchA, branchB, hostile]);
+    const projected = reduceThreadProjection([base, branchA, branchB, hostile]).contributions;
     expect(projected).toHaveLength(1);
     const visible = projected[0]?.visibleCid;
     // The refusal is retained WHICHEVER branch the projection selected — when
@@ -210,7 +258,7 @@ describe('thread projection (WS-R.2.2)', () => {
         target_record_cid: 'y-post',
       }),
     );
-    const notHidden = reduceThreadProjection([victim, hostileTomb]);
+    const notHidden = reduceThreadProjection([victim, hostileTomb]).contributions;
     expect(notHidden[0]).toMatchObject({ hidden: false });
     expect(notHidden[0]?.unauthorizedSupersedes).toEqual(['y-tomb']);
 
@@ -222,7 +270,7 @@ describe('thread projection (WS-R.2.2)', () => {
         target_record_cid: 'y-post',
       }),
     );
-    expect(reduceThreadProjection([victim, moderation])[0]).toMatchObject({
+    expect(reduceThreadProjection([victim, moderation]).contributions[0]).toMatchObject({
       hidden: true,
       hiddenBy: 'y-mod',
     });
@@ -251,7 +299,7 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 2 },
     );
-    expect(reduceThreadProjection([post, v1, moderated])[0]).toMatchObject({
+    expect(reduceThreadProjection([post, v1, moderated]).contributions[0]).toMatchObject({
       hidden: true,
       hiddenBy: 'm-mod',
     });
@@ -261,7 +309,7 @@ describe('thread projection (WS-R.2.2)', () => {
       mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'm-post' }),
       { roomLogSeq: 3 },
     );
-    const after = reduceThreadProjection([post, v1, moderated, v2]);
+    const after = reduceThreadProjection([post, v1, moderated, v2]).contributions;
     expect(after[0]?.visibleCid).toBe('m-v2'); // the tip did move…
     expect(after[0]).toMatchObject({ hidden: true, hiddenBy: 'm-mod' }); // …the hiding did not lift
     // And the passed-over variant is retained rather than dropped (§25.1).
@@ -286,7 +334,7 @@ describe('thread projection (WS-R.2.2)', () => {
       mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'd-post' }),
       { roomLogSeq: 3 },
     );
-    expect(reduceThreadProjection([post, v1, ownTomb, v2])[0]).toMatchObject({
+    expect(reduceThreadProjection([post, v1, ownTomb, v2]).contributions[0]).toMatchObject({
       hidden: true,
       hiddenBy: 'd-tomb',
     });
@@ -314,7 +362,7 @@ describe('thread projection (WS-R.2.2)', () => {
         replaces_record_cid: 'h-1', // aimed at the refused record, not the post
       }),
     );
-    const projected = reduceThreadProjection([post, h1, h2]);
+    const projected = reduceThreadProjection([post, h1, h2]).contributions;
     expect(projected[0]?.visibleCid).toBe('h-post');
     expect(projected[0]?.unauthorizedSupersedes).toEqual(['h-1', 'h-2']);
   });
@@ -340,7 +388,7 @@ describe('thread projection (WS-R.2.2)', () => {
         replaces_record_cid: 'n-mod',
       }),
     );
-    const projected = reduceThreadProjection([post, mod, attackMod]);
+    const projected = reduceThreadProjection([post, mod, attackMod]).contributions;
     expect(projected[0]).toMatchObject({ hidden: true, hiddenBy: 'n-mod' });
     expect(projected[0]?.unauthorizedSupersedes).toEqual(['n-attack']);
   });
@@ -358,7 +406,7 @@ describe('thread projection (WS-R.2.2)', () => {
         replaces_record_cid: 'z-post',
       }),
     );
-    const projected = reduceThreadProjection([post, fromOtherDevice]);
+    const projected = reduceThreadProjection([post, fromOtherDevice]).contributions;
     expect(projected[0]?.visibleCid).toBe('z-edit');
     expect(projected[0]?.unauthorizedSupersedes).toBeUndefined();
   });
@@ -366,7 +414,7 @@ describe('thread projection (WS-R.2.2)', () => {
   it('is independent of record arrival order (property)', () => {
     const records = [post, edit1, edit2, tomb];
     const reference = JSON.stringify(
-      reduceThreadProjection(records).map((p) => p.visibleCid + p.hidden),
+      reduceThreadProjection(records).contributions.map((p) => p.visibleCid + p.hidden),
     );
     const permutations = [
       [tomb, edit2, edit1, post],
@@ -374,9 +422,11 @@ describe('thread projection (WS-R.2.2)', () => {
       [edit1, tomb, post, edit2],
     ];
     for (const perm of permutations) {
-      expect(JSON.stringify(reduceThreadProjection(perm).map((p) => p.visibleCid + p.hidden))).toBe(
-        reference,
-      );
+      expect(
+        JSON.stringify(
+          reduceThreadProjection(perm).contributions.map((p) => p.visibleCid + p.hidden),
+        ),
+      ).toBe(reference);
     }
   });
 });

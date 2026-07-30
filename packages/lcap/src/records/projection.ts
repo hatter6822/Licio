@@ -196,6 +196,39 @@ export interface ProjectedContribution {
 }
 
 /**
+ * A refusal whose TARGET this record set does not resolve — evidence with no
+ * contribution to hang off.
+ *
+ * `ownsTarget` records every refused supersession against the target it named, and
+ * the per-root walk surfaces those reachable from a projected chain.  On a PARTIAL
+ * replica the named target may not have arrived, so no root can reach the entry and
+ * the refusal was dropped from every output field — while §25.2 says conflicting
+ * evidence is never silently discarded, with no exception for a target that is
+ * merely absent.  These carry it until the target arrives and the projection
+ * re-runs over the larger set, at which point the refusal resolves normally.
+ */
+export interface UnresolvedSupersede {
+  /** The record the refused supersessions named, which this set does not resolve. */
+  readonly targetCid: string;
+  /** The refused `edit`/`tombstone` CIDs that named it. Sorted. */
+  readonly recordCids: readonly string[];
+}
+
+/**
+ * A projected thread: the visible contributions, plus the refusals that belong to
+ * no contribution here.
+ *
+ * The evidence rides in the RETURN rather than a sibling function a caller has to
+ * know to call — an unwired guarantee is the shape this defect had in the first
+ * place.
+ */
+export interface ThreadProjection {
+  readonly contributions: readonly ProjectedContribution[];
+  /** Sorted by `targetCid`. Empty when every refusal found its contribution. */
+  readonly unresolvedSupersedes: readonly UnresolvedSupersede[];
+}
+
+/**
  * Deterministically pick the visible edit among conflicting edits of one target:
  * the canonically-latest under the §12.4 precedence ladder (room-log seq →
  * checkpoint index → claim → receipt → record_cid), i.e. the maximum of the total
@@ -218,7 +251,7 @@ function pickLatestEdit(edits: readonly ThreadRecord[]): ThreadRecord {
  * order.  Deterministic and arrival-order-independent: edit chains and
  * tombstones are resolved over the whole record set before ordering.
  */
-export function reduceThreadProjection(records: readonly ThreadRecord[]): ProjectedContribution[] {
+export function reduceThreadProjection(records: readonly ThreadRecord[]): ThreadProjection {
   const byCid = new Map(records.map((r) => [r.recordCid, r]));
   const editsByTarget = new Map<string, ThreadRecord[]>();
   const tombstoneByTarget = new Map<string, string>();
@@ -279,6 +312,8 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
     }
   }
 
+  /** Refused CIDs that a root's walk actually reached (the rest are unresolved). */
+  const surfacedRefusals = new Set<string>();
   const projectedByRoot = new Map<string, ProjectedContribution>();
   for (const root of roots) {
     const chain = [root.recordCid];
@@ -358,6 +393,7 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
     // Sorted, not in arrival order — this field is part of the projection output and
     // the §25.2 guarantee is that the whole output is input-order independent.
     const refused = [...refusedSet].sort();
+    for (const cid of refusedSet) surfacedRefusals.add(cid);
 
     // THE LOSING AUTHORIZED EDITS.  `editChain` is the visible path, which is what
     // a renderer needs; the variants `pickLatestEdit` passed over were computed
@@ -378,9 +414,25 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
     });
   }
 
-  // Order by the roots' display order so an edit never changes a contribution's
-  // position (the original post's place in the thread is stable).
-  return displayOrder(roots).map(
-    (root) => projectedByRoot.get(root.recordCid) as ProjectedContribution,
-  );
+  // WHAT NO ROOT COULD REACH.  Asking which refusals were SURFACED, rather than
+  // which targets look reachable, is what makes this exact: a target present in the
+  // set but itself dropped for an absent target of its own strands the refusals
+  // naming it just as thoroughly as a target that never arrived.
+  const unresolvedSupersedes: UnresolvedSupersede[] = [];
+  for (const [targetCid, recordCids] of refusedByTarget) {
+    const stranded = recordCids.filter((cid) => !surfacedRefusals.has(cid)).sort();
+    if (stranded.length > 0) unresolvedSupersedes.push({ targetCid, recordCids: stranded });
+  }
+  // Sorted, like every other field here: the whole output is arrival-order
+  // independent or the §25.2 determinism guarantee is not one.
+  unresolvedSupersedes.sort((x, y) => (x.targetCid < y.targetCid ? -1 : 1));
+
+  return {
+    // Order by the roots' display order so an edit never changes a contribution's
+    // position (the original post's place in the thread is stable).
+    contributions: displayOrder(roots).map(
+      (root) => projectedByRoot.get(root.recordCid) as ProjectedContribution,
+    ),
+    unresolvedSupersedes,
+  };
 }

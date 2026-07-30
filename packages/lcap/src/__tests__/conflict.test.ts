@@ -133,16 +133,38 @@ describe('visible-thread projection (WS-R.13.2)', () => {
   const opts = { trustOf: (cid: string) => trust[cid] ?? 'raw_unverified' };
 
   it('overlays trust and is deterministic across runs', () => {
-    const a = projectVisibleThread(records, opts);
-    const b = projectVisibleThread([...records].reverse(), opts);
+    const a = projectVisibleThread(records, opts).contributions;
+    const b = projectVisibleThread([...records].reverse(), opts).contributions;
     expect(a.map((c) => c.visibleCid + c.trustState)).toEqual(
       b.map((c) => c.visibleCid + c.trustState),
     );
     expect(a.find((c) => c.rootCid === 'r-a')?.trustState).toBe('witnessed');
   });
 
+  it('carries unresolved refusal evidence through the trust/safety overlay', () => {
+    // The overlay layer's own header promises conflicting evidence "remains
+    // INSPECTABLE (flagged, never dropped)".  It maps the projection's
+    // contributions, so returning only those would have re-broken the §25.2
+    // guarantee ONE LAYER ABOVE the fix that closed it — and every other test here
+    // reads `.contributions`, so nothing would have noticed.
+    const orphan: ThreadRecord = {
+      recordCid: 'r-orphan',
+      record: record({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'never-synced',
+      }),
+    };
+    const projection = projectVisibleThread([...records, orphan], opts);
+    expect(projection.contributions).toHaveLength(2);
+    expect(projection.unresolvedSupersedes).toEqual([
+      { targetCid: 'never-synced', recordCids: ['r-orphan'] },
+    ]);
+  });
+
   it('restricts low-trust content in strict safety mode but keeps it inspectable', () => {
-    const strict = projectVisibleThread(records, { ...opts, safetyMode: 'strict' });
+    const strict = projectVisibleThread(records, { ...opts, safetyMode: 'strict' }).contributions;
     const low = strict.find((c) => c.rootCid === 'r-b');
     expect(low?.restrictedBySafety).toBe(true); // proof_verified is below authorized
     expect(low?.shownByDefault).toBe(false);
@@ -156,7 +178,7 @@ describe('visible-thread projection (WS-R.13.2)', () => {
     const conflicted = projectVisibleThread(records, {
       ...opts,
       conflictingCids: new Set(['r-b']),
-    });
+    }).contributions;
     expect(conflicted.find((c) => c.rootCid === 'r-b')?.conflicting).toBe(true);
     expect(conflicted).toHaveLength(2);
   });
