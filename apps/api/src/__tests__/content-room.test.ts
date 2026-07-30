@@ -837,6 +837,45 @@ function jpegWithExif(): Uint8Array {
   ]);
 }
 
+/** A minimal JPEG that carries real dimensions: `jpegWithExif` above has no SOF
+ *  segment (it exists for the EXIF-strip assertions), so the parser correctly
+ *  answers `null` for it — a poster test needs a header to read. */
+function jpegWithSize(width: number, height: number): Uint8Array {
+  const seg = (marker: number, payload: number[]): number[] => [
+    0xff,
+    marker,
+    ((payload.length + 2) >> 8) & 0xff,
+    (payload.length + 2) & 0xff,
+    ...payload,
+  ];
+  const a = (t: string): number[] => [...t].map((c) => c.charCodeAt(0));
+  return new Uint8Array([
+    0xff,
+    0xd8,
+    ...seg(0xe0, [...a('JFIF\0'), 1, 2, 0, 0, 1, 0, 1, 0, 0]),
+    // SOF0: precision, height, width, one component.
+    ...seg(0xc0, [
+      0x08,
+      (height >> 8) & 0xff,
+      height & 0xff,
+      (width >> 8) & 0xff,
+      width & 0xff,
+      0x01,
+      0x01,
+      0x11,
+      0x00,
+    ]),
+    0xff,
+    0xda,
+    0x00,
+    0x04,
+    0x00,
+    0x00,
+    0xff,
+    0xd9,
+  ]);
+}
+
 async function uploadRaw(
   cookie: string,
   bytes: Uint8Array,
@@ -903,7 +942,13 @@ describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
       'text/vtt',
       'c.vtt',
     );
-    const poster = await uploadRaw(author.cookie, jpegWithExif(), 'image/jpeg', 'p.jpg', 'Poster');
+    const poster = await uploadRaw(
+      author.cookie,
+      jpegWithSize(1280, 720),
+      'image/jpeg',
+      'p.jpg',
+      'Poster',
+    );
     expect([video.status, captions.status, poster.status]).toEqual([201, 201, 201]);
     const created = await app().request(
       post(
@@ -932,6 +977,15 @@ describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
     expect(media.url).toBe(`/v1/uploads/${video.uploadId}`);
     expect(media.captions_url).toBe(`/v1/uploads/${captions.uploadId}`);
     expect(media.poster_url).toBe(`/v1/uploads/${poster.uploadId}`);
+    // THE POSTER'S dimensions reach the story, so the card can reserve the
+    // preview box.  A video upload has none — the upload route parses them only
+    // for images — so copying the video's left a video card with nulls while the
+    // loop that validated the poster discarded exactly the numbers needed.
+    if (poster.uploadId === null) throw new Error('poster upload returned no id');
+    const posterRecord = await fixture.forum.uploads.getRecord(poster.uploadId);
+    expect([posterRecord?.imageWidth, posterRecord?.imageHeight]).toEqual([1280, 720]);
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect([story?.mediaWidth, story?.mediaHeight]).toEqual([1280, 720]);
   });
 
   it('rejects a video post referencing a caption upload owned by someone else', async () => {
@@ -1499,6 +1553,69 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
     }
     // …and the story BEHIND the blocked page was still contained.
     expect((await fixture.ingestion.stories.getById(cleanId))?.visibility).toBe('room_only');
+  });
+
+  it('a story submitted ABOVE the cursor is still contained before the flip', async () => {
+    // The cursor only moves one way, so a submission that read the room as
+    // public can land after its page was fetched: its `createdAt` sorts ABOVE
+    // the cursor and every later cursored page excludes it.  The room would flip
+    // to private with that story still `public`, and nothing would revisit it —
+    // the retry short-circuits on `room.visibility === target`, and making the
+    // room public again would re-publish content the steward had contained.
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'strag' });
+    await joinAsMember(room, author.userId);
+    const first = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/straggler-a', { room_id: room }),
+        author.cookie,
+      ),
+    );
+    expect(first.status).toBe(201);
+
+    // Simulate the race: the SECOND story appears only after the cascade's first
+    // page has been read, and it is NEWER, so a cursored re-query skips it.
+    const realList = fixture.ingestion.stories.listByRoom.bind(fixture.ingestion.stories);
+    let pages = 0;
+    let lateId = '';
+    const spy = vi
+      .spyOn(fixture.ingestion.stories, 'listByRoom')
+      .mockImplementation(async (roomId, limit, visibility, before) => {
+        const rows = await realList(roomId, limit, visibility, before);
+        if (pages === 0) {
+          pages += 1;
+          const late = await app().request(
+            post(
+              '/v1/stories',
+              linkSubmission('https://example.com/straggler-b', { room_id: room }),
+              author.cookie,
+            ),
+          );
+          lateId = ((await late.json()) as { story_id: string }).story_id;
+        }
+        return rows;
+      });
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'strag-sw' });
+    let out: Awaited<ReturnType<typeof changeRoomVisibility>>;
+    try {
+      out = await changeRoomVisibility(
+        fixture.forum,
+        fixture.ingestion,
+        fixture.events,
+        fixture.identity,
+        steward.userId,
+        room,
+        'private',
+        1,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(out.ok).toBe(true);
+    // The late arrival was contained BEFORE the flip, not left published.
+    expect((await fixture.ingestion.stories.getById(lateId))?.visibility).toBe('room_only');
+    expect((await fixture.forum.rooms.getById(room))?.visibility).toBe('private');
   });
 
   it('a public story that collides with an in-room twin blocks the flip instead of 500-ing', async () => {

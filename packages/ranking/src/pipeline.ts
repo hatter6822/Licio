@@ -133,9 +133,16 @@ const SENSITIVE_FRESHNESS_CAP_MIN_VERSION = '1.4.0';
  * bounds sensitive content rather than the one that does not.
  */
 function profileAppliesSensitiveFreshnessCap(profileVersion: string): boolean {
-  const parts = profileVersion.split('.').map((p) => Number.parseInt(p, 10));
-  if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n) || n < 0)) return true;
-  const [major = 0, minor = 0, patch = 0] = parts;
+  // WHOLLY numeric components, not `parseInt`'s prefix.  `parseInt('1beta', 10)`
+  // is 1, so `1beta.3.0` parsed as [1, 3, 0] and was treated as a VALID legacy
+  // version — silently disabling the §11.5 sensitive-freshness cap for an
+  // operator profile whose version string is malformed.  That is the opposite of
+  // the fail-closed reading an unknown version is supposed to get, and it fails
+  // closed in the direction that matters least: uncapped sensitive content.
+  const parts = profileVersion.split('.');
+  if (parts.length !== 3 || !parts.every((part) => /^\d+$/.test(part))) return true;
+  const numbers = parts.map((part) => Number.parseInt(part, 10));
+  const [major = 0, minor = 0, patch = 0] = numbers;
   const [capMajor = 0, capMinor = 0, capPatch = 0] = SENSITIVE_FRESHNESS_CAP_MIN_VERSION.split(
     '.',
   ).map((p) => Number.parseInt(p, 10));

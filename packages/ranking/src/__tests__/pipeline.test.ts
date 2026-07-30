@@ -564,13 +564,25 @@ describe('WS-I §11.5 conservative freshness curve', () => {
 
   it('an unparseable profile version applies the cap (the safe reading)', () => {
     const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
-    const custom: RankingProfileConfig = {
-      ...BREAKING_NEWS_PROFILE,
-      profile_version: 'operator-a',
-    };
-    expect(
-      freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0, custom),
-    ).toBeLessThan(0.1);
+    // Including versions `parseInt` would PARTIALLY parse: `parseInt('1beta')`
+    // is 1, so `1beta.3.0` read as a valid legacy version and silently disabled
+    // the cap — fail-OPEN in the one direction that matters, uncapped sensitive
+    // content.
+    for (const version of [
+      'operator-a',
+      '1beta.3.0',
+      '1.3',
+      '1.3.0.0',
+      '-1.3.0',
+      '1.3.x',
+      ' 1.3.0',
+    ]) {
+      const custom: RankingProfileConfig = { ...BREAKING_NEWS_PROFILE, profile_version: version };
+      expect(
+        freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0, custom),
+        `version ${version} must fail closed and apply the cap`,
+      ).toBeLessThan(0.1);
+    }
   });
 
   it('with no stored score the curve is still the fallback for both kinds', () => {

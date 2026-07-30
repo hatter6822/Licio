@@ -392,6 +392,11 @@ export async function submitStory(
       };
     }
     mediaUploadRef = upload.uploadId;
+    // A VIDEO upload has no parsed dimensions — the upload route extracts them
+    // only for images — so copying them here left a video story's card with
+    // nulls.  The POSTER is the image the card actually renders, and its
+    // dimensions are read from the sub-upload below; a video's own entry stays
+    // null rather than borrowing a number that describes nothing.
     mediaWidth = upload.imageWidth;
     mediaHeight = upload.imageHeight;
     mediaType = wantImage ? 'image' : 'video';
@@ -438,6 +443,15 @@ export async function submitStory(
         };
       }
       if (sub.scanState === 'pending') heldForScan = true;
+      // THE POSTER'S dimensions are the ones the feed card reserves space with.
+      // `StoryMedia` renders the poster as the `<img>` for a video story and
+      // supports width/height, and this loop had already fetched and validated
+      // the upload carrying them — then discarded them, so the poster kept the
+      // layout shift the whole dimensions pass exists to remove.
+      if (typePrefix === 'image/' && sub.imageWidth !== null && sub.imageHeight !== null) {
+        mediaWidth = sub.imageWidth;
+        mediaHeight = sub.imageHeight;
+      }
     }
   }
 

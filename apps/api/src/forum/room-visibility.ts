@@ -129,6 +129,74 @@ export async function changeRoomVisibility(
    *  reappeared in every page and was reported once per pass. */
   const blocked = new Set<string>();
 
+  /**
+   * Contain ONE public story: the tier flip, its `content.visibility.changed`
+   * event, and the counters — in one place because there are TWO sweeps below
+   * (the cursored pass and the final uncursored straggler pass) and a story
+   * converted by one of them must be indistinguishable from a story converted
+   * by the other.  Two call sites emitting different side effects for the same
+   * transition is how a downstream consumer learns about only some of them.
+   *
+   * Returns true when the story was contained, false when a tier-unique
+   * collision refused it (recorded in `blocked`).
+   */
+  const containStory = async (story: { storyId: string }): Promise<boolean> => {
+    try {
+      await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
+    } catch (error) {
+      // `stories_canonical_url_room_uq` is a partial unique on
+      // `(canonical_url, room_id) where visibility = 'room_only'`, and a room
+      // may legitimately hold BOTH a public story and a room_only one for the
+      // same link — `ingestion/submission.ts` records the cross-tier pointer
+      // for exactly that pair.  Converting the public copy then collides with
+      // its in-room twin.
+      //
+      // Unhandled, that 23505 escaped the loop as a 500 with the room still
+      // PUBLIC and an arbitrary prefix of its stories already converted — a
+      // containment failure reported as a server error.  Caught here so the
+      // sweep finishes every story it CAN contain, and the room flip is skipped:
+      // a room that still holds public content must not be marked private,
+      // because the `room.visibility === target` short-circuit at the top would
+      // then answer a retry with `{ ok: true, converted: 0 }` and the content
+      // would stay published.
+      if (!isUniqueViolation(error)) throw error;
+      blocked.add(story.storyId);
+      ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
+      return false;
+    }
+    const event = contentVisibilityChangedEventSchema.parse({
+      event_id: randomUUID(),
+      event_type: 'content.visibility.changed',
+      timestamp: nowIso,
+      schema_version: '1',
+      story_id: story.storyId,
+      room_id: roomId,
+      from: 'public',
+      to: 'room_only',
+      trigger: 'room_visibility_change',
+      actor_ref: actorUserId,
+      privacy_classification: 'public',
+      retention_tier: 'public_contribution',
+    });
+    const entry = TOPIC_REGISTRY['content.visibility.changed'];
+    await events.eventStore.insertMany([
+      {
+        eventId: event.event_id,
+        eventType: event.event_type,
+        topic: event.event_type,
+        timestamp: event.timestamp,
+        privacyClassification: entry.privacy_classification,
+        retentionTier: entry.retention_tier,
+        payload: event as unknown as Record<string, unknown>,
+        ownerUserId: actorUserId,
+        purgeAfter: null,
+      },
+    ]);
+    ingestion.trackBackground(events.router.publish(event));
+    converted += 1;
+    return true;
+  };
+
   if (target === 'private') {
     // Per-story sweep: force every PUBLIC story room_only. PAGED until none
     // remain — converting a story to room_only removes it from the public-only
@@ -140,59 +208,7 @@ export async function changeRoomVisibility(
       const batch = await ingestion.stories.listByRoom(roomId, sweepLimit, 'public', cursor);
       if (batch.length === 0) break;
       for (const story of batch) {
-        try {
-          await ingestion.stories.update(story.storyId, { visibility: 'room_only' });
-        } catch (error) {
-          // `stories_canonical_url_room_uq` is a partial unique on
-          // `(canonical_url, room_id) where visibility = 'room_only'`, and a
-          // room may legitimately hold BOTH a public story and a room_only one
-          // for the same link — `ingestion/submission.ts` records the
-          // cross-tier pointer for exactly that pair.  Converting the public
-          // copy then collides with its in-room twin.
-          //
-          // Unhandled, that 23505 escaped the loop as a 500 with the room still
-          // PUBLIC and an arbitrary prefix of its stories already converted —
-          // a containment failure reported as a server error.  It is caught
-          // here so the sweep finishes every story it CAN contain, and the room
-          // flip below is skipped: a room that still holds public content must
-          // not be marked private, because the `room.visibility === target`
-          // short-circuit at the top would then answer a retry with
-          // `{ ok: true, converted: 0 }` and the content would stay published.
-          if (!isUniqueViolation(error)) throw error;
-          blocked.add(story.storyId);
-          ingestion.metrics.increment('rooms.visibility_cascade_duplicate');
-          continue;
-        }
-        const event = contentVisibilityChangedEventSchema.parse({
-          event_id: randomUUID(),
-          event_type: 'content.visibility.changed',
-          timestamp: nowIso,
-          schema_version: '1',
-          story_id: story.storyId,
-          room_id: roomId,
-          from: 'public',
-          to: 'room_only',
-          trigger: 'room_visibility_change',
-          actor_ref: actorUserId,
-          privacy_classification: 'public',
-          retention_tier: 'public_contribution',
-        });
-        const entry = TOPIC_REGISTRY['content.visibility.changed'];
-        await events.eventStore.insertMany([
-          {
-            eventId: event.event_id,
-            eventType: event.event_type,
-            topic: event.event_type,
-            timestamp: event.timestamp,
-            privacyClassification: entry.privacy_classification,
-            retentionTier: entry.retention_tier,
-            payload: event as unknown as Record<string, unknown>,
-            ownerUserId: actorUserId,
-            purgeAfter: null,
-          },
-        ]);
-        ingestion.trackBackground(events.router.publish(event));
-        converted += 1;
+        await containStory(story);
       }
       // A short page means no public stories remain — the sweep is complete.
       if (batch.length < sweepLimit) break;
@@ -209,6 +225,32 @@ export async function changeRoomVisibility(
       const last = batch[batch.length - 1];
       if (last === undefined) break;
       cursor = { createdAt: last.createdAt, storyId: last.storyId };
+    }
+    // A FINAL UNCURSORED SWEEP, because the cursor only moves one way.  A
+    // submission that read the room as still public can land AFTER its page was
+    // fetched, and its `createdAt` sorts ABOVE the cursor — so every later
+    // cursored page excludes it and the room could flip to private with that
+    // story still `public`.  Worse than a missed conversion: the retry path
+    // short-circuits on `room.visibility === target`, so nothing ever revisits
+    // it, and making the room public again would re-publish content the steward
+    // had already contained.  The cursor made this window wider than the
+    // fresh-page query it replaced, so closing it is part of that change, not a
+    // separate concern.
+    //
+    // Bounded: this pass converts only what the cursored sweep could not have
+    // seen, so on a quiet room it reads one short page and stops.  A submission
+    // racing THIS pass is caught by the tier-unique index and reported as a
+    // blocker rather than silently left public.
+    for (;;) {
+      const stragglers = await ingestion.stories.listByRoom(roomId, sweepLimit, 'public');
+      const pending = stragglers.filter((story) => !blocked.has(story.storyId));
+      if (pending.length === 0) break;
+      let convertedHere = 0;
+      for (const story of pending) {
+        if (await containStory(story)) convertedHere += 1;
+      }
+      // Nothing moved and nothing new was blocked ⇒ no progress is possible.
+      if (convertedHere === 0) break;
     }
     if (blocked.size > 0) {
       return {

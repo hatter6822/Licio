@@ -390,18 +390,29 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
         const user = await services.store.getUser(auth.userId);
-        if (!user?.email || (await services.store.getAuth(auth.userId))?.emailVerified) {
+        const authRow = await services.store.getAuth(auth.userId);
+        // THE STAGED ADDRESS FIRST, when there is one.  `/email/add` stages a
+        // `pendingEmail` and sends its code DETACHED, so an SES fault leaves the
+        // address staged and the code undelivered — and this route used to send
+        // only to the address ON FILE and refuse outright whenever that factor
+        // was already verified.  A member changing an already-verified email was
+        // therefore waiting for a code that was never sent, with the advertised
+        // resend path answering `not_applicable`: the one state in which resend
+        // is most obviously needed was the one it excluded.
+        const target = authRow?.pendingEmail ?? user?.email ?? null;
+        const staged = authRow?.pendingEmail != null;
+        if (target === null || (!staged && authRow?.emailVerified)) {
           return c.json(err('not_applicable', 'No unverified email on file.'), 400);
         }
         const accountRef = `resend:${auth.userId}`;
         if (!(await canResend(services.otp, accountRef))) {
           return c.json(err('cooldown', 'Please wait before requesting another code.'), 429);
         }
-        const { code } = await startEmailVerification(services.otp, auth.userId, user.email);
+        const { code } = await startEmailVerification(services.otp, auth.userId, target);
         // The cooldown above is the real bound; the send itself is best-effort
         // and off the response path (an SES fault must not 500 a resend the
         // caller would then have to wait out the cooldown to retry).
-        deliverMail(services.mailer.sendCode(user.email, code, 'verify'), 'email_resend');
+        deliverMail(services.mailer.sendCode(target, code, 'verify'), 'email_resend');
         return c.json({ status: 'sent' as const });
       })
 

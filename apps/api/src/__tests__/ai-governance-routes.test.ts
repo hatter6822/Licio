@@ -254,6 +254,50 @@ describe('WS-K routes', () => {
     expect(item?.reports.map((r) => r.reason).sort()).toEqual(['factual_error', 'fake_citation']);
   });
 
+  it('the attached reports are BOUNDED per item; the count is not', async () => {
+    // The queue read is capped at 100 items, but each expanded to a report list
+    // written by third parties — anyone may report a subject — so the response
+    // size was attacker-influenceable and the 100 bounded nothing.  The count
+    // must stay the TRUE total: a steward's sense of scale cannot shrink with
+    // the page size.
+    const steward = await seedUserWithSession(forum.identity, { steward: true });
+    await ai.summaries.putDraft({
+      summaryId: 'sum-flood-q',
+      threadId: 'thread-flood-q',
+      draft: {},
+      outputId: 'out-flood-q',
+      qualityPassed: true,
+      createdAt: new Date(ai.now()).toISOString(),
+    });
+    for (let i = 0; i < 30; i += 1) {
+      const reporter = await seedUserWithSession(forum.identity);
+      const res = await app.request(
+        jsonReq(
+          '/v1/ai/summaries/sum-flood-q/report',
+          'POST',
+          { reason: 'fake_citation' },
+          reporter.cookie,
+        ),
+      );
+      expect(res.status).toBe(201);
+    }
+    const queue = await app.request(
+      jsonReq('/v1/ai/admin/review', 'GET', undefined, steward.cookie),
+    );
+    const body = (await queue.json()) as {
+      items: {
+        subjectRef: string;
+        report_count: number;
+        reports: unknown[];
+        reports_truncated: boolean;
+      }[];
+    };
+    const item = body.items.find((i) => i.subjectRef === 'sum-flood-q');
+    expect(item?.report_count).toBe(30); // the whole truth…
+    expect(item?.reports).toHaveLength(20); // …in a bounded payload
+    expect(item?.reports_truncated).toBe(true);
+  });
+
   it('translates content and accepts reports for any authenticated user', async () => {
     const user = await seedUserWithSession(forum.identity);
     const res = await app.request(

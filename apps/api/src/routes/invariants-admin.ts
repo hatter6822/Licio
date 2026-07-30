@@ -280,7 +280,15 @@ export function createInvariantsAdminRoutes(
         // metrics, no suppressed-cell detail — parity vs under-review only.
         // Bounded to the transparency window: this route emits one statement
         // per row, so an unbounded read would also be an unbounded response.
-        const periodStart = new Date(Date.now() - TRANSPARENCY_LOOKBACK_MS).toISOString();
+        // ONE clock read for the whole report.  Three separate `Date.now()` /
+        // `new Date()` calls gave `period_start`, `period_end` and `generated_at`
+        // three different instants, so a report's own window did not quite
+        // contain its own generation time — small, but a transparency artifact is
+        // supposed to be reproducible from the values it prints.
+        const generatedAt = new Date();
+        const periodStart = new Date(
+          generatedAt.getTime() - TRANSPARENCY_LOOKBACK_MS,
+        ).toISOString();
         const store = resolveEvents().invariantStore;
         const rows = await store.listByTypeSince('GWEI', periodStart, TRANSPARENCY_ROW_CAP);
         // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
@@ -303,9 +311,9 @@ export function createInvariantsAdminRoutes(
           };
         });
         return c.json({
-          generated_at: new Date().toISOString(),
+          generated_at: generatedAt.toISOString(),
           period_start: periodStart,
-          period_end: new Date().toISOString(),
+          period_end: generatedAt.toISOString(),
           // What the period HELD, against what this response carries.
           total_outputs: total,
           truncated: total > statements.length,

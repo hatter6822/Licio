@@ -15,6 +15,7 @@
 //    (kernel verdict + capability + kill switch) — WS-M is its production caller.
 //  - `elections` adapts scheduleElection(force) for community-voted rotations.
 
+import type { GovernanceAdvisory } from '@licio/ai-governance';
 import type { WeightModel } from '@licio/governance';
 import { checkVoterEligibility, decCompare, resolveVotingWeight } from '@licio/governance';
 
@@ -403,19 +404,41 @@ export function createInMemoryTreasuryServices(inputs: TreasuryServicesInputs): 
       // to discard the value, so the advice reached no store, no route, and no
       // steward — "advisory" only means anything when someone can read the
       // advice and knowingly ignore it.
-      const advisories = [
-        input.recipientRef === null
-          ? null
-          : await highlightConflictOfInterest(
-              aiDeps,
-              input.proposalRef,
-              input.proposerRef,
-              input.recipientRef,
-            ),
-        await detectScamPatterns(aiDeps, input.proposalRef, input.text),
+      // PERSIST EACH FINDING AS IT IS PRODUCED.  Building the array first meant
+      // one rejected check discarded the other's already-computed advisory: the
+      // COI flag would be gone while its `AIOutputRecord` remained, so the audit
+      // trail showed an assessment that no steward could read.  The outer path
+      // catches and returns success — advice is not a precondition of governance
+      // — which is exactly why a lost advisory here is silent.
+      //
+      // Each check is also isolated from the other: a scam-marker list that is
+      // temporarily unavailable must not cost the conflict-of-interest finding,
+      // and vice versa.  They answer different questions and neither is the
+      // other's precondition.
+      const checks: Array<() => Promise<GovernanceAdvisory | null>> = [
+        ...(input.recipientRef === null
+          ? []
+          : [
+              () =>
+                highlightConflictOfInterest(
+                  aiDeps,
+                  input.proposalRef,
+                  input.proposerRef,
+                  input.recipientRef as string,
+                ),
+            ]),
+        () => detectScamPatterns(aiDeps, input.proposalRef, input.text),
       ];
-      for (const advisory of advisories) {
-        if (advisory !== null) await ai.governanceAdvisories.put(advisory);
+      for (const check of checks) {
+        try {
+          const advisory = await check();
+          if (advisory !== null) await ai.governanceAdvisories.put(advisory);
+        } catch (error) {
+          knomosis.alert?.('governance.advisory.check_failed', {
+            proposal_id: input.proposalRef,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     },
     masterSecret: knomosis.masterSecret,

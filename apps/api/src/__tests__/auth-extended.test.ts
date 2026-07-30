@@ -199,6 +199,36 @@ describe('email factor verify/resend gating', () => {
     );
   });
 
+  it('resend targets the STAGED address when an email change is pending', async () => {
+    // `/email/add` stages a `pendingEmail` and sends its code DETACHED, so an SES
+    // fault leaves the address staged and the code undelivered.  This route used
+    // to send only to the address ON FILE and refuse outright when that factor
+    // was already verified — so a member changing an already-verified email
+    // waited for a code that was never sent, and the advertised resend path
+    // answered `not_applicable`: the one state where resend is most obviously
+    // needed was the one it excluded.
+    const app = createApp();
+    const sid = await registerEmail(app, 'staged-from@example.com', 'stageduser');
+    // Verify the current factor, so the OLD guard would refuse the resend.
+    const user = await services.store.getUserByEmail('staged-from@example.com');
+    if (!user) throw new Error('fixture user missing');
+    await services.store.setAuth(user.userId, {
+      emailVerified: true,
+      pendingEmail: 'staged-to@example.com',
+    });
+    const mailer = services.mailer as RecordingMailer;
+    const before = mailer.codes.length;
+    const res = await app.request('/v1/auth/email/resend', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    expect(res.status).toBe(200);
+    // The code went to the STAGED address — the one the member is waiting on —
+    // not to the verified address already on file.
+    const sent = mailer.codes.slice(before);
+    expect(sent.map((entry) => entry.to)).toEqual(['staged-to@example.com']);
+  });
+
   it('enforces the 60-second resend cooldown', async () => {
     const app = createApp();
     const sid = await registerEmail(app, 'res@example.com', 'resuser');

@@ -36,6 +36,12 @@ import {
   requireSteward,
 } from '../middleware/auth.js';
 
+/** Reports attached to ONE review-queue item.  The queue itself is capped, but
+ *  its items expand to third-party-written report lists, so without a per-item
+ *  bound the response size is attacker-influenceable and the queue cap bounds
+ *  nothing.  `report_count` still carries the true total. */
+const REVIEW_REPORTS_PER_ITEM = 20;
+
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
 const aiModalitySchema = z.enum(['classification', 'generation', 'embedding']);
@@ -338,6 +344,13 @@ export function createAiGovernanceAdminRoutes() {
         // all.  Reading them here keeps the dedup (one item) while giving the
         // steward what they are triaging (all of it), and leaves the incumbent's
         // own evidence unrewritten.
+        //
+        // BOUNDED PER ITEM.  The queue read is capped at 100 items, but each one
+        // expanded to a report list written by third parties — anyone may report
+        // a subject — so the response size became attacker-influenceable and the
+        // 100 no longer bounded anything.  The COUNT is the complete figure a
+        // steward triages on; the attached reports are the newest few, which is
+        // what a reviewer reads before opening the subject.
         const enriched = await Promise.all(
           items.map(async (item) => {
             const reports =
@@ -346,7 +359,17 @@ export function createAiGovernanceAdminRoutes() {
                 : item.kind === 'reported_translation'
                   ? await ai.translations.listReports(item.subjectRef)
                   : [];
-            return { ...item, report_count: reports.length, reports };
+            const newestFirst = [...reports].sort((a, b) =>
+              b.reported_at.localeCompare(a.reported_at),
+            );
+            return {
+              ...item,
+              // The TRUE total, never the length of the truncated list — the
+              // steward's sense of scale must not shrink with the page size.
+              report_count: reports.length,
+              reports: newestFirst.slice(0, REVIEW_REPORTS_PER_ITEM),
+              reports_truncated: reports.length > REVIEW_REPORTS_PER_ITEM,
+            };
           }),
         );
         return c.json({ items: enriched });
