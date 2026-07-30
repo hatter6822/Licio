@@ -152,6 +152,8 @@ interface TestHarness extends ProposalDeps {
   >;
   /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
   memberFactsAsOf: (string | null)[];
+  /** Instants the FREEZE measurement reported — the stamp must be one of these. */
+  basisMeasuredAt: string[];
 }
 
 function buildHarness(): TestHarness {
@@ -183,6 +185,7 @@ function buildHarness(): TestHarness {
   };
   /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
   const memberFactsAsOf: (string | null)[] = [];
+  const basisMeasuredAt: string[] = [];
   const memberFactsOverride = new Map<
     string,
     {
@@ -207,6 +210,14 @@ function buildHarness(): TestHarness {
       );
     },
     eligibleMemberCount: async () => 3,
+    // The FREEZE reader reports the instant it measured at, and RECORDS it, so a
+    // test can assert the stamp came from the measurement rather than from a clock
+    // read beside it.
+    measureEligibleMembers: async () => {
+      const asOf = new Date(clock).toISOString();
+      basisMeasuredAt.push(asOf);
+      return { count: 3, asOf };
+    },
   };
   const deps: ProposalDeps = {
     profiles: new InMemoryGovernanceProfileStore(),
@@ -273,6 +284,7 @@ function buildHarness(): TestHarness {
     electionsOpened,
     memberFactsOverride,
     memberFactsAsOf,
+    basisMeasuredAt,
   });
 }
 
@@ -1503,6 +1515,15 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     // …so the basis was counted well after the scheduled deadline, and the
     // instant is recorded rather than inferred from the schedule.
     expect(Date.parse(opened?.eligibleBasisAt ?? '')).toBeGreaterThan(deadline);
+    // AND the recorded instant is the MEASUREMENT's, not a clock read beside it.
+    // Taking it from the clock first and passing it into a live count fixed the join
+    // direction and left the departure one: membership is hard-deleted on leave, so a
+    // member who left during the sweep's own runtime is absent from the rows the
+    // count reads and the denominator ends up smaller than the electorate at the
+    // instant it claims — quorum easier than the pack asks for, with no way to
+    // reconstruct the departure afterwards.  The harness's `measureEligibleMembers`
+    // reports its own clock, so this pins which of the two the stamp came from.
+    expect(deps.basisMeasuredAt).toContain(opened?.eligibleBasisAt);
 
     // A member who joined between the deadline and the actual open was counted
     // in that basis, so their ballot must count too.
@@ -2117,6 +2138,16 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       // makes every test through this harness exercise the pre-freeze live-facts path
       // while appearing to cover the frozen one.
       memberFacts: (roomId, userId, asOf) => inner.memberFacts(roomId, userId, asOf),
+      // The FREEZE goes through here now, so this is where the eligibility shape has
+      // to be captured.  Forwarding straight to `inner` left `captured` empty while
+      // the assertion still read like it was covering the freeze.
+      measureEligibleMembers: async (roomId, eligibility) => {
+        if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
+        return {
+          count: await inner.eligibleMemberCount(roomId, eligibility),
+          asOf: new Date().toISOString(),
+        };
+      },
       eligibleMemberCount: (roomId, eligibility) => {
         if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
         return inner.eligibleMemberCount(roomId, eligibility);

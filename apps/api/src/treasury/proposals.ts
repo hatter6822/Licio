@@ -156,6 +156,30 @@ export interface MembershipFactsPort {
       asOf?: string;
     },
   ): Promise<number>;
+  /**
+   * The basis AND the instant it was measured at, for the FREEZE.
+   *
+   * Same defect, same fix as `RoomStore.measureEligibleVoters`: a clock reading
+   * passed into a live count leaks a JOIN in one ordering and a DEPARTURE in the
+   * other, and membership is hard-deleted on leave so neither is recoverable
+   * afterwards.  The instant has to come from the measurement.
+   *
+   * EXACT on the fast count (one statement).  On the per-member walk that a
+   * participation-denominated pack requires, `asOf` is the instant the ROSTER was
+   * enumerated — which removes the join direction entirely and narrows the departure
+   * one to the walk's own duration, since a member who leaves mid-walk can still
+   * lose their facts read.  Closing that last window needs the whole walk under one
+   * database snapshot, which the port boundary does not currently offer; tracked in
+   * `docs/treasury/README.md`.
+   */
+  measureEligibleMembers(
+    roomId: string,
+    eligibility?: {
+      rules: EligibilityRules;
+      treasuryControlling: boolean;
+      weight?: { model: WeightModel; maxVotingWeightPerAccount: number };
+    },
+  ): Promise<{ count: number; asOf: string }>;
 }
 
 /** The shipped WS-U executor seam (GovernanceService.executeTreasuryAction). */
@@ -337,6 +361,36 @@ async function eligibleBasisFor(
     // The weight model is half the ballot gate, so it is half the basis too —
     // see `eligibleMemberCount`.  Defaulted exactly as `signProposal` defaults it
     // so the two cannot disagree about which model is in force.
+    weight: {
+      model: pack.weightModel ?? 'one_civic_account_one_vote',
+      maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
+    },
+  });
+}
+
+/**
+ * The basis AND its instant, for the freeze at `deliberation → open`.
+ *
+ * Separate from `eligibleBasisFor` because they answer different questions:
+ * that one counts as of an instant it is GIVEN (the tally's fallback, against a
+ * basis already recorded), while this one reports the instant it measured at so the
+ * stamp cannot describe a different population from the count beside it.
+ */
+async function measureEligibleBasis(
+  deps: ProposalDeps,
+  proposal: GovernanceProposalRecord,
+  pack: LawPack,
+): Promise<{ count: number; asOf: string }> {
+  return deps.membership.measureEligibleMembers(proposal.roomId, {
+    rules: pack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: isTreasuryControlling(proposal),
+    // Defaulted exactly as `signProposal` and `eligibleBasisFor` default it, so no
+    // two of the three can disagree about which model is in force.
     weight: {
       model: pack.weightModel ?? 'one_civic_account_one_vote',
       maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
@@ -1383,15 +1437,14 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       // No resolvable pack ⇒ no basis to record. The row stays null and the
       // tally falls back to the live read, which is what it did before — a
       // missing pack must not silently stamp a 0 and fail quorum outright.
-      // ONE instant, taken BEFORE the count and passed INTO it, so the
-      // denominator is the electorate as of exactly the moment the ballot gate
-      // will compare against.  Stamping `nowIso` beside a live count left a
-      // window — the sweep's own runtime — in which a member was inside the
-      // count and outside the cutoff: the same defect this stamp was added to
-      // fix, at a smaller scale.
-      const basisAt = new Date(deps.now()).toISOString();
-      const eligibleBasisCount =
-        pack === undefined ? null : await eligibleBasisFor(deps, proposal, pack, basisAt);
+      // THE INSTANT COMES FROM THE MEASUREMENT.  Taking it first and passing it into
+      // a live count fixed the JOIN direction and left the DEPARTURE one: a member
+      // who leaves during the sweep's own runtime is hard-deleted from the rows the
+      // count reads, so the denominator ends up smaller than the electorate at the
+      // instant it claims — quorum easier to meet than the pack asks for.
+      const measured = pack === undefined ? null : await measureEligibleBasis(deps, proposal, pack);
+      const basisAt = measured?.asOf ?? new Date(deps.now()).toISOString();
+      const eligibleBasisCount = measured?.count ?? null;
       const opened = await deps.proposals.casVotingState(
         proposal.proposalId,
         'deliberation',

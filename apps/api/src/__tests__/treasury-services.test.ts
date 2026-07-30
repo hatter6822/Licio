@@ -58,6 +58,7 @@ async function wsmServices(): Promise<TreasuryServices> {
         verifiedIdentity: true,
       }),
       eligibleMemberCount: async () => 3,
+      measureEligibleMembers: async () => ({ count: 3, asOf: new Date().toISOString() }),
     },
     treasuryExecutor: { execute: async () => ({ accepted: true, code: null }) },
     elections: { openElection: async () => true },

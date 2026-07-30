@@ -136,7 +136,7 @@ export function buildMembershipFactsPort(
       memberSince,
     };
   };
-  return {
+  const port: MembershipFactsPort = {
     memberFacts,
     eligibleMemberCount: async (roomId, eligibility) => {
       // Without rules the electorate is the room membership; with rules the
@@ -243,7 +243,27 @@ export function buildMembershipFactsPort(
       }
       return eligible;
     },
+    measureEligibleMembers: async (roomId, eligibility) => {
+      // THE INSTANT COMES FROM THE MEASUREMENT, for the reason the port documents.
+      //
+      // `measureEligibleVoters` is one statement returning both, so the fast count
+      // is EXACT.  It also serves as the roster instant for the per-member walk: a
+      // pack whose weight can resolve to zero needs the walk, and taking its `asOf`
+      // from that first read removes the join direction outright — nobody who joined
+      // after it is in the roster the walk enumerates OR inside the ballot cutoff.
+      // A member who leaves mid-walk can still lose their facts read and drop out of
+      // the count; closing that needs the whole walk under one database snapshot,
+      // which this port boundary does not offer (tracked in `docs/treasury/README.md`).
+      const measured = await forum.rooms.measureEligibleVoters(roomId);
+      if (eligibility === undefined) return measured;
+      const count = await port.eligibleMemberCount(roomId, {
+        ...eligibility,
+        asOf: measured.asOf,
+      });
+      return { count, asOf: measured.asOf };
+    },
   };
+  return port;
 }
 
 /** WS-L.2.5b: LIVE WS-M obligations for the wallet-unlink check (W12) — a
