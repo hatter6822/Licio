@@ -7,11 +7,12 @@
 // per-task failure isolation (one broken sweep never blocks the rest).
 
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createInMemoryAiGovernanceServices,
   setAiGovernanceServices,
 } from '../ai-governance/services.js';
+import { ensureComplianceServicesForTests } from '../compliance/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
@@ -424,7 +425,23 @@ describe('runWsmTick (WS-M sweeps)', () => {
   });
 });
 
+/**
+ * Grant KYC standing to everyone, for the suites that are not ABOUT standing.
+ *
+ * The basis mirrors the /sign gate exactly now, and `requireGovernanceEligibility`
+ * demands `kyc_partner` on every ballot — so an unseeded member is refused at the route
+ * and must not sit in the denominator either. These suites exercise the LAW-PACK
+ * predicate and the weight models; leaving them to fail on a compliance leg they never
+ * meant to exercise would test the wrong thing, and `the compliance legs` block below
+ * covers that leg on its own.
+ */
+function grantKycToAll(): void {
+  const compliance = ensureComplianceServicesForTests();
+  vi.spyOn(compliance, 'kycLevel').mockResolvedValue('kyc_partner');
+}
+
 describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
+  beforeEach(grantKycToAll);
   const forumOf = (
     subscription: { status: string; requestedAt: string; joinedAt?: string } | null,
   ): ForumServices =>
@@ -432,6 +449,8 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
       rooms: {
         getSubscription: async () => subscription,
         countEligibleVoters: async () => 42,
+        // The basis has no fast path any more, so it always enumerates the roster.
+        listEligibleVoterIds: async () => [USER],
       },
     }) as unknown as ForumServices;
   /** A boolean keeps the pre-freeze callers reading naturally; the object form
@@ -443,6 +462,11 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     ({
       store: {
         getAuth: async () => (typeof auth === 'boolean' ? { emailVerified: auth } : auth),
+        // The basis has no fast path any more, so it always reads the account state and
+        // the credential inventory — the gates `/sign` applies to every ballot.
+        getUser: async () => ({ ageBand: 'adult' }),
+        listWebauthn: async () => [],
+        listWalletAuth: async () => [],
       },
     }) as unknown as IdentityServices;
 
@@ -470,7 +494,14 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     // `undefined` is the LIVE instant — the third argument is the electorate freeze's
     // `asOf`, absent here because nothing froze.
     expect(countSpy).toHaveBeenCalledWith(ROOM, USER, undefined);
-    expect(await port.eligibleMemberCount(ROOM)).toBe(42);
+    // ONE, from folding the roster — not the raw `countEligibleVoters` stub's 42.
+    //
+    // With no eligibility spec the basis used to take a fast path that returned that
+    // counter untouched. It cannot any more: the account and compliance gates apply to
+    // EVERY ballot, and a raw count cannot express them, so a count taken that way would
+    // include members the ballot gate refuses and inflate the quorum bar by exactly the
+    // population that is not allowed to turn up.
+    expect(await port.eligibleMemberCount(ROOM)).toBe(1);
   });
 
   it('an UNKNOWN join is unjudgeable for the freeze, but still has an age', async () => {
@@ -497,32 +528,56 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
     expect(facts?.membershipDays).toBe(10);
   });
 
-  it('the basis is counted AS OF the freeze instant, not live beside it', async () => {
-    // A count taken live and an instant stamped beside it are two answers to
-    // one question, and the gap between them is the sweep's own runtime: a
-    // member joining inside it lands in the denominator and outside the ballot
-    // cutoff, which is exactly the mismatch the freeze exists to remove.
-    // Passing the instant INTO the count closes it by construction.
+  it('the basis is measured AS OF the freeze instant, not live beside it', async () => {
+    // A count taken live and an instant stamped beside it are two answers to one
+    // question: a member joining between them lands in the denominator and outside the
+    // ballot cutoff, which is the mismatch the freeze exists to remove.
+    //
+    // This used to assert that the FAST PATH forwarded the instant to
+    // `countEligibleVoters`. There is no fast path now — a raw count cannot express the
+    // account and compliance gates that apply to every ballot — so the same property is
+    // asserted where it now lives: the instant reaches the SNAPSHOT, and the fold judges
+    // at the snapshot's own `asOf`.
     const fixture = await freshKnomosisServices();
     const asOf = new Date(fixture.knomosis.now()).toISOString();
     const seen: Array<string | undefined> = [];
     const port = buildMembershipFactsPort(
+      forumOf({ status: 'active', requestedAt: asOf }),
       {
-        rooms: {
-          getSubscription: async () => null,
-          countEligibleVoters: async (_r: string, joinedBefore?: string) => {
-            seen.push(joinedBefore);
-            return 7;
-          },
+        store: {
+          getAuth: async () => ({ emailVerified: true }),
+          getUser: async () => ({ ageBand: 'adult' }),
+          listWebauthn: async () => [],
+          listWalletAuth: async () => [],
         },
-      } as unknown as ForumServices,
-      identityOf(true),
+      } as never,
       fixture.knomosis,
+      () => ({
+        snapshot: async (_roomId: string, at?: string) => {
+          seen.push(at);
+          return {
+            asOf: at ?? asOf,
+            members: [
+              {
+                userId: 'member',
+                subscribed: true,
+                joinedAt: asOf,
+                requestedAt: asOf,
+                accountState: 'active',
+                ageBand: 'adult' as const,
+                emailVerified: true,
+                emailVerifiedAt: null,
+                hasVerifiedCredential: true,
+                kycVerified: true,
+                hasComplianceHold: false,
+                hasHighRiskWallet: false,
+                contributionCount: 0,
+              },
+            ],
+          };
+        },
+      }),
     );
-    // The trivial arm (no rules) still carries the instant — it is the SAME
-    // denominator either way.
-    expect(await port.eligibleMemberCount(ROOM, undefined)).toBe(7);
-    expect(seen).toEqual([undefined]);
     expect(
       await port.eligibleMemberCount(ROOM, {
         rules: {
@@ -534,8 +589,8 @@ describe('buildMembershipFactsPort (WS-M.4.2c-2)', () => {
         treasuryControlling: false,
         asOf,
       }),
-    ).toBe(7);
-    expect(seen[1]).toBe(asOf);
+    ).toBe(1);
+    expect(seen).toEqual([asOf]);
   });
 
   it('membership age and the freeze both read JOINED, not REQUESTED', async () => {
@@ -906,6 +961,7 @@ describe('the treasury services singleton', () => {
 });
 
 describe('eligibility-aware quorum basis (W3 review)', () => {
+  beforeEach(grantKycToAll);
   const forumOf = (facts: Record<string, { requestedAt: string } | null>): ForumServices =>
     ({
       rooms: {
@@ -973,6 +1029,85 @@ describe('eligibility-aware quorum basis (W3 review)', () => {
         treasuryControlling: false,
       }),
     ).toBe(0);
+  });
+
+  it('the ROUTE gates apply to every ballot, not just treasury-controlling ones', async () => {
+    // `/sign` applies authMiddleware + requireVerifiedAccount + requireAdult +
+    // requireGovernanceEligibility to EVERY ballot. The basis mirrored the first two only
+    // on the treasury arm and the third not at all — so an ordinary proposal's
+    // denominator counted teens, unverified and suspended accounts, members with no KYC
+    // standing, members under a compliance hold and members with a flagged wallet, none
+    // of whom can record a ballot. Each one inflates the quorum bar: the vote needs
+    // turnout from a population that is not allowed to turn up.
+    //
+    // Injected directly rather than seeded through six stores, because the fact that
+    // each leg refuses is the subject, and the contract suite already proves both
+    // adapters produce these facts from real rows.
+    const fixture = await freshKnomosisServices();
+    const base = {
+      subscribed: true,
+      joinedAt: new Date(fixture.knomosis.now() - 90 * 86_400_000).toISOString(),
+      requestedAt: new Date(fixture.knomosis.now() - 90 * 86_400_000).toISOString(),
+      accountState: 'active' as string | null,
+      ageBand: 'adult' as 'adult' | 'teen_16_17' | null,
+      emailVerified: true,
+      emailVerifiedAt: null,
+      hasVerifiedCredential: true,
+      kycVerified: true,
+      hasComplianceHold: false,
+      hasHighRiskWallet: false,
+      contributionCount: 0,
+    };
+    const refusedBy: ReadonlyArray<readonly [string, Partial<typeof base>]> = [
+      ['a teen', { ageBand: 'teen_16_17' }],
+      ['an age we do not know', { ageBand: null }],
+      ['a suspended account', { accountState: 'suspended' }],
+      ['no verified credential', { hasVerifiedCredential: false }],
+      ['no KYC standing', { kycVerified: false }],
+      ['an open compliance hold', { hasComplianceHold: true }],
+      ['a high-risk wallet', { hasHighRiskWallet: true }],
+    ];
+    const trivialRules = {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    };
+    const countWith = async (over: Partial<typeof base>): Promise<number> => {
+      const port = buildMembershipFactsPort(
+        forumOf({ subject: { requestedAt: base.requestedAt } }),
+        {
+          store: {
+            getAuth: async () => ({ emailVerified: true }),
+            getUser: async () => ({ ageBand: 'adult' }),
+            listWebauthn: async () => [],
+            listWalletAuth: async () => [],
+          },
+        } as never,
+        fixture.knomosis,
+        () => ({
+          snapshot: async () => ({
+            asOf: new Date(fixture.knomosis.now()).toISOString(),
+            members: [{ userId: 'subject', ...base, ...over }],
+          }),
+        }),
+      );
+      return port.eligibleMemberCount(ROOM, { rules: trivialRules, treasuryControlling: false });
+    };
+
+    // The baseline member counts on an ORDINARY proposal…
+    expect(await countWith({})).toBe(1);
+    // …and each gate removes them, on that same ordinary proposal.
+    for (const [why, over] of refusedBy) {
+      expect(await countWith(over), why).toBe(0);
+    }
+    // A RESTRICTED account still counts: `accountMayHoldSession` admits it, and the
+    // restriction blocks public contribution rather than self-service governance.
+    expect(await countWith({ accountState: 'restricted' })).toBe(1);
+    // An UNKNOWN account state is admitted, which is this port's standing discipline for
+    // a fact it cannot establish and the safe direction besides — a wider denominator
+    // only makes quorum harder.
+    expect(await countWith({ accountState: null })).toBe(1);
   });
 
   it('a multisig pack counts its SIGNERS, not zero and not the whole roster', async () => {

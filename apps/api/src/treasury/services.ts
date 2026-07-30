@@ -16,36 +16,6 @@
 //  - `elections` adapts scheduleElection(force) for community-voted rotations.
 
 import type { GovernanceAdvisory } from '@licio/ai-governance';
-import type { WeightModel } from '@licio/governance';
-import {
-  BASIS_EXCLUSIONS,
-  ballotVerdict,
-  buildVoterFacts,
-  deriveMemberFacts,
-} from './ballot-predicate.js';
-import { type ElectorateBasisStore, InMemoryElectorateBasisStore } from './electorate-basis.js';
-
-/**
- * The weight models whose resolution can be ZERO for an otherwise-eligible
- * member — the ones whose electorate therefore needs a per-member walk.
- *
- * `one_civic_account_one_vote` and `role_based_quorum` resolve `min(1, cap)` and
- * the cap is `.positive()`, so they are always above zero.  The token models are
- * §17.5-gated and refused wholesale at signing.  That leaves the
- * participation-denominated one, which is exactly the case that starved quorum.
- */
-const WEIGHT_MODELS_THAT_CAN_RESOLVE_ZERO: ReadonlySet<WeightModel> = new Set([
-  'reputation_bounded',
-  'capped_token',
-  'quadratic_capped',
-  // `multisig_steward` resolves `resolved: false` for every NON-signer, which is a zero
-  // for basis purposes — so it needs the per-member walk too.  Without it the fast count
-  // returned the whole roster while only the m signers could vote, inflating the quorum
-  // bar; with the walk but without the signer set above it returned zero, making quorum
-  // unreachable.  The two halves of this fix are load-bearing together.
-  'multisig_steward',
-]);
-
 import {
   detectScamPatterns,
   highlightConflictOfInterest,
@@ -53,6 +23,7 @@ import {
 } from '../ai-governance/governance-ai.js';
 import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import { buildGovernanceAiDeps } from '../ai-governance/wiring.js';
+import { complianceServicesConfigured, getComplianceServices } from '../compliance/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { GovernanceService } from '../governance/service.js';
 import type { GovernanceStores } from '../governance/stores.js';
@@ -63,6 +34,14 @@ import { authMethodInventory } from '../identity/services.js';
 import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/ports.js';
 import { canExpandForRoom } from '../knomosis/reconciliation.js';
 import type { KnomosisServices } from '../knomosis/services.js';
+import {
+  BASIS_EXCLUSIONS,
+  ballotVerdict,
+  buildVoterFacts,
+  DEFAULT_ELIGIBILITY_RULES,
+  deriveMemberFacts,
+} from './ballot-predicate.js';
+import { type ElectorateBasisStore, InMemoryElectorateBasisStore } from './electorate-basis.js';
 import type {
   MembershipFactsPort,
   ProposalDeps,
@@ -164,13 +143,24 @@ export function buildMembershipFactsPort(
         },
         hasVerifiedCredential: async (userId) =>
           hasVerifiedCredential(await authMethodInventory(identity, userId)),
-        // The three compliance legs are NOT applied by this port yet — the exact-parity
-        // slice adds them to both sides at once.  Reporting them as "clear" here keeps
-        // this swap what it claims to be: a change of where the facts come from, not of
-        // which members the basis admits.
-        kycVerified: async () => true,
-        hasComplianceHold: async () => false,
-        hasHighRiskWallet: async () => false,
+        // The SAME three reads `checkGovernanceEligibility` makes, and the same shapes
+        // the statement encodes — including the suppressed-lawful-access exclusion, so a
+        // refusal cannot reveal what counsel has not permitted a member to be told.
+        kycVerified: async (userId) => {
+          if (!complianceServicesConfigured()) return false;
+          const c = getComplianceServices();
+          return (await c.kycLevel(userId)) === 'kyc_partner';
+        },
+        hasComplianceHold: async (userId) => {
+          if (!complianceServicesConfigured()) return false;
+          const c = getComplianceServices();
+          const suppressed = await c.lawfulAccess.unnotifiedCaseIdsForSubject(userId);
+          return (
+            (await c.cases.countOpenByRisk(userId, 'user', ['high', 'critical'], suppressed)) > 0
+          );
+        },
+        hasHighRiskWallet: async (userId) =>
+          (await knomosis.wallets.listByUser(userId, false)).some((w) => w.riskState === 'high'),
         contributionCount: (roomId, userId, asOf) =>
           knomosis.governanceAudit.countQualifyingByRoomActor(roomId, userId, asOf),
         now: () => knomosis.now(),
@@ -180,54 +170,84 @@ export function buildMembershipFactsPort(
   const port: MembershipFactsPort = {
     memberFacts,
     eligibleMemberCount: async (roomId, eligibility) => {
-      // Without rules the electorate is the room membership; with rules the
-      // SAME predicate that gates ballots filters the quorum basis — members
-      // who could never vote must not inflate the denominator (WS-M.4.2c).
-      // Treasury-controlling votes NEVER take the shortcut: null member facts
-      // fail closed at signing (a steward without an active subscription
-      // cannot cast a spend ballot), so they must not count in the basis.
+      // NO FAST PATH.  There used to be one: with trivial rules and no
+      // participation-denominated model, the basis returned a raw
+      // `countEligibleVoters` instead of walking, because the walk cost 4N–9N round
+      // trips and the rules could not refuse anyone.
       //
-      // A PARTICIPATION-DENOMINATED weight model also disqualifies the shortcut,
-      // because it is the other half of the ballot gate: `signProposal` refuses a
-      // zero-weight ballot, quorum counts DISTINCT RECORDED VOTERS, and under
-      // `reputation_bounded` a member with no qualifying contributions resolves
-      // to zero — so counting them here makes quorum unreachable no matter how
-      // many members vote.  Only the models whose weight can BE zero need the
-      // per-member walk; `one_civic_account_one_vote` and `role_based_quorum`
-      // resolve `min(1, cap)` with a positive cap, so they keep the fast count.
-      const zeroWeightPossible =
-        eligibility?.weight !== undefined &&
-        WEIGHT_MODELS_THAT_CAN_RESOLVE_ZERO.has(eligibility.weight.model);
-      const trivial =
-        eligibility === undefined ||
-        (!eligibility.treasuryControlling &&
-          !zeroWeightPossible &&
-          (eligibility.rules.minMembershipDays ?? 0) === 0 &&
-          (eligibility.rules.minContributions ?? 0) === 0 &&
-          eligibility.rules.requireVerifiedIdentity !== true);
-      // The electorate AS OF the freeze instant, on BOTH arms — a count taken
-      // live and an instant stamped beside it are two answers to one question.
-      if (trivial) return forum.rooms.countEligibleVoters(roomId, eligibility?.asOf);
+      // Two things ended it. The walk is now ONE statement, so the shortcut saves a
+      // fraction of one query rather than a fan-out. And the account and compliance
+      // gates below apply to EVERY ballot, not just the ones with rules — a raw count
+      // cannot express "adult, verified, KYC-standing, no hold, no flagged wallet", so
+      // taking it would count members the ballot gate refuses and inflate the quorum bar
+      // by exactly the population that cannot turn up. A shortcut that is only sound
+      // when nothing can refuse anyone stopped being sound the moment something always
+      // can.
+      //
+      // With no eligibility spec at all the pack's rules are the permissive defaults —
+      // but the route gates still apply, because they are the route's, not the pack's.
+      const spec = eligibility ?? {
+        rules: DEFAULT_ELIGIBILITY_RULES,
+        treasuryControlling: false,
+      };
       // ONE SNAPSHOT, not a fan-out.  This walked the roster and read three stores per
       // member (seven on a treasury-controlling vote), each in its own snapshot — so the
       // instant it stamped was not the instant its count described, and a member who left
       // mid-walk dropped out of a count already stamped.  `snapshot` is one statement:
       // every fact below describes one state, and its `asOf` IS that state's instant.
-      const snap = await basisStore().snapshot(roomId, eligibility.asOf);
+      const snap = await basisStore().snapshot(roomId, spec.asOf);
       let eligible = 0;
       for (const row of snap.members) {
         const userId = row.userId;
         // ROUTE-GATE PARITY for treasury-controlling counts (W13): production
         // ballots and delegations require a verified ADULT account, so members
         // who could never reach signProposal must not inflate the basis.
-        if (eligibility?.treasuryControlling === true) {
-          if (row.ageBand !== 'adult') continue;
-          if (!row.hasVerifiedCredential) continue;
+        // ROUTE-GATE PARITY, UNCONDITIONALLY.
+        //
+        // `/sign` applies authMiddleware + requireVerifiedAccount + requireAdult +
+        // requireGovernanceEligibility to EVERY ballot, not only a treasury-controlling
+        // one. This mirrored the first two and only on the treasury arm, and the third
+        // not at all — so on an ordinary proposal the denominator counted teens,
+        // unverified accounts, suspended accounts, members with no KYC standing, members
+        // under a compliance hold and members whose wallet is flagged high-risk, none of
+        // whom can record a ballot. Every one of those inflates the quorum bar: the vote
+        // needs turnout from a population that is not allowed to turn up.
+        //
+        // A `restricted` account DOES count: `accountMayHoldSession` admits it, and the
+        // restriction blocks public contribution rather than self-service governance.
+        // A KNOWN state that cannot hold a session is a refusal; an UNKNOWN one is
+        // admitted, which is this port's standing discipline for a fact it cannot
+        // establish (`memberSince`, `emailVerifiedAt`) and the safe direction besides —
+        // a wider denominator only ever makes quorum harder. `account_state` is NOT NULL
+        // with a default, so null here means no user row at all, and such a member is
+        // already refused by the age gate below (`age_band_if_known` would be null too).
+        if (
+          row.accountState !== null &&
+          row.accountState !== 'active' &&
+          row.accountState !== 'restricted'
+        ) {
+          continue;
         }
+        // `requireAdult()` denies unless the band IS adult, so an unknown age is a
+        // refusal here too — `age_band_if_known` is nullable by design (a raw date of
+        // birth is never stored), which makes "unknown" a real production state and a
+        // real refusal, not a gap.
+        if (row.ageBand !== 'adult') continue;
+        // `requireVerifiedAccount()` — a verified email, a passkey, or a wallet
+        // credential; any one of the three.
+        if (!row.hasVerifiedCredential) continue;
+        // The three `checkGovernanceEligibility` legs, FROZEN at the measurement instant
+        // per the maintainer's decision: a member who loses standing mid-window stays in
+        // the denominator and is refused a ballot, which shrinks turnout without
+        // shrinking the denominator. That direction only ever makes quorum HARDER, which
+        // is the safe way to be wrong about an electorate.
+        if (!row.kycVerified) continue;
+        if (row.hasComplianceHold) continue;
+        if (row.hasHighRiskWallet) continue;
         // The SAME derivation `memberFacts` uses, over the snapshot's row rather than
         // three live reads — one spelling, so the basis and the ballot gate cannot come
         // to disagree about a member.
-        const facts = deriveMemberFacts(row, Date.parse(snap.asOf), eligibility.asOf);
+        const facts = deriveMemberFacts(row, Date.parse(snap.asOf), spec.asOf);
         // ONE PREDICATE, the same call `signProposal` makes.  The basis used to build
         // `VoterFacts` twice in this loop — `reputationScore: 0` for eligibility and
         // `contributionCount ?? 0` for the weight — so the two halves of one answer
@@ -242,13 +262,13 @@ export function buildMembershipFactsPort(
             // false here made `resolveVotingWeight` refuse every member under
             // `multisig_steward` — a basis of ZERO, and quorum unreachable however many
             // signers cast a ballot the gate happily accepted.
-            isDesignatedSigner: eligibility.weight?.signers?.includes(userId) ?? false,
+            isDesignatedSigner: spec.weight?.signers?.includes(userId) ?? false,
           }),
           {
-            rules: eligibility.rules,
-            treasuryControlling: eligibility.treasuryControlling,
+            rules: spec.rules,
+            treasuryControlling: spec.treasuryControlling,
             recusalRequired: false,
-            weight: eligibility.weight ?? {
+            weight: spec.weight ?? {
               model: 'one_civic_account_one_vote',
               maxVotingWeightPerAccount: 1,
             },
