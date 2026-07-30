@@ -165,6 +165,7 @@ function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditReco
     nextState: row.nextState,
     reversible: row.reversible,
     linkedActionId: row.linkedActionId,
+    caseId: row.caseId,
     reportIds: row.reportIds,
     coApproverUserId: row.coApproverUserId,
     notes: row.notes,
@@ -786,6 +787,7 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
         nextState: record.nextState,
         reversible: record.reversible,
         linkedActionId: record.linkedActionId,
+        caseId: record.caseId,
         reportIds: record.reportIds,
         coApproverUserId: record.coApproverUserId,
         notes: record.notes,
@@ -806,6 +808,7 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     }
     if (filter.action !== undefined) c.push(eq(moderationAudit.action, filter.action));
     if (filter.reasonCode !== undefined) c.push(eq(moderationAudit.reasonCode, filter.reasonCode));
+    if (filter.caseId !== undefined) c.push(eq(moderationAudit.caseId, filter.caseId));
     if (filter.createdAfter !== undefined) {
       c.push(gte(moderationAudit.eventTime, new Date(filter.createdAfter)));
     }

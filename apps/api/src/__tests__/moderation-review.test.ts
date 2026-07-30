@@ -437,6 +437,71 @@ describe('buildCaseReview (snapshot + thread + side-by-side)', () => {
     expect(await buildCaseReview(services, SAFETY, 'missing')).toBeNull();
   });
 
+  it('carries THIS case history — including untargeted events, excluding other cases', async () => {
+    const subject = '00000000-0000-4000-8000-0000000000c7';
+    const mine = await insertCase({
+      caseId: 'cccccccc-0000-4000-9000-000000000001',
+      targetType: 'account',
+      targetId: subject,
+      contentKind: null,
+    });
+    const other = await insertCase({
+      caseId: 'cccccccc-0000-4000-9000-000000000002',
+      targetType: 'account',
+      targetId: subject,
+      contentKind: null,
+    });
+
+    // A case-scoped event that names NO target — the routing that put the case in a
+    // queue.  Reconstructing history by target/subject cannot see this row at all,
+    // which is half of why the panel needed `case_id`.
+    await services.audit.append({
+      actorUserId: null,
+      actorRole: null,
+      action: 'assign',
+      caseId: mine,
+      reasonCode: null,
+      targetType: 'account',
+      targetId: null,
+      subjectUserId: null,
+      priorState: 'unassigned',
+      nextState: 'reviewer-1',
+      reversible: false,
+      linkedActionId: null,
+      reportIds: [],
+      coApproverUserId: null,
+      notes: null,
+    });
+    // A DIFFERENT case about the SAME subject — the other half: a subject-keyed
+    // reconstruction sweeps this in, and it is not this case's history.
+    await services.audit.append({
+      actorUserId: null,
+      actorRole: null,
+      action: 'remove',
+      caseId: other,
+      reasonCode: null,
+      targetType: 'account',
+      targetId: subject,
+      subjectUserId: subject,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      linkedActionId: null,
+      reportIds: [],
+      coApproverUserId: null,
+      notes: null,
+    });
+
+    const review = await buildCaseReview(services, SAFETY, mine);
+    expect(review?.case_history.map((e) => e.action)).toEqual(['assign']);
+    expect(review?.case_history[0]?.prior_state).toBe('unassigned');
+    expect(review?.case_history[0]?.next_state).toBe('reviewer-1');
+
+    // And the other case sees only its own.
+    const otherReview = await buildCaseReview(services, SAFETY, other);
+    expect(otherReview?.case_history.map((e) => e.action)).toEqual(['remove']);
+  });
+
   it('#1 scopes the action palette to the case target type', async () => {
     // An ACCOUNT case must not offer content actions (hide/remove).
     const acctCase = await insertCase({

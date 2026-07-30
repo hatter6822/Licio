@@ -49,6 +49,7 @@ async function autoAssignNewCase(
     actorUserId: null, // system routing
     actorRole: null,
     action: 'assign',
+    caseId: theCase.caseId,
     targetType: theCase.targetType,
     targetId: theCase.targetId,
     subjectUserId: assignee,
@@ -464,6 +465,7 @@ export async function detectCoordination(
         actorUserId: null,
         actorRole: null,
         action: 'coordination_delay',
+        caseId: theCase.caseId,
         reasonCode: null,
         targetType: theCase.targetType,
         targetId: theCase.targetId,

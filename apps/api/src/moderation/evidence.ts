@@ -218,6 +218,9 @@ export async function applyEvidenceDecision(
       ? 'ROLE_EVIDENCE'
       : (actor.stewardRoles[0] ?? null),
     action: request.action === 'clear' ? 'evidence_clear' : request.action,
+    // Evidence decisions annotate CONTENT metadata and are not filed against a
+    // moderation case — they have their own reviewable feed.
+    caseId: null,
     targetType: 'content',
     targetId: target.contributionId,
     subjectUserId: null,

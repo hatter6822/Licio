@@ -282,6 +282,7 @@ describe('InMemoryModerationAuditStore', () => {
       nextState: 'removed',
       reversible: true,
       linkedActionId: null,
+      caseId: null,
       reportIds: [],
       coApproverUserId: null,
       notes: null,

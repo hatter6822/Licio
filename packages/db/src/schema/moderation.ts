@@ -228,6 +228,12 @@ export const moderationAudit = pgTable(
     nextState: text('next_state'),
     reversible: boolean('reversible').notNull().default(false),
     linkedActionId: uuid('linked_action_id'),
+    /** The case this record belongs to, so the review panel can show THIS case's history
+     *  rather than everything that ever happened to the same subject.  A plain uuid, not
+     *  a reference: an ON DELETE SET NULL cascade is an UPDATE, and the append-only
+     *  trigger rejects those (migration 0117).  NULL means "not case-scoped" — a queue
+     *  read, an automated block — never "case unknown but present". */
+    caseId: uuid('case_id'),
     reportIds: jsonb('report_ids').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     coApproverUserId: uuid('co_approver_user_id').references(() => users.userId, {
       onDelete: 'set null',

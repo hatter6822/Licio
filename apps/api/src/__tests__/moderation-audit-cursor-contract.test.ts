@@ -55,6 +55,7 @@ async function seed(store: ModerationAuditStore, subjectUserId: string): Promise
       nextState: null,
       reversible: false,
       linkedActionId: null,
+      caseId: null,
       reportIds: [],
       coApproverUserId: null,
       notes: `row ${i}`,

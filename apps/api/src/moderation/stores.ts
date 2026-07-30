@@ -112,6 +112,8 @@ export interface ModerationAuditRecord {
   nextState: string | null;
   reversible: boolean;
   linkedActionId: string | null;
+  /** The case this record belongs to; null when the event is not case-scoped. */
+  caseId: string | null;
   reportIds: string[];
   coApproverUserId: string | null;
   notes: string | null;
@@ -365,6 +367,8 @@ export interface AuditQueryFilter {
   subjectUserId?: string;
   action?: string;
   reasonCode?: string;
+  /** Restrict to ONE case's history — the review panel's read. */
+  caseId?: string;
   createdAfter?: string;
   createdBefore?: string;
   /** Keyset cursor on the `ordinal` DESC order (exclusive).  Preferred over `offset`:
@@ -916,6 +920,7 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     if (f.subjectUserId && r.subjectUserId !== f.subjectUserId) return false;
     if (f.action && r.action !== f.action) return false;
     if (f.reasonCode && r.reasonCode !== f.reasonCode) return false;
+    if (f.caseId && r.caseId !== f.caseId) return false;
     if (f.createdAfter && r.eventTime < f.createdAfter) return false;
     if (f.createdBefore && r.eventTime > f.createdBefore) return false;
     return true;

@@ -177,6 +177,7 @@ const caseReview: CaseReviewResponse = {
     contribution_types: { question: 3 },
     rooms_active_in: 1,
   },
+  case_history: [],
   invariant_signals: {
     mfci: { available: true, state: 'elevated', detail: null },
     scoi: { available: false, state: null, detail: null },

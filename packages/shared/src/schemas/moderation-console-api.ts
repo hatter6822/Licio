@@ -240,6 +240,33 @@ export const sideBySideViewSchema = z
   .strict();
 export type SideBySideView = z.infer<typeof sideBySideViewSchema>;
 
+// ---------------------------------------------------------------------------
+// Audit log viewer + transparency export (WS-J.2.5a/b).
+// ---------------------------------------------------------------------------
+
+export const auditRecordViewSchema = z
+  .object({
+    audit_id: uuidSchema,
+    event_time: isoTimestampSchema,
+    /** Actor handle, or null for `system` (automated blocks). */
+    actor_handle: z.string().min(1).nullable(),
+    actor_role: stewardRoleIdSchema.nullable(),
+    action: z.string().min(1).max(40),
+    reason_code: contributionReasonCodeSchema.nullable(),
+    target_type: z.string().min(1).max(20),
+    target_id: uuidSchema.nullable(),
+    prior_state: z.string().max(40).nullable(),
+    next_state: z.string().max(40).nullable(),
+    reversible: z.boolean(),
+    linked_action_id: uuidSchema.nullable(),
+    report_ids: z.array(uuidSchema),
+    co_approver_handle: z.string().min(1).nullable(),
+    /** Internal note — visible to authorized roles only. */
+    notes: z.string().max(2000).nullable(),
+  })
+  .strict();
+export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;
+
 export const caseReviewResponseSchema = z
   .object({
     case_id: uuidSchema,
@@ -260,6 +287,13 @@ export const caseReviewResponseSchema = z
     /** Preserved report-time snapshot when the live content is gone (tombstone). */
     snapshot_body: z.string().max(5000).nullable(),
     user_history: userHistorySchema,
+    /** THIS case's audit trail, newest first (WS-J.2.2 / §25.4).
+     *
+     *  Distinct from `user_history`, which answers "what has this subject been through"
+     *  across every case.  A reviewer deciding one case needs the events OF that case —
+     *  including the ones that name no target at all, like the routing and assignment
+     *  that put it in front of them. */
+    case_history: z.array(auditRecordViewSchema),
     invariant_signals: invariantSignalsPanelSchema,
     side_by_side: sideBySideViewSchema.nullable(),
     /** The console actions the requesting reviewer's role may take here. */
@@ -449,33 +483,6 @@ export const appealDecisionResponseSchema = z
   })
   .strict();
 export type AppealDecisionResponse = z.infer<typeof appealDecisionResponseSchema>;
-
-// ---------------------------------------------------------------------------
-// Audit log viewer + transparency export (WS-J.2.5a/b).
-// ---------------------------------------------------------------------------
-
-export const auditRecordViewSchema = z
-  .object({
-    audit_id: uuidSchema,
-    event_time: isoTimestampSchema,
-    /** Actor handle, or null for `system` (automated blocks). */
-    actor_handle: z.string().min(1).nullable(),
-    actor_role: stewardRoleIdSchema.nullable(),
-    action: z.string().min(1).max(40),
-    reason_code: contributionReasonCodeSchema.nullable(),
-    target_type: z.string().min(1).max(20),
-    target_id: uuidSchema.nullable(),
-    prior_state: z.string().max(40).nullable(),
-    next_state: z.string().max(40).nullable(),
-    reversible: z.boolean(),
-    linked_action_id: uuidSchema.nullable(),
-    report_ids: z.array(uuidSchema),
-    co_approver_handle: z.string().min(1).nullable(),
-    /** Internal note — visible to authorized roles only. */
-    notes: z.string().max(2000).nullable(),
-  })
-  .strict();
-export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;
 
 export const auditQuerySchema = z
   .object({

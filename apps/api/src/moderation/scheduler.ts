@@ -86,6 +86,7 @@ export async function runModerationTick(
         actorUserId: null,
         actorRole: null,
         action: 'revert',
+        caseId: action.caseId,
         reasonCode: action.reasonCode,
         targetType: action.targetType,
         targetId: action.targetId,

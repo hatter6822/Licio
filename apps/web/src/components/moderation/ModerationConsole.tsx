@@ -926,6 +926,46 @@ function CaseReviewDialog({
             ) : null}
           </section>
 
+          {/* THIS case's trail, which is a different question from the user history
+              above: that one spans every case the subject has ever been in, while a
+              reviewer deciding this case needs the events OF this case — including the
+              ones that name no target at all, like the routing and assignment that put
+              it in front of them.  Each row NAMES ITS EDGE (prior → next), so a
+              takeover or a re-route reads as the transition it was. */}
+          <section aria-label={t('console.caseHistory', 'Case history')} className="text-xs">
+            <h3 className="text-xs font-semibold uppercase text-ink-muted">
+              {t('console.caseHistory', 'Case history')}
+            </h3>
+            {data.case_history.length > 0 ? (
+              <ul className="mt-1 flex flex-col gap-1">
+                {data.case_history.map((entry) => (
+                  <li key={entry.audit_id} className="rounded bg-surface p-2 text-ink">
+                    <span>
+                      {entry.action}
+                      {entry.reason_code ? ` · ${reasonLabel(entry.reason_code)}` : ''}
+                    </span>
+                    <span className="text-ink-muted">
+                      {' · '}
+                      {entry.actor_handle ?? t('console.systemActor', 'system')}
+                      {' · '}
+                      {entry.event_time.slice(0, 16).replace('T', ' ')}
+                    </span>
+                    {entry.prior_state || entry.next_state ? (
+                      <span className="text-ink-muted">
+                        {' · '}
+                        {entry.prior_state ?? '—'} → {entry.next_state ?? '—'}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-ink-muted">
+                {t('console.caseHistoryEmpty', 'No recorded events for this case yet.')}
+              </p>
+            )}
+          </section>
+
           {data.side_by_side ? (
             <section aria-label={t('console.diff', 'Edited since report')} className="text-xs">
               <h3 className="text-xs font-semibold uppercase text-warning-on-soft">

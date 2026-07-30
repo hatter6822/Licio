@@ -362,6 +362,7 @@ export function createModerationConsoleRoutes() {
             actorUserId: actor.userId,
             actorRole: actor.stewardRoles[0] ?? null,
             action: 'assign',
+            caseId: theCase.caseId,
             targetType: theCase.targetType,
             targetId: theCase.targetId,
             // NAMES BOTH HOLDERS.  The row recorded an `assign` on the target with
@@ -503,6 +504,7 @@ export function createModerationConsoleRoutes() {
               actorUserId: actor.userId,
               actorRole: actor.stewardRoles[0] ?? null,
               action: 'assign',
+              caseId: theCase.caseId,
               targetType: theCase.targetType,
               targetId: theCase.targetId,
               // Named here too — the bulk path wrote the row with no identities and

@@ -29,6 +29,8 @@ export interface AuditWriteInput {
   nextState?: string | null;
   reversible?: boolean;
   linkedActionId?: string | null;
+  /** The case this event belongs to.  Omitted ⇒ not case-scoped. */
+  caseId?: string | null;
   reportIds?: string[];
   coApproverUserId?: string | null;
   notes?: string | null;
@@ -57,6 +59,7 @@ export async function writeAudit(
       nextState: input.nextState ?? null,
       reversible: input.reversible ?? false,
       linkedActionId: input.linkedActionId ?? null,
+      caseId: input.caseId ?? null,
       reportIds: input.reportIds ?? [],
       coApproverUserId: input.coApproverUserId ?? null,
       notes: input.notes ?? null,

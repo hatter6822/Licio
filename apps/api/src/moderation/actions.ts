@@ -370,6 +370,10 @@ export async function applyAction(
     actorUserId: actor.userId,
     actorRole: action.actorRole,
     action: request.action,
+    // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the
+    // same value the action row was written with, so the history cannot be steered
+    // onto another case by a forged field.
+    caseId: linkedCase?.caseId ?? null,
     reasonCode,
     targetType: request.target_type,
     targetId: request.target_id,
@@ -594,6 +598,9 @@ export async function performRevert(
     actorUserId: actor.userId,
     actorRole: revert.actorRole,
     action: 'revert',
+    // The REVERTED action's case, so a revert lands in the history of the case that
+    // produced it rather than nowhere.
+    caseId: original.caseId,
     reasonCode: revertReason,
     targetType: original.targetType,
     targetId: original.targetId,

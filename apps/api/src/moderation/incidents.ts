@@ -129,6 +129,9 @@ export async function resolveIncident(
     actorUserId: actor.userId,
     actorRole: actor.stewardRoles[0] ?? null,
     action: 'incident_resolve',
+    // An incident may or may not have reached a case; when it has, the resolution
+    // belongs in that case's history.
+    caseId: incident.caseId,
     targetType: incident.targetType,
     targetId: incident.targetId,
     subjectUserId: null,

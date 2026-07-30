@@ -176,6 +176,9 @@ export function createAutoModerationSink(services: ModerationServices): AutoMode
       await writeAudit(services, {
         actorUserId: null,
         actorRole: null,
+        // No case: an automated pre-publication block precedes any report, so there
+        // is nothing to file it under.  NULL here means exactly that.
+        caseId: null,
         action: 'auto_block',
         reasonCode: input.reasonCode,
         targetType: 'content',

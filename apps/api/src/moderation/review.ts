@@ -23,6 +23,7 @@ import {
   type UserHistoryAction,
 } from '@licio/shared';
 import { actionValidForTarget } from './actions.js';
+import { auditToView } from './audit.js';
 import {
   availableConsoleActions,
   maySeeCoordinationDetail,
@@ -244,6 +245,12 @@ export async function buildReportQueue(
   return { emergency, standard, next_cursor: nextCursor, filtered_total: filteredTotal };
 }
 
+/** How much of a case's trail the panel carries.  A case accumulates a bounded number of
+ *  events (reports route it, a steward claims it, an action lands, an appeal decides it),
+ *  so this is a guard against a pathological case rather than a paging boundary — the
+ *  full trail stays reachable through the audit viewer's `case` filter. */
+const CASE_HISTORY_LIMIT = 200;
+
 async function resolveHandles(
   services: ModerationServices,
   userIds: readonly string[],
@@ -365,8 +372,14 @@ export async function buildCaseReview(
     ),
   );
 
-  const [history, signals, snapshot, thread] = await Promise.all([
+  const [history, caseTrail, signals, snapshot, thread] = await Promise.all([
     buildUserHistory(services, subjectUserId),
+    // THIS case's trail (WS-J.2.2 / §25.4).  The panel's contract has always claimed to
+    // render it; it could not until `case_id` existed on the record, because the trail
+    // was addressable only by target/subject — which is a different question, and
+    // answered wrongly in both directions (unrelated cases about the same subject swept
+    // in; case-scoped events that name no target, like routing and assignment, missed).
+    services.audit.list({ caseId, limit: CASE_HISTORY_LIMIT }),
     targetId === null
       ? defaultInvariantPort.signalsFor(theCase.targetType, '', subjectUserId, false)
       : services.invariants.signalsFor(
@@ -383,6 +396,14 @@ export async function buildCaseReview(
       : Promise.resolve({ items: [], reportedContributionId: null }),
   ]);
 
+  // Handles for the trail's actors — resolved after the fetch, since the ids come from it.
+  const caseTrailHandles = await resolveHandles(
+    services,
+    caseTrail.flatMap((r) =>
+      [r.actorUserId, r.coApproverUserId].filter((x): x is string => x !== null),
+    ),
+  );
+
   return {
     case_id: theCase.caseId,
     target_type: theCase.targetType,
@@ -397,6 +418,9 @@ export async function buildCaseReview(
     reported_contribution_id: thread.reportedContributionId,
     snapshot_body: snapshot ? snapshot.originalBody : null,
     user_history: history,
+    // Notes ARE included: `/cases/:id` is already behind the console's steward gate, and
+    // the reviewer reading this panel is the person the note was written for.
+    case_history: caseTrail.map((r) => auditToView(r, caseTrailHandles, true)),
     invariant_signals: signals,
     side_by_side: snapshot?.editedAfterReport
       ? {
