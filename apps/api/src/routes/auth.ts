@@ -11,6 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  accountMayHoldSession,
   authSessionResultSchema,
   authStatusResponseSchema,
   defaultPersonalizationSettings,
@@ -97,7 +98,11 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         // route guard bounced them to /login and the appeal they are entitled
         // to file was unreachable.  `suspended`/`deleted`/`deactivated` remain
         // unauthenticated here, as they are at the middleware.
-        if (user?.accountState !== 'active' && user?.accountState !== 'restricted') {
+        // `user === null` stated separately: the previous `user?.accountState !==
+        // …` spelling narrowed `user` as a side effect of the optional chain, and
+        // a shared predicate cannot, so the absent-user case has to be said out
+        // loud rather than ride on the shape of the comparison.
+        if (user === null || !accountMayHoldSession(user.accountState)) {
           return c.json(unauth);
         }
         return c.json(

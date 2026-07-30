@@ -264,6 +264,25 @@ describe('WS-Q.2.1 submission guards', () => {
     expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(false);
   });
 
+  it('a RESTRICTED admin KEEPS the read arm — the soft resolver must admit exactly what authMiddleware does', async () => {
+    // The complementary direction to the test above, and the one the active-only
+    // spelling got wrong.  A `restrict` sanction is permitted on any
+    // non-deactivated subject with no staff immunity, and it costs the WRITE
+    // paths — not the account.  With the resolver reading `=== 'active'` a
+    // restricted admin had its roles collapsed to `[]` and silently lost
+    // private-server-room READ, while the same session authenticated normally,
+    // `/auth/status` reported it authenticated, and requireSteward/requireCounsel
+    // still authorized it.  That disagreement between an authenticated route and
+    // a soft resolver about one account is precisely what the `restricted` work
+    // set out to remove.
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin5', admin: true });
+    const record = await fixture.forum.rooms.getById(room);
+    if (!record) throw new Error('setup');
+    await fixture.identity.store.updateUser(admin.userId, { accountState: 'restricted' });
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(true);
+  });
+
   it('the debate-override platform-admin arm carries the per-session MFA bar (codex: require MFA before admin overrides)', async () => {
     // A judged arena over a real public-room story, planted directly at the
     // store (the full correction→arena lifecycle is the forum-debate suite's

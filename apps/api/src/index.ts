@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { createDbClient, pingDatabase } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
+import { accountMayHoldSession } from '@licio/shared';
 import {
   parseGovernanceExtraRuntimeUrls,
   parseGovernanceModelHubAliases,
@@ -1083,13 +1084,18 @@ setModerationServices(moderationServices);
 forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // The WS-Q read bar's platform-ADMIN arm (2026-07 final-line-of-defense
 // decision): the content-visibility chokepoint consults the identity store's
-// platform roles on the private-SERVER-room miss path only.  ACTIVE accounts
-// only (codex on PR #146): soft-session read routes never run authMiddleware's
-// account-state check, so without this a suspended admin's still-valid cookie
-// would keep the private-room read arm.
+// platform roles on the private-SERVER-room miss path only.  Soft-session read
+// routes never run authMiddleware's account-state check, so without this a
+// SUSPENDED admin's still-valid cookie would keep the private-room read arm.
+//
+// The bar is `accountMayHoldSession`, not `=== 'active'`: this resolver must
+// admit exactly what the middleware admits, and a hand-written copy of that rule
+// stayed active-only after the middleware learned about `restricted` — costing a
+// restricted admin its private-room READ while the same session authenticated
+// fine everywhere else.  See that predicate for why it is defined once.
 forumServices.platformRolesReader = async (id) => {
   const user = await identityServices.store.getUser(id);
-  return user?.accountState === 'active' ? user.roles : [];
+  return accountMayHoldSession(user?.accountState) ? (user?.roles ?? []) : [];
 };
 // WS-J.2.6 pre-checks on the contribution submission path: spam/malware
 // auto-block (recorded as appealable system actions) + duplicate-flood/policy-

@@ -12,6 +12,7 @@
 // LICIO_E2E=1. It is NEVER the production server (that is src/index.ts), so the
 // test-auth route cannot be a production backdoor.
 import { serve } from '@hono/node-server';
+import { accountMayHoldSession } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import { Hono } from 'hono';
 import { seedAiGovernance } from './ai-governance/seed.js';
@@ -143,7 +144,7 @@ await forumServices.reloadConfig();
 // incl. the active-account gate).
 forumServices.platformRolesReader = async (id) => {
   const user = await identityServices.store.getUser(id);
-  return user?.accountState === 'active' ? user.roles : [];
+  return accountMayHoldSession(user?.accountState) ? (user?.roles ?? []) : [];
 };
 // WS-T challenge policy — the KYC capacity-boost reader (mirrors the
 // production boot: lazy compliance resolution, fail-closed to false).
