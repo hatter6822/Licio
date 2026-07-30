@@ -1027,6 +1027,146 @@ describe('WS-S.4.3 connectPrivatePeer (live carrier)', () => {
     // legitimately CPU-heavy — give it ample headroom over the 5s default so slower CI isn't flaky.
   }, 30_000);
 
+  it('a forgery REUSING the honest signalling key no longer evicts it (PRIV-CAP-ORDER)', async () => {
+    // `selectFreshestCandidates` ran BEFORE cap verification and is last-write-wins
+    // keyed only on `signaling_public_key`, resolved by the ANNOUNCER-CHOSEN
+    // `expires_at`.  So a forgery that KEPT the honest key won the map slot, and was
+    // then itself dropped for failing verification — leaving the honest capped device
+    // in NEITHER set and never dialled.  The cap binding added earlier could not help:
+    // the attacker authors a TIER, not an order.
+    const p2p = await import('@licio/private-p2p');
+    const cap = await import('@licio/private-p2p/rendezvous-cap');
+    const created = await p2p.createPrivateRoom({
+      roomId: 'room-cap-order',
+      founderMemberId: 'founder',
+      founderDeviceId: 'founder-dev',
+      profile: PROFILE,
+    });
+    const epoch = Number(created.epochState.epoch);
+    const rendezvousKey = created.epochState.keys.rendezvousKey;
+    const timeBucket = p2p.rendezvousTimeBucket(Date.now());
+    const roomBlindId = await p2p.deriveRoomBlindId(rendezvousKey, epoch, timeBucket);
+
+    const issuer = cap.RendezvousIssuer.generate(String(epoch));
+    const member = new cap.RendezvousMember();
+    member.installCredential(
+      String(epoch),
+      issuer.issueForCommitment(member.commitment),
+      issuer.publicKey,
+    );
+    const issuerKey = member.issuerKey(String(epoch));
+    if (!issuerKey) throw new Error('member not enrolled');
+    const issuerPk = cap.issuerKeyFromBytes(issuerKey);
+    const hooks = {
+      build: () => null,
+      filterVerified: (
+        caps: ReadonlyArray<{
+          proof: string;
+          pseudonym: string;
+          signalingPublicKey: Uint8Array;
+          peerDeviceId: string;
+        }>,
+        rb: string,
+        e: number,
+        b: number,
+        now: number,
+      ): number[] =>
+        cap
+          .filterVerifiedPresence(
+            caps.map((c, i) => ({
+              pseudonym: cap.fromBase64Url(c.pseudonym),
+              proof: cap.fromBase64Url(c.proof),
+              epoch: String(e),
+              bucket: b,
+              binding: cap.dialBinding(c.signalingPublicKey, c.peerDeviceId),
+              value: i,
+            })),
+            issuerPk,
+            new TextEncoder().encode(rb),
+            { nowMs: now },
+          )
+          .map((v) => v.value),
+    };
+
+    // The HONEST peer: a real cap, bound to its own dial identity.
+    const honestSigKey = (await p2p.generateX25519KeyPair()).publicKey;
+    const honestCap = cap.buildAnnouncementCap(
+      member,
+      roomBlindId,
+      epoch,
+      timeBucket,
+      honestSigKey,
+      'honest-dev',
+    );
+    if (!honestCap) throw new Error('honest cap not built');
+    const sharedSig = p2p.toBase64Url(honestSigKey);
+
+    const rendezvous = inMemoryRendezvous();
+    const now = Date.now();
+    // Honest first, with the ordinary 30-minute TTL every honest client uses.
+    await rendezvous.announce(
+      await p2p.buildRendezvousRecord({
+        rendezvousKey,
+        epoch,
+        timeBucket,
+        deviceId: 'honest-dev',
+        announcement: {
+          schema: 'licio.private.rendezvous_announcement.v1',
+          peer_device_id: 'honest-dev',
+          signaling_public_key: sharedSig,
+          transport_hints: [],
+          cap: { proof: honestCap.proof, pseudonym: honestCap.pseudonym },
+        },
+        nowMs: now,
+      }),
+    );
+    // THE FORGERY: the SAME signalling key, a later expiry, and a cap that cannot
+    // verify.  Announced second so it is the one a last-write-wins merge keeps.
+    await rendezvous.announce(
+      await p2p.buildRendezvousRecord({
+        rendezvousKey,
+        epoch,
+        timeBucket,
+        deviceId: 'attacker-dev',
+        announcement: {
+          schema: 'licio.private.rendezvous_announcement.v1',
+          peer_device_id: 'attacker-dev',
+          signaling_public_key: sharedSig,
+          transport_hints: [],
+          cap: { proof: 'AAAAAAAAAAAAAAAA', pseudonym: 'BBBBBBBBBBBBBBBB' },
+        },
+        nowMs: now + 600_000,
+      }),
+    );
+
+    let dialled = 0;
+    await expect(
+      connectPrivatePeer({
+        p2p,
+        rendezvous,
+        roomIdCommitment: created.roomIdCommitment,
+        epoch,
+        rendezvousKey,
+        selfDeviceId: 'founder-dev',
+        selfSigningKey: created.founder.signingKeyPair.privateKey,
+        resolveDevice: () => undefined,
+        transportMode: 'direct_allowed' as const,
+        nowMs: () => Date.now(),
+        pollIntervalMs: 1,
+        timeoutMs: 400,
+        rendezvousCap: hooks,
+        rtcFactory: () => {
+          dialled += 1;
+          return new FakePeer(new FakeLink());
+        },
+      }),
+    ).rejects.toThrow();
+    // THE ASSERTION: the honest capped record survived the forgery and was dialled.
+    // Before the fix this was 0 — the honest record was evicted by the merge and the
+    // forgery was then dropped at verification, so nothing was left to dial.
+    expect(dialled).toBeGreaterThan(0);
+  }, 30_000);
+
   it('ITERATES to the next candidate when the first dial fails (PRIV-CARRIER-3)', async () => {
     const p2p = await import('@licio/private-p2p');
     const created = await p2p.createPrivateRoom({

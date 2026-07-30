@@ -267,11 +267,22 @@ slice is closed on the convergence side:
   (`dialBinding`: the signalling key AND the claimed `peer_device_id`,
   length-prefixed).  Binding the key alone left a targeted eviction: a member
   could open an honest announcement, keep its signalling key so the proof still
-  verified, swap the device id, and re-seal with a later expiry — and
-  `selectFreshestCandidates` dedups by the signalling key BEFORE cap
-  verification, so the forgery replaced the honest record, the dial reached the
-  honest peer, failed the §15.5 claimed-device check, and cooled down that
-  device's (now deterministic) key.
+  verified, swap the device id, and re-seal with a later expiry — the dial then
+  reached the honest peer, failed the §15.5 claimed-device check, and cooled down
+  that device's (now deterministic) key.
+- The carrier VERIFIES CAPS BEFORE deduplicating, and deduplicates WITHIN each
+  tier.  `selectFreshestCandidates` resolves a key collision by
+  `record.expires_at`, which the ANNOUNCER chooses, so running it across a mixed
+  set was itself the eviction primitive: a forgery keeping an honest signalling key
+  won the slot regardless of the binding, and was then dropped for failing
+  verification — leaving the honest capped device in NEITHER set and never dialled.
+  Binding and ordering were two separate holes.
+- The dial tier is the VERIFIED cap, never a present one.  `ann.cap` is bounded
+  base64url and nothing else, so partitioning on presence let any current-epoch
+  member choose their own tier and put an honest uncapped peer outside the pool
+  entirely.  The verified tier also YIELDS on alternate rounds: owning every round
+  lets a capped member refresh a valid cap under a new signalling key after each
+  failed dial and consume the whole deadline.
 - Dial selection ALTERNATES between the freshest candidate and the most starved
   one (`pickDialCandidate`).  The failed-dial cooldown is keyed by the record's
   ephemeral key, so a member rotating it puts a fresh spoof at the head of every

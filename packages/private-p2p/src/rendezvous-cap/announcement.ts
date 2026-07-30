@@ -25,11 +25,16 @@ export interface AnnouncementCap {
  * Binding the signalling key ALONE left a gap: a hostile member could open an
  * honest announcement, keep its `signaling_public_key` so the proof still
  * verified, swap `peer_device_id`, and re-seal under the room key with a later
- * expiry.  `selectFreshestCandidates` dedups by the signalling key BEFORE cap
- * verification, so the forgery replaced the honest record; the dial then
- * reached the honest peer, failed the §15.5 claimed-device check, and cooled
- * down the honest device's now-deterministic key.  A cap that authorises a dial
- * has to cover everything the dial acts on.
+ * expiry — the dial then reached the honest peer, failed the §15.5 claimed-device
+ * check, and cooled down the honest device's now-deterministic key.  A cap that
+ * authorises a dial has to cover everything the dial acts on.
+ *
+ * The binding does not, on its own, close the EVICTION: the carrier used to dedup
+ * by signalling key before verifying any cap, so a forgery keeping that key won the
+ * slot whatever the binding said, and was then dropped for failing verification —
+ * the honest device in neither set.  That is fixed in the carrier
+ * (`connect-peer.ts`: verify first, dedup within each tier), not here.  Two
+ * different holes; this note used to read as though the binding covered both.
  *
  * Length-prefixed, never `||`: a field boundary that can move is a field
  * boundary an attacker can move.

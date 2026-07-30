@@ -642,10 +642,16 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
 
 // --- Dial selection: neither ordering nor flooding may starve a candidate ------------------------
 describe('pickDialCandidate (an attacker-authored order cannot starve a peer)', () => {
-  const c = (key: string, capped = false) => ({
-    ann: capped
-      ? { signaling_public_key: key, cap: { proof: 'p', pseudonym: 'n' } }
-      : { signaling_public_key: key },
+  /**
+   * `capVerified` is the VERDICT the carrier stamps after `filterVerified`, not the
+   * presence of `ann.cap`.  These fixtures used to build the "capped" candidate as
+   * `cap: {proof:'p', pseudonym:'n'}` — an unverifiable stub — and assert it won every
+   * round, which asserted the ATTACK as desired behaviour: any current-epoch member
+   * can stamp exactly that.
+   */
+  const c = (key: string, capVerified = false) => ({
+    ann: { signaling_public_key: key },
+    capVerified,
   });
 
   it('BRACKETING no longer works — the honest record in the middle is reached', () => {
@@ -679,18 +685,47 @@ describe('pickDialCandidate (an attacker-authored order cannot starve a peer)', 
     expect([...seen].sort()).toEqual(['a', 'b', 'c', 'd']);
   });
 
-  it('prefers the CAPPED tier, which the Tier-2 cap bounds to one slot per device', () => {
+  it('LEADS with the verified tier but ALTERNATES, so Tier-1 is never starved', () => {
     // The ordering fix alone cannot bound anything — ordering is the attacker's
     // input.  The bound comes from the cap: `filterVerified` dedups by verified
-    // pseudonym, so a flooder contributes exactly ONE capped candidate however
-    // many records it mints.  Selecting from that subset is what makes the
-    // rotation's coverage meaningful.
-    const sample = [c('E_flood_1'), c('E_flood_2'), c('E_flood_3'), c('E_capped', true)];
-    for (let round = 0; round < 4; round += 1) {
-      expect(pickDialCandidate(sample, round, new Set())?.ann.signaling_public_key).toBe(
-        'E_capped',
+    // pseudonym, so a flooder contributes exactly ONE verified candidate however
+    // many records it mints.
+    //
+    // But the verified tier must not own EVERY round.  A capped member can refresh a
+    // valid cap under a NEW signalling key after each failed dial, defeating the
+    // key-based cooldown and consuming the whole deadline; and even with no attacker,
+    // three stale capped presences exhaust the candidate timeouts before any
+    // reachable Tier-1 peer is tried.  So it leads on even rounds and yields on odd.
+    const sample = [c('E_flood_1'), c('E_flood_2'), c('E_flood_3'), c('E_verified', true)];
+    expect(pickDialCandidate(sample, 0, new Set())?.ann.signaling_public_key).toBe('E_verified');
+    expect(pickDialCandidate(sample, 2, new Set())?.ann.signaling_public_key).toBe('E_verified');
+    // Odd rounds go to Tier-1 — which is what stops the verified tier monopolising.
+    expect(pickDialCandidate(sample, 1, new Set())?.capVerified).toBe(false);
+    expect(pickDialCandidate(sample, 3, new Set())?.capVerified).toBe(false);
+    // With nothing else, the verified tier still takes every round.
+    const onlyVerified = [c('E_only', true)];
+    for (let round = 0; round < 3; round += 1) {
+      expect(pickDialCandidate(onlyVerified, round, new Set())?.ann.signaling_public_key).toBe(
+        'E_only',
       );
     }
+  });
+
+  it('a cap nobody VERIFIED buys no tier at all', () => {
+    // The attacker authors a TIER, not an order — which is why presence cannot be the
+    // partition.  An unverified candidate sits with Tier-1 however it is labelled.
+    const flood = Array.from({ length: 20 }, (_unused, i) => c(`E_flood_${i}`));
+    const honest = c('E_honest');
+    const seen = new Set<string>();
+    const tried = new Set<string>();
+    for (let round = 0; round < 25; round += 1) {
+      const pick = pickDialCandidate([...flood, honest], round, tried);
+      if (pick === undefined) break;
+      seen.add(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
+    }
+    // Every candidate is reached, because none of them claimed a tier.
+    expect(seen.has('E_honest')).toBe(true);
   });
 
   it('falls back to the whole pool once everything in it has been tried', () => {
