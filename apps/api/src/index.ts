@@ -277,6 +277,7 @@ import {
 } from './lib/reply-notifications.js';
 import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
+import { notFoundHandler } from './middleware/error-handler.js';
 import { actorQueues } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
@@ -2319,7 +2320,11 @@ if (
     });
     // Mount the control routes ahead of the CSRF-protected app (sessionless),
     // the same placement the E2E test-auth route uses.
+    // `notFound` on the WRAPPER too: `route()` copies the child's routes up, so a
+    // path matching neither reaches THIS instance's handler, and Hono's default is
+    // plain text — off the `apiErrorSchema` contract every client parses.
     appFetch = new Hono()
+      .notFound(notFoundHandler)
       .route('/v1/dev/simulator', createSimulatorRoutes(simulator))
       .route('/', baseApp).fetch;
     if (requested !== 'idle') {

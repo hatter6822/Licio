@@ -86,7 +86,12 @@ describe('the BFF terminal error handler', () => {
     if (!parsed.success) return;
     // The status maps to the spelling the rest of the API already uses for it,
     // so a client `switch` sees one vocabulary wherever the refusal came from.
-    expect(parsed.data.error.code).toBe('oversized_request');
+    // `payload_too_large` — the spelling `stories.ts`/`forum.ts` already use for
+    // this condition.  `oversized_request` lives only in the LCAP
+    // `{error: '<string>'}` envelope, which is not `apiErrorSchema`, so mapping
+    // 413 to it gave the one condition the docstring cites as its example TWO
+    // spellings.
+    expect(parsed.data.error.code).toBe('payload_too_large');
     expect(parsed.data.error.message).toBe('Payload too large');
   });
 
@@ -130,5 +135,32 @@ describe('the BFF terminal error handler', () => {
     expect(await res.clone().text()).not.toBe('Internal Server Error');
     expect(apiErrorSchema.parse(await res.json()).error.code).toBe('internal_error');
     for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("the NOT-FOUND half of Hono's default", () => {
+  // The error handler had repaired one half of Hono's two-line default and left
+  // the other: `app.notFound` was registered nowhere, so `c.text('404 Not Found',
+  // 404)` shipped.  `normalizeError` safe-parses the body against
+  // `apiErrorSchema`, fails, and falls back to `http_404` plus the bare status
+  // text — verbatim the failure mode this module's header says it exists to remove.
+  it('answers an UNMATCHED path in the API error contract, not plain text', async () => {
+    const res = await createApp().request('/v1/definitely-not-a-route');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const parsed = apiErrorSchema.safeParse(await res.json());
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.error.code).toBe('not_found');
+  });
+
+  it('answers a WRONG METHOD on an existing path the same way', async () => {
+    // Hono routes by method, so this reaches the not-found handler too — and it is
+    // the shape a client is most likely to hit by accident.  A SAFE method on a
+    // POST-only path: a mutation method would be refused 403 by the CSRF
+    // middleware before routing ever ran, which tests the wrong thing.
+    const res = await createApp().request('/v1/telemetry');
+    expect(res.status).toBe(404);
+    const parsed = apiErrorSchema.safeParse(await res.json());
+    expect(parsed.success).toBe(true);
   });
 });

@@ -25,7 +25,7 @@
 // or an upstream URL, and none of that belongs in a response body.  The
 // detail goes to the log, keyed by the same `requestId` the response carries
 // in `X-Request-ID`, so an operator can join the two.
-import type { ErrorHandler } from 'hono';
+import type { Context, Env, ErrorHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { AppEnv } from '../app.js';
 import { createLogger } from '../lib/logger.js';
@@ -65,7 +65,15 @@ const HTTP_EXCEPTION_CODES: Readonly<Record<number, string>> = {
   403: 'forbidden',
   404: 'not_found',
   409: 'conflict',
-  413: 'oversized_request',
+  // `payload_too_large`, NOT `oversized_request`.  The claim above — that these
+  // are "the spellings the rest of the API already uses" — was false for 413:
+  // `stories.ts` and `forum.ts` both answer an oversized upload with
+  // `payload_too_large` (pinned in `stories.test.ts`), while
+  // `oversized_request` exists only inside the LCAP/rendezvous
+  // `{error: '<string>'}` envelope, which is not `apiErrorSchema` and so is not
+  // an `error.code` any client can switch on.  Mapping 413 to it introduced a
+  // SECOND spelling for the one condition the docstring cites as its example.
+  413: 'payload_too_large',
   415: 'unsupported_media_type',
   422: 'unprocessable_entity',
   429: 'rate_limited',
@@ -101,3 +109,29 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
     500,
   );
 };
+
+/**
+ * The terminal NOT-FOUND handler.
+ *
+ * Hono installs its own default — `c.text('404 Not Found', 404)` — and this app
+ * registered nothing over it, so an unmatched path (or a wrong method on an
+ * existing path) answered with PLAIN TEXT.  `normalizeError` on the client
+ * safe-parses the body against `apiErrorSchema`, fails, and falls back to
+ * `http_404` plus the bare status text: verbatim the failure mode this module's
+ * own header says it exists to eliminate ("`c.text(...)` is not the API
+ * contract").  The error handler above had repaired one half of Hono's two-line
+ * default and left the other in place.
+ *
+ * Exported because THREE Hono instances need it: the production app, and the two
+ * wrappers that mount it (the DEV simulator and the E2E harness).  A sub-app's
+ * `notFound` does not cover the parent's unmatched paths — `route()` copies the
+ * child's ROUTES up, so anything matching neither reaches the PARENT's handler —
+ * which is why registering it once inside `createApp` would have left both
+ * wrappers speaking plain text.
+ */
+// Generic over `Env` deliberately: it reads nothing from the context beyond
+// `json`, and the two wrappers are plain `new Hono()` (BlankEnv) while the app is
+// `Hono<AppEnv>` — pinning it to `AppEnv` made it unusable at exactly the two
+// registration sites that needed it most.
+export const notFoundHandler = <E extends Env>(c: Context<E>): Response =>
+  c.json({ error: { code: 'not_found', message: 'Resource not found' } }, 404);

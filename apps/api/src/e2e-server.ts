@@ -79,6 +79,7 @@ import { InMemoryLcapServerStore } from './lcap/store.js';
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { notFoundHandler } from './middleware/error-handler.js';
 import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
 import {
@@ -351,7 +352,10 @@ await seedAiGovernance(aiGovernanceServices);
 
 // --- App: the test-auth route first (no CSRF — it bootstraps the session),
 // then the full production app for everything else. --------------------------
+// `notFound` on the WRAPPER too — see the note in `index.ts`: an unmatched path
+// reaches this instance, not the mounted app, and Hono's default is plain text.
 const app = new Hono()
+  .notFound(notFoundHandler)
   .route('/v1/test-auth', createTestAuthRoute(identityServices))
   // Test-only fixture signer (never in the production AppType): the Playwright
   // fake EIP-6963 provider proxies its sign requests here so the browser
