@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
 import { useFocusTrap } from './useFocusTrap.js';
 
 function Trap({ active, withFocusable }: { active: boolean; withFocusable: boolean }) {
@@ -67,5 +68,81 @@ describe('useFocusTrap', () => {
 
     rerender(<Trap active={false} withFocusable />);
     expect(outside).toHaveFocus(); // focus restored to the pre-trap element
+  });
+});
+
+describe('nested traps', () => {
+  // `Dialog` portals to `document.body`, so a dialog rendered inside another is a
+  // DOM SIBLING of it. Both traps listen on `document` in the capture phase and
+  // the outer registered first, so it ran first, saw focus outside ITS container,
+  // and preventDefault()ed every Tab raised in the inner dialog — with `inert`
+  // support its own `first.focus()` no-ops, so focus never moved at all.
+  function Nested({
+    onOuterEscape,
+    onInnerEscape,
+  }: {
+    onOuterEscape: () => void;
+    onInnerEscape: () => void;
+  }): React.ReactElement {
+    const outer = useFocusTrap<HTMLDivElement>(true, { onEscape: onOuterEscape });
+    const inner = useFocusTrap<HTMLDivElement>(true, { onEscape: onInnerEscape });
+    return (
+      <>
+        <div ref={outer} data-testid="outer">
+          <button type="button">outer-a</button>
+          <button type="button">outer-b</button>
+        </div>
+        <div ref={inner} data-testid="inner">
+          <button type="button">inner-a</button>
+          <button type="button">inner-b</button>
+        </div>
+      </>
+    );
+  }
+
+  it('lets Tab move WITHIN the inner trap instead of being cancelled by the outer one', async () => {
+    const user = userEvent.setup();
+    render(<Nested onOuterEscape={vi.fn()} onInnerEscape={vi.fn()} />);
+    const innerA = screen.getByRole('button', { name: 'inner-a' });
+    const innerB = screen.getByRole('button', { name: 'inner-b' });
+    innerA.focus();
+    expect(innerA).toHaveFocus();
+    await user.tab();
+    // Before the fix focus stayed parked on `inner-a` through every Tab.
+    expect(innerB).toHaveFocus();
+  });
+
+  it('wraps at the end of the INNER trap, not into the outer one', async () => {
+    const user = userEvent.setup();
+    render(<Nested onOuterEscape={vi.fn()} onInnerEscape={vi.fn()} />);
+    screen.getByRole('button', { name: 'inner-b' }).focus();
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'inner-a' })).toHaveFocus();
+  });
+
+  it('sends Escape to the INNER trap only', async () => {
+    const onOuterEscape = vi.fn();
+    const onInnerEscape = vi.fn();
+    const user = userEvent.setup();
+    render(<Nested onOuterEscape={onOuterEscape} onInnerEscape={onInnerEscape} />);
+    screen.getByRole('button', { name: 'inner-a' }).focus();
+    await user.keyboard('{Escape}');
+    expect(onInnerEscape).toHaveBeenCalledTimes(1);
+    // One key press closing two dialogs is the same bug from the other side.
+    expect(onOuterEscape).not.toHaveBeenCalled();
+  });
+
+  it('still pulls focus in when it is outside EVERY trap', async () => {
+    // The original guarantee must survive: a trap with focus nowhere near it still
+    // claims the next Tab.
+    const user = userEvent.setup();
+    render(<Nested onOuterEscape={vi.fn()} onInnerEscape={vi.fn()} />);
+    document.body.focus();
+    await user.tab();
+    const focused = document.activeElement;
+    expect(
+      screen.getByTestId('outer').contains(focused) ||
+        screen.getByTestId('inner').contains(focused),
+    ).toBe(true);
   });
 });

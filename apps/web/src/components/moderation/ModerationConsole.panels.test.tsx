@@ -990,6 +990,65 @@ describe('WS-J.2 console surfaces for the previously unreachable routes', () => 
     );
   });
 
+  it('WS-J.2.3b: SWITCHING rows without dismissing does not carry the reason over', async () => {
+    // The path the dismiss test above does NOT cover, and the one that mattered:
+    // the row button set a new target and never touched the reason, so a steward
+    // could pick a code for action A, click Revert on action B WITHOUT cancelling,
+    // and find B's dialog already armed with A's answer and its confirm enabled.
+    // One click wrote that justification into `moderation_actions.reason_code` and
+    // into the hash-chained audit row, and re-noticed the subject — none of which
+    // can be corrected in place.
+    //
+    // In a real browser `inert` on the background portal happens to block that
+    // click; jsdom does not enforce `inert`, so this drives the state machine
+    // directly rather than relying on a DOM modality property of a hook.
+    const A = '00000000-0000-4000-8000-0000000000f1';
+    const B = '00000000-0000-4000-8000-0000000000f2';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: A,
+            action: 'hide',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+          {
+            action_id: B,
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    const reverts = await screen.findAllByRole('button', { name: /^revert$/i });
+    // A: choose a reason…
+    fireEvent.click(reverts[0] as HTMLElement);
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    // …then open B's dialog WITHOUT cancelling A's.
+    fireEvent.click(reverts[1] as HTMLElement);
+    // B's question is unanswered, and cannot be confirmed until it is.
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
+    const confirm = screen.getByRole('button', { name: /^revert action$/i });
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
+    // And nothing was submitted for either action.
+    fireEvent.click(confirm);
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+  });
+
   it('WS-J.2.1d: a case held by ANOTHER reviewer offers no silent claim', async () => {
     // The claim mutation overwrites the assignment and sends no reason, so the
     // audit entry records the handover with `notes: null`.  Offering it here

@@ -668,29 +668,39 @@ function CaseReviewDialog({
   // write "harassment" as the justification for undoing an unrelated spam or
   // mistaken sanction — a false entry in the one record that is supposed to
   // explain what a steward did and why.
-  const [revertTarget, setRevertTarget] = useState<string | null>(null);
-  /** ONE way to close this dialog, because there were three ways to leave the
-   *  reason behind.  Clearing it only on SUCCESS meant a steward could pick a
-   *  reason, cancel, open Revert on a DIFFERENT action, and find that reason
-   *  already selected with confirmation enabled — recording a justification
-   *  they never chose for that action.  A dialog that asks a question has to
-   *  forget the answer when it is dismissed. */
-  const closeRevert = (): void => {
-    setRevertTarget(null);
-    setRevertReason('');
-  };
-  // EMPTY until the steward chooses.  A pre-selected code plus an enabled
-  // confirm is a default the dialog can record without anyone deciding
-  // anything: open it on a mistaken spam sanction, click Revert, and the audit
-  // trail says the reversal was for harassment.  Asking the question is only
-  // asking it if an answer is required.
-  const [revertReason, setRevertReason] = useState<ModerationReasonCode | ''>('');
+  /**
+   * ONE ATOM: the action being reverted AND the reason chosen for it.
+   *
+   * Two separate `useState`s made the reason outlive its question.  Clearing it
+   * in `closeRevert` covered DISMISSAL and nothing else — the row button set a new
+   * target without touching the reason, so a steward could pick a code for action
+   * A, click Revert on action B without dismissing, and find B's dialog already
+   * armed with A's answer and its confirm button enabled.  One click then wrote
+   * that justification into `moderation_actions.reason_code` and into the
+   * HASH-CHAINED audit row, and re-noticed the subject — none of which can be
+   * corrected in place.
+   *
+   * Pairing them makes it structurally impossible rather than adding a second
+   * place to remember to clear: opening the dialog on a row cannot carry an
+   * answer, because opening it MEANS constructing `{ actionId, reason: '' }`.
+   * The previous shape needed every future writer of `setRevertTarget` to
+   * remember, and the one writer that existed did not.
+   */
+  const [revertRequest, setRevertRequest] = useState<{
+    actionId: string;
+    /** EMPTY until the steward chooses.  A pre-selected code plus an enabled
+     *  confirm is a default the dialog can record without anyone deciding
+     *  anything: open it on a mistaken spam sanction, click Revert, and the audit
+     *  trail says the reversal was for harassment. */
+    reason: ModerationReasonCode | '';
+  } | null>(null);
+  const closeRevert = (): void => setRevertRequest(null);
   // Keyed by the action being undone so only that row spins.
   const revert = useMutation({
-    // Unreachable with an empty reason — the confirm button is disabled until
-    // one is chosen — but typed so it stays that way.
-    mutationFn: (actionId: string) =>
-      revertModerationAction(actionId, revertReason as ModerationReasonCode),
+    // The pair travels WITH the mutation, so what is submitted is what the open
+    // dialog was showing — not whatever a closure happened to hold by then.
+    mutationFn: (v: { actionId: string; reason: ModerationReasonCode }) =>
+      revertModerationAction(v.actionId, v.reason),
     onSuccess: () => {
       toast({ message: t('console.revertDone', 'Action reverted.'), tone: 'success' });
       closeRevert();
@@ -896,8 +906,8 @@ function CaseReviewDialog({
                     ) : entry.reversible ? (
                       <Button
                         variant="ghost"
-                        loading={revert.isPending && revert.variables === entry.action_id}
-                        onClick={() => setRevertTarget(entry.action_id)}
+                        loading={revert.isPending && revert.variables?.actionId === entry.action_id}
+                        onClick={() => setRevertRequest({ actionId: entry.action_id, reason: '' })}
                       >
                         {t('console.revert', 'Revert')}
                       </Button>
@@ -966,7 +976,7 @@ function CaseReviewDialog({
           the justification for undoing the action, in the action row and the
           audit trail, so inheriting the palette's pending new-action selection
           would write a reason the steward never chose. */}
-      {revertTarget !== null ? (
+      {revertRequest !== null ? (
         <Dialog open onClose={closeRevert} title={t('console.revertTitle', 'Revert this action')}>
           <div className="flex flex-col gap-3">
             <p className="text-sm text-ink-muted">
@@ -977,9 +987,11 @@ function CaseReviewDialog({
             </p>
             <Select
               label={t('console.revertReason', 'Reversal reason')}
-              value={revertReason}
+              value={revertRequest.reason}
               placeholder={t('console.revertReasonPlaceholder', 'Choose a reason…')}
-              onValueChange={(v) => setRevertReason(v as ModerationReasonCode)}
+              onValueChange={(v) =>
+                setRevertRequest({ ...revertRequest, reason: v as ModerationReasonCode })
+              }
               options={REASON_OPTIONS}
             />
             <div className="flex justify-end gap-2">
@@ -989,8 +1001,16 @@ function CaseReviewDialog({
               <Button
                 variant="primary"
                 loading={revert.isPending}
-                disabled={revertReason === ''}
-                onClick={() => revert.mutate(revertTarget)}
+                disabled={revertRequest.reason === ''}
+                onClick={() => {
+                  // Narrowed, not cast: the `disabled` above is what used to make
+                  // the old `as ModerationReasonCode` safe, so reordering the guard
+                  // would have sent an empty string to a `.strict()` schema and
+                  // surfaced a 400 as the generic "could not be reverted" toast.
+                  const { actionId, reason } = revertRequest;
+                  if (reason === '') return;
+                  revert.mutate({ actionId, reason });
+                }}
               >
                 {t('console.revertConfirm', 'Revert action')}
               </Button>
