@@ -890,6 +890,11 @@ function jpegWithSize(width: number, height: number): Uint8Array {
     0x04,
     0x00,
     0x00,
+    // ENTROPY-CODED BYTES.  This fixture ended immediately after a sized SOS
+    // header, which is exactly the undecodable file `stripJpeg` now refuses — a
+    // marker is not a scan.  `jpegWithExif` above always carried scan data.
+    0x12,
+    0x34,
     0xff,
     0xd9,
   ]);

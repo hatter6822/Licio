@@ -625,7 +625,11 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
   function webpWithExif(): Uint8Array {
     return webpFile([
       ...webpChunk('VP8X', [0b0000_1100, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // EXIF+XMP flags
-      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
+      // A REAL minimum lossy bitstream: 3-byte frame tag, the `9d 01 2a` start
+      // code, then two 16-bit dimensions.  A 4-byte stub used to do — until the
+      // container check started requiring enough bytes to BE a bitstream, which is
+      // the point of it.
+      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00]),
       ...webpChunk('EXIF', fourCc('GPSLatitude 51.5')),
     ]);
   }
@@ -689,12 +693,28 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     // The bound has to admit every real encoding, or it is a different bug.
     const lossless = webpFile(webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]));
     expect(stripWebp(lossless).ok).toBe(true);
+    // An ANMF frame is a 16-byte frame header and then the frame's OWN image
+    // chunk — so the fixture carries one, because that is what the check now reads.
+    const frame = [
+      ...Array.from({ length: 16 }, () => 0),
+      ...webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]),
+    ];
     const animated = webpFile([
       ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
       ...webpChunk('ANIM', [0, 0, 0, 0, 0, 0]),
-      ...webpChunk('ANMF', [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+      ...webpChunk('ANMF', frame),
     ]);
     expect(stripWebp(animated).ok).toBe(true);
+    // …and a frame whose nested chunk is NOT an image bitstream is refused, which is
+    // the half a size floor alone cannot reach.
+    const bogusFrame = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('EXIF', [0x00, 0x01, 0x02, 0x03, 0x04]),
+      ]),
+    ]);
+    expect(stripWebp(bogusFrame)).toEqual({ ok: false, reason: 'malformed' });
   });
 
   function gifExtension(label: number, payloads: readonly number[][]): number[] {
@@ -843,6 +863,91 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
           0x00,
           0xfe,
           0xff,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/jpeg',
+        // SOI + SOF0 + a syntactically valid, SIZED SOS header — and then the file
+        // ends.  A marker is not a scan: there is not one entropy-coded byte here.
+        what: 'SOS header with no entropy data',
+        bytes: [
+          0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xff, 0xff, 0xff, 0xff, 0x03, 0x01, 0x11, 0x00,
+          0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // VP8X + a ONE-BYTE `VP8 ` chunk.  The FourCC is the real one and the
+        // dimensions read fine off the VP8X canvas; the bitstream cannot exist in a
+        // single byte.  This is the row the per-chunk size floor is for — the nested
+        // ANMF check below cannot reach it.
+        what: 'VP8 chunk too small to be a bitstream',
+        bytes: [
+          ...ascii('RIFF'),
+          0x1a,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          ...ascii('VP8 '),
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // VP8X + a one-byte ANMF.  The FourCC says animation frame; nothing in it
+        // could decode, and a size floor alone would let a 16-byte header through.
+        what: 'ANMF with no frame bitstream',
+        bytes: [
+          ...ascii('RIFF'),
+          0x1a,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x02,
+          0x00,
+          0x00,
+          0x00,
+          0x0f,
+          0x00,
+          0x00,
+          0x0f,
+          0x00,
+          0x00,
+          ...ascii('ANMF'),
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
           0x00,
         ],
       },

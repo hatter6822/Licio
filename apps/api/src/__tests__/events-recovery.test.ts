@@ -141,6 +141,33 @@ describe('durable-consumer recovery (WS-E.1.5 at-least-once)', () => {
     expect(mfciIntake).toEqual([delivered.event_id, missed.event_id]);
   });
 
+  it('rebuilds a LEGACY contribution by resolving its thread (rolling upgrade)', async () => {
+    // `rebuildRealtimeFromEvents` can resolve a pre-migration-0111 payload from its
+    // `thread_id`, and this asserts recovery actually HANDS IT the resolver: dropping
+    // that argument left every test green while the rebuild reproduced the very gap
+    // it exists to repair.
+    const threadId = randomUUID();
+    const storyId = randomUUID();
+    const now = Date.now();
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        topic: 'contribution.created',
+        timestamp: new Date(now).toISOString(),
+        accessClassification: 'restricted',
+        retentionTier: 'standard',
+        payload: { thread_id: threadId, user_id: randomUUID() },
+      },
+    ] as unknown as Parameters<typeof fixture.events.eventStore.insertMany>[0]);
+    fixture.events.storyIdForThread = async (id) => (id === threadId ? storyId : null);
+
+    const report = await recoverEventPipeline(fixture.events, now);
+    expect(report.realtimeRebuilt).toBe(1);
+    // …and the contribution landed under the OWNING STORY, not nowhere.
+    const snapshot = await fixture.events.realtime.snapshot(storyId, realtimeWindowStart(now));
+    expect(snapshot?.contributions).toBeGreaterThan(0);
+  });
+
   it('clears stale real-time counters even when the durable log holds nothing', async () => {
     // Phantom counters with no durable backing (e.g. Redis outliving a
     // `none`-preference purge) must not survive recovery as fake volume.

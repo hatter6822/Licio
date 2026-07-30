@@ -99,9 +99,24 @@ export function registerDefaultConsumers(
         // the same event, which is the only reason one of them looked correct.
         const contribution = event as {
           story_id?: string;
+          thread_id?: string;
           user_id?: string;
           timestamp: string;
         };
+        // RESOLVE BEFORE REFUSING.  A rolling deployment has old pods emitting
+        // `contribution.created` after migration 0111 has already run, so a payload
+        // legitimately carrying only `thread_id` is the NORMAL state mid-upgrade —
+        // not a corrupt event.  Dead-lettering it stranded those contributions
+        // outside the realtime counters and the early-aggregation trigger, and the
+        // one-time backfill cannot repair an event written after it ran.  The fold's
+        // own thread → story seam is right here and answers the question.
+        if (contribution.story_id === undefined && contribution.thread_id !== undefined) {
+          const resolved = await events.storyIdForThread(contribution.thread_id);
+          if (resolved !== null) {
+            events.metrics.increment('events.contribution_legacy_resolved');
+            contribution.story_id = resolved;
+          }
+        }
         if (contribution.story_id === undefined || contribution.user_id === undefined) {
           // Metered, not silently dropped: a legacy payload that cannot be keyed
           // is a fact about the upgrade, and a redrive must not report success
@@ -110,8 +125,9 @@ export function registerDefaultConsumers(
           // the payloads are migrated.
           events.metrics.increment('events.contribution_legacy_unkeyed');
           throw new Error(
-            'contribution.created carries no story_id (pre-upgrade payload); ' +
-              'migrate the stored payload or resolve its story from thread_id before redriving',
+            'contribution.created carries no story_id and its thread resolves to none ' +
+              '(pre-upgrade payload, deleted thread, or missing user_id); migrate the ' +
+              'stored payload before redriving',
           );
         }
         const storyId = contribution.story_id;

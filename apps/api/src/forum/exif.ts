@@ -144,7 +144,6 @@ export function stripJpeg(bytes: Uint8Array): StripOutcome {
       return { ok: true, bytes: concat(out), stripped };
     }
     if (marker === 0xda) {
-      sawScan = true;
       // SOS: a scan header (2-byte length) then entropy-coded data with NO length
       // prefix. Keep the header + entropy up to the next real marker, then keep
       // walking (do not bail to end-of-file).
@@ -153,12 +152,17 @@ export function stripJpeg(bytes: Uint8Array): StripOutcome {
       if (headerLen < 2 || at + 2 + headerLen > bytes.length) {
         return { ok: false, reason: 'malformed' };
       }
-      const next = nextJpegMarker(bytes, at + 2 + headerLen);
-      if (next === -1) {
-        // Truncated scan with no terminating marker — keep what remains.
-        out.push(bytes.subarray(at));
-        return { ok: true, bytes: concat(out), stripped };
-      }
+      const entropyFrom = at + 2 + headerLen;
+      const next = nextJpegMarker(bytes, entropyFrom);
+      // A SIZED SOS HEADER IS NOT A SCAN.  Marking `sawScan` on the marker alone
+      // accepted a file that ends immediately after the header — no entropy-coded
+      // byte anywhere — while `jpegDimensions` still read the attacker's SOF.  The
+      // scan has to actually contain data, and the file has to reach EOI below:
+      // this branch used to return `ok` for a scan with no terminating marker,
+      // which is the same truncated non-image by another route.
+      if (next === -1) return { ok: false, reason: 'malformed' };
+      if (next <= entropyFrom) return { ok: false, reason: 'malformed' };
+      sawScan = true;
       out.push(bytes.subarray(at, next));
       at = next;
       continue;
@@ -252,6 +256,22 @@ export function stripWebp(bytes: Uint8Array): StripOutcome {
   // an animation frame, which holds its own VP8/VP8L sub-chunk.  `ALPH` and `ANIM`
   // are auxiliary — an alpha plane or a loop count is not an image.
   const IMAGE_DATA = new Set(['VP8 ', 'VP8L', 'ANMF']);
+  /**
+   * The smallest payload each image chunk could possibly be, so a one-byte chunk
+   * with the right FourCC does not read as pixels.
+   *
+   * `VP8 ` — a 3-byte frame tag, the 3-byte `9d 01 2a` start code and two 16-bit
+   * dimensions: 10 bytes, which is exactly what `webpDimensions` already reads.
+   * `VP8L` — the `0x2f` signature and a 4-byte packed header: 5 bytes, again what
+   * the dimension parser reads.  `ANMF` — a 16-byte frame header followed by a
+   * nested chunk, so it cannot be shorter than 16 + 8 + the nested minimum, and its
+   * nested FourCC is checked below.
+   */
+  const MIN_IMAGE_PAYLOAD: Readonly<Record<string, number>> = {
+    'VP8 ': 10,
+    VP8L: 5,
+    ANMF: 16 + 8 + 5,
+  };
   let imageDataBytes = 0;
   let first = true;
   while (at + 8 <= bytes.length) {
@@ -286,7 +306,26 @@ export function stripWebp(bytes: Uint8Array): StripOutcome {
       if (fourCc !== 'VP8X' && !IMAGE_DATA.has(fourCc)) return { ok: false, reason: 'malformed' };
       first = false;
     }
-    if (IMAGE_DATA.has(fourCc)) imageDataBytes += size;
+    if (IMAGE_DATA.has(fourCc) && size >= (MIN_IMAGE_PAYLOAD[fourCc] ?? 1)) {
+      // An ANMF chunk carries a 16-byte frame header and then the frame's OWN
+      // image chunk.  Counting its declared size as pixels accepted a one-byte
+      // `ANMF`, and then a 16-byte one, neither of which any decoder can use — the
+      // container check has to reach the bitstream, not stop at the wrapper.
+      if (fourCc === 'ANMF') {
+        const nested = String.fromCharCode(
+          bytes[at + 8 + 16] ?? 0,
+          bytes[at + 9 + 16] ?? 0,
+          bytes[at + 10 + 16] ?? 0,
+          bytes[at + 11 + 16] ?? 0,
+        );
+        // `ALPH` may precede the bitstream inside a frame, so it counts as
+        // structure rather than as the payload itself.
+        if (nested !== 'VP8 ' && nested !== 'VP8L' && nested !== 'ALPH') {
+          return { ok: false, reason: 'malformed' };
+        }
+      }
+      imageDataBytes += size;
+    }
     at = end;
   }
   // No pixels, no upload — including the zero-chunk case, where the loop above
