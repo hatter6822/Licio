@@ -464,6 +464,81 @@ describe('WS-K.1.4a summary generation', () => {
       return f;
     }
 
+    it('a LONG question sentence does not make the draft unparseable', async () => {
+      // `aiSummaryDraftSchema` caps every text at 2,000 while a comment body may be
+      // 5,000, so anything copied out of a comment has to be clamped —
+      // `unresolved_questions` was not.  A single long question therefore made `parse`
+      // throw for that thread on EVERY tick, from ordinary legal content: the
+      // statements path clamped and the questions path did not.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      const longQuestion = `${'Why does the council keep revisiting this '.repeat(80)}?`;
+      expect(longQuestion.length).toBeGreaterThan(2_000);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        longQuestion,
+      ]);
+      // Before the clamp this REJECTED, and the sweep then re-read the same page for
+      // ever (later: gave up on the thread and passed it over).
+      const outcome = await generateThreadSummary(summaryDeps(f), threadId);
+      expect(outcome.ok).toBe(true);
+      const draft = await f.ai.summaries.getLatestForThread(threadId);
+      if (draft === null) throw new Error('expected a stored draft');
+      const questions = (draft.draft as { unresolved_questions?: string[] }).unresolved_questions;
+      expect(questions?.length).toBeGreaterThan(0);
+      for (const q of questions ?? []) expect(q.length).toBeLessThanOrEqual(2_000);
+    });
+
+    it('a `?` inside a URL does not withhold the summary for ever', async () => {
+      // `hasOpenQuestions` used to be `/\?/` over the raw body while
+      // `unresolved_questions` requires a sentence-FINAL `?`, so a thread whose only
+      // `?` sits in a query string had the signal say "questions exist" and the list
+      // come back empty — constraint 2 ("open questions not listed") then withheld
+      // every such summary permanently.  Two spellings of one obligation.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'See https://data.example.test/budget?year=2026 for the approved figures.',
+        'The suburbs received a smaller share than downtown.',
+        'Residents downtown dispute that reading of the table.',
+      ]);
+      const outcome = await generateThreadSummary(summaryDeps(f), threadId);
+      expect(outcome.ok).toBe(true);
+      // Published, not withheld: no sentence asks a question, so nothing is missing.
+      expect(outcome.ok && outcome.published).toBe(true);
+    });
+
+    it('a WITHHELD summary keeps its steward-review entry even if the draft write fails', async () => {
+      // The draft was written FIRST, and the sweep's "already done" test is
+      // `getLatestForThread` — so a failure on the queue insert left a draft with no
+      // review entry, the next tick skipped the thread, and the entry withholding
+      // DEPENDS ON was lost permanently.  A summary withheld with nobody told is the
+      // one outcome this branch must not produce.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The council approved the zzzqterm allocation on Tuesday.',
+        'Some residents argue it favors downtown.',
+        'Others say the suburbs were fairly treated.',
+      ]);
+      const deps = {
+        ...summaryDeps(f),
+        // Constraint 5 (avoid slur synthesis) fails deterministically, so this
+        // summary is withheld rather than published.
+        slurDenylist: () => ['zzzqterm'],
+      };
+      f.ai.summaries.putDraft = async () => {
+        throw new Error('draft store unavailable');
+      };
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow(
+        'draft store unavailable',
+      );
+      // The review entry survived the draft failure, so a steward still sees it.
+      const pending = await f.ai.reviewQueue.list({ status: 'pending' }, 50);
+      expect(pending.some((r) => r.kind === 'flagged_hallucination')).toBe(true);
+    });
+
     it('generates a draft for a thread the sweep reaches', async () => {
       const f = wired();
       const { threadId } = await seedThread(f.forum);
