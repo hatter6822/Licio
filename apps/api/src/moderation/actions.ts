@@ -505,6 +505,23 @@ async function matchCase(
   return theCase;
 }
 
+/** The scope a revert must be serialised within — the set its reversal-integrity scan
+ *  reads.  Content actions scan BY TARGET, account sanctions BY SUBJECT; anything else
+ *  scans nothing and only needs to not collide, so it takes its own action's scope. */
+function revertScopeKey(original: ModerationActionRecord): string {
+  if (
+    CONTENT_ACTIONS.has(original.action as ConsoleAction) &&
+    original.targetType === 'content' &&
+    original.targetId !== null
+  ) {
+    return `content:${original.targetId}`;
+  }
+  if (accountStateFor(original.action as ConsoleAction) !== null && original.subjectUserId) {
+    return `account:${original.subjectUserId}`;
+  }
+  return `action:${original.actionId}`;
+}
+
 export type RevertOutcome =
   | { ok: true; response: RevertActionResponse }
   | {
@@ -595,9 +612,17 @@ export async function performRevert(
   // restore first, mark second, so a failure leaves a retryable state — is obsolete:
   // there is no longer an interval between them for a failure to land in.
   const claimed = await services.transactor.run(async (tx) => {
-    // Serialise against other reverts touching this subject (or, for a content action
-    // with no subject, this target).  Taken FIRST: scope lock → row locks → chain lock.
-    await tx.lockRevertScope(original.subjectUserId ?? original.targetId ?? original.actionId);
+    // Serialise against the other reverts whose scan reads the SAME set as this one's.
+    // The key follows the scan rather than the record: the content scan is by target and
+    // the account scan is by subject, so keying both on `subjectUserId ?? targetId` would
+    // put two content reverts on one target into DIFFERENT scopes whenever their subjects
+    // differ — which they do once an erasure scrub NULLs one author.  Both would then
+    // scan concurrently, both defer, and the content stays suppressed with nothing active
+    // to revert, which is the defect this lock exists to prevent.
+    //
+    // At most one branch below applies (`CONTENT_ACTIONS` and the account-state actions
+    // are disjoint), so this is one lock, not two.  Taken FIRST: scope → rows → chain.
+    await tx.lockRevertScope(revertScopeKey(original));
     const marked = await tx.actions.revertIfNotReverted(original.actionId);
     // Someone else reverted it between the read above and here.  Nothing written, so the
     // empty unit commits and the caller answers idempotently rather than recording a

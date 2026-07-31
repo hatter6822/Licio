@@ -139,6 +139,68 @@ describe('a reversal happens once', () => {
     expect(applied.filter((a) => a.userId === subject && a.state === 'active')).toHaveLength(1);
   });
 
+  it('RESTORES content when two removals on ONE target have different subjects', async () => {
+    // Same defect on the content side, and the reason the scope key follows the SCAN
+    // rather than the record: the content scan is BY TARGET, so two reverts on one target
+    // must share a scope.  Keying on `subjectUserId ?? targetId` puts them in different
+    // scopes the moment their subjects differ — which they do once an erasure scrub NULLs
+    // one author — and then both scan concurrently, both see the other still active, both
+    // defer, and the content stays removed with nothing left to revert.
+    const target = randomUUID();
+    const mk = async (subject: string | null): Promise<ModerationActionRecord> =>
+      services.actions.insert({
+        actorUserId: ACTOR.userId,
+        actorRole: 'ROLE_SAFETY',
+        action: 'remove',
+        targetType: 'content',
+        targetId: target,
+        subjectUserId: subject,
+        reasonCode: 'MOD_HARASS_001',
+        duration: null,
+        reviewerNote: null,
+        priorState: 'visible',
+        nextState: 'removed',
+        reversible: true,
+        reverted: false,
+        linkedActionId: null,
+        caseId: null,
+        coApproverUserId: null,
+        reportIds: [],
+      });
+    const scrubbed = await mk(null); // author erased
+    const named = await mk('00000000-0000-4000-8000-0000000000c3');
+
+    const restored: string[] = [];
+    services.content = {
+      ...services.content,
+      async applyContentState(targetId, _kind, state): Promise<void> {
+        if (state === 'visible') restored.push(targetId);
+      },
+    };
+    // The in-memory transactor runs units one at a time, so it can never distinguish two
+    // scopes from one — the key only bites against Postgres advisory locks.  What IS
+    // observable here is the key each unit asks for, which is the property: two reverts
+    // whose scans read the same set must ask for the same scope.
+    const scopes: string[] = [];
+    const inner = services.transactor;
+    services.transactor = {
+      run: (work) =>
+        inner.run((tx) => work({ ...tx, lockRevertScope: async (k) => void scopes.push(k) })),
+    };
+
+    await Promise.all([
+      performRevert(services, ACTOR, scrubbed),
+      performRevert(services, ACTOR, named),
+    ]);
+
+    expect((await services.actions.getById(scrubbed.actionId))?.reverted).toBe(true);
+    expect((await services.actions.getById(named.actionId))?.reverted).toBe(true);
+    // ONE scope, named for the target both scans read — not two, named for two subjects.
+    expect(scopes).toEqual([`content:${target}`, `content:${target}`]);
+    // Visible again, restored exactly once — by whichever revert went second.
+    expect(restored).toEqual([target]);
+  });
+
   it('marks the original reverted exactly once', async () => {
     await Promise.all([
       performRevert(services, ACTOR, original),
