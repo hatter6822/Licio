@@ -179,6 +179,28 @@ export function createAutoModerationSink(services: ModerationServices): AutoMode
           coApproverUserId: null,
           reportIds: [],
         });
+        await createActionNotice(
+          services,
+          {
+            userId: input.authorUserId,
+            actionId: action.actionId,
+            action: 'remove',
+            reasonCode: input.reasonCode,
+            appealable,
+          },
+          tx.notices,
+        );
+        // `tx.audit` LAST, and that ordering is load-bearing rather than stylistic.
+        //
+        // The chained append takes a transaction-scoped advisory lock, so it is the one
+        // GLOBAL lock any unit acquires.  Every other unit takes its row locks first and
+        // that lock last, which is a single consistent order and cannot cycle.  This unit
+        // audited before writing the notice, so it held the advisory lock while waiting
+        // on a `moderation_notices` lock — the exact inversion, against `performRevert`
+        // and the appeal decision, which hold notices locks while waiting on the
+        // advisory one.  Two of those interleave into a deadlock.
+        //
+        // Nothing here reads the audit result, so the swap is otherwise a no-op.
         await tx.audit({
           actorUserId: null,
           actorRole: null,
@@ -195,17 +217,6 @@ export function createAutoModerationSink(services: ModerationServices): AutoMode
           reversible: true,
           notes: input.reasons.join(', '),
         });
-        await createActionNotice(
-          services,
-          {
-            userId: input.authorUserId,
-            actionId: action.actionId,
-            action: 'remove',
-            reasonCode: input.reasonCode,
-            appealable,
-          },
-          tx.notices,
-        );
       });
       services.metrics.increment('moderation.auto_block');
     },
