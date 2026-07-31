@@ -14,7 +14,6 @@ import type {
   IncidentQueueResponse,
   ReportCaseStatus,
 } from '@licio/shared';
-import { writeAudit } from './audit.js';
 import type { StewardActor } from './authz.js';
 import type { ModerationServices } from './services.js';
 import type { CoordinatedReportIncidentRecord } from './stores.js';
@@ -95,50 +94,60 @@ export async function resolveIncident(
   }
   const nowIso = new Date(services.now()).toISOString();
 
-  // Reconcile the linked case FIRST (lift the enforcement delay / dismiss), THEN
-  // mark the incident resolved.  The stores share no transaction, so if the
-  // incident write failed AFTER the incident was closed, the incident would
-  // vanish from the open queue (retries 409 `already_resolved`) while the case
-  // stayed enforcement-delayed and non-integrity reviewers stayed blocked.
-  // Reconcile-first inverts that: a failure leaves the case correctly reconciled
-  // and the incident still open for a retry (the retry's reconcile is idempotent).
+  // ONE UNIT: the case reconcile, the incident compare-and-set, and the audit row.
+  //
+  // The three used to be ordered defensively — case first, incident second, audit third —
+  // with a comment explaining that the stores shared no transaction, so a failure between
+  // them had to leave the SAFE half done: an incident closed while its case stayed
+  // enforcement-delayed would have vanished from the open queue while still blocking
+  // non-integrity reviewers.  A transaction spans them now, so the ordering carries no
+  // weight and the failure it was hedging against cannot occur: all three land or none do.
   let caseStatus: ReportCaseStatus | null = null;
-  if (incident.caseId !== null) {
-    const theCase = await services.cases.getById(incident.caseId);
-    if (theCase !== null) {
-      const patch =
-        resolution === 'cleared'
-          ? { enforcementDelayed: false }
-          : { enforcementDelayed: false, status: 'resolved' as const };
-      const updated = await services.cases.update(theCase.caseId, patch);
-      caseStatus = updated?.status ?? theCase.status;
-    }
-  }
+  const outcome = await services.transactor.run(async (tx) => {
+    // CAS FIRST now, because it is the one that decides whether this call does anything
+    // at all: `resolve` transitions ONLY a still-`open` incident, and a null means a
+    // concurrent reviewer already resolved it.  Losing it must write nothing — the
+    // winner already reconciled and audited.
+    const resolvedIncident = await tx.incidents.resolve(
+      incidentId,
+      resolution,
+      actor.userId,
+      nowIso,
+    );
+    if (resolvedIncident === null) return null;
 
-  // Compare-and-set: `resolve` transitions ONLY a still-`open` incident.  After
-  // the open read above, a null means a concurrent reviewer already resolved it
-  // (the CAS lost the race) — report `already_resolved`, not `not_found`, and do
-  // NOT audit a second time (the winner already did; the case reconcile above is
-  // idempotent, so the loser's redundant reconcile is harmless).
-  const resolved = await services.incidents.resolve(incidentId, resolution, actor.userId, nowIso);
-  if (resolved === null) {
+    if (incident.caseId !== null) {
+      const theCase = await tx.cases.getById(incident.caseId);
+      if (theCase !== null) {
+        const patch =
+          resolution === 'cleared'
+            ? { enforcementDelayed: false }
+            : { enforcementDelayed: false, status: 'resolved' as const };
+        const updated = await tx.cases.update(theCase.caseId, patch);
+        caseStatus = updated?.status ?? theCase.status;
+      }
+    }
+
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: 'incident_resolve',
+      // An incident may or may not have reached a case; when it has, the resolution
+      // belongs in that case's history.
+      caseId: incident.caseId,
+      targetType: incident.targetType,
+      targetId: incident.targetId,
+      subjectUserId: null,
+      priorState: 'open',
+      nextState: resolution,
+      notes: note ? `${resolution}: ${note}` : resolution,
+    });
+    return resolvedIncident;
+  });
+  if (outcome === null) {
     return { ok: false, code: 'already_resolved', message: 'Incident already resolved' };
   }
-
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: 'incident_resolve',
-    // An incident may or may not have reached a case; when it has, the resolution
-    // belongs in that case's history.
-    caseId: incident.caseId,
-    targetType: incident.targetType,
-    targetId: incident.targetId,
-    subjectUserId: null,
-    priorState: 'open',
-    nextState: resolution,
-    notes: note ? `${resolution}: ${note}` : resolution,
-  });
+  const resolved = outcome;
   services.metrics.increment(`moderation.incident.${resolution}`);
   return { ok: true, incident: incidentToView(resolved), caseStatus };
 }

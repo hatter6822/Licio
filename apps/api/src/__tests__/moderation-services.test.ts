@@ -636,7 +636,7 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
     expect(again.ok).toBe(false);
   });
 
-  it('#6 reconciles the case before resolving the incident (partial-failure safe)', async () => {
+  it('#6 resolves the incident and reconciles its case ATOMICALLY', async () => {
     services = createInMemoryModerationServices();
     const caseId = await delayedCase();
     const incident = await services.incidents.insert({
@@ -652,17 +652,24 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
       reviewedAt: null,
       reviewedBy: null,
     });
-    // The incident write fails AFTER the case is reconciled: the delay must
-    // already be lifted (reviewers unblocked) and the incident left OPEN to retry
-    // (not vanished from the queue while the case stays delayed).
-    services.incidents.resolve = async () => {
-      throw new Error('incident store unavailable');
+    // This used to assert an ORDERING — case reconciled first, incident left open — which
+    // was the best a pair of stores sharing no transaction could do: leave the SAFE half
+    // done.  They share one now, so the property is stronger and simpler: neither half
+    // survives a failure.
+    //
+    // The failure is injected into the CASE write, which runs AFTER the incident's
+    // compare-and-set, so there is something to roll back.  Failing the CAS itself would
+    // prove nothing — nothing had been written yet.
+    services.cases.update = async () => {
+      throw new Error('case store unavailable');
     };
     await expect(
       resolveIncident(services, integrityActor(), incident.incidentId, 'cleared', undefined),
-    ).rejects.toThrow(/incident store unavailable/);
-    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(false);
+    ).rejects.toThrow(/case store unavailable/);
+    // BOTH unchanged.  The incident is still open for a retry, and the case is still
+    // delayed — consistent, and the retry does both or neither again.
     expect((await services.incidents.getById(incident.incidentId))?.status).toBe('open');
+    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(true);
   });
 
   it('#KEyPO a lost resolve race reports already_resolved (CAS miss)', async () => {

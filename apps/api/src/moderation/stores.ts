@@ -1445,7 +1445,14 @@ export class InMemoryReviewerStatusStore implements ReviewerStatusStore {
   }
 }
 
-export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReportIncidentStore {
+export class InMemoryCoordinatedReportIncidentStore
+  implements CoordinatedReportIncidentStore, InMemoryRollback
+{
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, CoordinatedReportIncidentRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {

@@ -1865,6 +1865,11 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
  * chain head from outside the unit and write its row outside the change it describes,
  * which is precisely the gap this closes.
  */
+/** The advisory-lock key serialising appends to the global moderation audit chain.
+ *  A distinct constant in the same space as the migration lock (`4_021_997`); the
+ *  rendezvous store's locks are `hashtext`-derived and cannot collide with a literal. */
+const MODERATION_CHAIN_LOCK_KEY = 4_021_998;
+
 export class DrizzleModerationTransactor implements ModerationTransactor {
   readonly #db: Db;
   readonly #auditChain: () => AuditChainDeps;
@@ -1881,8 +1886,31 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         actions: new DrizzleModerationActionStore(tx),
         notices: new DrizzleModerationNoticeStore(tx),
         appeals: new DrizzleModerationAppealStore(tx),
-        audit: (input) =>
-          appendAudit({ ...this.#auditChain(), store: new DrizzleModerationAuditStore(tx) }, input),
+        incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        audit: async (input) => {
+          // SERIALISE the chain append, rather than colliding and retrying.
+          //
+          // The chain is GLOBAL — one parent slot for the whole trail — so concurrent
+          // units all read the same head and all but one lose the fork-proof unique.  The
+          // savepoint retry recovers, but the work is quadratic: measured here, N writers
+          // spend N(N+1)/2 attempts (3, 10, 36, 108 for N = 2, 4, 8, 16), and at 16 a
+          // writer EXHAUSTS `MAX_CHAIN_RETRIES` and fails outright.  Since the append is
+          // now inside the state change's transaction, that failure aborts the change —
+          // a steward's action refused because fifteen others were in flight.  The
+          // auto-block sink and brigade detection make that burst reachable.
+          //
+          // A transaction-scoped advisory lock turns the collision into a queue: each
+          // writer waits, reads the true head, and inserts once.  Taken HERE rather than
+          // at the top of the unit so it covers only the append, and taken lazily so a
+          // unit that writes no audit never serialises against one that does.  It is
+          // re-entrant, so several audits in one unit take it once, and it releases at
+          // commit or rollback with no unlock path to leak.
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(${MODERATION_CHAIN_LOCK_KEY})`);
+          return appendAudit(
+            { ...this.#auditChain(), store: new DrizzleModerationAuditStore(tx) },
+            input,
+          );
+        },
       }),
     );
   }

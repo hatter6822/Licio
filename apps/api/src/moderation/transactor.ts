@@ -46,6 +46,7 @@
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { AuditWriteInput } from './audit.js';
 import type {
+  CoordinatedReportIncidentStore,
   ModerationActionStore,
   ModerationAppealStore,
   ModerationCaseStore,
@@ -70,6 +71,10 @@ export interface ModerationTx {
    * email side of it is separate and stays outside.
    */
   readonly notices: ModerationNoticeStore;
+  /** Coordinated-report incidents.  Their resolution reconciles the linked CASE too, and
+   *  the two used to be ordered defensively — case first, incident second — precisely
+   *  because no transaction spanned them.  One does now. */
+  readonly incidents: CoordinatedReportIncidentStore;
   /** Appeals.  `claimDecision` is an IRREVERSIBLE compare-and-set — once it lands the
    *  appeal is no longer pending and every retry answers `already_decided` — so its audit
    *  row has to commit with it or there is no second chance to write one. */

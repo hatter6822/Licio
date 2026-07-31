@@ -165,6 +165,7 @@ export function createInMemoryModerationServices(
   const actionStore = new InMemoryModerationActionStore(now);
   const noticeStore = new InMemoryModerationNoticeStore(now);
   const appealStore = new InMemoryModerationAppealStore(now);
+  const incidentStore = new InMemoryCoordinatedReportIncidentStore(now);
   const services: ModerationServices = {
     cases: caseStore,
     reports: new InMemoryModerationReportStore(now),
@@ -179,9 +180,10 @@ export function createInMemoryModerationServices(
         actions: actionStore,
         notices: noticeStore,
         appeals: appealStore,
+        incidents: incidentStore,
         audit: (input) => appendAudit(services.auditChain, input),
       },
-      [caseStore, actionStore, noticeStore, appealStore, auditStore],
+      [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],
     ),
     auditChain: {
       store: auditStore,
@@ -196,7 +198,7 @@ export function createInMemoryModerationServices(
     appeals: appealStore,
     notices: noticeStore,
     reviewerStatus: new InMemoryReviewerStatusStore(),
-    incidents: new InMemoryCoordinatedReportIncidentStore(now),
+    incidents: incidentStore,
     evidenceDecisions: new InMemoryEvidenceDecisionStore(now),
     submissions: new RecentSubmissionTracker(),
     content: options.content ?? defaultContentPort,

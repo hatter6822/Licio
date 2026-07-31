@@ -369,6 +369,15 @@ These are structural guarantees the code holds (each covered by a test):
   best-effort posture, which remains correct for events that are NOT state changes (a
   queue view, an export).  The failure that actually happens, a chain parent collision, is
   absorbed beneath the seam by a savepoint and a retry and never reaches a unit.
+- **Chain appends are SERIALISED, not collided-and-retried.**  The chain is global — one
+  parent slot for the whole trail — so concurrent units all read the same head and all but
+  one lose the fork-proof unique.  The savepoint retry recovers, but the work is
+  quadratic: measured, N writers spend N(N+1)/2 attempts (3, 10, 36, 108 for N = 2, 4, 8,
+  16), and at 16 a writer exhausts `MAX_CHAIN_RETRIES` and fails — which, with the append
+  inside the state change's transaction, aborts the change.  A transaction-scoped advisory
+  lock turns the collision into a queue: every writer then commits on its first attempt,
+  32 concurrent writers included, in linear time.  Taken lazily and only around the
+  append, so a unit writing no audit never serialises against one that does.
 - **The trail is tamper-EVIDENT, not merely append-only.** Every record is
   MAC-chained to its predecessor over the append ordinal, so altering one
   invalidates every hash after it, and the chain is keyed from the identity master
