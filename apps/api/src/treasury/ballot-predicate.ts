@@ -230,3 +230,21 @@ export const DEFAULT_ELIGIBILITY_RULES: EligibilityRules = {
   requireVerifiedIdentity: false,
   newWalletCoolingOffDays: 0,
 };
+
+/**
+ * Assemble the BASIS's `VoterFacts` — `buildVoterFacts` with `BASIS_EXCLUSIONS` applied
+ * here rather than at the call site.
+ *
+ * The exclusions used to be spread in by the caller, which made the list a convention:
+ * the basis was free to substitute a different value, or none, and nothing would say so.
+ * The drift guard could not see it either — its check spread `BASIS_EXCLUSIONS` into the
+ * call itself and then asserted the output carried them, which holds for any pass-through
+ * regardless of what the basis does.  Applying them in ONE function makes the guard
+ * observe the real substitution, and leaves the caller with only the fields that are
+ * genuinely per-member.
+ */
+export function buildBasisVoterFacts(
+  input: Omit<BallotFactsInput, keyof typeof BASIS_EXCLUSIONS>,
+): VoterFacts {
+  return buildVoterFacts({ ...input, ...BASIS_EXCLUSIONS });
+}

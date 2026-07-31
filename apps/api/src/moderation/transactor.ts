@@ -89,6 +89,21 @@ export interface ModerationTx {
    * keeps its restore outside the unit, as it always has.
    */
   readonly content: Pick<ModerationContentPort, 'applyContentState' | 'applyAccountState'>;
+  /**
+   * Serialise this unit against others touching the same SUBJECT (or target).
+   *
+   * The reversal-integrity scan asks "is any OTHER sanction still suppressing this?" and
+   * skips restoring state when one is.  A compare-and-set cannot make that safe on its
+   * own, because two reverts of DIFFERENT actions never contend: each marks its own row,
+   * and each scan — reading a snapshot taken before the other committed — sees the other
+   * still active.  Both defer, neither restores, and the subject is left sanctioned with
+   * no active sanction to revert and no product path back.
+   *
+   * Taken FIRST in the unit, before any row lock and long before the chain's advisory
+   * lock at `audit`, so the global order stays: scope lock → row locks → chain lock.
+   * A no-op in memory, where the transactor already runs units one at a time.
+   */
+  lockRevertScope(key: string): Promise<void>;
   /** Coordinated-report incidents.  Their resolution reconciles the linked CASE too, and
    *  the two used to be ordered defensively — case first, incident second — precisely
    *  because no transaction spanned them.  One does now. */

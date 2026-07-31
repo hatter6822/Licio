@@ -230,28 +230,36 @@ describe.skipIf(!DB_URL)('moderation audit chain — live Postgres', () => {
       notes: null,
     }) satisfies ModerationAuditRecord;
 
-  it('links each entry to the live head, and the chain verifies', async () => {
+  it('links each entry to the live head, and the chain verifies AS READ BACK', async () => {
     ran = true;
+    // A per-run tag so the read-back selects exactly these five rows: the gated suites
+    // share one live database and this one has run before.
+    const runCase = randomUUID();
     const written: ModerationAuditRecord[] = [];
     for (let i = 0; i < 5; i++) {
       const head = await store.chainHead();
       const entry = await store.appendChained(
-        stage(`pg_chain_${i}`, head?.integrityHash ?? null),
+        { ...stage(`pg_chain_${i}`, head?.integrityHash ?? null), caseId: runCase },
         (s) => computeAuditEntryHash(s, KEY, refOf),
       );
       expect(entry).not.toBeNull();
       written.push(entry as ModerationAuditRecord);
     }
-    // Verified as READ BACK, not as returned: the round trip through Postgres is where a
-    // preimage that cannot be recomputed from a stored row would show up (a timestamp
-    // hashed at a finer resolution than the driver returns, for one).
-    const readBack = await store.list({ action: 'pg_chain_0', limit: 10 });
-    expect(readBack[0]?.integrityHash).toBe(written[0]?.integrityHash);
-    for (let i = 1; i < written.length; i++) {
-      expect(written[i]?.prevHash).toBe(written[i - 1]?.integrityHash);
-    }
-    const report = verifyAuditChain(written, KEY, refOf);
+
+    // THE VERIFICATION RUNS ON THE ROWS, NOT ON THE OBJECTS THAT PRODUCED THEM.
+    //
+    // Verifying `written` proves only that `computeAuditEntryHash` is deterministic
+    // within one process — it recomputes each hash from the very values it was computed
+    // from, so it holds even if nothing reached Postgres intact.  The whole point of the
+    // live leg is the ROUND TRIP: a preimage field that cannot be recovered from a
+    // stored row makes every later verification fail, and the driver's `timestamptz`
+    // truncation is exactly such a field (microsecond in, millisecond out).  A verifier
+    // reading the table is the only reader that ever exists in production.
+    const readBack = (await store.list({ caseId: runCase, limit: 10 })).reverse();
+    expect(readBack.map((r) => r.action)).toEqual(written.map((w) => w.action));
+    const report = verifyAuditChain(readBack, KEY, refOf);
     expect(report.problems).toEqual([]);
+    expect(report.valid).toBe(true);
   });
 
   it('the DATABASE refuses a second entry claiming the same parent', async () => {

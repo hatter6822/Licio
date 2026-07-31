@@ -680,6 +680,17 @@ describe('moderation console (role-gated)', () => {
     expect(list.status).toBe(200);
     expect(((await list.json()) as { count: number }).count).toBe(1);
 
+    // A MALFORMED CURSOR RESTARTS THE PAGE, it does not fail the read.  `cursor` is a
+    // client-supplied string whose two parts are cast `::timestamptz` and `::uuid` in the
+    // store; this queue's decoder checked only that both were non-empty, so two arbitrary
+    // tokens reached Postgres and came back as a 500 on a plain GET.
+    const garbage = Buffer.from('yesterday|not-a-uuid', 'utf-8').toString('base64url');
+    const bad = await app().request(
+      get(`/v1/moderation/incidents?cursor=${garbage}`, integrity.cookie),
+    );
+    expect(bad.status).toBe(200);
+    expect(((await bad.json()) as { count: number }).count).toBe(1);
+
     const resolved = await app().request(
       post(
         `/v1/moderation/incidents/${incident.incidentId}/resolve`,

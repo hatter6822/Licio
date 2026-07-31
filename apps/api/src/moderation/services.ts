@@ -181,6 +181,9 @@ export function createInMemoryModerationServices(
         notices: noticeStore,
         appeals: appealStore,
         incidents: incidentStore,
+        // A no-op: the in-memory transactor already runs units one at a time, which is
+        // the property the Postgres advisory lock buys.
+        lockRevertScope: async () => {},
         // The in-memory unit shares the services' own port: there is no second handle to
         // bind, and a fold over Maps has no partial commit to protect against.
         content: {

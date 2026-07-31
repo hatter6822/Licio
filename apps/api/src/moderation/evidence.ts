@@ -24,6 +24,7 @@ import type {
   EvidenceQueueResponse,
   EvidenceQueueRow,
 } from '@licio/shared';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
 import { writeAudit } from './audit.js';
 import { type CapabilityDenial, denyCapability, denyQueue, type StewardActor } from './authz.js';
 import type { ModerationServices } from './services.js';
@@ -32,22 +33,6 @@ import type { EvidenceDecisionRecord } from './stores.js';
 /** Bound on rows scanned per queue page (decided rows are skipped, so one
  *  page may scan more candidates than it returns). */
 const QUEUE_SCAN_CAP = 500;
-
-const encodeCursor = (createdAt: string, id: string): string =>
-  Buffer.from(`${createdAt}|${id}`, 'utf-8').toString('base64url');
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Decode + SHAPE-VALIDATE a keyset cursor.  A malformed cursor (garbage
- *  base64, non-timestamp, non-uuid) restarts from the beginning — the
- *  defensive branchContent semantics, never a 500 from a failed `::uuid`
- *  cast inside the store. */
-const decodeCursor = (cursor: string): { createdAt: string; id: string } | null => {
-  const [createdAt, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-  if (!createdAt || !id) return null;
-  if (!Number.isFinite(Date.parse(createdAt)) || !UUID_RE.test(id)) return null;
-  return { createdAt, id };
-};
 
 /**
  * The evidence queue (oldest first, FIFO): citation-bearing published
@@ -63,7 +48,8 @@ export async function buildEvidenceQueue(
   if (!listCited) return { items: [], next_cursor: null };
 
   const items: EvidenceQueueRow[] = [];
-  let after = opts.cursor ? decodeCursor(opts.cursor) : null;
+  const start = decodeKeysetCursor(opts.cursor);
+  let after = start === null ? null : { createdAt: start.time, id: start.id };
   let scanned = 0;
   let exhausted = false;
   while (items.length < opts.limit && scanned < QUEUE_SCAN_CAP) {
@@ -111,7 +97,8 @@ export async function buildEvidenceQueue(
       break;
     }
   }
-  const next_cursor = !exhausted && after !== null ? encodeCursor(after.createdAt, after.id) : null;
+  const next_cursor =
+    !exhausted && after !== null ? encodeKeysetCursor(after.createdAt, after.id) : null;
   return { items, next_cursor };
 }
 

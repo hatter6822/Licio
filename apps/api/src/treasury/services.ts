@@ -35,9 +35,8 @@ import type { ExternalObligation, TreasuryObligationsPort } from '../knomosis/po
 import { canExpandForRoom } from '../knomosis/reconciliation.js';
 import type { KnomosisServices } from '../knomosis/services.js';
 import {
-  BASIS_EXCLUSIONS,
   ballotVerdict,
-  buildVoterFacts,
+  buildBasisVoterFacts,
   DEFAULT_ELIGIBILITY_RULES,
   deriveMemberFacts,
 } from './ballot-predicate.js';
@@ -252,12 +251,12 @@ export function buildMembershipFactsPort(
         // `VoterFacts` twice in this loop — `reputationScore: 0` for eligibility and
         // `contributionCount ?? 0` for the weight — so the two halves of one answer
         // disagreed about the same member.  What the basis deliberately does not mirror
-        // is now NAMED in `BASIS_EXCLUSIONS` rather than hard-coded here.
+        // is NAMED in `BASIS_EXCLUSIONS` and applied by `buildBasisVoterFacts`, so it
+        // cannot be substituted differently here than the list says.
         const verdict = ballotVerdict(
-          buildVoterFacts({
+          buildBasisVoterFacts({
             userId,
             facts: facts ?? null,
-            ...BASIS_EXCLUSIONS,
             // FROM THE PINNED PACK, exactly as the ballot gate reads it.  Hard-coding
             // false here made `resolveVotingWeight` refuse every member under
             // `multisig_steward` — a basis of ZERO, and quorum unreachable however many

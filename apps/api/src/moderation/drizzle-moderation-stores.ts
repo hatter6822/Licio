@@ -1892,6 +1892,12 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         notices: new DrizzleModerationNoticeStore(tx),
         appeals: new DrizzleModerationAppealStore(tx),
         incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        // `hashtext` rather than a literal: the scope is a uuid, and the lock space is
+        // shared, so it is namespaced to keep it clear of the chain key and of the
+        // rendezvous store's own `hashtext` pairs.
+        lockRevertScope: async (key) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mod-revert:${key}`}))`);
+        },
         // Supplied by the composition root: moderation declares that it needs the
         // enforcement bound to THIS handle, and never constructs another domain's store.
         content: this.#enforcementOver(tx),

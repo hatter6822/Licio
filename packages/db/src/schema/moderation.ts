@@ -255,6 +255,36 @@ export const moderationAudit = pgTable(
     index('moderation_audit_action_idx').on(t.action),
     index('moderation_audit_reason_idx').on(t.reasonCode),
     index('moderation_audit_time_idx').on(t.eventTime),
+    // ------------------------------------------------------------------
+    // Migrations 0115 / 0117 / 0118.  Declared here because `db:push` builds the
+    // database from THIS file: an index that exists only in a migration is one
+    // `db:push` DROPS.  Three of the four below are correctness constraints, not
+    // performance — losing them silently turns a forked chain into a valid one.
+    // ------------------------------------------------------------------
+    /** 0115 — the ordinal is the keyset cursor, so a duplicate would make a page
+     *  either repeat a row or skip one. */
+    uniqueIndex('moderation_audit_ordinal_key').on(t.ordinal),
+    /** 0117 — the per-case history read: filter, then walk the keyset. */
+    index('moderation_audit_case_ordinal_idx')
+      .on(t.caseId, t.ordinal.desc())
+      .where(sql`${t.caseId} IS NOT NULL`),
+    /** 0118 — one child per parent.  Two writers reading the same head both build
+     *  on it; this lets exactly one land and the loser retries against the new
+     *  head.  Without it the chain forks and both branches verify in isolation. */
+    uniqueIndex('moderation_audit_chain_parent_uq')
+      .on(t.prevHash)
+      .where(sql`${t.prevHash} IS NOT NULL`),
+    /** 0118 — exactly ONE genesis for the whole table.  The constant expression
+     *  makes every qualifying row collide with every other, which IS the singleton
+     *  constraint; a second genesis would start a second chain nothing links to. */
+    uniqueIndex('moderation_audit_chain_genesis_uq')
+      .on(sql`(true)`)
+      .where(sql`${t.prevHash} IS NULL AND ${t.integrityHash} IS NOT NULL`),
+    /** 0118 — the verifier walks forward from the genesis; the head read takes the
+     *  greatest chained ordinal.  Both are this index. */
+    index('moderation_audit_chain_ordinal_idx')
+      .on(t.ordinal)
+      .where(sql`${t.integrityHash} IS NOT NULL`),
   ],
 );
 export type ModerationAuditRowDb = typeof moderationAudit.$inferSelect;

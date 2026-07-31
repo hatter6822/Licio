@@ -990,6 +990,46 @@ describe('action palette + revert', () => {
     expect(await services.notices.unreadCount(AUTHOR)).toBe(1);
   });
 
+  it('does NOT file the action into a case about a DIFFERENT target', async () => {
+    // `case_id` is a client-supplied field on a steward request.  A stale one (the
+    // console holding a case the reviewer already moved on from) or a forged one names
+    // a case this action has nothing to do with — and BOTH `case_id` columns used to
+    // take it: the action row from `request.case_id` directly, the audit row from a
+    // record that had been fetched but not checked, under a comment calling it verified.
+    // The case-history panel reads that column, so an unrelated case's trail would show
+    // an enforcement it never carried.
+    const other = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-000000000003',
+      targetType: 'content',
+      targetId: '00000000-0000-4000-9000-0000000000ff', // NOT the action's target
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 1000).toISOString(),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_002',
+      case_id: other.caseId,
+    });
+
+    // The enforcement stands — it is about its own target and needs no case.
+    expect(out.ok).toBe(true);
+    // But nothing was filed under, or done to, the unrelated case.
+    expect((await services.cases.getById(other.caseId))?.status).toBe('new');
+    const trail = await services.audit.list({ limit: 20 });
+    expect(trail.filter((r) => r.caseId === other.caseId)).toEqual([]);
+    const actions = await services.actions.listActiveByTarget('content', TARGET);
+    expect(actions.map((a) => a.caseId)).toEqual([null]);
+  });
+
   it('a CSAM removal is non-reversible and non-appealable (lawful basis)', async () => {
     const out = await applyAction(services, safetyActor(), {
       target_type: 'content',

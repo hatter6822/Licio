@@ -98,7 +98,7 @@ export const storyHiddenStateEnum = pgEnum('story_hidden_state', [
   /** A duplicate of an in-room twin that already carries this canonical URL.  Hiding it
    *  takes it out of the tier uniques (both are partial on `hidden_state IS NULL`), which
    *  is what lets a public story trapped in a private room be converted at all — see
-   *  migration 0120.  NOT liftable by the moderation reinstate path, which names `safety`
+   *  migration 0119.  NOT liftable by the moderation reinstate path, which names `safety`
    *  explicitly: there is nothing to reinstate, the URL is served by the twin. */
   'superseded',
 ]);

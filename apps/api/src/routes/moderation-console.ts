@@ -45,6 +45,7 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { getIdentityServices } from '../identity/services.js';
+import { decodeKeysetCursor, isCursorUuid } from '../lib/keyset-cursor.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { applyAction, revertAction } from '../moderation/actions.js';
@@ -79,18 +80,11 @@ import type { ModerationTx } from '../moderation/transactor.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
-const CURSOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Decode + shape-validate a `(timestamp|uuid)` keyset cursor.  Malformed
- *  cursors restart from the beginning (defensive, never a 500 from a failed
- *  `::timestamptz`/`::uuid` cast inside a store). */
-function decodeKeysetCursor(cursor: string | undefined): [string, string] | [undefined, undefined] {
-  if (!cursor) return [undefined, undefined];
-  const [time, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-  if (!time || !id || !Number.isFinite(Date.parse(time)) || !CURSOR_UUID_RE.test(id)) {
-    return [undefined, undefined];
-  }
-  return [time, id];
+/** The `(timestamp, uuid)` keyset cursor as a tuple, for the store filters that take
+ *  the two parts separately.  Malformed cursors restart from the beginning. */
+function decodeKeysetTuple(cursor: string | undefined): [string, string] | [undefined, undefined] {
+  const at = decodeKeysetCursor(cursor);
+  return at === null ? [undefined, undefined] : [at.time, at.id];
 }
 
 /** The audit cursor is the append ORDINAL — an integer, so it survives the wire round
@@ -114,8 +108,11 @@ function decodeAuditCursor(
     const ordinal = Number(raw.slice(2));
     return Number.isSafeInteger(ordinal) && ordinal > 0 ? { afterOrdinal: ordinal } : {};
   }
-  const [, id] = decodeKeysetCursor(cursor);
-  return id === undefined ? {} : { afterAuditId: id };
+  // The legacy form's id is exact, so the timestamp beside it does not have to parse —
+  // only the id is used.  `decodeKeysetCursor` requires both, so this checks the id
+  // directly rather than discarding a usable cursor.
+  const [, id] = raw.split('|');
+  return id !== undefined && isCursorUuid(id) ? { afterAuditId: id } : {};
 }
 const uuidParam = <K extends string>(name: K) =>
   z.object({ [name]: uuidSchema } as Record<K, typeof uuidSchema>);
@@ -696,7 +693,7 @@ export function createModerationConsoleRoutes() {
           const mod = getModerationServices();
           const limit = q.limit ?? 50;
           let nextCursor: string | null = null;
-          const [curTime, curId] = decodeKeysetCursor(q.cursor);
+          const [curTime, curId] = decodeKeysetTuple(q.cursor);
           let records = await mod.evidenceDecisions.listRecent({
             ...(curTime && curId ? { after: { createdAt: curTime, decisionId: curId } } : {}),
             limit: limit + 1,

@@ -22,6 +22,7 @@ import {
   type UserHistory,
   type UserHistoryAction,
 } from '@licio/shared';
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/keyset-cursor.js';
 import { actionValidForTarget } from './actions.js';
 import { auditToView } from './audit.js';
 import {
@@ -107,21 +108,21 @@ function decodeQueueCursor(
   cursor: string | undefined,
 ): { section: QueueSection; sla: string; id: string } | null {
   if (!cursor) return null;
-  try {
-    const parts = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-    if (parts.length === 3) {
-      const [section, sla, id] = parts;
-      if (section === 'e' || section === 's') return { section, sla: sla ?? '', id: id ?? '' };
-      return null;
-    }
-    if (parts.length === 2) {
-      const [sla, id] = parts;
-      return sla && id ? { section: 's', sla, id } : null;
-    }
-    return null;
-  } catch {
-    return null;
+  const parts = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
+  if (parts.length === 3) {
+    const [section, sla, id] = parts;
+    if (section !== 'e' && section !== 's') return null;
+    // The `s||` sentinel: start of the standard section, no keyset position.
+    if (!sla && !id) return { section, sla: '', id: '' };
+    // Anything else has to BE a position — both parts are cast in the store.
+    const at = decodeKeysetCursor(encodeKeysetCursor(sla ?? '', id ?? ''));
+    return at === null ? null : { section, sla: at.time, id: at.id };
   }
+  if (parts.length === 2) {
+    const at = decodeKeysetCursor(cursor);
+    return at === null ? null : { section: 's', sla: at.time, id: at.id };
+  }
+  return null;
 }
 const encodeQueueCursor = (section: QueueSection, slaDueAt: string, caseId: string): string =>
   Buffer.from(`${section}|${slaDueAt}|${caseId}`, 'utf-8').toString('base64url');
@@ -130,13 +131,8 @@ const STANDARD_START_CURSOR = Buffer.from('s||', 'utf-8').toString('base64url');
 /** Decode the appeal queue's 2-part `sla|appealId` keyset cursor (the appeal
  *  queue has a single section, so no section tag). */
 function decodeCursor(cursor: string | undefined): { sla: string; id: string } | null {
-  if (!cursor) return null;
-  try {
-    const [sla, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-    return sla && id ? { sla, id } : null;
-  } catch {
-    return null;
-  }
+  const at = decodeKeysetCursor(cursor);
+  return at === null ? null : { sla: at.time, id: at.id };
 }
 
 /** Build the report queue (emergency on top + paginated standard section). */

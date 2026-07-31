@@ -992,6 +992,17 @@ interface ModerationEnforcementStores {
   contributions: () => Pick<ContributionStore, 'setModerationState'>;
   stories: () => Pick<StoryStore, 'getById' | 'update' | 'getByCanonicalUrl'>;
   users: () => Pick<IdentityStore, 'updateUser'>;
+  /** Run one write so that ITS failure is recoverable, leaving the caller able to
+   *  continue.  Autocommit gets that for free — a failed statement is its own aborted
+   *  transaction — but inside a unit of work it needs a SAVEPOINT, because Postgres
+   *  puts the whole transaction into an aborted state on ANY error and every later
+   *  statement then fails with 25P02.
+   *
+   *  The reinstate below depends on it: it catches a 23505 and then READS to find out
+   *  whether the URL slot is genuinely occupied.  Without a savepoint that read is the
+   *  first statement of an aborted transaction, so the retry never happens and the
+   *  metric, the log line and the specific error are all replaced by a bare 25P02. */
+  attempt: <T>(write: () => Promise<T>) => Promise<T>;
 }
 
 const moderationEnforcementWritesOver = (
@@ -1027,7 +1038,9 @@ const moderationEnforcementWritesOver = (
       // reporting success while the story stayed hidden would not.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await stores.stories().update(id, { hiddenState: null });
+          // `stores.attempt` so a 23505 inside a unit of work rolls back to a savepoint
+          // rather than poisoning the transaction the catch block is about to read in.
+          await stores.attempt(() => stores.stories().update(id, { hiddenState: null }));
           break;
         } catch (error) {
           if (!isTierUniqueViolation(error)) throw error;
@@ -1059,6 +1072,8 @@ const moderationEnforcementWritesOver = (
 
 /** The ambient binding — every store resolved from its container at call time. */
 const moderationEnforcementWrites = moderationEnforcementWritesOver({
+  // Autocommit: each statement is already its own transaction, so nothing to scope.
+  attempt: (write) => write(),
   safety: () => eventServices.safetyStore,
   contributions: () => forumServices.contributions,
   stories: () => ingestionServices.stories,
@@ -1168,6 +1183,10 @@ if (db) {
     createProductionContentPort({
       ...moderationContentReads,
       ...moderationEnforcementWritesOver({
+        // Drizzle's nested `transaction()` emits SAVEPOINT / RELEASE / ROLLBACK TO, so a
+        // constraint violation inside rolls back to the savepoint and leaves the enclosing
+        // unit usable — the same mechanism the chained audit append uses for its retry.
+        attempt: (write) => exec.transaction(write),
         safety: () => new DrizzleItemSafetyStateStore(exec),
         contributions: () => new DrizzleContributionStore(exec),
         stories: () => new DrizzleStoryStore(exec),

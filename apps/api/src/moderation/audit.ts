@@ -40,9 +40,9 @@ export interface AuditWriteInput {
 /**
  * Append one CHAINED audit record, THROWING on failure.
  *
- * The throwing variant is what a transactional unit needs.  Inside
- * `ModerationServices.transact`, the state change has NOT committed yet — so an audit
- * failure must propagate and take the state change down with it.  That inverts the
+ * The throwing variant is what a transactional unit needs.  Inside a
+ * `ModerationServices.transactor.run` unit the state change has NOT committed yet — so an
+ * audit failure must propagate and take the state change down with it.  That inverts the
  * guarantee in the right direction: not "enforcement proceeds, accountability degrades to
  * an alert", but "no state change without its record".
  *

@@ -51,11 +51,23 @@ ALTER TYPE "story_hidden_state_next" RENAME TO "story_hidden_state";
 -- Both columns move in ONE statement.  Split across two, the row would be momentarily
 -- `room_only` and not yet hidden (or hidden and still public), and either the tier unique
 -- or the 0110 trigger would refuse the intermediate state.
+-- EVERY stranded row, not only the unhidden ones.
+--
+-- A public story in a private room that is ALREADY hidden — a `takedown`, or a moderation
+-- `safety` hide — is not a publish leak (`fromStory` needs `hiddenState === null` to
+-- publish), but it is still the WS-Q violation this migration exists to end, and the 0110
+-- trigger will refuse any later update that leaves it public.  Skipping it also left the
+-- assertion below counting a row the repair had declined to touch, which halts the
+-- migration chain permanently on any installation that has one.
+--
+-- `COALESCE` keeps the stronger reason where one exists: a takedown stays a takedown and
+-- merely becomes room_only, while an unhidden duplicate becomes `superseded`.  Hiding
+-- either way takes the row out of the tier uniques, which are partial on
+-- `hidden_state IS NULL`, so no conversion can collide.
 UPDATE "stories" AS s
    SET "visibility" = 'room_only',
-       "hidden_state" = 'superseded'
+       "hidden_state" = COALESCE(s."hidden_state", 'superseded')
  WHERE s."visibility" = 'public'
-   AND s."hidden_state" IS NULL
    AND s."room_id" IN (SELECT "room_id" FROM "rooms" WHERE "visibility" = 'private');
 --> statement-breakpoint
 

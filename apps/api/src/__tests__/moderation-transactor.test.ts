@@ -111,12 +111,24 @@ describe('moderation transactor — in-memory', () => {
     // B claims but stalls between its CAS and its audit row — the gap the defect lived
     // in.  C's whole reassignment is issued while B is stalled.
     const first = claim('reviewer-b', held.wait);
+    let secondDone = false;
     const second = (async () => {
-      // Let B's CAS land, then start C.  Without the unit, C would run to completion —
-      // CAS and audit row both — while B is still holding its unwritten row.
-      await Promise.resolve();
       await reassign('reviewer-b', 'reviewer-c');
+      secondDone = true;
     })();
+
+    // THE STALL HAS TO BE REAL.  Opening the gate in the same tick that issues C leaves
+    // both units racing on microtasks, which they win or lose for reasons that have
+    // nothing to do with the seam — the assertion below then holds with no unit at all,
+    // and the test proves nothing.  So B is held across many event-loop turns, which is
+    // every opportunity C needs to run to completion.
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // It did not run, and THIS is the property: C's CAS cannot land while B's unit is
+    // open, so there is no gap for B's audit row to arrive late in.  Unserialised, C
+    // would be finished by now with its row already in the trail ahead of B's.
+    expect(secondDone).toBe(false);
+    expect(await trail()).toEqual([]);
 
     held.open();
     await Promise.all([first, second]);
@@ -298,9 +310,18 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
       CREATE OR REPLACE FUNCTION transactor_probe_fail() RETURNS trigger AS $$
       BEGIN RAISE EXCEPTION 'audit insert refused'; END;
       $$ LANGUAGE plpgsql`);
+    // SCOPED TO THIS TEST'S CASE.  A trigger is a database-wide object visible to every
+    // connection, and the gated suites share one live database while vitest runs their
+    // FILES in parallel — so an unconditional BEFORE INSERT on `moderation_audit` fails
+    // every sibling's audit write for as long as it is attached, as a moderation defect
+    // in a suite that touched nothing.  The `WHEN` clause makes it fire only for the row
+    // this test is about (`case_id` is NULL or another uuid everywhere else, and neither
+    // matches), which is all the test ever needed.  Inlined rather than bound: a
+    // `CREATE TRIGGER` is DDL and takes no parameters, and the value is a `randomUUID`.
     await db.execute(sql`
       CREATE TRIGGER transactor_probe_fail BEFORE INSERT ON moderation_audit
-      FOR EACH ROW EXECUTE FUNCTION transactor_probe_fail()`);
+      FOR EACH ROW WHEN (NEW.case_id = ${sql.raw(`'${caseId}'`)}::uuid)
+      EXECUTE FUNCTION transactor_probe_fail()`);
     try {
       await expect(
         transactor.run(async (tx) => {
@@ -309,7 +330,7 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
         }),
       ).rejects.toThrow();
     } finally {
-      await db.execute(sql`DROP TRIGGER transactor_probe_fail ON moderation_audit`);
+      await db.execute(sql`DROP TRIGGER IF EXISTS transactor_probe_fail ON moderation_audit`);
       await db.execute(sql`DROP FUNCTION transactor_probe_fail()`);
     }
 
@@ -362,6 +383,62 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
       sql`SELECT count(*)::int AS n FROM item_safety_states WHERE item_id = ${itemId}::uuid`,
     )) as unknown as Array<{ n: number }>;
     expect(rows[0]?.n).toBe(0);
+  });
+
+  it('an enforcement RETRY inside a unit needs a savepoint, and gets one', async () => {
+    ran = true;
+    // THE MECHANISM THE REINSTATE PATH RUNS ON.  Un-hiding a story re-enters the tier
+    // unique's partial index, so a re-submission that took the URL slot meanwhile makes
+    // the write raise 23505 — which the composition root CATCHES and then READS from, to
+    // find out whether the occupant is still there or the race resolved itself.
+    //
+    // Under autocommit that read is fine.  Inside a unit it is not: Postgres puts the
+    // WHOLE transaction into an aborted state on any error, so the next statement fails
+    // with 25P02 and the retry, the metric, the log line and the specific error are all
+    // replaced by a bare "current transaction is aborted".  `attempt` therefore wraps
+    // each such write in a nested `transaction()`, which drizzle emits as a SAVEPOINT.
+    //
+    // Both halves are checked: only the contrast shows the savepoint is load-bearing.
+    // A temp table with `ON COMMIT DROP` supplies the 23505 without touching real data.
+    let abortedCode: string | undefined;
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.execute(sql`CREATE TEMP TABLE sp_probe_a (k int PRIMARY KEY) ON COMMIT DROP`);
+        await tx.execute(sql`INSERT INTO sp_probe_a VALUES (1)`);
+        try {
+          await tx.execute(sql`INSERT INTO sp_probe_a VALUES (1)`);
+        } catch {
+          /* the 23505 the caller means to handle */
+        }
+        // The caller's next statement — its read, in the real path.
+        await tx.execute(sql`SELECT count(*) FROM sp_probe_a`).catch((error: unknown) => {
+          // Drizzle wraps the driver error, so the SQLSTATE is on the cause.  25P02 is
+          // `current transaction is aborted, commands ignored until end of block`.
+          abortedCode = (error as { cause?: { code?: string } }).cause?.code;
+          throw error;
+        });
+      }),
+    ).rejects.toThrow();
+    expect(abortedCode).toBe('25P02');
+
+    // WITH the savepoint the transaction survives, so the caller's read runs and its own
+    // handling — retry, metric, log, a specific error — happens as written.
+    const survived = await db.transaction(async (tx) => {
+      await tx.execute(sql`CREATE TEMP TABLE sp_probe_b (k int PRIMARY KEY) ON COMMIT DROP`);
+      await tx.execute(sql`INSERT INTO sp_probe_b VALUES (1)`);
+      try {
+        await tx.transaction(async (sp) => {
+          await sp.execute(sql`INSERT INTO sp_probe_b VALUES (1)`);
+        });
+      } catch {
+        /* the 23505, rolled back to the savepoint */
+      }
+      const rows = (await tx.execute(
+        sql`SELECT count(*)::int AS n FROM sp_probe_b`,
+      )) as unknown as Array<{ n: number }>;
+      return rows[0]?.n;
+    });
+    expect(survived).toBe(1);
   });
 
   it('actually ran the gated legs (a skipped leg proves nothing)', () => {

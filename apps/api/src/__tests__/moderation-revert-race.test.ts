@@ -88,6 +88,57 @@ describe('a reversal happens once', () => {
     expect(await revertRows()).toBe(1);
   });
 
+  it('RESTORES the account when two DIFFERENT sanctions are reverted at once', async () => {
+    // The reversal-integrity scan asks "is any OTHER sanction still holding this account
+    // down?" and skips the restore when one is.  Run outside the unit it read a snapshot
+    // taken before this revert's compare-and-set — and two reverts of DIFFERENT actions
+    // never contend — so each saw the other still active, each deferred, and the subject
+    // was left suspended with NOTHING active to revert: `listActiveTemporary…` filters on
+    // `reverted = false`, so the sweep never revisits, and a retried revert takes the
+    // idempotent path without restoring.  Permanently suspended, no way back.
+    const subject = original.subjectUserId as string;
+    const second = await services.actions.insert({
+      actorUserId: ACTOR.userId,
+      actorRole: 'ROLE_SAFETY',
+      action: 'restrict',
+      targetType: 'account',
+      targetId: randomUUID(),
+      subjectUserId: subject,
+      reasonCode: 'MOD_HARASS_001',
+      duration: 'P1D',
+      reviewerNote: null,
+      priorState: 'active',
+      nextState: 'restricted',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+
+    // The default port is a no-op, so the restore has to be observed directly.
+    const applied: Array<{ userId: string; state: string }> = [];
+    services.content = {
+      ...services.content,
+      async applyAccountState(userId, state): Promise<void> {
+        applied.push({ userId, state });
+      },
+    };
+
+    await Promise.all([
+      performRevert(services, ACTOR, original),
+      performRevert(services, ACTOR, second),
+    ]);
+
+    // Both reverted, and the account came back.  The LAST reverter restores — which is
+    // the rule the scan was always meant to express, and which it only reaches because
+    // its scan runs inside the unit, after the first reversal committed.
+    expect((await services.actions.getById(original.actionId))?.reverted).toBe(true);
+    expect((await services.actions.getById(second.actionId))?.reverted).toBe(true);
+    expect(applied.filter((a) => a.userId === subject && a.state === 'active')).toHaveLength(1);
+  });
+
   it('marks the original reverted exactly once', async () => {
     await Promise.all([
       performRevert(services, ACTOR, original),
