@@ -8,7 +8,6 @@ import { hostname } from 'node:os';
 import type { ConsoleAction } from '@licio/shared';
 import type { JobLeaseStore } from '../identity/job-lease.js';
 import { accountStateFor, parseDurationDays, restoreStateFrom } from './actions.js';
-import { writeAudit } from './audit.js';
 import type { ModerationServices } from './services.js';
 
 export type ModerationSchedulerTask =
@@ -82,24 +81,31 @@ export async function runModerationTick(
           );
         }
       }
-      await services.actions.update(action.actionId, { reverted: true });
-      // Through the FUNNEL (see the note in `reports.ts`): a direct append bypasses the
-      // hash chain and reads as an unchained row, i.e. as tampering.
-      await writeAudit(services, {
-        actorUserId: null,
-        actorRole: null,
-        action: 'revert',
-        caseId: action.caseId,
-        reasonCode: action.reasonCode,
-        targetType: action.targetType,
-        targetId: action.targetId,
-        subjectUserId: action.subjectUserId,
-        priorState: action.nextState,
-        nextState: action.priorState,
-        reversible: false,
-        linkedActionId: action.actionId,
-        notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
+      // ONE UNIT: the compare-and-set that claims the lift, and the audit row for it.
+      //
+      // COMPARE-AND-SET, not a blind write.  The distributed lease keeps two SWEEPS
+      // apart and says nothing about a steward reverting the same action mid-sweep —
+      // both used to succeed, and the append-only trail recorded one reversal twice.
+      const claimed = await services.transactor.run(async (tx) => {
+        if ((await tx.actions.revertIfNotReverted(action.actionId)) === null) return false;
+        await tx.audit({
+          actorUserId: null,
+          actorRole: null,
+          action: 'revert',
+          caseId: action.caseId,
+          reasonCode: action.reasonCode,
+          targetType: action.targetType,
+          targetId: action.targetId,
+          subjectUserId: action.subjectUserId,
+          priorState: action.nextState,
+          nextState: action.priorState,
+          reversible: false,
+          linkedActionId: action.actionId,
+          notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
+        });
+        return true;
       });
+      if (!claimed) continue;
       lifted += 1;
     }
     if (lifted > 0) {

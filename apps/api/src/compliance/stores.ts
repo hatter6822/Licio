@@ -27,6 +27,7 @@ import type {
   SarStatus,
 } from '@licio/shared';
 import type { InMemoryRollback as InMemoryRollbackContract } from '../lib/in-memory-rollback.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import { UniqueViolationError } from '../lib/pg-errors.js';
 
 type Clock = () => number;
@@ -559,36 +560,22 @@ export type { InMemoryRollback } from '../lib/in-memory-rollback.js';
 export { UniqueViolationError };
 
 /**
- * The in-memory `ComplianceTransactor`: snapshot → run → restore on ANY throw,
- * giving tests and dev the same all-or-nothing semantics Postgres gives
- * production.  Re-entrant runs JOIN the outer unit rather than nesting a
- * second snapshot, so a composite (a SAR draft applying a hold, say) commits
- * once — matching the single transaction the Drizzle adapter opens.
+ * The in-memory `ComplianceTransactor`.
+ *
+ * A named class over the shared unit of work — the name is what the runtime parity guard
+ * and `check:prod-parity` key on.  The mechanics live in `lib/in-memory-unit-of-work.ts`.
+ *
+ * It previously carried its own copy, and that copy tested re-entrancy with a DEPTH
+ * COUNTER.  A counter cannot tell a nested call from an unrelated concurrent one, and
+ * `runChainedUnit` is driven from the compliance HTTP handlers, which do run
+ * concurrently — so a second request arriving mid-unit JOINED the first, ran interleaved
+ * inside it, and committed (or rolled back) as part of it.  Production was unaffected
+ * (`DrizzleComplianceTransactor` opens a real transaction per call and has no counter),
+ * which is exactly what made it invisible: the divergence lived only where the tests run.
  */
-export class InMemoryComplianceTransactor implements ComplianceTransactor {
-  readonly #stores: ComplianceTxStores;
-  readonly #rollbacks: readonly InMemoryRollbackContract[];
-  #depth = 0;
-
-  constructor(stores: ComplianceTxStores, rollbacks: readonly InMemoryRollbackContract[]) {
-    this.#stores = stores;
-    this.#rollbacks = rollbacks;
-  }
-
-  async run<T>(work: (stores: ComplianceTxStores) => Promise<T>): Promise<T> {
-    if (this.#depth > 0) return work(this.#stores); // join the ambient unit
-    const undo = this.#rollbacks.map((store) => store.beginRollback());
-    this.#depth += 1;
-    try {
-      return await work(this.#stores);
-    } catch (error) {
-      for (const restore of undo) restore();
-      throw error;
-    } finally {
-      this.#depth -= 1;
-    }
-  }
-}
+export class InMemoryComplianceTransactor
+  extends InMemoryUnitOfWork<ComplianceTxStores>
+  implements ComplianceTransactor {}
 
 /** Screening-verdict cache (WS-N.2.2a; Redis in production). */
 export interface ScreeningCacheStore {

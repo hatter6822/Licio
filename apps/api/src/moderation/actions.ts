@@ -22,7 +22,6 @@ import {
   reasonCodeAppealable,
   type StewardCapability,
 } from '@licio/shared';
-import { writeAudit } from './audit.js';
 import {
   type CapabilityDenial,
   denyCapability,
@@ -294,24 +293,57 @@ export async function applyAction(
   }
   const priorState = contentState ? 'visible' : accountState ? priorAccount : null;
   const nextState = contentState ?? accountState ?? null;
-  const action = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: request.action,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    subjectUserId: subjectUserId ?? null,
-    reasonCode,
-    duration: request.duration ?? null,
-    reviewerNote: request.reviewer_note ?? null,
-    priorState,
-    nextState,
-    reversible,
-    reverted: false,
-    linkedActionId: null,
-    caseId: request.case_id ?? null,
-    coApproverUserId: null,
-    reportIds,
+  // ONE UNIT: the action row and its audit record.
+  //
+  // They sit BEFORE the effect is applied, which is the ordering change.  The effect goes
+  // through WS-D/WS-G ports — external calls that no transaction spans and that must not
+  // be held open across one — so the choice is which side of them the record lands on.
+  //
+  // It has to be this side.  A port failure ALREADY left the action row committed and
+  // unaudited (this function throws, and nothing rolls the insert back), so
+  // "recorded but not yet applied" is not a new state — it is today's failure state with
+  // its accountability record missing.  Pairing the two makes the steward's decision
+  // durable and chained whatever the port does next, and the ports are idempotent by
+  // design, so the effect is retryable in a way the record is not.
+  const action = await services.transactor.run(async (tx) => {
+    const inserted = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: request.action,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      reasonCode,
+      duration: request.duration ?? null,
+      reviewerNote: request.reviewer_note ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reverted: false,
+      linkedActionId: null,
+      caseId: request.case_id ?? null,
+      coApproverUserId: null,
+      reportIds,
+    });
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: inserted.actorRole,
+      action: request.action,
+      // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the
+      // same value the action row was written with, so the history cannot be steered
+      // onto another case by a forged field.
+      caseId: linkedCase?.caseId ?? null,
+      reasonCode,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reportIds,
+      notes: request.reviewer_note ?? null,
+    });
+    return inserted;
   });
 
   // 2. Apply the effect (idempotent at the port; an already-removed item is a
@@ -365,25 +397,8 @@ export async function applyAction(
     }
   }
 
-  // 5. Audit (complete field set, WS-J.2.5a).
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: action.actorRole,
-    action: request.action,
-    // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the
-    // same value the action row was written with, so the history cannot be steered
-    // onto another case by a forged field.
-    caseId: linkedCase?.caseId ?? null,
-    reasonCode,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    subjectUserId: subjectUserId ?? null,
-    priorState,
-    nextState,
-    reversible,
-    reportIds,
-    notes: request.reviewer_note ?? null,
-  });
+  // 5. Audited in step 1, with the action row it describes — see there for why the
+  //    record commits before the effect rather than after it.
   services.metrics.increment(`moderation.action.${request.action}`);
 
   return {
@@ -555,62 +570,91 @@ export async function performRevert(
       );
     }
   }
-  // Restore succeeded — NOW mark the original reverted (idempotency point).
-  await services.actions.update(original.actionId, { reverted: true });
-  const revert = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: 'revert',
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    reasonCode: revertReason,
-    duration: null,
-    reviewerNote: revertNote,
-    priorState: original.nextState,
-    nextState: original.priorState,
-    reversible: false,
-    reverted: false,
-    linkedActionId: original.actionId,
-    caseId: original.caseId,
-    coApproverUserId: null,
-    reportIds: [],
-  });
+  // ONE UNIT from here: the compare-and-set that claims the reversal, the `revert` action
+  // row, the member notice, and the audit entry.  Before, each was its own write — and
+  // the CAS was not a CAS at all but a blind `update` guarded by a read taken far above,
+  // so two concurrent reverts both passed the check, both wrote, and the append-only
+  // trail recorded one reversal twice.
+  //
+  // The account-state restore stays OUTSIDE and BEFORE, where the existing ordering
+  // already puts it: it is a WS-D port, not a moderation store, so no transaction spans
+  // it — and it is idempotent, so a unit that fails leaves the account restored and the
+  // action unmarked, which a retry simply redoes.
+  const claimed = await services.transactor.run(async (tx) => {
+    const marked = await tx.actions.revertIfNotReverted(original.actionId);
+    // Someone else reverted it between the read above and here.  Nothing written, so the
+    // empty unit commits and the caller answers idempotently rather than recording a
+    // second reversal of the same action.
+    if (marked === null) return null;
 
-  // Re-notify the subject if the original carried a notice (no silent undo).
-  let noticeSent = false;
-  if (original.subjectUserId && isSignificantAction(original.action)) {
-    await services.notices.insert({
-      userId: original.subjectUserId,
-      kind: 'action',
-      actionId: revert.actionId,
-      title: 'A moderation action was reversed',
-      body: `A previous moderation action on your ${original.targetType} was reversed. No further action is required.`,
-      reasonCode: original.reasonCode,
-      appealable: false,
-      appealStatus: null,
-      readAt: null,
+    const revert = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: 'revert',
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      reasonCode: revertReason,
+      duration: null,
+      reviewerNote: revertNote,
+      priorState: original.nextState,
+      nextState: original.priorState,
+      reversible: false,
+      reverted: false,
+      linkedActionId: original.actionId,
+      caseId: original.caseId,
+      coApproverUserId: null,
+      reportIds: [],
     });
-    noticeSent = true;
-  }
 
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: revert.actorRole,
-    action: 'revert',
-    // The REVERTED action's case, so a revert lands in the history of the case that
-    // produced it rather than nowhere.
-    caseId: original.caseId,
-    reasonCode: revertReason,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    priorState: original.nextState,
-    nextState: original.priorState,
-    reversible: false,
-    linkedActionId: original.actionId,
-    notes: revertNote,
+    // Re-notify the subject if the original carried a notice (no silent undo).
+    let noticeSent = false;
+    if (original.subjectUserId && isSignificantAction(original.action)) {
+      await tx.notices.insert({
+        userId: original.subjectUserId,
+        kind: 'action',
+        actionId: revert.actionId,
+        title: 'A moderation action was reversed',
+        body: `A previous moderation action on your ${original.targetType} was reversed. No further action is required.`,
+        reasonCode: original.reasonCode,
+        appealable: false,
+        appealStatus: null,
+        readAt: null,
+      });
+      noticeSent = true;
+    }
+
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: revert.actorRole,
+      action: 'revert',
+      // The REVERTED action's case, so a revert lands in the history of the case that
+      // produced it rather than nowhere.
+      caseId: original.caseId,
+      reasonCode: revertReason,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      priorState: original.nextState,
+      nextState: original.priorState,
+      reversible: false,
+      linkedActionId: original.actionId,
+      notes: revertNote,
+    });
+    return { revert, noticeSent };
   });
+
+  if (claimed === null) {
+    // The idempotent answer, matching the shape the early `original.reverted` check
+    // returns — a retried request must not become a conflict, and a lost race IS a retry.
+    return {
+      revert_action_id: original.linkedActionId ?? original.actionId,
+      reverted_action_id: original.actionId,
+      notice_sent: false,
+      created_at: new Date(services.now()).toISOString(),
+    };
+  }
+  const { revert, noticeSent } = claimed;
   services.metrics.increment('moderation.revert');
 
   return {

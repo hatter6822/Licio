@@ -325,6 +325,19 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
     return row === undefined ? null : mapCase(row);
   }
 
+  async delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT: the `enforcement_delayed = false` predicate lives in the UPDATE, so
+    // Postgres decides which detection run under a brigade actually engages the delay —
+    // and therefore which one pages and audits.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ enforcementDelayed: true, updatedAt: new Date() })
+      .where(and(eq(moderationCases.caseId, caseId), eq(moderationCases.enforcementDelayed, false)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
   async claimIfUnassigned(
     caseId: string,
     reviewerId: string,
@@ -701,6 +714,20 @@ export class DrizzleModerationActionStore implements ModerationActionStore {
       .update(moderationActions)
       .set(set)
       .where(eq(moderationActions.actionId, actionId))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapAction(row);
+  }
+
+  async revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null> {
+    // ONE STATEMENT.  The `reverted = false` predicate lives in the UPDATE, so Postgres
+    // decides the winner of two concurrent reverts; an empty `returning()` means someone
+    // else already marked it.  A read-then-write here would leave the race exactly where
+    // it was, just with more code around it.
+    const rows = await this.#db
+      .update(moderationActions)
+      .set({ reverted: true })
+      .where(and(eq(moderationActions.actionId, actionId), eq(moderationActions.reverted, false)))
       .returning();
     const row = rows[0];
     return row === undefined ? null : mapAction(row);
@@ -1852,6 +1879,8 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
       work({
         cases: new DrizzleModerationCaseStore(tx),
         actions: new DrizzleModerationActionStore(tx),
+        notices: new DrizzleModerationNoticeStore(tx),
+        appeals: new DrizzleModerationAppealStore(tx),
         audit: (input) =>
           appendAudit({ ...this.#auditChain(), store: new DrizzleModerationAuditStore(tx) }, input),
       }),

@@ -23,7 +23,6 @@ import {
 } from '@licio/shared';
 import { NO_KEY_WARNING, scanForKeyMaterial } from '../compliance/no-key-filter.js';
 import { autoAssignCase } from './assignment.js';
-import { writeAudit } from './audit.js';
 import { coordinationScore } from './prechecks.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationCaseRecord, ModerationReportRecord } from './stores.js';
@@ -292,12 +291,24 @@ export async function submitReport(
     reasonCodeSlaHours(reasonCode),
   );
   const slaDueAt = new Date(Date.parse(theCase.createdAt) + minSlaHours * 3_600_000).toISOString();
+  // NO `status` KEY.  This block recomputes the aggregate from the case's committed
+  // reports, and severity/routedTo/reportCount/slaDueAt genuinely are derived from the
+  // `listByCase` above.  `status` was not: it was carried verbatim from a snapshot read
+  // ~85 lines earlier, across a report insert and a full re-read — so a steward
+  // transition landing in that window was written back to its old value.  An `escalate`
+  // silently dropped out of the escalated queue while its audit row still stood, and
+  // nothing recorded the undo, because nothing knew one had happened.
+  //
+  // Removing the key loses nothing: it could only ever write back what it read.  The
+  // reopen its dead ternary reached for is already structural — `findOpenByTarget`
+  // filters `status <> 'resolved'`, so a new report against a resolved target opens a
+  // FRESH case rather than reviving the old one, which also makes
+  // `theCase.status === 'resolved'` unreachable on every path into here.
   await services.cases.update(theCase.caseId, {
     severity: aggSeverity,
     routedTo,
     reportCount: caseReports.length,
     slaDueAt,
-    status: theCase.status === 'resolved' ? 'new' : theCase.status,
   });
 
   services.metrics.increment('reports.created');
@@ -457,8 +468,34 @@ export async function detectCoordination(
   }
 
   // MFCI-2: delay volume-driven enforcement pending integrity review.
-  await services.cases.update(theCase.caseId, { enforcementDelayed: true });
+  //
+  // ONE UNIT: the compare-and-set that engages the delay, and the audit row recording it.
+  // The audit used to sit in `trackBackground`, which has no production flush — so the
+  // record of an enforcement delay could simply die with the process, leaving the flag
+  // set and nothing saying who set it or why.  Inline and joined, it cannot.
+  const delayed = await services.transactor.run(async (tx) => {
+    if ((await tx.cases.delayEnforcementIfNotDelayed(theCase.caseId)) === null) return false;
+    await tx.audit({
+      actorUserId: null,
+      actorRole: null,
+      action: 'coordination_delay',
+      caseId: theCase.caseId,
+      reasonCode: null,
+      targetType: theCase.targetType,
+      targetId: theCase.targetId,
+      subjectUserId: null,
+      priorState: 'enforcement_active',
+      nextState: 'enforcement_delayed',
+      reversible: true,
+      notes: 'Coordinated-report protection engaged pending integrity review (MFCI-2).',
+    });
+    return true;
+  });
+  if (!delayed) return;
   services.metrics.increment('reports.coordination_flagged');
+  // OUTSIDE the unit, and after it: paging on-call is an outward action that a rollback
+  // cannot recall.  Ordering it after the commit means the page always describes a delay
+  // that really is in force.
   services.alerts.pageOnCall({
     kind: 'coordinated_report',
     targetType: theCase.targetType,
@@ -466,27 +503,4 @@ export async function detectCoordination(
     reasonCode: null,
     severity: current.severity,
   });
-  // Automated, system-actor audit entry (WS-J.2.5a: every automated event).
-  services.trackBackground(
-    Promise.resolve().then(async () => {
-      // Through the FUNNEL, like every other write.  This called `audit.append` directly
-      // while `writeAudit`'s header called itself "the single funnel" — harmless until
-      // the funnel gained the hash chain, at which point a direct append would have
-      // written an unchained row the verifier reports as tampering.
-      await writeAudit(services, {
-        actorUserId: null,
-        actorRole: null,
-        action: 'coordination_delay',
-        caseId: theCase.caseId,
-        reasonCode: null,
-        targetType: theCase.targetType,
-        targetId: theCase.targetId,
-        subjectUserId: null,
-        priorState: 'enforcement_active',
-        nextState: 'enforcement_delayed',
-        reversible: true,
-        notes: 'Coordinated-report protection engaged pending integrity review (MFCI-2).',
-      });
-    }),
-  );
 }

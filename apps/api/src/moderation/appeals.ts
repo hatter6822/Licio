@@ -28,7 +28,6 @@ import {
   performRevert,
 } from './actions.js';
 import { assignAppealReviewer } from './assignment.js';
-import { writeAudit } from './audit.js';
 import { isSenior, type StewardActor } from './authz.js';
 import { createAppealOutcomeNotice } from './notices.js';
 import type { ModerationServices } from './services.js';
@@ -299,12 +298,58 @@ export async function decideAppeal(
   // AFTER the claim but BEFORE the revert leaves the appeal decided with the
   // sanction still standing (recoverable by a steward revert); race-safety here
   // outranks that rare retry case.
-  const claimed = await services.appeals.claimDecision(appealId, {
-    status,
-    decidedAt: nowIso,
-    decidedBy: actor.userId,
-    decisionReasonCode: reasonCode,
-    decisionExplanation: explanation,
+  // ONE UNIT: the irreversible claim, the notice bookkeeping it implies, and the audit
+  // record of the decision.
+  //
+  // `claimDecision` is a compare-and-set with NO retry path — once it lands the appeal is
+  // no longer pending and every retry answers `already_decided` — so an audit written
+  // afterwards had exactly one chance and no way to recover from missing it.  The
+  // decision's record now commits with the decision.
+  //
+  // The reversal and any replacement sanction stay BELOW and outside: both reach WS-D/WS-G
+  // ports, which no transaction spans, and both are separately audited actions in their
+  // own right.
+  const claimed = await services.transactor.run(async (tx) => {
+    const won = await tx.appeals.claimDecision(appealId, {
+      status,
+      decidedAt: nowIso,
+      decidedBy: actor.userId,
+      decisionReasonCode: reasonCode,
+      decisionExplanation: explanation,
+    });
+    if (!won) return false;
+    // Clear the ORIGINAL action notice's pending-appeal flag → its final status, so the
+    // inbox stops rendering "Appeal under review" after the decision (the outcome notice
+    // is a SEPARATE record; the original would otherwise stay stale forever — WS-J.1.3d).
+    await tx.notices.markAppealDecided(appeal.appellantUserId, appeal.actionId, status);
+    // Notify the appellant (WS-J.1.3d).
+    await createAppealOutcomeNotice(
+      services,
+      {
+        userId: appeal.appellantUserId,
+        actionId: appeal.actionId,
+        appealStatus: status,
+        reasonCode,
+        explanation,
+      },
+      tx.notices,
+    );
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: 'appeal_decision',
+      caseId: original.caseId,
+      reasonCode,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: appeal.appellantUserId,
+      priorState: 'appeal_pending',
+      nextState: status,
+      reversible: false,
+      linkedActionId: original.actionId,
+      notes: explanation,
+    });
+    return true;
   });
   if (!claimed) {
     return { ok: false, code: 'already_decided', message: 'Appeal already decided' };
@@ -333,38 +378,7 @@ export async function decideAppeal(
     }
   }
 
-  // (The decision fields were persisted by the atomic claim above.)
-
-  // Clear the ORIGINAL action notice's pending-appeal flag → its final status, so
-  // the inbox stops rendering "Appeal under review" after the decision (the
-  // outcome notice below is a SEPARATE record; the original would otherwise stay
-  // stale forever — WS-J.1.3d).
-  await services.notices.markAppealDecided(appeal.appellantUserId, appeal.actionId, status);
-
-  // Notify the appellant (WS-J.1.3d).
-  await createAppealOutcomeNotice(services, {
-    userId: appeal.appellantUserId,
-    actionId: appeal.actionId,
-    appealStatus: status,
-    reasonCode,
-    explanation,
-  });
-
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: 'appeal_decision',
-    caseId: original.caseId,
-    reasonCode,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: appeal.appellantUserId,
-    priorState: 'appeal_pending',
-    nextState: status,
-    reversible: false,
-    linkedActionId: original.actionId,
-    notes: explanation,
-  });
+  // (The decision, its notices and its audit row all committed in the unit above.)
   services.metrics.increment(`appeals.decided.${status}`);
   return { ok: true, status, noticeSent: true };
 }
@@ -422,24 +436,44 @@ async function applyModifiedAction(
   // temporary sanction PERMANENT — harsher than the original).  Content
   // modifications carry no duration (auto-lift is account-only).
   const duration = accountState ? remainingDuration(original, services.now()) : null;
-  const newAction = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: modifiedAction,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    reasonCode,
-    duration,
-    reviewerNote: 'Applied via appeal modification',
-    priorState,
-    nextState,
-    reversible,
-    reverted: false,
-    linkedActionId: original.actionId,
-    caseId: original.caseId,
-    coApproverUserId: null,
-    reportIds: [],
+  // ONE UNIT: the replacement sanction and its audit record, before the ports apply it —
+  // the same ordering `applyAction` uses, and for the same reason.  A port failure already
+  // left this action row committed and unaudited, so pairing them only completes the
+  // record of a state that could already occur.
+  await services.transactor.run(async (tx) => {
+    const inserted = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: modifiedAction,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      reasonCode,
+      duration,
+      reviewerNote: 'Applied via appeal modification',
+      priorState,
+      nextState,
+      reversible,
+      reverted: false,
+      linkedActionId: original.actionId,
+      caseId: original.caseId,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: modifiedAction,
+      caseId: original.caseId,
+      reasonCode,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      priorState,
+      nextState,
+      reversible,
+      linkedActionId: inserted.actionId,
+    });
   });
   // `contentState` is set only for a content target, whose id is never scrubbed
   // (the null guard also narrows the type for the port call).
@@ -455,18 +489,5 @@ async function applyModifiedAction(
   if (accountState && original.subjectUserId) {
     await services.content.applyAccountState(original.subjectUserId, accountState, null);
   }
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: modifiedAction,
-    caseId: original.caseId,
-    reasonCode,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    priorState,
-    nextState,
-    reversible,
-    linkedActionId: newAction.actionId,
-  });
+  // (Audited in the unit above, with the action row it describes.)
 }

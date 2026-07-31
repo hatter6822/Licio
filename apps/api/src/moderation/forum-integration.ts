@@ -18,7 +18,6 @@ import {
   contributionUrls,
 } from '../forum/safety.js';
 import type { AutoModerationSink } from '../forum/services.js';
-import { writeAudit } from './audit.js';
 import { createActionNotice } from './notices.js';
 import {
   classifyDuplicateFlood,
@@ -154,48 +153,59 @@ export function createWsJContributionSafety(
 export function createAutoModerationSink(services: ModerationServices): AutoModerationSink {
   return {
     async recordContentAutoBlock(input): Promise<void> {
-      const action = await services.actions.insert({
-        actorUserId: null, // system
-        actorRole: null,
-        action: 'remove',
-        targetType: 'content',
-        targetId: input.contributionId,
-        subjectUserId: input.authorUserId,
-        reasonCode: input.reasonCode,
-        duration: null,
-        reviewerNote: `automated block: ${input.reasons.join(', ')}`,
-        priorState: 'visible',
-        nextState: 'removed',
-        reversible: true,
-        reverted: false,
-        linkedActionId: null,
-        caseId: null,
-        coApproverUserId: null,
-        reportIds: [],
-      });
-      await writeAudit(services, {
-        actorUserId: null,
-        actorRole: null,
-        // No case: an automated pre-publication block precedes any report, so there
-        // is nothing to file it under.  NULL here means exactly that.
-        caseId: null,
-        action: 'auto_block',
-        reasonCode: input.reasonCode,
-        targetType: 'content',
-        targetId: input.contributionId,
-        subjectUserId: input.authorUserId,
-        priorState: 'visible',
-        nextState: 'removed',
-        reversible: true,
-        notes: input.reasons.join(', '),
-      });
+      // ONE UNIT: the system action row, its audit entry, and the appealable
+      // statement-of-reasons notice.  This is a fully AUTOMATED removal with no human
+      // actor, so the record is the only account of it that exists — and the notice is
+      // the member's only route to appeal, which must not survive a rollback of the
+      // removal it describes.
       const appealable = reasonCodeAppealable(input.reasonCode as ModerationReasonCode);
-      await createActionNotice(services, {
-        userId: input.authorUserId,
-        actionId: action.actionId,
-        action: 'remove',
-        reasonCode: input.reasonCode,
-        appealable,
+      await services.transactor.run(async (tx) => {
+        const action = await tx.actions.insert({
+          actorUserId: null, // system
+          actorRole: null,
+          action: 'remove',
+          targetType: 'content',
+          targetId: input.contributionId,
+          subjectUserId: input.authorUserId,
+          reasonCode: input.reasonCode,
+          duration: null,
+          reviewerNote: `automated block: ${input.reasons.join(', ')}`,
+          priorState: 'visible',
+          nextState: 'removed',
+          reversible: true,
+          reverted: false,
+          linkedActionId: null,
+          caseId: null,
+          coApproverUserId: null,
+          reportIds: [],
+        });
+        await tx.audit({
+          actorUserId: null,
+          actorRole: null,
+          // No case: an automated pre-publication block precedes any report, so there
+          // is nothing to file it under.  NULL here means exactly that.
+          caseId: null,
+          action: 'auto_block',
+          reasonCode: input.reasonCode,
+          targetType: 'content',
+          targetId: input.contributionId,
+          subjectUserId: input.authorUserId,
+          priorState: 'visible',
+          nextState: 'removed',
+          reversible: true,
+          notes: input.reasons.join(', '),
+        });
+        await createActionNotice(
+          services,
+          {
+            userId: input.authorUserId,
+            actionId: action.actionId,
+            action: 'remove',
+            reasonCode: input.reasonCode,
+            appealable,
+          },
+          tx.notices,
+        );
       });
       services.metrics.increment('moderation.auto_block');
     },

@@ -43,10 +43,14 @@
 // and two bulk operations over overlapping sets in different orders would deadlock.  One
 // case per unit keeps a single lock order — case row, then the chain — which no cycle
 // can form across.
-import { AsyncLocalStorage } from 'node:async_hooks';
-import type { InMemoryRollback } from '../lib/in-memory-rollback.js';
+import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { AuditWriteInput } from './audit.js';
-import type { ModerationActionStore, ModerationCaseStore } from './stores.js';
+import type {
+  ModerationActionStore,
+  ModerationAppealStore,
+  ModerationCaseStore,
+  ModerationNoticeStore,
+} from './stores.js';
 
 /**
  * The stores a unit may touch, bound to ONE transaction.
@@ -59,6 +63,17 @@ import type { ModerationActionStore, ModerationCaseStore } from './stores.js';
 export interface ModerationTx {
   readonly cases: ModerationCaseStore;
   readonly actions: ModerationActionStore;
+  /**
+   * Member notices.  A DURABLE write, so it belongs in the unit: a reversal that rolls
+   * back must not leave the member holding a notice telling them an action against them
+   * was undone when it was not.  The notice is a row, not an outward send — the push /
+   * email side of it is separate and stays outside.
+   */
+  readonly notices: ModerationNoticeStore;
+  /** Appeals.  `claimDecision` is an IRREVERSIBLE compare-and-set — once it lands the
+   *  appeal is no longer pending and every retry answers `already_decided` — so its audit
+   *  row has to commit with it or there is no second chance to write one. */
+  readonly appeals: ModerationAppealStore;
   /**
    * Append this unit's audit record, chained, inside this transaction.
    *
@@ -84,64 +99,15 @@ export interface ModerationTransactor {
 }
 
 /**
- * The in-memory `ModerationTransactor`: snapshot → run → restore on ANY throw.
+ * The in-memory `ModerationTransactor`.
  *
- * SERIALISED, which goes beyond what the compliance twin does and is load-bearing here.
- * In production the ordering comes from transaction VISIBILITY — a unit cannot observe
- * another's state change until that unit has fully committed.  A fold over Maps has no
- * such boundary: every write is visible the instant it happens, and there ARE awaits
- * between the CAS and the append, so two interleaved units reproduce exactly the disorder
- * this seam removes and the twin fails to demonstrate the property it exists to mirror.
- * A promise chain is the whole mechanism.
- *
- * Re-entrant runs JOIN the ambient unit rather than taking a second snapshot, matching
- * the single transaction the Drizzle adapter opens.  Without the join a nested run would
- * also wait on a queue slot its own caller is holding — a deadlock, not a slowdown.
+ * A named class over the shared unit of work, and the name is load-bearing twice: the
+ * runtime parity guard recognises an un-swapped adapter by its constructor name, and
+ * `check:prod-parity` pairs `InMemory*` with `Drizzle*` statically.  The mechanics —
+ * snapshot/restore, serialisation, and the async-context re-entrancy test — live in
+ * `lib/in-memory-unit-of-work.ts` so this domain and WS-N cannot drift apart on them
+ * again.
  */
-export class InMemoryModerationTransactor implements ModerationTransactor {
-  readonly #tx: ModerationTx;
-  readonly #rollbacks: readonly InMemoryRollback[];
-  /**
-   * The ambient unit, if this call is running INSIDE one.
-   *
-   * A depth counter cannot answer this, and the difference is not academic: a counter
-   * says "some unit is in flight", which is equally true of a nested call and of an
-   * unrelated concurrent one.  Treating the concurrent caller as nested makes it JOIN —
-   * it runs interleaved with the unit already in flight, under that unit's snapshot,
-   * which is precisely the interleaving this seam removes.  Caught by the ordering test
-   * below, which showed the second reviewer's unit starting inside the first's.
-   *
-   * `AsyncLocalStorage` propagates through the awaits of one async chain and NOT into a
-   * chain started independently, which is exactly the distinction required.
-   */
-  readonly #ambient = new AsyncLocalStorage<ModerationTx>();
-  #queue: Promise<unknown> = Promise.resolve();
-
-  constructor(tx: ModerationTx, rollbacks: readonly InMemoryRollback[]) {
-    this.#tx = tx;
-    this.#rollbacks = rollbacks;
-  }
-
-  async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
-    const ambient = this.#ambient.getStore();
-    if (ambient !== undefined) return work(ambient); // genuinely nested — join it
-    const running = this.#queue.then(() =>
-      this.#ambient.run(this.#tx, async () => {
-        const undo = this.#rollbacks.map((store) => store.beginRollback());
-        try {
-          return await work(this.#tx);
-        } catch (error) {
-          for (const restore of undo) restore();
-          throw error;
-        }
-      }),
-    );
-    // The queue advances on SETTLEMENT, not on success: a unit that throws must still
-    // release the next one, or one failure wedges every later write.
-    this.#queue = running.then(
-      () => undefined,
-      () => undefined,
-    );
-    return running;
-  }
-}
+export class InMemoryModerationTransactor
+  extends InMemoryUnitOfWork<ModerationTx>
+  implements ModerationTransactor {}

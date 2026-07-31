@@ -281,6 +281,15 @@ export interface ModerationCaseStore {
    */
   claimIfUnassigned(caseId: string, reviewerId: string): Promise<ModerationCaseRecord | null>;
   /**
+   * Set the MFCI-2 enforcement delay, ONLY if it is not already set.
+   *
+   * Null ⇒ some other detection run already delayed this case, so the page and the audit
+   * row that accompany the delay must not fire a second time.  A read-then-write left
+   * that to a check taken before the write, which under a brigade — many reports landing
+   * at once, each triggering detection — is exactly when it is least true.
+   */
+  delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null>;
+  /**
    * REASSIGN only if the case is still held by `expectedAssignee`.
    *
    * The reasoned-reassignment path used an unconditional `update`, so two reviewers
@@ -353,6 +362,20 @@ export interface ModerationActionStore {
     actionId: string,
     patch: Partial<ModerationActionRecord>,
   ): Promise<ModerationActionRecord | null>;
+  /**
+   * Mark an action reverted, ONLY if it is not already — the compare-and-set that makes
+   * a revert happen once.
+   *
+   * The revert path used to read `reverted`, decide, and then write unconditionally.  Two
+   * concurrent reverts of the same action both read false, both passed the check and both
+   * wrote — producing TWO `revert` action rows and TWO audit rows for one reversal, in an
+   * append-only record that then says the action was reverted twice.  The scheduler's
+   * auto-lift raced a steward's revert the same way; the distributed lease only keeps two
+   * SWEEPS apart, and says nothing about a human arriving mid-sweep.
+   *
+   * Null ⇒ someone else got there first, and the caller takes its idempotent path.
+   */
+  revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null>;
   listBySubject(userId: string): Promise<ModerationActionRecord[]>;
   /** Active (non-reverted) actions against an item, newest first. */
   listActiveByTarget(targetType: string, targetId: string): Promise<ModerationActionRecord[]>;
@@ -671,6 +694,20 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemor
     return { ...updated };
   }
 
+  async delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle adapter's
+    // one-statement `UPDATE … WHERE enforcement_delayed = false`.
+    const r = this.#rows.get(caseId);
+    if (!r || r.enforcementDelayed) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      enforcementDelayed: true,
+      updatedAt: iso(this.#now),
+    };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
   async claimIfUnassigned(
     caseId: string,
     reviewerId: string,
@@ -848,6 +885,16 @@ export class InMemoryModerationReportStore implements ModerationReportStore {
 }
 
 export class InMemoryModerationActionStore implements ModerationActionStore, InMemoryRollback {
+  async revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null> {
+    // Read, test and write with NO `await` between them — on a single-threaded event
+    // loop that is as atomic as the Drizzle adapter's one-statement
+    // `UPDATE … WHERE reverted = false`, which is the semantics this emulates.
+    const row = this.#rows.get(actionId);
+    if (!row || row.reverted) return null;
+    const updated: ModerationActionRecord = { ...row, reverted: true };
+    this.#rows.set(actionId, updated);
+    return { ...updated };
+  }
   /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
   beginRollback(): () => void {
     return mapRollback(this.#rows);
@@ -1214,7 +1261,12 @@ export class InMemoryAccountMuteStore implements AccountMuteStore {
   }
 }
 
-export class InMemoryModerationAppealStore implements ModerationAppealStore {
+export class InMemoryModerationAppealStore implements ModerationAppealStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationAppealRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -1312,7 +1364,12 @@ export class InMemoryModerationAppealStore implements ModerationAppealStore {
   }
 }
 
-export class InMemoryModerationNoticeStore implements ModerationNoticeStore {
+export class InMemoryModerationNoticeStore implements ModerationNoticeStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationNoticeRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {

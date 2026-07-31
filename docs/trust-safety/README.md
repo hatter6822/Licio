@@ -333,6 +333,22 @@ These are structural guarantees the code holds (each covered by a test):
 - **The audit log audits its own reads.** Both the transparency export AND the
   `/audit` viewer write a meta-audit record (the query scope), so steward
   inspection of the accountability trail is itself accountable.
+- **A reversal happens ONCE.**  `performRevert` read `reverted`, decided, and then wrote
+  unconditionally — so two concurrent reverts both passed the check and both wrote a
+  revert action, a member notice and an audit row, and the trail said one sanction was
+  reversed twice.  `revertIfNotReverted` moves the predicate into the UPDATE; a lost race
+  returns the idempotent answer instead of a second reversal.  The live pairings are a
+  steward's revert against the expiry sweep, and an appeal overturn against a steward
+  revert — the distributed lease keeps two SWEEPS apart and says nothing about a human
+  arriving mid-sweep.  `delayEnforcementIfNotDelayed` does the same for the MFCI-2 flag,
+  so a brigade's many detection runs page and audit exactly once.
+- **The report aggregate no longer writes back a status it read.**  The recompute carried
+  `status` verbatim from a snapshot taken ~85 lines and two round trips earlier, so a
+  steward `escalate` or `resolve` landing in that window was silently reverted — its audit
+  row still standing, and nothing recording the undo.  The key is gone: it could only ever
+  write back what it read, and the reopen its dead ternary reached for is already
+  structural, since `findOpenByTarget` skips resolved cases and a new report therefore
+  opens a fresh one.
 - **A state change and its audit record are ONE unit.**  Assignment was already a
   compare-and-set, so no case could be moved from a stale snapshot; what remained was the
   gap between the CAS committing and the row being appended, in which a delayed reviewer's
@@ -342,7 +358,12 @@ These are structural guarantees the code holds (each covered by a test):
   audit row included — has committed.  The guarantee is VISIBILITY, not lock contention,
   which is why it holds however the two requests are scheduled.  Applied to all three
   assignment paths (auto-route, console assign, bulk assign), per case rather than per
-  batch so two bulk operations over overlapping sets cannot deadlock.
+  batch so two bulk operations over overlapping sets cannot deadlock — and since extended
+  to the action palette, the revert, the automated pre-publication block, the appeal
+  decision and its replacement sanction, and the expiry sweep's lift.  Where a WS-D/WS-G
+  port applies the effect, the record commits BEFORE it: a port failure already left the
+  action row committed and unaudited, so pairing them only completes a state that could
+  already occur, and the ports are idempotent where the record is not.
 - **No state change without its record.**  Inside a unit an audit failure aborts the
   change rather than degrading to an alert — the deliberate inversion of `writeAudit`'s
   best-effort posture, which remains correct for events that are NOT state changes (a
