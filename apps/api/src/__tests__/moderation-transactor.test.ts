@@ -17,6 +17,7 @@ import { createDbClient, migrationsFolder } from '@licio/db';
 import { sql } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { DrizzleItemSafetyStateStore } from '../events/drizzle-event-stores.js';
 import { DrizzleModerationTransactor } from '../moderation/drizzle-moderation-stores.js';
 import {
   createInMemoryModerationServices,
@@ -175,11 +176,21 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
     // `moderation_cases.assigned_to` is a real FK, so the reviewers have to be real.
     alice = await makeUser(db, 'alice');
     bob = await makeUser(db, 'bob');
-    transactor = new DrizzleModerationTransactor(db, () => ({
-      store: { chainHead: async () => null } as never,
-      key: 'transactor-test-key',
-      refOf: (id) => id,
-    }));
+    transactor = new DrizzleModerationTransactor(
+      db,
+      () => ({
+        store: { chainHead: async () => null } as never,
+        key: 'transactor-test-key',
+        refOf: (id) => id,
+      }),
+      // This suite drives the moderation stores directly; the enforcement binding is
+      // exercised by `moderation-services.test.ts`, so a no-op keeps the unit honest
+      // about what it is testing.
+      () => ({
+        applyContentState: async () => {},
+        applyAccountState: async () => {},
+      }),
+    );
   });
 
   afterAll(async () => {
@@ -308,6 +319,49 @@ describe.skipIf(!DB_URL)('moderation transactor — live Postgres', () => {
       assigned_to: string | null;
     }>;
     expect(rows[0]?.assigned_to).toBeNull();
+  });
+
+  it('ROLLS BACK the ENFORCEMENT itself, across bounded contexts', async () => {
+    ran = true;
+    const itemId = randomUUID();
+    // A transactor whose enforcement binding is real: the WS-E item-safety write, bound
+    // to the unit's handle exactly as the composition root binds it in production.
+    const enforcing = new DrizzleModerationTransactor(
+      db,
+      () => ({ store: { chainHead: async () => null } as never, key: 'k', refOf: (id) => id }),
+      (exec) => ({
+        applyContentState: async () => {
+          await new DrizzleItemSafetyStateStore(exec).set({
+            itemId,
+            safetyState: 'removed',
+            frozenScore: null,
+            frozenActiveAttention: null,
+            frozenParticipation: null,
+            caseId: null,
+            updatedBy: alice,
+            updatedAt: new Date().toISOString(),
+          });
+        },
+        applyAccountState: async () => {},
+      }),
+    );
+
+    await expect(
+      enforcing.run(async (tx) => {
+        await tx.content.applyContentState(itemId, 'contribution', 'removed', null, alice);
+        // Whatever fails after the effect — an audit refusal, a constraint, a crash on the
+        // record side — must take the enforcement with it.
+        throw new Error('record failed after the effect');
+      }),
+    ).rejects.toThrow('record failed after the effect');
+
+    // NO suppression survives.  Before this binding existed the safety row committed on
+    // its own, and content stayed excluded from ranking with nothing recording why —
+    // the state that made a phantom "revert handle" look necessary.
+    const rows = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM item_safety_states WHERE item_id = ${itemId}::uuid`,
+    )) as unknown as Array<{ n: number }>;
+    expect(rows[0]?.n).toBe(0);
   });
 
   it('actually ran the gated legs (a skipped leg proves nothing)', () => {

@@ -361,20 +361,28 @@ These are structural guarantees the code holds (each covered by a test):
   batch so two bulk operations over overlapping sets cannot deadlock — and since extended
   to the action palette, the revert, the automated pre-publication block, the appeal
   decision and its replacement sanction, and the expiry sweep's lift.
-- **Nothing is recorded unless the effect landed.**  The action row used to be written
-  BEFORE the ports, on the reasoning that it is the revert handle — `applyContentState`
-  writes two tables, so a throw between them leaves content partially hidden, and `clear`
-  maps to no content state, so the palette offers no restore.  The concern is real; the
-  handle is not.  `performRevert` asks `listActiveByTarget` whether some OTHER action
-  still suppresses the item and skips restoring when one does, so a row left by a FAILED
-  enforcement answers yes — and a member whose steward retried successfully and who then
-  WINS THEIR APPEAL stays hidden, defeated by the record of an attempt that never took
-  effect.  An orphan that enforces is a phantom sanction, not a handle.  The effect is
-  applied first, and then the action row, the case resolution, the member notice and the
-  audit entry commit together.  A port failure leaves at most a partial ranking-exclusion
-  and no record: UNDER-enforcement, the safe direction, completed by the steward's retry
-  since the port is idempotent.  Closing even that means making the port's own two writes
-  atomic with each other, inside the content port.
+- **The enforcement and its record are ONE transaction.**  The effect reaches WS-E
+  item-safety state, WS-G contributions, WS-F stories and WS-D accounts — four bounded
+  contexts, and all of them the same Postgres, so one transaction spans them.  What was
+  in the way was never the domains but the wiring: the content port was a ~190-line
+  literal passed inline at the boot, every dep closing over a service CONTAINER, and a
+  container-backed dep resolves whatever store the container holds, which is by
+  definition not a transaction.  Naming the write set (`ContentEnforcementDeps`) makes
+  `(exec) => ContentEnforcementDeps` expressible, and the composition root — the only
+  place that knows all four domains — supplies it, so moderation still constructs nobody
+  else's stores.
+  This removes two failure states rather than choosing between them.  A port that throws
+  part-way no longer leaves content partially hidden, because the rollback takes the
+  safety-state write with it — so there is no orphaned suppression, and no need for the
+  phantom "revert handle" that used to answer `stillSuppressed` and defeat a granted
+  appeal.  And a record that fails no longer leaves an enforced action unrecorded,
+  because the enforcement goes back with it.  Proved against live Postgres by failing a
+  unit after the effect and asserting no `item_safety_states` row survives; mutation-
+  tested by binding the enforcement to the base client, which leaves one behind.
+  Only the APPLY direction is taken through a unit.  Restoring a story clears its hidden
+  state, which re-enters a partial unique index behind a retry-on-23505 loop correct only
+  under autocommit, and which deliberately rethrows a live conflict to leave the action
+  un-reverted and retryable — so the revert path keeps its restore outside the unit.
 - **The trail is tamper-EVIDENT, not merely append-only.** Every record is
   MAC-chained to its predecessor over the append ordinal, so altering one
   invalidates every hash after it, and the chain is keyed from the identity master

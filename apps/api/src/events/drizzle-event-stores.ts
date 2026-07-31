@@ -15,7 +15,7 @@ import {
   aggregationWindows,
   attentionAggregates,
   consumerCheckpoints,
-  type createDbClient,
+  type DbExecutor,
   eventDeadLetters,
   events as eventsTable,
   invariantOutputs,
@@ -66,7 +66,10 @@ import {
   type StoredEvent,
 } from './stores.js';
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction — the seam the forum/ingestion adapters already
+// take.  Without it these stores can only ever run standalone, which is what kept a
+// moderation enforcement out of the transaction that records it.
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);

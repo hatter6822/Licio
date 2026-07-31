@@ -181,6 +181,12 @@ export function createInMemoryModerationServices(
         notices: noticeStore,
         appeals: appealStore,
         incidents: incidentStore,
+        // The in-memory unit shares the services' own port: there is no second handle to
+        // bind, and a fold over Maps has no partial commit to protect against.
+        content: {
+          applyContentState: (...args) => services.content.applyContentState(...args),
+          applyAccountState: (...args) => services.content.applyAccountState(...args),
+        },
         audit: (input) => appendAudit(services.auditChain, input),
       },
       [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],

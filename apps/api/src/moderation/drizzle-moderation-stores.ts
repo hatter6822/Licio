@@ -84,6 +84,9 @@ import type {
 } from './stores.js';
 import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
+/** Binds the enforcement writes to one executor (see `ModerationTx.content`). */
+type TxEnforcement = (exec: Db) => ModerationTx['content'];
+
 // The base client OR an open transaction, the same seam the forum/ingestion adapters
 // take.  Without it these stores can only ever run standalone — which is what kept the
 // assignment CAS and its audit row in two separate transactions.
@@ -1873,10 +1876,12 @@ const MODERATION_CHAIN_LOCK_KEY = 4_021_998;
 export class DrizzleModerationTransactor implements ModerationTransactor {
   readonly #db: Db;
   readonly #auditChain: () => AuditChainDeps;
+  readonly #enforcementOver: TxEnforcement;
 
-  constructor(db: Db, auditChain: () => AuditChainDeps) {
+  constructor(db: Db, auditChain: () => AuditChainDeps, enforcementOver: TxEnforcement) {
     this.#db = db;
     this.#auditChain = auditChain;
+    this.#enforcementOver = enforcementOver;
   }
 
   async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
@@ -1887,6 +1892,9 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
         notices: new DrizzleModerationNoticeStore(tx),
         appeals: new DrizzleModerationAppealStore(tx),
         incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        // Supplied by the composition root: moderation declares that it needs the
+        // enforcement bound to THIS handle, and never constructs another domain's store.
+        content: this.#enforcementOver(tx),
         audit: async (input) => {
           // SERIALISE the chain append, rather than colliding and retrying.
           //
@@ -1926,9 +1934,10 @@ export class DrizzleModerationTransactor implements ModerationTransactor {
 export function createDrizzleModerationStores(
   db: Db,
   auditChain: () => AuditChainDeps,
+  enforcementOver: TxEnforcement,
 ): DrizzleModerationStores {
   return {
-    transactor: new DrizzleModerationTransactor(db, auditChain),
+    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver),
     cases: new DrizzleModerationCaseStore(db),
     reports: new DrizzleModerationReportStore(db),
     actions: new DrizzleModerationActionStore(db),

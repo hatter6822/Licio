@@ -45,6 +45,7 @@
 // can form across.
 import { InMemoryUnitOfWork } from '../lib/in-memory-unit-of-work.js';
 import type { AuditWriteInput } from './audit.js';
+import type { ModerationContentPort } from './ports.js';
 import type {
   CoordinatedReportIncidentStore,
   ModerationActionStore,
@@ -71,6 +72,23 @@ export interface ModerationTx {
    * email side of it is separate and stays outside.
    */
   readonly notices: ModerationNoticeStore;
+  /**
+   * The ENFORCEMENT writes, bound to this transaction.
+   *
+   * They reach WS-E item-safety state, WS-G contributions, WS-F stories and WS-D
+   * accounts — four bounded contexts, and all of them the same Postgres, so one
+   * transaction spans them perfectly well.  What must not happen is moderation reaching
+   * INTO those domains to construct their stores; the binding arrives from the
+   * composition root, which is the only place that knows all four, as one definition
+   * applied to the base client for ordinary calls and to this handle here.
+   *
+   * Only the APPLY direction is ever taken through a unit.  Restoring a story clears its
+   * hidden state, which re-enters a partial unique index behind a retry-on-23505 loop
+   * that is correct only under autocommit — and which deliberately rethrows a live
+   * conflict so the action stays un-reverted and retryable.  The revert path therefore
+   * keeps its restore outside the unit, as it always has.
+   */
+  readonly content: Pick<ModerationContentPort, 'applyContentState' | 'applyAccountState'>;
   /** Coordinated-report incidents.  Their resolution reconciles the linked CASE too, and
    *  the two used to be ordered defensively — case first, incident second — precisely
    *  because no transaction spanned them.  One does now. */

@@ -5,6 +5,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
+import type { DbExecutor } from '@licio/db';
 import { createDbClient, pingDatabase } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
 import { accountMayHoldSession } from '@licio/shared';
@@ -110,6 +111,7 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
+import type { ItemSafetyStateStore } from './events/stores.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
@@ -136,6 +138,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import type { ContributionStore } from './forum/stores.js';
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
@@ -180,6 +183,7 @@ import {
   setIdentityServices,
 } from './identity/services.js';
 import { createContractVerifier } from './identity/siwe.js';
+import type { IdentityStore } from './identity/store.js';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
@@ -203,6 +207,7 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
+import type { StoryStore } from './ingestion/stores.js';
 import {
   DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
@@ -976,22 +981,37 @@ const moderationContentReads: Omit<ContentPortDeps, keyof ContentEnforcementDeps
  * A getter costs nothing and removes the constraint, so the ten lazy members and this one
  * now bind the same way.
  */
-const moderationEnforcementWrites: ContentEnforcementDeps = {
+/** The stores the enforcement writes reach, as THUNKS.
+ *
+ *  Thunks because the same four closures serve two bindings with different lifetimes: the
+ *  ambient one must resolve its store on each call (the containers are swapped to Postgres
+ *  during boot), and the transactional one resolves a store built over an open handle.  A
+ *  single set of closures, parameterised, so the two bindings cannot drift. */
+interface ModerationEnforcementStores {
+  safety: () => ItemSafetyStateStore;
+  contributions: () => Pick<ContributionStore, 'setModerationState'>;
+  stories: () => Pick<StoryStore, 'getById' | 'update' | 'getByCanonicalUrl'>;
+  users: () => Pick<IdentityStore, 'updateUser'>;
+}
+
+const moderationEnforcementWritesOver = (
+  stores: ModerationEnforcementStores,
+): ContentEnforcementDeps => ({
   get safetyStore() {
-    return eventServices.safetyStore;
+    return stores.safety();
   },
   setContributionModerationState: (id, state) =>
-    forumServices.contributions.setModerationState(id, state),
+    stores.contributions().setModerationState(id, state),
   // WS-J #9: a story hide/removal must also leave it inaccessible via the
   // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
   // the canonical hiddenState (both the detail route and ranking honour it).
   // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
   setStoryHiddenState: async (id, next) => {
-    const story = await ingestionServices.stories.getById(id);
+    const story = await stores.stories().getById(id);
     if (!story) return;
     if (next === 'safety') {
       if (story.hiddenState === null) {
-        await ingestionServices.stories.update(id, { hiddenState: 'safety' });
+        await stores.stories().update(id, { hiddenState: 'safety' });
       }
     } else if (story.hiddenState === 'safety') {
       // UN-HIDING RE-ENTERS THE URL SLOT.  Both tier uniques are partial on
@@ -1007,14 +1027,14 @@ const moderationEnforcementWrites: ContentEnforcementDeps = {
       // reporting success while the story stayed hidden would not.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await ingestionServices.stories.update(id, { hiddenState: null });
+          await stores.stories().update(id, { hiddenState: null });
           break;
         } catch (error) {
           if (!isTierUniqueViolation(error)) throw error;
           const occupant =
             story.canonicalUrl === null
               ? null
-              : await ingestionServices.stories.getByCanonicalUrl(
+              : await stores.stories().getByCanonicalUrl(
                   story.canonicalUrl,
                   // The DISCRIMINATED tier — the union requires `roomId` on the
                   // room_only arm and forbids it on the public one, so it cannot be
@@ -1034,9 +1054,16 @@ const moderationEnforcementWrites: ContentEnforcementDeps = {
       }
     }
   },
-  setAccountState: (userId, accountState) =>
-    identityServices.store.updateUser(userId, { accountState }),
-};
+  setAccountState: (userId, accountState) => stores.users().updateUser(userId, { accountState }),
+});
+
+/** The ambient binding — every store resolved from its container at call time. */
+const moderationEnforcementWrites = moderationEnforcementWritesOver({
+  safety: () => eventServices.safetyStore,
+  contributions: () => forumServices.contributions,
+  stories: () => ingestionServices.stories,
+  users: () => identityServices.store,
+});
 
 const moderationServices = createInMemoryModerationServices({
   content: createProductionContentPort({
@@ -1130,7 +1157,28 @@ if (db) {
   // The chain thunk, not a captured value: `auditChain` is rewired a few lines below
   // with the master-secret-derived key, and a transactor holding a copy taken here would
   // sign every production row with the DEV key.
-  const stores = createDrizzleModerationStores(db, () => moderationServices.auditChain);
+  // THE ENFORCEMENT, BOUND TO THE UNIT'S HANDLE.
+  //
+  // The same four write closures the ambient binding uses, over stores constructed on the
+  // transaction instead of read from a container — which is the whole reason the write
+  // set was named and parameterised.  The READS stay ambient on purpose: they resolve
+  // pre-existing rows, not the unit's own uncommitted writes, so the committed snapshot
+  // is the correct thing for them to see.
+  const enforcementOver = (exec: DbExecutor) =>
+    createProductionContentPort({
+      ...moderationContentReads,
+      ...moderationEnforcementWritesOver({
+        safety: () => new DrizzleItemSafetyStateStore(exec),
+        contributions: () => new DrizzleContributionStore(exec),
+        stories: () => new DrizzleStoryStore(exec),
+        users: () => new DrizzleIdentityStore(exec),
+      }),
+    });
+  const stores = createDrizzleModerationStores(
+    db,
+    () => moderationServices.auditChain,
+    enforcementOver,
+  );
   moderationServices.cases = stores.cases;
   moderationServices.reports = stores.reports;
   moderationServices.actions = stores.actions;

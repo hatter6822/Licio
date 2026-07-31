@@ -19,7 +19,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   auditLog,
-  type createDbClient,
+  type DbExecutor,
   deletionRequests,
   exportJobs,
   jobLeases,
@@ -65,7 +65,10 @@ import type {
  *  mirrors the WS-E retention sweep's chunk. */
 const IDENTITY_BATCH_READ_CHUNK = 500;
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction — the seam the forum/ingestion adapters already
+// take.  Without it these stores can only ever run standalone, which is what kept a
+// moderation enforcement out of the transaction that records it.
+type Db = DbExecutor;
 
 // uuid-keyed lookups guard their input so a malformed id behaves like the
 // in-memory adapter (miss → null) instead of a Postgres uuid-cast error.

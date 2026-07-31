@@ -315,31 +315,41 @@ export async function applyAction(
   // making the port's own two writes atomic with each other, which belongs inside the
   // content port rather than here.
   //
-  // 1. Apply the effect (idempotent at the port; an already-removed item is a no-op
-  //    there).  Reflected to distribution through the ranking seam.
-  if (contentState && request.target_type === 'content') {
-    await services.content.applyContentState(
-      request.target_id,
-      resolution.contentKind,
-      contentState,
-      request.case_id ?? null,
-      actor.userId,
-    );
-  }
-  if (accountState && subjectUserId) {
-    await services.content.applyAccountState(subjectUserId, accountState, durationDays);
-  }
-
-  // 2. ONE UNIT: the action row, the case resolution, the member notice and the audit
-  //    entry — every durable artifact asserting this happened, written only once it has.
+  // ONE UNIT — THE ENFORCEMENT INCLUDED.
   //
-  //    Grouping them is what closes the older hole too: the audit write was best-effort
-  //    and unpaired, so any audit failure left an enforced action with a resolved case and
-  //    a notice sent to the member and nothing in the trail.  Now the four stand or fall
-  //    together, and a failure returns an error the steward retries.
+  // The effect and every artifact that records it now commit together.  That is possible
+  // because the enforcement writes reach WS-E item-safety state, WS-G contributions,
+  // WS-F stories and WS-D accounts, and all four are the same Postgres: `tx.content` is
+  // the same port bound to this transaction, supplied by the composition root.
+  //
+  // It removes the last two failure states rather than choosing between them.  A port
+  // that throws part-way no longer leaves content partially hidden — the rollback takes
+  // the safety-state write with it — so there is no orphaned suppression to recover from
+  // and no need for the phantom "revert handle" that used to defeat appeals.  And a
+  // record that fails no longer leaves an enforced action unrecorded, because the
+  // enforcement goes back with it.
+  //
+  // The effect stays FIRST inside the unit: the ports are idempotent, and ordering them
+  // ahead of the record keeps the trail's claim behind the thing it claims even while
+  // both are provisional.
   let appealable = false;
   let noticeSent = false;
   const action = await services.transactor.run(async (tx) => {
+    // Idempotent at the port; an already-removed item is a no-op there.  Reflected to
+    // distribution through the ranking seam.
+    if (contentState && request.target_type === 'content') {
+      await tx.content.applyContentState(
+        request.target_id,
+        resolution.contentKind,
+        contentState,
+        request.case_id ?? null,
+        actor.userId,
+      );
+    }
+    if (accountState && subjectUserId) {
+      await tx.content.applyAccountState(subjectUserId, accountState, durationDays);
+    }
+
     const inserted = await tx.actions.insert({
       actorUserId: actor.userId,
       actorRole: actor.stewardRoles[0] ?? null,
