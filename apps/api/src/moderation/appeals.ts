@@ -436,23 +436,24 @@ async function applyModifiedAction(
   // temporary sanction PERMANENT — harsher than the original).  Content
   // modifications carry no duration (auto-lift is account-only).
   const duration = accountState ? remainingDuration(original, services.now()) : null;
-  // SAME RULE AS `applyAction`: nothing is recorded unless the effect landed.  A row
-  // written before the ports and left behind by a failure reads as live suppression to
-  // `performRevert`, which is how a phantom sanction defeats a later appeal — and this
-  // function IS the appeal path, so it is the last place that should leave one.
-  if (contentState && original.targetId !== null) {
-    await services.content.applyContentState(
-      original.targetId,
-      null,
-      contentState,
-      original.caseId,
-      actor.userId,
-    );
-  }
-  if (accountState && original.subjectUserId) {
-    await services.content.applyAccountState(original.subjectUserId, accountState, null);
-  }
+  // ONE UNIT, enforcement included — the same shape `applyAction` uses.  This is the
+  // APPEAL path, so it is the last place that should be able to leave an orphaned
+  // suppression: one would answer `stillSuppressed` for `performRevert` and keep a member
+  // hidden after they had won.  Applying inside the unit makes that unreachable rather
+  // than merely unlikely.
   await services.transactor.run(async (tx) => {
+    if (contentState && original.targetId !== null) {
+      await tx.content.applyContentState(
+        original.targetId,
+        null,
+        contentState,
+        original.caseId,
+        actor.userId,
+      );
+    }
+    if (accountState && original.subjectUserId) {
+      await tx.content.applyAccountState(original.subjectUserId, accountState, null);
+    }
     const newAction = await tx.actions.insert({
       actorUserId: actor.userId,
       actorRole: actor.stewardRoles[0] ?? null,
