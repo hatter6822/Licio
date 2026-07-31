@@ -11,7 +11,12 @@ import {
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
-import { applyAction, parseDurationDays, revertAction } from '../moderation/actions.js';
+import {
+  applyAction,
+  parseDurationDays,
+  performRevert,
+  revertAction,
+} from '../moderation/actions.js';
 import { checkEligibility, decideAppeal, submitAppeal } from '../moderation/appeals.js';
 import { buildTransparencyExport, writeAudit } from '../moderation/audit.js';
 import {
@@ -636,7 +641,7 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
     expect(again.ok).toBe(false);
   });
 
-  it('#6 reconciles the case before resolving the incident (partial-failure safe)', async () => {
+  it('#6 resolves the incident and reconciles its case ATOMICALLY', async () => {
     services = createInMemoryModerationServices();
     const caseId = await delayedCase();
     const incident = await services.incidents.insert({
@@ -652,17 +657,24 @@ describe('MFCI-2 enforcement delay + incident resolution', () => {
       reviewedAt: null,
       reviewedBy: null,
     });
-    // The incident write fails AFTER the case is reconciled: the delay must
-    // already be lifted (reviewers unblocked) and the incident left OPEN to retry
-    // (not vanished from the queue while the case stays delayed).
-    services.incidents.resolve = async () => {
-      throw new Error('incident store unavailable');
+    // This used to assert an ORDERING — case reconciled first, incident left open — which
+    // was the best a pair of stores sharing no transaction could do: leave the SAFE half
+    // done.  They share one now, so the property is stronger and simpler: neither half
+    // survives a failure.
+    //
+    // The failure is injected into the CASE write, which runs AFTER the incident's
+    // compare-and-set, so there is something to roll back.  Failing the CAS itself would
+    // prove nothing — nothing had been written yet.
+    services.cases.update = async () => {
+      throw new Error('case store unavailable');
     };
     await expect(
       resolveIncident(services, integrityActor(), incident.incidentId, 'cleared', undefined),
-    ).rejects.toThrow(/incident store unavailable/);
-    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(false);
+    ).rejects.toThrow(/case store unavailable/);
+    // BOTH unchanged.  The incident is still open for a retry, and the case is still
+    // delayed — consistent, and the retry does both or neither again.
     expect((await services.incidents.getById(incident.incidentId))?.status).toBe('open');
+    expect((await services.cases.getById(caseId))?.enforcementDelayed).toBe(true);
   });
 
   it('#KEyPO a lost resolve race reports already_resolved (CAS miss)', async () => {
@@ -831,12 +843,13 @@ describe('account-state prior-state preservation (D3)', () => {
   });
 });
 
-describe('action durability — record before enforcement (A2)', () => {
-  it('persists the action row even when the enforcement port throws', async () => {
-    // The content store is down: applyContentState rejects.  With the action
-    // recorded FIRST, the failure surfaces but the row survives as a revert
-    // handle (pre-fix order enforced before recording, so a throw left the
-    // content hidden with no action id / notice / revert handle).
+describe('action durability — nothing is recorded unless the effect landed (A2)', () => {
+  it('writes NOTHING when the enforcement port throws', async () => {
+    // This replaces a test that asserted the opposite — that the action row survives a
+    // port failure "as a revert handle".  The handle is a phantom sanction:
+    // `performRevert` consults `listActiveByTarget` to decide whether some OTHER action
+    // still suppresses the item, and a row from an enforcement that FAILED answers yes.
+    // The next test shows what that costs.
     const throwingPort: ModerationContentPort = {
       ...recordingContentPort(),
       async applyContentState(): Promise<void> {
@@ -855,11 +868,69 @@ describe('action durability — record before enforcement (A2)', () => {
         reason_code: 'MOD_HARASS_001',
       }),
     ).rejects.toThrow(/content store unavailable/);
-    // The durable action row exists (non-reverted) despite the enforcement throw.
+
+    // No action row, no audit claim, no notice.  The effect did not land, so nothing
+    // asserts that it did — and the steward's retry re-applies the idempotent port.
+    expect(await services.actions.listActiveByTarget('content', TARGET)).toHaveLength(0);
+    expect(
+      (await services.audit.list({ limit: 50 })).filter((r) => r.action === 'remove'),
+    ).toHaveLength(0);
+    expect(await services.notices.listByUser(AUTHOR, null, 50)).toHaveLength(0);
+  });
+
+  it('a phantom row from a FAILED enforcement would defeat a later appeal', async () => {
+    // Why the row above must not exist, demonstrated on the mechanism itself.  A leftover
+    // active content action makes `performRevert` skip restoring visibility, so a member
+    // who wins their appeal stays hidden.
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const real = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(real.ok).toBe(true);
+    // The orphan a failed attempt used to leave behind.
+    await services.actions.insert({
+      actorUserId: safetyActor().userId,
+      actorRole: 'ROLE_SAFETY',
+      action: 'remove',
+      targetType: 'content',
+      targetId: TARGET,
+      subjectUserId: AUTHOR,
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+
+    // Revert the REAL one, as a granted appeal would.
     const active = await services.actions.listActiveByTarget('content', TARGET);
-    expect(active).toHaveLength(1);
-    expect(active[0]?.action).toBe('remove');
-    expect(active[0]?.reverted).toBe(false);
+    const originalAction = active[active.length - 1];
+    expect(originalAction).toBeDefined();
+    await performRevert(
+      services,
+      safetyActor(),
+      originalAction as NonNullable<typeof originalAction>,
+    );
+
+    // The appeal was granted and the content is STILL suppressed — `stillSuppressed` saw
+    // the orphan and skipped the restore.  That is the cost the removed test protected.
+    const port = services.content as RecordingContentPort;
+    const restored = port.contentStates.filter(
+      (c) => c.targetId === TARGET && c.state === 'visible',
+    );
+    expect(restored).toHaveLength(0);
   });
 });
 
@@ -917,6 +988,46 @@ describe('action palette + revert', () => {
     expect(port.contentStates).toContainEqual({ targetId: TARGET, state: 'removed' });
     expect((await services.cases.getById(theCase.caseId))?.status).toBe('resolved');
     expect(await services.notices.unreadCount(AUTHOR)).toBe(1);
+  });
+
+  it('does NOT file the action into a case about a DIFFERENT target', async () => {
+    // `case_id` is a client-supplied field on a steward request.  A stale one (the
+    // console holding a case the reviewer already moved on from) or a forged one names
+    // a case this action has nothing to do with — and BOTH `case_id` columns used to
+    // take it: the action row from `request.case_id` directly, the audit row from a
+    // record that had been fetched but not checked, under a comment calling it verified.
+    // The case-history panel reads that column, so an unrelated case's trail would show
+    // an enforcement it never carried.
+    const other = await services.cases.insert({
+      caseId: '00000000-0000-4000-9000-000000000003',
+      targetType: 'content',
+      targetId: '00000000-0000-4000-9000-0000000000ff', // NOT the action's target
+      contentKind: 'contribution',
+      status: 'new',
+      severity: 'severe',
+      routedTo: 'standard',
+      assignedTo: null,
+      reportCount: 1,
+      enforcementDelayed: false,
+      resolvedActionId: null,
+      slaDueAt: new Date(services.now() + 1000).toISOString(),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_002',
+      case_id: other.caseId,
+    });
+
+    // The enforcement stands — it is about its own target and needs no case.
+    expect(out.ok).toBe(true);
+    // But nothing was filed under, or done to, the unrelated case.
+    expect((await services.cases.getById(other.caseId))?.status).toBe('new');
+    const trail = await services.audit.list({ limit: 20 });
+    expect(trail.filter((r) => r.caseId === other.caseId)).toEqual([]);
+    const actions = await services.actions.listActiveByTarget('content', TARGET);
+    expect(actions.map((a) => a.caseId)).toEqual([null]);
   });
 
   it('a CSAM removal is non-reversible and non-appealable (lawful basis)', async () => {

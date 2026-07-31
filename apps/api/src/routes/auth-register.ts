@@ -5,7 +5,6 @@
 // the email-factor verify/resend/add flows that let a registered or passkey-only
 // account confirm or attach an email.  Passwordless throughout.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   authSessionResultSchema,
   defaultPersonalizationSettings,
@@ -35,12 +34,14 @@ import type { IdentityServices } from '../identity/services.js';
 import { buildSessionCookie, readSessionToken, rotateSession } from '../identity/sessions.js';
 import { createRegistrationOptions, verifyRegistration } from '../identity/webauthn.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, requireStepUp } from '../middleware/auth.js';
 import {
   ATTEMPT_COOKIES,
   accountRefForEmail,
   buildAttemptCookie,
   clearAttemptCookie,
+  deliverMail,
   err,
   finalizeLogin,
   loginDenialResponse,
@@ -273,10 +274,16 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         // Anti-enumeration: a duplicate email returns the same generic response and
         // notifies the existing owner instead of creating a second account.  The
         // notice is under the same per-mailbox cooldown as code issuance, so
-        // repeated duplicate registrations cannot bomb the owner's inbox.
+        // repeated duplicate registrations cannot bomb the owner's inbox.  The
+        // send is DETACHED (`deliverMail`) on this branch and on the new-account
+        // branch below, so neither pays the SES round trip on the response path
+        // and the two cannot be told apart by timing.
         if (await services.store.getUserByEmail(body.email)) {
           if (await canResend(services.otp, `notice:${accountRefForEmail(services, body.email)}`)) {
-            await services.mailer.sendNotice(body.email, 'duplicate_registration');
+            deliverMail(
+              services.mailer.sendNotice(body.email, 'duplicate_registration'),
+              'duplicate_registration',
+            );
           }
           return c.json(registeredAgeBandSchema.parse({ age_band: gate.band }));
         }
@@ -296,7 +303,10 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           roles: ['user'],
         });
         const { code } = await startEmailVerification(services.otp, user.userId, body.email);
-        await services.mailer.sendCode(body.email, code, 'verify');
+        // Detached: the user row is already committed, so an SES fault must not
+        // 500 the request and strand a real account with no session — the user
+        // is signed in below and can pull a fresh code from /email/resend.
+        deliverMail(services.mailer.sendCode(body.email, code, 'verify'), 'register_verify');
         // The account is active (reduced capability until the email is verified).
         const fin = await finalizeLogin(services, c, {
           userId: user.userId,
@@ -380,15 +390,29 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
         const auth = c.get('auth');
         if (!auth) return c.json(err('unauthenticated', 'Authentication required'), 401);
         const user = await services.store.getUser(auth.userId);
-        if (!user?.email || (await services.store.getAuth(auth.userId))?.emailVerified) {
+        const authRow = await services.store.getAuth(auth.userId);
+        // THE STAGED ADDRESS FIRST, when there is one.  `/email/add` stages a
+        // `pendingEmail` and sends its code DETACHED, so an SES fault leaves the
+        // address staged and the code undelivered — and this route used to send
+        // only to the address ON FILE and refuse outright whenever that factor
+        // was already verified.  A member changing an already-verified email was
+        // therefore waiting for a code that was never sent, with the advertised
+        // resend path answering `not_applicable`: the one state in which resend
+        // is most obviously needed was the one it excluded.
+        const target = authRow?.pendingEmail ?? user?.email ?? null;
+        const staged = authRow?.pendingEmail != null;
+        if (target === null || (!staged && authRow?.emailVerified)) {
           return c.json(err('not_applicable', 'No unverified email on file.'), 400);
         }
         const accountRef = `resend:${auth.userId}`;
         if (!(await canResend(services.otp, accountRef))) {
           return c.json(err('cooldown', 'Please wait before requesting another code.'), 429);
         }
-        const { code } = await startEmailVerification(services.otp, auth.userId, user.email);
-        await services.mailer.sendCode(user.email, code, 'verify');
+        const { code } = await startEmailVerification(services.otp, auth.userId, target);
+        // The cooldown above is the real bound; the send itself is best-effort
+        // and off the response path (an SES fault must not 500 a resend the
+        // caller would then have to wait out the cooldown to retry).
+        deliverMail(services.mailer.sendCode(target, code, 'verify'), 'email_resend');
         return c.json({ status: 'sent' as const });
       })
 
@@ -406,7 +430,10 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           // under the per-mailbox cooldown so repeats cannot bomb their inbox.
           if (await services.store.getUserByEmail(email)) {
             if (await canResend(services.otp, `notice:${accountRefForEmail(services, email)}`)) {
-              await services.mailer.sendNotice(email, 'duplicate_email_add');
+              deliverMail(
+                services.mailer.sendNotice(email, 'duplicate_email_add'),
+                'duplicate_email_add',
+              );
             }
             return c.json({ status: 'sent' as const });
           }
@@ -416,7 +443,10 @@ export function createRegisterRoutes(resolve: () => IdentityServices) {
           // last-verified-method invariant the removal endpoints already enforce).
           await services.store.setAuth(auth.userId, { pendingEmail: email });
           const { code } = await startEmailVerification(services.otp, auth.userId, email);
-          await services.mailer.sendCode(email, code, 'verify');
+          // Detached like the taken-address branch above: the pending address is
+          // already staged, so an SES fault must not 500 the request (which would
+          // leave a staged pendingEmail behind a 500 the caller reads as failure).
+          deliverMail(services.mailer.sendCode(email, code, 'verify'), 'email_add_verify');
           return c.json({ status: 'sent' as const });
         },
       )

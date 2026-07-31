@@ -108,6 +108,58 @@ describe('validateServerEnv', () => {
     );
   });
 
+  it('accepts a COMPLETE EMBEDDING group and rejects every PARTIAL one (WS-F.3.2a)', () => {
+    const full = {
+      ...validEnv,
+      EMBEDDING_URL: 'https://embed.internal',
+      EMBEDDING_MODEL: 'bge-small-en-v1.5',
+      EMBEDDING_MODEL_VERSION: '1.5',
+      EMBEDDING_DIMENSION: '384',
+    };
+    const result = validateServerEnv(full);
+    expect(result.EMBEDDING_MODEL_VERSION).toBe('1.5');
+    expect(result.EMBEDDING_DIMENSION).toBe(384);
+
+    // Drop each key in turn: a partial group would silently fall back to the
+    // deterministic lexical provider, degrading semantic search platform-wide
+    // with no signal — so every one-key-short shape must fail at startup.
+    for (const drop of [
+      'EMBEDDING_URL',
+      'EMBEDDING_MODEL',
+      'EMBEDDING_MODEL_VERSION',
+      'EMBEDDING_DIMENSION',
+    ] as const) {
+      const partial = { ...full };
+      delete (partial as Record<string, unknown>)[drop];
+      expect(() => validateServerEnv(partial)).toThrow(/Incomplete EMBEDDING configuration/);
+    }
+    // The whole group absent stays valid (the lexical fallback is the default).
+    expect(validateServerEnv(validEnv).EMBEDDING_URL).toBeUndefined();
+  });
+
+  it('accepts a COMPLETE COMPLIANCE_SCREENING pair and rejects a PARTIAL one (WS-N)', () => {
+    const full = {
+      ...validEnv,
+      COMPLIANCE_SCREENING_URL: 'https://screening.example',
+      COMPLIANCE_SCREENING_TOKEN_FILE: '/run/secrets/screening-token',
+    };
+    expect(validateServerEnv(full).COMPLIANCE_SCREENING_URL).toBe('https://screening.example');
+
+    // A URL with no token file (or vice versa) constructs no provider, so every
+    // sanctions screen answers `unavailable` — which real-fund environments
+    // REJECT.  A typo must name itself at startup, not block treasury actions
+    // silently in a deployment the operator believes is fully configured.
+    for (const drop of ['COMPLIANCE_SCREENING_URL', 'COMPLIANCE_SCREENING_TOKEN_FILE'] as const) {
+      const partial = { ...full };
+      delete (partial as Record<string, unknown>)[drop];
+      expect(() => validateServerEnv(partial)).toThrow(
+        /Incomplete COMPLIANCE_SCREENING configuration/,
+      );
+    }
+    // Both unset ⇒ no provider (the fail-closed default) and no error.
+    expect(validateServerEnv(validEnv).COMPLIANCE_SCREENING_URL).toBeUndefined();
+  });
+
   it('accepts a COMPLETE Knomosis gateway pair and rejects a PARTIAL one (WS-L)', () => {
     const result = validateServerEnv({
       ...validEnv,
@@ -481,6 +533,15 @@ describe('validateClientEnv', () => {
     ).not.toThrow();
     // A genuinely leaked NON-framework key is still rejected (the guard's real job).
     expect(() => validateClientEnv({ BASE_URL: '/', SECRET_TOKEN: 'leaked' })).toThrow('VITE_');
+  });
+
+  it('rejects a BLANK VITE_LCAP_NETWORK_ID (unset is fine; empty is a wrong room hash)', () => {
+    // `'' ?? 'licio'` is `''` — the bundle-import fallback only catches
+    // null/undefined, so a blank value derives a wrong authenticated room hash
+    // and every scope-filtered import silently rejects records it should admit.
+    expect(() => validateClientEnv({ VITE_LCAP_NETWORK_ID: '' })).toThrow('VITE_LCAP_NETWORK_ID');
+    expect(() => validateClientEnv({ VITE_LCAP_NETWORK_ID: 'licio-test' })).not.toThrow();
+    expect(() => validateClientEnv({})).not.toThrow();
   });
 
   it('rejects a garbage private-bundle signer pin (fails the build loudly)', () => {

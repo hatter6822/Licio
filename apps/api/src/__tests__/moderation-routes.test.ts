@@ -680,6 +680,17 @@ describe('moderation console (role-gated)', () => {
     expect(list.status).toBe(200);
     expect(((await list.json()) as { count: number }).count).toBe(1);
 
+    // A MALFORMED CURSOR RESTARTS THE PAGE, it does not fail the read.  `cursor` is a
+    // client-supplied string whose two parts are cast `::timestamptz` and `::uuid` in the
+    // store; this queue's decoder checked only that both were non-empty, so two arbitrary
+    // tokens reached Postgres and came back as a 500 on a plain GET.
+    const garbage = Buffer.from('yesterday|not-a-uuid', 'utf-8').toString('base64url');
+    const bad = await app().request(
+      get(`/v1/moderation/incidents?cursor=${garbage}`, integrity.cookie),
+    );
+    expect(bad.status).toBe(200);
+    expect(((await bad.json()) as { count: number }).count).toBe(1);
+
     const resolved = await app().request(
       post(
         `/v1/moderation/incidents/${incident.incidentId}/resolve`,
@@ -1027,6 +1038,272 @@ describe('console route branches (assign, bulk, revert, reviewer-status, queue f
     const cases = await mod.cases.list({ limit: 1 });
     return cases[0]?.caseId ?? '';
   }
+
+  it('REFUSES a claim on a case another reviewer already holds', async () => {
+    // The route wrote `assignedTo` unconditionally: `theCase.assignedTo` was
+    // fetched and never read, and there is no `If-Match` or version on the wire,
+    // so any report-queue steward performed a silent takeover with one POST.
+    // Hiding the client's button narrowed the UI and left the route open — and
+    // that button reads a 30-second-stale snapshot anyway.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    expect(
+      (
+        await app().request(
+          post(
+            `/v1/moderation/cases/${caseId}/assign`,
+            { reviewer_id: first.userId },
+            safety.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const stolen = await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: second.userId }, safety.cookie),
+    );
+    expect(stolen.status).toBe(409);
+    expect(((await stolen.json()) as { error: { code: string } }).error.code).toBe(
+      'already_assigned',
+    );
+    // …and the holder is unchanged.
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
+  });
+
+  it('REFUSES the SECOND reasoned reassignment off the same holder', async () => {
+    // The claim path was a CAS; the reasoned-reassignment path was an
+    // unconditional `update`, so two reviewers taking a case off the same colleague
+    // both got 200 and last-writer-won — the same race, one branch along.  It also
+    // made the audit row lie: `priorState` came from a read taken before either
+    // write, so the trail recorded an edge no write performed, and a reader
+    // following the history ended at whichever append happened to land last rather
+    // than at the reviewer who actually holds the case.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const takerA = await safetyUser();
+    const takerB = await safetyUser();
+    const caseId = await openCase();
+    const assign = (reviewerId: string, reason?: string) =>
+      app().request(
+        post(
+          `/v1/moderation/cases/${caseId}/assign`,
+          { reviewer_id: reviewerId, ...(reason === undefined ? {} : { reason }) },
+          safety.cookie,
+        ),
+      );
+    expect((await assign(holder.userId)).status).toBe(200);
+    const stale = await getModerationServices().cases.getById(caseId);
+    if (!stale) throw new Error('expected the seeded case');
+    expect((await assign(takerA.userId, 'escalating to a specialist')).status).toBe(200);
+    // takerB's console is working from the snapshot it loaded BEFORE takerA moved
+    // the case — a 30-second-stale queue read, which is the whole scenario.  The
+    // route's own re-read cannot help: it is the read that is stale.
+    const mod = getModerationServices();
+    const realGetById = mod.cases.getById.bind(mod.cases);
+    mod.cases.getById = async (id: string) => (id === caseId ? stale : realGetById(id));
+    const second = await assign(takerB.userId, 'also escalating');
+    mod.cases.getById = realGetById;
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { error: { code: string } }).error.code).toBe(
+      'already_assigned',
+    );
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(takerA.userId);
+    // EVERY recorded assignment names an edge a write actually performed, so the
+    // history reconstructs by following those edges rather than by append order.
+    const trail = (await getModerationServices().audit.list({ limit: 50 })).filter(
+      (row) => row.action === 'assign',
+    );
+    const edges = new Map(trail.map((row) => [row.priorState, row.nextState]));
+    expect(edges.get('unassigned')).toBe(holder.userId);
+    expect(edges.get(holder.userId)).toBe(takerA.userId);
+    // …and no row claims a transition FROM the reviewer who lost the race.
+    expect(trail.some((row) => row.nextState === takerB.userId)).toBe(false);
+  });
+
+  it('ALLOWS a reasoned reassignment, and records both holders', async () => {
+    // Taking a case off a colleague is a legitimate flow — the console's own
+    // comment describes it — but it is a REASONED one, and the audit row must say
+    // who lost it.  The row used to carry `subjectUserId: null` and no
+    // prior/next state, so the takeover was unattributable, not merely
+    // unexplained.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: first.userId }, safety.cookie),
+    );
+    const res = await app().request(
+      post(
+        `/v1/moderation/cases/${caseId}/assign`,
+        { reviewer_id: second.userId, reason: 'first reviewer is on leave' },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(second.userId);
+    const audit = await getModerationServices().audit.list({ limit: 50 });
+    const row = audit.find((r) => r.action === 'assign' && r.nextState === second.userId);
+    expect(row?.priorState).toBe(first.userId);
+    expect(row?.subjectUserId).toBe(second.userId);
+    expect(row?.notes).toContain('on leave');
+  });
+
+  it('is IDEMPOTENT for the holder re-claiming', async () => {
+    // A retried request must not become a conflict.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const caseId = await openCase();
+    for (const expected of [200, 200]) {
+      expect(
+        (
+          await app().request(
+            post(
+              `/v1/moderation/cases/${caseId}/assign`,
+              { reviewer_id: holder.userId },
+              safety.cookie,
+            ),
+          )
+        ).status,
+      ).toBe(expected);
+    }
+  });
+
+  it('the BULK path enforces the same guard', async () => {
+    // Bulk assign overwrote any case's assignee and did not even forward the
+    // request's `reason_code`, so it was a complete bypass of the single-assign
+    // guard — a silent steal, one page at a time.
+    const safety = await safetyUser();
+    const first = await safetyUser();
+    const second = await safetyUser();
+    const caseId = await openCase();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: first.userId }, safety.cookie),
+    );
+    const res = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        {
+          case_ids: [caseId],
+          action: 'assign',
+          reason_code: 'MOD_SPAM_001',
+          reviewer_id: second.userId,
+        },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { ok: boolean; error: string | null }[] };
+    expect(body.results[0]?.ok).toBe(false);
+    expect(body.results[0]?.error).toBe('already_assigned');
+    expect((await getModerationServices().cases.getById(caseId))?.assignedTo).toBe(first.userId);
+  });
+
+  it('a BULK retry by the SAME holder appends no audit row', async () => {
+    // My own defect, caught in review an hour after writing it: the guard permitted
+    // a retry for a case the reviewer already held, skipped the compare-and-set,
+    // and then wrote an audit row whose prior state was a hard-coded `unassigned`.
+    // An ordinary idempotent retry therefore corrupted an append-only history.
+    const safety = await safetyUser();
+    const holder = await safetyUser();
+    const caseId = await openCase();
+    const mod = getModerationServices();
+    await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: holder.userId }, safety.cookie),
+    );
+    const before = (await mod.audit.list({ limit: 100 })).filter(
+      (r) => r.action === 'assign',
+    ).length;
+    const res = await app().request(
+      post(
+        '/v1/moderation/bulk',
+        {
+          case_ids: [caseId],
+          action: 'assign',
+          reason_code: 'MOD_SPAM_001',
+          reviewer_id: holder.userId,
+        },
+        safety.cookie,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { ok: boolean }[] };
+    expect(body.results[0]?.ok).toBe(true); // idempotent, not a conflict
+    const after = (await mod.audit.list({ limit: 100 })).filter(
+      (r) => r.action === 'assign',
+    ).length;
+    expect(after).toBe(before); // …and a no-op is not an event
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(holder.userId);
+  });
+
+  it('the AUTO-ROUTED assign row names its edge, like the console rows do', async () => {
+    // The first assign row on the common path — auto-routing runs for every newly
+    // opened case — carried neither `priorState` nor `nextState`, and `writeAudit`
+    // defaults both to null.  Following the trail by its edges, which is what makes
+    // the history correct regardless of append order, therefore met a null→null row
+    // at the head of every chain.
+    //
+    // Asserting this needs a reviewer marked AVAILABLE and `settle()`: without both,
+    // `autoAssignCase` returns null, no row is written, and an assertion over the
+    // trail passes without ever seeing the row it is about.  (It did — the first
+    // version of this check lived in the reassignment test, where neither holds.)
+    const routed = await safetyUser();
+    const mod = getModerationServices();
+    await mod.reviewerStatus.set(routed.userId, 'available', new Date().toISOString());
+    const reporter = await seedUser({ handle: `rep${randomUUID().slice(0, 6)}` });
+    await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    await mod.settle();
+    const caseId = (await mod.cases.list({ limit: 1 }))[0]?.caseId ?? '';
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(routed.userId);
+
+    const systemRows = (await mod.audit.list({ limit: 50 })).filter(
+      (r) => r.action === 'assign' && r.actorUserId === null,
+    );
+    expect(systemRows).toHaveLength(1);
+    // `unassigned` is guaranteed by the CAS predicate, and the next state is the
+    // holder the case actually ended up with.
+    expect(systemRows[0]?.priorState).toBe('unassigned');
+    expect(systemRows[0]?.nextState).toBe(routed.userId);
+  });
+
+  it('AUTO-ROUTED cases are protected by the same guard as manual claims', async () => {
+    // Auto-routing runs through `trackBackground` when a report opens a case, and
+    // in practice it completes during the POST — so the interleaved ordering
+    // (human claims first, routing lands second) is not reachable from outside the
+    // route.  What IS reachable, and is the harm, is the other direction: once
+    // routing has assigned a case, a second reviewer must not be able to take it
+    // silently.
+    const safety = await safetyUser();
+    const autoTarget = await safetyUser();
+    const other = await safetyUser();
+    const mod = getModerationServices();
+    await mod.reviewerStatus.set(autoTarget.userId, 'available', new Date().toISOString());
+    const reporter = await seedUser({ handle: `rep${randomUUID().slice(0, 6)}` });
+    await app().request(post('/v1/reports', reportBody(), reporter.cookie));
+    await mod.settle();
+    const caseId = (await mod.cases.list({ limit: 1 }))[0]?.caseId ?? '';
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(autoTarget.userId);
+    const stolen = await app().request(
+      post(`/v1/moderation/cases/${caseId}/assign`, { reviewer_id: other.userId }, safety.cookie),
+    );
+    expect(stolen.status).toBe(409);
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(autoTarget.userId);
+  });
+
+  it('the store CAS refuses a claim on an assigned case, in either arrival order', async () => {
+    // The guarantee `autoAssignNewCase` relies on to be ordering-independent.  It is
+    // asserted at the STORE because that is where the atomicity lives — the
+    // in-memory adapter's read-test-write with no `await` between, and Postgres's
+    // one-statement `UPDATE … WHERE assigned_to IS NULL`.
+    const holder = await safetyUser();
+    const late = await safetyUser();
+    const caseId = await openCase();
+    const mod = getModerationServices();
+    expect(await mod.cases.claimIfUnassigned(caseId, holder.userId)).not.toBeNull();
+    expect(await mod.cases.claimIfUnassigned(caseId, late.userId)).toBeNull();
+    expect((await mod.cases.getById(caseId))?.assignedTo).toBe(holder.userId);
+  });
 
   it('assigns a case (ok / case-404 / reviewer-404 / reviewer-ineligible)', async () => {
     const safety = await safetyUser();

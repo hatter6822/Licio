@@ -122,6 +122,8 @@ export function StoryCard({
           {...(media.captionsText !== undefined ? { captionsText: media.captionsText } : {})}
           {...(media.captionsUrl !== undefined ? { captionsUrl: media.captionsUrl } : {})}
           {...(media.posterUrl !== undefined ? { posterUrl: media.posterUrl } : {})}
+          {...(media.width !== undefined ? { width: media.width } : {})}
+          {...(media.height !== undefined ? { height: media.height } : {})}
         />
       ) : null}
 

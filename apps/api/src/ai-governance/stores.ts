@@ -13,6 +13,7 @@ import type {
   AiTranslation,
   BlockedInvocationRecord,
   DataLineageRecord,
+  GovernanceAdvisory,
   GovernanceProposalSummary,
   HarnessDecision,
   RegisteredModel,
@@ -349,6 +350,27 @@ export interface AiReviewItem {
 
 export interface AiReviewQueueStore {
   insert(item: Omit<AiReviewItem, 'reviewId' | 'createdAt' | 'resolvedAt'>): Promise<AiReviewItem>;
+  /**
+   * Replace the PENDING item's context for (kind, subject) — the re-evaluation case.
+   *
+   * `insert` deliberately keeps the incumbent's context on conflict, because for a
+   * REPORT the second report is an independent event and overwriting the first one's
+   * reason would destroy it (the per-subject reports are read alongside the item).
+   *
+   * A withheld SUMMARY is the opposite: its subject is stable per thread, and a retry
+   * re-runs the whole evaluation, minting a fresh `output_id` with fresh quality
+   * failures and a fresh hallucination rate.  The draft upserts to that new evaluation.
+   * If the queue item keeps the first attempt's evidence, the steward reviews one
+   * evaluation while reading the draft of another — and can correct or accept the wrong
+   * immutable output record, which is worse the more the thread changed between
+   * attempts.  Both must describe ONE evaluation, so this is the call that makes the
+   * item follow the draft.  Returns null when no pending item exists.
+   */
+  refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null>;
   get(reviewId: string): Promise<AiReviewItem | null>;
   list(
     filter: { status?: AiReviewItem['status']; kind?: AiReviewKind },
@@ -369,6 +391,21 @@ export class InMemoryAiReviewQueueStore implements AiReviewQueueStore {
   async insert(
     item: Omit<AiReviewItem, 'reviewId' | 'createdAt' | 'resolvedAt'>,
   ): Promise<AiReviewItem> {
+    // Mirrors `ai_review_queue_pending_subject_uq`: at most ONE pending item
+    // per (kind, subject).  The report routes are what write here, and an
+    // adapter more permissive than the database would let a defect pass every
+    // unit test and only surface against live Postgres.
+    if (item.status === 'pending') {
+      for (const existing of this.#rows.values()) {
+        if (
+          existing.status === 'pending' &&
+          existing.kind === item.kind &&
+          existing.subjectRef === item.subjectRef
+        ) {
+          return clone(existing);
+        }
+      }
+    }
     this.#seq += 1;
     const record: AiReviewItem = {
       ...item,
@@ -378,6 +415,21 @@ export class InMemoryAiReviewQueueStore implements AiReviewQueueStore {
     };
     this.#rows.set(record.reviewId, clone(record));
     return clone(record);
+  }
+
+  async refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null> {
+    for (const [id, existing] of this.#rows) {
+      if (existing.status !== 'pending') continue;
+      if (existing.kind !== kind || existing.subjectRef !== subjectRef) continue;
+      const updated: AiReviewItem = { ...existing, context };
+      this.#rows.set(id, clone(updated));
+      return clone(updated);
+    }
+    return null;
   }
   async get(reviewId: string): Promise<AiReviewItem | null> {
     const row = this.#rows.get(reviewId);
@@ -431,8 +483,28 @@ export interface SummaryDraftRecord {
 export interface SummaryStore {
   putDraft(record: SummaryDraftRecord): Promise<void>;
   getDraft(summaryId: string): Promise<SummaryDraftRecord | null>;
+  /** The most recent draft for a thread, or null when it has never been
+   *  summarized.  The sweep reads this to decide whether a thread is due; the
+   *  `ai_summary_drafts_thread_idx` index that supports it already existed with
+   *  no query behind it. */
+  getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null>;
   putReport(report: SummaryReport): Promise<void>;
-  listReports(summaryId: string): Promise<SummaryReport[]>;
+  /**
+   * The NEWEST `limit` reports for one summary.
+   *
+   * The limit is REQUIRED, and newest-first is the store's own order rather
+   * than the caller's, because the unbounded version was the defect: the review
+   * queue read every report row for up to 100 subjects concurrently just to
+   * report a count, so the response was bounded while the READ was not — and
+   * nothing prunes these tables, so any authenticated account could grow one
+   * subject's reports without limit and take the only surface that shows
+   * reports to a steward down permanently.  A caller that wants the total asks
+   * `countReports`.
+   */
+  listReports(summaryId: string, limit: number): Promise<SummaryReport[]>;
+  /** How many reports one summary has — the figure a steward triages on,
+   *  answered without materializing the rows. */
+  countReports(summaryId: string): Promise<number>;
   countReportsByReason(): Promise<Record<string, number>>;
   clear(): Promise<void>;
 }
@@ -447,11 +519,34 @@ export class InMemorySummaryStore implements SummaryStore {
     const row = this.#drafts.get(summaryId);
     return row ? clone(row) : null;
   }
+  async getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null> {
+    let latest: SummaryDraftRecord | null = null;
+    for (const row of this.#drafts.values()) {
+      if (row.threadId !== threadId) continue;
+      // Tie-break on summaryId so equal timestamps still give ONE answer —
+      // the same total-order discipline the Drizzle adapter's ORDER BY needs.
+      if (
+        latest === null ||
+        row.createdAt > latest.createdAt ||
+        (row.createdAt === latest.createdAt && row.summaryId > latest.summaryId)
+      ) {
+        latest = row;
+      }
+    }
+    return latest ? clone(latest) : null;
+  }
   async putReport(report: SummaryReport): Promise<void> {
     this.#reports.push(clone(report));
   }
-  async listReports(summaryId: string): Promise<SummaryReport[]> {
-    return this.#reports.filter((r) => r.summary_id === summaryId).map(clone);
+  async listReports(summaryId: string, limit: number): Promise<SummaryReport[]> {
+    return this.#reports
+      .filter((r) => r.summary_id === summaryId)
+      .sort((x, y) => y.reported_at.localeCompare(x.reported_at))
+      .slice(0, Math.max(0, limit))
+      .map(clone);
+  }
+  async countReports(summaryId: string): Promise<number> {
+    return this.#reports.filter((r) => r.summary_id === summaryId).length;
   }
   async countReportsByReason(): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
@@ -471,7 +566,11 @@ export interface TranslationStore {
   get(translationId: string): Promise<AiTranslation | null>;
   findBySource(sourceRef: string, targetLang: string): Promise<AiTranslation | null>;
   putReport(report: TranslationReport): Promise<void>;
-  listReports(translationId: string): Promise<TranslationReport[]>;
+  /** The NEWEST `limit` reports for one translation — see
+   *  `SummaryStore.listReports` for why the bound is not optional. */
+  listReports(translationId: string, limit: number): Promise<TranslationReport[]>;
+  /** How many reports one translation has, without materializing the rows. */
+  countReports(translationId: string): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -494,8 +593,15 @@ export class InMemoryTranslationStore implements TranslationStore {
   async putReport(report: TranslationReport): Promise<void> {
     this.#reports.push(clone(report));
   }
-  async listReports(translationId: string): Promise<TranslationReport[]> {
-    return this.#reports.filter((r) => r.translation_id === translationId).map(clone);
+  async listReports(translationId: string, limit: number): Promise<TranslationReport[]> {
+    return this.#reports
+      .filter((r) => r.translation_id === translationId)
+      .sort((x, y) => y.reported_at.localeCompare(x.reported_at))
+      .slice(0, Math.max(0, limit))
+      .map(clone);
+  }
+  async countReports(translationId: string): Promise<number> {
+    return this.#reports.filter((r) => r.translation_id === translationId).length;
   }
   async clear(): Promise<void> {
     this.#rows.clear();
@@ -504,6 +610,79 @@ export class InMemoryTranslationStore implements TranslationStore {
 }
 
 // --- WS-K.2.2a governance proposal summaries -------------------------------
+
+/** Where a maintenance sweep resumes; null ⇒ start from the newest page. */
+export interface SweepCursor {
+  readonly createdAt: string;
+  readonly ref: string;
+}
+
+/**
+ * The durable position of a maintenance sweep (WS-K.1.4a).
+ *
+ * The hourly tick runs under a DISTRIBUTED lease, so an in-process cursor is
+ * lost to every restart, deploy, and lease handover — resetting the sweep to
+ * the newest page.  At one page an hour a large installation is reset long
+ * before it reaches the tail, so the older threads the sweep exists to
+ * summarize are never reached: the same permanent gap the cursor closed, one
+ * layer up.
+ */
+export interface SweepCursorStore {
+  get(sweepName: string): Promise<SweepCursor | null>;
+  /** `null` rewinds to the newest page (the tail was reached). */
+  set(sweepName: string, cursor: SweepCursor | null): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export class InMemorySweepCursorStore implements SweepCursorStore {
+  readonly #rows = new Map<string, SweepCursor>();
+  async get(sweepName: string): Promise<SweepCursor | null> {
+    const row = this.#rows.get(sweepName);
+    return row ? { ...row } : null;
+  }
+  async set(sweepName: string, cursor: SweepCursor | null): Promise<void> {
+    if (cursor === null) this.#rows.delete(sweepName);
+    else this.#rows.set(sweepName, { ...cursor });
+  }
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
+
+/**
+ * The §24.5 governance ADVISORIES a steward reads before deciding.
+ *
+ * `highlightConflictOfInterest` and `detectScamPatterns` produced a concrete
+ * advisory and the production caller discarded the value — no store, no route,
+ * no reader — so the advice the wiring claimed to provide reached nobody.
+ * "Advisory" only means anything when someone can see the advice and knowingly
+ * ignore it; unread advice is not restraint, it is absence.
+ */
+export interface GovernanceAdvisoryStore {
+  put(advisory: GovernanceAdvisory): Promise<void>;
+  listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]>;
+  clear(): Promise<void>;
+}
+
+export class InMemoryGovernanceAdvisoryStore implements GovernanceAdvisoryStore {
+  readonly #rows = new Map<string, GovernanceAdvisory>();
+  async put(advisory: GovernanceAdvisory): Promise<void> {
+    this.#rows.set(advisory.advisory_id, clone(advisory));
+  }
+  async listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]> {
+    return [...this.#rows.values()]
+      .filter((a) => a.proposal_ref === proposalRef)
+      .sort(
+        (a, b) =>
+          a.generated_at.localeCompare(b.generated_at) ||
+          a.advisory_id.localeCompare(b.advisory_id),
+      )
+      .map(clone);
+  }
+  async clear(): Promise<void> {
+    this.#rows.clear();
+  }
+}
 
 export interface GovernanceSummaryStore {
   put(summary: GovernanceProposalSummary): Promise<void>;

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Pure behavioural tests for the WS-J reason-code metadata + steward-role
-// helpers (no filesystem — the doc-drift cross-check lives in the node-typed
-// scripts/policy project).  These pin the SEMANTICS the report router, SLA
-// tracker, and appeal gate rely on.
+// helpers (no filesystem — the doc-drift cross-check lives in
+// `apps/api/src/__tests__/moderation-doctrine-consistency.test.ts`, the node
+// project that can read MODERATION_TAXONOMY.md / STEWARD_ROLES.md from disk).
+// These pin the SEMANTICS the report router, SLA tracker, and appeal gate rely
+// on.
 import { describe, expect, it } from 'vitest';
 import {
   EMERGENCY_REASON_CODES,

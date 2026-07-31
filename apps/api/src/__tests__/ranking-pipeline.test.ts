@@ -738,6 +738,73 @@ describe('replay (WS-I.2.5b)', () => {
     expect(result.diff).toEqual([]);
   });
 
+  it('LIVE SERVING caps a sensitive story, and the log records that it did', async () => {
+    // The §11.5 cap's WIRING, which nothing asserted: the pure core was covered
+    // from both sides while `serveFeed` could have passed either answer and the
+    // whole api suite stayed green.  That mattered because the predecessor gate
+    // read the cap off `profile_snapshot.profile_version` — an operator-writable
+    // label — so a house profile numbered `1.0.0` served sensitive content
+    // uncapped, and no test here would have noticed.
+    // Old enough that the conservative envelope drops below the recorded WS-F
+    // score (that difference IS the cap), young enough to be retrieved at all —
+    // a story past the retrieval window never reaches the ranked path and the
+    // feed falls back, which proves nothing.
+    const old = new Date(Date.now() - 6 * 3_600_000).toISOString();
+    const { storyId } = await seedStory(fixture.ingestion, {
+      publishedAt: old,
+      // `medical` is sensitive for §11.5 (any non-`none` label is) WITHOUT being
+      // age-restricted: `graphic`/`crisis` are excluded outright for signed-out
+      // requests, so the item never reaches scoring and the cap is untestable
+      // through them on this surface.
+      sensitivityLabels: ['medical'],
+    });
+    // A recent companion so the pool clears whatever minimum the ranked path
+    // needs — a fallback writes `replay_inputs: null` and proves nothing.
+    await seedStory(fixture.ingestion, {
+      publishedAt: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+    await seedInvariantOutput(fixture.events, {
+      invariantType: 'PWAtt_v1',
+      targetId: storyId,
+      scoreVector: { active_attention: 0.8, participation: 0.7 },
+      shadowMode: false,
+    });
+    // A HIGH recorded WS-F score is what makes the cap observable: without one,
+    // `freshness_decay` is absent and the curve is merely the fallback, so a
+    // test that only reads the served value cannot tell the cap from the
+    // fallback — and would pass with the cap disabled.  The cap's whole job is
+    // to bound a score WS-F already assigned.
+    await fixture.ingestion.freshness.upsert({
+      storyId,
+      freshnessScore: 1,
+      topicBaselineMs: null,
+      featureVersion: 1,
+      computedAt: new Date().toISOString(),
+    });
+    await runFeatureBatch(featureDeps(), 50, 6);
+    const served = await serveFeed(fixture.ranking, {
+      userId: null,
+      surface: 'front_page',
+      surfaceRoomId: null,
+      surfaceTopicId: null,
+      mode: undefined,
+    });
+    const log = await fixture.ranking.decisionLogs.getByRequestId(served.requestId);
+    // The POLICY is recorded, not re-derived — which is what lets replay
+    // reproduce a pre-cap decision without reporting it as a regression.
+    expect(log?.replay_inputs?.sensitive_freshness_cap).toBe(true);
+    // …and it actually bound.  Stated as the PROPERTY — the conservative
+    // envelope lowered WS-F's own recorded score — rather than as arithmetic
+    // against a particular half-life, which is profile configuration and would
+    // make this test fail on a re-tune that broke nothing.
+    const stored = (await assembleFeatureVector(featureDeps(), storyId))?.freshness_decay;
+    const scored = log?.score_components[storyId];
+    expect(stored).toBeGreaterThan(0);
+    expect(scored?.baseline.freshness_decay).toBeLessThan(stored ?? 0);
+    // The recorded decision still replays exactly.
+    expect((await replayDecision(fixture.ranking, served.requestId)).match).toBe(true);
+  });
+
   it('replay still matches after NEWER feature revisions land (pinned snapshot)', async () => {
     const served = await serveRanked();
     // New invariant data arrives; features advance to new revisions.

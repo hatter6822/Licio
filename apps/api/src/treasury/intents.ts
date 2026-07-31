@@ -977,7 +977,9 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
           next === 'finalized' &&
           (updated.targetType === 'grant_payout' || updated.targetType === 'steward_compensation')
         ) {
-          await settleGrantPayout(deps, updated);
+          // `targetId` is the grant (a compensation intent that names no grant
+          // simply resolves to null and projects nothing).
+          await projectGrantPayout(deps, updated.targetId);
         }
         current = updated;
       }
@@ -988,31 +990,104 @@ export async function reconcileIntents(deps: IntentDeps, pageSize = 200): Promis
 }
 
 /**
- * A payout intent reached ON-CHAIN FINALITY: project the linked grant's payout
- * state from its milestones' intent finality — `paid` only when EVERY scheduled
- * milestone's intent finalized, `partially_paid` while some have (WS-M.5.1a;
- * scheduling alone never claims payment).
+ * Project a grant's payout state from its milestones' intent finality
+ * (WS-M.5.1a; scheduling alone never claims payment): `paid` once every
+ * milestone that can still pay has both a payout intent AND that intent's
+ * on-chain finality, `partially_paid` while only some have.
+ *
+ * The denominator is the PAYABLE milestone set, mirroring the liquidity
+ * encumbrance in `proposals.ts`: a terminally `rejected` milestone can never
+ * carry a `paymentIntentId` (only the `accepted` branch of
+ * `updateGrantMilestone` mints one, and `rejected` has no outgoing
+ * transition), so counting it in the denominator pinned a grant with any
+ * rejected tranche at `partially_paid` FOREVER — and an unsettled grant keeps
+ * `listUnsettledByRecipient` blocking the recipient's last wallet unlink.
+ *
+ * Keyed on the GRANT rather than on the settling intent, and exported, because
+ * finality is not the only event that changes this projection: a rejection
+ * landing AFTER the last payable tranche finalized moves the denominator with
+ * no intent left in flight, so `reconcileIntents` (which sweeps intent states)
+ * never sees it — the milestone-transition path has to re-project directly.
  */
-async function settleGrantPayout(deps: IntentDeps, intent: PaymentIntentRecord): Promise<void> {
-  const grant = await deps.grants.getById(intent.targetId);
+export async function projectGrantPayout(deps: IntentDeps, grantId: string): Promise<void> {
+  const grant = await deps.grants.getById(grantId);
   if (grant === null || grant.payoutState === 'clawed_back') return;
   let finalized = 0;
   let scheduled = 0;
+  let payable = 0;
   for (const milestone of grant.milestones) {
+    if (milestone.state === 'rejected') continue;
+    payable += 1;
     if (milestone.paymentIntentId === null) continue;
     scheduled += 1;
     const linked = await deps.intents.getById(milestone.paymentIntentId);
     if (linked?.executionState === 'finalized') finalized += 1;
   }
+  // EVERY MILESTONE REJECTED ⇒ terminal, not perpetually `not_started`.  With an
+  // empty payable set the old `finalized === 0` return left the grant unsettled
+  // for ever, and `listUnsettledByRecipient` counts every state except
+  // paid/clawed_back as an outstanding obligation — so a grant whose tranches
+  // can NEVER pay permanently blocked the recipient from unlinking their last
+  // wallet.  `closed` (migration 0109) says what happened: nothing paid, nothing
+  // reversed, nothing left to do.
+  if (payable === 0) {
+    if (grant.payoutState !== 'closed') {
+      await deps.grants.setPayoutState(grant.grantId, 'closed');
+    }
+    return;
+  }
   if (finalized === 0) return;
   const payoutState =
-    finalized === grant.milestones.length && scheduled === grant.milestones.length
+    finalized === payable && scheduled === payable
       ? ('paid' as const)
       : ('partially_paid' as const);
   if (payoutState === grant.payoutState) return;
   // COLUMN-scoped (W12): a whole-grant update here would write the stale
   // milestones snapshot back over a concurrent milestone transition.
   await deps.grants.setPayoutState(grant.grantId, payoutState);
+}
+
+/**
+ * Re-project every UNSETTLED grant of one treasury.
+ *
+ * `projectGrantPayout` is called inline from the milestone transition, and that
+ * call is non-fatal by design: the transition is already durable and a projection
+ * failure must not turn a recorded rejection into a 409 the steward retries.  The
+ * comment there used to justify swallowing it with "the next intent finality
+ * re-projects anyway", which is true for every grant that HAS an intent and false
+ * for the case that needs it most — an all-rejected grant has no payment intent, so
+ * no finality ever arrives, `reconcileIntents` sweeps intents and never sees it, and
+ * the grant sat outside `paid`/`clawed_back` for ever while
+ * `listUnsettledByRecipient` counted it as an outstanding obligation blocking the
+ * recipient's last wallet unlink.  A swallowed error needs somewhere for the work to
+ * land; this is it.
+ *
+ * The projection is a pure recomputation from the grant's own milestones and their
+ * linked intents, writing only when the state actually changes, so re-running it
+ * over a grant that needs nothing costs a read and is otherwise invisible.
+ *
+ * Keyset-paged by `grantId`, like the liquidity encumbrance walk: settling a grant
+ * removes it from the unsettled set, and paging by id rather than offset means a row
+ * dropping out cannot make the sweep skip the row after it.
+ */
+export async function reconcileGrantPayouts(
+  deps: IntentDeps,
+  treasuryId: string,
+  pageSize = 200,
+): Promise<number> {
+  let projected = 0;
+  let afterId: string | null = null;
+  for (;;) {
+    const page = await deps.grants.listUnsettledByTreasury(treasuryId, pageSize, afterId);
+    if (page.length === 0) break;
+    afterId = page[page.length - 1]?.grantId ?? null;
+    for (const grant of page) {
+      await projectGrantPayout(deps, grant.grantId);
+      projected += 1;
+    }
+    if (page.length < pageSize) break;
+  }
+  return projected;
 }
 
 /**

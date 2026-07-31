@@ -4,7 +4,9 @@
 // runtime `superRefine` in `apps/api/src/knomosis/pin.ts` (kept in sync by
 // `knomosis-pin-config.test.ts`).  Deliberately DEPENDENCY-FREE (no zod, no
 // node: builtins) so the `scripts`-rooted vitest project — which resolves no
-// external packages — can unit test it directly.
+// external packages — can unit test it directly.  Its ONE import is the
+// zero-dependency signed-action-type tuple from `@licio/shared`, taken by
+// relative path so the list the gate enforces IS the registry's list.
 
 /** The structural subset of a pinned deployment these invariants read. */
 export interface PinnedDeploymentLike {
@@ -21,14 +23,14 @@ export interface PinnedDeploymentLike {
   contract_allowlist: readonly string[];
 }
 
-export const KNOMOSIS_SIGNED_ACTION_TYPES = [
-  'proposal_sign',
-  'treasury_deposit',
-  'grant_payout',
-  'charter_update',
-  'bounty_contribution',
-  'steward_rotation',
-] as const;
+// The action types come from `@licio/shared`'s zero-dependency tuple module by
+// RELATIVE path — not a re-spelling, and not an `@licio/shared` package import
+// (which this project does not resolve, and which would pull zod in).  A
+// seventh signed action therefore reaches the reversibility-coverage check
+// below automatically.
+export { KNOMOSIS_SIGNED_ACTION_TYPES } from '../packages/shared/src/knomosis/signed-action-types.js';
+
+import { KNOMOSIS_SIGNED_ACTION_TYPES } from '../packages/shared/src/knomosis/signed-action-types.js';
 
 const SENTINEL_COMMIT = '0'.repeat(40);
 const SENTINEL_HASH = `0x${'0'.repeat(64)}`;

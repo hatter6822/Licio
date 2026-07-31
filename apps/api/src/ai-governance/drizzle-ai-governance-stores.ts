@@ -20,6 +20,7 @@ import type {
   AiTranslation,
   BlockedInvocationRecord,
   DataLineageRecord,
+  GovernanceAdvisory,
   GovernanceProposalSummary,
   HarnessDecision,
   RegisteredModel,
@@ -32,6 +33,7 @@ import {
   aiCorrections,
   aiDataLineage,
   aiEvaluations,
+  aiGovernanceAdvisories,
   aiGovernanceSummaries,
   aiInventoryVersions,
   aiModelCards,
@@ -43,6 +45,7 @@ import {
   aiRuntimeMetrics,
   aiSummaryDrafts,
   aiSummaryReports,
+  aiSweepCursors,
   aiTranslationReports,
   aiTranslations,
   type createDbClient,
@@ -57,6 +60,7 @@ import type {
   CorrectionStore,
   DataLineageStore,
   EvaluationStore,
+  GovernanceAdvisoryStore,
   GovernanceSummaryStore,
   InventoryStore,
   ModelRegistryStore,
@@ -69,6 +73,8 @@ import type {
   RuntimeMonitorStore,
   SummaryDraftRecord,
   SummaryStore,
+  SweepCursor,
+  SweepCursorStore,
   TranslationStore,
 } from './stores.js';
 
@@ -623,10 +629,87 @@ export class DrizzleAiReviewQueueStore implements AiReviewQueueStore {
         createdAt: new Date(),
         resolvedAt: null,
       })
+      // One PENDING item per (kind, subject) — `ai_review_queue_pending_subject_uq`.
+      // A repeat report is not an error and must not 500 the route; it adds to
+      // the report COUNT (recorded in the report tables) without adding a
+      // second queue entry a steward has to triage.
+      .onConflictDoNothing()
       .returning();
     const row = rows[0];
-    if (!row) throw new Error('ai_review_queue insert returned no row');
-    return this.#toItem(row);
+    if (row) return this.#toItem(row);
+    const incumbent = await this.#db
+      .select()
+      .from(aiReviewQueue)
+      .where(
+        and(
+          eq(aiReviewQueue.kind, item.kind),
+          eq(aiReviewQueue.subjectRef, item.subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .limit(1);
+    const existing = incumbent[0];
+    if (existing) return this.#toItem(existing);
+    // The incumbent was RESOLVED between the conflicting insert and this read.
+    // The partial index only covers `pending`, so the row that blocked us is no
+    // longer in the way — retry once and the insert now succeeds.  Throwing here
+    // would 500 the reporting endpoint for a report already persisted, and leave
+    // no queue item for it: the steward never sees the post-resolution report.
+    const retried = await this.#db
+      .insert(aiReviewQueue)
+      .values({
+        reviewId: `airev-${randomUUID()}`,
+        kind: item.kind,
+        subjectRef: item.subjectRef,
+        context: item.context,
+        status: item.status,
+        resolution: item.resolution,
+        resolvedBy: item.resolvedBy,
+        createdAt: new Date(),
+        resolvedAt: null,
+      })
+      .onConflictDoNothing()
+      .returning();
+    const retriedRow = retried[0];
+    if (retriedRow) return this.#toItem(retriedRow);
+    // A THIRD party opened a pending item in the meantime — that is the
+    // dedup working, so return theirs rather than failing.
+    const raced = await this.#db
+      .select()
+      .from(aiReviewQueue)
+      .where(
+        and(
+          eq(aiReviewQueue.kind, item.kind),
+          eq(aiReviewQueue.subjectRef, item.subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .limit(1);
+    const racedRow = raced[0];
+    if (!racedRow) throw new Error('ai_review_queue insert returned no row');
+    return this.#toItem(racedRow);
+  }
+
+  async refreshPendingContext(
+    kind: AiReviewKind,
+    subjectRef: string,
+    context: AiReviewItem['context'],
+  ): Promise<AiReviewItem | null> {
+    // ONE STATEMENT scoped by the same predicate the pending-subject unique uses, so
+    // it cannot touch a resolved item (whose evidence is the record of what a steward
+    // actually decided on) or a second subject.
+    const rows = await this.#db
+      .update(aiReviewQueue)
+      .set({ context })
+      .where(
+        and(
+          eq(aiReviewQueue.kind, kind),
+          eq(aiReviewQueue.subjectRef, subjectRef),
+          eq(aiReviewQueue.status, 'pending'),
+        ),
+      )
+      .returning();
+    return rows[0] ? this.#toItem(rows[0]) : null;
   }
 
   async get(reviewId: string): Promise<AiReviewItem | null> {
@@ -723,6 +806,28 @@ export class DrizzleSummaryStore implements SummaryStore {
     };
   }
 
+  async getLatestForThread(threadId: string): Promise<SummaryDraftRecord | null> {
+    const rows = await this.#db
+      .select()
+      .from(aiSummaryDrafts)
+      .where(eq(aiSummaryDrafts.threadId, threadId))
+      // `created_at DESC, summary_id DESC` is a TOTAL order: two drafts written
+      // in the same clock tick must still yield one deterministic answer, or
+      // the sweep's "is this thread due" question could flip between ticks.
+      .orderBy(desc(aiSummaryDrafts.createdAt), desc(aiSummaryDrafts.summaryId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      summaryId: row.summaryId,
+      threadId: row.threadId,
+      draft: row.draft,
+      outputId: row.outputId,
+      qualityPassed: row.qualityPassed,
+      createdAt: iso(row.createdAt),
+    };
+  }
+
   async putReport(report: SummaryReport): Promise<void> {
     await this.#db.insert(aiSummaryReports).values({
       reportId: report.report_id,
@@ -733,12 +838,17 @@ export class DrizzleSummaryStore implements SummaryStore {
     });
   }
 
-  async listReports(summaryId: string): Promise<SummaryReport[]> {
+  async listReports(summaryId: string, limit: number): Promise<SummaryReport[]> {
+    // NEWEST FIRST AND LIMITED IN SQL.  Ordering ascending and slicing in the
+    // caller still transfers every row, which is the whole defect: with nothing
+    // pruning `ai_summary_reports`, one subject's reports grow without bound and
+    // each carries an 8,000-character `correction_text`.
     const rows = await this.#db
       .select()
       .from(aiSummaryReports)
       .where(eq(aiSummaryReports.summaryId, summaryId))
-      .orderBy(asc(aiSummaryReports.createdAt), asc(aiSummaryReports.reportId));
+      .orderBy(desc(aiSummaryReports.createdAt), desc(aiSummaryReports.reportId))
+      .limit(Math.max(0, limit));
     return rows.map((row) => ({
       report_id: row.reportId,
       summary_id: row.summaryId,
@@ -746,6 +856,14 @@ export class DrizzleSummaryStore implements SummaryStore {
       correction_text: row.correctionText ?? null,
       reported_at: iso(row.createdAt),
     }));
+  }
+
+  async countReports(summaryId: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(aiSummaryReports)
+      .where(eq(aiSummaryReports.summaryId, summaryId));
+    return row?.total ?? 0;
   }
 
   async countReportsByReason(): Promise<Record<string, number>> {
@@ -837,18 +955,27 @@ export class DrizzleTranslationStore implements TranslationStore {
     });
   }
 
-  async listReports(translationId: string): Promise<TranslationReport[]> {
+  async listReports(translationId: string, limit: number): Promise<TranslationReport[]> {
     const rows = await this.#db
       .select()
       .from(aiTranslationReports)
       .where(eq(aiTranslationReports.translationId, translationId))
-      .orderBy(asc(aiTranslationReports.createdAt), asc(aiTranslationReports.reportId));
+      .orderBy(desc(aiTranslationReports.createdAt), desc(aiTranslationReports.reportId))
+      .limit(Math.max(0, limit));
     return rows.map((row) => ({
       report_id: row.reportId,
       translation_id: row.translationId,
       reason: row.reason as TranslationReport['reason'],
       reported_at: iso(row.createdAt),
     }));
+  }
+
+  async countReports(translationId: string): Promise<number> {
+    const [row] = await this.#db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(aiTranslationReports)
+      .where(eq(aiTranslationReports.translationId, translationId));
+    return row?.total ?? 0;
   }
 
   async clear(): Promise<void> {
@@ -908,6 +1035,80 @@ export class DrizzleGovernanceSummaryStore implements GovernanceSummaryStore {
 
   async clear(): Promise<void> {
     await this.#db.delete(aiGovernanceSummaries);
+  }
+}
+
+export class DrizzleSweepCursorStore implements SweepCursorStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async get(sweepName: string): Promise<SweepCursor | null> {
+    const rows = await this.#db
+      .select()
+      .from(aiSweepCursors)
+      .where(eq(aiSweepCursors.sweepName, sweepName))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.cursorCreatedAt === null || row.cursorRef === null) return null;
+    return { createdAt: iso(row.cursorCreatedAt), ref: row.cursorRef };
+  }
+
+  async set(sweepName: string, cursor: SweepCursor | null): Promise<void> {
+    // UPSERT rather than delete-on-null: the row records that this sweep has a
+    // position at all, and a null pair is the honest spelling of "back at the
+    // newest page" — deleting it would make "never run" and "wrapped" the same
+    // state.
+    const values = {
+      cursorCreatedAt: cursor === null ? null : new Date(cursor.createdAt),
+      cursorRef: cursor?.ref ?? null,
+      updatedAt: new Date(),
+    };
+    await this.#db
+      .insert(aiSweepCursors)
+      .values({ sweepName, ...values })
+      .onConflictDoUpdate({ target: aiSweepCursors.sweepName, set: values });
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(aiSweepCursors);
+  }
+}
+
+export class DrizzleGovernanceAdvisoryStore implements GovernanceAdvisoryStore {
+  readonly #db: Db;
+
+  constructor(db: Db) {
+    this.#db = db;
+  }
+
+  async put(advisory: GovernanceAdvisory): Promise<void> {
+    await this.#db
+      .insert(aiGovernanceAdvisories)
+      .values({
+        advisoryId: advisory.advisory_id,
+        proposalRef: advisory.proposal_ref,
+        kind: advisory.kind,
+        advisory: asJson(advisory),
+        outputId: advisory.output_id,
+        createdAt: new Date(advisory.generated_at),
+      })
+      .onConflictDoNothing();
+  }
+
+  async listByProposal(proposalRef: string): Promise<GovernanceAdvisory[]> {
+    const rows = await this.#db
+      .select()
+      .from(aiGovernanceAdvisories)
+      .where(eq(aiGovernanceAdvisories.proposalRef, proposalRef))
+      .orderBy(asc(aiGovernanceAdvisories.createdAt), asc(aiGovernanceAdvisories.advisoryId));
+    return rows.map((row) => row.advisory as GovernanceAdvisory);
+  }
+
+  async clear(): Promise<void> {
+    await this.#db.delete(aiGovernanceAdvisories);
   }
 }
 
@@ -1071,6 +1272,8 @@ export interface DrizzleAiGovernanceStores {
   reviewQueue: AiReviewQueueStore;
   summaries: SummaryStore;
   translations: TranslationStore;
+  governanceAdvisories: GovernanceAdvisoryStore;
+  sweepCursors: SweepCursorStore;
   governanceSummaries: GovernanceSummaryStore;
   runtime: RuntimeMonitorStore;
   moderationLog: ModerationDecisionLogStore;
@@ -1093,6 +1296,8 @@ export function createDrizzleAiGovernanceStores(db: Db): DrizzleAiGovernanceStor
     reviewQueue: new DrizzleAiReviewQueueStore(db),
     summaries: new DrizzleSummaryStore(db),
     translations: new DrizzleTranslationStore(db),
+    governanceAdvisories: new DrizzleGovernanceAdvisoryStore(db),
+    sweepCursors: new DrizzleSweepCursorStore(db),
     governanceSummaries: new DrizzleGovernanceSummaryStore(db),
     runtime: new DrizzleRuntimeMonitorStore(db),
     moderationLog: new DrizzleModerationDecisionLog(db),

@@ -10,7 +10,6 @@
 // (WS-F.1.4f), steward lifecycle triggers (WS-F.1.1c), runtime config, and
 // the re-embedding/backfill controls (WS-F.3.2f).
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   STORY_LIFECYCLE_TRIGGERS,
   sourceCorrectionAppendSchema,
@@ -40,6 +39,7 @@ import { getBackfillProgress, startBackfill, validateBackfill } from '../ingesti
 import { applyLifecycleTrigger } from '../ingestion/lifecycle.js';
 import { getIngestionServices } from '../ingestion/services.js';
 import type { TakedownRecordRow } from '../ingestion/stores.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });

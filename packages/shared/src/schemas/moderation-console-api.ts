@@ -12,6 +12,7 @@
 //   • Reporter identity is carried only on the role-gated review projection,
 //     never on the queue rows or any user-facing shape (SPEC §19.5).
 import { z } from 'zod';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 import {
   citationSchema,
@@ -143,7 +144,7 @@ export const caseReportDetailSchema = z
     report_id: uuidSchema,
     reason_code: contributionReasonCodeSchema,
     context: z.string().max(500).nullable(),
-    evidence_urls: z.array(z.string().max(2048)),
+    evidence_urls: z.array(z.string().max(MAX_URL_LENGTH)),
     created_at: isoTimestampSchema,
     /** Reporter handle — present ONLY for roles authorized to see it; else null
      *  (reporter-identity protection, SPEC §19.5). */
@@ -160,6 +161,19 @@ export const userHistoryActionSchema = z
     reason_code: contributionReasonCodeSchema.nullable(),
     created_at: isoTimestampSchema,
     reverted: z.boolean(),
+    /**
+     * Whether `revertAction` can actually undo this one.
+     *
+     * Bans, lawful-basis removals and the non-enforcement workflow verbs
+     * (`clear` / `escalate`) are recorded `reversible: false` and the revert
+     * route refuses them with `not_reversible`.  The projection used to drop
+     * this flag, so the console offered a Revert control on every un-reverted
+     * action — including every one that could only ever fail.  Defaulted so a
+     * row written before the field was carried reads as NOT reversible, which
+     * is the fail-closed direction: it hides a control rather than offering one
+     * that errors.
+     */
+    reversible: z.boolean().default(false),
   })
   .strict();
 export type UserHistoryAction = z.infer<typeof userHistoryActionSchema>;
@@ -226,6 +240,33 @@ export const sideBySideViewSchema = z
   .strict();
 export type SideBySideView = z.infer<typeof sideBySideViewSchema>;
 
+// ---------------------------------------------------------------------------
+// Audit log viewer + transparency export (WS-J.2.5a/b).
+// ---------------------------------------------------------------------------
+
+export const auditRecordViewSchema = z
+  .object({
+    audit_id: uuidSchema,
+    event_time: isoTimestampSchema,
+    /** Actor handle, or null for `system` (automated blocks). */
+    actor_handle: z.string().min(1).nullable(),
+    actor_role: stewardRoleIdSchema.nullable(),
+    action: z.string().min(1).max(40),
+    reason_code: contributionReasonCodeSchema.nullable(),
+    target_type: z.string().min(1).max(20),
+    target_id: uuidSchema.nullable(),
+    prior_state: z.string().max(40).nullable(),
+    next_state: z.string().max(40).nullable(),
+    reversible: z.boolean(),
+    linked_action_id: uuidSchema.nullable(),
+    report_ids: z.array(uuidSchema),
+    co_approver_handle: z.string().min(1).nullable(),
+    /** Internal note — visible to authorized roles only. */
+    notes: z.string().max(2000).nullable(),
+  })
+  .strict();
+export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;
+
 export const caseReviewResponseSchema = z
   .object({
     case_id: uuidSchema,
@@ -246,6 +287,13 @@ export const caseReviewResponseSchema = z
     /** Preserved report-time snapshot when the live content is gone (tombstone). */
     snapshot_body: z.string().max(5000).nullable(),
     user_history: userHistorySchema,
+    /** THIS case's audit trail, newest first (WS-J.2.2 / §25.4).
+     *
+     *  Distinct from `user_history`, which answers "what has this subject been through"
+     *  across every case.  A reviewer deciding one case needs the events OF that case —
+     *  including the ones that name no target at all, like the routing and assignment
+     *  that put it in front of them. */
+    case_history: z.array(auditRecordViewSchema),
     invariant_signals: invariantSignalsPanelSchema,
     side_by_side: sideBySideViewSchema.nullable(),
     /** The console actions the requesting reviewer's role may take here. */
@@ -328,6 +376,14 @@ export const reviewerStatusRequestSchema = z
   .strict();
 export type ReviewerStatusRequest = z.infer<typeof reviewerStatusRequestSchema>;
 
+/** The caller's OWN stored availability.  Without a read the console can only
+ *  guess, and it guessed `available` — telling a reviewer they were in the
+ *  auto-assignment pool while the server still had them `offline`. */
+export const reviewerStatusResponseSchema = z
+  .object({ status: reviewerAvailabilitySchema })
+  .strict();
+export type ReviewerStatusResponse = z.infer<typeof reviewerStatusResponseSchema>;
+
 // ---------------------------------------------------------------------------
 // Bulk actions (WS-J.2.1c) — per-item audit + reversible.
 // ---------------------------------------------------------------------------
@@ -396,7 +452,7 @@ export const appealReviewResponseSchema = z
     original_reviewer_handle: z.string().min(1).nullable(),
     original_created_at: isoTimestampSchema,
     appellant_statement: z.string().max(2000),
-    new_evidence: z.array(z.string().max(2048)),
+    new_evidence: z.array(z.string().max(MAX_URL_LENGTH)),
     target_type: reportTargetTypeSchema,
     // Nullable: a right-to-erasure purge scrubs an `account` target's UUID.
     target_id: uuidSchema.nullable(),
@@ -427,33 +483,6 @@ export const appealDecisionResponseSchema = z
   })
   .strict();
 export type AppealDecisionResponse = z.infer<typeof appealDecisionResponseSchema>;
-
-// ---------------------------------------------------------------------------
-// Audit log viewer + transparency export (WS-J.2.5a/b).
-// ---------------------------------------------------------------------------
-
-export const auditRecordViewSchema = z
-  .object({
-    audit_id: uuidSchema,
-    event_time: isoTimestampSchema,
-    /** Actor handle, or null for `system` (automated blocks). */
-    actor_handle: z.string().min(1).nullable(),
-    actor_role: stewardRoleIdSchema.nullable(),
-    action: z.string().min(1).max(40),
-    reason_code: contributionReasonCodeSchema.nullable(),
-    target_type: z.string().min(1).max(20),
-    target_id: uuidSchema.nullable(),
-    prior_state: z.string().max(40).nullable(),
-    next_state: z.string().max(40).nullable(),
-    reversible: z.boolean(),
-    linked_action_id: uuidSchema.nullable(),
-    report_ids: z.array(uuidSchema),
-    co_approver_handle: z.string().min(1).nullable(),
-    /** Internal note — visible to authorized roles only. */
-    notes: z.string().max(2000).nullable(),
-  })
-  .strict();
-export type AuditRecordView = z.infer<typeof auditRecordViewSchema>;
 
 export const auditQuerySchema = z
   .object({
@@ -677,7 +706,7 @@ export type IncidentResolveResponse = z.infer<typeof incidentResolveResponseSche
  *  (the fetch runs server-side over the SSRF-hardened WS-F fetcher). */
 export const urlVerdictRequestSchema = z
   .object({
-    url: z.string().url().max(2048),
+    url: z.string().url().max(MAX_URL_LENGTH),
   })
   .strict();
 export type UrlVerdictRequest = z.infer<typeof urlVerdictRequestSchema>;

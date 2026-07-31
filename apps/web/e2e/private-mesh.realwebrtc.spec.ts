@@ -87,6 +87,54 @@ const MESH_OPTS = {
 };
 
 test.describe('private room MESH over the real rendezvous (three browsers, WS-S launch gate)', () => {
+  // This file RUNS in CI; before the change that added it, `test:e2e:webrtc`
+  // appeared in no workflow, so all five real-WebRTC specs were dead letters.
+  //
+  // It was quarantined at ~1 pass in 3.  The MECHANISM, traced with per-member
+  // instrumentation: the §15.4 signal queue was keyed on the RECIPIENT's
+  // ephemeral alone, and the drain is DELIVER-ONCE.  In a 3-peer mesh everyone
+  // dials everyone at once and each addresses the SAME (freshest) announcement
+  // of the member it is dialling — so two offers land in ONE queue, the session
+  // that drains it can open only the one matching its channel key, and the other
+  // is dropped as un-openable AND already cleared from the box.  Not delayed:
+  // destroyed.  That peer then burns its dial deadline against a view that has
+  // moved on — the `skipped a signal` warnings, on the member everyone is
+  // dialling.  (The previous docstring on `deriveSignalAddress` CLAIMED this
+  // could not happen, "gives every pairwise channel its own queue"; that holds
+  // only while each session has its own recipient ephemeral, which stops being
+  // true the moment two peers pick the same announcement.)
+  //
+  // FIXED by `deriveSignalAddress` becoming PAIRWISE and DIRECTED — keyed on the
+  // sender's identity as well as the recipient's — so the two offers land in
+  // different queues and neither is destroyed.  `deriveSignalingKeyPair` (one
+  // signalling identity per device per bucket) lands with it: it fixes the
+  // separate announcement fan-out, and the pairwise address is what makes it
+  // safe.  Which half carries the flake is MEASURED, not assumed — the address
+  // change alone, with the old per-call ephemeral still in place, passes.
+  //
+  // MEASURED (2026-07-29), and the load condition is part of the result:
+  //   idle machine     pre-fix 5/5 pass,  fixed 10/10  ← does NOT reproduce idle
+  //   under load       pre-fix 0/2 pass,  fixed 13/14
+  // "Under load" = three Chromium instances against a looping api+web vitest run,
+  // load average 15-17.  That is well beyond CI, which runs this suite alone with
+  // one worker.  The single failure did not recur in a second six-run pass and its
+  // output was not captured, so its cause is unestablished rather than explained.
+  //
+  // Because a pass rate depends on the machine, the load-independent evidence is
+  // the deterministic pair in `packages/private-p2p/src/__tests__/rendezvous.test.ts`
+  // ("a SHARED signal queue destroys a third party's offer"), which exhibits the
+  // destruction and its absence with no timing in it at all.
+  //
+  // An earlier mitigation (dial the freshest candidate and RE-POLL rather than
+  // grinding a stale list — PRIV-CARRIER-FRESH-VIEW) took this from 1-in-3 to
+  // 6-in-8.  It is kept: still the right dial strategy, and it lowers the cost of
+  // a miss.  It did not remove the mechanism, which is why it was a mitigation.
+  //
+  // Rejected, with the property each would cost: keying the SERVER slot by
+  // `peer_blind_id` restores one-slot-per-device but hands any current-epoch
+  // member a targeted EVICTION vector — the sharper cousin of the DoS
+  // `selectFreshestCandidates` refuses to enable (PRIV-CARRIER-FRESHEST-NOSPOOF);
+  // a CI retry count would hide the defect rather than fix it.
   test('3 members converge to the byte-identical union, and the mesh survives a peer drop', async ({
     browser,
     browserName,

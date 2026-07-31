@@ -230,8 +230,65 @@ describe('resolveVotingWeight (WS-M.4.2c-1)', () => {
         ],
       }),
     );
-    // Own 1 + three eligible delegations = 4, capped to 3.
+    // Own 1 + three eligible delegations = 4, but only TWO fit whole under a cap
+    // of 3, so the third is left unconsumed and votes directly.
     expect(resolution).toMatchObject({ resolved: true, weight: '3' });
+    expect(resolution.resolved && resolution.countedDelegatorIds).toEqual(['d1', 'd2']);
+  });
+
+  it('a FRACTIONAL cap does not swallow the unit that only partly fits', () => {
+    // `maxVotingWeightPerAccount` is `z.number().positive()` with no integer
+    // constraint, and each delegated unit is weight 1.  Folding the boundary
+    // delegation because there was *some* headroom absorbed 0.01 of it, marked the
+    // delegator CONSUMED, and refused their direct ballot 409 — 0.99 of a vote
+    // erased from the tally and the ballot that would have carried it turned away.
+    const resolution = resolveVotingWeight(
+      base({
+        model: 'delegated',
+        maxVotingWeightPerAccount: 1.01,
+        delegations: [{ delegatorUserId: 'd1', delegatorEligible: true, weight: 1 }],
+      }),
+    );
+    // The fractional headroom is simply unused: a fraction of a member's vote is
+    // not a thing that can be conferred.
+    expect(resolution).toMatchObject({ resolved: true, weight: '1' });
+    expect(resolution.resolved && resolution.countedDelegatorIds).toEqual([]);
+  });
+
+  it('a unit that fits WHOLE under a fractional cap IS still folded', () => {
+    // The complementary direction — the fix must not refuse everything.  Cap 2.5:
+    // own 1 + d1 = 2 fits; adding d2 would be 3, so d2 keeps its own ballot and
+    // 0.5 of the ceiling goes unused.  Under-using a fractional ceiling is the
+    // whole trade, stated here so it is a decision rather than a surprise.
+    const resolution = resolveVotingWeight(
+      base({
+        model: 'delegated',
+        maxVotingWeightPerAccount: 2.5,
+        delegations: [
+          { delegatorUserId: 'd1', delegatorEligible: true, weight: 1 },
+          { delegatorUserId: 'd2', delegatorEligible: true, weight: 1 },
+        ],
+      }),
+    );
+    expect(resolution).toMatchObject({ resolved: true, weight: '2' });
+    expect(resolution.resolved && resolution.countedDelegatorIds).toEqual(['d1']);
+  });
+
+  it('a SMALLER later unit still uses the headroom a bigger one could not', () => {
+    // Why the skip is a `continue` and not a `break`.
+    const resolution = resolveVotingWeight(
+      base({
+        model: 'delegated',
+        maxVotingWeightPerAccount: 2,
+        delegations: [
+          { delegatorUserId: 'big', delegatorEligible: true, weight: '1.5' },
+          { delegatorUserId: 'small', delegatorEligible: true, weight: '0.5' },
+        ],
+      }),
+    );
+    // own 1 + 1.5 = 2.5 > 2, so `big` is skipped; 1 + 0.5 = 1.5 fits.
+    expect(resolution).toMatchObject({ resolved: true, weight: '1.5' });
+    expect(resolution.resolved && resolution.countedDelegatorIds).toEqual(['small']);
   });
 
   it('multisig_steward gives designated signers one capped vote and refuses others', () => {

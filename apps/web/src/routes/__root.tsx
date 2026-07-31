@@ -8,6 +8,7 @@
 // it is not double-wrapped.
 import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-router';
 import { useEffect } from 'react';
+import { RestrictedAccountBanner } from '../components/safety/RestrictedAccountBanner.js';
 import { SearchModalHost } from '../components/search/SearchModal/index.js';
 import { AppShell } from '../components/ui/AppShell/index.js';
 import { BottomNav, defaultNavItems } from '../components/ui/BottomNav/index.js';
@@ -163,6 +164,10 @@ function RootLayout(): React.ReactElement {
       {/* WS-B.2.5: a calm, polite offline banner above the routed content while
           the device is offline (the cache still serves what it has). */}
       {!online && <OfflineState className="mb-4" headingLevel={2} />}
+      {/* WS-J: a restricted account may sign in precisely so it can appeal and
+          exercise its data rights.  Say so — otherwise the UI looks entirely
+          normal until a write fails with no explanation. */}
+      <RestrictedAccountBanner />
       <Outlet />
       <SearchModalHost />
     </AppShell>

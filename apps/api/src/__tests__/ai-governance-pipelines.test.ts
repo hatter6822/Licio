@@ -6,7 +6,7 @@
 // + accuracy, governance AI (cited fields, uncertainty, COI/scam advisories,
 // prohibited capabilities blocked), and runtime monitoring.
 import { topicIdForSlug, UNCLASSIFIED_TOPIC_ID } from '@licio/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   accuracyMetrics,
   type CorrectionDeps,
@@ -26,6 +26,7 @@ import {
   type PipelineDeps,
 } from '../ai-governance/pipelines.js';
 import { type RuntimeMonitorDeps, runtimeMonitorTick } from '../ai-governance/runtime-monitor.js';
+import { runSummarySweep, SUMMARY_SWEEP_CURSOR } from '../ai-governance/scheduler.js';
 import { seedAiGovernance } from '../ai-governance/seed.js';
 import {
   type AiGovernanceServices,
@@ -382,16 +383,538 @@ describe('WS-K.1.4a summary generation', () => {
       createdAt: new Date(f.ai.now()).toISOString(),
     });
     await reportSummary(summaryDeps(f), 'sum-1', 'fake_citation', 'citation does not exist');
-    const reports = await f.ai.summaries.listReports('sum-1');
+    const reports = await f.ai.summaries.listReports('sum-1', 10);
     expect(reports[0]?.reason).toBe('fake_citation');
     const pending = await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10);
     expect(pending).toHaveLength(1);
+  });
+
+  it('N reports of ONE summary leave ONE pending queue item', async () => {
+    // Both report routes are authenticated and were neither rate limited nor
+    // deduplicated, so a single account could mint an unbounded number of
+    // review-queue rows — and a steward queue in which one summary appears five
+    // hundred times is how a real item goes unseen.  The reports themselves are
+    // all still recorded; only the QUEUE is one-per-subject.
+    const f = fresh();
+    await f.ai.summaries.putDraft({
+      summaryId: 'sum-flood',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(f.ai.now()).toISOString(),
+    });
+    for (let i = 0; i < 25; i += 1) {
+      await reportSummary(summaryDeps(f), 'sum-flood', 'fake_citation', `report ${i}`);
+    }
+    // The TOTAL comes from the count; the LIST is bounded by its own argument —
+    // an unbounded read of a flooded subject is the defect, not the measurement.
+    expect(await f.ai.summaries.countReports('sum-flood')).toBe(25);
+    expect(await f.ai.summaries.listReports('sum-flood', 5)).toHaveLength(5);
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 100)).toHaveLength(1);
+  });
+
+  it('a RESOLVED item does not block a later re-report from opening a fresh one', async () => {
+    // The index is partial on `pending` precisely so a steward decision can be
+    // revisited: without that, one resolved item would silence a subject for good.
+    const f = fresh();
+    await f.ai.summaries.putDraft({
+      summaryId: 'sum-again',
+      threadId: 'thread-1',
+      draft: {},
+      outputId: 'out-1',
+      qualityPassed: true,
+      createdAt: new Date(f.ai.now()).toISOString(),
+    });
+    await reportSummary(summaryDeps(f), 'sum-again', 'fake_citation', null);
+    const [pending] = await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10);
+    if (!pending) throw new Error('no queue item');
+    await f.ai.reviewQueue.resolve(
+      pending.reviewId,
+      'dismissed',
+      'steward-1',
+      new Date(f.ai.now()).toISOString(),
+    );
+    await reportSummary(summaryDeps(f), 'sum-again', 'fake_citation', null);
+    expect(
+      await f.ai.reviewQueue.list({ kind: 'reported_summary', status: 'pending' }, 10),
+    ).toHaveLength(1);
+    expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10)).toHaveLength(2);
   });
 
   it('refuses a report for a non-existent summary (no bogus-id pollution)', async () => {
     const f = fresh();
     expect(await reportSummary(summaryDeps(f), 'nope', 'fake_citation', null)).toBeNull();
     expect(await f.ai.reviewQueue.list({ kind: 'reported_summary' }, 10)).toHaveLength(0);
+  });
+
+  // The PRODUCTION caller.  `generateThreadSummary` had none while
+  // `reportSummary` — the same module — was routed, so a summary could be
+  // reported and never generated.  These drive the scheduler task, not the
+  // pipeline function, so removing the sweep fails here rather than leaving the
+  // pipeline tests above green over an unreachable producer.
+  describe('the hourly summary sweep (the production caller)', () => {
+    function wired(): Fixture {
+      const f = fresh();
+      f.ai.ingestion = f.forum.ingestion;
+      f.ai.forum = f.forum.forum;
+      // The cursor lives in the fixture's own store, so each case already
+      // starts from the newest page — no cross-test reset needed now that it
+      // is not process-global.
+      return f;
+    }
+
+    it('a LONG question sentence does not make the draft unparseable', async () => {
+      // `aiSummaryDraftSchema` caps every text at 2,000 while a comment body may be
+      // 5,000, so anything copied out of a comment has to be clamped —
+      // `unresolved_questions` was not.  A single long question therefore made `parse`
+      // throw for that thread on EVERY tick, from ordinary legal content: the
+      // statements path clamped and the questions path did not.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      const longQuestion = `${'Why does the council keep revisiting this '.repeat(80)}?`;
+      expect(longQuestion.length).toBeGreaterThan(2_000);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        longQuestion,
+      ]);
+      // Before the clamp this REJECTED, and the sweep then re-read the same page for
+      // ever (later: gave up on the thread and passed it over).
+      const outcome = await generateThreadSummary(summaryDeps(f), threadId);
+      expect(outcome.ok).toBe(true);
+      const draft = await f.ai.summaries.getLatestForThread(threadId);
+      if (draft === null) throw new Error('expected a stored draft');
+      const questions = (draft.draft as { unresolved_questions?: string[] }).unresolved_questions;
+      expect(questions?.length).toBeGreaterThan(0);
+      for (const q of questions ?? []) expect(q.length).toBeLessThanOrEqual(2_000);
+    });
+
+    it('a `?` inside a URL does not withhold the summary for ever', async () => {
+      // `hasOpenQuestions` used to be `/\?/` over the raw body while
+      // `unresolved_questions` requires a sentence-FINAL `?`, so a thread whose only
+      // `?` sits in a query string had the signal say "questions exist" and the list
+      // come back empty — constraint 2 ("open questions not listed") then withheld
+      // every such summary permanently.  Two spellings of one obligation.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'See https://data.example.test/budget?year=2026 for the approved figures.',
+        'The suburbs received a smaller share than downtown.',
+        'Residents downtown dispute that reading of the table.',
+      ]);
+      const outcome = await generateThreadSummary(summaryDeps(f), threadId);
+      expect(outcome.ok).toBe(true);
+      // Published, not withheld: no sentence asks a question, so nothing is missing.
+      expect(outcome.ok && outcome.published).toBe(true);
+    });
+
+    it('a WITHHELD summary keeps its steward-review entry even if the draft write fails', async () => {
+      // The draft was written FIRST, and the sweep's "already done" test is
+      // `getLatestForThread` — so a failure on the queue insert left a draft with no
+      // review entry, the next tick skipped the thread, and the entry withholding
+      // DEPENDS ON was lost permanently.  A summary withheld with nobody told is the
+      // one outcome this branch must not produce.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The council approved the zzzqterm allocation on Tuesday.',
+        'Some residents argue it favors downtown.',
+        'Others say the suburbs were fairly treated.',
+      ]);
+      const deps = {
+        ...summaryDeps(f),
+        // Constraint 5 (avoid slur synthesis) fails deterministically, so this
+        // summary is withheld rather than published.
+        slurDenylist: () => ['zzzqterm'],
+      };
+      const realPutDraft = f.ai.summaries.putDraft.bind(f.ai.summaries);
+      f.ai.summaries.putDraft = async () => {
+        throw new Error('draft store unavailable');
+      };
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow(
+        'draft store unavailable',
+      );
+      // The review entry survived the draft failure, so a steward still sees it.
+      const pending = await f.ai.reviewQueue.list({ status: 'pending' }, 50);
+      expect(pending.some((r) => r.kind === 'flagged_hallucination')).toBe(true);
+
+      // …and EXACTLY ONE of them, however often the draft write fails.  A random
+      // `summaryId` per attempt meant the queue's `(kind, subjectRef)` dedup could
+      // never fire, so every retry left another pending item pointing at a draft
+      // that does not exist — three per tick from the in-tick retries, and more on
+      // each later sweep, since `getLatestForThread` still finds nothing.
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow();
+      await expect(generateThreadSummary(deps, threadId)).rejects.toThrow();
+      const afterRetries = (await f.ai.reviewQueue.list({ status: 'pending' }, 50)).filter(
+        (r) => r.kind === 'flagged_hallucination',
+      );
+      expect(afterRetries).toHaveLength(1);
+
+      // …and once the store recovers, THAT subject gets its draft — no orphan left.
+      f.ai.summaries.putDraft = realPutDraft;
+      expect((await generateThreadSummary(deps, threadId)).ok).toBe(true);
+      const stored = await f.ai.summaries.getLatestForThread(threadId);
+      expect(stored?.summaryId).toBe(afterRetries[0]?.subjectRef);
+
+      // THE ITEM DESCRIBES THE SAME EVALUATION AS THE DRAFT.  The stable subject makes
+      // the dedup return the incumbent, so without a refresh the steward would read the
+      // FIRST attempt's evidence — a different `output_id`, different quality failures,
+      // a different hallucination rate — beside a draft upserted from the LAST attempt,
+      // and could accept or correct the wrong immutable output record.
+      const settledItem = (await f.ai.reviewQueue.list({ status: 'pending' }, 50)).find(
+        (r) => r.subjectRef === stored?.summaryId,
+      );
+      expect(settledItem?.context['output_id']).toBe(stored?.outputId);
+    });
+
+    it('generates a draft for a thread the sweep reaches', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      const result = await runSummarySweep(f.ai);
+      expect(result.generated).toBe(1);
+      expect(await f.ai.summaries.getLatestForThread(threadId)).not.toBeNull();
+    });
+
+    it('summarizes a thread ONCE — a second tick mints no second record', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      const first = await runSummarySweep(f.ai);
+      const draft = await f.ai.summaries.getLatestForThread(threadId);
+      const second = await runSummarySweep(f.ai);
+      expect(first.generated).toBe(1);
+      // Re-summarizing hourly would mint an AIOutputRecord per thread per tick:
+      // unbounded audit noise and unbounded guard work for no new signal.
+      expect(second.generated).toBe(0);
+      expect(second.skipped).toBe(1);
+      expect((await f.ai.summaries.getLatestForThread(threadId))?.summaryId).toBe(draft?.summaryId);
+    });
+
+    it('a thread below the activity threshold is a skip, not a failure', async () => {
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, ['One comment only.']);
+      const errors: string[] = [];
+      const result = await runSummarySweep(f.ai, (_e, id) => errors.push(id));
+      expect(result).toEqual({ examined: 1, generated: 0, skipped: 1 });
+      expect(errors).toEqual([]);
+    });
+
+    it('one failing thread does not cost the rest of the page', async () => {
+      const f = wired();
+      const bad = await seedThread(f.forum);
+      const good = await seedThread(f.forum);
+      for (const id of [bad.threadId, good.threadId]) {
+        await seedRoots(f, id, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const realGet = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      f.ai.summaries.getLatestForThread = async (threadId: string) => {
+        if (threadId === bad.threadId) throw new Error('store outage');
+        return realGet(threadId);
+      };
+      const failed: string[] = [];
+      const result = await runSummarySweep(f.ai, (_e, id) => failed.push(id));
+      // The next tick would start from the same page, so a thread that throws
+      // must not be able to block every thread behind it forever.
+      expect(failed).toEqual([bad.threadId]);
+      expect(result.generated).toBe(1);
+      expect(await f.ai.summaries.getLatestForThread(good.threadId)).not.toBeNull();
+    });
+
+    it('PAGES FORWARD — a second tick reaches threads the first never saw', async () => {
+      // Reading the newest page every hour returns the same threads forever:
+      // once they have drafts, or keep answering `insufficient_activity`, the
+      // sweep never reaches an older one and any deployment with more threads
+      // than the page size leaves the remainder permanently unsummarized.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      // Two threads per tick over four threads: without a cursor the second
+      // tick re-reads the same two and the older half is never summarized.
+      const first = await runSummarySweep(f.ai, () => {}, 2);
+      const second = await runSummarySweep(f.ai, () => {}, 2);
+      expect(first.generated).toBe(2);
+      expect(second.generated).toBe(2);
+      // Every thread ended up with a draft — the property that matters.
+      for (const id of ids) {
+        expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
+      }
+    });
+
+    it('SURVIVES the process that held the cursor (lease handover, restart)', async () => {
+      // The tick runs under a distributed lease.  A cursor held in the process
+      // is lost to every restart, deploy, and handover to another pod — each
+      // one resetting the sweep to the newest page, so at one page an hour a
+      // large installation is reset long before it reaches the tail and the
+      // older threads it exists to summarize are never reached.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const first = await runSummarySweep(f.ai, () => {}, 2);
+      expect(first.generated).toBe(2);
+      // A DIFFERENT lease holder: fresh services over the SAME durable stores,
+      // exactly as the next pod sees them.
+      const next = {
+        ...f.ai,
+        sweepCursors: f.ai.sweepCursors,
+      } as typeof f.ai;
+      const stored = await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR);
+      expect(stored).not.toBeNull();
+      const second = await runSummarySweep(next, () => {}, 2);
+      expect(second.generated).toBe(2);
+      for (const id of ids) {
+        expect(await f.ai.summaries.getLatestForThread(id)).not.toBeNull();
+      }
+    });
+
+    it('COMMITS the cursor only after the page has been processed', async () => {
+      // The cursor used to move before the loop, so a stop or crash between the
+      // two — precisely the restart the persistence exists to survive — left the
+      // next lease holder starting AFTER up to `limit` unexamined threads, which
+      // are then unreachable until the corpus wraps back to the newest page.  A
+      // cursor that can skip work is worse than one that repeats it: re-examining
+      // costs one lookup, skipping costs a summary until the wrap.
+      //
+      // Process death cannot be staged in-process, so this asserts the property
+      // that makes the crash safe: the write happens AFTER every thread on the
+      // page has been examined.
+      const f = wired();
+      for (let i = 0; i < 3; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const order: string[] = [];
+      const realGet = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      vi.spyOn(f.ai.summaries, 'getLatestForThread').mockImplementation(async (id: string) => {
+        order.push('examine');
+        return realGet(id);
+      });
+      const realSet = f.ai.sweepCursors.set.bind(f.ai.sweepCursors);
+      vi.spyOn(f.ai.sweepCursors, 'set').mockImplementation(async (name, cursor) => {
+        order.push('commit');
+        return realSet(name, cursor);
+      });
+      await runSummarySweep(f.ai, () => {}, 2);
+      vi.restoreAllMocks();
+      // Both threads on the page examined BEFORE the single commit.
+      expect(order).toEqual(['examine', 'examine', 'commit']);
+    });
+
+    it('retries a TRANSIENT failure in-tick and still summarizes the thread', async () => {
+      // Advancing the cursor past a failed thread costs a transient fault that
+      // thread's summary until the whole corpus wraps — days on a large
+      // installation.  The retry happens where the fault actually occurs.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      let calls = 0;
+      const real = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      const spy = vi
+        .spyOn(f.ai.summaries, 'getLatestForThread')
+        .mockImplementation(async (id: string) => {
+          calls += 1;
+          if (calls === 1) throw new Error('transient');
+          return real(id);
+        });
+      const errors: string[] = [];
+      const result = await runSummarySweep(f.ai, (_e, id) => errors.push(id), 2);
+      spy.mockRestore();
+      // The retry succeeded, so the thread got its summary and the caller heard
+      // about no failure at all.
+      expect(result.generated).toBe(1);
+      expect(errors).toEqual([]);
+      expect(await f.ai.summaries.getLatestForThread(threadId)).not.toBeNull();
+    });
+
+    it('a POISON thread does not pin the sweep — the cursor passes it', async () => {
+      // The other half, and the opposite failure: holding the cursor until a
+      // thread succeeds lets ONE permanently-broken thread (malformed stored
+      // data, say) re-read the same page every tick for ever, so no older page
+      // is ever reached again.  After its bounded attempts the sweep gives up,
+      // reports it ONCE, and moves on.
+      const f = wired();
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const spy = vi
+        .spyOn(f.ai.summaries, 'getLatestForThread')
+        .mockRejectedValue(new Error('poison'));
+      const errors: string[] = [];
+      await runSummarySweep(f.ai, (_e, id) => errors.push(id), 2);
+      spy.mockRestore();
+      // ONE report per thread, not one per attempt.
+      expect(errors).toHaveLength(2);
+      expect(new Set(errors).size).toBe(2);
+      // …and the cursor MOVED, so the older pages stay reachable.
+      const cursor = await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR);
+      expect(cursor).not.toBeNull();
+    });
+
+    it('WRAPS to the newest page once the tail is exhausted', async () => {
+      // A thread that only later crosses the activity threshold must still be
+      // reachable, so the cursor resets rather than parking at the end.
+      const f = wired();
+      const { threadId } = await seedThread(f.forum);
+      // A short page (limit 2) over one thread ⇒ the tail is reached at once.
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(1);
+      await seedRoots(f, threadId, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      expect((await runSummarySweep(f.ai, () => {}, 2)).generated).toBe(1);
+    });
+
+    it('WRAPS when the page comes back EMPTY, not just when it comes back short', async () => {
+      // The trigger the short-page test above cannot reach: a page that is
+      // exactly FULL, with nothing older behind it.  Four threads at limit 2
+      // means tick 2 fills its page and lands the cursor on the oldest thread,
+      // so tick 3 reads strictly older than that and gets nothing.
+      //
+      // An empty page IS the tail — the most unambiguous form of it — but the
+      // commit guarded the wrap behind "did any thread settle", which an empty
+      // page cannot satisfy.  The cursor stayed pinned at the oldest thread and
+      // every later tick re-read the same empty page: `{examined: 0}` for ever,
+      // with no metric and no error, so nothing created afterwards was ever
+      // summarized again.  And the pinned position is the DURABLE row, so a
+      // restart did not clear it either.
+      const f = wired();
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(2);
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(2);
+      // The tail tick: nothing older is left.
+      expect((await runSummarySweep(f.ai, () => {}, 2)).examined).toBe(0);
+      expect(await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR)).toBeNull();
+      // The property that matters, and the one the parked cursor destroyed: a
+      // thread created after the tail was reached still gets summarized.
+      const { threadId: fresh } = await seedThread(f.forum);
+      await seedRoots(f, fresh, [
+        'The city council approved the new budget on Tuesday.',
+        'Some residents argue the budget favors downtown over the suburbs.',
+        'Will the budget be revisited next quarter?',
+      ]);
+      // Reached WITHIN a full traversal, not necessarily on the next tick: the
+      // fixture clock is fixed, so all five threads share a `created_at` and the
+      // DESC tiebreak falls to the random thread id — asserting the fresh thread
+      // lands in the very first page after the wrap is a 2-in-5 coin flip.  What
+      // the wrap actually guarantees is that it is reached at all, and three
+      // pages of two cover five threads.
+      for (let tick = 0; tick < 3; tick += 1) {
+        if ((await f.ai.summaries.getLatestForThread(fresh)) !== null) break;
+        await runSummarySweep(f.ai, () => {}, 2);
+      }
+      expect(await f.ai.summaries.getLatestForThread(fresh)).not.toBeNull();
+    });
+
+    it('a REPORTER that throws cannot cost the sweep its position', async () => {
+      // `onThreadError` is caller-supplied.  It was invoked before the thread was
+      // settled, so a logger that throws propagated out of the sweep ahead of the
+      // commit — the cursor stayed put and the next tick re-read the same page,
+      // the reporting path resurrecting the very livelock the attempt bound
+      // exists to prevent.
+      const f = wired();
+      const ids: string[] = [];
+      for (let i = 0; i < 2; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        ids.push(threadId);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      // ASK which thread the first tick will read rather than assuming it.  The
+      // fixture clock is fixed, so every thread shares a `created_at` and the
+      // `(created_at, thread_id)` DESC order falls through to the id — which is
+      // random per thread.  Picking "the last one seeded" made this test a coin
+      // flip that passed alone and failed in the suite.
+      const [first] = await f.forum.ingestion.stories.listThreads(null, 1);
+      const poisoned = first?.threadId;
+      expect(ids).toContain(poisoned);
+      const realGetLatest = f.ai.summaries.getLatestForThread.bind(f.ai.summaries);
+      f.ai.summaries.getLatestForThread = async (threadId: string) => {
+        if (threadId === poisoned) throw new Error('poison');
+        return realGetLatest(threadId);
+      };
+      await expect(
+        runSummarySweep(
+          f.ai,
+          () => {
+            throw new Error('the logger itself is broken');
+          },
+          1,
+        ),
+      ).resolves.toMatchObject({ examined: 1 });
+      // The position moved past the poisoned thread despite the failed report,
+      // so the second thread is reachable on the next tick.
+      expect(await f.ai.sweepCursors.get(SUMMARY_SWEEP_CURSOR)).not.toBeNull();
+      expect((await runSummarySweep(f.ai, () => {}, 1)).generated).toBe(1);
+    });
+
+    it('the sweep is BOUNDED — it never walks more threads than its limit', async () => {
+      const f = wired();
+      for (let i = 0; i < 4; i += 1) {
+        const { threadId } = await seedThread(f.forum);
+        await seedRoots(f, threadId, [
+          'The city council approved the new budget on Tuesday.',
+          'Some residents argue the budget favors downtown over the suburbs.',
+          'Will the budget be revisited next quarter?',
+        ]);
+      }
+      const result = await runSummarySweep(f.ai, () => {}, 2);
+      expect(result.examined).toBe(2);
+      expect(result.generated).toBe(2);
+    });
   });
 });
 

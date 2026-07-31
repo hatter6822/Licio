@@ -9,7 +9,6 @@
 // Registration/versioning require a complete card; deploy runs the gate (card +
 // passing harness decision + resolved risk assessment); every write is validated.
 
-import { zValidator } from '@hono/zod-validator';
 import { modelCardSchema } from '@licio/ai-governance';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -28,6 +27,7 @@ import {
 } from '../ai-governance/registry.js';
 import { getAiGovernanceServices } from '../ai-governance/services.js';
 import { buildHarnessDeps, buildRegistryDeps } from '../ai-governance/wiring.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -35,6 +35,12 @@ import {
   requireAiTeam,
   requireSteward,
 } from '../middleware/auth.js';
+
+/** Reports attached to ONE review-queue item.  The queue itself is capped, but
+ *  its items expand to third-party-written report lists, so without a per-item
+ *  bound the response size is attacker-influenceable and the queue cap bounds
+ *  nothing.  `report_count` still carries the true total. */
+const REVIEW_REPORTS_PER_ITEM = 20;
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
 
@@ -329,7 +335,54 @@ export function createAiGovernanceAdminRoutes() {
       .get('/review', requireSteward(), async (c) => {
         const ai = getAiGovernanceServices();
         const items = await ai.reviewQueue.list({ status: 'pending' }, 100);
-        return c.json({ items });
+        // EVERY report for the subject, not just the one that opened the item.
+        // A repeat report about a pending subject is deliberately deduped at the
+        // queue (`ai_review_queue_pending_subject_uq`) so a steward triages one
+        // entry — but the incumbent's `context` is a frozen snapshot of the
+        // FIRST report, so every later reason and correction text was persisted
+        // and then unreachable: the report stores had no production reader at
+        // all.  Reading them here keeps the dedup (one item) while giving the
+        // steward what they are triaging (all of it), and leaves the incumbent's
+        // own evidence unrewritten.
+        //
+        // BOUNDED PER ITEM — IN THE READ, not just in the response.  The queue
+        // read is capped at 100 items, but each one expanded to a report list
+        // written by third parties (anyone may report a subject), so the 100 no
+        // longer bounded anything.  Slicing the list AFTER loading it fixed the
+        // response size and left the read unbounded, which is where the cost
+        // actually is: 100 subjects loaded concurrently, nothing prunes
+        // `ai_summary_reports`/`ai_translation_reports`, and each summary report
+        // carries an 8,000-character `correction_text`.  Since this route is the
+        // ONLY reader of those tables, degrading it hides every report from every
+        // steward — so the count comes from a COUNT and the rows are limited by
+        // the query.
+        const reportReader = (item: (typeof items)[number]) =>
+          item.kind === 'reported_summary'
+            ? ai.summaries
+            : item.kind === 'reported_translation'
+              ? ai.translations
+              : null;
+        const enriched = await Promise.all(
+          items.map(async (item) => {
+            const store = reportReader(item);
+            const [reportCount, reports] = await Promise.all([
+              store === null ? 0 : store.countReports(item.subjectRef),
+              // One more than shown, purely to answer "is there more?" without a
+              // second count — still a constant, not a function of the attacker's
+              // report volume.
+              store === null ? [] : store.listReports(item.subjectRef, REVIEW_REPORTS_PER_ITEM + 1),
+            ]);
+            return {
+              ...item,
+              // The TRUE total, never the length of the truncated list — the
+              // steward's sense of scale must not shrink with the page size.
+              report_count: reportCount,
+              reports: reports.slice(0, REVIEW_REPORTS_PER_ITEM),
+              reports_truncated: reportCount > REVIEW_REPORTS_PER_ITEM,
+            };
+          }),
+        );
+        return c.json({ items: enriched });
       })
       .post('/review/:id/resolve', requireSteward(), async (c) => {
         const ai = getAiGovernanceServices();

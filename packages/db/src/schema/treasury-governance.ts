@@ -115,6 +115,12 @@ export const grantPayoutStateEnum = knomosisSchema.enum('grant_payout_state', [
   'scheduled',
   'partially_paid',
   'paid',
+  // TERMINAL-BUT-UNPAID (migration 0109): every milestone was rejected, so the
+  // payable set is empty and nothing can ever pay.  Neither `paid` (money moved)
+  // nor `clawed_back` (money returned), and no longer `not_started` — it is
+  // FINISHED, which is what lets the unsettled predicates stop counting it
+  // against the recipient's last wallet unlink.
+  'closed',
   'clawed_back',
 ]);
 
@@ -422,6 +428,14 @@ export const delegationRecords = knomosisSchema.table(
       .on(t.roomId, t.delegatorUserId, t.scopeKey)
       .where(sql`${t.state} = 'active'`),
     index('delegation_delegate_idx').on(t.roomId, t.delegateUserId, t.state),
+    // The DOUBLE-COUNT guard's read: every delegation granted by a set of
+    // delegators in a room, across ALL states.  Neither index above serves it —
+    // `delegation_active_uq` is partial on `state = 'active'` and so cannot answer
+    // a query that must see revoked rows (a revocation after the delegate signed
+    // is precisely what the guard looks for), and the other is keyed on the
+    // DELEGATE.  Without this the guard scanned a history a member can grow
+    // without limit by revoking and re-creating a delegation.
+    index('delegation_delegator_idx').on(t.roomId, t.delegatorUserId),
   ],
 );
 export type DelegationRecordRow = typeof delegationRecords.$inferSelect;

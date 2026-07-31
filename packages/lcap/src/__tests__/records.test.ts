@@ -92,14 +92,14 @@ describe('thread projection (WS-R.2.2)', () => {
   );
 
   it('resolves the edit chain to the latest visible tip', () => {
-    const projected = reduceThreadProjection([post, edit1, edit2]);
+    const projected = reduceThreadProjection([post, edit1, edit2]).contributions;
     expect(projected).toHaveLength(1);
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', visibleCid: 'r-e2', hidden: false });
     expect(projected[0]?.editChain).toEqual(['r-o', 'r-e1', 'r-e2']);
   });
 
   it('hides a tombstoned contribution but retains its chain', () => {
-    const projected = reduceThreadProjection([post, edit1, edit2, tomb]);
+    const projected = reduceThreadProjection([post, edit1, edit2, tomb]).contributions;
     expect(projected[0]).toMatchObject({ rootCid: 'r-o', hidden: true, hiddenBy: 'r-t' });
   });
 
@@ -130,15 +130,364 @@ describe('thread projection (WS-R.2.2)', () => {
       }),
       { roomLogSeq: 2 },
     );
-    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]);
+    const projected = reduceThreadProjection([base, staleHighSeq, freshLowSeq]).contributions;
     expect(projected).toHaveLength(1);
     expect(projected[0]?.visibleCid).toBe('t-fresh');
+  });
+
+  it('refuses a cross-author edit and keeps it inspectable (never the visible tip)', () => {
+    // `edit` authorizes acting on one's OWN contribution; superseding another
+    // member's requires `moderate`, i.e. a `moderation_action`.  The hostile edit
+    // carries the higher room-log seq, so only the ownership gate stops it winning.
+    const victim = tr('x-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const hostile = tr(
+      'x-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'x-post',
+      }),
+      { roomLogSeq: 5 },
+    );
+    const projected = reduceThreadProjection([victim, hostile]).contributions;
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({ rootCid: 'x-post', visibleCid: 'x-post' });
+    expect(projected[0]?.editChain).toEqual(['x-post']);
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['x-edit']);
+  });
+
+  it('keeps the DESCENDANTS of a refused supersession, not just its first link', () => {
+    // The hostile chain's second link.  B's cross-author edit of A's post is refused
+    // — but B's NEXT edit targets that refused record, whose author really is B, so
+    // `ownsTarget` passes it and it lands in `editsByTarget` under a record in no
+    // authorized branch.  No root's chain reaches that key and it was never refused,
+    // so it appeared in neither output field: half the chain, silently gone, in the
+    // one place §25.2 says evidence is never silently discarded.
+    const post = tr('h-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const hostile = (
+      cid: string,
+      target: string,
+      seq: number,
+      type: 'edit' | 'tombstone' = 'edit',
+    ) =>
+      tr(
+        cid,
+        mkRecord({
+          event_type: type,
+          author_account_id: 'attacker',
+          author_device_key_id: 'attacker-key',
+          ...(type === 'edit' ? { replaces_record_cid: target } : { target_record_cid: target }),
+        }),
+        { roomLogSeq: seq },
+      );
+    const first = hostile('h-1', 'h-post', 1);
+    const second = hostile('h-2', 'h-1', 2);
+    const third = hostile('h-3', 'h-2', 3);
+    // …and a tombstone the attacker aims at their own refused edit hides the same way.
+    const tomb = hostile('h-tomb', 'h-3', 4, 'tombstone');
+    const projection = reduceThreadProjection([post, first, second, third, tomb]);
+    expect(projection.contributions).toHaveLength(1);
+    expect(projection.contributions[0]?.unauthorizedSupersedes).toEqual([
+      'h-1',
+      'h-2',
+      'h-3',
+      'h-tomb',
+    ]);
+    // The post itself is untouched: none of this moved the tip or hid it.
+    expect(projection.contributions[0]).toMatchObject({
+      visibleCid: 'h-post',
+      hidden: false,
+    });
+    // The author's OWN edits stay out of the refusal evidence — the descendant rule
+    // follows `editsByTarget` only from a refused record, never from the branch.
+    const mine = tr(
+      'h-mine',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'h-post' }),
+      { roomLogSeq: 5 },
+    );
+    const withMine = reduceThreadProjection([post, mine, first, second]);
+    expect(withMine.contributions[0]?.unauthorizedSupersedes).toEqual(['h-1', 'h-2']);
+    expect(withMine.contributions[0]?.editChain).toEqual(['h-post', 'h-mine']);
+  });
+
+  it('keeps refusal evidence whose TARGET has not arrived (partial replica)', () => {
+    // The partial-replica case.  `ownsTarget` refuses an edit whose named target is
+    // absent and files the evidence under that missing CID; the per-root walk seeds
+    // from projected chains, so no root could ever reach the entry and the refusal
+    // was dropped from every output field.  §25.2 forbids silently discarding
+    // conflicting evidence and makes no exception for a target that merely has not
+    // synced yet, which is the ordinary state of a partial replica.
+    const post = tr('o-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const orphanEdit = tr(
+      'o-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'not-yet-synced',
+      }),
+      { roomLogSeq: 1 },
+    );
+    const orphanTomb = tr(
+      'o-tomb',
+      mkRecord({
+        event_type: 'tombstone',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        target_record_cid: 'not-yet-synced',
+      }),
+      { roomLogSeq: 2 },
+    );
+    // A descendant of a stranded refusal is no more reachable than its parent, so it
+    // has to ride along in the same report — otherwise the unresolved path retains
+    // half the chain exactly like the per-root path used to.
+    const orphanDescendant = tr(
+      'o-edit-2',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        replaces_record_cid: 'o-edit',
+      }),
+      { roomLogSeq: 3 },
+    );
+    const projection = reduceThreadProjection([post, orphanEdit, orphanTomb, orphanDescendant]);
+    // The unrelated post projects normally and claims none of this evidence…
+    expect(projection.contributions).toHaveLength(1);
+    expect(projection.contributions[0]?.unauthorizedSupersedes).toBeUndefined();
+    // …and the refusals are reported against the target that did not arrive,
+    // sorted, so the output stays arrival-order independent.
+    expect(projection.unresolvedSupersedes).toEqual([
+      { targetCid: 'not-yet-synced', recordCids: ['o-edit', 'o-edit-2', 'o-tomb'] },
+    ]);
+
+    // ONCE THE TARGET ARRIVES the refusal resolves the ordinary way: it belongs to
+    // a contribution now, so it moves out of the unresolved list rather than being
+    // reported twice.
+    const arrived = tr('not-yet-synced', mkRecord({ event_type: 'post' }), { roomLogSeq: 3 });
+    const complete = reduceThreadProjection([
+      post,
+      orphanEdit,
+      orphanTomb,
+      orphanDescendant,
+      arrived,
+    ]);
+    expect(complete.unresolvedSupersedes).toEqual([]);
+    const target = complete.contributions.find((c) => c.rootCid === 'not-yet-synced');
+    expect(target?.unauthorizedSupersedes).toEqual(['o-edit', 'o-edit-2', 'o-tomb']);
+  });
+
+  it('keeps refusal evidence aimed at the branch the projection did NOT pick', () => {
+    // Two competing AUTHORIZED edits fork the record; `pickLatestEdit` selects
+    // one, so the loser's CID is absent from `editChain`.  A hostile
+    // cross-author edit aimed at that loser used to vanish from
+    // `unauthorizedSupersedes` entirely — the evidence disappeared for exactly
+    // the conflict case the field exists to expose.
+    const base = tr('b-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const branchA = tr(
+      'b-a',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'b-post' }),
+      { roomLogSeq: 1 },
+    );
+    const branchB = tr(
+      'b-b',
+      mkRecord({
+        event_type: 'edit',
+        author_device_key_id: 'dev-B',
+        device_seq: 1,
+        replaces_record_cid: 'b-post',
+      }),
+      { roomLogSeq: 2 },
+    );
+    const hostile = tr(
+      'b-hostile',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        author_device_key_id: 'attacker-key',
+        // Aimed at whichever branch loses below — both are asserted.
+        replaces_record_cid: 'b-a',
+      }),
+      { roomLogSeq: 9 },
+    );
+    const projected = reduceThreadProjection([base, branchA, branchB, hostile]).contributions;
+    expect(projected).toHaveLength(1);
+    const visible = projected[0]?.visibleCid;
+    // The refusal is retained WHICHEVER branch the projection selected — when
+    // it picks `b-a` the target is on the chain, and when it picks `b-b` it is
+    // not, and that second case is the one that used to lose the evidence.
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['b-hostile']);
+    expect(['b-a', 'b-b']).toContain(visible);
+  });
+
+  it('refuses a cross-author tombstone but honours a moderation_action', () => {
+    const victim = tr('y-post', mkRecord({ event_type: 'post' }));
+    const hostileTomb = tr(
+      'y-tomb',
+      mkRecord({
+        event_type: 'tombstone',
+        author_account_id: 'attacker',
+        target_record_cid: 'y-post',
+      }),
+    );
+    const notHidden = reduceThreadProjection([victim, hostileTomb]).contributions;
+    expect(notHidden[0]).toMatchObject({ hidden: false });
+    expect(notHidden[0]?.unauthorizedSupersedes).toEqual(['y-tomb']);
+
+    const moderation = tr(
+      'y-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'y-post',
+      }),
+    );
+    expect(reduceThreadProjection([victim, moderation]).contributions[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'y-mod',
+    });
+  });
+
+  it('a moderated variant cannot be un-hidden by publishing a NEWER own edit', () => {
+    // The moderation bypass.  Hiding was scoped to the VISIBLE path, so the
+    // moderated author had a move available to no one else: publish a second
+    // authorized edit of the root at a higher room-log seq, the visible chain
+    // stops passing through the moderated variant, and the moderation record
+    // disappears from every output field.  §25.1's stricter visible state has to
+    // win over the whole logical contribution, which is what this file's header
+    // says a moderation_action hides.
+    const post = tr('m-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const v1 = tr(
+      'm-v1',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'm-post' }),
+      { roomLogSeq: 1 },
+    );
+    const moderated = tr(
+      'm-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'm-v1',
+      }),
+      { roomLogSeq: 2 },
+    );
+    expect(reduceThreadProjection([post, v1, moderated]).contributions[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'm-mod',
+    });
+    // …now the author's escape hatch: a SECOND authorized edit of the root.
+    const v2 = tr(
+      'm-v2',
+      mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'm-post' }),
+      { roomLogSeq: 3 },
+    );
+    const after = reduceThreadProjection([post, v1, moderated, v2]).contributions;
+    expect(after[0]?.visibleCid).toBe('m-v2'); // the tip did move…
+    expect(after[0]).toMatchObject({ hidden: true, hiddenBy: 'm-mod' }); // …the hiding did not lift
+    // And the passed-over variant is retained rather than dropped (§25.1).
+    expect(after[0]?.supersededEdits).toEqual(['m-v1']);
+  });
+
+  it("an author's OWN tombstone of a losing variant still deletes the contribution", () => {
+    // The same bypass from the other side: an offline-plane deletion aimed at a
+    // variant that later stops being visible silently did nothing on any peer
+    // holding both variants.
+    const post = tr('d-post', mkRecord({ event_type: 'post' }), { roomLogSeq: 0 });
+    const v1 = tr(
+      'd-v1',
+      mkRecord({ event_type: 'edit', device_seq: 1, replaces_record_cid: 'd-post' }),
+      { roomLogSeq: 1 },
+    );
+    const ownTomb = tr('d-tomb', mkRecord({ event_type: 'tombstone', target_record_cid: 'd-v1' }), {
+      roomLogSeq: 2,
+    });
+    const v2 = tr(
+      'd-v2',
+      mkRecord({ event_type: 'edit', device_seq: 2, replaces_record_cid: 'd-post' }),
+      { roomLogSeq: 3 },
+    );
+    expect(reduceThreadProjection([post, v1, ownTomb, v2]).contributions[0]).toMatchObject({
+      hidden: true,
+      hiddenBy: 'd-tomb',
+    });
+  });
+
+  it('retains a hostile record aimed at an ALREADY-REFUSED hostile record', () => {
+    // Refusal evidence was collected one hop only, so whether a chain of hostile
+    // records survived depended on whether its earliest link happened to name an
+    // AUTHORIZED record.  §25.2 attaches no such condition to "never silently
+    // discarded".
+    const post = tr('h-post', mkRecord({ event_type: 'post' }));
+    const h1 = tr(
+      'h-1',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        replaces_record_cid: 'h-post',
+      }),
+    );
+    const h2 = tr(
+      'h-2',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker-2',
+        replaces_record_cid: 'h-1', // aimed at the refused record, not the post
+      }),
+    );
+    const projected = reduceThreadProjection([post, h1, h2]).contributions;
+    expect(projected[0]?.visibleCid).toBe('h-post');
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['h-1', 'h-2']);
+  });
+
+  it('retains a hostile record aimed at the MODERATION record itself', () => {
+    // The moderation/tombstone records acting on a contribution are part of it,
+    // so a record trying to supersede one is evidence about this contribution —
+    // and named a CID in neither the edit graph nor the refused set.
+    const post = tr('n-post', mkRecord({ event_type: 'post' }));
+    const mod = tr(
+      'n-mod',
+      mkRecord({
+        event_type: 'moderation_action',
+        author_account_id: 'moderator',
+        target_record_cid: 'n-post',
+      }),
+    );
+    const attackMod = tr(
+      'n-attack',
+      mkRecord({
+        event_type: 'edit',
+        author_account_id: 'attacker',
+        replaces_record_cid: 'n-mod',
+      }),
+    );
+    const projected = reduceThreadProjection([post, mod, attackMod]).contributions;
+    expect(projected[0]).toMatchObject({ hidden: true, hiddenBy: 'n-mod' });
+    expect(projected[0]?.unauthorizedSupersedes).toEqual(['n-attack']);
+  });
+
+  it("still applies an edit made from the author's SECOND device", () => {
+    // Ownership is per ACCOUNT, not per device key — a member editing from another
+    // of their own devices must keep working.
+    const post = tr('z-post', mkRecord({ event_type: 'post', author_device_key_id: 'key-a' }));
+    const fromOtherDevice = tr(
+      'z-edit',
+      mkRecord({
+        event_type: 'edit',
+        author_device_id: 'dev-2',
+        author_device_key_id: 'key-b',
+        replaces_record_cid: 'z-post',
+      }),
+    );
+    const projected = reduceThreadProjection([post, fromOtherDevice]).contributions;
+    expect(projected[0]?.visibleCid).toBe('z-edit');
+    expect(projected[0]?.unauthorizedSupersedes).toBeUndefined();
   });
 
   it('is independent of record arrival order (property)', () => {
     const records = [post, edit1, edit2, tomb];
     const reference = JSON.stringify(
-      reduceThreadProjection(records).map((p) => p.visibleCid + p.hidden),
+      reduceThreadProjection(records).contributions.map((p) => p.visibleCid + p.hidden),
     );
     const permutations = [
       [tomb, edit2, edit1, post],
@@ -146,9 +495,11 @@ describe('thread projection (WS-R.2.2)', () => {
       [edit1, tomb, post, edit2],
     ];
     for (const perm of permutations) {
-      expect(JSON.stringify(reduceThreadProjection(perm).map((p) => p.visibleCid + p.hidden))).toBe(
-        reference,
-      );
+      expect(
+        JSON.stringify(
+          reduceThreadProjection(perm).contributions.map((p) => p.visibleCid + p.hidden),
+        ),
+      ).toBe(reference);
     }
   });
 });

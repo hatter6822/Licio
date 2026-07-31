@@ -4,7 +4,7 @@
 // coerced to the route default via `.catch(...)` — never silently accepted as
 // arbitrary input. These drive the feed-mode switcher and the thread branch tab
 // from shareable URLs.
-import { feedModeCompatSchema, normalizeFeedMode, uuidSchema } from '@licio/shared';
+import { feedModeCompatSchema, MAX_URL_LENGTH, normalizeFeedMode, uuidSchema } from '@licio/shared';
 import { z } from 'zod';
 
 /**
@@ -34,7 +34,7 @@ export type LoginSearch = z.infer<typeof loginSearchSchema>;
 /** Submit composer: story submission only; share-target params seed the story composer. */
 export const submitSearchSchema = z.object({
   /** Share-target intake (WS-G.3.7a): citation pre-population. */
-  share_url: z.string().url().max(2048).optional().catch(undefined),
+  share_url: z.string().url().max(MAX_URL_LENGTH).optional().catch(undefined),
   share_title: z.string().max(300).optional().catch(undefined),
 });
 export type SubmitSearch = z.infer<typeof submitSearchSchema>;

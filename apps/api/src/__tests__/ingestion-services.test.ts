@@ -53,7 +53,7 @@ async function submitBrief(cookie: string, over: Record<string, unknown> = {}): 
   return story_id;
 }
 
-function contributionCreated(userId: string, threadId: string) {
+function contributionCreated(userId: string, threadId: string, storyId: string) {
   return contributionCreatedEventSchema.parse({
     event_id: randomUUID(),
     event_type: 'contribution.created',
@@ -61,6 +61,7 @@ function contributionCreated(userId: string, threadId: string) {
     schema_version: '1',
     contribution_id: randomUUID(),
     thread_id: threadId,
+    story_id: storyId,
     user_id: userId,
     contribution_type: 'correction',
     target_claim_id: null,
@@ -80,7 +81,9 @@ describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
     const before = await fixture.ingestion.stories.getById(storyId);
     const freshnessBefore = await fixture.ingestion.freshness.get(storyId);
     nowMs += 60_000;
-    await fixture.events.router.publish(contributionCreated(userId, thread?.threadId as string));
+    await fixture.events.router.publish(
+      contributionCreated(userId, thread?.threadId as string, storyId),
+    );
     const after = await fixture.ingestion.stories.getById(storyId);
     expect(after?.lastMaterialUpdateAt).not.toBe(before?.lastMaterialUpdateAt);
     const freshnessAfter = await fixture.ingestion.freshness.get(storyId);
@@ -106,7 +109,7 @@ describe('ingestion-signals consumer (WS-F.1.1c via WS-E events)', () => {
     );
     const burst = async () => {
       for (let i = 0; i < 2; i += 1) {
-        await fixture.events.router.publish(contributionCreated(userId, threadId));
+        await fixture.events.router.publish(contributionCreated(userId, threadId, storyId));
       }
     };
     await burst();

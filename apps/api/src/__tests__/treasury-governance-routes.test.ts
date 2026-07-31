@@ -7,6 +7,10 @@
 
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryAiGovernanceServices,
+  setAiGovernanceServices,
+} from '../ai-governance/services.js';
 import { createInMemoryGovernanceStores } from '../governance/stores.js';
 import { buildSessionCookie, createSession } from '../identity/sessions.js';
 import { storeKnomosisConfigValue } from '../knomosis/config.js';
@@ -116,13 +120,48 @@ async function wsmFixture(options: { steward?: boolean } = {}): Promise<WsmFixtu
         contributionCount: 10,
         verifiedIdentity: true,
       }),
-      eligibleMemberCount: async () => 3,
+      eligibleMemberCount: async () => ({ count: 3, asOf: new Date(0).toISOString() }),
+      measureEligibleMembers: async () => ({ count: 3, asOf: new Date().toISOString() }),
     },
     treasuryExecutor: { execute: async () => ({ accepted: true, code: null }) },
     elections: { openElection: async () => true },
   });
   setTreasuryServices(treasury);
   return Object.assign(fixture, { treasury, mode });
+}
+
+/** A minimal published production proposal row (the WSM lifecycle shape). */
+function proposalRow(proposalId: string, roomId: string) {
+  return {
+    proposalId,
+    roomId,
+    proposerUserId: crypto.randomUUID(),
+    proposalType: 'capped_grant' as const,
+    title: 'Fund the sprint',
+    plainLanguageSummary: 'Pay a contributor.',
+    requestedAmount: '500',
+    asset: 'USDC',
+    recipientRef: null,
+    conflictDisclosures: 'None.',
+    riskAssessment: 'Low.',
+    requestedAction: { kind: 'grant' },
+    expectedDeliverable: 'A deliverable.',
+    preflightState: 'passed' as const,
+    votingState: 'deliberation' as const,
+    challengeState: 'none' as const,
+    executionState: 'not_executed' as const,
+    simulationMode: false,
+    executableAfter: null,
+    createdAt: new Date().toISOString(),
+    executedAt: null,
+    executionClaimedAt: null,
+    lawPackVersionId: crypto.randomUUID(),
+    category: 'grant' as const,
+    deliberationEndsAt: new Date(Date.now() + 3_600_000).toISOString(),
+    votingEndsAt: new Date(Date.now() + 7_200_000).toISOString(),
+    challengeWindowEndsAt: null,
+    tallySnapshot: null,
+  };
 }
 
 afterEach(() => {
@@ -561,6 +600,76 @@ describe('WS-M treasury + payment intents', () => {
     expect(body.proposal['preflight_state']).toBe('passed');
     expect(body.proposal['law_pack_version_id']).toBeDefined();
     expect(body.proposal['votes']).toBeUndefined();
+  });
+
+  it('serves the §24.5 ADVISORIES attached to a proposal, and 404s a cross-room id', async () => {
+    // The advisory pipeline produced concrete findings (proposer-is-recipient,
+    // scam-associated language) that the production caller discarded: no store,
+    // no route, no reader.  Advice nobody can open is not restraint, it is
+    // absence — so this is the surface that makes "advisory" mean something.
+    const fixture = await wsmFixture();
+    const { cookie } = await seedUserWithSession(fixture.identity, { steward: true });
+    const ai = createInMemoryAiGovernanceServices(fixture.events, { now: () => Date.now() });
+    setAiGovernanceServices(ai);
+    const proposalId = crypto.randomUUID();
+    await fixture.treasury.proposals.insert({
+      ...proposalRow(proposalId, ROOM),
+    });
+    await ai.governanceAdvisories.put({
+      advisory_id: `gadv-${crypto.randomUUID()}`,
+      proposal_ref: proposalId,
+      kind: 'scam_pattern',
+      detail: 'Scam-associated language detected ("guaranteed returns") — a steward decides.',
+      advisory_only: true,
+      output_id: `aiout-${crypto.randomUUID()}`,
+      generated_at: new Date().toISOString(),
+    });
+    const res = await req(
+      'GET',
+      `/rooms/${ROOM}/governance/proposals/${proposalId}/advisories`,
+      cookie,
+    );
+    expect(res.status).toBe(200);
+    // …and a NON-steward member of the same room gets a 404, not the findings.
+    // `simGate(..., false)` asks whether the caller may READ the room, which in
+    // a public production room is every authenticated account — and a COI flag
+    // naming the proposer, or a scam-pattern hit on their wording, is decision
+    // support for the room's decision-makers, not a disclosure to the
+    // proposer's audience.
+    const member = await seedUserWithSession(fixture.identity, { steward: false });
+    fixture.knomosis.rooms = {
+      ...(fixture.knomosis.rooms as object),
+      isSteward: async () => false,
+      isMember: async () => true,
+      contentVisibleToUser: async () => true,
+      roomGovernance: async () => ({ mode: 'testnet' as never, name: 'Governed Room' }),
+    } as typeof fixture.knomosis.rooms;
+    expect(
+      (
+        await req(
+          'GET',
+          `/rooms/${ROOM}/governance/proposals/${proposalId}/advisories`,
+          member.cookie,
+        )
+      ).status,
+    ).toBe(404);
+    const body = (await res.json()) as {
+      advisories: { kind: string; advisory_only: boolean }[];
+    };
+    expect(body.advisories).toHaveLength(1);
+    expect(body.advisories[0]?.kind).toBe('scam_pattern');
+    // Pinned true by the schema: this endpoint informs a decision, never gates one.
+    expect(body.advisories[0]?.advisory_only).toBe(true);
+
+    // A proposal id from another room is a 404, not a 403 — an outsider learns
+    // nothing about which proposals exist elsewhere.
+    const otherRoom = crypto.randomUUID();
+    const foreignId = crypto.randomUUID();
+    await fixture.treasury.proposals.insert({ ...proposalRow(foreignId, otherRoom) });
+    expect(
+      (await req('GET', `/rooms/${ROOM}/governance/proposals/${foreignId}/advisories`, cookie))
+        .status,
+    ).toBe(404);
   });
 
   it('a stranger cannot advance someone else’s payment intent (PR #144 review)', async () => {

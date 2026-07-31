@@ -14,6 +14,11 @@ export interface ProjectTest {
   environment: 'node' | 'jsdom';
   setupFiles?: string[];
   env?: Record<string, string>;
+  /** Per-project timeout, in ms.  Declared because `policyProjectTest` sets it
+   *  — and, until this file entered a tsconfig, TypeScript never saw that the
+   *  interface omitted it (`error TS2353: 'testTimeout' does not exist in type
+   *  'ProjectTest'`).  See the root `tsconfig.tools.json`. */
+  testTimeout?: number;
 }
 
 /**
@@ -55,3 +60,40 @@ export const policyProjectTest: ProjectTest = {
   // above the work that a slow machine is not a failure.
   testTimeout: 120_000,
 };
+
+/**
+ * Refuse a per-workspace `--coverage` run.
+ *
+ * The 80% gate is defined ONCE, in the root `vitest.config.ts`, over the union
+ * of every workspace's files.  A workspace-local config carries no `coverage`
+ * block, so `pnpm --filter <ws> test --coverage` used to run with vitest's
+ * defaults: it printed a coverage table and exited 0 no matter how low the
+ * number was.  A gate that always passes is worse than no gate — it is read as
+ * a gate.
+ *
+ * Per-workspace THRESHOLDS would not fix it either, because they would be a
+ * different bar than the one CI enforces, and two bars is how a green local run
+ * stops predicting a green CI one.  So the honest answer is to refuse and name
+ * the command that actually gates.  Same idiom as `check:dead-exports` refusing
+ * to run when a tracked file falls outside every tsconfig: a check that cannot
+ * judge must not report success.
+ */
+export function refuseWorkspaceCoverage(workspace: string): void {
+  const enabled = process.argv.some(
+    (arg) => arg === '--coverage' || arg.startsWith('--coverage.') || arg === '--coverage=true',
+  );
+  if (!enabled) return;
+  throw new Error(
+    [
+      `Coverage is not gated per workspace, so \`--coverage\` here would report a`,
+      `number that always passes. The 80% gate spans every workspace and lives in`,
+      `the root config.`,
+      ``,
+      `  run:  pnpm test --coverage        (NOT \`pnpm test -- --coverage\`)`,
+      ``,
+      `and measure it with the gated services up (DATABASE_URL / REDIS_URL) — the`,
+      `integration suites carry a large share of the branch coverage.`,
+      `(refused for workspace: ${workspace})`,
+    ].join('\n'),
+  );
+}

@@ -6,7 +6,7 @@
 // framing exists on any wire shape).  `governance_mode` defaults to
 // `ordinary` and is read-only in WS-G (mode changes land with WS-L/M).
 import { z } from 'zod';
-import { isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
+import { apiErrorSchema, isoTimestampSchema, paginatedSchema, uuidSchema } from './common.js';
 
 // ---------------------------------------------------------------------------
 // Enums (WS-G.2.1/2.2; STEWARD_ROLES mirrors docs/policy/STEWARD_ROLES.md).
@@ -510,6 +510,23 @@ export const roomVisibilityChangeRequestSchema = z
   .object({ visibility: roomVisibilitySchema })
   .strict();
 export type RoomVisibilityChangeRequest = z.infer<typeof roomVisibilityChangeRequestSchema>;
+
+/**
+ * The WS-Q.3.4 cascade's 409: the public stories a tier-unique collision refused
+ * to contain, NAMED.
+ *
+ * A room may legitimately hold both a public story and a room_only one for the
+ * same link, so containing the public copy collides with its in-room twin.  The
+ * cascade already identified every such story so a steward could resolve them —
+ * and the route serialized the generic `{ error }` and dropped the list, leaving
+ * the caller a count and no way to act on it.  The ids ride ALONGSIDE the error
+ * contract rather than inside `details`, which is the field→message map the form
+ * surfaces render.
+ */
+export const roomVisibilityConflictSchema = apiErrorSchema
+  .extend({ blocked_story_ids: z.array(uuidSchema).min(1) })
+  .strict();
+export type RoomVisibilityConflict = z.infer<typeof roomVisibilityConflictSchema>;
 
 export const roomJoinRequestPublicSchema = z
   .object({

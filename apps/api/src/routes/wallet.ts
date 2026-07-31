@@ -12,7 +12,6 @@
 // are CSRF-protected (session-bearing browser flows keep the double-submit
 // token; no new exemptions).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   uuidSchema,
   WALLET_UNLINK_OBLIGATIONS_MAX,
@@ -47,6 +46,7 @@ import {
   type WalletServiceDeps,
   walletRiskState,
 } from '../knomosis/wallet.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

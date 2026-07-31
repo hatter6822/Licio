@@ -5,9 +5,12 @@
 // boot.  Routes read the module singleton via `getModerationServices()`; the
 // production boot swaps Postgres adapters + real ports in by assignment;
 // tests build an in-memory container and `setModerationServices(...)`.
+import { createHash } from 'node:crypto';
 import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import { appendAudit } from './audit.js';
+import type { AuditChainDeps } from './audit-chain.js';
 import {
   DEFAULT_MODERATION_CONFIG,
   loadModerationConfig,
@@ -57,6 +60,7 @@ import {
   type ModerationReportStore,
   type ReviewerStatusStore,
 } from './stores.js';
+import { InMemoryModerationTransactor, type ModerationTransactor } from './transactor.js';
 
 /** In-process counters (no PII; observability only, SPEC §18.2). */
 export class ModerationMetrics {
@@ -77,6 +81,23 @@ export interface ModerationServices {
   reports: ModerationReportStore;
   actions: ModerationActionStore;
   audit: ModerationAuditStore;
+  /**
+   * Run a state change and its audit record as ONE unit (WS-J.2.3, `transactor.ts`).
+   *
+   * Replaced at production boot by `DrizzleModerationTransactor`, which arrives from the
+   * same factory as the Postgres stores so the two cannot be half-wired.  Until then the
+   * in-memory twin serialises units and rolls back on a throw, so both sides answer the
+   * same question about what a failed unit leaves behind.
+   */
+  transactor: ModerationTransactor;
+  /** The audit trail's tamper-evidence key + identifier ref (WS-J.2.5, migration 0118).
+   *
+   *  Present by DEFAULT — in dev and test as well as production — because a chain that
+   *  only the production wiring turns on is a chain no test exercises, and the first time
+   *  anyone runs the verifier would be the first time the code has ever run.  Production
+   *  derives the key from the identity master secret; the in-memory factory derives a
+   *  local one, so the SHAPE of every trail is the same everywhere. */
+  auditChain: AuditChainDeps;
   blocks: AccountBlockStore;
   mutes: AccountMuteStore;
   appeals: ModerationAppealStore;
@@ -114,6 +135,8 @@ export interface ModerationServices {
 }
 
 export interface InMemoryModerationOptions {
+  /** Override the audit chain's MAC key (production passes the derived one). */
+  auditChainKey?: string;
   config?: Partial<ModerationRuntimeConfig>;
   content?: ModerationContentPort;
   users?: ModerationUserPort;
@@ -137,17 +160,54 @@ export function createInMemoryModerationServices(
   const metrics = new ModerationMetrics();
   const log = options.log ?? ((): void => {});
 
+  const auditStore = new InMemoryModerationAuditStore(now);
+  const caseStore = new InMemoryModerationCaseStore(now);
+  const actionStore = new InMemoryModerationActionStore(now);
+  const noticeStore = new InMemoryModerationNoticeStore(now);
+  const appealStore = new InMemoryModerationAppealStore(now);
+  const incidentStore = new InMemoryCoordinatedReportIncidentStore(now);
   const services: ModerationServices = {
-    cases: new InMemoryModerationCaseStore(now),
+    cases: caseStore,
     reports: new InMemoryModerationReportStore(now),
-    actions: new InMemoryModerationActionStore(now),
-    audit: new InMemoryModerationAuditStore(now),
+    actions: actionStore,
+    audit: auditStore,
+    // The unit of work.  `audit` reads `services.auditChain` at CALL time rather than
+    // capturing it, so a boot that rewires the chain key does not leave the transactor
+    // signing with the dev one.
+    transactor: new InMemoryModerationTransactor(
+      {
+        cases: caseStore,
+        actions: actionStore,
+        notices: noticeStore,
+        appeals: appealStore,
+        incidents: incidentStore,
+        // A no-op: the in-memory transactor already runs units one at a time, which is
+        // the property the Postgres advisory lock buys.
+        lockRevertScope: async () => {},
+        // The in-memory unit shares the services' own port: there is no second handle to
+        // bind, and a fold over Maps has no partial commit to protect against.
+        content: {
+          applyContentState: (...args) => services.content.applyContentState(...args),
+          applyAccountState: (...args) => services.content.applyAccountState(...args),
+        },
+        audit: (input) => appendAudit(services.auditChain, input),
+      },
+      [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],
+    ),
+    auditChain: {
+      store: auditStore,
+      // A LOCAL key, overridden at production boot from the identity master secret.  It
+      // exists so the chain runs everywhere: a tamper-evidence path that only production
+      // exercises is one whose first real execution is in production.
+      key: options.auditChainKey ?? 'licio-dev-moderation-audit-chain',
+      refOf: (id) => createHash('sha256').update(`moderation-audit-ref:${id}`).digest('hex'),
+    },
     blocks: new InMemoryAccountBlockStore(now),
     mutes: new InMemoryAccountMuteStore(now),
-    appeals: new InMemoryModerationAppealStore(now),
-    notices: new InMemoryModerationNoticeStore(now),
+    appeals: appealStore,
+    notices: noticeStore,
     reviewerStatus: new InMemoryReviewerStatusStore(),
-    incidents: new InMemoryCoordinatedReportIncidentStore(now),
+    incidents: incidentStore,
     evidenceDecisions: new InMemoryEvidenceDecisionStore(now),
     submissions: new RecentSubmissionTracker(),
     content: options.content ?? defaultContentPort,

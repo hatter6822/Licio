@@ -10,6 +10,7 @@ import {
   comprehensionResults,
   type createDbClient,
   governanceAuditLogs,
+  governanceDelegatedUnitClaims,
   governanceProposals,
   governanceProposalVotes,
   governanceSignatures,
@@ -41,6 +42,7 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { keysetAfterRow } from '../lib/keyset.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import type { ActionNonceStore } from './services.js';
 import type {
@@ -53,6 +55,7 @@ import type {
   GovernanceAuditStore,
   GovernanceProposalRecord,
   GovernanceProposalStore,
+  GovernanceSignatureInsert,
   GovernanceSignatureRecord,
   GovernanceSignatureStore,
   KnomosisActionRecordEntity,
@@ -1245,6 +1248,8 @@ function mapProposal(row: typeof governanceProposals.$inferSelect): GovernancePr
     deliberationEndsAt: isoOrNull(row.deliberationEndsAt),
     votingEndsAt: isoOrNull(row.votingEndsAt),
     challengeWindowEndsAt: isoOrNull(row.challengeWindowEndsAt),
+    eligibleBasisCount: row.eligibleBasisCount ?? null,
+    eligibleBasisAt: row.eligibleBasisAt ? iso(row.eligibleBasisAt) : null,
     tallySnapshot: (row.tallySnapshot as Record<string, unknown> | null) ?? null,
   };
 }
@@ -1281,6 +1286,8 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
       deliberationEndsAt: dateOrNull(record.deliberationEndsAt ?? null),
       votingEndsAt: dateOrNull(record.votingEndsAt ?? null),
       challengeWindowEndsAt: dateOrNull(record.challengeWindowEndsAt ?? null),
+      eligibleBasisCount: record.eligibleBasisCount ?? null,
+      eligibleBasisAt: record.eligibleBasisAt == null ? null : new Date(record.eligibleBasisAt),
       tallySnapshot: record.tallySnapshot ?? null,
     });
     return record;
@@ -1440,6 +1447,15 @@ export class DrizzleGovernanceProposalStore implements GovernanceProposalStore {
           : {}),
         ...(patch.votingEndsAt !== undefined
           ? { votingEndsAt: dateOrNull(patch.votingEndsAt ?? null) }
+          : {}),
+        ...(patch.eligibleBasisAt !== undefined
+          ? {
+              eligibleBasisAt:
+                patch.eligibleBasisAt === null ? null : new Date(patch.eligibleBasisAt),
+            }
+          : {}),
+        ...(patch.eligibleBasisCount !== undefined
+          ? { eligibleBasisCount: patch.eligibleBasisCount }
           : {}),
         ...(patch.tallySnapshot !== undefined ? { tallySnapshot: patch.tallySnapshot } : {}),
         ...(patch.challengeState !== undefined ? { challengeState: patch.challengeState } : {}),
@@ -1687,33 +1703,103 @@ function mapSignature(row: typeof governanceSignatures.$inferSelect): Governance
     purpose: row.purpose as NonNullable<GovernanceSignatureRecord['purpose']>,
     choice: (row.choice as GovernanceSignatureRecord['choice']) ?? null,
     nonce: row.nonce,
+    countedDelegatorIds: row.countedDelegatorIds,
   };
+}
+
+/**
+ * Thrown to unwind the ballot transaction when a delegated unit was claimed first.
+ *
+ * A thrown error is what rolls a Drizzle transaction back, and the losing delegator
+ * ids have to survive that unwinding to reach the caller — a plain `tx.rollback()`
+ * discards everything the callback computed, which would leave the route unable to
+ * say WHICH unit went elsewhere.
+ */
+class DelegatedUnitClaimConflict extends Error {
+  readonly delegatorUserIds: readonly string[];
+  constructor(delegatorUserIds: readonly string[]) {
+    super('a delegated unit was claimed by another ballot');
+    this.name = 'DelegatedUnitClaimConflict';
+    this.delegatorUserIds = delegatorUserIds;
+  }
 }
 
 export class DrizzleGovernanceSignatureStore implements GovernanceSignatureStore {
   constructor(private readonly db: Db) {}
 
-  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
-    const rows = await this.db
-      .insert(governanceSignatures)
-      .values({
-        signatureId: record.signatureId,
-        proposalId: record.proposalId,
-        userId: record.userId,
-        walletAccountId: record.walletAccountId,
-        signatureType: record.signatureType,
-        typedDataHash: record.typedDataHash,
-        signatureRef: record.signatureRef,
-        weightSnapshot: record.weightSnapshot,
-        eligibilityReason: record.eligibilityReason,
-        createdAt: new Date(record.createdAt),
-        purpose: record.purpose ?? 'vote',
-        choice: record.choice ?? null,
-        nonce: record.nonce ?? null,
+  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert> {
+    const wanted = [...new Set(record.countedDelegatorIds ?? [])];
+    // ONE TRANSACTION for the signature and its delegated-unit claims.  Two
+    // delegates can resolve weight from the same uncommitted view — a member who
+    // splits an `all` delegation to one and a `type:` delegation to another — so the
+    // pre-insert `delegatorsAlreadyConsumed` read narrows that window and cannot
+    // close it.  The (proposal, delegator) primary key from migration 0114 decides
+    // the race, and a lost claim rolls the SIGNATURE back with it: a ballot that
+    // persisted weight for a unit it did not win is the same double count, one row
+    // later.
+    return this.db
+      .transaction(async (tx) => {
+        const inserted = await tx
+          .insert(governanceSignatures)
+          .values({
+            signatureId: record.signatureId,
+            proposalId: record.proposalId,
+            userId: record.userId,
+            walletAccountId: record.walletAccountId,
+            signatureType: record.signatureType,
+            typedDataHash: record.typedDataHash,
+            signatureRef: record.signatureRef,
+            weightSnapshot: record.weightSnapshot,
+            eligibilityReason: record.eligibilityReason,
+            createdAt: new Date(record.createdAt),
+            purpose: record.purpose ?? 'vote',
+            choice: record.choice ?? null,
+            nonce: record.nonce ?? null,
+            // A delegated ballot's consumed set is frozen HERE, at signing time —
+            // reconstructing it later from delegations that have since been
+            // granted or revoked would answer a different question.
+            countedDelegatorIds:
+              record.countedDelegatorIds === null || record.countedDelegatorIds === undefined
+                ? null
+                : [...record.countedDelegatorIds],
+          })
+          .onConflictDoNothing()
+          .returning({ signatureId: governanceSignatures.signatureId });
+        if (inserted.length === 0)
+          return { ok: false as const, reason: 'duplicate_signature' as const };
+        if (wanted.length === 0) return { ok: true as const, record };
+        // `onConflictDoNothing` and a count comparison rather than catching 23505:
+        // the claims that landed come back NAMED, so the refusal can say which unit
+        // went elsewhere instead of classifying a driver error by code.
+        const claimed = await tx
+          .insert(governanceDelegatedUnitClaims)
+          .values(
+            wanted.map((delegatorUserId) => ({
+              proposalId: record.proposalId,
+              delegatorUserId,
+              signatureId: record.signatureId,
+              createdAt: new Date(record.createdAt),
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ delegatorUserId: governanceDelegatedUnitClaims.delegatorUserId });
+        if (claimed.length === wanted.length) return { ok: true as const, record };
+        const won = new Set(claimed.map((r) => r.delegatorUserId));
+        const lost = wanted.filter((id) => !won.has(id)).sort();
+        // `rollback()` throws to unwind the transaction, so the `return` after it is
+        // unreachable — the value is carried out through the catch below instead.
+        throw new DelegatedUnitClaimConflict(lost);
       })
-      .onConflictDoNothing()
-      .returning({ signatureId: governanceSignatures.signatureId });
-    return rows.length > 0 ? record : null;
+      .catch((error: unknown) => {
+        if (error instanceof DelegatedUnitClaimConflict) {
+          return {
+            ok: false as const,
+            reason: 'delegated_unit_claimed' as const,
+            delegatorUserIds: error.delegatorUserIds,
+          };
+        }
+        throw error;
+      });
   }
 
   async listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]> {
@@ -2051,13 +2137,23 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
           ? eq(governanceAuditLogs.roomId, roomId)
           : and(
               eq(governanceAuditLogs.roomId, roomId),
-              // Row-value keyset comparison over the STRICT (createdAt, entryId)
-              // total order — the entryId tiebreaker makes same-millisecond rows
-              // page without skips/duplicates (WS-L.4.1f).  The timestamp binds
-              // as an ISO STRING + explicit cast: postgres.js cannot serialize a
-              // raw Date inside a row-value fragment (it threw on every second
-              // page until the treasury contract test caught it).
-              sql`(${governanceAuditLogs.createdAt}, ${governanceAuditLogs.entryId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.entryId}::uuid)`,
+              // Row-value keyset over the STRICT (createdAt, entryId) total order,
+              // resolved from the ENTRY ID (WS-L.4.1f).
+              //
+              // The `entryId` tiebreaker was supposed to make same-millisecond rows page
+              // without skips — and could not, because it only engages once the
+              // timestamps compare EQUAL, and a cursor timestamp never equals the value
+              // it came from.  `created_at` is microsecond `timestamptz`; the driver
+              // returns a millisecond `Date`; the cursor is therefore rounded down and
+              // the strict `<` skips the rest of its own millisecond before the
+              // tiebreaker is ever consulted.  The id is exact, so the row supplies its
+              // own position instead.
+              keysetAfterRow(
+                governanceAuditLogs.createdAt,
+                governanceAuditLogs.entryId,
+                before.entryId,
+                'desc',
+              ),
             ),
       )
       .orderBy(desc(governanceAuditLogs.createdAt), desc(governanceAuditLogs.entryId))
@@ -2100,7 +2196,7 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
     return rows[0]?.count ?? 0;
   }
 
-  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+  async countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number> {
     const rows = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(governanceAuditLogs)
@@ -2109,6 +2205,8 @@ export class DrizzleGovernanceAuditStore implements GovernanceAuditStore {
           eq(governanceAuditLogs.roomId, roomId),
           eq(governanceAuditLogs.actorUserId, userId),
           inArray(governanceAuditLogs.actionType, [...READINESS_QUALIFYING_AUDIT_ACTIONS]),
+          // Bounded so the frozen electorate counts contributions as they stood.
+          ...(asOf === undefined ? [] : [lte(governanceAuditLogs.createdAt, new Date(asOf))]),
         ),
       );
     return rows[0]?.count ?? 0;

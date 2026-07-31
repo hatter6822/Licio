@@ -7,7 +7,7 @@
 // failure path, and assorted store reads.
 import { randomUUID } from 'node:crypto';
 import type { RegisteredModel } from '@licio/ai-governance';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   detectMissingFields,
   detectScamPatterns,
@@ -303,13 +303,76 @@ describe('WS-K scheduler tick', () => {
     expect(errors).toContain('config_reload');
   });
 
-  it('starts and stops the hourly scheduler', () => {
+  it('consults the lease, skips the tick when DENIED, and stops cleanly', async () => {
+    // `expect(typeof stop).toBe('function')` is true of any function the
+    // factory returns, so `startAiGovernanceScheduler` could have been gutted
+    // to `() => () => {}` and this test would not have noticed — neither the
+    // lease gate nor the stop it names was asserted.
     const { ai } = fresh();
-    const stop = startAiGovernanceScheduler(ai, () => {}, 3_600_000, {
-      lease: { tryAcquire: async () => false },
+    let checks = 0;
+    // `checks > 0` alone proves only that the lease was CONSULTED.  An
+    // implementation that asked and then ran config reload, monitoring and the
+    // accuracy recompute anyway would pass it — which is the whole fail-closed
+    // guarantee, and the thing that stops two instances doing the work twice.
+    // Spy on a tick stage and assert it stays UNTOUCHED.
+    const reload = vi.spyOn(ai, 'reloadConfig');
+    const stop = startAiGovernanceScheduler(ai, () => {}, 5, {
+      lease: {
+        tryAcquire: async () => {
+          checks += 1;
+          return false;
+        },
+      },
     });
-    expect(typeof stop).toBe('function');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBeGreaterThan(0); // the gate is consulted
+    expect(reload).not.toHaveBeenCalled(); // …and the DENIAL actually stopped the tick
     stop();
+    const afterStop = checks;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBe(afterStop); // …and stop() really halts it
+    reload.mockRestore();
+  });
+
+  it('RUNS the tick when the lease GRANTS', async () => {
+    // The complementary direction, and the one an unpaired negative cannot
+    // reach: `expect(reload).not.toHaveBeenCalled()` above proves the tick did
+    // not run, not that the DENIAL is what stopped it.  A scheduler wired to
+    // consult the lease and then never tick — config reload, drift monitor,
+    // accuracy recompute and summary sweep all silently dead in production — is
+    // green against the denial test alone, because its only lease returns false.
+    const { ai } = fresh();
+    const reload = vi.spyOn(ai, 'reloadConfig');
+    const stop = startAiGovernanceScheduler(ai, () => {}, 5, {
+      lease: { tryAcquire: async () => true },
+    });
+    await vi.waitFor(() => expect(reload).toHaveBeenCalled(), { timeout: 1_000 });
+    stop();
+    reload.mockRestore();
+  });
+
+  it('FAILS CLOSED when the lease itself THROWS', async () => {
+    // The sibling exit shape, and the production-relevant one: `makeJobLease()`
+    // returns `DrizzleJobLeaseStore` whenever a DB is configured, so a Postgres
+    // blip makes `tryAcquire` REJECT rather than resolve false.  A gate that
+    // fails open there is two instances doing the work twice — the guarantee the
+    // denial test's own comment names, for an input shape it never supplies.
+    const { ai } = fresh();
+    const reload = vi.spyOn(ai, 'reloadConfig');
+    const tasks: string[] = [];
+    const stop = startAiGovernanceScheduler(ai, (_err, task) => tasks.push(task), 5, {
+      lease: {
+        tryAcquire: async () => {
+          throw new Error('lease store unreachable');
+        },
+      },
+    });
+    // The failure is REPORTED (an operator has to see it)…
+    await vi.waitFor(() => expect(tasks).toContain('lease'), { timeout: 1_000 });
+    // …and the tick did NOT run anyway.
+    expect(reload).not.toHaveBeenCalled();
+    stop();
+    reload.mockRestore();
   });
 });
 

@@ -51,6 +51,7 @@ import {
   isNull,
   lt,
   lte,
+  or,
   sql,
 } from 'drizzle-orm';
 import { isUniqueViolation } from '../lib/pg-errors.js';
@@ -77,11 +78,13 @@ import type {
   ReviewKind,
   ReviewQueueStore,
   SignatureStore,
+  SourceHideReason,
   SourceRecord,
   SourceStore,
   StoryCreateInput,
   StoryCreateOutcome,
   StoryDedupTier,
+  StoryPageCursor,
   StoryRecord,
   StorySignatureRecord,
   StoryStore,
@@ -122,6 +125,8 @@ export class DrizzleStoryStore implements StoryStore {
       roomId: row.roomId,
       visibility: row.visibility,
       mediaUploadRef: row.mediaUploadRef,
+      mediaWidth: row.mediaWidth,
+      mediaHeight: row.mediaHeight,
       canonicalPublicStoryId: row.canonicalPublicStoryId,
       language: row.language,
       topicIds: row.topicIds,
@@ -246,38 +251,52 @@ export class DrizzleStoryStore implements StoryStore {
       // cursor row reappear on the next page (gated-test-proven).
       const now = new Date();
       return await this.#db.transaction(async (tx) => {
+        // EVERY field of the create input, checked by the compiler.  Three had
+        // already gone missing here — `canonicalPublicStoryId` (the WS-Q
+        // cross-tier link, so a database-backed room_only story lost its
+        // pointer to the public conversation), `disputeStatus`, and `settledAt`
+        // — and the dimensions made four.  Hand-listing columns is how that
+        // happens, and the read path mapping a column back is no evidence the
+        // write path ever set it.  `satisfies Record<keyof StoryCreateInput,
+        // unknown>` turns the next omission into a build failure instead of a
+        // field that is silently null in production and correct in every
+        // in-memory test.
+        const columns = {
+          storyId: story.storyId,
+          canonicalUrl: story.canonicalUrl,
+          title: story.title,
+          titleHash: story.titleHash,
+          submittedBy: story.submittedBy,
+          sourceId: story.sourceId,
+          // WS-Q dual-write — every story insert stamps the home room + visibility.
+          roomId: story.roomId,
+          visibility: story.visibility,
+          canonicalPublicStoryId: story.canonicalPublicStoryId,
+          mediaUploadRef: story.mediaUploadRef,
+          // Server-parsed intrinsic dimensions (0103).
+          mediaWidth: story.mediaWidth ?? null,
+          mediaHeight: story.mediaHeight ?? null,
+          language: story.language,
+          topicIds: story.topicIds,
+          proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
+          locationScope: story.locationScope,
+          sensitivityLabels: story.sensitivityLabels,
+          lifecycleState: story.lifecycleState,
+          submissionType: story.submissionType,
+          submissionMetadata: story.submissionMetadata,
+          excerpt: story.excerpt,
+          publisher: story.publisher,
+          author: story.author,
+          publishedAt: dateOrNull(story.publishedAt),
+          mediaType: story.mediaType,
+          extractionState: story.extractionState,
+          hiddenState: story.hiddenState,
+          disputeStatus: story.disputeStatus,
+          settledAt: dateOrNull(story.settledAt ?? null),
+        } satisfies Record<keyof StoryCreateInput, unknown>;
         const inserted = await tx
           .insert(storiesTable)
-          .values({
-            storyId: story.storyId,
-            canonicalUrl: story.canonicalUrl,
-            title: story.title,
-            titleHash: story.titleHash,
-            submittedBy: story.submittedBy,
-            sourceId: story.sourceId,
-            // WS-Q dual-write — every story insert stamps the home room + visibility.
-            roomId: story.roomId,
-            visibility: story.visibility,
-            mediaUploadRef: story.mediaUploadRef,
-            canonicalPublicStoryId: story.canonicalPublicStoryId,
-            language: story.language,
-            topicIds: story.topicIds,
-            proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
-            locationScope: story.locationScope,
-            sensitivityLabels: story.sensitivityLabels,
-            lifecycleState: story.lifecycleState,
-            submissionType: story.submissionType,
-            submissionMetadata: story.submissionMetadata,
-            excerpt: story.excerpt,
-            publisher: story.publisher,
-            author: story.author,
-            publishedAt: dateOrNull(story.publishedAt),
-            mediaType: story.mediaType,
-            extractionState: story.extractionState,
-            hiddenState: story.hiddenState,
-            createdAt: now,
-            updatedAt: now,
-          })
+          .values({ ...columns, createdAt: now, updatedAt: now })
           .returning();
         const thread = await tx
           .insert(threadsTable)
@@ -389,16 +408,30 @@ export class DrizzleStoryStore implements StoryStore {
     roomId: string,
     limit: number,
     visibility?: StoryVisibility,
+    before?: StoryPageCursor,
   ): Promise<StoryRecord[]> {
     const rows = await this.#db
       .select()
       .from(storiesTable)
       .where(
-        visibility === undefined
-          ? eq(storiesTable.roomId, roomId)
-          : and(eq(storiesTable.roomId, roomId), eq(storiesTable.visibility, visibility)),
+        and(
+          eq(storiesTable.roomId, roomId),
+          visibility === undefined ? undefined : eq(storiesTable.visibility, visibility),
+          // Strictly older than the cursor under the same order the query
+          // returns — the id breaks a createdAt tie, so a page boundary can
+          // neither skip a row nor hand one back twice.
+          before === undefined
+            ? undefined
+            : or(
+                lt(storiesTable.createdAt, new Date(before.createdAt)),
+                and(
+                  eq(storiesTable.createdAt, new Date(before.createdAt)),
+                  lt(storiesTable.storyId, before.storyId),
+                ),
+              ),
+        ),
       )
-      .orderBy(desc(storiesTable.createdAt))
+      .orderBy(desc(storiesTable.createdAt), desc(storiesTable.storyId))
       .limit(limit);
     return rows.map((row) => this.#toRecord(row));
   }
@@ -601,7 +634,7 @@ export class DrizzleStoryStore implements StoryStore {
     }));
   }
 
-  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+  async hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number> {
     // One set-based UPDATE; `isNull(hiddenState)` makes a re-action idempotent
     // and the count honest (only newly-hidden rows are returned).
     const rows = await this.#db
@@ -1552,6 +1585,21 @@ export function buildTsQuery(tokens: readonly string[], prefix: boolean): string
     .join(' & ');
 }
 
+/**
+ * Normalize a `timestamptz` read through the RAW `db.execute` path to ISO-8601.
+ * Unlike the query builder, that path hands the column back as Postgres's own
+ * output text — `2026-07-28 23:58:55.359+00`, not a `Date` — so `String(value)`
+ * produced a timestamp that `isoTimestampSchema` rejects.  Both consumers
+ * depend on the ISO form: the route re-validates the response through
+ * `searchResponseSchema` (a non-ISO `created_at` is a 500 on every non-empty
+ * search), and `encodeSearchCursor` embeds it in a keyset cursor that
+ * `decodeSearchCursor` must be able to read back.  It is also what makes the
+ * merge sort below compare the SAME strings the in-memory index compares.
+ */
+function isoTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
 export class PostgresSearchIndex implements SearchIndex {
   readonly #db: Db;
 
@@ -1615,7 +1663,9 @@ export class PostgresSearchIndex implements SearchIndex {
       title: string;
       snippet: string | null;
       relevance: number;
-      created_at: Date;
+      /** `db.execute` returns this as Postgres output TEXT, not a `Date` — see
+       *  `isoTimestamp`, which every read of it goes through. */
+      created_at: Date | string;
       /** `incorrect` never appears — every branch filters it out. */
       dispute_status: 'none' | 'under_debate' | 'validated';
     }> = [];
@@ -1627,9 +1677,20 @@ export class PostgresSearchIndex implements SearchIndex {
     ) =>
       cursor === null
         ? sql`true`
-        : sql`(${rank} < ${cursor.relevance}
-            or (${rank} = ${cursor.relevance} and ${createdAt} < ${cursor.createdAt}::timestamptz)
-            or (${rank} = ${cursor.relevance} and ${createdAt} = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
+        : // MILLISECONDS on the column side, matching the resolution the cursor can
+          // actually carry.  `created_at` is microsecond `timestamptz`, but the value
+          // that reaches `encodeSearchCursor` came back from the driver as a JS `Date`
+          // and the cross-corpus merge below re-sorts on that same rounded string — so
+          // the order the caller sees IS the millisecond order.  Comparing a rounded
+          // cursor against the unrounded column instead made the `=` arm unreachable
+          // for any row in the cursor's own millisecond: the equality never held, the
+          // `<` arm excluded them, and the `id` tiebreaker that was supposed to separate
+          // them was never consulted.  Truncating both sides puts the predicate, the
+          // per-corpus ORDER BY (which reads this same alias) and the merge on one
+          // total order.
+          sql`(${rank} < ${cursor.relevance}
+            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) < ${cursor.createdAt}::timestamptz)
+            or (${rank} = ${cursor.relevance} and date_trunc('milliseconds', ${createdAt}) = ${cursor.createdAt}::timestamptz and ${id} < ${cursor.id}::uuid))`;
 
     // A story-scoped query searches the story's CONVERSATION: the story record
     // itself is the page the reader is already on, so its corpus is skipped
@@ -1658,7 +1719,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'story' as result_type, s.story_id as id, s.story_id as story_id,
                s.title as title, s.excerpt as snippet,
                ${storyRank} as relevance,
-               s.created_at as created_at,
+               date_trunc('milliseconds', s.created_at) as created_at,
                s.dispute_status as dispute_status
         from stories s
         where ${sql.join(filters, sql` and `)}
@@ -1689,7 +1750,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'claim' as result_type, c.claim_id as id, c.story_id as story_id,
                c.canonical_text as title, null as snippet,
                ts_rank_cd(c.search_tsv, ${match})::float8 as relevance,
-               c.created_at as created_at,
+               date_trunc('milliseconds', c.created_at) as created_at,
                'none' as dispute_status
         from claims c
         where ${sql.join(filters, sql` and `)}
@@ -1747,7 +1808,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'comment' as result_type, c.contribution_id as id, t.story_id as story_id,
                s.title as title, left(c.body, ${SEARCH_COMMENT_SNIPPET_LENGTH}) as snippet,
                ${commentRank} as relevance,
-               c.created_at as created_at,
+               date_trunc('milliseconds', c.created_at) as created_at,
                c.dispute_status as dispute_status
         from contributions c
         join threads t on t.thread_id = c.thread_id
@@ -1791,7 +1852,7 @@ export class PostgresSearchIndex implements SearchIndex {
         select 'room' as result_type, r.room_id as id, null as story_id,
                r.name as title, r.description as snippet,
                ${roomRank} as relevance,
-               r.created_at as created_at,
+               date_trunc('milliseconds', r.created_at) as created_at,
                'none' as dispute_status
         from rooms r
         where ${sql.join(filters, sql` and `)}
@@ -1805,8 +1866,8 @@ export class PostgresSearchIndex implements SearchIndex {
     // Merge with the SAME total order as the in-memory index, then page.
     rows.sort((a, b) => {
       if (b.relevance !== a.relevance) return b.relevance - a.relevance;
-      const at = a.created_at instanceof Date ? a.created_at.toISOString() : String(a.created_at);
-      const bt = b.created_at instanceof Date ? b.created_at.toISOString() : String(b.created_at);
+      const at = isoTimestamp(a.created_at);
+      const bt = isoTimestamp(b.created_at);
       return bt.localeCompare(at) || b.id.localeCompare(a.id);
     });
     const page = rows.slice(0, request.limit);
@@ -1817,8 +1878,7 @@ export class PostgresSearchIndex implements SearchIndex {
       title: row.title.slice(0, 1000),
       snippet: row.snippet === null ? null : row.snippet.slice(0, 2000),
       relevance: Number(row.relevance),
-      created_at:
-        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      created_at: isoTimestamp(row.created_at),
       dispute_status: row.dispute_status,
     }));
     const last = items.at(-1);

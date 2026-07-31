@@ -92,7 +92,16 @@ export const extractionStateEnum = pgEnum('story_extraction_state', [
 
 /** Hidden content states; null ⇒ visible. Takedown removal (WS-F.1.4f) and
  *  safety hiding both exclude the story from search and read surfaces. */
-export const storyHiddenStateEnum = pgEnum('story_hidden_state', ['takedown', 'safety']);
+export const storyHiddenStateEnum = pgEnum('story_hidden_state', [
+  'takedown',
+  'safety',
+  /** A duplicate of an in-room twin that already carries this canonical URL.  Hiding it
+   *  takes it out of the tier uniques (both are partial on `hidden_state IS NULL`), which
+   *  is what lets a public story trapped in a private room be converted at all — see
+   *  migration 0119.  NOT liftable by the moderation reinstate path, which names `safety`
+   *  explicitly: there is nothing to reinstate, the URL is served by the twin. */
+  'superseded',
+]);
 
 /**
  * WS-T dispute posture — the sourced-correction debate outcome, ORTHOGONAL to
@@ -141,6 +150,18 @@ export const stories = pgTable(
     mediaUploadRef: uuid('media_upload_ref').references(() => uploads.uploadId, {
       onDelete: 'set null',
     }),
+    /**
+     * Intrinsic dimensions of `media_upload_ref`, copied at submission so the
+     * feed projection can reserve the image's real box without one upload
+     * lookup per media story per request.
+     *
+     * SERVER-parsed (`imageDimensions`), never taken from the submission body:
+     * a dimension the client can state is one the client can lie about, and an
+     * attacker-chosen reserved box is a layout the page cannot recover from.
+     * NULL together, never singly (a DB CHECK pins it).
+     */
+    mediaWidth: integer('media_width'),
+    mediaHeight: integer('media_height'),
     /**
      * WS-Q.2.2b — cross-tier link: a `room_only` story for the same canonical
      * URL points at the canonical PUBLIC story (self-FK). Null when none / this
@@ -224,6 +245,14 @@ export const stories = pgTable(
       .where(
         sql`${t.canonicalUrl} is not null and ${t.visibility} = 'room_only' and ${t.hiddenState} is null`,
       ),
+    // The COMPLEMENT of the two uniques above: both carry `hidden_state is
+    // null`, so neither can serve the takedown-denylist probe
+    // (`hasHiddenForUrl`: `canonical_url = $1 and hidden_state is not null`),
+    // which runs on every link submission and every author widen and was a
+    // sequential scan of `stories` (migration 0098).
+    index('stories_canonical_url_hidden_idx')
+      .on(t.canonicalUrl)
+      .where(sql`${t.canonicalUrl} is not null and ${t.hiddenState} is not null`),
     index('stories_source_idx').on(t.sourceId),
     index('stories_topic_gin').using('gin', t.topicIds),
     index('stories_lifecycle_idx').on(t.lifecycleState, t.updatedAt),

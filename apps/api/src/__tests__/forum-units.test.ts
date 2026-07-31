@@ -19,6 +19,7 @@ import {
 import { FORUM_TO_EVENT_TYPE } from '../forum/contributions.js';
 import { InMemoryDebateBroadcaster, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import {
+  imageDimensions,
   matchesMagic,
   parseGifBlocks,
   stripGif,
@@ -408,6 +409,179 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     ]);
   }
 
+  it('REFUSES a PNG whose first chunk is not IHDR, and reads no dimensions from it', () => {
+    // The signature alone was treated as proof of the layout: `pngDimensions` read
+    // bytes 16–23 regardless, so a crafted file carrying the PNG magic and any other
+    // first chunk was stored with ATTACKER-CHOSEN width and height up to 2^32-1.
+    // `StoryMedia` reserves an aspect box from them, so the feed laid out a hole of
+    // the attacker's shape until the browser failed to decode it.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    // 13 payload bytes so the LENGTH check alone would pass — only the TYPE differs.
+    const fakeIhdr = [0, 0, 0xff, 0xff, 0, 0, 0xff, 0xff, 8, 6, 0, 0, 0];
+    const notIhdr = new Uint8Array([
+      ...SIG,
+      ...chunk('tEXt', fakeIhdr),
+      ...chunk('IDAT', [1]),
+      ...chunk('IEND', []),
+    ]);
+    expect(imageDimensions('image/png', notIhdr)).toBeNull();
+    // …while the genuine article still reads.
+    expect(imageDimensions('image/png', pngWithText())).not.toBeNull();
+  });
+
+  it('REFUSES a PNG with NO IMAGE DATA — IHDR then IEND', () => {
+    // The shape that survived the first IHDR/IEND fix: a valid signature, a 13-byte
+    // IHDR declaring attacker-chosen dimensions, and an immediate IEND.  The scanner
+    // cleared it, `pngDimensions` read the declared size, and `StoryMedia` reserved
+    // that aspect box until the browser rejected an undecodable image.  My own
+    // zero-dimension fixture below was exactly this shape, which is how it slipped
+    // past me.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const bigIhdr = [0, 0, 0xff, 0xff, 0, 0, 0xff, 0xff, 8, 6, 0, 0, 0];
+    const noIdat = new Uint8Array([...SIG, ...chunk('IHDR', bigIhdr), ...chunk('IEND', [])]);
+    expect(stripPng(noIdat)).toEqual({ ok: false, reason: 'malformed' });
+    // An EMPTY IDAT is no better than none.
+    const emptyIdat = new Uint8Array([
+      ...SIG,
+      ...chunk('IHDR', bigIhdr),
+      ...chunk('IDAT', []),
+      ...chunk('IEND', []),
+    ]);
+    expect(stripPng(emptyIdat)).toEqual({ ok: false, reason: 'malformed' });
+    // And IEND carries NO data — a payload there means the container was built by
+    // hand, not by an encoder.
+    const fatIend = new Uint8Array([
+      ...SIG,
+      ...chunk('IHDR', bigIhdr),
+      ...chunk('IDAT', [1]),
+      ...chunk('IEND', [0]),
+    ]);
+    expect(stripPng(fatIend)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('REFUSES a PNG whose FIRST chunk is not a 13-byte IHDR', () => {
+    // Enforced in the stripper too, not only in the dimension reader — the stripper
+    // is what decides whether the bytes are stored at all.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const thirteen = [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0];
+    expect(
+      stripPng(
+        new Uint8Array([
+          ...SIG,
+          ...chunk('tEXt', thirteen), // right length, wrong type
+          ...chunk('IDAT', [1]),
+          ...chunk('IEND', []),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+    expect(
+      stripPng(
+        new Uint8Array([
+          ...SIG,
+          ...chunk('IHDR', [0, 0, 0, 1]), // right type, wrong length
+          ...chunk('IDAT', [1]),
+          ...chunk('IEND', []),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('REFUSES a PNG that never reaches IEND', () => {
+    // `stripPng` fell out of the bottom of its loop when the chunks simply ran out,
+    // returning `ok: true` for a container with no IEND — so a fabricated or
+    // truncated file was accepted and stored.
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0];
+    const noIend = new Uint8Array([...SIG, ...chunk('IHDR', ihdr), ...chunk('IDAT', [1])]);
+    expect(stripPng(noIend)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('REFUSES zero dimensions (guarded once, in imageDimensions, for every format)', () => {
+    const chunk = (type: string, payload: number[]): number[] => {
+      const len = payload.length;
+      return [
+        (len >> 24) & 0xff,
+        (len >> 16) & 0xff,
+        (len >> 8) & 0xff,
+        len & 0xff,
+        ...[...type].map((ch) => ch.charCodeAt(0)),
+        ...payload,
+        0,
+        0,
+        0,
+        0,
+      ];
+    };
+    const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    // A zero would make every downstream aspect calculation divide by it.  The
+    // guard lives in `imageDimensions`, which bounds every format to [1, 65535] —
+    // this pins that it covers a well-formed IHDR carrying zeros, so nobody adds a
+    // second narrower copy inside the PNG reader.
+    const zeroIhdr = [0, 0, 0, 0, 0, 0, 0, 0, 8, 6, 0, 0, 0];
+    const zero = new Uint8Array([...SIG, ...chunk('IHDR', zeroIhdr), ...chunk('IEND', [])]);
+    expect(imageDimensions('image/png', zero)).toBeNull();
+  });
+
   it('strips PNG tEXt/eXIf chunks and keeps IHDR/IDAT/IEND', () => {
     const result = stripPng(pngWithText());
     expect(result.ok && result.stripped).toBe(true);
@@ -419,26 +593,22 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
     expect(text).toContain('IEND');
   });
 
-  /** Minimal WebP: RIFF/WEBP + VP8X (EXIF+XMP flags) + VP8 + EXIF chunk. */
-  function webpWithExif(): Uint8Array {
-    const fourCc = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
-    const chunk = (cc: string, payload: number[]): number[] => {
-      const len = payload.length;
-      return [
-        ...fourCc(cc),
-        len & 0xff,
-        (len >> 8) & 0xff,
-        (len >> 16) & 0xff,
-        (len >> 24) & 0xff,
-        ...payload,
-        ...(len % 2 === 1 ? [0] : []),
-      ];
-    };
-    const body = [
-      ...chunk('VP8X', [0b0000_1100, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // EXIF+XMP flags
-      ...chunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
-      ...chunk('EXIF', fourCc('GPSLatitude 51.5')),
+  const fourCc = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
+  /** One RIFF chunk: FourCC, u32-LE size, payload, even-pad. */
+  const webpChunk = (cc: string, payload: number[]): number[] => {
+    const len = payload.length;
+    return [
+      ...fourCc(cc),
+      len & 0xff,
+      (len >> 8) & 0xff,
+      (len >> 16) & 0xff,
+      (len >> 24) & 0xff,
+      ...payload,
+      ...(len % 2 === 1 ? [0] : []),
     ];
+  };
+  /** A RIFF/WEBP container around the given chunk bytes, with a correct size. */
+  function webpFile(body: readonly number[]): Uint8Array {
     const size = body.length + 4;
     return new Uint8Array([
       ...fourCc('RIFF'),
@@ -448,6 +618,19 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       (size >> 24) & 0xff,
       ...fourCc('WEBP'),
       ...body,
+    ]);
+  }
+
+  /** Minimal WebP: RIFF/WEBP + VP8X (EXIF+XMP flags) + VP8 + EXIF chunk. */
+  function webpWithExif(): Uint8Array {
+    return webpFile([
+      ...webpChunk('VP8X', [0b0000_1100, 0, 0, 0, 0, 0, 0, 0, 0, 0]), // EXIF+XMP flags
+      // A REAL minimum lossy bitstream: 3-byte frame tag, the `9d 01 2a` start
+      // code, then two 16-bit dimensions.  A 4-byte stub used to do — until the
+      // container check started requiring enough bytes to BE a bitstream, which is
+      // the point of it.
+      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00]),
+      ...webpChunk('EXIF', fourCc('GPSLatitude 51.5')),
     ]);
   }
 
@@ -466,6 +649,146 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       ((result.bytes[6] ?? 0) << 16) |
       ((result.bytes[7] ?? 0) << 24);
     expect(riffSize).toBe(result.bytes.length - 8);
+  });
+
+  it('rejects a WebP with a VP8X canvas but NO image payload', () => {
+    // The reported attack: a valid RIFF/WEBP header and a 10-byte VP8X chunk
+    // declaring an attacker-chosen canvas — no VP8, no VP8L, no ANMF, no pixels.
+    // `stripWebp` accepted it, so the upload stored and `webpDimensions` read the
+    // declared canvas, and the feed reserved an aspect box up to 65,535:1 until the
+    // browser rejected the file.  Same hole the PNG path closed a round earlier.
+    const canvasOnly = webpFile(
+      // Canvas 65535x65535 (stored minus one, 24-bit LE at payload +4 and +7).
+      webpChunk('VP8X', [0, 0, 0, 0, 0xfe, 0xff, 0x00, 0xfe, 0xff, 0x00]),
+    );
+    expect(stripWebp(canvasOnly)).toEqual({ ok: false, reason: 'malformed' });
+    // The zero-chunk case is the same defect with even less to it.
+    expect(stripWebp(webpFile([]))).toEqual({ ok: false, reason: 'malformed' });
+    // An alpha plane and a loop count are not an image either.
+    expect(
+      stripWebp(
+        webpFile([
+          ...webpChunk('VP8X', [0b0001_0000, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+          ...webpChunk('ALPH', [0x00, 0x01]),
+          ...webpChunk('ANIM', [0, 0, 0, 0, 0, 0]),
+        ]),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('rejects an ANMF frame that carries only an alpha plane', () => {
+    // ALPH may PRECEDE the bitstream inside a frame, so accepting the frame as soon as
+    // its first nested chunk was one of the three legal FourCCs let an alpha-only
+    // frame stand in for pixels — the auxiliary/payload distinction the code stated in
+    // words and did not check.  The frame is now walked to a real VP8/VP8L.
+    const alphaOnly = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('ALPH', [0x00, 0x01, 0x02, 0x03, 0x04]),
+      ]),
+    ]);
+    expect(stripWebp(alphaOnly)).toEqual({ ok: false, reason: 'malformed' });
+    // …and ALPH BEFORE a bitstream is still fine, which is why the walk continues
+    // rather than refusing on the first ALPH.
+    const alphaThenImage = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('ALPH', [0x00, 0x01, 0x02, 0x03, 0x04]),
+        ...webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]),
+      ]),
+    ]);
+    expect(stripWebp(alphaThenImage).ok).toBe(true);
+  });
+
+  it('withholds dimensions for an ABSURD aspect ratio, whatever the container says', () => {
+    // The bound that ends the regress.  Every container check is a bound on what we
+    // can PROVE about the bytes, and that argument has no end short of decoding the
+    // image — each validated layer invites "but the layer inside it is still only
+    // declared".  This bounds what a wrong declaration can COST instead: the harm is
+    // always a reserved box the browser later abandons, and 65,535:1 is the version
+    // that wrecks a feed.  Null is UNKNOWN, so such an image reserves nothing —
+    // exactly what one with an unreadable header already does.
+    const gif = (w: number, h: number): Uint8Array =>
+      new Uint8Array([
+        ...[...'GIF89a'].map((c) => c.charCodeAt(0)),
+        w & 0xff,
+        (w >> 8) & 0xff,
+        h & 0xff,
+        (h >> 8) & 0xff,
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xff,
+        0xff,
+        0xff,
+        0x2c,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x02,
+        0x02,
+        0x4c,
+        0x01,
+        0x00,
+        0x3b,
+      ]);
+    // 65535 x 1 parses fine and is refused as a layout commitment.
+    expect(imageDimensions('image/gif', gif(65_535, 1))).toBeNull();
+    expect(imageDimensions('image/gif', gif(1, 65_535))).toBeNull();
+    // A generous panorama is well inside the bound and still published.
+    expect(imageDimensions('image/gif', gif(4000, 500))).toEqual({ width: 4000, height: 500 });
+  });
+
+  it('rejects a WebP led by a metadata chunk', () => {
+    // Distinct from the payload check above: this file HAS a VP8 payload, so the
+    // image-data bound is satisfied and only the leading-chunk rule refuses it.  A
+    // conformant container starts with VP8X (extended) or its image payload
+    // (simple); EXIF is legal only after the image data.  Rewriting a container
+    // whose structure we cannot account for is how the previous two holes started.
+    const metadataFirst = webpFile([
+      ...webpChunk('EXIF', fourCc('GPSLatitude 51.5')),
+      ...webpChunk('VP8 ', [0x10, 0x20, 0x30, 0x40]),
+    ]);
+    expect(stripWebp(metadataFirst)).toEqual({ ok: false, reason: 'malformed' });
+  });
+
+  it('accepts the WebP shapes that DO carry pixels', () => {
+    // The bound has to admit every real encoding, or it is a different bug.
+    const lossless = webpFile(webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]));
+    expect(stripWebp(lossless).ok).toBe(true);
+    // An ANMF frame is a 16-byte frame header and then the frame's OWN image
+    // chunk — so the fixture carries one, because that is what the check now reads.
+    const frame = [
+      ...Array.from({ length: 16 }, () => 0),
+      ...webpChunk('VP8L', [0x2f, 0x00, 0x00, 0x00, 0x00]),
+    ];
+    const animated = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANIM', [0, 0, 0, 0, 0, 0]),
+      ...webpChunk('ANMF', frame),
+    ]);
+    expect(stripWebp(animated).ok).toBe(true);
+    // …and a frame whose nested chunk is NOT an image bitstream is refused, which is
+    // the half a size floor alone cannot reach.
+    const bogusFrame = webpFile([
+      ...webpChunk('VP8X', [0b0000_0010, 0, 0, 0, 0x0f, 0, 0, 0x0f, 0, 0]),
+      ...webpChunk('ANMF', [
+        ...Array.from({ length: 16 }, () => 0),
+        ...webpChunk('EXIF', [0x00, 0x01, 0x02, 0x03, 0x04]),
+      ]),
+    ]);
+    expect(stripWebp(bogusFrame)).toEqual({ ok: false, reason: 'malformed' });
   });
 
   function gifExtension(label: number, payloads: readonly number[][]): number[] {
@@ -519,6 +842,376 @@ describe('WS-G.3.7b — metadata stripping on real binary fixtures', () => {
       0x3b,
     ]);
   }
+
+  it('EVERY format whose dimensions we publish refuses a container with no image data', () => {
+    // ONE TABLE, four formats, because this hole was reported FOUR times: PNG with
+    // no IEND, then PNG with no IDAT, then WebP with no VP8/VP8L/ANMF, then GIF with
+    // no image block — and JPEG had it too, unreported.  Each fix landed in the
+    // format in front of it, so the obligation all four share got closed
+    // three-quarters of the way, three times running.
+    //
+    // The obligation follows from `imageDimensions`: it publishes an
+    // attacker-controlled width and height for each of these types, `StoryMedia`
+    // reserves an aspect box from them (up to 65,535:1), and a failed strip is the
+    // 415 that keeps the file out of storage entirely.  A new format added to
+    // `imageDimensions` owes a row here.
+    const ascii = (text: string): number[] => [...text].map((ch) => ch.charCodeAt(0));
+    const headerOnly: ReadonlyArray<{ type: string; bytes: number[]; what: string }> = [
+      {
+        type: 'image/jpeg',
+        // SOI + SOF0 declaring 65535x65535 + EOI. No scan: no entropy-coded byte.
+        what: 'no SOS scan',
+        bytes: [
+          0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xff, 0xff, 0xff, 0xff, 0x03, 0x01, 0x11, 0x00,
+          0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9,
+        ],
+      },
+      {
+        type: 'image/png',
+        // Signature + a 13-byte IHDR + IEND. No IDAT.
+        what: 'no IDAT chunk',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // RIFF/WEBP + a 10-byte VP8X canvas. No VP8, VP8L or ANMF.
+        what: 'no VP8/VP8L/ANMF payload',
+        bytes: [
+          ...ascii('RIFF'),
+          0x16,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/jpeg',
+        // SOI + SOF0 + a syntactically valid, SIZED SOS header — and then the file
+        // ends.  A marker is not a scan: there is not one entropy-coded byte here.
+        what: 'SOS header with no entropy data',
+        bytes: [
+          0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xff, 0xff, 0xff, 0xff, 0x03, 0x01, 0x11, 0x00,
+          0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // VP8X + a ONE-BYTE `VP8 ` chunk.  The FourCC is the real one and the
+        // dimensions read fine off the VP8X canvas; the bitstream cannot exist in a
+        // single byte.  This is the row the per-chunk size floor is for — the nested
+        // ANMF check below cannot reach it.
+        what: 'VP8 chunk too small to be a bitstream',
+        bytes: [
+          ...ascii('RIFF'),
+          0x1a,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          0xfe,
+          0xff,
+          0x00,
+          ...ascii('VP8 '),
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/webp',
+        // VP8X + a one-byte ANMF.  The FourCC says animation frame; nothing in it
+        // could decode, and a size floor alone would let a 16-byte header through.
+        what: 'ANMF with no frame bitstream',
+        bytes: [
+          ...ascii('RIFF'),
+          0x1a,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('WEBP'),
+          ...ascii('VP8X'),
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x02,
+          0x00,
+          0x00,
+          0x00,
+          0x0f,
+          0x00,
+          0x00,
+          0x0f,
+          0x00,
+          0x00,
+          ...ascii('ANMF'),
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+        ],
+      },
+      {
+        type: 'image/png',
+        // A one-byte IDAT: a positive declared length that cannot even hold zlib's
+        // 2-byte header, let alone a deflate stream.
+        what: 'IDAT too small for a zlib header',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x01,
+          ...ascii('IDAT'),
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/png',
+        // A big-enough IDAT whose first two bytes are not a zlib header (RFC 1950:
+        // method must be 8 and `(CMF<<8|FLG) % 31` must be 0).
+        what: 'IDAT that is not a zlib stream',
+        bytes: [
+          0x89,
+          0x50,
+          0x4e,
+          0x47,
+          0x0d,
+          0x0a,
+          0x1a,
+          0x0a,
+          0x00,
+          0x00,
+          0x00,
+          0x0d,
+          ...ascii('IHDR'),
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0x08,
+          0x06,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x04,
+          ...ascii('IDAT'),
+          0xde,
+          0xad,
+          0xbe,
+          0xef,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          ...ascii('IEND'),
+          0xae,
+          0x42,
+          0x60,
+          0x82,
+        ],
+      },
+      {
+        type: 'image/gif',
+        // An image DESCRIPTOR whose first LZW sub-block is zero-length: no compressed
+        // data at all, so the block is not an image however it is introduced.
+        what: 'image descriptor with empty LZW data',
+        bytes: [
+          ...ascii('GIF89a'),
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0x80,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0xff,
+          0x2c,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x01,
+          0x00,
+          0x01,
+          0x00,
+          0x00,
+          0x02,
+          0x00,
+          0x3b,
+        ],
+      },
+      {
+        type: 'image/gif',
+        // GIF89a + an attacker-chosen logical-screen descriptor + trailer.
+        what: 'no image block',
+        bytes: [
+          ...ascii('GIF89a'),
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0x80,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          0xff,
+          0xff,
+          0xff,
+          0x3b,
+        ],
+      },
+    ];
+    for (const { type, bytes, what } of headerOnly) {
+      const upload = new Uint8Array(bytes);
+      // The dimension parser DOES read the attacker's numbers — that is the point:
+      // the container check is the only thing standing between them and a layout.
+      expect(imageDimensions(type, upload), `${type} (${what}) dimensions`).not.toBeNull();
+      // …and the strip refuses it, which the upload route answers with a 415, so the
+      // file is never stored and those numbers are never published.
+      expect(stripUploadMetadata(type, upload), `${type} (${what})`).toEqual({
+        ok: false,
+        reason: 'malformed',
+      });
+    }
+  });
 
   it('parses GIF block spans exactly and rejects truncations cleanly', () => {
     const gif = gifWithMetadata();

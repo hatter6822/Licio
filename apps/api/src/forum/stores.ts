@@ -141,6 +141,11 @@ export interface UploadRecord {
   altText: string | null;
   storageRef: string;
   metadataStripped: boolean;
+  /** Intrinsic pixel dimensions (images only; both set or both null — see
+   *  `imageDimensions`). Null means UNKNOWN, never a default: the renderer
+   *  reserves nothing rather than reserving a guess. */
+  imageWidth: number | null;
+  imageHeight: number | null;
   scanState: 'pending' | 'clear' | 'flagged';
   /** WS-Q.5.2c — the story this upload is media for (main media, caption track,
    *  or poster); set at story submission, `null` for contribution attachments.
@@ -239,6 +244,27 @@ export interface ContributionStore {
       order?: 'newest' | 'oldest';
     },
   ): Promise<ContributionRecord[]>;
+  /**
+   * Direct children of MANY parents at once, each parent's own newest-first
+   * page bounded by `limitPerParent`.
+   *
+   * The comment page builds a reply forest: a page of roots, each with its
+   * bounded reply preview, each of those with theirs, `depth` deep.  Walking
+   * that with `listChildren` per node is one query per NODE — about 200 for a
+   * single `/stories/:id/comments` request — while the shape of the work is one
+   * query per LEVEL.
+   *
+   * Ordering within each parent is IDENTICAL to `listChildren`'s newest-first
+   * default (section rank, then created_at desc, then id desc), because the two
+   * feed the same rendered list and a reply that moved when the page batched
+   * differently would be a visible defect rather than an optimization.
+   *
+   * Returns a map keyed by parent id; a parent with no children is absent.
+   */
+  listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>>;
   /** Rows whose path contains `rootId` (the subtree, excluding the root),
    *  `(created_at, id)` ascending with keyset continuation — the WS-G.3.3
    *  lazy-loading contract holds for subtrees too. */
@@ -459,11 +485,41 @@ export interface RoomStore {
   /** Distinct count of users ELIGIBLE TO VOTE in the room's governance — active
    *  subscribers ∪ stewards, the exact electorate `isRoomMember` admits (a steward
    *  role holder can vote without an active subscription). Used as the governance
-   *  quorum/turnout denominator so it matches who can actually cast a ballot. */
-  countEligibleVoters(roomId: string): Promise<number>;
+   *  quorum/turnout denominator so it matches who can actually cast a ballot.
+   *
+   *  `joinedBefore` counts the electorate AS OF an instant, which is what makes
+   *  a frozen denominator and a frozen ballot gate the SAME question.  Stamping
+   *  an instant beside a live count leaves a window — however small — in which a
+   *  member is inside the count and outside the cutoff, and that is precisely
+   *  the mismatch the freeze exists to remove; passing the instant in closes it
+   *  by construction instead of by proximity.  A member whose join instant is
+   *  unknown, and every steward (whose seat carries no join instant at all), is
+   *  UNJUDGEABLE and counted — matching the ballot gate, which lets a null
+   *  `memberSince` through rather than locking out a legitimate steward. */
+  countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number>;
+  /**
+   * The electorate AND the instant it was measured at, from ONE read.
+   *
+   * Every caller that FREEZES a turnout denominator needs this rather than
+   * `countEligibleVoters`.  Those callers used to take a clock reading and pass it
+   * into a live count, and no ordering of those two steps is sound: with the instant
+   * FIRST, a member who leaves in between is deleted from the current rows the count
+   * reads, so the denominator is smaller than the electorate at the instant it
+   * claims — turnout inflated, and an election can settle that missed its
+   * participation floor.  With the instant SECOND, a member who joins in between is
+   * outside the count and inside the cutoff, which is the same hole facing the other
+   * way.  Membership is HARD-DELETED on leave (`deleteSubscription`, and
+   * `room_subscription_status` has no `left` state), so no as-of query can
+   * reconstruct a departure after the fact.
+   *
+   * Returning both from one measurement is what removes the window: the count and
+   * the cutoff describe one state by construction, not by being written next to each
+   * other.
+   */
+  measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }>;
   /** The SAME electorate as `countEligibleVoters`, as ids — WS-M applies the
    *  law-pack eligibility predicate per member for the quorum basis. */
-  listEligibleVoterIds(roomId: string): Promise<string[]>;
+  listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]>;
   listJoinRequests(roomId: string): Promise<RoomSubscriptionRecord[]>;
   getJoinRequest(requestId: string): Promise<RoomSubscriptionRecord | null>;
   /** Remove every subscription and steward row for a user (WS-D.2.4
@@ -491,7 +547,14 @@ export interface UploadStore {
    *  upload is created unlinked; `ownerStoryId` defaults to null and is set
    *  later via {@link UploadStore.setOwnerStory} at story submission. */
   put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    // `imageWidth`/`imageHeight` are SERVER-DERIVED from the container header
+    // and unknown for video/caption uploads, so they are optional here and
+    // always present — null when unknown — on the stored record.
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord>;
   getRecord(uploadId: string): Promise<UploadRecord | null>;
@@ -783,6 +846,33 @@ export class InMemoryContributionStore implements ContributionStore {
       // A nested `incorrect` reply sinks among its siblings too (WS-T).
       .sort((a, b) => bySectionThenOrder(a, b, order, null));
     return rows.slice(0, opts.limit);
+  }
+
+  async listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>> {
+    const states = opts.states ? new Set(opts.states) : null;
+    const wanted = new Set(parentContributionIds);
+    const byParent = new Map<string, ContributionRecord[]>();
+    for (const row of this.#rows.values()) {
+      const parent = row.parentContributionId;
+      if (parent === null || !wanted.has(parent)) continue;
+      if (states !== null && !states.has(row.moderationState)) continue;
+      const bucket = byParent.get(parent);
+      if (bucket) bucket.push(row);
+      else byParent.set(parent, [row]);
+    }
+    for (const [parent, rows] of byParent) {
+      // The SAME comparator `listChildren` uses, newest-first: the two feed one
+      // rendered list, and a reply that moved because the page batched
+      // differently would be a defect, not an optimization.
+      byParent.set(
+        parent,
+        rows.sort((a, b) => bySectionThenOrder(a, b, 'newest', null)).slice(0, opts.limitPerParent),
+      );
+    }
+    return byParent;
   }
 
   async countByType(
@@ -1291,17 +1381,33 @@ export class InMemoryRoomStore implements RoomStore {
     return count;
   }
 
-  async countEligibleVoters(roomId: string): Promise<number> {
-    return (await this.listEligibleVoterIds(roomId)).length;
+  async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
+    return (await this.listEligibleVoterIds(roomId, joinedBefore)).length;
   }
 
-  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+  async measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }> {
+    // Single-threaded and synchronous over a Map: nothing can interleave between the
+    // count and the stamp here, which is exactly the property the Drizzle adapter
+    // buys with one statement.
+    const asOf = new Date().toISOString();
+    return { count: (await this.listEligibleVoterIds(roomId, asOf)).length, asOf };
+  }
+
+  async listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can
     // vote via their role without an active subscription).
     const ids = new Set<string>();
     for (const sub of this.#subscriptions.values()) {
-      if (sub.roomId === roomId && sub.status === 'active') ids.add(sub.userId);
+      if (sub.roomId !== roomId || sub.status !== 'active') continue;
+      // Only exclude a member we KNOW joined after the instant: an unknown join
+      // is unjudgeable, and the ballot gate lets that through too.
+      if (joinedBefore !== undefined && sub.joinedAt !== null && sub.joinedAt > joinedBefore) {
+        continue;
+      }
+      ids.add(sub.userId);
     }
+    // Stewards carry no join instant, so the cutoff cannot judge them — the
+    // same reason `castVote` admits a null `memberSince`.
     for (const steward of this.#stewards) {
       if (steward.roomId === roomId) ids.add(steward.userId);
     }
@@ -1397,12 +1503,21 @@ export class InMemoryUploadStore implements UploadStore {
   }
 
   async put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    // `imageWidth`/`imageHeight` are SERVER-DERIVED from the container header
+    // and unknown for video/caption uploads, so they are optional here and
+    // always present — null when unknown — on the stored record.
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
     const full: UploadRecord = {
       ...record,
       ownerStoryId: record.ownerStoryId ?? null,
+      imageWidth: record.imageWidth ?? null,
+      imageHeight: record.imageHeight ?? null,
       createdAt: iso(this.#now),
     };
     this.#records.set(full.uploadId, full);

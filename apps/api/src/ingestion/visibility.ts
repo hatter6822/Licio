@@ -24,6 +24,11 @@ import {
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { IdentityServices } from '../identity/services.js';
+import {
+  isCheckViolation,
+  isTierUniqueViolation,
+  TIER_COLLISION_RETRIES,
+} from '../lib/pg-errors.js';
 import { findNearDuplicates, loadStoredSignature, signatureStory } from './dedup.js';
 import { submissionText } from './pipeline.js';
 import type { IngestionServices } from './services.js';
@@ -113,9 +118,105 @@ export async function changeStoryVisibility(
         };
       }
     }
+  } else if (story.canonicalUrl !== null) {
+    // NARROW — the SAME admission screen, against the room-scoped tier.
+    //
+    // `stories_canonical_url_room_uq` is a partial unique on
+    // `(canonical_url, room_id) where visibility = 'room_only' and hidden_state
+    // is null`, so flipping a public story to `room_only` inserts it into an
+    // index a pre-existing room_only twin of the same URL already occupies.
+    // The widen branch above screens for exactly this and answers 409; the
+    // narrow branch screened for nothing, so the same collision surfaced as an
+    // unhandled 23505 — a 500 — and the story stayed PUBLIC. A story the author
+    // asked to take out of public view remaining public is the wrong direction
+    // for a failure to fall.
+    const existingRoomOnly = await ingestion.stories.getByCanonicalUrl(story.canonicalUrl, {
+      visibility: 'room_only',
+      roomId: story.roomId,
+    });
+    if (existingRoomOnly !== null) {
+      ingestion.metrics.increment('visibility.narrow_url_collision');
+      return {
+        ok: false,
+        status: 409,
+        code: 'duplicate_story',
+        message: 'An in-room story already exists for this link',
+        existingStoryId: existingRoomOnly.storyId,
+      };
+    }
   }
 
-  const updated = await ingestion.stories.update(storyId, { visibility: target });
+  // The screens above are a read followed by a write, so two concurrent
+  // changes can both pass them.  The database still refuses the second, and
+  // that refusal names the same DUPLICATE the screen does — reported as such
+  // rather than escaping as a 500.  Only the two canonical-URL tier uniques
+  // mean "duplicate story"; any other constraint is a different bug and must
+  // keep propagating rather than be relabelled.
+  let updated: Awaited<ReturnType<typeof ingestion.stories.update>>;
+  // RETRY when the blocker turns out to be GONE.  The refusal and the lookup
+  // that names the winner are two statements, and between them the incumbent
+  // can be hidden, deleted, or moved to another tier — after which the write
+  // this refused would succeed.  Reporting the caller's OWN story as the
+  // duplicate (`winner?.storyId ?? storyId`) was false on its face and, for a
+  // narrowing request, left the story PUBLIC because of a blocker that no
+  // longer existed: a privacy-reducing operation failing for a stale reason,
+  // which is the direction that must never be quietly accepted.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      updated = await ingestion.stories.update(storyId, { visibility: target });
+      break;
+    } catch (error) {
+      // THE ROOM WENT PRIVATE UNDER US.  The widen guard above read the room and
+      // then awaited two more queries before this write, so a room-visibility
+      // cascade landing in between used to leave the story PUBLIC in a now-private
+      // room — reachable by the Gate-19 public re-publisher, which derives
+      // eligibility from storage mode and story visibility and never reads room
+      // visibility.  Migration 0110's `stories_room_visibility` trigger refuses
+      // it, and the honest answer is the one the pre-check already gives for the
+      // same fact: the room is private, so the widen is refused.  Not a retry —
+      // the condition is stable, and retrying would only fail again.
+      if (isCheckViolation(error)) {
+        ingestion.metrics.increment('visibility.widen_room_went_private');
+        return {
+          ok: false,
+          status: 422,
+          code: 'private_room_widen',
+          message: 'A story in a private room cannot become public (§14.5.1)',
+        };
+      }
+      if (!isTierUniqueViolation(error)) {
+        throw error;
+      }
+      const widening = target === 'public';
+      const winner =
+        story.canonicalUrl === null
+          ? null
+          : await ingestion.stories.getByCanonicalUrl(
+              story.canonicalUrl,
+              widening
+                ? { visibility: 'public' }
+                : { visibility: 'room_only', roomId: story.roomId },
+            );
+      if (winner === null && attempt < TIER_COLLISION_RETRIES) continue;
+      ingestion.metrics.increment(
+        widening ? 'visibility.widen_url_collision' : 'visibility.narrow_url_collision',
+      );
+      // Still refused with no winner to name after the retries: the constraint
+      // is real but its holder is not readable here, so rethrow rather than
+      // invent an incumbent.  A 500 on an unexplainable refusal is honest; a
+      // 409 naming the caller's own story is not.
+      if (winner === null) throw error;
+      return {
+        ok: false,
+        status: 409,
+        code: 'duplicate_story',
+        message: widening
+          ? 'A public story already exists for this link'
+          : 'An in-room story already exists for this link',
+        existingStoryId: winner.storyId,
+      };
+    }
+  }
   if (updated === null) {
     return { ok: false, status: 404, code: 'not_found', message: 'Resource not found' };
   }

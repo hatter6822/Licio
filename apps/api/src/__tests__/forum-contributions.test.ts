@@ -122,6 +122,17 @@ describe('WS-T.3.2 — comment-first write surface', () => {
     for (const event of [...createdEvents, ...challengerEvents]) {
       expect(JSON.stringify(event.payload)).not.toContain('This is a comment in the thread.');
     }
+    // EVERY EMITTED PAYLOAD CARRIES `story_id`, and it is the thread's OWN story.
+    // The schema's docstring claimed this was "pinned by a test"; the only pin was
+    // over a static fixture in `@licio/shared`, a package that cannot see the
+    // emitter — so deleting the field compiled and nothing here failed.  The
+    // participation fold's key is only uniform while this holds, and a thread id
+    // and its story id are two independently minted uuids.
+    const storyId = await fixture.ingestion.stories.getStoryIdByThreadId(threadId);
+    expect(storyId).not.toBeNull();
+    for (const event of [...createdEvents, ...challengerEvents]) {
+      expect((event.payload as { story_id?: unknown }).story_id).toBe(storyId);
+    }
   });
 
   it('comment replies nest under comments (path + depth)', async () => {
@@ -191,6 +202,46 @@ describe('WS-T — a sourced correction opens the arena + refuses a disputed tar
     // root contribution — the opposite of a comment-target correction.
     expect(correction.parent_contribution_id).toBeNull();
     expect(correction.depth).toBe(0);
+  });
+
+  it('a comment image carries its intrinsic dimensions to the renderer', async () => {
+    // The CLS fix stopped at the upload response.  The dimensions were parsed
+    // and stored, the upload echoed them, and the projection that SERVES the
+    // comment dropped them — so `<img>` rendered with no width/height and the
+    // thread below reflowed when the bytes landed.  A fix that only the
+    // composer preview can see is not the fix.
+    const thread = await fixture.ingestion.stories.getThreadById(threadId);
+    const storyId = thread?.storyId ?? '';
+    const upload = await fixture.forum.uploads.put(
+      {
+        uploadId: randomUUID(),
+        ownerUserId: userId,
+        contentType: 'image/jpeg',
+        byteSize: 64,
+        altText: 'The reservoir gauge at noon',
+        storageRef: 'uploads/dims',
+        metadataStripped: true,
+        imageWidth: 1280,
+        imageHeight: 720,
+        scanState: 'clear',
+      },
+      new Uint8Array([1]),
+    );
+    await createOk({
+      ...contributionBody('comment', threadId),
+      attachment_ids: [upload.uploadId],
+    });
+    const res = await app().request(
+      new Request(`http://local/v1/stories/${storyId}/comments`, { headers: { cookie } }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      comments: { media?: { width?: number; height?: number }[] }[];
+    };
+    const media = body.comments.flatMap((c) => c.media ?? []);
+    expect(media).toHaveLength(1);
+    expect(media[0]?.width).toBe(1280);
+    expect(media[0]?.height).toBe(720);
   });
 
   it('pins a live story-target correction to the TOP of the section (above newer comments)', async () => {

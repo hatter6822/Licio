@@ -39,6 +39,59 @@ export const contributionCreatedEventSchema = z
     event_type: z.literal('contribution.created'),
     contribution_id: uuidSchema,
     thread_id: uuidSchema,
+    /**
+     * The thread's OWNING STORY — the key every scoring consumer folds by.
+     *
+     * A thread and its story are two independently minted uuids
+     * (`ingestion/submission.ts` mints both), so a consumer that keys
+     * participation by `thread_id` while attention, source-opens and saves key
+     * by `story_id` silently produces TWO disjoint items: the real story with
+     * no contributions, and a phantom carrying nothing else.  Half the
+     * ConstructiveParticipation budget then never reaches the story it belongs
+     * to, and every downstream lookup by story id (the PWAtt row the ranking
+     * features read, the item-safety row a cascade freeze writes, the Signal
+     * Ledger's story title) misses.
+     *
+     * `threads.story_id` is `NOT NULL` with a foreign key, so the emitter
+     * always knows this; carrying it here is what makes the fold key uniform
+     * rather than something each consumer has to re-derive — which is how the
+     * divergence arose.  `thread_id` stays for the genuinely thread-scoped
+     * consumers (the SCOI bridge attempt, thread-posture escalation).
+     *
+     * OPTIONAL ON THE WIRE, mandatory in the EMITTER — and the asymmetry is
+     * deliberate.  Events are persisted and replayed: `recoverEventPipeline`
+     * feeds every stored row back through `parseEvent` and SILENTLY DROPS what
+     * fails.  Making this field required while `EVENT_SCHEMA_VERSION` stays `1`
+     * would therefore make every `contribution.created` payload written by the
+     * previous release unparseable — so on a rolling upgrade they would vanish
+     * from the replay to `ingestion-signals` and `invariant-scoi-bridge`, from
+     * the real-time rebuild, and an existing dead letter would be deleted as
+     * corrupt.  A field cannot become required in-place on a schema whose old
+     * instances are still on disk.
+     *
+     * Optional does not mean unenforced, and the enforcement is now real.  The
+     * emitter in `forum/contributions.ts` annotates its literal
+     * `ContributionCreatedEvent & { story_id: string }`, so removing the field is
+     * a COMPILE error — `parse` takes `unknown`, so before that annotation this
+     * paragraph claimed an enforcement that did not exist, and the "pinned by a
+     * test" it referred to was a static fixture in this package, which cannot see
+     * `apps/api`.  `forum-contributions.test.ts` now asserts the emitted payload
+     * carries the thread's own story id.
+     *
+     * A payload without it can only be pre-upgrade, and such rows are RESOLVED
+     * rather than dropped: migration 0111 backfills the stored payloads from
+     * `threads.story_id`, and the participation fold falls back to the same
+     * thread → story resolution its sibling consumer already used (only an
+     * unresolvable thread is skipped, counted by
+     * `pwatt.contribution.unresolved_story`, never folded under a thread id).
+     *
+     * Making the field REQUIRED is the contract step of an
+     * expand/migrate/contract and belongs in a later release — during a rolling
+     * upgrade an instance running the previous code is still emitting payloads
+     * without it, so a required field would reject live traffic, not just old
+     * rows.  Tracked in `docs/events/README.md`.
+     */
+    story_id: uuidSchema.optional(),
     user_id: uuidSchema,
     contribution_type: eventContributionTypeSchema,
     target_claim_id: uuidSchema.nullable(),

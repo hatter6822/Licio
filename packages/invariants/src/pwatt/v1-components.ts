@@ -119,10 +119,11 @@ export interface PwattV1ComponentsConfig {
   /** Fraction of its type weight an uncited accusation keeps (WS-E.2.2b). */
   accusationDownweight: number;
   /**
-   * WS-T sourced-comment bonus in [0, 1]: the extra weight a FULLY-sourced type
-   * earns over an unsourced one, applied to the SATURATED per-type value (so the
-   * concave curve + the ≤50% dimension cap bound it — a link-spam cannot run
-   * away).  0 disables it.  An evidence signal, not applause.
+   * WS-T sourced-comment bonus in [0, 1]: the MAXIMUM extra weight a sourced
+   * type earns over an unsourced one (reached once the sourced count itself
+   * saturates), applied to the SATURATED per-type value (so the concave curve +
+   * the ≤50% dimension cap bound it — a link-spam cannot run away).  0 disables
+   * it.  An evidence signal, not applause.
    */
   citationBonus: number;
   /** Window contribution count beyond which rapid-repetition dampening applies. */
@@ -198,8 +199,11 @@ export interface ActorV1ContributionResult {
  * the score while totalContributions <= config.rapidThreshold; once it exceeds
  * the threshold the SPEC §5.3 rapid-repetition anti-signal deliberately
  * multiplies the value by config.rapidDampening (mirrors actorParticipation in
- * participation.ts). Adding a citation to an accusation always raises the
- * pre-dampening value (the transparency remedy, WS-E.2.2b).
+ * participation.ts). Adding a citation to an accusation never lowers the
+ * pre-dampening value, and strictly raises it until BOTH the type's effective
+ * count and its sourced count have saturated (the transparency remedy,
+ * WS-E.2.2b — in the saturated tail every term is flat by construction, which
+ * is what saturation means; nothing there can be bought with volume either).
  */
 export function actorV1Contribution(
   actor: Pick<
@@ -225,12 +229,25 @@ export function actorV1Contribution(
     const effectiveCount = n - uncited + config.accusationDownweight * uncited;
     const base = saturate(effectiveCount, config.contributionCurve);
     // WS-T — a sourced contribution earns a bonus on the SATURATED per-type value
-    // (the structural inverse of the uncited-accusation downweight): the fraction
-    // of this type that carries a source scales a `(1 + citationBonus)` multiplier.
+    // (the structural inverse of the uncited-accusation downweight): the sourced
+    // COUNT, itself passed through the per-user curve, scales a
+    // `(1 + citationBonus)` multiplier.
+    //
+    // The multiplier reads the sourced COUNT, never the sourced FRACTION
+    // (`cited / n`).  A fraction strictly DECREASES when an uncited contribution
+    // is added, so once `base` has saturated the product `base * (1 + b*cited/n)`
+    // strictly decreases in `n` — adding a genuine constructive contribution
+    // would LOWER the actor's participation, breaking this function's documented
+    // monotonicity inside the pre-dampening window (reachable with any
+    // `saturationPoint <= rapidThreshold`, and structurally with the `sigmoid`
+    // curve, which has no saturation point to constrain).  Saturating the count
+    // keeps the term non-decreasing in both `n` and `cited`, keeps the same
+    // `1 + citationBonus` ceiling, and matches the v0 sibling
+    // (`actorParticipation`), which weights the absolute cited count.
     const cited = Math.min(toNonNegative(actor.citedContributionsByType[type] ?? 0), n);
     citedTotal += cited;
-    const citedFraction = n > 0 ? cited / n : 0;
-    weighted += typeWeight * base * (1 + config.citationBonus * citedFraction);
+    weighted +=
+      typeWeight * base * (1 + config.citationBonus * saturate(cited, config.contributionCurve));
   }
   if (uncitedTotal > 0) annotations.push('source_free_accusation_downweight');
   if (citedTotal > 0) annotations.push('sourced_contribution_weighted');

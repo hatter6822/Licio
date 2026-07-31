@@ -70,7 +70,13 @@ apps/api/src/treasury/
 │                                   through the WS-U kernel executor
 ├── grants.ts                    -- WS-M.5.1a milestone grants (milestones sum EXACTLY
 │                                   to the amount; review-gated; clawback = platform)
-├── delegations.ts               -- WS-M.4.2c-3 one-active-delegation-per-scope
+├── delegations.ts               -- WS-M.4.2c-3 one-active-delegation-per-scope, and
+│                                   the shared "already consumed" predicate: a unit is
+│                                   spent only if the delegate's ballot RECORDED it
+│                                   (`counted_delegator_ids`, 0105) — the per-account
+│                                   cap discards delegations past the ceiling, and
+│                                   treating existence as consumption disenfranchised
+│                                   every delegator the cap dropped
 ├── budgets.ts                   -- WS-M.3.2a whole-period integer refill + CAS charge
 ├── prohibited-targets.ts        -- fail-closed action-kind classifier (denylist +
 │                                   per-type allowlist; unclassifiable ⇒ reject)
@@ -282,3 +288,18 @@ a non-`ordinary` mode) plus the room header:
    the WS-L submission pipeline; a capped/mature deployment with real value
    requires the WS-L residuals (external audit, cross-stack fixtures) to be
    closed first — those gates are owned by `docs/knomosis/README.md`.
+5. ~~**The electorate basis walk is not under one database snapshot.**~~ **CLOSED.**
+   The basis is now ONE statement — `DrizzleElectorateBasisStore` materialises the
+   roster with every fact the predicate reads (the second of the two closures this
+   entry named), and `eligibleMemberCount` folds that single snapshot instead of
+   fanning out 4N–9N reads.  Two consequences, and the second was the point:
+   Postgres fixes the snapshot at statement start, so every fact describes one
+   state; and `now()` is the transaction timestamp, so the instant the count claims
+   IS that state's instant rather than a clock read taken beside it.
+   `measureEligibleMembers` also stopped taking a second read purely to learn the
+   time — the seam between those two reads was the last live window, since a member
+   who left in between is HARD-DELETED (`deleteSubscription`;
+   `room_subscription_status` has no `left` state) and so vanished from a count
+   still stamped with the earlier instant, making the denominator too small and
+   quorum easier than the pack asks for.  The port reports the snapshot's own
+   instant, so there is one read and nothing to disagree.

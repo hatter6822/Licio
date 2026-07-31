@@ -30,10 +30,36 @@ import type {
  */
 export const PWATT_V0_SHADOW_MODE = false as const;
 
-/** Implementation version stamped on stored v0 outputs. */
-export const PWATT_V0_VERSION = 'v0' as const;
-/** Implementation version stamped on stored v1 outputs. */
-export const PWATT_V1_VERSION = 'v1' as const;
+/**
+ * Implementation version stamped on stored v0 outputs.
+ *
+ * `v0.1` is the SAME WS-T sourced-contribution bonus as `v1.1` below.  The
+ * change landed in `participation.ts`'s `actorParticipation`, which `v0.ts`
+ * folds into `participation` and thence into `score`, so both stored rows moved
+ * — and only one version string did.  The rationale under `PWATT_V1_VERSION`
+ * applies here verbatim and was simply not carried across: a pre-deploy v0
+ * window reprocessed today overwrote its historical row on an unchanged natural
+ * key with numbers the old formula never produced.  Measured on one actor with
+ * two corrections: participation 0.0963855 → 0.1150442, score 0.0792596 →
+ * 0.0885889, both stamped `v0`.
+ */
+export const PWATT_V0_VERSION = 'v0.1' as const;
+/**
+ * Implementation version stamped on stored v1 outputs.
+ *
+ * IT MOVES WITH THE FORMULA, and that is not bookkeeping.  The invariant
+ * store's conflict key includes this string and `upsert` updates on conflict,
+ * so reprocessing a pre-deploy window under an unchanged version OVERWRITES the
+ * historical row with values the old algorithm never produced — the comparison
+ * and the audit reproducibility both go with it, silently, since nothing about
+ * the row says it was recomputed.  A new string makes the two revisions occupy
+ * two natural keys, which is the whole point of stamping one.
+ *
+ * `v1.1` is the WS-T sourced-contribution bonus (`v1-components.ts`): cited
+ * contributions scale a saturated `(1 + citationBonus)` multiplier, so a cited
+ * actor's participation differs from what `v1` scored.
+ */
+export const PWATT_V1_VERSION = 'v1.1' as const;
 
 /**
  * One actor's deduplicated signal summary for a single item within a single

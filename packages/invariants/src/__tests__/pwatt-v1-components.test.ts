@@ -10,10 +10,13 @@ import {
   type ActorItemSummary,
   actorV1Contribution,
   antiSignalAttenuation,
+  computePwattV0,
   computePwattV1Components,
   DEFAULT_ANTI_SIGNAL_ATTENUATION,
   DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
   type ItemAntiSignals,
+  PWATT_V0_VERSION,
+  PWATT_V1_VERSION,
   V1_CONTRIBUTION_WEIGHTS,
   validateAntiSignalAttenuation,
   validatePwattV1ComponentsConfig,
@@ -59,6 +62,40 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
     expect(sourced.value).toBeGreaterThan(unsourced.value);
     expect(sourced.annotations).toContain('sourced_contribution_weighted');
     expect(unsourced.annotations).not.toContain('sourced_contribution_weighted');
+  });
+
+  it('the stored implementation version moved with the formula', () => {
+    // The invariant store's conflict key includes this string and `upsert`
+    // updates on conflict, so shipping the sourced-contribution bonus under an
+    // unchanged `v1` would let a reprocessed pre-deploy window OVERWRITE its
+    // historical row with values the old algorithm never produced — losing the
+    // comparison and the audit reproducibility with no trace that it happened.
+    // This assertion is the gate: change the scoring above, and it fails until
+    // the version moves too.
+    expect(PWATT_V1_VERSION).toBe('v1.1');
+    expect(PWATT_V1_VERSION).not.toBe(PWATT_V0_VERSION);
+  });
+
+  it('…and so did the V0 version, because the same bonus moved the v0 formula', () => {
+    // The bonus landed in `participation.ts`'s `actorParticipation`, which is the
+    // v0 path (`v0.ts` folds `itemParticipation` into `participation` and then
+    // into `score`), and `apps/api` upserts that row under ('PWAtt_v0', …,
+    // PWATT_V0_VERSION).  Both stored rows changed; only one version string did,
+    // so the v0 row was the one silently overwritten on reprocessing.
+    //
+    // Tied to the BEHAVIOUR, not just the literal: the pin is only meaningful
+    // while the v0 score actually responds to citations.
+    const base = { correction: 2 } as const;
+    const v0Input = (overrides: Partial<ActorItemSummary>) => ({
+      itemId: 'item-1',
+      actors: [actor(overrides)],
+      antiSignals: {},
+    });
+    const uncited = computePwattV0(v0Input({ contributions: base }));
+    const cited = computePwattV0(v0Input({ contributions: base, citedContributionsByType: base }));
+    expect(cited.participation).toBeGreaterThan(uncited.participation);
+    expect(cited.score).toBeGreaterThan(uncited.score);
+    expect(PWATT_V0_VERSION).toBe('v0.1');
   });
 
   it('per-user saturation: the Nth same-type contribution adds less than the (N-1)th', () => {
@@ -127,6 +164,82 @@ describe('actorV1Contribution (hierarchy + per-user saturation)', () => {
         return after >= before || `adding ${extra} decreased ${before} -> ${after}`;
       },
     );
+  });
+
+  it('property: the citation bonus keeps the score monotone at ANY saturation point', () => {
+    // The regression this pins: while the bonus multiplier read the sourced
+    // FRACTION (`cited / n`), an uncited contribution added to an already-
+    // SATURATED per-type value strictly LOWERED the actor's score — inside the
+    // window the docstring guarantees monotone.  Two configs reach that regime
+    // and are both schema-legal + runtime-settable through `pwatt_config`:
+    // a saturation point at or below `rapidThreshold`, and the `sigmoid` curve,
+    // which has no saturation point for a config validator to reject at all.
+    const curves = [
+      { kind: 'logarithmic' as const, scale: 1, saturationPoint: 2 },
+      { kind: 'logarithmic' as const, scale: 1, saturationPoint: 6 },
+      { kind: 'sigmoid' as const, scale: 1 },
+    ];
+    const types = ['correction', 'explanation', 'bridge_comment'] as const;
+    for (const contributionCurve of curves) {
+      // rapidThreshold far above the enumerated counts: the guarantee is
+      // explicitly scoped to totalContributions <= rapidThreshold, above which
+      // the §5.3 rapid-repetition dampening deliberately drops the value.
+      const config = {
+        ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+        contributionCurve,
+        rapidThreshold: 1_000,
+      };
+      const score = (type: (typeof types)[number], n: number, cited: number, uncited: number) =>
+        actorV1Contribution(
+          actor({
+            contributions: { [type]: n },
+            citedContributionsByType: { [type]: cited },
+            uncitedAccusationsByType: { [type]: uncited },
+          }),
+          config,
+        ).value;
+      for (const type of types) {
+        for (let n = 0; n <= 8; n += 1) {
+          for (let cited = 0; cited <= n; cited += 1) {
+            for (let uncited = 0; cited + uncited <= n; uncited += 1) {
+              const where = `${contributionCurve.kind} ${type} n=${n} cited=${cited} uncited=${uncited}`;
+              const before = score(type, n, cited, uncited);
+              // One more UNSOURCED contribution — the case the fraction broke.
+              expect(score(type, n + 1, cited, uncited), where).toBeGreaterThanOrEqual(before);
+              // One more SOURCED contribution.
+              expect(score(type, n + 1, cited + 1, uncited), where).toBeGreaterThanOrEqual(before);
+              // The WS-E.2.2b transparency remedy: sourcing an accusation.
+              if (uncited > 0) {
+                expect(score(type, n, cited + 1, uncited - 1), where).toBeGreaterThanOrEqual(
+                  before,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('a saturated per-type value is not lowered by an uncited contribution', () => {
+    // The reported instance, verbatim: saturationPoint 2 sits BELOW the
+    // rapidThreshold of 5, so `correction` saturates at n=2 while the
+    // documented monotone window runs to n=5.
+    const config = {
+      ...DEFAULT_PWATT_V1_COMPONENTS_CONFIG,
+      contributionCurve: { kind: 'logarithmic' as const, scale: 1, saturationPoint: 2 },
+      rapidThreshold: 5,
+    };
+    const value = (n: number) =>
+      actorV1Contribution(
+        actor({
+          contributions: { correction: n },
+          citedContributionsByType: { correction: 1 },
+        }),
+        config,
+      ).value;
+    expect(value(4)).toBeGreaterThanOrEqual(value(3));
+    expect(value(5)).toBeGreaterThanOrEqual(value(4));
   });
 });
 

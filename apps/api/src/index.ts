@@ -5,8 +5,10 @@ import { createServer as createHttpsServer } from 'node:https';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
+import type { DbExecutor } from '@licio/db';
 import { createDbClient, pingDatabase } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
+import { accountMayHoldSession } from '@licio/shared';
 import {
   parseGovernanceExtraRuntimeUrls,
   parseGovernanceModelHubAliases,
@@ -109,6 +111,7 @@ import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
 } from './events/services.js';
+import type { ItemSafetyStateStore } from './events/stores.js';
 import { ContributionRateLimiter, threadReadableToUser } from './forum/contributions.js';
 import { anonymizeUserContent, exportUserContent } from './forum/data-rights.js';
 import {
@@ -135,6 +138,7 @@ import {
   registerForumConsumers,
   setForumServices,
 } from './forum/services.js';
+import type { ContributionStore } from './forum/stores.js';
 import { toContributionPublic } from './forum/threads.js';
 import { resolveGovernanceConfig } from './governance/config.js';
 import { createDrizzleGovernanceStores } from './governance/drizzle-governance-stores.js';
@@ -179,6 +183,7 @@ import {
   setIdentityServices,
 } from './identity/services.js';
 import { createContractVerifier } from './identity/siwe.js';
+import type { IdentityStore } from './identity/store.js';
 import {
   DrizzleClaimStore,
   DrizzleEmbeddingStore,
@@ -202,6 +207,7 @@ import {
   registerIngestionConsumers,
   setIngestionServices,
 } from './ingestion/services.js';
+import type { StoryStore } from './ingestion/stores.js';
 import {
   DrizzleBridgeAttemptStore,
   DrizzleCalibrationStore,
@@ -260,6 +266,7 @@ import { DrizzleUserSettingsStore } from './lib/drizzle-settings-store.js';
 import { describeListenFailure, systemErrorCode } from './lib/listen-diagnostics.js';
 import { createLogger } from './lib/logger.js';
 import { assertProductionParity } from './lib/parity-guard.js';
+import { isTierUniqueViolation, TIER_COLLISION_RETRIES } from './lib/pg-errors.js';
 import { pgNoticeLogLevel } from './lib/pg-notices.js';
 import {
   getPreferences,
@@ -276,6 +283,7 @@ import {
 } from './lib/reply-notifications.js';
 import { getUserSettingsStore, setUserSettingsStore } from './lib/user-settings.js';
 import { getTokenStore, RedisTokenStore, setTokenStore } from './middleware/csrf.js';
+import { notFoundHandler } from './middleware/error-handler.js';
 import { actorQueues } from './moderation/authz.js';
 import { createDrizzleModerationStores } from './moderation/drizzle-moderation-stores.js';
 import {
@@ -285,6 +293,8 @@ import {
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
+  type ContentEnforcementDeps,
+  type ContentPortDeps,
   createCitedContributionReads,
   createProductionContentPort,
   createProductionEventPort,
@@ -324,6 +334,7 @@ import {
 } from './telemetry/drizzle-telemetry-stores.js';
 import { startTelemetryScheduler, TELEMETRY_SCHEDULER_INTERVAL_MS } from './telemetry/scheduler.js';
 import { createInMemoryTelemetryServices, setTelemetryServices } from './telemetry/service.js';
+import { DrizzleElectorateBasisStore } from './treasury/drizzle-electorate-basis.js';
 import { createDrizzleTreasuryStores } from './treasury/drizzle-treasury-stores.js';
 import { buildWsmReadinessChecklistPort } from './treasury/readiness.js';
 import {
@@ -566,6 +577,13 @@ registerIngestionConsumers(eventServices, ingestionServices);
 setIngestionServices(ingestionServices);
 
 // --- WS-G forum services -----------------------------------------------------
+// The WS-E fold's thread → story fallback (see `storyIdForThread` on
+// `EventPipelineServices`).  Assigned AFTER the ingestion container exists, like
+// the story-title cache above: `eventServices` is built first, and the resolution
+// belongs to the story store.
+eventServices.storyIdForThread = (threadId) =>
+  ingestionServices.stories.getStoryIdByThreadId(threadId);
+
 const forumServices = createInMemoryForumServices({
   events: eventServices,
   ingestion: ingestionServices,
@@ -799,162 +817,273 @@ setIdentityServices(identityServices);
 // — the documented seam) and the WS-G contribution state; an account action
 // writes the WS-D state; user resolution reads the WS-D directory.  Alerts log;
 // on-call paging is a WS-O binding.
+/**
+ * The moderation content port, split into the deps that READ and the deps that WRITE.
+ *
+ * It used to be one ~190-line literal passed inline, every dep closing over a service
+ * CONTAINER whose store fields are replaced later by the Postgres swap.  That works for
+ * autocommit and cannot work for anything else: a container-backed dep resolves whatever
+ * store the container holds, which is by definition not a transaction.  So the enforcement
+ * could never join the unit of work that records it, and the shape of the wiring — not any
+ * property of the domains — was the reason.
+ *
+ * Named and split, the writes become a FUNCTION of the executor, and the same definition
+ * serves the base client and an open transaction.
+ */
+const moderationContentReads: Omit<ContentPortDeps, keyof ContentEnforcementDeps> = {
+  getStory: async (id) => {
+    const story = await ingestionServices.stories.getById(id);
+    return story
+      ? {
+          submittedBy: story.submittedBy,
+          title: story.title,
+          excerpt: story.excerpt,
+          createdAt: story.createdAt,
+        }
+      : null;
+  },
+  getContribution: async (id) => {
+    const c = await forumServices.contributions.getById(id);
+    return c ? { userId: c.userId } : null;
+  },
+  // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
+  // real WS-G/WS-F stores (the testable factory in production-ports.ts).
+  ...createCitedContributionReads({
+    contributions: forumServices.contributions,
+    stories: ingestionServices.stories,
+    // WS-J thread removal rides the WS-E item-safety row (the same read the
+    // thread routes consult) — a removed thread's citations never surface.
+    threadRemoved: async (threadId) =>
+      (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
+  }),
+  // WS-J #23: a thread report target → the thread's story owner.
+  getThread: async (threadId) => {
+    const thread = await ingestionServices.stories.getThreadById(threadId);
+    if (!thread) return null;
+    const story = await ingestionServices.stories.getById(thread.storyId);
+    return { submittedBy: story?.submittedBy ?? null };
+  },
+  // WS-J #17: an account action only proceeds against a REAL account.
+  accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
+  // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
+  getContributionSnapshot: async (id) => {
+    const c = await forumServices.contributions.getById(id);
+    if (!c) return null;
+    const edits = await forumServices.contributions.listEditHistory(id);
+    return {
+      body: c.body,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
+    };
+  },
+  // WS-J.2.2a thread context: the full thread centered on the reported item.
+  // The reviewer sees ALL moderation states (so removed/flagged items are
+  // visible in context) — never the public visibility filter.
+  getThreadContext: async (targetId, contentKind, requesterUserId) => {
+    // Resolve which thread to project, and (for a contribution target) which
+    // row the review centers on.  A story/thread report has no contribution id,
+    // so it projects the story's/thread's own thread — without this branch the
+    // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
+    let threadId: string | null = null;
+    let reportedContributionId: string | null = null;
+    if (contentKind === 'story') {
+      const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
+      threadId = thread?.threadId ?? null;
+    } else if (contentKind === 'thread') {
+      threadId = targetId;
+    } else {
+      const reported = await forumServices.contributions.getById(targetId);
+      if (reported) {
+        threadId = reported.threadId;
+        reportedContributionId = targetId;
+      }
+    }
+    if (threadId === null) return { items: [], reportedContributionId: null };
+    const rows = await forumServices.contributions.listByThread(threadId, {
+      states: ['published', 'under_review', 'hidden', 'removed'],
+      limit: 200,
+    });
+    // The reviewed contribution must ALWAYS appear in its context — a row late
+    // in a long thread can fall outside the first window, so include it
+    // explicitly if the window missed it (WS-J.2.2a).
+    if (
+      reportedContributionId !== null &&
+      !rows.some((r) => r.contributionId === reportedContributionId)
+    ) {
+      const reported = await forumServices.contributions.getById(reportedContributionId);
+      if (reported) rows.push(reported);
+    }
+    const authorIds = [
+      ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
+    ];
+    const authorList = await identityServices.store.getUsersByIds(authorIds);
+    const authors = new Map(
+      authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
+    );
+    const childCounts = await forumServices.contributions.childCounts(
+      rows.map((r) => r.contributionId),
+    );
+    const items = rows.map((r) =>
+      toContributionPublic(
+        r,
+        r.userId !== null ? (authors.get(r.userId) ?? null) : null,
+        childCounts.get(r.contributionId) ?? 0,
+        requesterUserId,
+        r.userId === null,
+      ),
+    );
+    return { items, reportedContributionId };
+  },
+  // WS-J #7: the report intake's read bar — resolve the target through the
+  // SAME WS-Q visibility gate as a direct content read (story read bar /
+  // thread read bar), so a reporter cannot probe existence of private /
+  // room_only content they cannot see.  Fail-closed on an unreachable shell.
+  isContentReadable: async (targetId, contentKind, requesterUserId) => {
+    if (contentKind === 'story') {
+      const story = await ingestionServices.stories.getById(targetId);
+      if (!story) return false;
+      const room = await forumServices.rooms.getById(story.roomId);
+      if (!room) return false;
+      return storyReadableByUser(forumServices, story, room, requesterUserId);
+    }
+    const bundle = {
+      forum: forumServices,
+      ingestion: ingestionServices,
+      events: eventServices,
+    };
+    if (contentKind === 'thread') {
+      const thread = await ingestionServices.stories.getThreadById(targetId);
+      return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+    }
+    if (contentKind === 'contribution') {
+      const contribution = await forumServices.contributions.getById(targetId);
+      if (!contribution) return false;
+      const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
+      return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+    }
+    return true;
+  },
+  now: () => Date.now(),
+};
+
+/**
+ * The enforcement writes over the ambient service containers — the autocommit binding.
+ *
+ * Every member resolves its store at CALL time.  `safetyStore` was the one exception: a
+ * bare property capture, evaluated once when this object is built, so it froze whichever
+ * store the container happened to hold at that line.  It was correct only because the
+ * events Postgres swap sits ~490 lines earlier in this file — an ordering constraint
+ * nothing states and nothing checks.  Move either block past the other and production
+ * writes item-safety state to the in-memory store: moderation removals would stop
+ * reaching the WS-I ranking filter, silently, with no error anywhere.
+ *
+ * A getter costs nothing and removes the constraint, so the ten lazy members and this one
+ * now bind the same way.
+ */
+/** The stores the enforcement writes reach, as THUNKS.
+ *
+ *  Thunks because the same four closures serve two bindings with different lifetimes: the
+ *  ambient one must resolve its store on each call (the containers are swapped to Postgres
+ *  during boot), and the transactional one resolves a store built over an open handle.  A
+ *  single set of closures, parameterised, so the two bindings cannot drift. */
+interface ModerationEnforcementStores {
+  safety: () => ItemSafetyStateStore;
+  contributions: () => Pick<ContributionStore, 'setModerationState'>;
+  stories: () => Pick<StoryStore, 'getById' | 'update' | 'getByCanonicalUrl'>;
+  users: () => Pick<IdentityStore, 'updateUser'>;
+  /** Run one write so that ITS failure is recoverable, leaving the caller able to
+   *  continue.  Autocommit gets that for free — a failed statement is its own aborted
+   *  transaction — but inside a unit of work it needs a SAVEPOINT, because Postgres
+   *  puts the whole transaction into an aborted state on ANY error and every later
+   *  statement then fails with 25P02.
+   *
+   *  The reinstate below depends on it: it catches a 23505 and then READS to find out
+   *  whether the URL slot is genuinely occupied.  Without a savepoint that read is the
+   *  first statement of an aborted transaction, so the retry never happens and the
+   *  metric, the log line and the specific error are all replaced by a bare 25P02. */
+  attempt: <T>(write: () => Promise<T>) => Promise<T>;
+}
+
+const moderationEnforcementWritesOver = (
+  stores: ModerationEnforcementStores,
+): ContentEnforcementDeps => ({
+  get safetyStore() {
+    return stores.safety();
+  },
+  setContributionModerationState: (id, state) =>
+    stores.contributions().setModerationState(id, state),
+  // WS-J #9: a story hide/removal must also leave it inaccessible via the
+  // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
+  // the canonical hiddenState (both the detail route and ranking honour it).
+  // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
+  setStoryHiddenState: async (id, next) => {
+    const story = await stores.stories().getById(id);
+    if (!story) return;
+    if (next === 'safety') {
+      if (story.hiddenState === null) {
+        await stores.stories().update(id, { hiddenState: 'safety' });
+      }
+    } else if (story.hiddenState === 'safety') {
+      // UN-HIDING RE-ENTERS THE URL SLOT.  Both tier uniques are partial on
+      // `hidden_state IS NULL`, so clearing it puts the row back into the index —
+      // and if a re-submission took that slot while the story was hidden, the write
+      // raises 23505.  Unhandled, that surfaced as a 500 from the moderation
+      // reinstate port with the story still hidden and no explanation.
+      //
+      // Retried, because the occupant may have vanished (the actual race).  A LIVE
+      // occupant is a real conflict, so it is METERED and rethrown rather than
+      // swallowed: `performRevert` leaves the action un-reverted, which keeps the
+      // reinstate retryable once a steward resolves the duplicate — silently
+      // reporting success while the story stayed hidden would not.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          // `stores.attempt` so a 23505 inside a unit of work rolls back to a savepoint
+          // rather than poisoning the transaction the catch block is about to read in.
+          await stores.attempt(() => stores.stories().update(id, { hiddenState: null }));
+          break;
+        } catch (error) {
+          if (!isTierUniqueViolation(error)) throw error;
+          const occupant =
+            story.canonicalUrl === null
+              ? null
+              : await stores.stories().getByCanonicalUrl(
+                  story.canonicalUrl,
+                  // The DISCRIMINATED tier — the union requires `roomId` on the
+                  // room_only arm and forbids it on the public one, so it cannot be
+                  // built by spreading.
+                  story.visibility === 'room_only'
+                    ? { visibility: 'room_only', roomId: story.roomId }
+                    : { visibility: 'public' },
+                );
+          if (occupant === null && attempt < TIER_COLLISION_RETRIES) continue;
+          ingestionServices.metrics.increment('moderation.reinstate_url_collision');
+          logger.warn(
+            { storyId: id, canonicalUrl: story.canonicalUrl },
+            'story reinstate refused: its URL slot is occupied',
+          );
+          throw error;
+        }
+      }
+    }
+  },
+  setAccountState: (userId, accountState) => stores.users().updateUser(userId, { accountState }),
+});
+
+/** The ambient binding — every store resolved from its container at call time. */
+const moderationEnforcementWrites = moderationEnforcementWritesOver({
+  // Autocommit: each statement is already its own transaction, so nothing to scope.
+  attempt: (write) => write(),
+  safety: () => eventServices.safetyStore,
+  contributions: () => forumServices.contributions,
+  stories: () => ingestionServices.stories,
+  users: () => identityServices.store,
+});
+
 const moderationServices = createInMemoryModerationServices({
   content: createProductionContentPort({
-    safetyStore: eventServices.safetyStore,
-    getStory: async (id) => {
-      const story = await ingestionServices.stories.getById(id);
-      return story
-        ? {
-            submittedBy: story.submittedBy,
-            title: story.title,
-            excerpt: story.excerpt,
-            createdAt: story.createdAt,
-          }
-        : null;
-    },
-    getContribution: async (id) => {
-      const c = await forumServices.contributions.getById(id);
-      return c ? { userId: c.userId } : null;
-    },
-    // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
-    // real WS-G/WS-F stores (the testable factory in production-ports.ts).
-    ...createCitedContributionReads({
-      contributions: forumServices.contributions,
-      stories: ingestionServices.stories,
-      // WS-J thread removal rides the WS-E item-safety row (the same read the
-      // thread routes consult) — a removed thread's citations never surface.
-      threadRemoved: async (threadId) =>
-        (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
-    }),
-    // WS-J #23: a thread report target → the thread's story owner.
-    getThread: async (threadId) => {
-      const thread = await ingestionServices.stories.getThreadById(threadId);
-      if (!thread) return null;
-      const story = await ingestionServices.stories.getById(thread.storyId);
-      return { submittedBy: story?.submittedBy ?? null };
-    },
-    // WS-J #17: an account action only proceeds against a REAL account.
-    accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
-    setContributionModerationState: (id, state) =>
-      forumServices.contributions.setModerationState(id, state),
-    // WS-J #9: a story hide/removal must also leave it inaccessible via the
-    // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
-    // the canonical hiddenState (both the detail route and ranking honour it).
-    // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
-    setStoryHiddenState: async (id, next) => {
-      const story = await ingestionServices.stories.getById(id);
-      if (!story) return;
-      if (next === 'safety') {
-        if (story.hiddenState === null) {
-          await ingestionServices.stories.update(id, { hiddenState: 'safety' });
-        }
-      } else if (story.hiddenState === 'safety') {
-        await ingestionServices.stories.update(id, { hiddenState: null });
-      }
-    },
-    setAccountState: (userId, accountState) =>
-      identityServices.store.updateUser(userId, { accountState }),
-    // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
-    getContributionSnapshot: async (id) => {
-      const c = await forumServices.contributions.getById(id);
-      if (!c) return null;
-      const edits = await forumServices.contributions.listEditHistory(id);
-      return {
-        body: c.body,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-        edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
-      };
-    },
-    // WS-J.2.2a thread context: the full thread centered on the reported item.
-    // The reviewer sees ALL moderation states (so removed/flagged items are
-    // visible in context) — never the public visibility filter.
-    getThreadContext: async (targetId, contentKind, requesterUserId) => {
-      // Resolve which thread to project, and (for a contribution target) which
-      // row the review centers on.  A story/thread report has no contribution id,
-      // so it projects the story's/thread's own thread — without this branch the
-      // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
-      let threadId: string | null = null;
-      let reportedContributionId: string | null = null;
-      if (contentKind === 'story') {
-        const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
-        threadId = thread?.threadId ?? null;
-      } else if (contentKind === 'thread') {
-        threadId = targetId;
-      } else {
-        const reported = await forumServices.contributions.getById(targetId);
-        if (reported) {
-          threadId = reported.threadId;
-          reportedContributionId = targetId;
-        }
-      }
-      if (threadId === null) return { items: [], reportedContributionId: null };
-      const rows = await forumServices.contributions.listByThread(threadId, {
-        states: ['published', 'under_review', 'hidden', 'removed'],
-        limit: 200,
-      });
-      // The reviewed contribution must ALWAYS appear in its context — a row late
-      // in a long thread can fall outside the first window, so include it
-      // explicitly if the window missed it (WS-J.2.2a).
-      if (
-        reportedContributionId !== null &&
-        !rows.some((r) => r.contributionId === reportedContributionId)
-      ) {
-        const reported = await forumServices.contributions.getById(reportedContributionId);
-        if (reported) rows.push(reported);
-      }
-      const authorIds = [
-        ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
-      ];
-      const authorList = await identityServices.store.getUsersByIds(authorIds);
-      const authors = new Map(
-        authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
-      );
-      const childCounts = await forumServices.contributions.childCounts(
-        rows.map((r) => r.contributionId),
-      );
-      const items = rows.map((r) =>
-        toContributionPublic(
-          r,
-          r.userId !== null ? (authors.get(r.userId) ?? null) : null,
-          childCounts.get(r.contributionId) ?? 0,
-          requesterUserId,
-          r.userId === null,
-        ),
-      );
-      return { items, reportedContributionId };
-    },
-    // WS-J #7: the report intake's read bar — resolve the target through the
-    // SAME WS-Q visibility gate as a direct content read (story read bar /
-    // thread read bar), so a reporter cannot probe existence of private /
-    // room_only content they cannot see.  Fail-closed on an unreachable shell.
-    isContentReadable: async (targetId, contentKind, requesterUserId) => {
-      if (contentKind === 'story') {
-        const story = await ingestionServices.stories.getById(targetId);
-        if (!story) return false;
-        const room = await forumServices.rooms.getById(story.roomId);
-        if (!room) return false;
-        return storyReadableByUser(forumServices, story, room, requesterUserId);
-      }
-      const bundle = {
-        forum: forumServices,
-        ingestion: ingestionServices,
-        events: eventServices,
-      };
-      if (contentKind === 'thread') {
-        const thread = await ingestionServices.stories.getThreadById(targetId);
-        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
-      }
-      if (contentKind === 'contribution') {
-        const contribution = await forumServices.contributions.getById(targetId);
-        if (!contribution) return false;
-        const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
-        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
-      }
-      return true;
-    },
-    now: () => Date.now(),
+    ...moderationContentReads,
+    ...moderationEnforcementWrites,
   }),
   users: createProductionUserPort({
     getUser: async (id) => {
@@ -1040,11 +1169,57 @@ if (db) {
   // Durable Postgres adapters (same interfaces as the in-memory stores; the
   // append-only audit log is the tamper-evident source of truth).  The
   // fail-closed config store is the deploy-free tuning surface.
-  const stores = createDrizzleModerationStores(db);
+  // The chain thunk, not a captured value: `auditChain` is rewired a few lines below
+  // with the master-secret-derived key, and a transactor holding a copy taken here would
+  // sign every production row with the DEV key.
+  // THE ENFORCEMENT, BOUND TO THE UNIT'S HANDLE.
+  //
+  // The same four write closures the ambient binding uses, over stores constructed on the
+  // transaction instead of read from a container — which is the whole reason the write
+  // set was named and parameterised.  The READS stay ambient on purpose: they resolve
+  // pre-existing rows, not the unit's own uncommitted writes, so the committed snapshot
+  // is the correct thing for them to see.
+  const enforcementOver = (exec: DbExecutor) =>
+    createProductionContentPort({
+      ...moderationContentReads,
+      ...moderationEnforcementWritesOver({
+        // Drizzle's nested `transaction()` emits SAVEPOINT / RELEASE / ROLLBACK TO, so a
+        // constraint violation inside rolls back to the savepoint and leaves the enclosing
+        // unit usable — the same mechanism the chained audit append uses for its retry.
+        attempt: (write) => exec.transaction(write),
+        safety: () => new DrizzleItemSafetyStateStore(exec),
+        contributions: () => new DrizzleContributionStore(exec),
+        stories: () => new DrizzleStoryStore(exec),
+        users: () => new DrizzleIdentityStore(exec),
+      }),
+    });
+  const stores = createDrizzleModerationStores(
+    db,
+    () => moderationServices.auditChain,
+    enforcementOver,
+  );
   moderationServices.cases = stores.cases;
   moderationServices.reports = stores.reports;
   moderationServices.actions = stores.actions;
   moderationServices.audit = stores.audit;
+  // The chain follows the STORE.  Swapping `audit` without this would leave the chain
+  // deps pointing at the discarded in-memory store, so every production write would
+  // chain against an empty head and the durable trail would be a run of genesis rows —
+  // each individually valid, none linked to anything.
+  // ONE UNIT: a state change and its audit row commit together or not at all
+  // (`moderation/transactor.ts`).  It arrives with the stores from one factory, so the
+  // Postgres stores cannot be installed beside the in-memory unit of work.
+  moderationServices.transactor = stores.transactor;
+  moderationServices.auditChain = {
+    store: stores.audit,
+    // Keyed from the identity master secret: repairing a doctored chain then needs a
+    // secret the database does not hold, which is the whole difference between
+    // tamper-EVIDENT and merely hashed.
+    key: accountRef(identityServices.config.masterSecret, 'moderation-audit-chain'),
+    // The same opaque-ref posture the compliance chains take: a chain hash must not
+    // double as an oracle for "was this person involved".
+    refOf: (id) => accountRef(identityServices.config.masterSecret, `moderation-audit:${id}`),
+  };
   moderationServices.blocks = stores.blocks;
   moderationServices.mutes = stores.mutes;
   moderationServices.appeals = stores.appeals;
@@ -1083,13 +1258,18 @@ setModerationServices(moderationServices);
 forumServices.relationshipReader = createRelationshipReader(moderationServices);
 // The WS-Q read bar's platform-ADMIN arm (2026-07 final-line-of-defense
 // decision): the content-visibility chokepoint consults the identity store's
-// platform roles on the private-SERVER-room miss path only.  ACTIVE accounts
-// only (codex on PR #146): soft-session read routes never run authMiddleware's
-// account-state check, so without this a suspended admin's still-valid cookie
-// would keep the private-room read arm.
+// platform roles on the private-SERVER-room miss path only.  Soft-session read
+// routes never run authMiddleware's account-state check, so without this a
+// SUSPENDED admin's still-valid cookie would keep the private-room read arm.
+//
+// The bar is `accountMayHoldSession`, not `=== 'active'`: this resolver must
+// admit exactly what the middleware admits, and a hand-written copy of that rule
+// stayed active-only after the middleware learned about `restricted` — costing a
+// restricted admin its private-room READ while the same session authenticated
+// fine everywhere else.  See that predicate for why it is defined once.
 forumServices.platformRolesReader = async (id) => {
   const user = await identityServices.store.getUser(id);
-  return user?.accountState === 'active' ? user.roles : [];
+  return accountMayHoldSession(user?.accountState) ? (user?.roles ?? []) : [];
 };
 // WS-J.2.6 pre-checks on the contribution submission path: spam/malware
 // auto-block (recorded as appealable system actions) + duplicate-flood/policy-
@@ -1151,20 +1331,20 @@ const aiGovernanceServices = createInMemoryAiGovernanceServices(eventServices, {
 });
 if (db) {
   const aiStores = createDrizzleAiGovernanceStores(db);
-  aiGovernanceServices.registry = aiStores.registry;
-  aiGovernanceServices.riskAssessments = aiStores.riskAssessments;
-  aiGovernanceServices.inventory = aiStores.inventory;
-  aiGovernanceServices.lineage = aiStores.lineage;
-  aiGovernanceServices.outputRecords = aiStores.outputRecords;
-  aiGovernanceServices.evaluations = aiStores.evaluations;
-  aiGovernanceServices.corrections = aiStores.corrections;
-  aiGovernanceServices.blocked = aiStores.blocked;
-  aiGovernanceServices.reviewQueue = aiStores.reviewQueue;
-  aiGovernanceServices.summaries = aiStores.summaries;
-  aiGovernanceServices.translations = aiStores.translations;
-  aiGovernanceServices.governanceSummaries = aiStores.governanceSummaries;
-  aiGovernanceServices.runtime = aiStores.runtime;
-  aiGovernanceServices.moderationLog = aiStores.moderationLog;
+  // INSTALL THE WHOLE BUNDLE.  This was fifteen hand-written assignments, and a
+  // store added to the factory without a line here silently kept its in-memory
+  // adapter in production — which is exactly what happened to
+  // `governanceAdvisories` and `sweepCursors`: migrations 0106 and 0108 created
+  // tables nothing ever wrote, the advisories a steward reads were lost on
+  // every restart, and the "durable" sweep cursor was durable in name only.
+  // `check:prod-parity` did not catch it either: an in-memory adapter DOES have
+  // a production counterpart here, it just was not reachable.
+  //
+  // `Object.assign` over the factory's own return type makes the list
+  // exhaustive by construction — the next store is installed by existing
+  // (`satisfies` on the factory's side keeps the shapes compatible), and
+  // `ai-governance-stores.test.ts` asserts every key actually arrives.
+  Object.assign(aiGovernanceServices, aiStores);
   // The prohibited-use guard captured the in-memory blocked store at container
   // construction — REBUILD it over the durable store, or its audit rows would
   // keep flowing to the discarded in-memory adapter.
@@ -1656,12 +1836,15 @@ if (governanceLlmDecision.enabled) {
   // key/URL live ONLY in these closures — never in the hashed identity config,
   // never in a log line. The per-runtime negotiation latches (effort rejected /
   // thinking exhausted) are operational signals — surface them in the boot log.
+  // BOTH backends take the same metadata-only hook, so neither the local
+  // negotiation nor the hosted SDK ever reaches a sink pino cannot redact.
+  const llmLaneLog = (event: string, meta: Record<string, unknown>): void => {
+    logger.warn(meta, event);
+  };
   const laneCompletion = (lane: GovernanceLlmLane): LlmCompletion =>
     lane.backend.kind === 'anthropic'
-      ? createAnthropicCompletion(lane.backend.apiKey, lane.settings)
-      : createLocalCompletion(lane.backend.baseUrl, lane.settings, fetch, (event, meta) =>
-          logger.warn(meta, event),
-        );
+      ? createAnthropicCompletion(lane.backend.apiKey, lane.settings, llmLaneLog)
+      : createLocalCompletion(lane.backend.baseUrl, lane.settings, fetch, llmLaneLog);
   const moderationComplete = laneCompletion(lanes.moderation);
   const adjudicationComplete = laneCompletion(lanes.adjudication);
 
@@ -1905,7 +2088,19 @@ setGovernanceService(
     onModerationDecided: (record) => {
       void aiGovernanceServices.moderationLog
         .append({ recordId: `moddec:${randomUUID()}`, ...record })
-        .catch(() => {});
+        .catch((err) => {
+          // The sink must not throw and must not block the moderation path
+          // (the durable trails — the immutable AIOutputRecord and the awaited
+          // agent-action audit row — already fail closed). But "record EVERY
+          // decided moderation" is an accountability claim, so a dropped row
+          // has to be diagnosable: log it, and count it so the transparency
+          // panel's under-count is visible rather than silent.
+          logger.error(
+            { err, roomId: record.roomId },
+            'WS-K moderation decision log append failed',
+          );
+          aiGovernanceServices.metrics.increment('ai.governance.moderation.log_append_failed');
+        });
     },
   }),
 );
@@ -1921,9 +2116,23 @@ knomosisServices.readinessChecklist = buildReadinessChecklistPort(forumServices,
 const treasuryServices = createInMemoryTreasuryServices({
   knomosis: knomosisServices,
   governanceStores,
-  membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
+  membership: buildMembershipFactsPort(
+    forumServices,
+    identityServices,
+    knomosisServices,
+    // LAZY, and deliberately so: this container is built BEFORE the Drizzle stores are
+    // assigned over it, so a port capturing the store eagerly would capture the
+    // in-memory one and serve it in production.  Resolving per call reads whatever the
+    // boot finished wiring.  With no `db` the in-memory default applies.
+    db ? () => new DrizzleElectorateBasisStore(db) : undefined,
+  ),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
-  elections: buildStewardElectionPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
+    // ONE measurement reporting the count AND its instant: the election records
+    // that instant as its open, and `castElectionVote` compares a voter's join
+    // against it.
+    forumServices.rooms.measureEligibleVoters(roomId),
+  ),
 });
 if (db) {
   Object.assign(treasuryServices, createDrizzleTreasuryStores(db));
@@ -2131,7 +2340,11 @@ startGovernanceScheduler(
     // The election quorum/turnout denominator is the SAME electorate that may vote
     // (active subscribers ∪ stewards, matching isRoomMember) — not just active
     // subscriptions — so a steward-role voter is counted.
-    eligibleVoterCount: (roomId) => forumServices.rooms.countEligibleVoters(roomId),
+    // The SETTLE fallback: a count AS OF the election's already-recorded open, which
+    // is a different question from the freeze below and rightly a different read.
+    eligibleVoterCount: (roomId, asOf) => forumServices.rooms.countEligibleVoters(roomId, asOf),
+    // The FREEZE: the count and the instant it was measured at, together.
+    measureElectorate: (roomId) => forumServices.rooms.measureEligibleVoters(roomId),
     // Re-validate an election winner is still a room member before seating them
     // (active subscription OR steward role — mirrors the ratification/vote gate).
     isRoomMember: async (roomId, userId) => {
@@ -2287,7 +2500,11 @@ if (
     });
     // Mount the control routes ahead of the CSRF-protected app (sessionless),
     // the same placement the E2E test-auth route uses.
+    // `notFound` on the WRAPPER too: `route()` copies the child's routes up, so a
+    // path matching neither reaches THIS instance's handler, and Hono's default is
+    // plain text — off the `apiErrorSchema` contract every client parses.
     appFetch = new Hono()
+      .notFound(notFoundHandler)
       .route('/v1/dev/simulator', createSimulatorRoutes(simulator))
       .route('/', baseApp).fetch;
     if (requested !== 'idle') {

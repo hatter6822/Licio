@@ -63,6 +63,9 @@ export function makeContext(partial: Partial<RankingRequestContext> = {}): Ranki
     sensitiveTopicIds: new Set(['self-harm']),
     maxSourceSharePctOverride: null,
     lensByItem: null,
+    // Defaults to the LIVE-SERVING answer, so a test that does not mention the
+    // cap exercises the policy production actually applies.
+    sensitiveFreshnessCap: true,
     ...partial,
   };
 }

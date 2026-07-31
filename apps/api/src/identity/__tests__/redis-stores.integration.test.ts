@@ -36,6 +36,68 @@ describe.skipIf(!REDIS_URL)('Redis identity adapters', () => {
     expect(await store.get('ttl')).toBeNull(); // expired
   });
 
+  it('RedisEphemeralStore: setIfAbsent/increment are atomic against LIVE Redis', async () => {
+    // The in-memory adapter can be atomic by construction (no await between
+    // read and write); Redis cannot, and Redis is what production runs. These
+    // two primitives back the MFA attempt cap and the OTP resend cooldown, so
+    // "atomic in memory, racy in production" is the failure mode that matters.
+    const store = new RedisEphemeralStore(redis as IORedis, 'test-eph:');
+
+    const claims = await Promise.all(
+      Array.from({ length: 12 }, () => store.setIfAbsent('cooldown', 'x', 60_000)),
+    );
+    expect(claims.filter((won) => won)).toHaveLength(1);
+
+    const counts = await Promise.all(
+      Array.from({ length: 20 }, () => store.increment('attempts', 300_000)),
+    );
+    expect([...counts].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 20 }, (_unused, i) => i + 1),
+    );
+
+    // The window is armed on CREATION only, so a later increment does not push
+    // it out (`PEXPIRE` runs under `n == 1` inside the same script).
+    //
+    // ASK REDIS, do not race it.  This used to arm a 40 ms window and assert
+    // the second increment inside a 15 ms margin: on a loaded machine a
+    // delayed timer or round trip let the key expire first, and a CORRECT
+    // implementation returned 1 and failed the test.  A long window plus the
+    // server's own remaining TTL tests the same property — "not re-armed" —
+    // with no timing assumption at all.
+    const WINDOW_MS = 60_000;
+    const ELAPSE_MS = 250;
+    await store.increment('longwindow', WINDOW_MS);
+    const firstTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    expect(firstTtl).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, ELAPSE_MS));
+    expect(await store.increment('longwindow', WINDOW_MS)).toBe(2);
+    const secondTtl = await (redis as IORedis).pttl('test-eph:longwindow');
+    // AN ABSOLUTE BOUND, not a comparison between the two reads.
+    //
+    // `secondTtl < firstTtl` replaced a 40 ms/15 ms race with a SUB-MILLISECOND
+    // one, inverted in direction: both `pttl` reads routinely land on the same
+    // integer millisecond, so the comparison was decided by whether the second
+    // round trip happened to be slower than the first — not by whether the window
+    // was re-armed.  Measured against a deliberately broken script (the `n == 1`
+    // guard removed, so `PEXPIRE` runs on every call), that assertion passed 8
+    // times in 40.  It used to fail a correct implementation; it had come to pass
+    // a broken one.
+    //
+    // The window was armed once at creation, so after `ELAPSE_MS` a correct
+    // implementation has strictly less than `WINDOW_MS - ELAPSE_MS` left, while a
+    // re-armed one is back at ~`WINDOW_MS`.  Jitter and scheduling delay only make
+    // the remaining TTL SMALLER, which is the safe direction — so the margin can
+    // never fail a correct implementation, however loaded the machine.
+    expect(secondTtl).toBeLessThanOrEqual(WINDOW_MS - ELAPSE_MS + 50);
+    expect(secondTtl).toBeGreaterThan(0);
+
+    // …and the window really does end, with a margin wide enough that only a
+    // broken expiry can fail it.
+    await store.increment('shortwindow', 40);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(await store.increment('shortwindow', 40)).toBe(1); // window elapsed
+  });
+
   it('RedisSessionStore: stores, lists per user, and deletes', async () => {
     const store = new RedisSessionStore(redis as IORedis, 'test-session:');
     const userId = '11111111-1111-4111-8111-111111111111';

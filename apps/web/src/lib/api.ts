@@ -55,6 +55,7 @@ import {
   roomLensSelectionSchema,
   roomListResponseSchema,
   roomSummarySchema,
+  roomVisibilityConflictSchema,
   type SignalLedgerResponse,
   type StoryCommentsResponse,
   type StoryCreateRequest,
@@ -96,11 +97,72 @@ const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export class ApiClientError extends Error {
   readonly code: string;
   readonly status: number | undefined;
-  constructor(code: string, message: string, status?: number) {
+  /**
+   * Field-level detail from `apiErrorSchema.error.details`, when the server
+   * sent any — a map of field path → message, for form surfaces to attach to
+   * the input that failed rather than showing one banner for the whole form.
+   *
+   * Empty for most errors by nature: only request VALIDATION produces per-field
+   * information.  It was dropped here entirely until the API started sending it
+   * (the 300-odd `zValidator` sites had no hook, so every validation failure
+   * arrived as an untyped `http_400`), which is why the documented channel had
+   * no reader.
+   */
+  readonly details: Readonly<Record<string, string>> | undefined;
+  constructor(
+    code: string,
+    message: string,
+    status?: number,
+    details?: Readonly<Record<string, string>>,
+  ) {
     super(message);
     this.name = 'ApiClientError';
     this.code = code;
     this.status = status;
+    this.details = details;
+  }
+}
+
+/**
+ * The WS-Q.3.4 cascade's 409, with the stories a steward has to resolve.
+ *
+ * `normalizeError` projects every failure through `apiErrorSchema`, which has
+ * no room for a list — so the ids the route was changed to send were parsed off
+ * and dropped one layer below the UI, and the steward still saw a count with no
+ * way to act on it.  A typed error is what carries them past that projection;
+ * `instanceof` narrows to a NON-optional list, so the drift becomes a compile
+ * error rather than a silent empty render.
+ */
+export class RoomVisibilityBlockedError extends ApiClientError {
+  readonly blockedStoryIds: readonly string[];
+  constructor(message: string, blockedStoryIds: readonly string[]) {
+    super('duplicate_story', message, 409);
+    this.name = 'RoomVisibilityBlockedError';
+    this.blockedStoryIds = blockedStoryIds;
+  }
+}
+
+/**
+ * A visibility change refused because the URL already exists in the target tier
+ * (WS-Q.2.4).
+ *
+ * EITHER DIRECTION: a widen collides with a public story, a narrow collides with
+ * an in-room twin.  It read "a widen" while sitting above the wrong class
+ * entirely, so it documented neither.
+ *
+ * The colliding story's id is a TYPED field rather than a property bolted onto a
+ * plain {@link ApiClientError}: producer and consumer previously agreed only by
+ * each supplying its own `as ApiClientError & { existingStoryId?: string }` cast,
+ * so a rename on either side compiled cleanly and silently dropped the "open the
+ * existing story" affordance. `instanceof DuplicateStoryError` narrows to a
+ * NON-optional id, which is what makes the drift a compile error.
+ */
+export class DuplicateStoryError extends ApiClientError {
+  readonly existingStoryId: string;
+  constructor(message: string, existingStoryId: string) {
+    super('duplicate_story', message, 409);
+    this.name = 'DuplicateStoryError';
+    this.existingStoryId = existingStoryId;
   }
 }
 
@@ -193,16 +255,20 @@ export const client: ReturnType<typeof hc<AppType>> = hc<AppType>(API_BASE, { fe
 async function normalizeError(response: Response): Promise<ApiClientError> {
   let code = `http_${response.status}`;
   let message = response.statusText || 'Request failed';
+  let details: Readonly<Record<string, string>> | undefined;
   try {
     const parsed = apiErrorSchema.safeParse(await response.json());
     if (parsed.success) {
       code = parsed.data.error.code;
       message = parsed.data.error.message;
+      details = parsed.data.error.details;
     }
   } catch {
     // Non-JSON error body; keep the status-derived defaults.
   }
-  return new ApiClientError(code, message, response.status);
+  return details === undefined
+    ? new ApiClientError(code, message, response.status)
+    : new ApiClientError(code, message, response.status, details);
 }
 
 /**
@@ -687,8 +753,9 @@ export type VisibilityChangeResult = z.infer<typeof visibilityChangeResponseSche
 /**
  * Narrow (public → room_only) or widen (room_only → public) a story's
  * visibility (author-only, WS-Q.2.4). A widen that collides with an existing
- * public story for the same URL throws an {@link ApiClientError} carrying the
- * existing story id (code `duplicate_story`).
+ * public story for the same URL throws a {@link DuplicateStoryError} carrying
+ * the existing story id — or, when the 409 body is unreadable, the plain
+ * {@link ApiClientError} with the same `duplicate_story` code and no id.
  */
 export async function changeStoryVisibility(
   storyId: string,
@@ -699,17 +766,19 @@ export async function changeStoryVisibility(
     json: { visibility },
   });
   if (response.status === 409) {
-    const body = storyDuplicateResponseSchema.safeParse(await response.json());
-    const existing = body.success ? body.data.existing_story_id : undefined;
-    const err = new ApiClientError(
-      'duplicate_story',
-      'A public story already exists for this link',
-      409,
-    );
-    if (existing !== undefined) {
-      (err as ApiClientError & { existingStoryId?: string }).existingStoryId = existing;
-    }
-    throw err;
+    // A non-JSON 409 body throws SyntaxError out of `json()`; catch it here so the
+    // caller always sees a normalised ApiClientError, never a raw parser error.
+    const raw: unknown = await response.json().catch(() => null);
+    const body = storyDuplicateResponseSchema.safeParse(raw);
+    // The SERVER'S message, not a fabricated one.  Narrowing a public story
+    // into a room collides with an IN-ROOM twin, and the server says exactly
+    // that — this used to overwrite it with "A public story already exists",
+    // so an owner reducing their own reach was told the opposite of what
+    // happened and left the story public.
+    const message = body.success ? body.data.error.message : 'A story already exists for this link';
+    throw body.success
+      ? new DuplicateStoryError(message, body.data.existing_story_id)
+      : new ApiClientError('duplicate_story', message, 409);
   }
   return parseResponse(response, visibilityChangeResponseSchema);
 }
@@ -750,6 +819,31 @@ export async function changeRoomVisibility(
     param: { roomId },
     json: { visibility },
   });
+  // The 409 is parsed HERE, before `parseResponse` hands it to `normalizeError`
+  // — that projection keeps only `{code, message}`, so the blocked ids the
+  // route sends would be dropped a layer below the UI that needs them.
+  if (response.status === 409) {
+    const raw: unknown = await response.json().catch(() => null);
+    const parsed = roomVisibilityConflictSchema.safeParse(raw);
+    if (parsed.success) {
+      throw new RoomVisibilityBlockedError(
+        parsed.data.error.message,
+        parsed.data.blocked_story_ids,
+      );
+    }
+    // READING THE BODY CONSUMED IT, so `parseResponse` below cannot re-read it.
+    // The route has a SECOND 409 shape — `visibility_race`, which carries no
+    // `blocked_story_ids` because a story turned public mid-cascade and the
+    // remedy is a plain retry — and letting that fall through reached
+    // `normalizeError` with an unreadable response, collapsing it to a generic
+    // `http_409` / "Conflict".  The retry guidance the server wrote was the whole
+    // point of that code, and it was being discarded one layer above the UI.
+    // Parse the ordinary envelope from the value already in hand.
+    const generic = apiErrorSchema.safeParse(raw);
+    if (generic.success) {
+      throw new ApiClientError(generic.data.error.code, generic.data.error.message, 409);
+    }
+  }
   const result = await parseResponse(
     response,
     z.object({ visibility: z.enum(['public', 'private']), converted: z.number().int().min(0) }),

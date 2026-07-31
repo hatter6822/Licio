@@ -9,7 +9,6 @@
 // §19.1) in front, and 503 when the hub is disabled (GOVERNANCE_MODEL_HUB=off)
 // — fail-closed, matching the propose-time `hub_disabled` rejection.
 
-import { zValidator } from '@hono/zod-validator';
 import {
   hubRevisionSchema,
   modelHubResolveResponseSchema,
@@ -20,6 +19,7 @@ import { z } from 'zod';
 import { ModelHubError } from '../ai-governance/model-hub.js';
 import { getAiGovernanceServices } from '../ai-governance/services.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;

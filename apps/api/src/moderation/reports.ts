@@ -23,7 +23,6 @@ import {
 } from '@licio/shared';
 import { NO_KEY_WARNING, scanForKeyMaterial } from '../compliance/no-key-filter.js';
 import { autoAssignCase } from './assignment.js';
-import { writeAudit } from './audit.js';
 import { coordinationScore } from './prechecks.js';
 import type { ModerationServices } from './services.js';
 import type { ModerationCaseRecord, ModerationReportRecord } from './stores.js';
@@ -37,16 +36,47 @@ async function autoAssignNewCase(
 ): Promise<void> {
   const assignee = await autoAssignCase(services);
   if (assignee === null) return;
-  await services.cases.update(theCase.caseId, { assignedTo: assignee });
-  await writeAudit(services, {
-    actorUserId: null, // system routing
-    actorRole: null,
-    action: 'assign',
-    targetType: theCase.targetType,
-    targetId: theCase.targetId,
-    subjectUserId: assignee,
-    notes: 'auto-assigned to the least-loaded available reviewer',
+  // AUTO-ROUTING LOSES TO A HUMAN.  This runs in the BACKGROUND
+  // (`services.trackBackground`), so it can land after a reviewer has already
+  // claimed the case manually — and a plain `update` would then overwrite that
+  // claim, silently, with no audit row naming the person it displaced.  The
+  // compare-and-set makes the outcome ordering-independent: whoever got there
+  // first keeps it, and this simply does nothing.
+  // ONE UNIT: the CAS and its audit row commit together, so the row cannot land after a
+  // human reviewer's later claim and leave the most recent entry naming the wrong holder.
+  // Auto-routing runs for every newly opened case, so this is the row most likely to be
+  // the one a reader reaches first.
+  const routed = await services.transactor.run(async (tx) => {
+    const claimed = await tx.cases.claimIfUnassigned(theCase.caseId, assignee);
+    // A human got there first.  Nothing written, nothing to audit — the empty unit
+    // commits and auto-routing has, correctly, done nothing.
+    if (claimed === null) return false;
+    await tx.audit({
+      actorUserId: null, // system routing
+      actorRole: null,
+      action: 'assign',
+      caseId: theCase.caseId,
+      targetType: theCase.targetType,
+      targetId: theCase.targetId,
+      subjectUserId: assignee,
+      // NAMES THE EDGE, like both console assignment rows do.
+      //
+      // This row carried neither state, and `writeAudit` defaults both to null — so the
+      // FIRST assign row on the common path said nothing about what changed.  Reading
+      // the trail by FOLLOWING its edges then met a null-to-null row at the head of
+      // every chain: the system assignment was unattributable, not merely unexplained.
+      //
+      // Both values are known here without assuming anything.  `claimIfUnassigned`
+      // succeeds only against `assigned_to IS NULL`, so the prior state IS unassigned;
+      // the next state is read off the row the CAS RETURNED rather than the local it was
+      // asked for, which is the discipline the console path uses.
+      priorState: 'unassigned',
+      nextState: claimed.assignedTo ?? assignee,
+      notes: 'auto-assigned to the least-loaded available reviewer',
+    });
+    return true;
   });
+  if (!routed) return;
   services.metrics.increment('moderation.auto_assign');
 }
 
@@ -261,12 +291,24 @@ export async function submitReport(
     reasonCodeSlaHours(reasonCode),
   );
   const slaDueAt = new Date(Date.parse(theCase.createdAt) + minSlaHours * 3_600_000).toISOString();
+  // NO `status` KEY.  This block recomputes the aggregate from the case's committed
+  // reports, and severity/routedTo/reportCount/slaDueAt genuinely are derived from the
+  // `listByCase` above.  `status` was not: it was carried verbatim from a snapshot read
+  // ~85 lines earlier, across a report insert and a full re-read — so a steward
+  // transition landing in that window was written back to its old value.  An `escalate`
+  // silently dropped out of the escalated queue while its audit row still stood, and
+  // nothing recorded the undo, because nothing knew one had happened.
+  //
+  // Removing the key loses nothing: it could only ever write back what it read.  The
+  // reopen its dead ternary reached for is already structural — `findOpenByTarget`
+  // filters `status <> 'resolved'`, so a new report against a resolved target opens a
+  // FRESH case rather than reviving the old one, which also makes
+  // `theCase.status === 'resolved'` unreachable on every path into here.
   await services.cases.update(theCase.caseId, {
     severity: aggSeverity,
     routedTo,
     reportCount: caseReports.length,
     slaDueAt,
-    status: theCase.status === 'resolved' ? 'new' : theCase.status,
   });
 
   services.metrics.increment('reports.created');
@@ -426,8 +468,34 @@ export async function detectCoordination(
   }
 
   // MFCI-2: delay volume-driven enforcement pending integrity review.
-  await services.cases.update(theCase.caseId, { enforcementDelayed: true });
+  //
+  // ONE UNIT: the compare-and-set that engages the delay, and the audit row recording it.
+  // The audit used to sit in `trackBackground`, which has no production flush — so the
+  // record of an enforcement delay could simply die with the process, leaving the flag
+  // set and nothing saying who set it or why.  Inline and joined, it cannot.
+  const delayed = await services.transactor.run(async (tx) => {
+    if ((await tx.cases.delayEnforcementIfNotDelayed(theCase.caseId)) === null) return false;
+    await tx.audit({
+      actorUserId: null,
+      actorRole: null,
+      action: 'coordination_delay',
+      caseId: theCase.caseId,
+      reasonCode: null,
+      targetType: theCase.targetType,
+      targetId: theCase.targetId,
+      subjectUserId: null,
+      priorState: 'enforcement_active',
+      nextState: 'enforcement_delayed',
+      reversible: true,
+      notes: 'Coordinated-report protection engaged pending integrity review (MFCI-2).',
+    });
+    return true;
+  });
+  if (!delayed) return;
   services.metrics.increment('reports.coordination_flagged');
+  // OUTSIDE the unit, and after it: paging on-call is an outward action that a rollback
+  // cannot recall.  Ordering it after the commit means the page always describes a delay
+  // that really is in force.
   services.alerts.pageOnCall({
     kind: 'coordinated_report',
     targetType: theCase.targetType,
@@ -435,25 +503,4 @@ export async function detectCoordination(
     reasonCode: null,
     severity: current.severity,
   });
-  // Automated, system-actor audit entry (WS-J.2.5a: every automated event).
-  services.trackBackground(
-    Promise.resolve().then(async () => {
-      await services.audit.append({
-        actorUserId: null,
-        actorRole: null,
-        action: 'coordination_delay',
-        reasonCode: null,
-        targetType: theCase.targetType,
-        targetId: theCase.targetId,
-        subjectUserId: null,
-        priorState: 'enforcement_active',
-        nextState: 'enforcement_delayed',
-        reversible: true,
-        linkedActionId: null,
-        reportIds: [],
-        coApproverUserId: null,
-        notes: 'Coordinated-report protection engaged pending integrity review (MFCI-2).',
-      });
-    }),
-  );
 }

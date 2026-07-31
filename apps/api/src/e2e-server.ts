@@ -12,6 +12,7 @@
 // LICIO_E2E=1. It is NEVER the production server (that is src/index.ts), so the
 // test-auth route cannot be a production backdoor.
 import { serve } from '@hono/node-server';
+import { accountMayHoldSession } from '@licio/shared';
 import { validateServerEnv } from '@licio/shared/env';
 import { Hono } from 'hono';
 import { seedAiGovernance } from './ai-governance/seed.js';
@@ -78,6 +79,7 @@ import { InMemoryLcapServerStore } from './lcap/store.js';
 import { demoStory } from './lib/demo-data.js';
 import { seedForumDemoData } from './lib/demo-seed.js';
 import { createLogger } from './lib/logger.js';
+import { notFoundHandler } from './middleware/error-handler.js';
 import { RendezvousService, setRendezvousService } from './private-rendezvous/service.js';
 import { InMemoryRendezvousStore } from './private-rendezvous/stores.js';
 import {
@@ -133,6 +135,13 @@ await ingestionServices.reloadConfig();
 registerIngestionConsumers(eventServices, ingestionServices);
 setIngestionServices(ingestionServices);
 
+// The WS-E fold's thread → story fallback (see `storyIdForThread` on
+// `EventPipelineServices`).  Assigned AFTER the ingestion container exists, like
+// the story-title cache above: `eventServices` is built first, and the resolution
+// belongs to the story store.
+eventServices.storyIdForThread = (threadId) =>
+  ingestionServices.stories.getStoryIdByThreadId(threadId);
+
 const forumServices = createInMemoryForumServices({
   events: eventServices,
   ingestion: ingestionServices,
@@ -143,7 +152,7 @@ await forumServices.reloadConfig();
 // incl. the active-account gate).
 forumServices.platformRolesReader = async (id) => {
   const user = await identityServices.store.getUser(id);
-  return user?.accountState === 'active' ? user.roles : [];
+  return accountMayHoldSession(user?.accountState) ? (user?.roles ?? []) : [];
 };
 // WS-T challenge policy — the KYC capacity-boost reader (mirrors the
 // production boot: lazy compliance resolution, fail-closed to false).
@@ -327,9 +336,16 @@ knomosisServices.lawPacks = buildLawPackPort(governanceStores);
 const treasuryServices = createInMemoryTreasuryServices({
   knomosis: knomosisServices,
   governanceStores,
+  // No `db` in this harness: the electorate snapshot falls back to the in-memory fold,
+  // which the shared contract suite holds to the same answers as the statement.
   membership: buildMembershipFactsPort(forumServices, identityServices, knomosisServices),
   treasuryExecutor: buildTreasuryExecutorPort(getGovernanceService()),
-  elections: buildStewardElectionPort(getGovernanceService()),
+  elections: buildStewardElectionPort(getGovernanceService(), (roomId) =>
+    // ONE measurement reporting the count AND its instant: the election records
+    // that instant as its open, and `castElectionVote` compares a voter's join
+    // against it.
+    forumServices.rooms.measureEligibleVoters(roomId),
+  ),
 });
 setTreasuryServices(treasuryServices);
 knomosisServices.readinessChecklist = buildWsmReadinessChecklistPort(treasuryServices);
@@ -339,7 +355,10 @@ await seedAiGovernance(aiGovernanceServices);
 
 // --- App: the test-auth route first (no CSRF — it bootstraps the session),
 // then the full production app for everything else. --------------------------
+// `notFound` on the WRAPPER too — see the note in `index.ts`: an unmatched path
+// reaches this instance, not the mounted app, and Hono's default is plain text.
 const app = new Hono()
+  .notFound(notFoundHandler)
   .route('/v1/test-auth', createTestAuthRoute(identityServices))
   // Test-only fixture signer (never in the production AppType): the Playwright
   // fake EIP-6963 provider proxies its sign requests here so the browser

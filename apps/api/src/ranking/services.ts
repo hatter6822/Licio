@@ -143,7 +143,6 @@ export function createCandidateDataPorts(
   return {
     recentStories: (limit) => ingestion.stories.listRecent(limit),
     storyById: (storyId) => ingestion.stories.getById(storyId),
-    threadByStoryId: (storyId) => ingestion.stories.getThreadByStoryId(storyId),
     threadsByStoryIds: (storyIds) => ingestion.stories.getThreadsByStoryIds(storyIds),
     async subscribedRoomIds(userId) {
       const subscriptions = await forum.rooms.listSubscriptionsByUser(userId);

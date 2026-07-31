@@ -239,6 +239,37 @@ describe('GET /v1/auth/status', () => {
     expect(body.user.roles).toEqual(['user']);
     expect(body.user.steward_roles).toEqual([]);
   });
+
+  it('reports a RESTRICTED account as authenticated, with its real state', async () => {
+    // The restrict sanction costs the write paths, not the account: the login
+    // path mints a session for it and `requireAuth` admits it so the member can
+    // appeal and exercise data rights.  This projection reporting
+    // `authenticated: false` was a lockout the API never imposed — the client's
+    // route guard reads it, so every self-service page bounced to /login while
+    // the session behind it was perfectly valid.
+    const user = await seedVerifiedUser({ email: 'restr@example.com', handle: 'restruser' });
+    const app = createApp();
+    const sid = await loginViaEmail(app, 'restr@example.com');
+    await services.store.updateUser(user.userId, { accountState: 'restricted' });
+    const res = await app.request('/v1/auth/status', { headers: { cookie: sid } });
+    const body = await readJson<{
+      authenticated: boolean;
+      user: { account_state: string };
+    }>(res);
+    expect(body.authenticated).toBe(true);
+    // …and the state is REPORTED, not flattened to 'active' — the restricted
+    // banner and the disabled write affordances are rendered from it.
+    expect(body.user.account_state).toBe('restricted');
+  });
+
+  it('reports a SUSPENDED account as unauthenticated', async () => {
+    const user = await seedVerifiedUser({ email: 'suspst@example.com', handle: 'suspstuser' });
+    const app = createApp();
+    const sid = await loginViaEmail(app, 'suspst@example.com');
+    await services.store.updateUser(user.userId, { accountState: 'suspended' });
+    const res = await app.request('/v1/auth/status', { headers: { cookie: sid } });
+    expect((await readJson<{ authenticated: boolean }>(res)).authenticated).toBe(false);
+  });
 });
 
 describe('active sessions', () => {

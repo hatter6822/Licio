@@ -9,12 +9,16 @@ import {
 import { useAuthStore } from '../stores/auth.js';
 import {
   ApiClientError,
+  changeRoomVisibility,
+  changeStoryVisibility,
   createContribution,
   createLens,
+  DuplicateStoryError,
   fetchFeed,
   fetchRoomLenses,
   joinRoom,
   parseResponse,
+  RoomVisibilityBlockedError,
   resetApiClientState,
   setRoomLens,
   uploadAttentionAggregates,
@@ -400,5 +404,95 @@ describe('room lens client (WS-G.2.2)', () => {
     const result = await setRoomLens(ROOM_ID, LENS.lens_id);
     expect(result.lens_id).toBe(LENS.lens_id);
     expect(posted).toEqual({ lens_id: LENS.lens_id });
+  });
+});
+
+describe('changeRoomVisibility 409 shapes (WS-Q.3.4)', () => {
+  const ROOM = '66666666-6666-4666-8666-666666666666';
+  const BLOCKED = '77777777-7777-4777-8777-777777777777';
+
+  it('keeps the BLOCKER ids so the steward can resolve each duplicate', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: { code: 'duplicate_story', message: '1 public story shares a link' },
+          blocked_story_ids: [BLOCKED],
+        },
+        409,
+      );
+    });
+    const error = await changeRoomVisibility(ROOM, 'private').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(RoomVisibilityBlockedError);
+    expect((error as RoomVisibilityBlockedError).blockedStoryIds).toEqual([BLOCKED]);
+  });
+
+  it('keeps the RETRY GUIDANCE of the second 409 shape, which carries no blockers', async () => {
+    // `visibility_race`: a story turned public mid-cascade, so the trigger refused
+    // the flip and the remedy is a plain retry.  Reading the body for the blocker
+    // shape CONSUMES it, so letting this fall through to `parseResponse` handed
+    // `normalizeError` an unreadable response and collapsed the whole thing to a
+    // generic `http_409` / "Conflict" — discarding the exact sentence that tells
+    // the steward what to do, one layer above the UI that shows it.
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: {
+            code: 'visibility_race',
+            message: 'A story in this room became public while it was being converted.',
+          },
+        },
+        409,
+      );
+    });
+    const error = await changeRoomVisibility(ROOM, 'private').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error).not.toBeInstanceOf(RoomVisibilityBlockedError);
+    expect((error as ApiClientError).code).toBe('visibility_race');
+    expect((error as ApiClientError).message).toContain('became public while it was being');
+    expect((error as ApiClientError).status).toBe(409);
+  });
+});
+
+describe('changeStoryVisibility duplicate collision (WS-Q.2.4)', () => {
+  const STORY_ID = '44444444-4444-4444-8444-444444444444';
+  const EXISTING_ID = '55555555-5555-4555-8555-555555555555';
+
+  it('throws a TYPED DuplicateStoryError carrying the colliding story id', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return jsonResponse(
+        {
+          error: { code: 'duplicate_story', message: 'already public' },
+          existing_story_id: EXISTING_ID,
+        },
+        409,
+      );
+    });
+    const error = await changeStoryVisibility(STORY_ID, 'public').catch((err: unknown) => err);
+    // `instanceof` — not a cast — is what makes a rename of the field a COMPILE
+    // error on both sides rather than a silently dropped "open the existing
+    // story" affordance.
+    expect(error).toBeInstanceOf(DuplicateStoryError);
+    expect((error as DuplicateStoryError).existingStoryId).toBe(EXISTING_ID);
+    expect((error as DuplicateStoryError).code).toBe('duplicate_story');
+    expect((error as DuplicateStoryError).status).toBe(409);
+    // Still an ApiClientError, so every generic error surface keeps working.
+    expect(error).toBeInstanceOf(ApiClientError);
+  });
+
+  it('falls back to a plain ApiClientError when the 409 body is unreadable', async () => {
+    mockFetch(async (url) => {
+      if (url.includes('/api/csrf-token')) return jsonResponse({ token: 't' });
+      return new Response('<html>gateway</html>', {
+        status: 409,
+        headers: { 'content-type': 'text/html' },
+      });
+    });
+    const error = await changeStoryVisibility(STORY_ID, 'public').catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error).not.toBeInstanceOf(DuplicateStoryError);
+    expect((error as ApiClientError).code).toBe('duplicate_story');
   });
 });

@@ -335,13 +335,29 @@ export class GovernanceService {
     return this.deps.stores.seats.get(roomId);
   }
 
+  /** One election by id — the read that lets a caller (or a test) see the
+   *  turnout electorate frozen at open, which is otherwise only observable
+   *  through the settle outcome. */
+  async getElection(electionId: string) {
+    return this.deps.stores.elections.get(electionId);
+  }
+
   /** Schedule an election when the term has elapsed and none is open (ADR-7).
    *  `options.force` skips the term-elapsed check for a COMMUNITY-VOTED early
    *  rotation (a WS-M `steward_rotation` proposal execution) — the one-open-
    *  per-room guard still applies unconditionally. */
   async scheduleElection(
     roomId: string,
-    options: { force?: boolean } = {},
+    options: {
+      force?: boolean;
+      /** MEASURES the electorate and reports the instant it measured at, together
+       *  (`RoomStore.measureEligibleVoters`).  `opensAt` is then that instant, so
+       *  the denominator and the cutoff `castVote` compares against describe one
+       *  state by construction.  A clock read passed into a live count is two
+       *  answers to one question whichever order they run in — see the store
+       *  method's own note. */
+      measureElectorate?: (roomId: string) => Promise<{ count: number; asOf: string }>;
+    } = {},
   ): Promise<GovernanceResult<string>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat) return err('no_seat', 'Room has no steward seat.');
@@ -349,8 +365,27 @@ export class GovernanceService {
     if (!options.force && this.deps.now().getTime() < Date.parse(seat.termEnd)) {
       return err('term_active', 'The current term has not elapsed.');
     }
+    // FREEZE the turnout electorate here, after the authorization checks pass so
+    // a refused call never pays for the count.  `tallyElection` divides
+    // `distinctVoters` by this; reading it fresh at SETTLE let anyone inflate
+    // room membership after the last ballot, push turnout below `minTurnout`,
+    // and fail an election that had met it — whereupon the fail-safe hands the
+    // incumbent a full new term.  The ratification path has always snapshotted
+    // its electorate at open; elections now match it.
+    // THE INSTANT COMES FROM THE MEASUREMENT, not from a clock beside it.
+    //
+    // Taking the instant first and passing it into a live count fixed the JOIN
+    // direction and opened the DEPARTURE one: a member who leaves in between is
+    // hard-deleted from the rows the count reads (`deleteSubscription`;
+    // `room_subscription_status` has no `left` state), so the denominator is
+    // smaller than the electorate at the instant it claims — turnout inflated, and
+    // an election can settle that missed its `minTurnout` floor.  Taking the
+    // instant afterwards just swaps which direction leaks.  One measurement
+    // reporting both is the only ordering that leaks in neither.
+    const measured = await options.measureElectorate?.(roomId);
+    const opensAt = measured === undefined ? this.deps.now() : new Date(measured.asOf);
+    const eligibleCount = Math.max(0, measured?.count ?? 0);
     const electionId = this.deps.uuid();
-    const opensAt = this.deps.now();
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     // The insert is the ATOMIC one-open-per-room guard (DB partial unique index /
     // in-memory check); the `seat.currentElectionId` check above is a fast-path
@@ -362,6 +397,7 @@ export class GovernanceService {
       opensAt: opensAt.toISOString(),
       closesAt: closesAt.toISOString(),
       weightModel: 'one_civic_account_one_vote',
+      eligibleCount,
       winnerUserId: null,
       tally: null,
       mode: 'simulated',
@@ -417,6 +453,19 @@ export class GovernanceService {
     // non-member candidate (defense-in-depth; the winner is also re-validated at
     // seat assignment). Defaults true so existing/internal callers are unaffected.
     candidateEligible = true,
+    /**
+     * When the voter joined the room (ISO), or null when it cannot be
+     * determined (a steward-role grant carries no subscription row).
+     *
+     * `eligibleCount` is snapshotted when the election OPENS, so the
+     * denominator is the population as it stood then.  Without this the
+     * numerator is not: a member who joins afterwards is `eligible` at vote time
+     * and raises `distinctVoters` against a denominator they were never counted
+     * in, so post-open entrants can satisfy `minTurnout` and decide a winner
+     * from outside the recorded electorate.  Freezing only the COUNT is half a
+     * freeze.
+     */
+    voterMemberSince: string | null = null,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote in a steward election.');
     // WS-L.3.5e: the governance-voting kill switch blocks NEW ballots only —
@@ -444,6 +493,15 @@ export class GovernanceService {
     // the endpoint is never a room-membership oracle for an invalid election.
     if (!candidateEligible) {
       return err('invalid_candidate', 'The candidate is not a member of this room.');
+    }
+    // The electorate was fixed at `opensAt`; a null join instant cannot be
+    // judged and passes, rather than locking out a legitimate steward.
+    if (voterMemberSince !== null && Date.parse(voterMemberSince) > Date.parse(election.opensAt)) {
+      return err(
+        'joined_after_open',
+        'The electorate for this election was fixed when it opened; ' +
+          'members who joined afterwards vote in the next one.',
+      );
     }
     const cast = await this.deps.stores.votes.cast({
       electionId,
@@ -478,10 +536,17 @@ export class GovernanceService {
     // baseline when the room has bound no law-pack — never a hardcoded constant.
     const rules = await this.resolveElectionRules(election.roomId);
     const ballots = await this.deps.stores.votes.listByElection(electionId);
+    // The FROZEN electorate wins over the caller's live read.  Dividing by a
+    // membership set that anyone can grow after the last ballot let a losing
+    // incumbent fail the election on turnout and take a full new term; the
+    // snapshot taken at open is the electorate the voters actually faced.
+    // A row opened before migration 0099 carries 0, and only then does the
+    // caller's count stand in — the same behaviour those rows had all along.
+    const turnoutBasis = election.eligibleCount > 0 ? election.eligibleCount : eligibleCount;
     const result = tallyElection(
       ballots.map((b) => ({ voterUserId: b.voterUserId, candidateUserId: b.candidateUserId })),
       rules,
-      { eligibleCount, incumbentUserId: seat?.holderUserId ?? null },
+      { eligibleCount: turnoutBasis, incumbentUserId: seat?.holderUserId ?? null },
     );
     const incumbent = seat?.holderUserId ?? null;
     let winnerUserId = result.winnerUserId;
@@ -539,9 +604,14 @@ export class GovernanceService {
    * context (the pay-to-rank isolation boundary).
    */
   async runElectionLifecycle(
-    eligibleVoterCount: (roomId: string) => Promise<number>,
+    eligibleVoterCount: (roomId: string, asOf: string) => Promise<number>,
     nowMs: number = this.deps.now().getTime(),
     isRoomMember?: (roomId: string, userId: string) => Promise<boolean>,
+    /** The FREEZE reader — count and instant together.  Distinct from
+     *  `eligibleVoterCount` above, which answers about a PAST recorded instant for
+     *  the settle fallback: that is a different question and rightly a different
+     *  read. */
+    measureElectorate?: (roomId: string) => Promise<{ count: number; asOf: string }>,
   ): Promise<{ scheduled: number; settled: number }> {
     const seats = await this.deps.stores.seats.list();
     let scheduled = 0;
@@ -549,7 +619,10 @@ export class GovernanceService {
     for (const seat of seats) {
       if (seat.currentElectionId === null) {
         if (nowMs >= Date.parse(seat.termEnd)) {
-          const result = await this.scheduleElection(seat.roomId);
+          // Pass the electorate reader so the turnout basis is frozen at OPEN.
+          const result = await this.scheduleElection(seat.roomId, {
+            ...(measureElectorate === undefined ? {} : { measureElectorate }),
+          });
           if (result.ok) scheduled += 1;
         }
         continue;
@@ -560,7 +633,11 @@ export class GovernanceService {
         election.status === 'open' &&
         nowMs >= Date.parse(election.closesAt)
       ) {
-        const count = await eligibleVoterCount(seat.roomId);
+        // The FALLBACK basis (used only when the election recorded no count) is
+        // read AS OF the election's open, not live at settle: the ballots were
+        // gated on `opensAt`, so a denominator measured now would be answering
+        // a different question from the numerator it divides.
+        const count = await eligibleVoterCount(seat.roomId, election.opensAt);
         // Bind the membership reader to THIS election's room so the winner is
         // re-validated as a member of the room being elected for.
         const memberCheck = isRoomMember
@@ -827,19 +904,20 @@ export class GovernanceService {
    * this is the steward's VALIDATION gate over the member-authored candidacy
    * pipeline: members propose and vote; the steward decides which admitted
    * proposals face a vote, and can cancel an open one below).
-   * `countEligibleVoters` is a soft cross-context reader for the room's eligible-
-   * voter count (active subscribers ∪ stewards). It is invoked ONLY AFTER the
-   * steward/model/law-pack checks pass — so an unauthorized caller can never force
-   * the (potentially expensive) count — and its result is SNAPSHOTTED onto the vote
-   * as the frozen turnout denominator, so membership churn during the window cannot
-   * flip the outcome (M4). Omitted ⇒ 0 for direct/test callers.
+   * `measureElectorate` is a soft cross-context reader for the room's eligible-voter
+   * count (active subscribers ∪ stewards) AND the instant it measured at. It is
+   * invoked ONLY AFTER the steward/model/law-pack checks pass — so an unauthorized
+   * caller can never force the (potentially expensive) count — and its result is
+   * SNAPSHOTTED onto the vote as the frozen turnout denominator, so membership churn
+   * during the window cannot flip the outcome (M4). Omitted ⇒ 0 for direct/test
+   * callers.
    */
   async openRatification(
     roomId: string,
     userId: string,
     modelId: string,
     lawPackId: string | null,
-    countEligibleVoters?: () => Promise<number>,
+    measureElectorate?: () => Promise<{ count: number; asOf: string }>,
   ): Promise<GovernanceResult<{ voteId: string }>> {
     const seat = await this.deps.stores.seats.get(roomId);
     if (!seat || seat.holderUserId !== userId) {
@@ -855,8 +933,13 @@ export class GovernanceService {
     const lawPack = await this.resolveLawPack(roomId, lawPackId);
     // Only NOW — after authorization + validation — read the electorate, so a
     // non-steward cannot force the count query by hammering the endpoint.
-    const eligibleCount = countEligibleVoters ? Math.max(0, await countEligibleVoters()) : 0;
-    const opensAt = this.deps.now();
+    //
+    // THE INSTANT COMES FROM THE MEASUREMENT, exactly as `scheduleElection` does —
+    // a clock reading beside a live count leaks a joiner in one ordering and a
+    // leaver in the other.
+    const measured = await measureElectorate?.();
+    const opensAt = measured === undefined ? this.deps.now() : new Date(measured.asOf);
+    const eligibleCount = Math.max(0, measured?.count ?? 0);
     const closesAt = new Date(opensAt.getTime() + this.deps.config.electionWindowSeconds * 1000);
     const voteId = this.deps.uuid();
     // The insert is the ATOMIC one-open-per-room guard (DB partial unique index /
@@ -891,6 +974,10 @@ export class GovernanceService {
     voterUserId: string,
     choice: RatificationChoice,
     eligible: boolean,
+    /** When this voter JOINED, so the electorate freeze binds the NUMERATOR too.
+     *  Null is unjudgeable (a steward-role arm carries no subscription row) and
+     *  passes, matching `castVote` and the `joinedBefore` count. */
+    voterMemberSince: string | null = null,
   ): Promise<GovernanceResult<void>> {
     if (!eligible) return err('not_member', 'Only room members may vote on ratification.');
     // WS-L.3.5e governance-voting kill switch (same semantics as castVote).
@@ -909,6 +996,22 @@ export class GovernanceService {
     // Reject after the published close time (status flips only on the tick).
     if (vote.status !== 'open' || this.deps.now().getTime() >= Date.parse(vote.closesAt)) {
       return err('not_open', 'Ratification vote is not open.');
+    }
+    // THE ELECTORATE FREEZE, on the numerator as well as the denominator.
+    // `eligibleCount` is snapshotted at the open while eligibility was checked
+    // live, so post-open joiners could each add to `distinctVoters` against a
+    // denominator they were never counted in — and `turnout` is
+    // `min(1, distinctVoters / eligibleCount)`, so enough of them satisfy any
+    // `minTurnout` outright.  This is the ONLY path to activating a room's
+    // in-room AI governance model, which makes it the last place a recruitment
+    // window belongs.  Elections and WS-M proposals already gate this; the
+    // ratification path is the third.
+    if (voterMemberSince !== null && Date.parse(voterMemberSince) > Date.parse(vote.opensAt)) {
+      return err(
+        'joined_after_open',
+        'The electorate for this ratification was fixed when it opened; ' +
+          'members who joined afterwards vote on the next one.',
+      );
     }
     const cast = await this.deps.stores.ratificationBallots.cast({
       voteId,

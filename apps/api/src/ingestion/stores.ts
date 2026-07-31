@@ -30,10 +30,25 @@ import type {
   ThreadConversationState,
   ThreadSafetyState,
 } from '@licio/shared';
+import {
+  TIER_UNIQUE_PUBLIC_CONSTRAINT,
+  TIER_UNIQUE_ROOM_CONSTRAINT,
+  UniqueViolationError,
+} from '../lib/pg-errors.js';
 
 // ---------------------------------------------------------------------------
 // Records (the storage shape; ISO timestamps on this side of the boundary).
 // ---------------------------------------------------------------------------
+
+/** Why a story is hidden.  Mirrors `story_hidden_state`; every reader that only asks
+ *  "is it hidden" tests for null, so this union is consulted by the few places that
+ *  care WHICH. */
+export type StoryHiddenState = 'takedown' | 'safety' | 'superseded';
+
+/** What a SOURCE-wide hide may set.  A narrower set on purpose, and derived rather than
+ *  respelled: `superseded` describes one row's relationship to its in-room twin, so it
+ *  can never be the reason an entire source was hidden. */
+export type SourceHideReason = Extract<StoryHiddenState, 'takedown' | 'safety'>;
 
 export interface StoryRecord {
   storyId: string;
@@ -47,6 +62,11 @@ export interface StoryRecord {
   visibility: StoryVisibility;
   /** WS-Q.2.3 — scan-gated media upload (image/video posts); null otherwise. */
   mediaUploadRef: string | null;
+  /** Intrinsic dimensions of the media upload, copied at submission from the
+   *  SERVER-parsed value so the feed projection reserves the real box with no
+   *  per-story upload lookup. Both null when unknown. */
+  mediaWidth: number | null;
+  mediaHeight: number | null;
   /** WS-Q.2.2b — the canonical PUBLIC story for the same URL (room_only rows). */
   canonicalPublicStoryId: string | null;
   language: string | null;
@@ -80,7 +100,7 @@ export interface StoryRecord {
     | 'failed'
     | 'disallowed_robots'
     | 'not_applicable';
-  hiddenState: 'takedown' | 'safety' | null;
+  hiddenState: StoryHiddenState | null;
   /** WS-T dispute posture (a corrected-story debate outcome); absent ⇒ `none`.
    *  ORTHOGONAL to `hiddenState`: an `incorrect` story stays VISIBLE but is
    *  penalized to the bottom of the feed by ranking. */
@@ -105,8 +125,18 @@ export interface StoryRecord {
  */
 export type StoryCreateInput = Omit<
   StoryRecord,
-  'createdAt' | 'updatedAt' | 'lastMaterialUpdateAt' | 'proposedTopicIds'
-> & { proposedTopicIds?: string[] };
+  | 'createdAt'
+  | 'updatedAt'
+  | 'lastMaterialUpdateAt'
+  | 'proposedTopicIds'
+  // Media dimensions are SERVER-DERIVED at submission (copied from the upload's
+  // parsed header) and unknown for every non-media story, so they are optional
+  // on the input and always present — null when unknown — on the stored record.
+  // A caller that had to write `mediaWidth: null` for a text story would be
+  // stating something it has no business knowing.
+  | 'mediaWidth'
+  | 'mediaHeight'
+> & { proposedTopicIds?: string[]; mediaWidth?: number | null; mediaHeight?: number | null };
 
 export interface ThreadShellRecord {
   threadId: string;
@@ -256,6 +286,19 @@ export interface EmbeddingRecord {
 // Store interfaces.
 // ---------------------------------------------------------------------------
 
+/** Strictly older than the cursor under `(createdAt DESC, storyId DESC)`. */
+function isOlderThan(story: StoryRecord, before: StoryPageCursor): boolean {
+  if (story.createdAt !== before.createdAt) return story.createdAt < before.createdAt;
+  return story.storyId < before.storyId;
+}
+
+/** A `(createdAt, storyId)` paging cursor over the most-recent-first story order.
+ *  The id breaks a createdAt tie, so no row is visited twice or skipped. */
+export interface StoryPageCursor {
+  readonly createdAt: string;
+  readonly storyId: string;
+}
+
 export interface StoryStore {
   /** Transactional story + thread-shell creation (WS-F.1.4d): both or neither.
    *  Returns the duplicate outcome when the canonical URL already exists —
@@ -271,8 +314,21 @@ export interface StoryStore {
    *  back-linking when a public story becomes canonical). */
   listRoomOnlyByCanonicalUrl(canonicalUrl: string): Promise<StoryRecord[]>;
   /** WS-Q.3.4a — stories in a room (the room-visibility cascade sweep input),
-   *  most-recent first, bounded. */
-  listByRoom(roomId: string, limit: number, visibility?: StoryVisibility): Promise<StoryRecord[]>;
+   *  most-recent first, bounded.
+   *
+   *  `before` is a `(createdAt, storyId)` cursor that pages STRICTLY OLDER.  The
+   *  cascade needs it because converting a story removes it from the `public`
+   *  filter while a story a tier-unique collision REFUSES stays public — so a
+   *  cursor-less sweep re-reads the same blocked rows on every pass, never
+   *  reaches an older convertible story, and (before the per-page progress
+   *  check below) looped for ever once any earlier page had converted
+   *  something. */
+  listByRoom(
+    roomId: string,
+    limit: number,
+    visibility?: StoryVisibility,
+    before?: StoryPageCursor,
+  ): Promise<StoryRecord[]>;
   /** WS-S.9 — the LIVE (`hidden_state IS NULL`) stories in a room, most-recent first, bounded.
    *  The migration purge loop pages with THIS (not `listByRoom`+a JS filter): each pass hides a
    *  batch, which drops out of the next query, so the window advances and the loop drains every
@@ -392,7 +448,7 @@ export interface StoryStore {
    *  whose PRIMARY source is `sourceId` and drop its archived excerpt (the
    *  `noarchive` realization). Idempotent — already-hidden rows are skipped —
    *  and returns the number of stories newly hidden. */
-  hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number>;
+  hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -627,6 +683,10 @@ export class InMemoryStoryStore implements StoryStore {
       // Default proposals to the trusted topics when a caller omits them (only
       // the submission path sets them separately — author picks vs sentinel).
       proposedTopicIds: story.proposedTopicIds ?? story.topicIds,
+      // Absent ⇒ unknown, which is null on the record. Only the submission path
+      // knows them (copied from the upload's parsed header).
+      mediaWidth: story.mediaWidth ?? null,
+      mediaHeight: story.mediaHeight ?? null,
       createdAt: at,
       updatedAt: at,
       lastMaterialUpdateAt: at,
@@ -695,12 +755,14 @@ export class InMemoryStoryStore implements StoryStore {
     roomId: string,
     limit: number,
     visibility?: StoryVisibility,
+    before?: StoryPageCursor,
   ): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
       .filter(
         (s) => s.roomId === roomId && (visibility === undefined || s.visibility === visibility),
       )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .filter((s) => before === undefined || isOlderThan(s, before))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.storyId.localeCompare(a.storyId))
       .slice(0, limit);
   }
 
@@ -819,8 +881,31 @@ export class InMemoryStoryStore implements StoryStore {
     const current = this.#stories.get(storyId);
     if (!current) return null;
     const updated: StoryRecord = { ...current, ...patch, updatedAt: nowIso(this.#now) };
+    // WS-Q.2.2a/2.4 — visibility or hidden_state changes MOVE the URL slot, and
+    // the destination slot may already be occupied: Postgres enforces
+    // `stories_canonical_url_public_uq` / `stories_canonical_url_room_uq` on
+    // every UPDATE, not only on INSERT.  This adapter used to reindex
+    // unconditionally, silently evicting the incumbent — so a collision that
+    // raises 23505 in production was invisible in every unit test, and both
+    // the story-narrow path and the room-visibility cascade shipped without
+    // handling it.  An in-memory adapter that is more permissive than the
+    // database is a dev↔prod divergence, and this is the direction that hides
+    // faults rather than inventing them.
+    const slot = this.#slotFor(updated);
+    if (slot !== null) {
+      const occupant = slot.map.get(slot.key);
+      if (occupant !== undefined && occupant !== storyId) {
+        // The names come from the SHARED list, so this emulation and the callers
+        // that discriminate on it cannot drift — a literal here that no consumer
+        // recognises turns a duplicate into a 500.
+        throw new UniqueViolationError(
+          updated.visibility === 'public'
+            ? TIER_UNIQUE_PUBLIC_CONSTRAINT
+            : TIER_UNIQUE_ROOM_CONSTRAINT,
+        );
+      }
+    }
     this.#stories.set(storyId, updated);
-    // WS-Q.2.2a/2.4 — visibility or hidden_state changes move the URL slot.
     this.#reindexUrl(current, updated);
     return updated;
   }
@@ -909,7 +994,7 @@ export class InMemoryStoryStore implements StoryStore {
     return [...(this.#sourceLinks.get(storyId) ?? [])];
   }
 
-  async hideBySource(sourceId: string, hiddenState: 'takedown' | 'safety'): Promise<number> {
+  async hideBySource(sourceId: string, hiddenState: SourceHideReason): Promise<number> {
     let count = 0;
     for (const [storyId, record] of this.#stories) {
       if (record.sourceId !== sourceId || record.hiddenState !== null) continue;

@@ -71,6 +71,32 @@ describe('tallyProposalVotes (WS-M.4.2d)', () => {
     expect(met.reject).toBe('1');
   });
 
+  it('tally-inversion: a ZERO bar lets one approval outweigh a hundred rejections', () => {
+    // Grounds `law-pack-validate`'s refusal of `minAffirmativeFraction <= 0`.  Note
+    // what the zero bar does NOT do: the pass test is STRICT (`approve > passBar`),
+    // so a vote with no affirmative weight still cannot pass — the validator's
+    // original "could pass with zero affirmative weight" rationale was wrong about
+    // the mechanism.  What it really opens is majority inversion, which is why the
+    // bound belongs on the threshold at every quorum rather than only a non-zero one.
+    const votes = [
+      vote('yes-1', 'approve'),
+      ...Array.from({ length: 100 }, (_, i) => vote(`no-${i}`, 'reject')),
+    ];
+    const inverted = tallyProposalVotes(votes, rules(0, 0), {
+      eligibleCount: 1_000,
+      deadlinePassed: true,
+    });
+    expect(inverted.outcome).toBe('passed');
+    expect(inverted.approve).toBe('1');
+    expect(inverted.reject).toBe('100');
+    // And the strict comparison still holds the floor at zero affirmative weight.
+    const allReject = tallyProposalVotes(votes.slice(1), rules(0, 0), {
+      eligibleCount: 1_000,
+      deadlinePassed: true,
+    });
+    expect(allReject.outcome).toBe('rejected');
+  });
+
   it('passes when the affirmative weight strictly exceeds the threshold bar', () => {
     const result = tallyProposalVotes(
       [vote('a', 'approve'), vote('b', 'approve'), vote('c', 'reject')],

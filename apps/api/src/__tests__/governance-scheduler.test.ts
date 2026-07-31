@@ -78,6 +78,47 @@ describe('runElectionLifecycle', () => {
     expect(seat?.bootstrap).toBe(false);
   });
 
+  it('RECORDS the turnout electorate on the election row at open', async () => {
+    // `tallyElection` divides distinct voters by the electorate.  Reading that
+    // denominator live at SETTLE let anyone inflate room membership after the
+    // last ballot, push turnout under `minTurnout`, and fail an election that
+    // had met it — whereupon the fail-safe hands the incumbent a full new term.
+    // The ratification path has always snapshotted at open; this asserts
+    // elections do too.
+    const { svc, advance, now } = make(100, 50);
+    await svc.bootstrapSeat('r', 'creator');
+    advance(101_000);
+    // THREE eligible voters at open — the scheduler must pass its FREEZE reader
+    // through to `scheduleElection` so the count lands on the row.  The freeze
+    // reader is a separate argument from the settle-fallback count on purpose: that
+    // one answers about an election's already-recorded open, which is a different
+    // question, and passing only it left the denominator at zero.
+    await svc.runElectionLifecycle(
+      async () => 3,
+      now(),
+      undefined,
+      async () => ({
+        count: 3,
+        asOf: new Date(now()).toISOString(),
+      }),
+    );
+    const electionId = await openElectionId(svc, 'r');
+    expect((await svc.getElection(electionId))?.eligibleCount).toBe(3);
+
+    await svc.castVote('r', electionId, 'v1', 'challenger', true);
+    await svc.castVote('r', electionId, 'v2', 'challenger', true);
+    await svc.castVote('r', electionId, 'v3', 'challenger', true);
+    advance(51_000);
+    // …and a thousand by the time the scheduler ticks. The recorded 3 is what
+    // the tally divides by, so the challenger still wins. (The turnout
+    // ARITHMETIC is pinned in `governance-service.test.ts`, under a law pack
+    // with a non-zero `minTurnout` — the baseline pack used here has 0, so the
+    // denominator cannot decide an outcome in this harness.)
+    const result = await svc.runElectionLifecycle(async () => 1_000, now());
+    expect(result.settled).toBe(1);
+    expect((await svc.getSeat('r'))?.holderUserId).toBe('challenger');
+  });
+
   it('keeps the incumbent on a fail-safe (no-quorum) election', async () => {
     const { svc, advance, now } = make(100, 50);
     await svc.bootstrapSeat('r', 'creator');
@@ -98,7 +139,13 @@ describe('runGovernanceTick', () => {
     await svc.bootstrapSeat('r', 'creator');
     advance(101_000);
     const log = vi.fn();
-    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 3, log, now });
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 3,
+      measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+      log,
+      now,
+    });
     expect(log).toHaveBeenCalledWith('governance.election_lifecycle', { scheduled: 1, settled: 0 });
   });
 
@@ -122,6 +169,7 @@ describe('runGovernanceTick', () => {
     await runGovernanceTick({
       service: svc,
       eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
       loadModerationContext,
       applyDeferredRemoderation: apply,
       log,
@@ -145,6 +193,7 @@ describe('runGovernanceTick', () => {
     await runGovernanceTick({
       service: svc,
       eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
       log: () => {},
       now: () => 0,
     });
@@ -159,7 +208,13 @@ describe('runGovernanceTick', () => {
       reEvaluateStuckAdmissions: reEval,
     } as unknown as GovernanceService;
     const log = vi.fn();
-    await runGovernanceTick({ service: svc, eligibleVoterCount: async () => 0, log, now: () => 0 });
+    await runGovernanceTick({
+      service: svc,
+      eligibleVoterCount: async () => 0,
+      measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
+      log,
+      now: () => 0,
+    });
     expect(reEval).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith('governance.admission_retry', { retried: 2, resolved: 1 });
   });
@@ -172,7 +227,13 @@ describe('runGovernanceTick', () => {
     } as unknown as GovernanceService;
     const onError = vi.fn();
     await runGovernanceTick(
-      { service: failing, eligibleVoterCount: async () => 0, log: () => {}, now: () => 0 },
+      {
+        service: failing,
+        eligibleVoterCount: async () => 0,
+        measureElectorate: async () => ({ count: 0, asOf: new Date(0).toISOString() }),
+        log: () => {},
+        now: () => 0,
+      },
       onError,
     );
     expect(onError).toHaveBeenCalledWith(expect.any(Error), 'election_lifecycle');
@@ -186,7 +247,13 @@ describe('runGovernanceTick', () => {
       advance(101_000); // term elapsed ⇒ the next tick opens an election
       const log = vi.fn();
       const stop = startGovernanceScheduler(
-        { service: svc, eligibleVoterCount: async () => 3, log, now },
+        {
+          service: svc,
+          eligibleVoterCount: async () => 3,
+          measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+          log,
+          now,
+        },
         () => {},
         10,
       );
@@ -202,5 +269,53 @@ describe('runGovernanceTick', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a REJECTING job lease is reported and skips the tick — it never escapes', async () => {
+    // The acquire is the one await in the interval callback that
+    // `runGovernanceTick`'s per-task catches do not cover. Unguarded, a
+    // transient Postgres error inside `tryAcquire` rejects a promise nobody
+    // holds, and Node's default `--unhandled-rejections=throw` terminates the
+    // BFF over a blip in an hourly background job.
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { svc, advance, now } = make(100, 50);
+      await svc.bootstrapSeat('r', 'creator');
+      advance(101_000);
+      const log = vi.fn();
+      const onError = vi.fn();
+      const stop = startGovernanceScheduler(
+        {
+          service: svc,
+          eligibleVoterCount: async () => 3,
+          measureElectorate: async () => ({ count: 3, asOf: new Date(now()).toISOString() }),
+          log,
+          now,
+        },
+        onError,
+        10,
+        {
+          lease: {
+            tryAcquire: async () => {
+              throw new Error('connection terminated unexpectedly');
+            },
+          },
+          holder: 'test',
+        },
+      );
+      await vi.advanceTimersByTimeAsync(12);
+      stop();
+      expect(onError).toHaveBeenCalledWith(expect.any(Error), 'lease');
+      expect(log).not.toHaveBeenCalled(); // fail closed: no lease, no tick
+    } finally {
+      vi.useRealTimers();
+      // Let any escaped rejection surface before we judge.
+      await new Promise((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
   });
 });

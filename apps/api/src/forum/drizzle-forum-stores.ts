@@ -45,6 +45,7 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -86,6 +87,21 @@ function iso(value: Date): string {
 
 function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
+}
+
+/**
+ * Escape LIKE metacharacters for Postgres's DEFAULT `\` escape character.
+ * The backslash MUST be escaped in the SAME pass as `%`/`_`: escaping the
+ * metacharacters first leaves a caller-supplied `\` free to pair with the
+ * injected one (`\\` is a literal backslash), which re-arms the metacharacter
+ * that follows it.  `q = '\%room'` would otherwise build `%\\%room%` — "any
+ * text, a literal backslash, ANY text, 'room'" — turning a substring search
+ * into a wildcard search that also diverges from `roomMatchesQuery`'s plain
+ * `String.includes` semantics.  (`drizzle-moderation-stores.ts`'s reason-code
+ * prefix match uses the identical single-pass expression.)
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 // WS-T: the section rank key (0 = pinned-top, 1 = normal, 2 = sunk).  Mirrors
@@ -353,6 +369,63 @@ export class DrizzleContributionStore implements ContributionStore {
       .orderBy(...sectionOrderBy(order, null))
       .limit(opts.limit);
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async listChildrenForParents(
+    parentContributionIds: readonly string[],
+    opts: { states?: readonly ContributionModerationState[]; limitPerParent: number },
+  ): Promise<Map<string, ContributionRecord[]>> {
+    const byParent = new Map<string, ContributionRecord[]>();
+    if (parentContributionIds.length === 0 || opts.limitPerParent <= 0) return byParent;
+    const conditions = [
+      inArray(contributionsTable.parentContributionId, [...parentContributionIds]),
+    ];
+    if (opts.states) conditions.push(inArray(contributionsTable.moderationState, [...opts.states]));
+    // One query per LEVEL instead of one per NODE. `row_number()` partitioned by
+    // parent takes each parent's own top-N, so the per-parent bound is applied
+    // in the database rather than by fetching everything and slicing.
+    //
+    // The ORDER inside the window is `sectionOrderBy(newest)` restated — the
+    // same section rank, created_at desc, id desc that `listChildren` applies.
+    // The two feed one rendered list; a reply that moved because the page
+    // batched differently would be a defect, not an optimization.
+    //
+    // The columns are spread explicitly rather than projected as a nested table
+    // object: Drizzle cannot carry a table projection through a subquery alias
+    // (it looks for the base table in the outer FROM and does not find it).
+    const ranked = this.#db
+      .select({
+        ...getTableColumns(contributionsTable),
+        rn: sql<number>`row_number() over (
+          partition by ${contributionsTable.parentContributionId}
+          order by ${sectionRankExpr(null)} asc,
+                   ${contributionsTable.createdAt} desc,
+                   ${contributionsTable.contributionId} desc
+        )`.as('rn'),
+      })
+      .from(contributionsTable)
+      .where(and(...conditions))
+      .as('ranked');
+    const rows = await this.#db
+      .select()
+      .from(ranked)
+      .where(sql`${ranked.rn} <= ${opts.limitPerParent}`)
+      // The window assigns the rank; only an outer ORDER BY makes the rows
+      // ARRIVE in it.  SQL guarantees no order without one, so without this the
+      // per-parent arrays could be built in any order and the reply previews
+      // would silently violate the newest-first / incorrect-last contract that
+      // `listChildren` and the in-memory adapter both keep — on the Drizzle path
+      // only, which is the half no unit test exercises.
+      .orderBy(sql`${ranked.parentContributionId}`, sql`${ranked.rn}`);
+    for (const entry of rows) {
+      const record = this.#toRecord(entry as unknown as typeof contributionsTable.$inferSelect);
+      const parent = record.parentContributionId;
+      if (parent === null) continue;
+      const bucket = byParent.get(parent);
+      if (bucket) bucket.push(record);
+      else byParent.set(parent, [record]);
+    }
+    return byParent;
   }
 
   async countByType(
@@ -846,7 +919,7 @@ export class DrizzleRoomStore implements RoomStore {
       conditions.push(inArray(roomsTable.visibility, [...opts.visibilities]));
     }
     if (opts.query !== undefined) {
-      const needle = `%${opts.query.toLowerCase().replaceAll('%', '\\%').replaceAll('_', '\\_')}%`;
+      const needle = `%${escapeLikePattern(opts.query.toLowerCase())}%`;
       conditions.push(
         sql`(lower(${roomsTable.name}) like ${needle} or lower(coalesce(${roomsTable.description}, '')) like ${needle})`,
       );
@@ -1092,15 +1165,57 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
-  async countEligibleVoters(roomId: string): Promise<number> {
+  /** The `joined_at` arm of the electorate filter: only a member we KNOW joined
+   *  after the instant is excluded, because an unknown join is unjudgeable and
+   *  the ballot gate lets that through too.  Empty when no instant is given. */
+  #joinedBeforeClause(joinedBefore: string | undefined) {
+    // The ISO STRING with an explicit cast, not a `Date`: these two queries go
+    // through raw `execute()`, whose parameter path takes the value as-is and
+    // rejects a Date instance outright (`ERR_INVALID_ARG_TYPE`).  The
+    // in-memory adapter has no parameter binding to disagree with, so only the
+    // gated live-Postgres suite can catch this.
+    return joinedBefore === undefined
+      ? sql``
+      : sql` AND (${roomSubscriptionsTable.joinedAt} IS NULL
+              OR ${roomSubscriptionsTable.joinedAt} <= ${joinedBefore}::timestamptz)`;
+  }
+
+  async measureEligibleVoters(roomId: string): Promise<{ count: number; asOf: string }> {
+    // ONE statement: `now()` is the statement's own transaction timestamp and the
+    // snapshot is fixed at statement start, so the count and the instant it is
+    // stamped with describe the SAME state.  A concurrent leave either committed
+    // before that snapshot (absent from the count, and absent at `asOf` too) or
+    // after it (counted, and a member at `asOf` — later churn, which the freeze
+    // deliberately ignores).  A concurrent join is symmetric.  Splitting these into
+    // a clock read and a live count is what left a window in either direction.
+    const rows = (await this.#db.execute(sql`
+      SELECT count(*)::int AS value, now()::text AS as_of FROM (
+        SELECT ${roomSubscriptionsTable.userId} FROM ${roomSubscriptionsTable}
+          WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
+            AND ${roomSubscriptionsTable.status} = 'active'
+            AND (${roomSubscriptionsTable.joinedAt} IS NULL
+                 OR ${roomSubscriptionsTable.joinedAt} <= now())
+        UNION
+        SELECT ${roomStewardsTable.userId} FROM ${roomStewardsTable}
+          WHERE ${roomStewardsTable.roomId} = ${roomId}
+      ) voters
+    `)) as unknown as Array<{ value: number; as_of: string }>;
+    const row = rows[0];
+    if (!row) return { count: 0, asOf: new Date().toISOString() };
+    return { count: row.value, asOf: new Date(row.as_of).toISOString() };
+  }
+
+  async countEligibleVoters(roomId: string, joinedBefore?: string): Promise<number> {
     // Distinct users who may vote: active subscribers ∪ stewards (a steward can vote
     // via their role without an active subscription). The UNION dedups in Postgres
     // and returns a SCALAR count — no materialising every member/steward user id.
+    // Stewards carry no join instant, so the cutoff cannot judge them.
     const rows = (await this.#db.execute(sql`
       SELECT count(*)::int AS value FROM (
         SELECT ${roomSubscriptionsTable.userId} FROM ${roomSubscriptionsTable}
           WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
             AND ${roomSubscriptionsTable.status} = 'active'
+            ${this.#joinedBeforeClause(joinedBefore)}
         UNION
         SELECT ${roomStewardsTable.userId} FROM ${roomStewardsTable}
           WHERE ${roomStewardsTable.roomId} = ${roomId}
@@ -1109,12 +1224,13 @@ export class DrizzleRoomStore implements RoomStore {
     return rows[0]?.value ?? 0;
   }
 
-  async listEligibleVoterIds(roomId: string): Promise<string[]> {
+  async listEligibleVoterIds(roomId: string, joinedBefore?: string): Promise<string[]> {
     const rows = (await this.#db.execute(sql`
       SELECT voters.user_id AS value FROM (
         SELECT ${roomSubscriptionsTable.userId} AS user_id FROM ${roomSubscriptionsTable}
           WHERE ${roomSubscriptionsTable.roomId} = ${roomId}
             AND ${roomSubscriptionsTable.status} = 'active'
+            ${this.#joinedBeforeClause(joinedBefore)}
         UNION
         SELECT ${roomStewardsTable.userId} AS user_id FROM ${roomStewardsTable}
           WHERE ${roomStewardsTable.roomId} = ${roomId}
@@ -1288,6 +1404,8 @@ export class DrizzleUploadStore implements UploadStore {
       altText: row.altText,
       storageRef: row.storageRef,
       metadataStripped: row.metadataStripped,
+      imageWidth: row.imageWidth,
+      imageHeight: row.imageHeight,
       scanState: row.scanState,
       ownerStoryId: row.ownerStoryId,
       createdAt: iso(row.createdAt),
@@ -1295,7 +1413,11 @@ export class DrizzleUploadStore implements UploadStore {
   }
 
   async put(
-    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId'> & { ownerStoryId?: string | null },
+    record: Omit<UploadRecord, 'createdAt' | 'ownerStoryId' | 'imageWidth' | 'imageHeight'> & {
+      ownerStoryId?: string | null;
+      imageWidth?: number | null;
+      imageHeight?: number | null;
+    },
     bytes: Uint8Array,
   ): Promise<UploadRecord> {
     const metadataValues = {
@@ -1306,6 +1428,8 @@ export class DrizzleUploadStore implements UploadStore {
       altText: record.altText,
       storageRef: record.storageRef,
       metadataStripped: record.metadataStripped,
+      imageWidth: record.imageWidth ?? null,
+      imageHeight: record.imageHeight ?? null,
       scanState: record.scanState,
       ownerStoryId: record.ownerStoryId ?? null,
     };

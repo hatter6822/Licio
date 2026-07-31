@@ -8,7 +8,6 @@
 // Every response is re-validated against the shared schema on egress (the
 // WS-C.1.2 boundary guarantee); logs and metrics carry ids and counts only.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   type ContributionPublic,
   challengeStandingResponseSchema,
@@ -85,7 +84,7 @@ import {
 } from '../forum/debate.js';
 import { type DebateFrame, sseDebateFrame } from '../forum/debate-broadcaster.js';
 import { buildDebateDeps } from '../forum/debate-scheduler.js';
-import { stripUploadMetadata } from '../forum/exif.js';
+import { imageDimensions, stripUploadMetadata } from '../forum/exif.js';
 import { getForumServices } from '../forum/services.js';
 import type { ContributionRecord, UploadRecord } from '../forum/stores.js';
 import {
@@ -112,6 +111,7 @@ import {
 } from '../lib/push-service.js';
 import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -171,17 +171,54 @@ async function softUserId(
   }
 }
 
-/** Per-request author resolver with a memo (no N+1 on a 50-row page). */
+/**
+ * Per-request author resolver: memoized AND batched (no N+1 on a 50-row page).
+ *
+ * A memo alone only collapses REPEAT authors — a page of DISTINCT ones still
+ * cost one indexed point lookup each, and `buildProjectCtx` fans up to ~200 of
+ * them out at once (50 roots plus 150 previewed replies) onto a ten-connection
+ * pool.  So calls made in the SAME TICK are coalesced: each records its id and
+ * shares a single `getUsersByIds` issued on the next microtask, which is
+ * exactly the shape of the `Promise.all(authorIds.map(...))` fan-out in
+ * `forum/comments.ts`.
+ *
+ * The memo holds the IN-FLIGHT PROMISE, not the resolved value, so concurrent
+ * first calls for one id coalesce too (the debate projections issue three at
+ * once), and an id the batch omits is memoized as a MISS — a deleted author is
+ * resolved once and never re-queried.
+ */
 function makeAuthorResolver(identity: IdentityServices) {
-  const memo = new Map<string, { handle: string; displayName: string } | null>();
-  return async (userId: string | null) => {
+  type Author = { handle: string; displayName: string } | null;
+  const memo = new Map<string, Promise<Author>>();
+  let pending: string[] = [];
+  let inFlight: Promise<Map<string, Author>> | null = null;
+
+  const scheduleBatch = (): Promise<Map<string, Author>> => {
+    // Deferring to a microtask (never a timer) keeps the batch inside the same
+    // synchronous fan-out without adding a tick of latency to a serial caller.
+    inFlight ??= Promise.resolve().then(async () => {
+      const ids = pending;
+      pending = [];
+      inFlight = null;
+      const users = await identity.store.getUsersByIds(ids);
+      const found = new Map<string, Author>();
+      for (const user of users) {
+        found.set(user.userId, { handle: user.handle, displayName: user.displayName });
+      }
+      return found;
+    });
+    return inFlight;
+  };
+
+  return async (userId: string | null): Promise<Author> => {
     if (userId === null) return null;
     const cached = memo.get(userId);
     if (cached !== undefined) return cached;
-    const user = await identity.store.getUser(userId);
-    const resolved = user ? { handle: user.handle, displayName: user.displayName } : null;
-    memo.set(userId, resolved);
-    return resolved;
+    pending.push(userId);
+    const batch = scheduleBatch();
+    const entry = batch.then((found) => found.get(userId) ?? null);
+    memo.set(userId, entry);
+    return entry;
   };
 }
 
@@ -1026,6 +1063,10 @@ export function createForumRoutes() {
             storedBytes = stripped.bytes;
             metadataStripped = stripped.stripped;
           }
+          // Read off the STORED bytes, not the upload: stripping rewrites the
+          // container, and the dimensions the renderer reserves must be the
+          // ones the served file actually has.
+          const dimensions = isImage ? imageDimensions(contentType, storedBytes) : null;
           const forum = getForumServices();
           // The injectable scanner runs AFTER the inline local checks
           // (magic, size, strip).  Default: local checks ARE the scan
@@ -1047,6 +1088,8 @@ export function createForumRoutes() {
               altText: isImage ? altText : null,
               storageRef: `uploads/${uploadId}`,
               metadataStripped: metadataStripped || isImage,
+              imageWidth: dimensions?.width ?? null,
+              imageHeight: dimensions?.height ?? null,
               scanState: scan.state,
               // Linked to its owning story at submission (WS-Q.5.2c); a
               // contribution attachment stays null and serves unrestricted.
@@ -1860,6 +1903,9 @@ function toUploadPublic(record: UploadRecord) {
     alt_text: record.altText,
     url: `/v1/uploads/${record.uploadId}`,
     metadata_stripped: record.metadataStripped,
+    ...(record.imageWidth !== null && record.imageHeight !== null
+      ? { image_width: record.imageWidth, image_height: record.imageHeight }
+      : {}),
     scan_state: record.scanState,
     created_at: record.createdAt,
   };

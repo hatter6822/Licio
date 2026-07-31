@@ -66,6 +66,8 @@ export const queryKeys = {
   modAppeal: (appealId: string) => ['mod-appeal', appealId] as const,
   modAudit: (filterKey: string) => ['mod-audit', filterKey] as const,
   modIncidents: () => ['mod-incidents'] as const,
+  /** The signed-in reviewer's OWN availability (the console initialises from it). */
+  modReviewerStatus: () => ['mod-reviewer-status'] as const,
   // The console's Sources tab (the ROLE_EVIDENCE doctrine surface — sourcing is
   // comment-centric, so the UI cache speaks "source"; the wire keeps evidence-*).
   modSourceQueue: () => ['mod-source-queue'] as const,

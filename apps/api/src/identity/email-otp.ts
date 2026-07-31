@@ -217,8 +217,9 @@ export async function canResend(
   accountRef: string,
   now: number = Date.now(),
 ): Promise<boolean> {
-  const existing = await store.get(resendKey(accountRef));
-  if (existing) return false;
-  await store.set(resendKey(accountRef), String(now), RESEND_COOLDOWN_MS);
-  return true;
+  // ONE atomic claim, not a read followed by a write.  Against Redis those are
+  // two round trips, so every concurrent resend for the same mailbox saw no
+  // cooldown, all of them passed, and all of them wrote it — the 60-second
+  // bound admitted an unbounded burst and the victim's inbox took the flood.
+  return store.setIfAbsent(resendKey(accountRef), String(now), RESEND_COOLDOWN_MS);
 }

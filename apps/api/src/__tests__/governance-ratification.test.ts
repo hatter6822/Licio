@@ -79,6 +79,51 @@ describe('GovernanceService ratification', () => {
     expect((await svc.openRatification('r', 's', modelId, null)).ok).toBe(true);
   });
 
+  it('the electorate is FROZEN on both sides — a post-open joiner cannot ratify', async () => {
+    // This is the ONLY path to activating a room's in-room AI governance model,
+    // and it kept the half-freeze that elections and WS-M proposals had already
+    // closed: `eligibleCount` snapshotted at the open, eligibility checked LIVE
+    // at ballot time.  `turnout` is `min(1, distinctVoters / eligibleCount)`, so
+    // enough post-open joiners satisfy ANY `minTurnout` — a room's model adopted
+    // without a single ballot from the electorate it was measured against.
+    // A window wide enough that the refusal below can only be the freeze.
+    const { svc, advance } = make(3_600);
+    await svc.bootstrapSeat('r', 's');
+    const modelId = await proposeEligible(svc, 'r', 's');
+    // The measurement REPORTS the instant it measured at, and the vote records that
+    // instant as its open — so the denominator and the ballot cutoff cannot describe
+    // two different states.
+    const asked: string[] = [];
+    const open = await svc.openRatification('r', 's', modelId, null, async () => {
+      const asOf = new Date().toISOString();
+      asked.push(asOf);
+      return { count: 5, asOf };
+    });
+    if (!open.ok) throw new Error('open failed');
+    const voteId = open.value.voteId;
+    expect(asked).toHaveLength(1);
+
+    // A member who was there when it opened votes normally.
+    const before = new Date(Date.parse(asked[0] as string) - 86_400_000).toISOString();
+    expect((await svc.castRatificationBallot('r', voteId, 'v1', 'approve', true, before)).ok).toBe(
+      true,
+    );
+
+    // One who joined a minute later is refused, with a code that says why.
+    advance(60_000);
+    const after = new Date(Date.parse(asked[0] as string) + 60_000).toISOString();
+    const late = await svc.castRatificationBallot('r', voteId, 'late', 'approve', true, after);
+    expect(late.ok).toBe(false);
+    expect(!late.ok && late.code).toBe('joined_after_open');
+
+    // An UNJUDGEABLE join instant (the steward-role arm carries no subscription
+    // row) still votes — refusing there would lock out a legitimate steward to
+    // close a narrower hole than it opens, the same call `castVote` makes.
+    expect((await svc.castRatificationBallot('r', voteId, 'sw', 'approve', true, null)).ok).toBe(
+      true,
+    );
+  });
+
   it('cancel: refused after the published close (no pocket veto during the settle latency window)', async () => {
     const { svc, advance } = make(50);
     await svc.bootstrapSeat('r', 's');
@@ -134,7 +179,7 @@ describe('GovernanceService ratification', () => {
     let counted = 0;
     const count = async () => {
       counted += 1;
-      return 5;
+      return { count: 5, asOf: new Date().toISOString() };
     };
     // A non-steward is rejected WITHOUT the (potentially expensive) electorate count.
     expect((await svc.openRatification('r', 'intruder', modelId, null, count)).ok).toBe(false);
@@ -333,7 +378,9 @@ describe('GovernanceService ratification', () => {
 
     // Frozen electorate of 2; one approving ballot ⇒ turnout 1/2 = 0.5 ✓ (adopted).
     const m1 = await proposeEligible(svc, 'r', 's');
-    const open1 = await svc.openRatification('r', 's', m1, lawPackId, () => Promise.resolve(2));
+    const open1 = await svc.openRatification('r', 's', m1, lawPackId, () =>
+      Promise.resolve({ count: 2, asOf: new Date().toISOString() }),
+    );
     const v1 = open1.ok ? open1.value.voteId : '';
     await svc.castRatificationBallot('r', v1, 'a', 'approve', true);
     expect((await svc.settleRatification(v1)).ok && (await svc.getBinding('r'))?.active).toBe(true);
@@ -341,7 +388,9 @@ describe('GovernanceService ratification', () => {
     // A SECOND vote with a frozen electorate of 10; the same single ballot ⇒
     // turnout 1/10 = 0.1 < 0.5 ⇒ FAIL-SAFE, no matter what membership does later.
     const m2 = await proposeEligible(svc, 'r', 's', { bundleId: 'b2', name: 'n2' });
-    const open2 = await svc.openRatification('r', 's', m2, lawPackId, () => Promise.resolve(10));
+    const open2 = await svc.openRatification('r', 's', m2, lawPackId, () =>
+      Promise.resolve({ count: 10, asOf: new Date().toISOString() }),
+    );
     const v2 = open2.ok ? open2.value.voteId : '';
     await svc.castRatificationBallot('r', v2, 'a', 'approve', true);
     const s2 = await svc.settleRatification(v2);

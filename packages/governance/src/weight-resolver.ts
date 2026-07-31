@@ -9,7 +9,7 @@
 // are recorded as satisfied (fail-closed, §17.5).  All weight arithmetic is
 // exact decimal (`decimal.ts`) — capped fractional weights never float-drift.
 
-import { decAdd, decCompare } from './decimal.js';
+import { decAdd, decCompare, decSub } from './decimal.js';
 import type { EligibilityRules, WeightModel } from './schemas/law-pack.js';
 import { GATED_WEIGHT_MODELS } from './schemas/law-pack.js';
 import type {
@@ -219,20 +219,61 @@ export function resolveVotingWeight(input: WeightResolverInput): WeightResolutio
       // Own vote (1) plus eligible incoming delegations; an ineligible delegator
       // confers nothing, and the AGGREGATE is capped — a delegate cannot exceed
       // the per-account ceiling by accumulating delegations (WS-M.4.2c-3).
-      let delegated = '0';
-      let counted = 0;
+      //
+      // The fold STOPS at the ceiling, and names the delegators it consumed.
+      // Summing every delegation and capping the total afterwards produced the
+      // same weight but lost which units the cap had dropped, and the caller's
+      // double-count guard reads exactly that: a delegator whose unit the cap
+      // discarded was still treated as having voted through their delegate, so
+      // their weight vanished from the tally while they were refused a direct
+      // ballot.  With a cap of 1 — the default when a law pack sets none —
+      // EVERY delegated unit is discarded, which turned delegation into pure
+      // disenfranchisement.  Consumption is now decided here, by the same fold
+      // that decides the weight, and cannot drift from it.
+      //
+      // Fold order is the caller's order and is load-bearing: it decides which
+      // delegators the ceiling admits, so the caller must present a canonical,
+      // stable one.
+      // A DELEGATED UNIT IS INDIVISIBLE — it is folded only if it fits WHOLE.
+      //
+      // Counting a partially-absorbed unit as consumed lost most of it.
+      // `maxVotingWeightPerAccount` is `z.number().positive()` with no integer
+      // constraint, and each delegated unit is the literal weight 1, so with a cap
+      // of 1.01 the boundary delegation folded (there was headroom), the resolved
+      // weight became 1.01, and that delegator was marked CONSUMED — 0.01 of their
+      // unit absorbed, 0.99 erased from the tally, and their own direct ballot
+      // refused 409 `delegated_weight_already_cast`.  A cap of 1.5 lost 0.5 the
+      // same way.
+      //
+      // Skipping it instead leaves that fraction of the ceiling unused, which is
+      // the right trade: a fraction of a member's vote is not a thing that can be
+      // conferred, and the delegator keeps the direct ballot that carries their
+      // whole unit.  The alternative — count them as unconsumed while their
+      // fraction still moved the weight — would double-count that fraction.
+      //
+      // `continue`, not `break`: a later delegation with a smaller weight may
+      // still fit the remaining headroom, and the caller's canonical order makes
+      // that deterministic.
+      let running = '1';
+      const countedDelegatorIds: string[] = [];
       for (const delegation of input.delegations) {
         if (!delegation.delegatorEligible) continue;
-        delegated = decAdd(delegated, delegation.weight);
-        counted += 1;
+        const next = decAdd(running, delegation.weight);
+        if (decCompare(next, cap) > 0) continue; // would not fit whole
+        running = next;
+        countedDelegatorIds.push(delegation.delegatorUserId);
       }
-      const weight = decMin(decAdd(1, delegated), cap);
+      const weight = decMin(running, cap);
+      // The own vote is 1, so anything above it is delegated — unless the cap
+      // itself sits below 1, in which case no delegated unit fit at all.
+      const delegated = decCompare(weight, '1') > 0 ? decSub(weight, '1') : '0';
       return {
         resolved: true,
         weight,
         eligibilityReason:
-          `Delegated: own vote + ${counted} eligible delegations (${delegated}) capped at ` +
-          `${cap} ⇒ weight ${weight}.`,
+          `Delegated: own vote + ${countedDelegatorIds.length} eligible delegations ` +
+          `(${delegated}) capped at ${cap} ⇒ weight ${weight}.`,
+        countedDelegatorIds,
       };
     }
     case 'multisig_steward': {

@@ -100,6 +100,12 @@ function epochHeader(epoch: Uint8Array): Uint8Array {
  * `bucket >= 0`) rotates the pseudonym every time bucket → cross-bucket unlinkable;
  * `PER_EPOCH_BUCKET` omits the bucket → one stable pseudonym per epoch (the stronger cap,
  * within-epoch linkable). See the spec §6.7 granularity policy.
+ *
+ * This is deliberately NOT where the announcement binding goes.  The context is the
+ * pseudonym GENERATOR's input, so folding a per-announcement value in here would give a
+ * device a fresh pseudonym for every announcement — and the per-bucket cap is enforced by
+ * deduping on the pseudonym, so it would silently stop capping anything.  The binding is
+ * a presentation header instead; see {@link rendezvousPresentationHeader}.
  */
 export function rendezvousContext(
   roomBlindId: Uint8Array,
@@ -114,6 +120,36 @@ export function rendezvousContext(
       ? concatBytes(Uint8Array.of(0xff), i2osp(0, 8))
       : concatBytes(Uint8Array.of(0x00), i2osp(bucket, 8)),
   );
+}
+
+/**
+ * Bind a presence proof to the ANNOUNCEMENT it rides in.
+ *
+ * Without this the proof attested only to "a member of this room is present in this
+ * bucket" — true of the honest device that made it, and STILL true no matter what the
+ * proof is subsequently attached to.  Any member can poll, LIFT an honest device's
+ * `(proof, pseudonym)` pair out of an opened announcement, and re-publish it carrying
+ * their own dial info.  Both the server and `filterVerifiedPresence` dedup by PSEUDONYM
+ * with first occurrence winning, so the forged record takes the honest device's one slot
+ * and evicts it from discovery — a targeted eviction primitive available to every room
+ * member, the same attack `selectFreshestCandidates` refuses to enable on the freshness
+ * side (PRIV-CARRIER-FRESHEST-NOSPOOF), reached by another road.
+ *
+ * `binding` is the announcement's DIAL IDENTITY: the per-announcement ephemeral signaling
+ * public key.  That is the field an attacker must substitute for the theft to be worth
+ * anything (a lifted proof over someone else's key sends dialers to the honest peer, not
+ * to them); it is fixed before the record is sealed, so the sealed bytes — which CONTAIN
+ * the cap — cannot bind themselves; and it is already what `selectFreshestCandidates`
+ * treats as a candidate's real identity.
+ *
+ * It rides as the BBS presentation header, which enters the proof challenge but NOT
+ * `deriveNymGenerator`.  That distinction is the whole design: the proof becomes
+ * announcement-specific while the pseudonym stays per-`(epoch, bucket)`, so the
+ * one-slot-per-device cap counts exactly what it counted before.  Binding through the
+ * pseudonym context instead would have handed every device unlimited slots per bucket.
+ */
+export function rendezvousPresentationHeader(binding: Uint8Array): Uint8Array {
+  return concatBytes(enc('licio.tier2.rendezvous.bind.v1'), lenPrefixed(binding));
 }
 
 /** A device's per-epoch credential + the secrets needed to show it. */
@@ -211,6 +247,7 @@ export function proveRendezvousPresence(
   cred: RendezvousCredential,
   epoch: Uint8Array,
   context: Uint8Array,
+  presentationHeader: Uint8Array,
 ): RendezvousPresence {
   const layout = credentialLayout(issuerPk, 1, [], epochHeader(epoch));
   const msgScalars = credentialScalars(
@@ -224,6 +261,7 @@ export function proveRendezvousPresence(
     NID_INDEX,
     [],
     context,
+    presentationHeader,
   );
 }
 
@@ -234,6 +272,7 @@ export function verifyRendezvousPresence(
   pseudonym: G1Point,
   epoch: Uint8Array,
   context: Uint8Array,
+  presentationHeader: Uint8Array,
 ): boolean {
   const layout = credentialLayout(issuerPk, 1, [], epochHeader(epoch));
   return verifyWithPseudonymPrepared(
@@ -245,6 +284,7 @@ export function verifyRendezvousPresence(
     [],
     NID_INDEX,
     context,
+    presentationHeader,
   );
 }
 

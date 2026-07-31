@@ -129,7 +129,7 @@ export function canonicalizeBcp47(tag: string): string {
 export const linkMetadataSchema = z
   .object({
     submission_type: z.literal('link'),
-    url: httpUrlSchema.max(2048),
+    url: httpUrlSchema,
     /** Short reason for submission (§14.1). */
     reason: z.string().min(1).max(500),
   })

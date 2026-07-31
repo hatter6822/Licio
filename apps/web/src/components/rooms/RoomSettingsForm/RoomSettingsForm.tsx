@@ -10,8 +10,11 @@
 //     (public→private forces every public story room_only). It is NOT a plain
 //     settings write — the settings endpoint rejects a visibility change.
 import type { RoomDetail, RoomJoinModel, RoomPostingPolicy } from '@licio/shared';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ApiClientError, RoomVisibilityBlockedError } from '../../../lib/api.js';
+import { fieldErrorsFrom } from '../../../lib/form-errors.js';
 import {
   useChangeRoomVisibilityMutation,
   useUpdateRoomSettingsMutation,
@@ -33,6 +36,25 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
   const [joinModel, setJoinModel] = useState<RoomJoinModel>(room.join_model);
   const [postingPolicy, setPostingPolicy] = useState<RoomPostingPolicy>(room.posting_policy);
   const [confirmCascade, setConfirmCascade] = useState(false);
+  /**
+   * Field-keyed messages from a failed save, `form` carrying the whole-form one.
+   *
+   * The save was SILENT: `useUpdateRoomSettingsMutation` has no `onError`, the
+   * global `MutationCache.onError` only emits RUM telemetry, and nothing here
+   * rendered `settings.error` — so a rejected PATCH showed no alert at all while
+   * the Selects kept displaying the steward's chosen value.  It read as SUCCESS.
+   *
+   * That is the DEFAULT path for a non-staff steward, not an edge case: the route
+   * runs `checkGovernanceEligibility`, which fails closed — `resolveCompliance()`
+   * returns null outside `NODE_ENV=test`, giving `eligibility_unavailable`, and a
+   * KYC-less account gives `kyc_required`.  Both arrive with a fully populated
+   * message that was being discarded.
+   *
+   * Per-field via `fieldErrorsFrom`, matching `RoomCreateForm` rather than
+   * inventing a second convention; the sibling `LensManager` in this same file
+   * already rendered its own error, which is what made the omission visible.
+   */
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
 
   // Coherence: a public room is open-join only (the server coerces this too).
   const effectiveJoinModel = isPublic ? 'open' : joinModel;
@@ -49,6 +71,7 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
         value={effectiveJoinModel}
         onValueChange={(v) => setJoinModel(v as RoomJoinModel)}
         disabled={isPublic}
+        {...(saveErrors['join_model'] ? { error: saveErrors['join_model'] } : {})}
         {...(isPublic
           ? {
               helperText: t(
@@ -67,6 +90,7 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
         label={t('roomSettings.posting', 'Who can post')}
         value={postingPolicy}
         onValueChange={(v) => setPostingPolicy(v as RoomPostingPolicy)}
+        {...(saveErrors['posting_policy'] ? { error: saveErrors['posting_policy'] } : {})}
         options={[
           { value: 'all_members', label: t('roomCreate.posting.all', 'All members') },
           {
@@ -78,12 +102,35 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
       <Button
         variant="secondary"
         disabled={settings.isPending}
-        onClick={() =>
-          settings.mutate({ join_model: effectiveJoinModel, posting_policy: postingPolicy })
-        }
+        onClick={() => {
+          setSaveErrors({});
+          settings.mutate(
+            { join_model: effectiveJoinModel, posting_policy: postingPolicy },
+            {
+              onError: (error) =>
+                setSaveErrors(
+                  fieldErrorsFrom(
+                    error,
+                    t('roomSettings.save.failed', 'The settings could not be saved.'),
+                  ),
+                ),
+            },
+          );
+        }}
       >
         {t('roomSettings.save', 'Save settings')}
       </Button>
+      {saveErrors['form'] ? (
+        <p role="alert" className="text-error-on-soft text-sm">
+          {saveErrors['form']}
+        </p>
+      ) : null}
+      {/* The controls deliberately KEEP the steward's choice after a failure.
+          Re-seeding them from `room` would discard the edit they are being asked
+          to retry — and could not work anyway: the server value did not change,
+          so a `useEffect` keyed on it never fires.  The alert is what removes the
+          reads-as-success problem; the dialog unmounts on tab switch, which
+          bounds how long an unsaved choice can linger. */}
 
       {/* The visibility cascade — confirmed, separate from the settings write. */}
       <div className="flex flex-col gap-2 border-line border-t pt-3">
@@ -118,6 +165,35 @@ export function RoomSettingsForm({ roomId, room }: RoomSettingsFormProps): React
               : t('roomSettings.makePublic', 'Make room public')}
           </Button>
         )}
+        {/* The cascade's refusal, WITH the stories to resolve.  The server
+            names every public story a canonical-URL collision refused to
+            contain precisely so a steward can act on each one; rendering a
+            count — or nothing at all, as this did — leaves them holding a
+            number and no way to find what it counts. */}
+        {cascade.error instanceof RoomVisibilityBlockedError ? (
+          <div role="alert" className="flex flex-col gap-1 text-sm">
+            <p className="text-error-on-soft">{cascade.error.message}</p>
+            <ul className="flex flex-col gap-1">
+              {cascade.error.blockedStoryIds.map((storyId) => (
+                <li key={storyId}>
+                  <Link
+                    to="/stories/$storyId"
+                    params={{ storyId }}
+                    className="text-primary-on-soft underline-offset-2 hover:underline"
+                  >
+                    {t('roomSettings.cascade.blockedStory', 'Resolve this duplicate')}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : cascade.error ? (
+          <p role="alert" className="text-error-on-soft text-sm">
+            {cascade.error instanceof ApiClientError
+              ? cascade.error.message
+              : t('roomSettings.cascade.failed', 'The visibility change could not be applied.')}
+          </p>
+        ) : null}
       </div>
 
       {/* WS-G.2.2 — interpretation lenses (steward-managed; server enforces role). */}

@@ -37,7 +37,11 @@ export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.Reac
   // rendered anchors' activation here is the only hook for the WS-G.4.2c
   // interstitial.  Keyboard users are covered twice over — anchors are
   // natively keyboard-operable (Enter fires click), and the keydown listener
-  // mirrors it for environments that do not synthesize that click.
+  // mirrors it for environments that do not synthesize that click.  Middle-
+  // button activation fires `auxclick`, NOT `click` (Chrome 55+ and matching
+  // Firefox behaviour), and the sanitizer stamps every surviving anchor with
+  // `target="_blank"` — so without that third listener a middle-click would
+  // natively open a blocklisted drainer in a new tab with no verdict at all.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -45,6 +49,10 @@ export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.Reac
       const anchor = (event.target as HTMLElement).closest('a');
       if (!anchor) return;
       if (event instanceof KeyboardEvent && event.key !== 'Enter') return;
+      // Gate `auxclick` on the MIDDLE button only (never `button !== 0`): the
+      // right button also raises `auxclick`, and cancelling that one would take
+      // the context menu — and with it "copy link address" — away from the user.
+      if (event instanceof MouseEvent && event.type === 'auxclick' && event.button !== 1) return;
       const href = anchor.getAttribute('href');
       if (!href || href.startsWith('mailto:')) return;
       // Hold navigation until the safety verdict; mailto passes through.
@@ -60,9 +68,11 @@ export function UgcBody({ markdown, compact = false }: UgcBodyProps): React.Reac
       });
     };
     container.addEventListener('click', intercept);
+    container.addEventListener('auxclick', intercept);
     container.addEventListener('keydown', intercept);
     return () => {
       container.removeEventListener('click', intercept);
+      container.removeEventListener('auxclick', intercept);
       container.removeEventListener('keydown', intercept);
     };
   }, []);

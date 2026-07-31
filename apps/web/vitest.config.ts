@@ -6,6 +6,8 @@
 // the same project settings from `vitest.shared.ts`.  Note: `vite.config.ts` is
 // the production BUILD config (Vite/Rolldown); this file owns the TEST config.
 import { defineConfig } from 'vitest/config';
-import { webProjectTest } from '../../vitest.shared';
+import { refuseWorkspaceCoverage, webProjectTest } from '../../vitest.shared';
+
+refuseWorkspaceCoverage('web');
 
 export default defineConfig({ test: webProjectTest });

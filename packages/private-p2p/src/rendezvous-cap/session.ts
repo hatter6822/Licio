@@ -31,6 +31,7 @@ import {
   type RendezvousCredential,
   type RendezvousPresence,
   rendezvousContext,
+  rendezvousPresentationHeader,
   verifyRendezvousCredential,
 } from './credential.js';
 
@@ -122,10 +123,23 @@ export class RendezvousMember {
   }
 
   /**
-   * Build a presence announcement (proof + pseudonym) for `(roomBlindId, epoch, bucket)`,
-   * or `null` if not enrolled for the epoch (the caller then rides Tier-1).
+   * Build a presence announcement (proof + pseudonym) for `(roomBlindId, epoch, bucket)`
+   * BOUND TO `binding`, or `null` if not enrolled for the epoch (the caller then rides
+   * Tier-1).
+   *
+   * `binding` is the announcement's dial identity — the ephemeral signaling public key
+   * this announcement publishes.  Taking it here rather than defaulting it is deliberate:
+   * a proof not bound to its announcement can be lifted from a polled record and
+   * re-published under someone else's dial info, and pseudonym dedup then evicts the
+   * honest device (see `rendezvousContext`).  Required, so no caller can produce an
+   * unbound proof by omission.
    */
-  announce(roomBlindId: Uint8Array, epoch: string, bucket: number): RendezvousPresence | null {
+  announce(
+    roomBlindId: Uint8Array,
+    epoch: string,
+    bucket: number,
+    binding: Uint8Array,
+  ): RendezvousPresence | null {
     const enrollment = this.enrolled.get(epoch);
     if (enrollment === undefined) return null;
     const context = rendezvousContext(roomBlindId, enc(epoch), bucket);
@@ -134,6 +148,10 @@ export class RendezvousMember {
       enrollment.credential,
       enc(epoch),
       context,
+      // The binding rides as the presentation header, NOT in the context: the
+      // context derives the pseudonym, and a per-announcement pseudonym would
+      // give every device unlimited slots per bucket.
+      rendezvousPresentationHeader(binding),
     );
   }
 

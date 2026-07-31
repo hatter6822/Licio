@@ -88,6 +88,24 @@ export interface EventPipelineServices {
   cryptoFlagEnabled: () => boolean;
   /** Story-title resolution for Signal Ledger entries (WS-E.2.1d). */
   storyTitle: (storyId: string) => string | null;
+  /**
+   * Thread → story resolution for a `contribution.created` payload written
+   * before `story_id` was carried on the wire (WS-E.2.1a fold key).
+   *
+   * The SAME resolution the sibling durable consumer of this event already does
+   * (`ingestion-signals` calls `stories.getStoryIdByThreadId` on it), added
+   * because the participation fold instead DROPPED such a payload: every
+   * pre-upgrade contribution left the durable fold — half of
+   * ConstructiveParticipation — for the whole 1h/24h/7d window horizon a rolling
+   * upgrade spans, and `scoring.ts` writes Signal Ledger entries only for folded
+   * actors, so those members' contributions never appeared in their own ledger
+   * either.  Two consumers of one event answering the same question differently
+   * is the asymmetry, and the fold had the worse answer.
+   *
+   * Returns null when the thread is unknown, and the fold then skips as before —
+   * a counted omission, never a phantom item keyed by a thread id.
+   */
+  storyIdForThread: (threadId: string) => Promise<string | null>;
   /** Structured compliance/operational logging (no payloads, no values). */
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
@@ -113,6 +131,7 @@ export interface InMemoryEventServicesOptions {
   retention?: Partial<RetentionPolicyConfig>;
   cryptoFlagEnabled?: () => boolean;
   storyTitle?: (storyId: string) => string | null;
+  storyIdForThread?: (threadId: string) => Promise<string | null>;
   log?: (event: string, meta: Record<string, unknown>) => void;
   now?: () => number;
 }
@@ -159,6 +178,7 @@ export function createInMemoryEventPipelineServices(
     retention: { ...DEFAULT_RETENTION_POLICY, ...options.retention },
     cryptoFlagEnabled,
     storyTitle: options.storyTitle ?? (() => null),
+    storyIdForThread: options.storyIdForThread ?? (async () => null),
     log: options.log ?? (() => {}),
     now,
   };

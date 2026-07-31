@@ -36,8 +36,10 @@ import {
   unpadBody,
 } from '../crypto/aead.js';
 import { type CanonicalValue, canonical, decodeCanonical } from '../crypto/canonical.js';
+import { deriveX25519KeyPair, type X25519KeyPair } from '../crypto/ecdh.js';
 import { hkdfExpandLabel } from '../crypto/hkdf.js';
-import { fromBase64Url, hmacSha256, randomBytes, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, hmacSha256, randomBytes, sha256, toBase64Url } from '../crypto/runtime.js';
+import { signEd25519 } from '../crypto/signatures.js';
 import { base64UrlSchema, privateIdSchema } from '../schemas/common.js';
 
 // --- discovery modes + risk steering (§15.2, §15.3.2) -----------------------
@@ -136,26 +138,117 @@ export async function derivePeerBlindId(
 }
 
 /**
- * A per-RECIPIENT §15.4 signaling-queue address, keyed on the RECIPIENT's ephemeral signaling key:
- * `HMAC-SHA256(rendezvous_key, canonical(["signal", recipient_ephemeral, epoch, time_bucket]))`,
- * base64url-encoded.
+ * A device's §15.4 SIGNALLING IDENTITY for one `(room, epoch, time bucket)`, derived from a secret
+ * ONLY THIS DEVICE HOLDS: its long-term Ed25519 signing key.
  *
- * WHY (not `derivePeerBlindId`): the rendezvous `signal/poll` drain is DELIVER-ONCE, so if two live
- * sessions on ONE device drained the SAME (device-level) address, the first pump to poll would
- * consume — and drop as un-openable — a signal meant for the OTHER session's channel key.  A mesh
- * (`connectMesh`) runs a fresh `connectPrivatePeer` per dial, each with its OWN ephemeral, so keying
- * the queue on the recipient's ephemeral gives every pairwise channel its own queue → no cross-dial
- * theft.
+ *     seed = SHA-256(Ed25519-Sign(device_signing_key,
+ *                    canonical(["signal-key", room_id_commitment, device_id, epoch, time_bucket])))
  *
- * WHY the RECIPIENT's key ALONE (not both ephemerals): a peer must be able to derive — and start
- * draining — its OWN inbound queue from its own ephemeral BEFORE it has discovered the sender, so an
- * offer sent the instant the offerer discovers it is not lost to a not-yet-draining answerer.  The
- * two directions use DIFFERENT recipient ephemerals (A drains `addr(eA)`, C drains `addr(eC)`), so a
- * peer never drains a signal it itself sent — directionality falls out of the distinct keys, with no
- * mutual-discovery round-trip.
+ * and that seed is the X25519 private scalar.
+ *
+ * THE KEY MUST NOT COME FROM THE RENDEZVOUS KEY.  This function first derived the scalar as
+ * `HMAC(rendezvous_key, ["signal-key", device_id, epoch, time_bucket])`, and every input to that is
+ * known to every current member: the rendezvous key is the room's shared discovery capability, and
+ * `peer_device_id`, `epoch` and the bucket are all in the room-key-sealed announcement.  Any member
+ * could therefore recompute ANOTHER device's signalling PRIVATE key, derive that pair's channel
+ * keys against the advertised peer public keys, and decrypt, forge, or — worst, because the
+ * `signal/poll` drain is deliver-once — CONSUME its SDP/ICE before the §15.5 membership handshake
+ * ever ran.  A private scalar has to be private; "only members can compute it" is the wrong bar
+ * when the attacker in the threat model IS a member.
+ *
+ * Ed25519 signing is DETERMINISTIC (RFC 8032 §5.1.6 derives the per-signature nonce from the
+ * private key and message), so the same device reproduces the same identity within a bucket without
+ * storing anything — which is what the ANNOUNCEMENT FAN-OUT fix needs.  `connectPrivatePeer` used
+ * to mint a FRESH ephemeral per CALL, and a mesh member runs that call CONCURRENTLY, once per peer,
+ * so a device dialling two peers published TWO live rendezvous slots, each lingering for the
+ * §15.3.2 TTL with no retraction.  Measured: three live candidates for a single device, and roughly
+ * a dozen addresses a minute that nobody answers at — contradicting `connect-peer.ts`'s own
+ * documented "one slot per device per bucket".  One identity per bucket makes that claim true;
+ * `selectFreshestCandidates` then collapses a device to one candidate by construction, and
+ * re-announcing is idempotent.  (The determinism is asserted, not assumed: the tests derive twice
+ * and compare, so a runtime with a non-conforming Ed25519 fails loudly instead of silently
+ * publishing a new slot per call again.)
+ *
+ * The PUBLIC half still reaches peers exactly as before — it rides in the sealed announcement's
+ * `signaling_public_key` — so no peer ever needs to derive it, and nothing about discovery changes.
+ *
+ * It is NOT what fixes the mesh flake; `deriveSignalAddress` carries that, and the split is measured
+ * rather than assumed (the address change alone, with the old per-call ephemeral still in place,
+ * passes the mesh spec).  The two land together because this one is only SAFE alongside it.
+ *
+ * The dependency, concretely: with the old recipient-only address, one identity per device would
+ * give a device a SINGLE inbound queue shared by every session it runs — the worst case of the
+ * deliver-once destruction the address change exists to stop.
+ *
+ * It does NOT weaken §15.3 unlinkability: the identity rotates with the time bucket exactly as
+ * `derivePeerBlindId` does, and the room-id commitment in the transcript keeps a device's identity
+ * in one room uncorrelatable with its identity in another — a member of BOTH rooms would otherwise
+ * see one public key in each and link the device across them.  Within a bucket a device was always
+ * linkable to itself anyway — that IS the one-slot-per-device-per-bucket cap the Tier-2 pseudonym
+ * enforces.
+ */
+export async function deriveSignalingKeyPair(
+  deviceSigningKey: CryptoKey,
+  roomIdCommitment: Uint8Array,
+  deviceId: string,
+  epoch: number,
+  timeBucket: number,
+): Promise<X25519KeyPair> {
+  const transcript = canonical([
+    'signal-key',
+    toBase64Url(roomIdCommitment),
+    deviceId,
+    epoch,
+    timeBucket,
+  ]);
+  // The signature is never published — only its hash, as a private scalar.  A member who knows the
+  // transcript AND this device's Ed25519 PUBLIC key can verify a candidate signature but cannot
+  // produce one, which is the whole difference from the derivation this replaced.
+  return deriveX25519KeyPair(await sha256(await signEd25519(deviceSigningKey, transcript)));
+}
+
+/**
+ * A PAIRWISE, DIRECTED §15.4 signaling-queue address:
+ * `HMAC-SHA256(rendezvous_key, canonical(["signal", sender_ephemeral, recipient_ephemeral, epoch,
+ * time_bucket]))`, base64url-encoded.
+ *
+ * The `signal/poll` drain is DELIVER-ONCE, so two live sessions on one device must never share an
+ * inbound address: the first pump to poll would consume — and drop as un-openable — a signal meant
+ * for the other session's channel key.  That is what the per-CALL ephemeral used to prevent, by
+ * giving every session a distinct recipient key; keying on the recipient ALONE was sound only while
+ * a device had one ephemeral per session.
+ *
+ * THE FAILURE THIS FIXES is a shared queue DESTROYING a third party's offer.  In a 3-peer mesh every
+ * member dials every other at once, and each addresses the SAME (freshest) announcement of the member
+ * it is dialling — so two offers land in ONE deliver-once queue.  The session that drains it can open
+ * only the one matching its channel key; the other is dropped as un-openable AND the poll has already
+ * cleared it, so it is gone rather than delayed.  That peer then waits out its dial deadline against
+ * a view that has moved on (the `skipped a signal` warnings, on the member everyone dials at once).
+ * Keying on the SENDER separates them: nothing is destroyed, and the second offer waits in the
+ * mailbox for the session that can open it.
+ *
+ * Note this is exactly the property the previous recipient-only docstring CLAIMED — "gives every
+ * pairwise channel its own queue" — and did not have.  It holds only while every session has its own
+ * recipient ephemeral, which stops being true the moment two peers pick the same announcement.
+ *
+ * MEASURED, because the halves are not equally load-bearing and it would be easy to assert otherwise:
+ * this change ALONE (with the old per-call ephemeral still in place) carries the mesh spec.
+ * `deriveSignalingKeyPair` fixes a different, separately-measured defect — see its own note — and
+ * depends on this one to be safe, since one identity per device with a recipient-only address would
+ * give a device a single shared queue for ALL its sessions: the worst case of the bug above.
+ *
+ * DIRECTED — the sender's key comes first — so A→B and B→A are distinct queues and a peer can never
+ * drain a signal it sent itself.  Both peers compute the same address for a direction from the two
+ * public keys they already hold, so there is no extra round-trip.
+ *
+ * The cost is that a peer can no longer derive its inbound address BEFORE discovering the sender, so
+ * it starts draining one poll later.  Nothing is lost: the queue is a server-side mailbox with a
+ * TTL, not a live socket, and an offer sent before the answerer began draining is still there when
+ * it does — the same property ICE candidates arriving ahead of their offer already rely on.
  */
 export async function deriveSignalAddress(
   rendezvousKey: Uint8Array,
+  senderSignalingPublicKey: Uint8Array,
   recipientSignalingPublicKey: Uint8Array,
   epoch: number,
   timeBucket: number,
@@ -163,6 +256,7 @@ export async function deriveSignalAddress(
   return toBase64Url(
     await blindId(rendezvousKey, [
       'signal',
+      toBase64Url(senderSignalingPublicKey),
       toBase64Url(recipientSignalingPublicKey),
       epoch,
       timeBucket,

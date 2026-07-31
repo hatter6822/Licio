@@ -27,7 +27,12 @@ import {
 } from '../knomosis/stores.js';
 import { verifyAuditChain } from '../treasury/audit-chain.js';
 import { actionBudgetStatus } from '../treasury/budgets.js';
-import { createDelegation, revokeDelegation } from '../treasury/delegations.js';
+import {
+  createDelegation,
+  delegatorsAlreadyConsumed,
+  type PriorBallot,
+  revokeDelegation,
+} from '../treasury/delegations.js';
 import { setGrantReview, updateGrantMilestone } from '../treasury/grants.js';
 import { adoptLawPack, registerLawPack } from '../treasury/law-packs.js';
 import {
@@ -138,8 +143,17 @@ interface TestHarness extends ProposalDeps {
   electionsOpened: string[];
   memberFactsOverride: Map<
     string,
-    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+    {
+      membershipDays: number | null;
+      contributionCount: number | null;
+      verifiedIdentity: boolean;
+      memberSince?: string;
+    }
   >;
+  /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
+  memberFactsAsOf: (string | null)[];
+  /** Instants the FREEZE measurement reported — the stamp must be one of these. */
+  basisMeasuredAt: string[];
 }
 
 function buildHarness(): TestHarness {
@@ -169,20 +183,41 @@ function buildHarness(): TestHarness {
       return true;
     },
   };
+  /** Every `asOf` the ballot gate asked `memberFacts` for, in order. */
+  const memberFactsAsOf: (string | null)[] = [];
+  const basisMeasuredAt: string[] = [];
   const memberFactsOverride = new Map<
     string,
-    { membershipDays: number | null; contributionCount: number | null; verifiedIdentity: boolean }
+    {
+      membershipDays: number | null;
+      contributionCount: number | null;
+      verifiedIdentity: boolean;
+      memberSince?: string;
+    }
   >();
   const membership: MembershipFactsPort = {
-    memberFacts: async (_r, userId) =>
-      members.has(userId)
-        ? (memberFactsOverride.get(userId) ?? {
-            membershipDays: 60,
-            contributionCount: 10,
-            verifiedIdentity: true,
-          })
-        : null,
-    eligibleMemberCount: async () => 3,
+    memberFacts: async (_r, userId, asOf) => {
+      // Recorded so a test can assert WHICH instant the gate asked about — the whole
+      // defect was the gate asking about `now`.
+      memberFactsAsOf.push(asOf ?? null);
+      if (!members.has(userId)) return null;
+      return (
+        memberFactsOverride.get(userId) ?? {
+          membershipDays: 60,
+          contributionCount: 10,
+          verifiedIdentity: true,
+        }
+      );
+    },
+    eligibleMemberCount: async () => ({ count: 3, asOf: new Date(0).toISOString() }),
+    // The FREEZE reader reports the instant it measured at, and RECORDS it, so a
+    // test can assert the stamp came from the measurement rather than from a clock
+    // read beside it.
+    measureEligibleMembers: async () => {
+      const asOf = new Date(clock).toISOString();
+      basisMeasuredAt.push(asOf);
+      return { count: 3, asOf };
+    },
   };
   const deps: ProposalDeps = {
     profiles: new InMemoryGovernanceProfileStore(),
@@ -248,6 +283,8 @@ function buildHarness(): TestHarness {
     executorAccepts,
     electionsOpened,
     memberFactsOverride,
+    memberFactsAsOf,
+    basisMeasuredAt,
   });
 }
 
@@ -521,6 +558,81 @@ describe('createProductionProposal (WS-M.4.1a-c + 4.2a)', () => {
     expect(proposal.category).toBe('grant');
     const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
     expect(chain.some((e) => e.actionType === 'proposal_published')).toBe(true);
+  });
+
+  // WS-K.2.2a §24.5.  `buildGovernanceAiDeps` was the one wiring builder with no
+  // production caller, so the whole advisory module — plain-language summary,
+  // missing required fields, conflict of interest, scam-pattern language — was
+  // reachable from nothing.  These pin the port's CONTRACT: it receives the
+  // published proposal, and it can never change the outcome.
+  describe('the §24.5 advisory port (advisory means advisory)', () => {
+    it('runs over a published proposal with the fields the §24.5 checks name', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const seen: Array<Record<string, unknown>> = [];
+      deps.governanceAdvisor = async (input) => {
+        seen.push(input as unknown as Record<string, unknown>);
+      };
+      const proposal = await createProposal(deps);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        proposalRef: proposal.proposalId,
+        roomId: ROOM,
+        proposerRef: PROPOSER,
+        // `detectMissingFields` asks about budget/recipient/citations by those
+        // names, so the mapping from this domain's fields has to be made once,
+        // at the call site, rather than guessed per caller.
+        fields: expect.objectContaining({ budget: '4000' }),
+      });
+    });
+
+    it('reads the CANONICAL recipient, so proposer-as-recipient is seen', async () => {
+      // The production contract carries the recipient in top-level
+      // `recipient_ref`, and an ordinary spend draft need not repeat it inside
+      // `requested_action` — so reading the action alone passed null for most
+      // proposals and the conflict-of-interest check never fired on the ones it
+      // exists for, while the missing-fields check called the recipient absent.
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const seen: Array<Record<string, unknown>> = [];
+      deps.governanceAdvisor = async (input) => {
+        seen.push(input as unknown as Record<string, unknown>);
+      };
+      await createProposal(deps, { recipient_ref: `user:${PROPOSER}` });
+      // Normalized past the accepted `user:` form, which is how the COI recusal
+      // gate compares it — so the advisor and the gate name the same party.
+      const advised = seen[0];
+      if (advised === undefined) throw new Error('the advisor was not called');
+      expect(advised['recipientRef']).toBe(PROPOSER);
+      expect((advised['fields'] as Record<string, string>)['recipient']).toBe(`user:${PROPOSER}`);
+    });
+
+    it('a FAILING advisor never unpublishes an already-recorded proposal', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      const alerts: string[] = [];
+      deps.alert = (event) => alerts.push(event);
+      deps.governanceAdvisor = async () => {
+        throw new Error('model unavailable');
+      };
+      const proposal = await createProposal(deps);
+      // Advice is not a precondition of governance: the proposal stands, the
+      // audit entry stands, and the failure is reported operationally.
+      expect(proposal.votingState).toBe('deliberation');
+      const chain = await deps.governanceAudit.listChainedByRoom(ROOM);
+      expect(chain.some((e) => e.actionType === 'proposal_published')).toBe(true);
+      expect(alerts).toContain('governance.advisory.failed');
+    });
+
+    it('an UNWIRED advisor is silence, not a failure', async () => {
+      const deps = buildHarness();
+      await prepareRoom(deps);
+      // A deployment with no AI wired keeps full governance — which is what
+      // "advisory" has to mean if it means anything.
+      expect(deps.governanceAdvisor).toBeUndefined();
+      const proposal = await createProposal(deps);
+      expect(proposal.votingState).toBe('deliberation');
+    });
   });
 
   it('replays idempotently on the same (room, user, key)', async () => {
@@ -1383,6 +1495,432 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
     ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
   });
 
+  it('a member the LAGGING open counted can still cast their ballot (WS-M.4.2c)', async () => {
+    // The denominator and the numerator have to answer to ONE instant.
+    // `eligibleBasisCount` is the membership at the actual deliberation→open
+    // transition, and the cutoff used to read the SCHEDULED
+    // `deliberationEndsAt` — so ordinary tick lag (or a room freeze) admitted
+    // members to the basis and refused them a ballot, and enough such joins
+    // made quorum unreachable however many eligible members voted.
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    const deadline = Date.parse(proposal.deliberationEndsAt ?? '');
+    // The scheduler runs an HOUR late…
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmDeliberationSeconds * 1000 + 1_000 + 3_600_000);
+    await settleDueProposals(deps, ROOM);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    expect(opened?.votingState).toBe('open');
+    // …so the basis was counted well after the scheduled deadline, and the
+    // instant is recorded rather than inferred from the schedule.
+    expect(Date.parse(opened?.eligibleBasisAt ?? '')).toBeGreaterThan(deadline);
+    // AND the recorded instant is the MEASUREMENT's, not a clock read beside it.
+    // Taking it from the clock first and passing it into a live count fixed the join
+    // direction and left the departure one: membership is hard-deleted on leave, so a
+    // member who left during the sweep's own runtime is absent from the rows the
+    // count reads and the denominator ends up smaller than the electorate at the
+    // instant it claims — quorum easier than the pack asks for, with no way to
+    // reconstruct the departure afterwards.  The harness's `measureEligibleMembers`
+    // reports its own clock, so this pins which of the two the stamp came from.
+    expect(deps.basisMeasuredAt).toContain(opened?.eligibleBasisAt);
+
+    // A member who joined between the deadline and the actual open was counted
+    // in that basis, so their ballot must count too.
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 60,
+      contributionCount: 10,
+      verifiedIdentity: true,
+      memberSince: new Date(deadline + 60_000).toISOString(),
+    });
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    expect('signature' in vote).toBe(true);
+  });
+
+  it('a delegator who joined AFTER the freeze confers NOTHING (WS-M.4.2c)', async () => {
+    // Delegation was the way around the electorate freeze.  The direct ballot
+    // refuses a signer whose join postdates `eligibleBasisAt`; the incoming-
+    // delegation fold applied the law-pack eligibility gate and nothing else,
+    // so one question — "is this member inside the population the denominator
+    // was counted over?" — was answered against a stamped instant for a direct
+    // voter and against LIVE membership for a delegated one.  Post-open joiners
+    // could hand their units to a delegate whose cap admits them all, and
+    // delegated weight is what the threshold arithmetic consumes.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = Date.parse(opened?.eligibleBasisAt ?? '');
+    expect(frozenAt).toBeGreaterThan(0);
+    // The delegator joined a minute AFTER the basis was frozen.
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 60,
+      contributionCount: 10,
+      verifiedIdentity: true,
+      memberSince: new Date(frozenAt + 60_000).toISOString(),
+    });
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // Own vote only — the post-freeze delegation conferred nothing…
+    expect(vote.signature.weightSnapshot).toBe('1');
+    // …and it is not recorded as consumed, so the unit is still the delegator's
+    // to cast on the NEXT proposal.
+    expect(vote.signature.countedDelegatorIds).toEqual([]);
+  });
+
+  it('a delegated unit the CAP dropped is still the delegator’s to cast (WS-M.4.2c-3)', async () => {
+    // Existence is not consumption.  The delegate's fold stops at the
+    // per-account ceiling, so with a cap of 1 — the default when a law pack
+    // sets none — the delegate's own vote fills the cap and NO delegated unit
+    // is counted.  The guard used to read "a live delegation existed when they
+    // signed" and refuse the delegator anyway: the unit left the tally, and
+    // the delegator was refused the ballot that would have carried it.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 1 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    // The cap admitted the delegate's own vote and nothing else…
+    expect(delegateVote.signature.weightSnapshot).toBe('1');
+    // …and the ballot says so, which is what the guard below reads.
+    expect(delegateVote.signature.countedDelegatorIds).toEqual([]);
+    const direct = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in direct)) throw new Error(JSON.stringify(direct));
+    expect(direct.signature.weightSnapshot).toBe('1');
+  });
+
+  it('the cap admits delegators in a canonical order, and frees the rest (WS-M.4.2c-3)', async () => {
+    // Cap 2 with TWO delegators: the delegate's own vote plus exactly ONE
+    // delegated unit fits.  Which one is decided by the canonical fold order
+    // (delegator id) rather than by store iteration, and the delegator the cap
+    // left out is still free — `delegatorsAlreadyConsumed` is the predicate
+    // both ballot guards read, so asserting it directly asserts both.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    for (const delegatorUserId of [STEWARD, PROPOSER]) {
+      await createDelegation(deps, {
+        roomId: ROOM,
+        delegatorUserId,
+        delegateUserId: VOTER_2,
+        scope: { all: true },
+      });
+    }
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('2');
+    // PROPOSER sorts before STEWARD, so the ceiling admitted PROPOSER — even
+    // though STEWARD's delegation was created first.
+    expect(delegateVote.signature.countedDelegatorIds).toEqual([PROPOSER]);
+    const signatures = await deps.proposalSignatures.listByProposal(proposal.proposalId);
+    const ballotByUser = new Map<string, PriorBallot>(
+      signatures
+        .filter((r) => r.purpose === 'vote')
+        .map((r) => [
+          r.userId,
+          {
+            createdAt: r.createdAt,
+            weightSnapshot: r.weightSnapshot,
+            countedDelegatorIds:
+              r.countedDelegatorIds == null ? null : new Set<string>(r.countedDelegatorIds),
+          },
+        ]),
+    );
+    const consumed = await delegatorsAlreadyConsumed(
+      deps.delegations,
+      ROOM,
+      proposal.proposalType,
+      [PROPOSER, STEWARD],
+      ballotByUser,
+      null,
+    );
+    expect(consumed.has(PROPOSER)).toBe(true);
+    expect(consumed.has(STEWARD)).toBe(false);
+
+    // LEGACY ROW: `counted_delegator_ids` is null (written before migration 0105),
+    // so the check falls back to timestamps — but a recorded weight of exactly 1
+    // is positive proof that NO delegated unit was folded into that ballot,
+    // whatever the timestamps say.  Refusing the delegator then erased a vote on
+    // the strength of a delegation the tally never counted.
+    const legacyWeightOne = new Map<string, PriorBallot>(
+      [...ballotByUser].map(([userId, ballot]) => [
+        userId,
+        { ...ballot, weightSnapshot: '1', countedDelegatorIds: null },
+      ]),
+    );
+    expect(
+      await delegatorsAlreadyConsumed(
+        deps.delegations,
+        ROOM,
+        proposal.proposalType,
+        [PROPOSER, STEWARD],
+        legacyWeightOne,
+        null,
+      ),
+    ).toEqual(new Set());
+
+    // …and a legacy row whose weight EXCEEDS 1 still falls back to the timestamp
+    // test, because then a delegated unit really was folded and the row does not
+    // say which.  The conservative answer is the one that cannot double-count.
+    const legacyWeightTwo = new Map<string, PriorBallot>(
+      [...ballotByUser].map(([userId, ballot]) => [
+        userId,
+        { ...ballot, weightSnapshot: '2', countedDelegatorIds: null },
+      ]),
+    );
+    expect(
+      (
+        await delegatorsAlreadyConsumed(
+          deps.delegations,
+          ROOM,
+          proposal.proposalType,
+          [PROPOSER, STEWARD],
+          legacyWeightTwo,
+          null,
+        )
+      ).has(PROPOSER),
+    ).toBe(true);
+  });
+
+  it('resolves EVERY candidate in ONE store read, not one per candidate', async () => {
+    // A delegate can hold many incoming delegations, and this read must include
+    // REVOKED rows — so before batching, one ballot performed N sequential scans of
+    // a history a member can grow without limit by revoking and re-creating a
+    // delegation.  The cost was attacker-controlled, not proportional to the ballot.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    let singleReads = 0;
+    let batchReads = 0;
+    const realSingle = deps.delegations.listByDelegator.bind(deps.delegations);
+    const realBatch = deps.delegations.listByDelegators.bind(deps.delegations);
+    deps.delegations.listByDelegator = async (room: string, id: string) => {
+      singleReads += 1;
+      return realSingle(room, id);
+    };
+    deps.delegations.listByDelegators = async (room: string, ids: readonly string[]) => {
+      batchReads += 1;
+      return realBatch(room, ids);
+    };
+    await delegatorsAlreadyConsumed(
+      deps.delegations,
+      ROOM,
+      'treasury_spend',
+      [PROPOSER, STEWARD, VOTER_2],
+      new Map(),
+      null,
+    );
+    expect(batchReads).toBe(1);
+    expect(singleReads).toBe(0);
+  });
+
+  it('asks for eligibility AS OF the frozen instant, not at the ballot', async () => {
+    // The freeze covered only `memberSince`.  Tenure, contributions and identity were
+    // read LIVE, so a member the frozen basis EXCLUDED for any of those could satisfy
+    // the rule mid-window and vote against a denominator they were never counted in —
+    // satisfying quorum, or turning a treasury decision, against a smaller frozen
+    // figure.  The whole defect was the gate asking about `now`.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'one_civic_account_one_vote' });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = opened?.eligibleBasisAt ?? '';
+    expect(Date.parse(frozenAt)).toBeGreaterThan(0);
+    deps.memberFactsAsOf.length = 0;
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // EVERY facts read on the ballot path used the frozen instant — none went live.
+    expect(deps.memberFactsAsOf.length).toBeGreaterThan(0);
+    expect([...new Set(deps.memberFactsAsOf)]).toEqual([frozenAt]);
+  });
+
+  it("asks for the DELEGATOR's eligibility at the frozen instant too", async () => {
+    // The delegated arm had the identical asymmetry: its JOIN test was already frozen
+    // while its eligibility verdict was live, so an ineligible delegator could become
+    // eligible mid-window and boost a delegate's ballot.  Delegation is otherwise the
+    // way around the freeze, and delegated weight is what the threshold arithmetic
+    // consumes.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 5 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const opened = await deps.proposals.getById(proposal.proposalId);
+    const frozenAt = opened?.eligibleBasisAt ?? '';
+    expect(Date.parse(frozenAt)).toBeGreaterThan(0);
+    deps.memberFactsAsOf.length = 0;
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // At least TWO reads — the voter and the delegator — and every one frozen.
+    expect(deps.memberFactsAsOf.length).toBeGreaterThan(1);
+    expect([...new Set(deps.memberFactsAsOf)]).toEqual([frozenAt]);
+  });
+
+  it('REVOKING after the delegate voted does not return the unit (WS-M.4.2c-1)', async () => {
+    // The guard used to read only ACTIVE delegations, so revoking erased its
+    // evidence while the weight stayed inside the delegate's frozen
+    // `weightSnapshot` — and the refusal message ("revoke the delegation to
+    // vote directly") walked the delegator straight through the hole.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegateVote = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in delegateVote)) throw new Error(JSON.stringify(delegateVote));
+    expect(delegateVote.signature.weightSnapshot).toBe('2'); // own 1 + PROPOSER's 1
+
+    // Now revoke, then try to vote directly.
+    const all = await deps.delegations.listByRoom(ROOM, 10);
+    const mine = all.find((d) => d.delegatorUserId === PROPOSER);
+    expect(
+      await revokeDelegation(deps, {
+        roomId: ROOM,
+        delegationId: mine?.delegationId ?? '',
+        actorUserId: PROPOSER,
+        isPlatformStaff: false,
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'delegated_weight_already_cast' });
+  });
+
+  it('SPLITTING an `all` and a `type:` delegation across two delegates counts the unit ONCE', async () => {
+    // `incomingDelegationsFor` dedups per DELEGATE, so it cannot see a sibling
+    // delegation the same delegator granted to someone else; `alreadyVoted`
+    // does not catch it either, because that delegator never voted directly.
+    // The unit was therefore counted once in each delegate's snapshot.
+    const deps = buildHarness();
+    await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 3 });
+    const WALLET_3 = '33333333-3333-4333-8333-333333333333';
+    const signer3 = privateKeyToAccount(`0x${'59'.repeat(32)}`);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    await linkWallet(deps, WALLET_3, STEWARD, signer3.address);
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    // ONE delegator, TWO delegates, two scopes that both match this proposal.
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: VOTER_2,
+      scope: { all: true },
+    });
+    const proposal = await createProposal(deps);
+    await createDelegation(deps, {
+      roomId: ROOM,
+      delegatorUserId: PROPOSER,
+      delegateUserId: STEWARD,
+      scope: { proposal_type: proposal.proposalType },
+    });
+    await openVoting(deps);
+
+    const first = await castVote(
+      deps,
+      proposal.proposalId,
+      VOTER_2,
+      WALLET_2,
+      testAccount2,
+      'approve',
+    );
+    if (!('signature' in first)) throw new Error(JSON.stringify(first));
+    expect(first.signature.weightSnapshot).toBe('2'); // own 1 + the delegated 1
+
+    const second = await castVote(deps, proposal.proposalId, STEWARD, WALLET_3, signer3, 'approve');
+    if (!('signature' in second)) throw new Error(JSON.stringify(second));
+    // Their OWN vote only — PROPOSER's unit is already inside the first ballot.
+    expect(second.signature.weightSnapshot).toBe('1');
+  });
+
   it('allows a delegator’s direct vote when the delegation POST-DATES the delegate’s ballot (WS-M.4.2c-1)', async () => {
     const deps = buildHarness();
     await prepareRoom(deps, { weightModel: 'delegated', maxVotingWeightPerAccount: 2 });
@@ -1584,26 +2122,56 @@ describe('signProposal (WS-M.2.3b-1 + 4.2c)', () => {
       }),
     });
     if (!('proposal' in created)) throw new Error(JSON.stringify(created));
-    await openVoting(deps);
-    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
-    await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve');
-    // Capture the eligibility basis the TALLY hands the membership port: the
-    // ballot gate treats a category-less rule rewrite as spend-controlling, so
-    // the quorum denominator must apply the SAME predicate — members who
-    // could never sign must not inflate it (W14).
+    // Capture the eligibility basis the quorum denominator is computed with:
+    // the ballot gate treats a category-less rule rewrite as spend-controlling,
+    // so the denominator must apply the SAME predicate — members who could
+    // never sign must not inflate it (W14).
+    //
+    // The observation point is BEFORE `openVoting`, because the basis is frozen
+    // at the `deliberation → open` transition rather than recomputed at settle
+    // (migration 0100): reading it fresh at settle let membership growth after
+    // the last ballot nullify a decided proposal.
     const inner = deps.membership;
     const captured: boolean[] = [];
     deps.membership = {
-      memberFacts: (roomId, userId) => inner.memberFacts(roomId, userId),
+      // FORWARDS `asOf`.  A positional forward that drops it compiles cleanly and
+      // makes every test through this harness exercise the pre-freeze live-facts path
+      // while appearing to cover the frozen one.
+      memberFacts: (roomId, userId, asOf) => inner.memberFacts(roomId, userId, asOf),
+      // The FREEZE goes through here now, so this is where the eligibility shape has
+      // to be captured.  Forwarding straight to `inner` left `captured` empty while
+      // the assertion still read like it was covering the freeze.
+      measureEligibleMembers: async (roomId, eligibility) => {
+        if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
+        // The port now reports the SNAPSHOT's own instant, so this forwards it rather
+        // than stamping a clock reading beside the count.
+        const measured = await inner.eligibleMemberCount(roomId, eligibility);
+        return {
+          count: measured.count,
+          asOf: measured.asOf,
+        };
+      },
       eligibleMemberCount: (roomId, eligibility) => {
         if (eligibility !== undefined) captured.push(eligibility.treasuryControlling);
         return inner.eligibleMemberCount(roomId, eligibility);
       },
     };
-    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
-    await settleDueProposals(deps, ROOM);
+    await openVoting(deps);
     expect(captured).toContain(true);
     expect(captured).not.toContain(false);
+    // …and it really was recorded, not merely computed and discarded.
+    const opened = await deps.proposals.getById(created.proposal.proposalId);
+    expect(opened?.votingState).toBe('open');
+    expect(opened?.eligibleBasisCount).toBeGreaterThan(0);
+
+    await linkWallet(deps, WALLET_1, VOTER_2, testAccount.address);
+    await castVote(deps, created.proposal.proposalId, VOTER_2, WALLET_1, testAccount, 'approve');
+    captured.length = 0;
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    // The settle tally uses the FROZEN basis, so it asks the membership port
+    // nothing — that silence is the fix.
+    expect(captured).toEqual([]);
     // The ONE predicate both gates share.
     expect(isTreasuryControlling({ category: null, proposalType: 'treasury_policy_update' })).toBe(
       true,
@@ -2107,6 +2675,63 @@ describe('settle + challenge + execute (WS-M.4.2d/4.3a/4.3b)', () => {
         create: draft({ requested_amount: '900' }),
       }),
     ).toMatchObject({ ok: true });
+  });
+
+  it('two ballots cannot both count the SAME delegated unit (migration 0114)', async () => {
+    // The double-count race the pre-insert read could only narrow.  A member who
+    // splits an `all` delegation to one delegate and a `type:<proposal>` delegation
+    // to another lets both delegates resolve weight from the same uncommitted view:
+    // each `consumedElsewhere` check comes back empty and both signatures insert,
+    // because `governance_signature_unique_idx` is keyed on the WALLET and a JSONB
+    // array carries no cross-row uniqueness.  The claim rows are what refuse it.
+    const deps = buildHarness();
+    await prepareRoom(deps);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const delegator = crypto.randomUUID();
+    const ballot = (userId: string) => ({
+      signatureId: crypto.randomUUID(),
+      proposalId: proposal.proposalId,
+      userId,
+      walletAccountId: crypto.randomUUID(),
+      signatureType: 'eip712_ecdsa' as const,
+      typedDataHash: `0x${'3'.repeat(64)}`,
+      signatureRef: crypto.randomUUID(),
+      weightSnapshot: '2',
+      eligibilityReason: 'delegated',
+      createdAt: new Date(deps.now()).toISOString(),
+      purpose: 'vote' as const,
+      choice: 'approve' as const,
+      nonce: crypto.randomUUID(),
+      // BOTH ballots claim the same delegator, exactly as two concurrent
+      // resolutions of an uncommitted view would.
+      countedDelegatorIds: [delegator],
+    });
+    const first = await deps.proposalSignatures.insert(ballot(PROPOSER));
+    expect(first.ok).toBe(true);
+    const second = await deps.proposalSignatures.insert(ballot(VOTER_2));
+    expect(second).toEqual({
+      ok: false,
+      reason: 'delegated_unit_claimed',
+      delegatorUserIds: [delegator],
+    });
+    // …and the refusal is not `duplicate_signature`: the second voter has not
+    // signed, and answering `already_signed` would send them looking for a ballot
+    // they never cast instead of re-submitting.
+    expect(second.ok === false && second.reason).toBe('delegated_unit_claimed');
+    // The losing ballot left NOTHING behind — no row that a tally could count.
+    const recorded = await deps.proposalSignatures.listByProposal(proposal.proposalId);
+    expect(recorded).toHaveLength(1);
+
+    // REVERTING the winner RELEASES its claim, or the delegator's unit would be
+    // disenfranchised for this proposal for ever — a worse failure than the double
+    // count this table prevents.
+    expect(await deps.proposalSignatures.removeByAction(ballot(PROPOSER).signatureRef)).toBe(0);
+    const winner = recorded[0];
+    if (!winner) throw new Error('expected the winning ballot');
+    expect(await deps.proposalSignatures.removeByAction(winner.signatureRef)).toBe(1);
+    const retried = await deps.proposalSignatures.insert(ballot(VOTER_2));
+    expect(retried.ok).toBe(true);
   });
 
   it('ledger-only signature rows (null snapshot) never tally or satisfy quorum (W8 review)', async () => {
@@ -2718,5 +3343,85 @@ describe('grants (WS-M.5.1a)', () => {
     // The kernel was NEVER invoked: a plan failure after the kernel append
     // would leave a phantom accepted spend consuming future cap headroom (W9).
     expect(deps.executorCalls).toEqual([]);
+  });
+});
+
+describe('reputation_bounded weight (§17.5: the fact has to be wired)', () => {
+  const REPUTATION_PACK: Partial<LawPack> = {
+    weightModel: 'reputation_bounded',
+    maxVotingWeightPerAccount: 10,
+  };
+
+  it('resolves the weight from the room-scoped participation count', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 3,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    const vote = await castVote(
+      deps,
+      proposal.proposalId,
+      PROPOSER,
+      WALLET_1,
+      testAccount,
+      'approve',
+    );
+    if (!('signature' in vote)) throw new Error(JSON.stringify(vote));
+    // min(score 3, cap 10) — NOT the hard-coded 0 every ballot used to carry.
+    expect(vote.signature.weightSnapshot).toBe('3');
+    expect(vote.signature.eligibilityReason).toContain('score 3');
+    expect(vote.tally.approve).toBe('3');
+  });
+
+  it('caps the score at the law-pack ceiling and settles a unanimous vote to passed', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 40, // above the cap: min(40, 10) = 10
+      verifiedIdentity: true,
+    });
+    deps.memberFactsOverride.set(VOTER_2, {
+      membershipDays: 90,
+      contributionCount: 4,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    await linkWallet(deps, WALLET_2, VOTER_2, testAccount2.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve');
+    await castVote(deps, proposal.proposalId, VOTER_2, WALLET_2, testAccount2, 'approve');
+    deps.clockAdvance(DEFAULT_KNOMOSIS_CONFIG.wsmVotingSeconds * 1000 + 1_000);
+    await settleDueProposals(deps, ROOM);
+    const settled = await deps.proposals.getById(proposal.proposalId);
+    // With every snapshot at 0 this UNANIMOUS approval settled `rejected`:
+    // `decided` stayed '0', so the threshold branch never ran.
+    expect(settled?.votingState).toBe('passed');
+    expect(settled?.tallySnapshot).toMatchObject({ outcome: 'passed', approve: '14', reject: '0' });
+  });
+
+  it('refuses a zero-weight ballot instead of recording a vote that cannot count', async () => {
+    const deps = buildHarness();
+    await prepareRoom(deps, REPUTATION_PACK);
+    deps.memberFactsOverride.set(PROPOSER, {
+      membershipDays: 90,
+      contributionCount: 0,
+      verifiedIdentity: true,
+    });
+    await linkWallet(deps, WALLET_1, PROPOSER, testAccount.address);
+    const proposal = await createProposal(deps);
+    await openVoting(deps);
+    expect(
+      await castVote(deps, proposal.proposalId, PROPOSER, WALLET_1, testAccount, 'approve'),
+    ).toMatchObject({ ok: false, code: 'zero_voting_weight' });
+    // Nothing recorded: a 0 adds nothing to the tally yet still counts toward
+    // QUORUM, so recording it would let a weightless electorate carry a room.
+    expect(await deps.proposalSignatures.listByProposal(proposal.proposalId)).toEqual([]);
   });
 });

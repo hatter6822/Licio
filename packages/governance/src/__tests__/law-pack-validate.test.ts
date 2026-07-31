@@ -314,6 +314,19 @@ describe('validateLawPackBundle (WS-M.1.3c structural)', () => {
     );
   });
 
+  it('rejects a zero threshold even with NO quorum floor', () => {
+    // This is the configuration the old guard let through: it fired only when
+    // `quorum.minFraction > 0`, so the WORST pack — no participation floor AND no
+    // affirmative floor — validated clean.  `tally-inversion` below is why that
+    // matters: at a zero bar one approval outweighs any number of rejections.
+    const pack = fullPack();
+    (pack.quorumRules ?? {})['capped_grant'] = { basis: 'eligible_voters', minFraction: 0 };
+    (pack.thresholdRules ?? {})['capped_grant'] = { minAffirmativeFraction: 0 };
+    expect(validateLawPackBundle(pack)).toContainEqual(
+      expect.objectContaining({ path: 'thresholdRules.capped_grant' }),
+    );
+  });
+
   it('requires the per-account cap alongside a weight model', () => {
     const pack = fullPack();
     delete pack.maxVotingWeightPerAccount;

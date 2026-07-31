@@ -6,7 +6,7 @@
 // the route-level shape validation / oversized rejection (with AND without
 // Content-Length); and the full-app mount proving the endpoints are CSRF-exempt
 // (a P2P client holds no session) and never 404 on poll.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { runRendezvousTick } from '../private-rendezvous/scheduler.js';
 import {
@@ -253,6 +253,88 @@ describe('routes — shape validation + bounds', () => {
     const d = await post('/signal/poll', { peer_blind_id: PEER_BLIND_2 });
     expect(d.status).toBe(200);
     expect(((await d.json()) as { signals: unknown[] }).signals).toHaveLength(1);
+  });
+});
+
+// The shipped budgets, and the guard on the harness relaxation.  Nothing else
+// asserts them: the real-WebRTC browser specs run under `LICIO_E2E=1`, so they
+// exercise the caps MULTIPLIED BY 50 and would stay green against budgets no
+// deployment offers.  These are deterministic, run in CI, and — the load-bearing
+// half — pin that the relaxation stays refused under `NODE_ENV=production`, the
+// exact shape a dropped guard would take.
+describe('rate-limit budgets — production values + the harness guard (§19.1)', () => {
+  const BUDGETS = [
+    { path: '/announce', limit: 120 },
+    { path: '/poll', limit: 240 },
+    { path: '/signal', limit: 240 },
+    { path: '/signal/poll', limit: 480 },
+  ] as const;
+
+  let savedE2e: string | undefined;
+  let savedNodeEnv: string | undefined;
+  beforeEach(() => {
+    savedE2e = process.env['LICIO_E2E'];
+    savedNodeEnv = process.env['NODE_ENV'];
+    setRendezvousService(new RendezvousService(new InMemoryRendezvousStore()));
+  });
+  afterEach(() => {
+    // The routes read process.env inside `createPrivateRendezvousRoutes()`, so
+    // restoring the values is enough — no module reset is needed.
+    if (savedE2e === undefined) delete process.env['LICIO_E2E'];
+    else process.env['LICIO_E2E'] = savedE2e;
+    if (savedNodeEnv === undefined) delete process.env['NODE_ENV'];
+    else process.env['NODE_ENV'] = savedNodeEnv;
+  });
+
+  /** Spend `limit` requests on a freshly built router, then return the status of
+   *  the NEXT one.  The bodies are deliberately invalid (400) so the budget is
+   *  measured without touching the store — the limiter runs before the handler. */
+  async function statusAfterSpending(
+    app: ReturnType<typeof createPrivateRendezvousRoutes>,
+    path: string,
+    limit: number,
+  ): Promise<number> {
+    for (let i = 0; i < limit; i += 1) {
+      const res = await app.request(path, {
+        method: 'POST',
+        body: '{}',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.status).toBe(400);
+    }
+    const over = await app.request(path, {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    return over.status;
+  }
+
+  it('enforces 120/240/240/480 per minute outside the harness', async () => {
+    delete process.env['LICIO_E2E'];
+    for (const { path, limit } of BUDGETS) {
+      expect([
+        path,
+        await statusAfterSpending(createPrivateRendezvousRoutes(), path, limit),
+      ]).toEqual([path, 429]);
+    }
+  });
+
+  it('refuses the harness relaxation under NODE_ENV=production', async () => {
+    process.env['LICIO_E2E'] = '1';
+    process.env['NODE_ENV'] = 'production';
+    // `LICIO_E2E=1` alone must never widen a production budget — the multiplier
+    // is a harness affordance, and a deployment that happens to carry the flag
+    // still gets the tight backstop.
+    expect(await statusAfterSpending(createPrivateRendezvousRoutes(), '/announce', 120)).toBe(429);
+  });
+
+  it('relaxes the cap for the in-memory harness only', async () => {
+    process.env['LICIO_E2E'] = '1';
+    process.env['NODE_ENV'] = 'test';
+    // Request 121 is served (not 429): the multiplier is live, which is what the
+    // multi-context mesh specs depend on.
+    expect(await statusAfterSpending(createPrivateRendezvousRoutes(), '/announce', 120)).toBe(400);
   });
 });
 

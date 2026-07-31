@@ -325,6 +325,61 @@ describe('WS-U governance routes', () => {
     expect(ok.status).toBe(200);
   });
 
+  it('an APPROVAL-gated joiner is judged by when they joined, not when they asked', async () => {
+    // The electorate freeze reads the subscription's join instant.  Reading
+    // `requestedAt` instead reopened the hole it closed: in an approval-gated
+    // room an account can ask to join BEFORE the election opens, sit pending —
+    // and therefore outside the frozen denominator — be approved after, and
+    // then clear the cutoff on a timestamp that predates a membership it did
+    // not yet hold.
+    const steward = await seedUserWithSession(forum.identity);
+    const lateJoiner = await seedUserWithSession(forum.identity);
+    const candidate = await seedUserWithSession(forum.identity);
+    const room = '00000000-0000-4000-8000-000000000009';
+    let t = Date.now();
+    resetGovernanceService();
+    setGovernanceService(
+      createGovernanceService({
+        config: resolveGovernanceConfig({ electionTermSeconds: 100, electionWindowSeconds: 50 }),
+        now: () => new Date(t),
+      }),
+    );
+    const svc = getGovernanceService();
+    await svc.bootstrapSeat(room, steward.userId);
+    await joinRoom(forum, room, candidate.userId);
+    // Asked to join a day BEFORE the election opens…
+    const requestedAt = new Date(t - 86_400_000).toISOString();
+    t += 101_000;
+    const sched = await svc.scheduleElection(room);
+    expect(sched.ok).toBe(true);
+    const electionId = sched.ok ? sched.value : '';
+    // …and was approved 10s AFTER it opened — still inside the 50s voting
+    // window, so the refusal below can only be the electorate freeze.
+    t += 10_000;
+    await forum.forum.rooms.upsertSubscription({
+      roomId: room,
+      userId: lateJoiner.userId,
+      status: 'active',
+      requestId: randomUUID(),
+      lensId: null,
+      requestedAt,
+      joinedAt: new Date(t).toISOString(),
+    });
+    const res = await app.request(
+      jsonReq(
+        `/v1/rooms/${room}/elections/${electionId}/vote`,
+        'POST',
+        { candidate_user_id: candidate.userId },
+        lateJoiner.cookie,
+      ),
+    );
+    const body = (await res.json()) as { error: { code: string } };
+    expect({ status: res.status, code: body.error.code }).toEqual({
+      status: 403,
+      code: 'joined_after_open',
+    });
+  });
+
   it('steward-election vote: gates to members and validates the candidate is a member', async () => {
     const steward = await seedUserWithSession(forum.identity);
     const member = await seedUserWithSession(forum.identity);
@@ -332,7 +387,11 @@ describe('WS-U governance routes', () => {
     const outsider = await seedUserWithSession(forum.identity);
 
     // A controllable clock so a real election can be scheduled (term-elapsed).
-    let t = Date.parse('2026-06-19T00:00:00.000Z');
+    // It starts at the REAL now because the electorate freeze compares a
+    // subscription's join instant — stamped by the forum service's own clock —
+    // against the election's open; a pinned past date would put every join
+    // "after" the open and refuse ballots for a reason this test is not about.
+    let t = Date.now();
     resetGovernanceService();
     setGovernanceService(
       createGovernanceService({
@@ -342,14 +401,15 @@ describe('WS-U governance routes', () => {
     );
     const svc = getGovernanceService();
     await svc.bootstrapSeat('00000000-0000-4000-8000-000000000008', steward.userId);
+    // `member` and `candidate` are active room members; `outsider` is not.
+    // They join BEFORE the election opens: the electorate is frozen at the open
+    // alongside the turnout denominator, so a later joiner is not in it.
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', member.userId);
+    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', candidate.userId);
     t += 101_000; // the term has elapsed ⇒ an election can open
     const sched = await svc.scheduleElection('00000000-0000-4000-8000-000000000008');
     const electionId = sched.ok ? sched.value : '';
     expect(electionId).not.toBe('');
-
-    // `member` and `candidate` are active room members; `outsider` is not.
-    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', member.userId);
-    await joinRoom(forum, '00000000-0000-4000-8000-000000000008', candidate.userId);
 
     const vote = (cookie: string, candidateUserId: string) =>
       app.request(

@@ -399,6 +399,9 @@ describe('metrics (WS-E.1.3a observability)', () => {
 
 describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () => {
   it('counts a sourced contribution into window volume; integrity stays anti-signal-only', async () => {
+    // The story and its thread are DISTINCT ids, as production mints them, so
+    // the fold key being the story is observable rather than coincidental.
+    const storyId = randomUUID();
     const threadId = randomUUID();
     const userId = randomUUID();
     await fixture.events.eventStore.insertMany([
@@ -411,6 +414,7 @@ describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () =
         retentionTier: 'public_contribution',
         payload: {
           thread_id: threadId,
+          story_id: storyId,
           user_id: userId,
           contribution_type: 'explanation',
           has_citation: true,
@@ -426,18 +430,98 @@ describe('aggregation fold: contribution + integrity branches (WS-E.2.1a)', () =
         timestamp: IN_WINDOW,
         privacyClassification: 'restricted',
         retentionTier: 'security_log',
-        payload: { signal_type: 'rage_loop', target_ids: [threadId] },
+        payload: { signal_type: 'rage_loop', target_ids: [storyId] },
         ownerUserId: null,
         purgeAfter: null,
       },
     ]);
     await computeAggregationWindow(fixture.events, T0, '1h');
-    const window = await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h');
+    // Nothing is ever folded under the THREAD id.
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+    const window = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
     // Integrity signals are recorded as anti-signal counts but deliberately
     // do NOT inflate eventCount (which conditions burst detection volume).
     expect(window?.eventCount).toBe(1);
     expect(window?.contributionCounts).toEqual({ explanation: 1 });
     expect(window?.antiSignalCounts).toEqual({ rage_loop: 1 });
+  });
+
+  it('RESOLVES a pre-upgrade contribution with no story_id, instead of dropping it', async () => {
+    // `story_id` is optional on the wire because a payload written by the previous
+    // release cannot have it.  The fold used to SKIP such a payload, which cost
+    // every pre-upgrade contribution its place in the durable fold — half of
+    // ConstructiveParticipation — for the whole window horizon a rolling upgrade
+    // spans, and `scoring.ts` writes Signal Ledger entries only for folded actors,
+    // so those members' own ledgers lost the contributions too.  The sibling
+    // durable consumer of this same event already resolved thread → story.
+    const storyId = randomUUID();
+    const threadId = randomUUID();
+    fixture.events.storyIdForThread = async (id) => (id === threadId ? storyId : null);
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: IN_WINDOW,
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        // No `story_id` — exactly what the previous release wrote.
+        payload: {
+          thread_id: threadId,
+          user_id: randomUUID(),
+          contribution_type: 'explanation',
+          has_citation: false,
+          accusation_flag: false,
+        },
+        ownerUserId: null,
+        purgeAfter: null,
+      },
+    ]);
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    // Folded under the resolved STORY…
+    const window = await fixture.events.windowStore.get(storyId, new Date(T0).toISOString(), '1h');
+    expect(window?.contributionCounts).toEqual({ explanation: 1 });
+    // …and never under the thread id, which is the phantom item that made the
+    // original defect invisible.
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+  });
+
+  it('still SKIPS a contribution whose thread cannot be resolved — counted, never a phantom', async () => {
+    // The seam returning null must not become a licence to key by thread id: an
+    // `AggregationWindow` row for a `targetType: 'story'` that is not a story is
+    // worse than a counted omission.
+    const threadId = randomUUID();
+    fixture.events.storyIdForThread = async () => null;
+    await fixture.events.eventStore.insertMany([
+      {
+        eventId: randomUUID(),
+        eventType: 'contribution.created',
+        topic: 'contribution.created',
+        timestamp: IN_WINDOW,
+        privacyClassification: 'public',
+        retentionTier: 'public_contribution',
+        payload: {
+          thread_id: threadId,
+          user_id: randomUUID(),
+          contribution_type: 'explanation',
+          has_citation: false,
+          accusation_flag: false,
+        },
+        ownerUserId: null,
+        purgeAfter: null,
+      },
+    ]);
+    await computeAggregationWindow(fixture.events, T0, '1h');
+    expect(await fixture.events.windowStore.get(threadId, new Date(T0).toISOString(), '1h')).toBe(
+      null,
+    );
+    expect(fixture.events.metrics.counter('pwatt.contribution.unresolved_story')).toBeGreaterThan(
+      0,
+    );
   });
 });
 
@@ -464,6 +548,30 @@ describe('small pure helpers', () => {
     ]);
     expect(result.order).toEqual(['c', 'a', 'b']);
     expect(result.rejectedShadowInputs).toBe(0);
+  });
+
+  it('rankFrontPageV0 stays a TOTAL order when a timestamp is unparseable', () => {
+    // The v0 sort used bare `Date.parse`, so a malformed instant produced NaN
+    // on both sides of the comparator.  A comparator that returns NaN is not a
+    // valid comparator — the resulting order is implementation-defined, in the
+    // one function whose contract is byte-exact determinism (it is what the
+    // §30.5 shadow-equivalence proof compares).  Ordering through
+    // `chronologicalOrder` parses via `parseTimestampOrZero`, so an unparseable
+    // instant sorts as epoch 0 (last) and ties break on id, as everywhere else.
+    const result = rankFrontPageV0([
+      { storyId: 'b', createdAt: 'not-a-timestamp' },
+      { storyId: 'a', createdAt: 'also-not-a-timestamp' },
+      { storyId: 'c', createdAt: '2026-06-10T11:00:00.000Z' },
+    ]);
+    expect(result.order).toEqual(['c', 'a', 'b']);
+    // And it is STABLE: the same input in a different arrival order is the
+    // same answer, which is what the equivalence comparison actually relies on.
+    const shuffled = rankFrontPageV0([
+      { storyId: 'c', createdAt: '2026-06-10T11:00:00.000Z' },
+      { storyId: 'a', createdAt: 'also-not-a-timestamp' },
+      { storyId: 'b', createdAt: 'not-a-timestamp' },
+    ]);
+    expect(shuffled.order).toEqual(result.order);
   });
 });
 
@@ -543,6 +651,7 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
   it('realtime rebuild covers the contribution branch and clear()', async () => {
     // A pinned clock keeps the fixed test window inside the live TTL.
     const realtime = new InMemoryRealtimeAggregator(() => T0 + 10 * 60_000);
+    const storyId = randomUUID();
     const threadId = randomUUID();
     const userId = randomUUID();
     await rebuildRealtimeFromEvents(
@@ -555,7 +664,12 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
           timestamp: IN_WINDOW,
           privacyClassification: 'public',
           retentionTier: 'public_contribution',
-          payload: { thread_id: threadId, user_id: userId, timestamp: IN_WINDOW },
+          payload: {
+            thread_id: threadId,
+            story_id: storyId,
+            user_id: userId,
+            timestamp: IN_WINDOW,
+          },
           ownerUserId: userId,
           createdAt: IN_WINDOW,
           purgeAfter: null,
@@ -564,12 +678,14 @@ describe('remaining in-memory store surfaces (coverage headroom)', () => {
       ],
       actorKeyOfPayload,
     );
-    const snapshot = await realtime.snapshot(threadId, realtimeWindowStart(Date.parse(IN_WINDOW)));
+    const windowStart = realtimeWindowStart(Date.parse(IN_WINDOW));
+    // Recorded against the STORY, matching every other branch of the rebuild
+    // and every reader of this layer — never the thread.
+    expect(await realtime.snapshot(threadId, windowStart)).toBeNull();
+    const snapshot = await realtime.snapshot(storyId, windowStart);
     expect(snapshot?.contributions).toBe(1);
     await realtime.clear();
-    expect(
-      await realtime.snapshot(threadId, realtimeWindowStart(Date.parse(IN_WINDOW))),
-    ).toBeNull();
+    expect(await realtime.snapshot(storyId, windowStart)).toBeNull();
   });
 
   it('attention store: anonymize/delete branches across owners', async () => {

@@ -10,8 +10,8 @@
 // `auth-credentials.ts`, and steward MFA in `auth-mfa.ts` — all composed below.
 
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
+  accountMayHoldSession,
   authSessionResultSchema,
   authStatusResponseSchema,
   defaultPersonalizationSettings,
@@ -48,6 +48,7 @@ import {
 import { hashAuthWalletAddress, issueSiweNonce, verifySiwe } from '../identity/siwe.js';
 import { createAuthenticationOptions, verifyAuthentication } from '../identity/webauthn.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
 import { createCredentialRoutes } from './auth-credentials.js';
 import { createMfaRoutes } from './auth-mfa.js';
@@ -88,7 +89,22 @@ function createLoginRoutes(resolve: () => IdentityServices) {
         const validated = await validateSession(services.sessions, token);
         if (!validated) return c.json(unauth);
         const user = await services.store.getUser(validated.record.user_id);
-        if (user?.accountState !== 'active') return c.json(unauth);
+        // The SAME states `requireAuth` admits, and for the same reason.  A
+        // `restricted` account (WS-J `restrict` sanction) may authenticate and
+        // self-serve — appeal, exercise data rights, read notices — and this
+        // projection reporting it `authenticated: false` was a lockout the API
+        // itself did not impose: the middleware let the restricted session
+        // through while `/status` told the client there was no session, so the
+        // route guard bounced them to /login and the appeal they are entitled
+        // to file was unreachable.  `suspended`/`deleted`/`deactivated` remain
+        // unauthenticated here, as they are at the middleware.
+        // `user === null` stated separately: the previous `user?.accountState !==
+        // …` spelling narrowed `user` as a side effect of the optional chain, and
+        // a shared predicate cannot, so the absent-user case has to be said out
+        // loud rather than ride on the shape of the comparison.
+        if (user === null || !accountMayHoldSession(user.accountState)) {
+          return c.json(unauth);
+        }
         return c.json(
           authStatusResponseSchema.parse({
             authenticated: true,
@@ -96,7 +112,9 @@ function createLoginRoutes(resolve: () => IdentityServices) {
               id: user.userId,
               handle: user.handle,
               display_name: user.displayName,
-              account_state: 'active',
+              // The REAL state, not a hard-coded 'active': the client renders
+              // the restricted banner and the write-path affordances from it.
+              account_state: user.accountState,
               locale: user.locale ?? 'en-US',
               // The user's OWN roles + doctrine grants: the client's
               // console-navigation hints (`canAccess*Console` — the

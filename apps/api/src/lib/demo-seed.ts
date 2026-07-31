@@ -1082,6 +1082,8 @@ export async function seedForumDemoData(
         altText: 'A chart of harbor water-clarity readings rising over the quarter.',
         storageRef: `demo/${imageUploadId}.png`,
         metadataStripped: true,
+        imageWidth: null,
+        imageHeight: null,
         scanState: 'clear',
       },
       pngBytes,

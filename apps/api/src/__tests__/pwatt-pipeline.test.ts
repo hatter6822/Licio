@@ -47,11 +47,29 @@ let fixture: EventServicesFixture;
 const T0 = Date.UTC(2026, 5, 10, 10, 0, 0);
 const IN_WINDOW = new Date(T0 + 10 * 60_000).toISOString();
 
+/**
+ * A stored `contribution.created` event, keyed by the story it folds under.
+ *
+ * The thread id is minted SEPARATELY and differs from the story id on every
+ * row — which is what production does (`ingestion/submission.ts` mints both).
+ * This helper used to take the fold key as `threadId` and every call site
+ * passed the STORY id, so `thread_id === story_id` throughout the suite and a
+ * fold that keyed contributions by thread id was indistinguishable from one
+ * that keyed them by story id.  With the two genuinely distinct, keying by
+ * thread scatters every contribution into its own single-actor phantom item
+ * and every participation assertion below fails.
+ */
 function contributionRow(
-  threadId: string,
+  storyId: string,
   userId: string,
   contributionType: string,
-  opts: { hasCitation?: boolean; accusation?: boolean; timestamp?: string } = {},
+  opts: {
+    hasCitation?: boolean;
+    accusation?: boolean;
+    timestamp?: string;
+    /** Pin the thread when a test needs two rows on the SAME thread. */
+    threadId?: string;
+  } = {},
 ): NewStoredEvent {
   return {
     eventId: randomUUID(),
@@ -66,7 +84,8 @@ function contributionRow(
       timestamp: opts.timestamp ?? IN_WINDOW,
       schema_version: '1',
       contribution_id: randomUUID(),
-      thread_id: threadId,
+      thread_id: opts.threadId ?? randomUUID(),
+      story_id: storyId,
       user_id: userId,
       contribution_type: contributionType,
       target_claim_id: null,

@@ -1,0 +1,27 @@
+-- Freeze the WS-M proposal QUORUM basis when voting opens.
+--
+-- `proposal-tally.ts` says of itself: "it never recomputes weights, so a later
+-- cap/eligibility change cannot shift a result after votes were cast."  The
+-- weights it means are per-ballot; the quorum DENOMINATOR was not among them.
+-- `tallyFor` computed `eligibleCount` from LIVE room membership at settle:
+--
+--   const quorumBar = decMul(ctx.eligibleCount, rules.quorum.minFraction);
+--   const quorumMet = ctx.eligibleCount > 0 && decCompare(quorumVoters, quorumBar) >= 0;
+--
+-- The `Math.min(1, …)` clamp on the reported turnout only sanitises the number
+-- shown; `quorumMet` uses the raw comparison.  So growing the electorate after
+-- ballots are cast raises the bar a fixed voter set can no longer clear, and a
+-- decided proposal fails quorum — and shrinking it does the opposite.  Either
+-- direction is a governance outcome moved by someone who did not vote.
+--
+-- The sibling paths already do this: `knomosis.ratification_vote.eligible_count`
+-- and (migration 0099) `knomosis.steward_election.eligible_count`.  The basis is
+-- stamped at the `deliberation → open` transition, which is the instant the
+-- electorate is fixed for the voters who are about to cast.
+--
+-- NULLABLE, not `DEFAULT 0`: 0 would make `quorumMet` FALSE unconditionally
+-- (`ctx.eligibleCount > 0` guards it), silently failing every proposal already
+-- open when this shipped.  NULL means "no basis recorded" and the tally falls
+-- back to the live read those rows have always used.
+ALTER TABLE "knomosis"."governance_proposal"
+  ADD COLUMN IF NOT EXISTS "eligible_basis_count" integer;

@@ -15,7 +15,12 @@
 // SEARCH_VALIDATED_BOOST; `incorrect` is excluded outright) — no financial
 // signal exists in any input type (no-pay-to-rank, §13.6), and user query
 // strings are tokenized, never concatenated into SQL.
-import type { ContributionDisputeStatus, SearchRequest, SearchResult } from '@licio/shared';
+import {
+  type ContributionDisputeStatus,
+  isoTimestampSchema,
+  type SearchRequest,
+  type SearchResult,
+} from '@licio/shared';
 
 /** The resolved (optional) viewer, threaded through by the route — NEVER part
  *  of the wire request. WS-J.1.2: comment hits by a blocked∪muted author are
@@ -62,7 +67,15 @@ export function decodeSearchCursor(
     if (relevance === undefined || createdAt === undefined || id === undefined) return null;
     const parsed = Number(relevance);
     if (!Number.isFinite(parsed)) return null;
-    if (Number.isNaN(Date.parse(createdAt))) return null;
+    // `Date.parse` is not the bar: V8 accepts far more than Postgres does (its
+    // own `Date#toString()` output, for one), and every accepted string is
+    // handed straight to a `::timestamptz` cast. Accept ONLY the shape
+    // `encodeSearchCursor` is ever fed — `Date#toISOString()`, which is exactly
+    // what `isoTimestampSchema` (UTC `Z`, no offset form) admits — and exclude
+    // year zero, which ISO-8601 has and Postgres does not (`date/time field
+    // value out of range`).
+    if (!isoTimestampSchema.safeParse(createdAt).success) return null;
+    if (createdAt.startsWith('0000-')) return null;
     if (!CURSOR_ID_RE.test(id)) return null;
     return { relevance: parsed, createdAt, id };
   } catch {

@@ -176,6 +176,17 @@ export interface GovernanceProposalRecord {
   deliberationEndsAt?: string | null;
   votingEndsAt?: string | null;
   challengeWindowEndsAt?: string | null;
+  /** The quorum DENOMINATOR frozen at `deliberation → open` (migration 0100).
+   *  Null ⇒ no basis recorded (a row opened before it existed), and the tally
+   *  falls back to the live membership count those rows always used. */
+  eligibleBasisCount?: number | null;
+  /** WHEN that basis was frozen (migration 0107): the ACTUAL deliberation→open
+   *  transition instant, which scheduler lag puts AFTER the scheduled
+   *  `deliberationEndsAt`.  The ballot cutoff reads this so the denominator and
+   *  the numerator answer to one instant — otherwise members who joined during
+   *  the lag are counted in the basis and refused a ballot, and enough of them
+   *  make quorum unreachable.  Null on rows opened before the column existed. */
+  eligibleBasisAt?: string | null;
   /** The settled tally snapshot (proposalTallyWireSchema shape). */
   tallySnapshot?: Record<string, unknown> | null;
 }
@@ -207,6 +218,18 @@ export interface GovernanceSignatureRecord {
   choice?: ProposalVoteChoice | null;
   /** Per-proposal single-use nonce (anti-replay). */
   nonce?: string | null;
+  // --- WS-M.4.2c-3 (migration 0105). ----------------------------------------
+  /**
+   * Under the `delegated` model, the delegators whose unit this ballot's
+   * weight snapshot ACTUALLY consumed — the fold stops at the per-account cap,
+   * so a delegation can exist at signing time and still confer nothing.
+   *
+   * `null` for every other model, and for rows written before the column
+   * existed; readers fall back to the conservative "any live delegation was
+   * consumed" test there, which over-counts consumption but never
+   * double-counts weight.
+   */
+  countedDelegatorIds?: readonly string[] | null;
 }
 
 export interface SimTreasuryRecord {
@@ -644,6 +667,8 @@ export interface GovernanceProposalStore {
         | 'executableAfter'
         | 'challengeWindowEndsAt'
         | 'votingEndsAt'
+        | 'eligibleBasisCount'
+        | 'eligibleBasisAt'
         | 'tallySnapshot'
         | 'challengeState'
       >
@@ -709,9 +734,39 @@ export interface ProposalVoteStore {
   clear(): Promise<void>;
 }
 
+/**
+ * The outcome of recording a ballot, with the two ways it can be refused kept
+ * APART.
+ *
+ * It used to be `record | null`, and one null meant "this wallet already signed".
+ * Adding the delegated-unit claim gives a second, unrelated refusal — a unit this
+ * ballot counted was won by a ballot that committed first — and collapsing the two
+ * would have made the route answer `already_signed` to a voter who had not signed,
+ * whose actual remedy is to re-submit against a view that now contains the winner.
+ */
+export type GovernanceSignatureInsert =
+  | { readonly ok: true; readonly record: GovernanceSignatureRecord }
+  /** A (proposal, wallet, purpose), one-vote-per-user, or nonce collision. */
+  | { readonly ok: false; readonly reason: 'duplicate_signature' }
+  /** Delegated units already claimed for this proposal by another ballot. */
+  | {
+      readonly ok: false;
+      readonly reason: 'delegated_unit_claimed';
+      readonly delegatorUserIds: readonly string[];
+    };
+
 export interface GovernanceSignatureStore {
-  /** Insert-once per (proposal, wallet); returns null on duplicate. */
-  insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null>;
+  /**
+   * Insert-once per (proposal, wallet, purpose).
+   *
+   * ATOMIC WITH THE DELEGATED-UNIT CLAIMS.  Every id in `countedDelegatorIds` is
+   * claimed as a row keyed (proposal, delegator) in the SAME transaction, so two
+   * delegates resolving weight from the same uncommitted view cannot both record
+   * the same unit — the read-then-write `delegatorsAlreadyConsumed` check could
+   * only narrow that race, never close it.  The loser rolls back whole rather
+   * than persisting weight it did not win.
+   */
+  insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert>;
   listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]>;
   /** Signatures by this wallet on proposals that are still open (obligations). */
   listOpenByWallet(walletAccountId: string): Promise<GovernanceSignatureRecord[]>;
@@ -803,7 +858,9 @@ export interface GovernanceAuditStore {
   /** WS-M.4.2c-2: one member's qualifying governance participation in a room —
    *  the `minContributions` eligibility basis (an in-context metric; never a
    *  cross-context content join). */
-  countQualifyingByRoomActor(roomId: string, userId: string): Promise<number>;
+  /** Qualifying contributions by one member in one room; `asOf` bounds on
+   *  `created_at` so the electorate freeze can count them as they stood. */
+  countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number>;
   /** WS-L data-rights: ANONYMIZE the actor on account deletion — the audit log
    *  is append-only, so the actor id is scrubbed, not the row.  Returns the rows
    *  anonymized. */
@@ -1830,7 +1887,14 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     this.#proposals = proposals;
   }
 
-  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureRecord | null> {
+  /** (proposal, delegator) → the signature that claimed that unit (migration 0114). */
+  readonly #claims = new Map<string, string>();
+
+  static #claimKey(proposalId: string, delegatorUserId: string): string {
+    return `${proposalId}\u0000${delegatorUserId}`;
+  }
+
+  async insert(record: GovernanceSignatureRecord): Promise<GovernanceSignatureInsert> {
     // Emulate ALL THREE unique indexes from migrations 0059 + 0082 + 0084 so
     // tests exercise database semantics: (proposal, wallet, PURPOSE) — a
     // designated signer who voted can still record the execution co-signature
@@ -1841,14 +1905,14 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
         row.walletAccountId === record.walletAccountId &&
         (row.purpose ?? 'vote') === (record.purpose ?? 'vote')
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
       if (
         (row.purpose ?? 'vote') === 'vote' &&
         (record.purpose ?? 'vote') === 'vote' &&
         row.userId === record.userId
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
       if (
         row.nonce !== undefined &&
@@ -1857,11 +1921,35 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
         record.nonce !== null &&
         row.nonce === record.nonce
       ) {
-        return null;
+        return { ok: false, reason: 'duplicate_signature' };
       }
     }
+    // …and the (proposal, delegator) primary key from migration 0114, ALL OR
+    // NOTHING like the transaction it stands for: a partially-claimed ballot would
+    // record weight for units it lost.
+    const wanted = [...new Set(record.countedDelegatorIds ?? [])];
+    const taken = wanted.filter((id) =>
+      this.#claims.has(InMemoryGovernanceSignatureStore.#claimKey(record.proposalId, id)),
+    );
+    if (taken.length > 0) {
+      return { ok: false, reason: 'delegated_unit_claimed', delegatorUserIds: taken.sort() };
+    }
+    for (const id of wanted) {
+      this.#claims.set(
+        InMemoryGovernanceSignatureStore.#claimKey(record.proposalId, id),
+        record.signatureId,
+      );
+    }
     this.#rows.set(record.signatureId, { ...record });
-    return { ...record };
+    return { ok: true, record: { ...record } };
+  }
+
+  /** ON DELETE CASCADE from `governance_signature`: a removed ballot RELEASES its
+   *  claims, or the delegator's unit is disenfranchised for that proposal for ever. */
+  #releaseClaims(signatureId: string): void {
+    for (const [key, owner] of this.#claims) {
+      if (owner === signatureId) this.#claims.delete(key);
+    }
   }
 
   async listByProposal(proposalId: string): Promise<GovernanceSignatureRecord[]> {
@@ -1885,6 +1973,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     for (const [key, row] of this.#rows) {
       if (row.signatureRef === actionRecordId) {
         this.#rows.delete(key);
+        this.#releaseClaims(row.signatureId);
         removed += 1;
       }
     }
@@ -1896,6 +1985,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
     for (const [key, row] of this.#rows) {
       if (row.userId === userId) {
         this.#rows.delete(key);
+        this.#releaseClaims(row.signatureId);
         removed += 1;
       }
     }
@@ -1904,6 +1994,7 @@ export class InMemoryGovernanceSignatureStore implements GovernanceSignatureStor
 
   async clear(): Promise<void> {
     this.#rows.clear();
+    this.#claims.clear();
   }
 }
 
@@ -2077,12 +2168,13 @@ export class InMemoryGovernanceAuditStore implements GovernanceAuditStore {
     ).length;
   }
 
-  async countQualifyingByRoomActor(roomId: string, userId: string): Promise<number> {
+  async countQualifyingByRoomActor(roomId: string, userId: string, asOf?: string): Promise<number> {
     return this.#rows.filter(
       (r) =>
         r.roomId === roomId &&
         r.actorUserId === userId &&
-        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType),
+        READINESS_QUALIFYING_AUDIT_ACTIONS.has(r.actionType) &&
+        (asOf === undefined || r.createdAt <= asOf),
     ).length;
   }
 

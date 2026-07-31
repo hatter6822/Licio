@@ -318,6 +318,57 @@ describe('MFCI analyst queue (WS-H.3.4b) + freeze clearing (WS-H.3.3d)', () => {
 });
 
 describe('GWEI transparency export (WS-H.5.2d)', () => {
+  it('never reports an output created after the period it declares', async () => {
+    // The report captured `generated_at` and then ran two reads bounded only
+    // BELOW, so an output created while those queries were in flight landed in a
+    // period whose declared `period_end` predates it — and the separate count
+    // could observe a row the list did not, reporting truncation that had not
+    // happened.  A row stamped ahead of the request stands in for that race
+    // deterministically.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const window = hourWindow(Date.now());
+    const gweiRow = (createdAt: string) => ({
+      invariantType: 'GWEI' as const,
+      targetType: 'cohort' as const,
+      targetId: randomUUID(),
+      timeWindow: window,
+      version: '1.0.0',
+      scoreVector: { gw2: 0.2 },
+      explanationSummary: null,
+      confidence: 0.8,
+      coverage: 1,
+      reasonCodes: [],
+      fallbackUsed: false,
+      versionMetadata: null,
+      shadowMode: true,
+      createdAt,
+    });
+    await fixture.events.invariantStore.upsert(gweiRow(new Date().toISOString()));
+    await fixture.events.invariantStore.upsert(
+      gweiRow(new Date(Date.now() + 60_000).toISOString()),
+    );
+
+    const response = await adminRequest(fixture, steward.cookie, '/gwei/transparency');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      statements: unknown[];
+      period_end: string;
+      total_outputs: number;
+      truncated: boolean;
+      covered_to: string | null;
+    };
+    // Only the in-period row, in BOTH the list and the count — so `truncated`
+    // stays false rather than inferring a cap that was never reached.
+    expect(body.statements).toHaveLength(1);
+    expect(body.total_outputs).toBe(1);
+    expect(body.truncated).toBe(false);
+    // And nothing the report names sits past the interval it prints.
+    if (body.covered_to !== null) {
+      expect(Date.parse(body.covered_to)).toBeLessThanOrEqual(Date.parse(body.period_end));
+    }
+  });
+
   it('publishes parity statements only — no cohort metrics, no suppressed detail', async () => {
     const fixture = freshInvariantServices();
     const steward = await seedUserWithSession(fixture.identity, { steward: true });
@@ -367,15 +418,82 @@ describe('GWEI transparency export (WS-H.5.2d)', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       statements: Array<{ status: string }>;
+      period_start: string;
+      total_outputs: number;
+      truncated: boolean;
     };
     expect(body.statements).toHaveLength(2);
     expect(body.statements.map((s) => s.status).sort()).toEqual([
       'parity_within_threshold',
       'withheld_small_cohort',
     ]);
+    // The export STATES its coverage: the period it covers and how many
+    // outputs that period holds, against what this response carries.
+    expect(body.total_outputs).toBe(2);
+    expect(body.truncated).toBe(false);
+    expect(Date.parse(body.period_start)).toBeLessThan(Date.now());
     // No cohort keys or metric values leak into the export.
     expect(JSON.stringify(body)).not.toContain('locale:');
     expect(JSON.stringify(body)).not.toContain('sourceDiversity');
+  });
+
+  it('MARKS a period whose outputs exceed the row cap as truncated', async () => {
+    // GWEI emits one output per eligible cohort pair per scheduler run, so the
+    // cap is reachable in an ordinary period.  A capped list with no
+    // denominator reads as a complete account of the window and cannot be
+    // reconciled against the logged outputs — which is precisely what a
+    // transparency report exists to allow.
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    const window = { start: '2026-06-01T00:00:00.000Z', end: '2026-06-08T00:00:00.000Z' };
+    for (let i = 0; i < 502; i += 1) {
+      await fixture.events.invariantStore.upsert({
+        invariantType: 'GWEI',
+        targetType: 'cohort',
+        targetId: randomUUID(),
+        timeWindow: window,
+        version: '1.0.0',
+        scoreVector: { gw2: 0.1 },
+        explanationSummary: null,
+        confidence: 0.8,
+        coverage: 1,
+        reasonCodes: [],
+        fallbackUsed: false,
+        versionMetadata: null,
+        shadowMode: true,
+        // Staggered so the report's covered range is a real interval rather
+        // than 502 rows sharing one instant.
+        createdAt: new Date(Date.now() - i * 60_000).toISOString(),
+      });
+    }
+    const response = await adminRequest(fixture, steward.cookie, '/gwei/transparency');
+    const body = (await response.json()) as {
+      statements: unknown[];
+      total_outputs: number;
+      truncated: boolean;
+      period_start: string;
+      period_end: string;
+      covered_from: string | null;
+      covered_to: string | null;
+    };
+    expect(body.statements).toHaveLength(500); // the cap
+    expect(body.total_outputs).toBe(502); // …of this many
+    expect(body.truncated).toBe(true);
+    // AND IT SAYS WHICH PART OF THE PERIOD IT ACTUALLY COVERS.  `period_start`
+    // is unconditionally `generated_at - 90 days`, so a truncated report
+    // advertised the full period while carrying a suffix of it, and no field
+    // named the oldest row included.  Nothing else could stand in: the
+    // per-statement `window` is GWEI's own analysis window, while the cap and
+    // the ordering are on `created_at`.
+    expect(body.covered_from).not.toBeNull();
+    expect(body.covered_to).not.toBeNull();
+    // Newest-first, so coverage starts after the requested period does — that
+    // gap IS the truncation, and it is now visible.
+    expect(Date.parse(body.covered_from as string)).toBeGreaterThan(Date.parse(body.period_start));
+    expect(Date.parse(body.covered_to as string)).toBeLessThanOrEqual(Date.parse(body.period_end));
+    expect(Date.parse(body.covered_from as string)).toBeLessThanOrEqual(
+      Date.parse(body.covered_to as string),
+    );
   });
 });
 
@@ -830,5 +948,59 @@ describe('realtime-tier preview (WS-H.1.2f)', () => {
       }),
     });
     expect(denied.status).toBe(403);
+  });
+});
+
+describe('invariant-output dashboards read a BOUNDED slice (no full-table scan)', () => {
+  /** One GWEI/MFCI output row; distinct `targetId`s occupy distinct store slots. */
+  const output = (invariantType: 'MFCI' | 'GWEI', createdAt = new Date().toISOString()) => ({
+    invariantType,
+    targetType: 'story' as const,
+    targetId: randomUUID(),
+    timeWindow: hourWindow(new Date('2026-01-01T00:00:00.000Z').getTime()),
+    version: '1.0.0',
+    scoreVector: { gw2: 0.1 },
+    explanationSummary: null,
+    confidence: 0.9,
+    coverage: 1,
+    reasonCodes: [] as string[],
+    fallbackUsed: false,
+    versionMetadata: null,
+    shadowMode: true,
+    createdAt,
+  });
+
+  /** Poison `listAll` — the unpredicated, unlimited read.  `invariant_outputs`
+   *  is retained 365 days at ~2 rows per story per window per hour, so any
+   *  serving-path caller of it is an OOM waiting for a busy instance. */
+  function forbidFullTableScan(fixture: InvariantServicesFixture): void {
+    fixture.events.invariantStore.listAll = () => {
+      throw new Error('listAll() is a full-table scan and must not be on the serving path');
+    };
+  }
+
+  it('serves /mfci/dashboard, /gwei/dashboard and /gwei/transparency without listAll()', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    await fixture.events.invariantStore.upsert(output('MFCI'));
+    await fixture.events.invariantStore.upsert(output('GWEI'));
+    forbidFullTableScan(fixture);
+
+    for (const path of ['/mfci/dashboard', '/gwei/dashboard', '/gwei/transparency']) {
+      const res = await adminRequest(fixture, steward.cookie, path);
+      expect([path, res.status]).toEqual([path, 200]);
+    }
+  });
+
+  it('caps /mfci/dashboard at 100 rows however many are retained', async () => {
+    const fixture = freshInvariantServices();
+    const steward = await seedUserWithSession(fixture.identity, { steward: true });
+    for (let i = 0; i < 120; i += 1) {
+      await fixture.events.invariantStore.upsert(output('MFCI'));
+    }
+    const res = await adminRequest(fixture, steward.cookie, '/mfci/dashboard');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { recent_outputs: unknown[] };
+    expect(body.recent_outputs).toHaveLength(100);
   });
 });

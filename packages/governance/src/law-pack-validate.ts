@@ -129,14 +129,26 @@ export function validateLawPackBundle(pack: LawPack): LawPackProblem[] {
         }
       }
     }
-    // A non-zero quorum with a zero threshold is a logical hole: a vote could
-    // "pass" with zero affirmative weight (WS-M.1.3c cross-field consistency).
-    for (const [type, rule] of Object.entries(quorum)) {
-      const bar = threshold[type];
-      if (rule.minFraction > 0 && bar !== undefined && bar.minAffirmativeFraction <= 0) {
+    // A ZERO threshold is a logical hole whatever the quorum is (WS-M.1.3c
+    // cross-field consistency).
+    //
+    // This used to fire only when `quorum.minFraction > 0`, on the stated grounds
+    // that a vote could otherwise "pass" with zero affirmative weight.  That
+    // rationale does not survive reading `tallyProposal`: the pass test is
+    // `approve > decided × minAffirmativeFraction` with a STRICT comparison, so a
+    // zero bar still demands `approve > 0` and a vote with no affirmative weight
+    // can never pass.  The real hole a zero bar opens is majority INVERSION —
+    // `passBar` is 0, so a single approval outweighs any number of rejections, and
+    // 1-approve-vs-100-rejects passes.  That is true at every quorum, which is
+    // exactly why gating the check on a non-zero quorum let the worst
+    // configuration (no participation floor AND no affirmative floor) validate
+    // clean.  The bound belongs on the threshold alone.
+    for (const [type, bar] of Object.entries(threshold)) {
+      if (bar.minAffirmativeFraction <= 0) {
         problems.push({
           path: `thresholdRules.${type}`,
-          problem: 'threshold must be > 0 for a proposal type with a non-zero quorum',
+          problem:
+            'minAffirmativeFraction must be > 0: a zero bar lets a single approval outweigh any number of rejections',
         });
       }
     }

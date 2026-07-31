@@ -76,6 +76,11 @@ export const stewardElections = knomosisSchema.table(
     opensAt: tz('opens_at').notNull(),
     closesAt: tz('closes_at').notNull(),
     weightModel: text('weight_model').notNull().default('one_civic_account_one_vote'),
+    /** The turnout electorate, FROZEN at open — mirroring `eligible_count` on
+     *  the ratification vote.  The settle tally divides by this, not by a fresh
+     *  membership read, so churn during the window cannot flip the outcome
+     *  (migration 0099). */
+    eligibleCount: integer('eligible_count').notNull().default(0),
     winnerUserId: uuid('winner_user_id').references(() => users.userId, { onDelete: 'set null' }),
     tally: jsonb('tally'), // settled CandidateTally[] snapshot (survives voter erasure)
     mode: governanceVoteModeEnum('mode').notNull().default('simulated'),

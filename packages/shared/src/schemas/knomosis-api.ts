@@ -550,6 +550,14 @@ export const governanceProposalListResponseSchema = z
   .strict();
 export type GovernanceProposalListResponse = z.infer<typeof governanceProposalListResponseSchema>;
 
+/** One simulated proposal — the sim-mode counterpart of
+ *  `productionProposalResponseSchema`, which existed while this did not, so the
+ *  single-proposal GET had no egress schema to apply on its sim branch. */
+export const governanceProposalResponseSchema = z
+  .object({ proposal: governanceProposalSchema })
+  .strict();
+export type GovernanceProposalResponse = z.infer<typeof governanceProposalResponseSchema>;
+
 export const proposalVoteRequestSchema = z
   .object({ choice: z.enum(['approve', 'reject', 'abstain']) })
   .strict();

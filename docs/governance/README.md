@@ -469,6 +469,24 @@ test):
   needs no snapshot — it comes from the vote's immutable bound law-pack). Membership
   churn during the window can no longer flip the outcome. `runRatificationLifecycle`
   no longer takes a live count.
+  A later review round closed the other half: the DENOMINATOR was frozen while
+  the ballot gate still read live membership, so a member who joined after the
+  open could vote and push turnout past 100% of the electorate it was measured
+  against — making the window between open and close a recruitment window.
+  `castVote` now takes the voter's join instant and refuses `joined_after_open`
+  (403 — not being in an electorate is an authorization answer, not a retryable
+  conflict), and `memberFacts` carries `memberSince` (the INSTANT — a day count
+  taken "now" cannot answer a question about a past open).
+  Two details the first cut got wrong, and both are load-bearing:
+  `memberSince` is `joinedAt`, never `requestedAt` — in an approval-gated room
+  an account can ask to join before the open, sit pending (so outside the
+  frozen denominator), be approved after, and clear the cutoff on a timestamp
+  predating its own membership; the same read feeds `minMembershipDays`, where
+  it made a 30-day requirement satisfiable after a day.  And the proposal
+  cutoff reads `eligible_basis_at` (migration 0107), the instant the basis was
+  actually counted, not the SCHEDULED `deliberationEndsAt`: scheduler lag put
+  those apart, and every member who joined in between inflated the quorum
+  denominator while being refused a ballot.
 - **L4 — one-open-election atomicity.** A `steward_election(room_id) WHERE
   status='open'` partial unique index (migration `0054`) + a nullable
   `ElectionStore.insert` (in-memory guard + Drizzle `onConflictDoNothing`) makes

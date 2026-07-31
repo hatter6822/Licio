@@ -654,10 +654,11 @@ async function handleExchange(server: LcapIngestServer, body: Uint8Array): Promi
   // 2) The server's frontier diff against the client's advertised frontier: what the
   // server is behind on (`wanted_from_client`).  `applyPulse` needs a synchronous
   // `have` predicate, so pre-fetch the bounded set of CIDs the client pulse references.
-  const have = new Set<string>();
-  for (const cid of pulseReferencedCids(request.pulse)) {
-    if (await server.hasObject(cid)) have.add(cid);
-  }
+  // ONE lookup for the whole bounded set.  Per-CID `hasObject` made this up to
+  // `MAX_PULSE_REFERENCED_CIDS` sequential round-trips for a single request from
+  // an unauthenticated peer — the amplifier the cap below bounds the COUNT of,
+  // multiplied right back by a round-trip apiece.
+  const have = await server.hasObjects(pulseReferencedCids(request.pulse));
   const reaction = applyPulse({
     remote: request.pulse,
     localCheckpointFrontier: await server.checkpointFrontier(),

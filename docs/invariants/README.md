@@ -566,6 +566,29 @@ SILENTLY — delivered, never a buzz that reinforces the loop.
 - **Notification dispatch** for bridge invitations awaits a platform
   dispatch path (`notification.sent` has no in-repo producer); bridge
   routing produces records for steward visibility only.
+- **GWEI parity export — the whole 90-day period is not yet obtainable.**
+  `GET /v1/invariants/admin/gwei/transparency` now states its coverage
+  honestly (`total_outputs`, `truncated`, and `covered_from`/`covered_to`
+  naming the `created_at` interval the response actually carries), so a
+  capped report no longer reads as a complete account of the window.  It is
+  still capped at `TRANSPARENCY_ROW_CAP = 500` with no way to read past it.
+  Two candidate closures, in preference order:
+  1. **Aggregate the report** — it is described as an *aggregate* parity
+     export and emits one statement per output row instead.  Grouping
+     `(time_window, status)` in SQL bounds the response by the number of
+     distinct windows rather than by the row count, which removes the cap and
+     the truncation concept together.  This is the right shape and the
+     intended closure.
+  2. **Paginate it** — needs a COMPOUND keyset `(created_at, row identity)`.
+     A `created_at`-only cursor is unsound here: a scheduler run writes many
+     rows at one instant, so `<` skips the ties and `<=` cannot terminate.
+     `InvariantOutputRecord` exposes no row identity today (the Drizzle table
+     has `invariant_output_id`; the in-memory store keys by the natural
+     tuple), so this is a store-interface change, not a route change.
+  A cursor was drafted and withdrawn during the review of PR #175 for exactly
+  the tie reason above — shipping one that silently skips rows would have been
+  worse than the cap, since it would claim a completeness it could not
+  deliver.  Closure target: with the WS-H.5.2d public-export hardening pass.
 - **Development demo:** the dev seed (`lib/demo-seed.ts`) computes SCOI from
   real lens contributions and surfaces the divergence on the story-page
   "Where interpretations differ" drawer, but does NOT seed the feed-card

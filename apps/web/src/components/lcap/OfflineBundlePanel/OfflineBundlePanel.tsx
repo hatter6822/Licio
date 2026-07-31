@@ -68,6 +68,10 @@ interface PrivateImportCounts {
   readonly rejected: number;
   readonly accepted: number;
   readonly quarantined: number;
+  /** Opened and already held — an exact re-receive of a backup this room has. */
+  readonly duplicate: number;
+  /** Retained awaiting an epoch key or device cert: NOT in room state yet. */
+  readonly pending: number;
 }
 
 /**
@@ -108,6 +112,11 @@ async function ingestPrivateBundle(
     rejected: recovered.rejected.length,
     accepted: report.accepted.length,
     quarantined: report.quarantined.length,
+    duplicate: report.duplicate,
+    // THIS BATCH's retained count, not the engine's whole pool: `load()`
+    // restores earlier retained envelopes, and reporting the pool would tell
+    // the user that unrelated old items came from the file they just imported.
+    pending: report.pending,
   };
 }
 
@@ -192,6 +201,14 @@ export function OfflineBundlePanel({
   const [localRooms, setLocalRooms] = useState<readonly LocalRoom[]>([]);
   const [pickedRoom, setPickedRoom] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // The engine now REPORTS what it did with everything it opened, so the panel
+  // no longer subtracts one count from another to guess.  The derived
+  // remainder (`recovered - accepted - quarantined`) counted a PENDING envelope
+  // — one retained because its epoch key or device cert has not arrived — as
+  // "already in this room", so a backup none of whose ops had entered room
+  // state was reported as an idempotent success.  Those are opposite answers.
+  const alreadyPresent = importState.phase === 'private_done' ? importState.counts.duplicate : 0;
+  const awaitingKeys = importState.phase === 'private_done' ? importState.counts.pending : 0;
   // The room being exported: the explicit prop (mounted FROM a room) overrides the offline-page pick.
   const effectiveRoomHash = roomHash ?? (pickedRoom || undefined);
 
@@ -698,16 +715,45 @@ export function OfflineBundlePanel({
 
         {importState.phase === 'private_done' ? (
           <div className="flex flex-col gap-2">
+            {/*
+              Three outcomes, three sentences — and only the ones that happened.
+              The done line used to end "The rest were held back — they do not
+              verify against this room's keys" UNCONDITIONALLY, which is false
+              for the most likely thing a person does with a private bundle:
+              re-import their own backup into the room it came from.  The engine
+              treats an exact re-receive as idempotent (`existingSig ===
+              envelope.signature` → neither accepted nor quarantined), so that
+              import reads "Added 0 of 12" and then accuses all twelve of failing
+              verification — telling someone their intact backup is corrupt.
+            */}
             <p className="text-sm text-success-on-soft" role="status">
               {t(
                 'lcap.bundle.privateImportDone',
-                'Added {accepted} of {recovered} encrypted items to the room. The rest were held back — they do not verify against this room’s keys.',
+                'Added {accepted} of {recovered} encrypted items to the room.',
                 {
                   accepted: importState.counts.accepted,
                   recovered: importState.counts.recovered,
                 },
               )}
             </p>
+            {alreadyPresent > 0 ? (
+              <p className="text-sm text-ink-muted">
+                {t(
+                  'lcap.bundle.privateImportAlreadyPresent',
+                  '{present} item(s) were already in this room — nothing to add.',
+                  { present: alreadyPresent },
+                )}
+              </p>
+            ) : null}
+            {awaitingKeys > 0 ? (
+              <p className="text-sm text-ink-muted">
+                {t(
+                  'lcap.bundle.privateImportPending',
+                  '{pending} item(s) are waiting for a room key or device record and will appear once it arrives.',
+                  { pending: awaitingKeys },
+                )}
+              </p>
+            ) : null}
             {importState.counts.quarantined > 0 || importState.counts.rejected > 0 ? (
               <p className="text-sm text-ink-muted">
                 {t(

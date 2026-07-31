@@ -26,7 +26,6 @@
 //   GET  /v1/invariants/admin/regression        — on-demand drift report
 //     (WS-H.1.2d-2).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   INVARIANT_TARGET_TYPES,
   INVARIANT_TYPE_NAMES,
@@ -51,10 +50,29 @@ import {
   recomputeScoiFor,
 } from '../invariants/scoi-actions.js';
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
+
+// --- Bounds on the invariant-output reads (serving path) --------------------
+// `invariant_outputs` grows at roughly two rows per story per window per hour
+// and is retained 365 days, so a dashboard must never reach it through
+// `listAll()` — that has no predicate and no LIMIT, and the filter/sort/slice
+// would then run in JavaScript AFTER every row (three jsonb columns each) had
+// been materialized into the Node heap.  `listByTypeSince` pushes the type
+// predicate, the `created_at DESC` ordering and the LIMIT into Postgres, and
+// the floor lets the planner walk `invariant_outputs_created_idx` backwards
+// instead of sorting the table.  These are RECENT-ACTIVITY views, so a window
+// is the right shape for them rather than a bound bolted onto "all of history".
+const DASHBOARD_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+const DASHBOARD_ROW_CAP = 100;
+// The public parity export emits ONE statement per row it reads, so its cap
+// bounds the RESPONSE as well as the query — it is the only one of the three
+// that previously kept (and mapped over) every retained row.
+const TRANSPARENCY_LOOKBACK_MS = 90 * 24 * 60 * 60_000;
+const TRANSPARENCY_ROW_CAP = 500;
 
 const invariantTypeSchema = z.enum(INVARIANT_TYPE_NAMES);
 
@@ -182,10 +200,11 @@ export function createInvariantsAdminRoutes(
         const events = resolveEvents();
         const cases = await invariants.mfciCases.listOpen(50);
         const calibration = await invariants.calibrations.get('mfci:target_concentration');
-        const outputs = (await events.invariantStore.listAll())
-          .filter((row) => row.invariantType === 'MFCI')
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-          .slice(0, 100);
+        const outputs = await events.invariantStore.listByTypeSince(
+          'MFCI',
+          new Date(Date.now() - DASHBOARD_LOOKBACK_MS).toISOString(),
+          DASHBOARD_ROW_CAP,
+        );
         return c.json({ open_cases: cases, calibration, recent_outputs: outputs });
       })
 
@@ -248,19 +267,47 @@ export function createInvariantsAdminRoutes(
       })
 
       .get('/gwei/dashboard', async (c) => {
-        const rows = (await resolveEvents().invariantStore.listAll())
-          .filter((row) => row.invariantType === 'GWEI')
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-          .slice(0, 100);
+        const rows = await resolveEvents().invariantStore.listByTypeSince(
+          'GWEI',
+          new Date(Date.now() - DASHBOARD_LOOKBACK_MS).toISOString(),
+          DASHBOARD_ROW_CAP,
+        );
         return c.json({ comparisons: rows });
       })
 
       .get('/gwei/transparency', async (c) => {
         // Public-safe aggregate parity statements (WS-H.5.2d): no cohort
         // metrics, no suppressed-cell detail — parity vs under-review only.
-        const rows = (await resolveEvents().invariantStore.listAll()).filter(
-          (row) => row.invariantType === 'GWEI',
+        // Bounded to the transparency window: this route emits one statement
+        // per row, so an unbounded read would also be an unbounded response.
+        // ONE clock read for the whole report.  Three separate `Date.now()` /
+        // `new Date()` calls gave `period_start`, `period_end` and `generated_at`
+        // three different instants, so a report's own window did not quite
+        // contain its own generation time — small, but a transparency artifact is
+        // supposed to be reproducible from the values it prints.
+        const generatedAt = new Date();
+        const periodStart = new Date(
+          generatedAt.getTime() - TRANSPARENCY_LOOKBACK_MS,
+        ).toISOString();
+        // BOTH reads bounded by the SAME instant the report prints, for the same
+        // reason they share one clock read: an output created while these queries
+        // are in flight would otherwise land in a period whose declared
+        // `period_end` predates it, and the count could observe a row the list
+        // could not — reporting truncation that had not happened.
+        const periodEnd = generatedAt.toISOString();
+        const store = resolveEvents().invariantStore;
+        const rows = await store.listByTypeSince(
+          'GWEI',
+          periodStart,
+          TRANSPARENCY_ROW_CAP,
+          periodEnd,
         );
+        // STATE THE COVERAGE.  GWEI emits one output per eligible cohort pair
+        // per scheduler run, so the cap is reachable in an ordinary period —
+        // and a capped list with no denominator reads as a complete account of
+        // the window and cannot be reconciled against the logged outputs.  The
+        // count is the one fact the truncated read cannot supply about itself.
+        const total = await store.countByTypeSince('GWEI', periodStart, periodEnd);
         const threshold = 0.5;
         const statements = rows.map((row) => {
           const suppressed = row.reasonCodes.includes('SUPPRESSED_K_ANONYMITY');
@@ -274,7 +321,27 @@ export function createInvariantsAdminRoutes(
                 : 'degradation_under_review',
           };
         });
-        return c.json({ generated_at: new Date().toISOString(), statements });
+        // THE RANGE ACTUALLY COVERED, which is not the range requested.
+        // `period_start`/`period_end` describe the 90-day window this report ASKS
+        // about, and they said so unconditionally — advertising the full period
+        // even when `truncated` was true, with no field naming the oldest row
+        // included.  Nothing else could stand in: the per-statement `window` is
+        // GWEI's own analysis window, while the cap and the ordering are on
+        // `created_at`, so it is not even a proxy.  These two bound what this
+        // page holds; the cursor reaches the rest.
+        const oldest = rows.at(-1)?.createdAt ?? null;
+        const newest = rows.at(0)?.createdAt ?? null;
+        return c.json({
+          generated_at: generatedAt.toISOString(),
+          period_start: periodStart,
+          period_end: periodEnd,
+          // What the period HELD, against what this response carries.
+          total_outputs: total,
+          truncated: total > statements.length,
+          covered_from: oldest,
+          covered_to: newest,
+          statements,
+        });
       })
 
       .get('/scoi/reports/:roomId', async (c) => {

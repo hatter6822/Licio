@@ -25,6 +25,7 @@ import { useT } from '../../../i18n/index.js';
 import { ApiClientError, createStory, uploadMedia } from '../../../lib/api.js';
 import { mintObjectUrl, sanitizeBlobUrl } from '../../../lib/blob-url.js';
 import { fileInputClasses } from '../../../lib/controls.js';
+import { fieldErrorsFrom } from '../../../lib/form-errors.js';
 import { useRoomsQuery } from '../../../lib/queries.js';
 import {
   type DraftStoryRecord,
@@ -462,15 +463,32 @@ export function StoryComposer({ onSubmitted, share }: StoryComposerProps): React
       onSubmitted?.({ storyId: result.story_id, pendingScan });
     } catch (error) {
       const code = error instanceof ApiClientError ? error.code : 'unknown';
-      const message =
-        error instanceof ApiClientError
-          ? error.message
-          : t(
-              'storyComposer.err.generic',
-              'Could not submit — your draft is kept on this device. Try again when you are online.',
-            );
+      const fallback = t(
+        'storyComposer.err.generic',
+        'Could not submit — your draft is kept on this device. Try again when you are online.',
+      );
       setStatus('idle');
-      setErrors({ form: `${code}: ${message}` });
+      // The server's PER-FIELD refusals ride alongside the banner, so a
+      // rejected body points at the control it was rejected for instead of
+      // leaving the author to guess.
+      //
+      // MAPPED, because several wire names are not the control names this component
+      // renders.  Without the map an over-long image description (`alt_text`),
+      // oversized caption text (`captions_text`), a rejected topic (`topic_ids`) or
+      // room (`room_id`) landed under a key nothing reads — the field message was
+      // parsed and then invisible behind the generic banner.  None of those is fully
+      // length-validated locally, so ordinary input reaches this path.
+      const fielded = fieldErrorsFrom(error, fallback, {
+        alt_text: 'altText',
+        media_alt_text: 'altText',
+        captions_text: 'captions',
+        captions_upload_id: 'captions',
+        topic_ids: 'topics',
+        room_id: 'room',
+        upload_id: 'file',
+        poster_upload_id: 'file',
+      });
+      setErrors({ ...fielded, form: `${code}: ${fielded['form'] ?? fallback}` });
     }
   }
 

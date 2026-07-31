@@ -17,6 +17,7 @@
 // `metadata` from the designated fields.
 import { z } from 'zod';
 import { isModerationReasonCode } from '../constants/moderation.js';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 import { httpUrlSchema, isoTimestampSchema, uuidSchema } from './common.js';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,22 @@ export const CONTRIBUTION_BODY_LIMITS: Readonly<Record<ContributionType, number>
   comment: 5_000,
   correction: 2_000,
 };
+
+/**
+ * Wire bound for a body: the largest per-type cap, DERIVED rather than
+ * restated.  The coarse outer bound the update/public schemas carry (the exact
+ * per-type cap is re-checked server-side against the STORED type), so a literal
+ * here would 422 an edit and fail the read-side parse of a body the create
+ * schema had just accepted.  `Object.values` over the
+ * `Record<ContributionType, number>` means adding a type — or raising
+ * `correction` above `comment` — cannot leave the maximum stale.  Declared here
+ * rather than beside the schemas that use it because `contributionUpdateSchema`
+ * evaluates its initializer at module-evaluation time and would otherwise hit
+ * the `const` TDZ.
+ */
+export const MAX_CONTRIBUTION_BODY_WIRE_LENGTH = Math.max(
+  ...Object.values(CONTRIBUTION_BODY_LIMITS),
+);
 
 /** Moderation lifecycle of a contribution (WS-G.1.2a; auditable, WS-J). */
 export const CONTRIBUTION_MODERATION_STATES = [
@@ -87,7 +104,7 @@ const DOI_PATTERN = /^doi:10\.\d{4,9}\/\S{1,200}$/i;
 export const citationUrlSchema = z
   .string()
   .min(1)
-  .max(2048)
+  .max(MAX_URL_LENGTH)
   .refine((value) => DOI_PATTERN.test(value) || /^https?:\/\/\S+$/i.test(value), {
     message: 'Citation must be an http(s) URL or a doi: reference',
   });
@@ -97,7 +114,7 @@ export const citationSchema = z
     url: citationUrlSchema,
     title: z.string().min(1).max(300).optional(),
     accessed_at: isoTimestampSchema.optional(),
-    archive_url: httpUrlSchema.max(2048).optional(),
+    archive_url: httpUrlSchema.optional(),
   })
   .strict();
 export type Citation = z.infer<typeof citationSchema>;
@@ -227,7 +244,7 @@ export type ContributionCreate = ContributionWriteCreate;
 export const contributionUpdateSchema = z
   .object({
     contribution_id: uuidSchema,
-    body: z.string().trim().min(1).max(5_000).optional(),
+    body: z.string().trim().min(1).max(MAX_CONTRIBUTION_BODY_WIRE_LENGTH).optional(),
     citations: z.array(citationSchema).max(MAX_CITATIONS).optional(),
   })
   .strict();
@@ -252,9 +269,6 @@ export const contributionMetadataSchema = z
   .strict();
 export type ContributionMetadata = z.infer<typeof contributionMetadataSchema>;
 
-/** Wire bound for a body (the largest per-type cap). */
-export const MAX_CONTRIBUTION_BODY_WIRE_LENGTH = 5_000;
-
 export const contributionMediaSchema = z
   .object({
     upload_id: uuidSchema,
@@ -263,6 +277,15 @@ export const contributionMediaSchema = z
     content_type: z.string().min(1).max(128),
     alt_text: z.string().min(1).max(500),
     animatable: z.boolean(),
+    /** Intrinsic pixel dimensions, so the renderer can reserve the box BEFORE
+     *  the bytes arrive (the CLS half of WS-G.4.2b).  Both present or both
+     *  absent — the upload row stores them that way — and absent means UNKNOWN,
+     *  never a default: reserving a guess moves the layout twice instead of
+     *  once.  The upload response has always carried them; the projection that
+     *  serves the comment did not, so the fix stopped at the composer preview
+     *  and the posted image still reflowed the thread. */
+    width: z.number().int().positive().optional(),
+    height: z.number().int().positive().optional(),
   })
   .strict();
 export type ContributionMedia = z.infer<typeof contributionMediaSchema>;

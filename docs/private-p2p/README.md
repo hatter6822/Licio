@@ -251,6 +251,44 @@ slice is closed on the convergence side:
   the epoch BEFORE any op frame is served (a `MessageInbox` queues so a fast peer's
   first frame is never dropped; a failed handshake tears the connection down and
   rejects — no op is ever served first).
+- **The §15.4 signalling identity is DEVICE-SECRET.**  `deriveSignalingKeyPair`
+  seeds the X25519 private scalar from `SHA-256(Ed25519-Sign(device_signing_key,
+  canonical(["signal-key", room_id_commitment, device_id, epoch, time_bucket])))`
+  — never from the rendezvous key, which every current member holds alongside a
+  sealed announcement carrying the device id, epoch and bucket, and which
+  therefore let ANY member recompute another device's signalling private key and
+  decrypt, forge, or consume its deliver-once SDP/ICE before the §15.5 handshake
+  ran.  Ed25519 determinism (RFC 8032 §5.1.6) keeps ONE identity per `(room,
+  epoch, bucket)` with nothing stored — the announcement-fan-out property — and
+  the room commitment in the transcript stops a member of two rooms linking a
+  device across them.  The public half still rides in the sealed announcement,
+  so discovery is unchanged.
+- The Tier-2 rendezvous cap is bound to the announcement's DIAL-CRITICAL fields
+  (`dialBinding`: the signalling key AND the claimed `peer_device_id`,
+  length-prefixed).  Binding the key alone left a targeted eviction: a member
+  could open an honest announcement, keep its signalling key so the proof still
+  verified, swap the device id, and re-seal with a later expiry — the dial then
+  reached the honest peer, failed the §15.5 claimed-device check, and cooled down
+  that device's (now deterministic) key.
+- The carrier VERIFIES CAPS BEFORE deduplicating, and deduplicates WITHIN each
+  tier.  `selectFreshestCandidates` resolves a key collision by
+  `record.expires_at`, which the ANNOUNCER chooses, so running it across a mixed
+  set was itself the eviction primitive: a forgery keeping an honest signalling key
+  won the slot regardless of the binding, and was then dropped for failing
+  verification — leaving the honest capped device in NEITHER set and never dialled.
+  Binding and ordering were two separate holes.
+- The dial tier is the VERIFIED cap, never a present one.  `ann.cap` is bounded
+  base64url and nothing else, so partitioning on presence let any current-epoch
+  member choose their own tier and put an honest uncapped peer outside the pool
+  entirely.  The verified tier also YIELDS on alternate rounds: owning every round
+  lets a capped member refresh a valid cap under a new signalling key after each
+  failed dial and consume the whole deadline.
+- Dial selection ALTERNATES between the freshest candidate and the most starved
+  one (`pickDialCandidate`).  The failed-dial cooldown is keyed by the record's
+  ephemeral key, so a member rotating it puts a fresh spoof at the head of every
+  re-polled sample; freshest-first alone would hand it every attempt until the
+  connect deadline.  Alternating bounds a flooder to every other dial, so an
+  honest candidate is reached within two rounds.
 - `apps/web/src/private-p2p/rendezvous-client.ts` (`httpRendezvousTransport`) is the
   zod-validated fetch transport over `POST /v1/private-rendezvous/{announce,poll,
   signal,signal/poll}` (blind ids + ciphertext + clamped TTL only; `poll` is never an

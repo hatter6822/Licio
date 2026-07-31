@@ -214,6 +214,11 @@ function buildDeps(overrides: Partial<WsmReadinessDeps> = {}): WsmReadinessDeps 
     regionResolver: defaultRegionResolverPort,
     roomMode,
     identityAudit: new InMemoryAuditStore(),
+    // §28.3 deployment-scope expansion gate.  The readiness path fails CLOSED on
+    // an unwired port, so the harness states its stance explicitly rather than
+    // inheriting one: these cases are about the readiness ladder, not about
+    // ledger divergence, so the deployment is clean unless a case overrides it.
+    canExpandDeployment: async () => ({ allowed: true, blocking: 0 }),
     config: () => ({ ...DEFAULT_KNOMOSIS_CONFIG }),
     now: () => {
       clock += 1;
@@ -728,6 +733,39 @@ describe('mode transitions (WS-M.1.1b)', () => {
       reason: 'audited transition',
       isPlatformStaff,
     });
+
+  it('§28.3 — an unresolved DEPLOYMENT divergence blocks production expansion', async () => {
+    // `canExpandTreasury` shipped with zero production call sites while five
+    // sibling comments reasoned about it as a live control ("must stop blocking
+    // canExpandTreasury", "stays blocked forever on a …") — the whole
+    // mismatch-RESOLUTION machinery existed to un-block a gate that never ran.
+    // A room's own `reconciliationState` does not cover this: `halted_event_gap`,
+    // `halted_unsupported_version`, orphan events and `compareActorLedger`
+    // divergences are deployment-level and never reach a room row.
+    const deps = buildDeps({ canExpandDeployment: async () => ({ allowed: false, blocking: 2 }) });
+    await makeTestnetReady(deps);
+    deps.compliance = { ...defaultCompliancePort, jurisdiction: async () => 'allowed' };
+    expect(await transition(deps, 'simulated')).toMatchObject({ ok: true });
+    expect(await transition(deps, 'testnet')).toMatchObject({ ok: true }); // not a production mode
+    const blocked = await transition(deps, 'capped_production');
+    expect(blocked).toMatchObject({ ok: false, code: 'reconciliation_divergent' });
+    expect(!blocked.ok && blocked.message).toContain('2 unresolved ledger');
+    expect(deps.mode.value).toBe('testnet'); // and the mode did NOT move
+  });
+
+  it('§28.3 — an UNWIRED deployment gate refuses expansion rather than skipping it', async () => {
+    // Fail-closed on a missing seam: a gate that silently no-ops because a boot
+    // forgot to wire it is the exact state this port was added to fix.
+    const deps = buildDeps();
+    delete (deps as { canExpandDeployment?: unknown }).canExpandDeployment;
+    await makeTestnetReady(deps);
+    deps.compliance = { ...defaultCompliancePort, jurisdiction: async () => 'allowed' };
+    await transition(deps, 'simulated');
+    await transition(deps, 'testnet');
+    const blocked = await transition(deps, 'capped_production');
+    expect(blocked).toMatchObject({ ok: false, code: 'reconciliation_divergent' });
+    expect(!blocked.ok && blocked.message).toContain('not wired');
+  });
 
   it('walks the full escalation ladder for a ready room', async () => {
     const deps = buildDeps();

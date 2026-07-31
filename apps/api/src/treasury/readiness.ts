@@ -53,6 +53,7 @@ import {
   tgErr,
 } from './profile.js';
 import type { AttestationStore, CharterStore } from './stores.js';
+import { canExpandWsmTreasury } from './treasury-reconciliation.js';
 
 export interface WsmReadinessDeps extends LawPackDeps {
   charters: CharterStore;
@@ -66,8 +67,26 @@ export interface WsmReadinessDeps extends LawPackDeps {
   regionResolver: RegionResolverPort;
   roomMode: RoomModePort;
   identityAudit: AuditStore;
+  /**
+   * The §28.3 DEPLOYMENT-scope expansion gate — `canExpandTreasury`
+   * (`knomosis/reconciliation.ts`), reached through a port so this context does
+   * not import the Knomosis gateway.
+   *
+   * Optional at the type level and FAIL-CLOSED at the call site: a boot that
+   * forgets to wire it must refuse expansion, not skip the check.  A gate that
+   * silently no-ops because a seam is missing is exactly the state this port
+   * was added to fix — `canExpandTreasury` had zero callers while five sibling
+   * comments reasoned about it as live.
+   */
+  canExpandDeployment?: (roomId: string) => Promise<{ allowed: boolean; blocking: number }>;
   config: () => KnomosisRuntimeConfig;
 }
+
+/** The fail-closed stand-in for an unwired {@link WsmReadinessDeps.canExpandDeployment}. */
+const REFUSE_EXPANSION_WHEN_UNWIRED = async (): Promise<{
+  allowed: boolean;
+  blocking: number;
+}> => ({ allowed: false, blocking: -1 });
 
 /** Which target modes each item is REQUIRED for (WS-M.1.2e `requiredFor`).
  *  `simulated` requires nothing — entering simulation is the safe direction
@@ -399,15 +418,47 @@ export async function requestWsmModeTransition(
     if (!isReadinessTarget(input.targetMode)) {
       return tgErr(409, 'transition_not_permitted', 'The target mode cannot be readiness-gated.');
     }
-    // §28.3 expansion blocker: an unexplained treasury divergence hard-blocks
-    // any escalation into (or within) the production modes.
+    // §28.3 expansion blocker: an unexplained divergence hard-blocks any
+    // escalation into (or within) the production modes.  TWO scopes, both
+    // required, and both were unreachable code until now.
     if (input.targetMode === 'capped_production' || input.targetMode === 'mature_production') {
-      const treasury = await deps.treasuries.getByRoom(input.roomId);
-      if (treasury !== null && treasury.reconciliationState === 'divergent') {
+      // (a) ROOM scope.  This was an inline re-implementation of
+      // `canExpandWsmTreasury`, which sat exported with no caller — two
+      // spellings of one predicate, and the documented one was the dead one.
+      // Calling it keeps the behaviour identical and leaves a single source.
+      const roomScope = await canExpandWsmTreasury(deps, input.roomId);
+      if (!roomScope.allowed) {
         return tgErr(
           409,
           'reconciliation_divergent',
-          'Treasury reconciliation has an unexplained divergence; expansion is blocked (§28.3).',
+          `${roomScope.reason ?? 'Treasury reconciliation has an unexplained divergence.'} Expansion is blocked (§28.3).`,
+        );
+      }
+      // (b) DEPLOYMENT scope — the half that was genuinely missing.
+      // `canExpandTreasury` (knomosis/reconciliation.ts) is the §28.3 gate the
+      // WS-L threat model describes as "a precondition, not a report", and five
+      // sibling comments reason about it as a live control ("must stop blocking
+      // canExpandTreasury", "stays blocked forever on a …").  It had ZERO
+      // production call sites: the whole mismatch-resolution machinery existed
+      // to un-block a gate that never ran.  A room's own `reconciliationState`
+      // does not cover it — `halted_event_gap`, `halted_unsupported_version`,
+      // orphan events and `compareActorLedger` divergences are DEPLOYMENT-level
+      // and never reach a room row.
+      //
+      // Fail-CLOSED when the port is unwired: an expansion gate that silently
+      // no-ops because a seam is missing is the failure mode this whole change
+      // is about.
+      const deploymentScope = await (deps.canExpandDeployment ?? REFUSE_EXPANSION_WHEN_UNWIRED)(
+        input.roomId,
+      );
+      if (!deploymentScope.allowed) {
+        return tgErr(
+          409,
+          'reconciliation_divergent',
+          deploymentScope.blocking < 0
+            ? 'The deployment reconciliation gate is not wired; expansion is blocked (§28.3).'
+            : `The Knomosis deployment has ${deploymentScope.blocking} unresolved ledger ` +
+                'divergence(s); expansion is blocked (§28.3).',
         );
       }
     }

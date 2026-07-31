@@ -21,6 +21,9 @@ import {
   hash32Schema,
   lowercaseAddressSchema,
   minorUnitAmountSchema,
+  PROPOSAL_CHALLENGE_STATES,
+  PROPOSAL_EXECUTION_STATES,
+  PROPOSAL_VOTING_STATES,
   positiveMinorUnitAmountSchema,
   READINESS_REQUIREMENTS,
 } from './knomosis-api.js';
@@ -94,13 +97,29 @@ export const GRANT_MILESTONE_STATES = [
   'rejected',
 ] as const;
 export const GRANT_REVIEW_STATES = ['pending', 'independent_review', 'cleared', 'flagged'] as const;
+/**
+ * Every payout state the store can hold, INCLUDING the terminal ones a client
+ * never asks for.
+ *
+ * `closed` — every milestone rejected, so nothing is payable and the grant is
+ * settled without a transfer — is written by the payout projection, and adding
+ * it to the DB enum and the store's row type left this list behind.  Nothing
+ * caught it: the list reaches the wire through `z.enum`, `parse` takes
+ * `unknown`, so the compiler had nothing to disagree with.  The grants-list
+ * route parses the WHOLE list server-side, and a `ZodError` is not an
+ * `HTTPException`, so one closed grant answered every read of that room's
+ * grants with a 500 — permanently, since `closed` is terminal.  A state the
+ * store can produce must be spellable here.
+ */
 export const GRANT_PAYOUT_STATES = [
   'not_started',
   'scheduled',
   'partially_paid',
   'paid',
   'clawed_back',
+  'closed',
 ] as const;
+export type GrantPayoutState = (typeof GRANT_PAYOUT_STATES)[number];
 
 /** Reconciliation snapshot results (WS-M.5.2a — zero-or-explained). */
 export const RECONCILIATION_SNAPSHOT_RESULTS = ['synced', 'explained', 'divergent'] as const;
@@ -458,16 +477,17 @@ export const productionProposalSchema = z
     /** The law-pack version PINNED at publication (WS-M.1.3d). */
     law_pack_version_id: uuidSchema.nullable(),
     preflight_state: z.enum(['pending', 'passed', 'failed']),
-    voting_state: z.enum(['draft', 'deliberation', 'open', 'passed', 'rejected', 'quorum_not_met']),
-    challenge_state: z.enum(['none', 'open', 'upheld', 'dismissed', 'escalated']),
-    execution_state: z.enum([
-      'not_executed',
-      'timelocked',
-      'executing',
-      'executed',
-      'blocked',
-      'expired',
-    ]),
+    // The three lifecycle unions are DERIVED from the stored vocabularies, not
+    // restated.  They were three hand-copies that happened to agree
+    // value-for-value, and `toWireProductionProposal` cast across the
+    // voting-state one with `as` — so the copies could silently diverge and the
+    // cast would keep it compiling, which is exactly the divergence a wire
+    // schema exists to catch.  Derived, the projection needs no cast at all and
+    // a new stored state is a type error at the wire boundary until it is
+    // deliberately handled.
+    voting_state: z.enum(PROPOSAL_VOTING_STATES),
+    challenge_state: z.enum(PROPOSAL_CHALLENGE_STATES),
+    execution_state: z.enum(PROPOSAL_EXECUTION_STATES),
     tally: proposalTallyWireSchema.nullable(),
     deliberation_ends_at: isoTimestampSchema.nullable(),
     voting_ends_at: isoTimestampSchema.nullable(),

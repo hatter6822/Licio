@@ -40,18 +40,48 @@ const notFound = (reason: string): TargetEligibility => ({
  *  (exported for unit coverage of the fail-closed matrix). */
 export function fromStory(
   row:
-    | { storageMode: 'server' | 'p2p'; visibility: 'public' | 'room_only'; hiddenState: unknown }
+    | {
+        storageMode: 'server' | 'p2p';
+        roomVisibility: 'public' | 'private';
+        visibility: 'public' | 'room_only';
+        hiddenState: unknown;
+      }
     | undefined,
 ): TargetEligibility {
   if (!row) return notFound('target_not_found');
   const isServer = row.storageMode === 'server';
-  const isPublic = row.visibility === 'public';
+  // THE ROOM'S VISIBILITY IS PART OF THE ITEM'S REAL VISIBILITY.
+  //
+  // This resolver exists because the publish path must not trust a caller's claim, and
+  // it derived the answer from storage mode, story visibility and hidden state — never
+  // from whether the ROOM is private.  A story left `public` inside a private room
+  // therefore resolved `publishable: true` and could be pinned to the public IPFS DHT.
+  //
+  // Such a row should not exist: migration 0110's trigger refuses one on any write.
+  // But a trigger only fires on a write, and the 0110 backfill deliberately skips rows
+  // whose canonical URL already has a live in-room twin — so the rows it cannot convert
+  // are exactly the ones nothing revisits.  A derivation that reads the room anyway
+  // cannot leak whichever way that is resolved, which is the point of deriving rather
+  // than trusting.
+  const inPrivateRoom = row.roomVisibility === 'private';
+  const isPublic = row.visibility === 'public' && !inPrivateRoom;
   // A story hidden for takedown OR safety is no longer publicly readable (`storyReadableByUser`
   // is false) even though its stored `visibility` may still be `public` — so it must NEVER be
   // pinned to the public DHT.  This complements the takedown oracle, which catches a takedown but
   // NOT a safety hide; the eligibility refuses BOTH.  (`hidden_state IS NULL` ⇒ live.)
   const isLive = row.hiddenState === null;
-  const reason = !isServer ? 'p2p_room' : !isLive ? 'hidden' : !isPublic ? 'room_only' : undefined;
+  const reason = !isServer
+    ? 'p2p_room'
+    : !isLive
+      ? 'hidden'
+      : inPrivateRoom
+        ? // NAMED SEPARATELY from `room_only`: the story says public and the room says
+          // private, which is a stranded row a steward should see, not an ordinary
+          // in-room item.
+          'private_room'
+        : !isPublic
+          ? 'room_only'
+          : undefined;
   return {
     publishable: isServer && isPublic && isLive,
     visibility: isPublic && isLive ? 'public' : 'in_room',
@@ -70,6 +100,7 @@ export function drizzlePublishEligibility(db: DbExecutor): PublishEligibilityRes
     const rows = await db
       .select({
         storageMode: rooms.storageMode,
+        roomVisibility: rooms.visibility,
         visibility: stories.visibility,
         hiddenState: stories.hiddenState,
       })

@@ -194,10 +194,23 @@ describe('integrity escalation (the forum-thread-posture consumer)', () => {
     expect(await fixture.events.deadLetters.list()).toEqual([]);
   });
 
-  it('resolves THREAD-id targets too (forum-driven cascades aggregate by thread)', async () => {
-    // pwatt/aggregation folds contribution events by
-    // payload.thread_id, so cascades detected on forum activity carry
-    // THREAD ids in target_ids — the consumer must not silently skip them.
+  it('a THREAD-id target still escalates — the LEGACY replay path', async () => {
+    // A cascade target is a PWAtt fold item id (`pwatt/scoring.ts` emits
+    // `target_ids: [item.itemId]`), and every branch of the fold now keys by the
+    // owning story — including `contribution.created`, which used to key by
+    // `thread_id` and so produced a phantom item nothing downstream could reach.
+    // So a signal emitted by THIS release always names a story.
+    //
+    // But `integrity.signal.detected` is durable and replayable, and a
+    // `harassment_cascade` emitted BEFORE the fold-key change still names a
+    // thread.  Dropping the thread lookup would silently skip those pending
+    // signals for the life of the retained window — a real escalation never
+    // applied.  Story-first with a thread fallback keeps them working.
+    //
+    // What keeps the fold-key fix honest is NOT this consumer being intolerant —
+    // it is `pwatt/aggregation.ts` folding by story and the tests there failing
+    // loudly on a regression.  Making the replay path lossy to police a
+    // different module's invariant costs real signals for no guarantee.
     await fixture.events.router.publish(cascadeSignal(threadId));
     await fixture.settleAll();
     expect(await safetyState()).toBe('elevated');

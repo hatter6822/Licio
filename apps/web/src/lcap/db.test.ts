@@ -115,6 +115,40 @@ describe('lcap_v2 schema creation', () => {
   });
 });
 
+describe('versionchange self-close', () => {
+  it('drops the memo so getLcapDb() reopens after a versionchange self-close', async () => {
+    // Prime the memoised connection through getLcapDb().
+    await getLcapDb();
+
+    // Fire `versionchange` on the live connection (a deleteDatabase from
+    // "another tab" is the simplest trigger). The handler closes the connection
+    // and — with the fix — clears the module memo, so getLcapDb() no longer
+    // hands out the dead handle (every request on it rejects InvalidStateError).
+    await deleteDatabase(LCAP_DB_NAME);
+
+    const db = await getLcapDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(LCAP_STORE.records, 'readwrite');
+      tx.objectStore(LCAP_STORE.records).put({
+        recordCid: 'lcapr_after_versionchange',
+        kind: 'contribution_event',
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error('transaction aborted'));
+    });
+    const stored = await new Promise<unknown>((resolve, reject) => {
+      const req = db
+        .transaction(LCAP_STORE.records, 'readonly')
+        .objectStore(LCAP_STORE.records)
+        .get('lcapr_after_versionchange');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    expect(stored).toBeDefined();
+  });
+});
+
 describe('lcap_v2 versioned migration', () => {
   it('adds a store on a version bump without losing existing data', async () => {
     const name = `lcap_v2-upgrade-${Math.random().toString(36).slice(2)}`;

@@ -48,6 +48,20 @@ export const clientEnvSchema = z
     VITE_ICE_SERVERS: z.string().optional(),
     /** WS-D wallet sign-in: the EIP-155 chain id the SIWE flow binds to. */
     VITE_WALLET_CHAIN_ID: z.coerce.number().int().positive().optional(),
+    /** WS-R LCAP network id — the client half of the server's `LCAP_NETWORK_ID`
+     *  (`apps/web/src/lcap/bundle-import.ts` reads it to derive a record's
+     *  AUTHENTICATED room hash for scope admission).  Unset is fine: both halves
+     *  fall back to `licio`.  Declared here for the EMPTY-string case, which is
+     *  not the same as unset — `'' ?? 'licio'` is `''` (`??` only catches
+     *  null/undefined), so a blank value silently derives a wrong room hash and
+     *  every scope-filtered bundle import rejects records it should admit.
+     *  Fail the boot instead.  NOTE: this cannot detect the two halves being set
+     *  to DIFFERENT ids — that mismatch needs a cross-half assertion, tracked in
+     *  `docs/planning/audit-residuals-2026-07.md`. */
+    VITE_LCAP_NETWORK_ID: z
+      .string()
+      .min(1, { message: 'VITE_LCAP_NETWORK_ID must be non-empty when set' })
+      .optional(),
     /** WS-D SIWE domain / URI the signed statement is scoped to. */
     VITE_SIWE_DOMAIN: z.string().min(1).optional(),
     VITE_SIWE_URI: z.string().url({ message: 'VITE_SIWE_URI must be a valid URL' }).optional(),

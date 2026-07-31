@@ -30,11 +30,21 @@ import {
 
 const REDIS_URL = process.env['REDIS_URL'];
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 2_000): Promise<void> => {
+/** Poll until `predicate` holds, and THROW when it does not — a silent return
+ *  turns every bare `await waitFor(...)` into a no-op, so a subscription that
+ *  never delivers reads as a pass.  Matches `ice-restart.test.ts` and the
+ *  real-WebRTC e2e spec, which already throw. */
+const waitFor = async (
+  predicate: () => boolean,
+  label = 'condition',
+  timeoutMs = 2_000,
+): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) {
+  while (Date.now() < deadline) {
+    if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  throw new Error(`waitFor timed out: ${label}`);
 };
 
 describe.skipIf(!REDIS_URL)('Redis transient-state adapters (live Redis)', () => {

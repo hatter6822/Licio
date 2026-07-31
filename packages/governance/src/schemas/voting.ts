@@ -98,6 +98,20 @@ export const weightResolutionSchema = z.discriminatedUnion('resolved', [
     weight: z.string().regex(/^\d+(\.\d+)?$/),
     /** Human-readable derivation (§17.5 "capped, explainable"). */
     eligibilityReason: z.string().min(1).max(500),
+    /**
+     * The delegators whose unit this weight ACTUALLY consumed, in fold order
+     * (`delegated` model only; absent for every other model).
+     *
+     * The per-account cap discards delegated units beyond the ceiling, so
+     * "delegated to a voter who signed" and "counted in that voter's snapshot"
+     * are two different facts.  Treating them as one disenfranchises the
+     * delegators the cap dropped: their weight is not in the delegate's
+     * snapshot, yet the double-count guard would still refuse both their own
+     * direct ballot and a second delegate's use of the unit.  This is the
+     * narrower fact, recorded at signing time so no later reader has to
+     * reconstruct it from delegations that have since changed.
+     */
+    countedDelegatorIds: z.array(z.string().min(1).max(128)).optional(),
   }),
   z.object({
     resolved: z.literal(false),

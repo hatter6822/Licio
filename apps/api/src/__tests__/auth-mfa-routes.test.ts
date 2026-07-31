@@ -357,4 +357,54 @@ describe('TOTP MFA enroll → confirm → verify', () => {
     expect((await services.store.getAuth(userId))?.mfaEnabled).toBe(true);
     expect((await services.store.getAuth(userId))?.mfaSecret).toBe(activeSecret);
   });
+
+  it('caps TOTP verification at 5 attempts per window — even CONCURRENTLY', async () => {
+    // `/mfa/totp/verify` carries no `rateLimit()` middleware, so this cap is the
+    // ONLY thing standing between an attacker with a valid session cookie and an
+    // unbounded 6-digit brute force. It had no test at all, and the counter it
+    // reads was a get-then-set: against Redis every overlapping request read the
+    // same count, every one passed the check, and every one wrote the same
+    // count + 1 — the bound never engaged.
+    const { app, sid } = await signup('mfacapuser');
+    const enroll = await app.request('/v1/auth/mfa/totp/enroll', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    const { otpauth_uri } = await readJson<{ otpauth_uri: string }>(enroll);
+    const secret = secretFromUri(otpauth_uri);
+    const confirm = await app.request('/v1/auth/mfa/totp/confirm', {
+      method: 'POST',
+      headers: headers(sid),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    expect(confirm.status).toBe(200);
+    const sid2 = cookie(confirm, '__Host-sid');
+
+    const guess = () =>
+      app.request('/v1/auth/mfa/totp/verify', {
+        method: 'POST',
+        headers: headers(sid2),
+        body: JSON.stringify({ code: '000000' }),
+      });
+
+    // Twenty simultaneous guesses: at most five may reach the comparison.
+    const statuses = (await Promise.all(Array.from({ length: 20 }, guess))).map((r) => r.status);
+    expect(statuses.filter((s) => s === 400)).toHaveLength(5); // invalid_code
+    expect(statuses.filter((s) => s === 429)).toHaveLength(15); // rate_limited
+
+    // And the window keeps holding after the burst.
+    const after = await guess();
+    expect(after.status).toBe(429);
+    expect((await readJson<{ error: { code: string } }>(after)).error.code).toBe('rate_limited');
+
+    // A CORRECT code is refused too while the window is closed — the cap gates
+    // the comparison itself, so a guessed code cannot slip through on the
+    // attempt that happens to be right.
+    const correct = await app.request('/v1/auth/mfa/totp/verify', {
+      method: 'POST',
+      headers: headers(sid2),
+      body: JSON.stringify({ code: totp(secret) }),
+    });
+    expect(correct.status).toBe(429);
+  });
 });

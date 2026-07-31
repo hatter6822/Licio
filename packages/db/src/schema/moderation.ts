@@ -21,6 +21,7 @@
 //     §13.6) — enforced by the ABSENCE of the column, not by hiding it.
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -203,6 +204,17 @@ export const moderationAudit = pgTable(
   'moderation_audit',
   {
     auditId: uuid('audit_id').primaryKey().defaultRandom(),
+    /** The APPEND ORDER, and the only sound keyset cursor over this table.  `event_time`
+     *  cannot serve: it is microsecond-resolution `timestamptz` that the driver truncates
+     *  to a millisecond JS `Date` on read, so a cursor built from a read row lands BELOW
+     *  the row it names and the next page skips everything sharing that millisecond
+     *  (migration 0115 has the measurement).  Sequence-assigned, so not gapless — proving
+     *  nothing was DELETED is the chain's job, not the ordinal's. */
+    ordinal: bigint('ordinal', { mode: 'number' })
+      .notNull()
+      // The sequence assigns it — declared here so the insert type does not demand a
+      // value the writer must not invent.
+      .default(sql`nextval('moderation_audit_ordinal_seq')`),
     eventTime: timestamp('event_time', { withTimezone: true }).notNull().defaultNow(),
     /** Null actor ⇒ `system` (automated block). */
     actorUserId: uuid('actor_user_id').references(() => users.userId, { onDelete: 'set null' }),
@@ -216,6 +228,20 @@ export const moderationAudit = pgTable(
     nextState: text('next_state'),
     reversible: boolean('reversible').notNull().default(false),
     linkedActionId: uuid('linked_action_id'),
+    /** The case this record belongs to, so the review panel can show THIS case's history
+     *  rather than everything that ever happened to the same subject.  A plain uuid, not
+     *  a reference: an ON DELETE SET NULL cascade is an UPDATE, and the append-only
+     *  trigger rejects those (migration 0117).  NULL means "not case-scoped" — a queue
+     *  read, an automated block — never "case unknown but present". */
+    caseId: uuid('case_id'),
+    /** The predecessor's `integrityHash`; NULL on the genesis entry AND on every row
+     *  written before migration 0118 (which are simply unchained — see there for why no
+     *  backfill can honestly chain the past). */
+    prevHash: text('prev_hash'),
+    /** Keyed MAC over this entry's substance and its parent.  Keyed, not a bare digest:
+     *  an unkeyed chain is recomputable by anyone who can rewrite the table, so it
+     *  detects corruption but not an adversary. */
+    integrityHash: text('integrity_hash'),
     reportIds: jsonb('report_ids').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
     coApproverUserId: uuid('co_approver_user_id').references(() => users.userId, {
       onDelete: 'set null',
@@ -229,6 +255,36 @@ export const moderationAudit = pgTable(
     index('moderation_audit_action_idx').on(t.action),
     index('moderation_audit_reason_idx').on(t.reasonCode),
     index('moderation_audit_time_idx').on(t.eventTime),
+    // ------------------------------------------------------------------
+    // Migrations 0115 / 0117 / 0118.  Declared here because `db:push` builds the
+    // database from THIS file: an index that exists only in a migration is one
+    // `db:push` DROPS.  Three of the four below are correctness constraints, not
+    // performance — losing them silently turns a forked chain into a valid one.
+    // ------------------------------------------------------------------
+    /** 0115 — the ordinal is the keyset cursor, so a duplicate would make a page
+     *  either repeat a row or skip one. */
+    uniqueIndex('moderation_audit_ordinal_key').on(t.ordinal),
+    /** 0117 — the per-case history read: filter, then walk the keyset. */
+    index('moderation_audit_case_ordinal_idx')
+      .on(t.caseId, t.ordinal.desc())
+      .where(sql`${t.caseId} IS NOT NULL`),
+    /** 0118 — one child per parent.  Two writers reading the same head both build
+     *  on it; this lets exactly one land and the loser retries against the new
+     *  head.  Without it the chain forks and both branches verify in isolation. */
+    uniqueIndex('moderation_audit_chain_parent_uq')
+      .on(t.prevHash)
+      .where(sql`${t.prevHash} IS NOT NULL`),
+    /** 0118 — exactly ONE genesis for the whole table.  The constant expression
+     *  makes every qualifying row collide with every other, which IS the singleton
+     *  constraint; a second genesis would start a second chain nothing links to. */
+    uniqueIndex('moderation_audit_chain_genesis_uq')
+      .on(sql`(true)`)
+      .where(sql`${t.prevHash} IS NULL AND ${t.integrityHash} IS NOT NULL`),
+    /** 0118 — the verifier walks forward from the genesis; the head read takes the
+     *  greatest chained ordinal.  Both are this index. */
+    index('moderation_audit_chain_ordinal_idx')
+      .on(t.ordinal)
+      .where(sql`${t.integrityHash} IS NOT NULL`),
   ],
 );
 export type ModerationAuditRowDb = typeof moderationAudit.$inferSelect;

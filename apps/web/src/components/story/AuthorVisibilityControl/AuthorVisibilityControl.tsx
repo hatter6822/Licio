@@ -11,7 +11,7 @@
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { ApiClientError } from '../../../lib/api.js';
+import { ApiClientError, DuplicateStoryError } from '../../../lib/api.js';
 import { useChangeStoryVisibilityMutation } from '../../../lib/queries.js';
 import { Button } from '../../ui/Button/index.js';
 
@@ -29,7 +29,32 @@ export function AuthorVisibilityControl({
 }: AuthorVisibilityControlProps): React.ReactElement {
   const t = useT();
   const mutation = useChangeStoryVisibilityMutation(storyId);
-  const [collisionStoryId, setCollisionStoryId] = useState<string | null>(null);
+  /**
+   * A SNAPSHOT of the refused request, taken when it was made.
+   *
+   * The tier used to be re-derived from the CURRENT `visibility` prop on every
+   * render, and the comment below the render claimed `target` was "what this
+   * control just asked for" — it is what the control WOULD ask for now.  The
+   * component is not keyed and the route reuses the instance, so after a narrow
+   * collision a story→story navigation or a focus refetch (`refetchOnWindowFocus`
+   * is on) re-rendered the same instance with the other visibility and the
+   * message flipped to the wrong tier, still pointing at the in-room twin's id.
+   * An owner reducing their own reach was told a PUBLIC story already existed.
+   *
+   * Capturing `target` at click time makes that impossible: the report describes
+   * the request that was refused, not the request the control would make next.
+   * `message` is the SERVER's own tier-accurate sentence, which the previous
+   * `return` discarded — the api layer deliberately preserves it one level down,
+   * and this component re-committed the same defect one level up.
+   */
+  const [collision, setCollision] = useState<{
+    /** The story this control was showing when the request was refused. */
+    forStoryId: string;
+    /** The TWIN the server named — where the link already lives. */
+    existingStoryId: string;
+    target: 'public' | 'room_only';
+    message: string;
+  } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const target = visibility === 'public' ? 'room_only' : 'public';
@@ -37,21 +62,28 @@ export function AuthorVisibilityControl({
   const widenBlocked = visibility === 'room_only' && roomVisibility === 'private';
 
   function onChange(): void {
-    setCollisionStoryId(null);
+    setCollision(null);
     setMessage(null);
-    mutation.mutate(target, {
+    // The tier this request ASKED for, closed over at click time.
+    const requested = target;
+    mutation.mutate(requested, {
       onError: (error) => {
-        if (
-          error instanceof ApiClientError &&
-          error.code === 'duplicate_story' &&
-          typeof (error as ApiClientError & { existingStoryId?: string }).existingStoryId ===
-            'string'
-        ) {
-          setCollisionStoryId(
-            (error as ApiClientError & { existingStoryId?: string }).existingStoryId ?? null,
-          );
+        // `instanceof`, not a cast: `DuplicateStoryError` narrows to a NON-optional
+        // id, so a rename on either side becomes a compile error rather than a
+        // silently dropped "open the existing story" affordance.
+        if (error instanceof DuplicateStoryError) {
+          setCollision({
+            forStoryId: storyId,
+            existingStoryId: error.existingStoryId,
+            target: requested,
+            message: error.message,
+          });
           return;
         }
+        // A 409 whose body could not be read arrives as a PLAIN `ApiClientError`
+        // with code `duplicate_story` and no id, so it must still say something —
+        // gating the whole collision UI on the subclass would render nothing at all
+        // for that case.
         setMessage(
           error instanceof ApiClientError
             ? error.message
@@ -60,6 +92,18 @@ export function AuthorVisibilityControl({
       },
     });
   }
+  // DERIVED, not cleared by an effect — so there is no state to get out of step
+  // and nothing is set during render.  A snapshot is shown only while it still
+  // describes THIS story and the refused request is still outstanding:
+  //   • a different `storyId` ⇒ the report belongs to another story (the route
+  //     reuses this instance, which is how it could be shown against the wrong one);
+  //   • `visibility === collision.target` ⇒ the story has since reached the tier
+  //     the refused request wanted, so the report is obsolete.
+  // Any OTHER visibility change leaves a legitimate refusal standing.
+  const activeCollision =
+    collision !== null && collision.forStoryId === storyId && visibility !== collision.target
+      ? collision
+      : null;
 
   return (
     <div className="flex flex-col gap-1">
@@ -74,16 +118,39 @@ export function AuthorVisibilityControl({
             : t('storyVisibility.widen', 'Make public')}
         </Button>
       )}
-      {collisionStoryId !== null ? (
-        <p className="text-ink text-sm">
-          {t('storyVisibility.collision', 'A public story already exists for this link:')}{' '}
+      {activeCollision !== null ? (
+        <p role="alert" className="text-ink text-sm">
+          {/* WHICH tier collided, from the SNAPSHOT of the request that was
+              refused — never re-derived from the current prop.  Narrowing lands on
+              an IN-ROOM twin, and naming every collision a public one told an owner
+              reducing their own reach the opposite of what happened.
+              
+              Note for anyone mutation-testing this line: with the gate above in
+              place it is provably EQUIVALENT to the old `target` expression, because
+              `visibility` is a two-value union — the block renders only when
+              `visibility !== collision.target`, which forces `target` (the opposite
+              of `visibility`) to equal `collision.target`.  The GATE is what fixes
+              the wrong-tier render; reading the snapshot here is what keeps it
+              correct if that union or that gate ever changes.  So this line has no
+              failing mutation, by construction rather than by oversight. */}
+          {activeCollision.target === 'public'
+            ? t('storyVisibility.collision', 'A public story already exists for this link:')
+            : t(
+                'storyVisibility.collisionInRoom',
+                'An in-room story already exists for this link:',
+              )}{' '}
           <Link
             to="/stories/$storyId"
-            params={{ storyId: collisionStoryId }}
+            params={{ storyId: activeCollision.existingStoryId }}
             className="text-primary-on-soft underline-offset-2 hover:underline"
           >
             {t('storyVisibility.collisionLink', 'view it')}
           </Link>
+          {/* The SERVER's own tier-accurate sentence.  The api layer preserves it
+              deliberately ("this used to overwrite it with 'A public story already
+              exists', so an owner reducing their own reach was told the opposite"),
+              and the early `return` above threw it away again. */}
+          <span className="block text-ink-muted text-xs">{activeCollision.message}</span>
         </p>
       ) : null}
       {message !== null ? <p className="text-error-on-soft text-sm">{message}</p> : null}

@@ -10,11 +10,13 @@
 // race — every step is explicitly sequenced.
 //
 // alice is forced to be the OFFERER (so she `createDataChannel`s the channel the test controls) by
-// choosing an adversary device id whose blind id sorts AFTER alice's (the carrier's role tiebreak).
+// drawing an adversary SIGNALLING key that sorts after her own — the carrier's role tiebreak reads
+// the dial identities, never the blind id (`pickOffererRoom`, and `connect-peer.ts:581`).
 import { describe, expect, it } from 'vitest';
 import {
   type ConnectPrivatePeerParams,
   connectPrivatePeer,
+  pickDialCandidate,
   type RtcDataChannelLike,
   type RtcIceCandidateInit,
   type RtcPeerConnectionLike,
@@ -24,6 +26,10 @@ import {
 import type { PresenceRecord, RendezvousTransport, WireSignal } from '../rendezvous-client.js';
 
 const PROFILE = { name: 'Adversarial Carrier Test', room_type: 'global_topic' } as const;
+/** Any device id that is not alice's.  Nothing in the carrier orders peers by device or blind id —
+ *  the offerer role reads the DIAL ids (`connect-peer.ts:598`) and self-exclusion is by equality
+ *  (`:795`) — so this needs to be distinct, and nothing more. */
+const ADVERSARY_DEVICE_ID = 'adversary-0';
 
 // --- a server-blind in-memory rendezvous (FIFO signal queue per recipient) ----------
 function inMemoryRendezvous(): RendezvousTransport & {
@@ -128,6 +134,26 @@ async function waitUntil(cond: () => boolean, label: string, budgetMs = 12_000):
   throw new Error(`waitUntil timed out: ${label}`);
 }
 
+/** Poll until `read()` stops changing — the same value across `QUIET_POLLS` consecutive ticks.
+ *  This is what an EXACT-count assertion over an async flush needs: a fixed settle tick asserts
+ *  "the flush fits in N ms", which is a bet on machine load, whereas quiescence asserts what the
+ *  test means — nothing more is coming.  Pair it with a `waitUntil` on the lower bound so a value
+ *  that has not started moving yet cannot read as quiet. */
+async function waitUntilQuiet(read: () => number, label: string, budgetMs = 12_000): Promise<void> {
+  const QUIET_POLLS = 8;
+  const deadline = Date.now() + budgetMs;
+  let last = read();
+  let quiet = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1));
+    const next = read();
+    quiet = next === last ? quiet + 1 : 0;
+    last = next;
+    if (quiet >= QUIET_POLLS) return;
+  }
+  throw new Error(`waitUntilQuiet timed out: ${label} still changing (last=${last})`);
+}
+
 /** The crypto context the adversary needs to seal signals alice will open (PRIV-CARRIER-7 ICE flood). */
 interface AdversaryCtx {
   readonly p2p: typeof import('@licio/private-p2p');
@@ -157,12 +183,20 @@ interface Harness {
 type P2P = typeof import('@licio/private-p2p');
 
 /**
- * Draw rooms until alice's blind id admits an adversary device id that sorts AFTER it ⇒ alice is the
- * OFFERER (the carrier's role tiebreak is the bytewise-smaller blind id).  Blind ids are random HMACs,
- * so for a given room MOST candidates sort after alice — but when alice's OWN blind id draws high,
- * every candidate can fall below it.  Searching many candidates AND redrawing the room (a fresh
- * rendezvousKey ⇒ a fresh alice blind id) makes the role assignment DETERMINISTIC: combined failure
- * ≈ (1/257)^25 ≈ 0, so the harness never flakes on the draw.
+ * Draw rooms until alice is the OFFERER — the role `connect-peer.ts` derives from
+ * `selfDialId < peerDialId`, comparing the two SIGNALLING public keys.  NOT the blind id: that
+ * field is server-visible and outside the cap's binding, so a forged record could make two honest
+ * peers disagree about who offers, and `connect-peer.ts:581` moved the tiebreak off it
+ * deliberately.  This search follows it — searching the blind ids instead would order a field the
+ * role no longer reads, and leave the one it does read to chance.
+ *
+ * Both dial ids are random, so a ONE-SIDED resample cannot bound the search: hold alice fixed and
+ * her own key can land near the top of the ordering, where every adversary draw falls below it and
+ * any budget runs out.  That is measured, not hypothetical — sampling 64 ephemerals against a fixed
+ * alice failed once per ~66 harness builds (∫₀¹ p⁶⁵ dp), which is the flake this loop removes.
+ * Redrawing the ROOM redraws alice too (a fresh founder signing key + room commitment ⇒ a fresh
+ * derived signalling key), so the sides are INDEPENDENT across attempts and the failures multiply:
+ * ≈ (1/65)^25 ≈ 0.
  */
 async function pickOffererRoom(p2p: P2P): Promise<{
   created: Awaited<ReturnType<P2P['createPrivateRoom']>>;
@@ -171,6 +205,7 @@ async function pickOffererRoom(p2p: P2P): Promise<{
   timeBucket: number;
   aliceBlind: string;
   adversaryDeviceId: string;
+  advEphemeral: Awaited<ReturnType<P2P['generateX25519KeyPair']>>;
 }> {
   for (let attempt = 0; attempt < 25; attempt++) {
     const created = await p2p.createPrivateRoom({
@@ -183,19 +218,26 @@ async function pickOffererRoom(p2p: P2P): Promise<{
     const rendezvousKey = created.epochState.keys.rendezvousKey;
     const timeBucket = p2p.rendezvousTimeBucket(Date.now());
     const aliceBlind = await p2p.derivePeerBlindId(rendezvousKey, 'founder-dev', epoch, timeBucket);
-    for (let i = 0; i < 256; i++) {
-      const candidate = `adversary-${i}`;
-      const blind = await p2p.derivePeerBlindId(rendezvousKey, candidate, epoch, timeBucket);
-      if (blind > aliceBlind) {
-        return {
-          created,
-          epoch,
-          rendezvousKey,
-          timeBucket,
-          aliceBlind,
-          adversaryDeviceId: candidate,
-        };
-      }
+    const aliceSignaling = await p2p.deriveSignalingKeyPair(
+      created.founder.signingKeyPair.privateKey,
+      created.roomIdCommitment,
+      'founder-dev',
+      epoch,
+      timeBucket,
+    );
+    const aliceDialId = p2p.toBase64Url(aliceSignaling.publicKey);
+    for (let i = 0; i < 64; i++) {
+      const advEphemeral = await p2p.generateX25519KeyPair();
+      if (p2p.toBase64Url(advEphemeral.publicKey) <= aliceDialId) continue;
+      return {
+        created,
+        epoch,
+        rendezvousKey,
+        timeBucket,
+        aliceBlind,
+        adversaryDeviceId: ADVERSARY_DEVICE_ID,
+        advEphemeral,
+      };
     }
   }
   throw new Error('could not force the offerer role in 25 room draws (astronomically unlikely)');
@@ -208,10 +250,11 @@ async function pickOffererRoom(p2p: P2P): Promise<{
  */
 async function setupOffererHarness(): Promise<Harness> {
   const p2p = await import('@licio/private-p2p');
-  const { created, epoch, rendezvousKey, timeBucket, aliceBlind, adversaryDeviceId } =
+  // `pickOffererRoom` has already settled the ordering that forces ALICE to offer — the adversary
+  // ephemeral it returns sorts ABOVE her derived signalling key, on the same draw as the room.
+  const { created, epoch, rendezvousKey, timeBucket, aliceBlind, adversaryDeviceId, advEphemeral } =
     await pickOffererRoom(p2p);
 
-  const advEphemeral = await p2p.generateX25519KeyPair();
   const advSigning = await p2p.generateDeviceSigningKeyPair();
   const advSigningPub = p2p.toBase64Url(await p2p.exportPublicKeyRaw(advSigning.publicKey));
   const adversaryBlind = await p2p.derivePeerBlindId(
@@ -372,20 +415,23 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
       const aliceEphPub = ctx.p2p.fromBase64Url(aliceAnn.signaling_public_key);
       const channelKey = await deriveAliceChannelKey(ctx, aliceEphPub);
 
-      // The carrier now drains the PER-RECIPIENT §15.4 signal queue (keyed on the RECIPIENT's ephemeral
-      // signaling key, NOT the device-level blind id), so a mesh's concurrent dials never steal each
-      // other's deliver-once signals.  Address the flood to alice's inbound queue (recipient = alice's
-      // ephemeral); the sender field is the adversary's own inbound queue (recipient = its ephemeral).
+      // The carrier drains a PAIRWISE, DIRECTED §15.4 queue — keyed on BOTH the sender's and the
+      // recipient's signalling identity — so a device's concurrent sessions never steal each other's
+      // deliver-once signals even though the device has one identity per bucket.  Address the flood
+      // to alice's inbound queue FOR THIS SENDER (adversary → alice); the sender field is the
+      // reverse direction (alice → adversary), which is where a reply would go.
       const routing = {
         roomBlindId: ctx.roomBlindId,
         senderBlindId: await ctx.p2p.deriveSignalAddress(
           ctx.rendezvousKey,
+          aliceEphPub,
           ctx.advEphemeral.publicKey,
           ctx.epoch,
           ctx.timeBucket,
         ),
         recipientBlindId: await ctx.p2p.deriveSignalAddress(
           ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
           aliceEphPub,
           ctx.epoch,
           ctx.timeBucket,
@@ -423,11 +469,17 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
         ),
       );
 
+      // Wait for the flush to REACH the cap, then for it to go QUIET, and only then assert the
+      // exact count.  Neither half is sufficient alone: a fixed settle tick bets that 64 awaited
+      // `addIceCandidate` resolutions fit inside it (a bet a loaded box loses, and the failure
+      // would read as a cap regression), while `waitUntil(n === 64)` alone would be satisfied
+      // TRANSIENTLY by a broken cap on its way through 64 to 100.  Quiescence is what the
+      // equality actually needs.
       await waitUntil(
-        () => (h.peer()?.iceApplied.length ?? 0) > 0,
-        'answer flushed the ICE buffer',
+        () => (h.peer()?.iceApplied.length ?? 0) >= 64,
+        'ICE buffer flushed to the cap',
       );
-      await new Promise((r) => setTimeout(r, 20)); // let any further flush settle
+      await waitUntilQuiet(() => h.peer()?.iceApplied.length ?? 0, 'the ICE flush');
       // EXACTLY 64 of the 100 flooded candidates were buffered + applied — 36 dropped past the cap.
       expect(h.peer()?.iceApplied.length).toBe(64);
 
@@ -459,12 +511,14 @@ describe('connectPrivatePeer — deterministic adversarial DoS / handshake bound
         roomBlindId: ctx.roomBlindId,
         senderBlindId: await ctx.p2p.deriveSignalAddress(
           ctx.rendezvousKey,
+          aliceEphPub,
           ctx.advEphemeral.publicKey,
           ctx.epoch,
           ctx.timeBucket,
         ),
         recipientBlindId: await ctx.p2p.deriveSignalAddress(
           ctx.rendezvousKey,
+          ctx.advEphemeral.publicKey,
           aliceEphPub,
           ctx.epoch,
           ctx.timeBucket,
@@ -590,7 +644,9 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
     // BOTH distinct ephemerals survive — the honest one is never dropped by the unproven claim.
     expect(out.map((c) => c.ann.signaling_public_key).sort()).toEqual(['E_h', 'E_s']);
     // Sorted freshest-first: the spoof (later expiry) is tried first (where the §15.5 mismatch check
-    // rejects it), then the honest candidate is dialed in the SAME round.
+    // rejects it), and the honest candidate is reached on a later round —
+    // guaranteed within two by `pickDialCandidate`'s alternation, even while the
+    // flooder keeps minting fresher records.
     expect(out[0]?.ann.signaling_public_key).toBe('E_s');
     expect(out[1]?.ann.signaling_public_key).toBe('E_h');
   });
@@ -610,5 +666,137 @@ describe('selectFreshestCandidates (rendezvous candidate dedup)', () => {
       cand('E3', 'z', 500),
     ]);
     expect(out.map((c) => c.ann.signaling_public_key)).toEqual(['E2', 'E3', 'E1']);
+  });
+});
+
+// --- Dial selection: neither ordering nor flooding may starve a candidate ------------------------
+describe('pickDialCandidate (an attacker-authored order cannot starve a peer)', () => {
+  /**
+   * `capVerified` is the VERDICT the carrier stamps after `filterVerified`, not the
+   * presence of `ann.cap`.  These fixtures used to build the "capped" candidate as
+   * `cap: {proof:'p', pseudonym:'n'}` — an unverifiable stub — and assert it won every
+   * round, which asserted the ATTACK as desired behaviour: any current-epoch member
+   * can stamp exactly that.
+   */
+  const c = (key: string, capVerified = false) => ({
+    ann: { signaling_public_key: key },
+    capVerified,
+  });
+
+  it('BRACKETING no longer works — the honest record in the middle is reached', () => {
+    // The defect that killed the previous policy.  `selectFreshestCandidates`
+    // sorts by `record.expires_at`, and that value is ANNOUNCER-CHOSEN, while
+    // every honest client uses exactly `now + 30min`.  So a hostile member mints
+    // one record above and one below, the honest record sits between them, and a
+    // head/tail policy selects nothing else for the whole dial window.
+    const sample = [c('E_spoof_high'), c('E_honest'), c('E_spoof_low')];
+    const tried = new Set<string>();
+    const picked: string[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      const pick = pickDialCandidate(sample, round, tried);
+      if (pick === undefined) break;
+      picked.push(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
+    }
+    expect(picked).toContain('E_honest');
+  });
+
+  it('rotates over EVERY position, not just the two ends', () => {
+    const sample = [c('a'), c('b'), c('c'), c('d')];
+    const tried = new Set<string>();
+    const seen = new Set<string>();
+    for (let round = 0; round < 4; round += 1) {
+      const pick = pickDialCandidate(sample, round, tried);
+      if (pick === undefined) break;
+      seen.add(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
+    }
+    expect([...seen].sort()).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('LEADS with the verified tier but ALTERNATES, so Tier-1 is never starved', () => {
+    // The ordering fix alone cannot bound anything — ordering is the attacker's
+    // input.  The bound comes from the cap: `filterVerified` dedups by verified
+    // pseudonym, so a flooder contributes exactly ONE verified candidate however
+    // many records it mints.
+    //
+    // But the verified tier must not own EVERY round.  A capped member can refresh a
+    // valid cap under a NEW signalling key after each failed dial, defeating the
+    // key-based cooldown and consuming the whole deadline; and even with no attacker,
+    // three stale capped presences exhaust the candidate timeouts before any
+    // reachable Tier-1 peer is tried.  So it leads on even rounds and yields on odd.
+    const sample = [c('E_flood_1'), c('E_flood_2'), c('E_flood_3'), c('E_verified', true)];
+    expect(pickDialCandidate(sample, 0, new Set())?.ann.signaling_public_key).toBe('E_verified');
+    expect(pickDialCandidate(sample, 2, new Set())?.ann.signaling_public_key).toBe('E_verified');
+    // Odd rounds go to Tier-1 — which is what stops the verified tier monopolising.
+    expect(pickDialCandidate(sample, 1, new Set())?.capVerified).toBe(false);
+    expect(pickDialCandidate(sample, 3, new Set())?.capVerified).toBe(false);
+    // With nothing else, the verified tier still takes every round.
+    const onlyVerified = [c('E_only', true)];
+    for (let round = 0; round < 3; round += 1) {
+      expect(pickDialCandidate(onlyVerified, round, new Set())?.ann.signaling_public_key).toBe(
+        'E_only',
+      );
+    }
+  });
+
+  it('a cap nobody VERIFIED buys no tier at all', () => {
+    // The attacker authors a TIER, not an order — which is why presence cannot be the
+    // partition.  An unverified candidate sits with Tier-1 however it is labelled.
+    const flood = Array.from({ length: 20 }, (_unused, i) => c(`E_flood_${i}`));
+    const honest = c('E_honest');
+    const seen = new Set<string>();
+    const tried = new Set<string>();
+    for (let round = 0; round < 25; round += 1) {
+      const pick = pickDialCandidate([...flood, honest], round, tried);
+      if (pick === undefined) break;
+      seen.add(pick.ann.signaling_public_key);
+      tried.add(pick.ann.signaling_public_key);
+    }
+    // Every candidate is reached, because none of them claimed a tier.
+    expect(seen.has('E_honest')).toBe(true);
+  });
+
+  it('falls back to the whole pool once everything in it has been tried', () => {
+    const sample = [c('a'), c('b')];
+    const tried = new Set(['a', 'b']);
+    expect(pickDialCandidate(sample, 0, tried)?.ann.signaling_public_key).toBe('a');
+    expect(pickDialCandidate(sample, 1, tried)?.ann.signaling_public_key).toBe('b');
+  });
+
+  it('under a FLOOD, only the cap tier keeps the honest peer reachable', () => {
+    // The residual the docstring states, made concrete.  A flooder minting a
+    // fresh ephemeral every poll produces candidates that are all `untried`, so
+    // neither the rotation nor the untried-preference bounds anything — the
+    // honest peer is reached only because its CAPPED record is the one slot the
+    // Tier-2 cap admits per device.
+    const tried = new Set<string>();
+    let reached = false;
+    for (let round = 0; round < 5; round += 1) {
+      const flood = Array.from({ length: 50 }, (_unused, i) => c(`E_flood_${round}_${i}`));
+      const pick = pickDialCandidate([...flood, c('E_honest_capped', true)], round, tried);
+      if (pick === undefined) break;
+      tried.add(pick.ann.signaling_public_key);
+      if (pick.ann.signaling_public_key === 'E_honest_capped') reached = true;
+    }
+    expect(reached).toBe(true);
+
+    // WITHOUT a cap on that record, the same flood starves it — which is why the
+    // docstring names this a residual of the cap rather than a property of this
+    // function.  Asserted so the limit is recorded, not implied.
+    const triedNoCap = new Set<string>();
+    let reachedNoCap = false;
+    for (let round = 0; round < 5; round += 1) {
+      const flood = Array.from({ length: 50 }, (_unused, i) => c(`E_f_${round}_${i}`));
+      const pick = pickDialCandidate([...flood, c('E_honest_plain')], round, triedNoCap);
+      if (pick === undefined) break;
+      triedNoCap.add(pick.ann.signaling_public_key);
+      if (pick.ann.signaling_public_key === 'E_honest_plain') reachedNoCap = true;
+    }
+    expect(reachedNoCap).toBe(false);
+  });
+
+  it('an empty sample yields nothing', () => {
+    expect(pickDialCandidate([], 0, new Set())).toBeUndefined();
   });
 });

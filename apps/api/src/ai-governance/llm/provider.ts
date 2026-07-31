@@ -27,6 +27,7 @@ import type { ModelIdentity } from '../models.js';
 import { recordAiOutput } from '../output-records.js';
 import type { AiGovernanceServices } from '../services.js';
 import type { GovernanceLlmSettings } from './config.js';
+import type { LocalCompletionLog } from './local.js';
 import { checkLawmakingSummaryQuality } from './quality.js';
 import type { ResolvedRoomModel, RoomModelResolver } from './room-models.js';
 
@@ -411,12 +412,35 @@ export function createGovernanceLlmNlProvider(
 
 /** The real Claude completion over the official SDK (boot-only construction:
  *  the key exists solely in this closure; requests carry a strict JSON output
- *  format and the fail-closed timeout/retry posture). */
+ *  format and the fail-closed timeout/retry posture). The metadata-only `log`
+ *  seam is the same one `createLocalCompletion` takes — the boot passes pino. */
 export function createAnthropicCompletion(
   apiKey: string,
   settings: GovernanceLlmSettings,
+  log: LocalCompletionLog = () => {},
 ): LlmCompletion {
-  const client = new Anthropic({ apiKey, timeout: settings.timeoutMs, maxRetries: 1 });
+  const client = new Anthropic({
+    apiKey,
+    timeout: settings.timeoutMs,
+    maxRetries: 1,
+    // NEVER the SDK's `console` default (client.js: `options.logger ?? console`):
+    // a library that logs on our behalf is a hole in pino's redaction exactly
+    // like an unhandled postgres.js `onnotice`, and at `debug` the SDK prints
+    // the request BODY — the governed room content this file's header promises
+    // is never logged. Pinning `logLevel` is load-bearing too: the constructor
+    // reads `ANTHROPIC_LOG` only when the option is unset, so without it an
+    // operator's `ANTHROPIC_LOG=debug` would promote the level and route that
+    // body straight into the hook below.
+    logLevel: 'warn',
+    logger: {
+      error: (message: string) => log('ai.llm.sdk.error', { message }),
+      warn: (message: string) => log('ai.llm.sdk.warn', { message }),
+      // Unreachable at `warn`, but the SDK's Logger shape requires all four,
+      // and a future level bump must not start forwarding request bodies.
+      info: () => {},
+      debug: () => {},
+    },
+  });
   return async (request) => {
     const response = await client.messages.create(
       {

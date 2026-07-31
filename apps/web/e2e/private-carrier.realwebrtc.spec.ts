@@ -260,9 +260,20 @@ test.describe('private carrier over real WebRTC (WP-9, finding 13)', () => {
           }),
         ]);
 
+        // The codec `PrivateSyncSession` requires — the SAME three members
+        // `room-manager.ts` wires in production.  `chunkOpResponse` is not
+        // optional: `onRequest` calls it to batch the served envelopes, so a stub
+        // without it threw a TypeError inside the frame handler, which the
+        // session reports through `onError` — unset here — and therefore
+        // SWALLOWED.  The responder simply went quiet, the requester waited out
+        // its 15s convergence loop, and the failure looked like "sync does not
+        // converge" rather than "the test's codec is incomplete".  This code runs
+        // inside `page.evaluate`, so TypeScript never checked the stub against
+        // the interface that documents the member as REQUIRED.
         const codec = {
           encodeSyncMessage: p2p.encodeSyncMessage,
           decodeSyncMessage: p2p.decodeSyncMessage,
+          chunkOpResponse: p2p.chunkOpResponseEnvelopes,
         };
         const sa = new PrivateSyncSession(alice, a.channel, codec);
         const sb = new PrivateSyncSession(bob, b.channel, codec);

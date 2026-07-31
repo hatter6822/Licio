@@ -252,6 +252,33 @@ describe('contribution events (WS-E.1.1c)', () => {
     }
   });
 
+  it('contribution.created story_id is WIRE-OPTIONAL so a rolling upgrade keeps replaying', () => {
+    // Events are persisted, and `recoverEventPipeline` feeds every stored row
+    // back through `parseEvent` and SILENTLY DROPS what fails.  Making this
+    // field required in place — on a schema whose old instances are still on
+    // disk, with `EVENT_SCHEMA_VERSION` unchanged — would therefore delete every
+    // `contribution.created` payload the previous release wrote: gone from the
+    // replay to `ingestion-signals` and `invariant-scoi-bridge`, gone from the
+    // real-time rebuild, and an existing dead letter deleted as corrupt.
+    const { story_id: _omitted, ...preUpgrade } = EVENT_FIXTURES['contribution.created'] as Record<
+      string,
+      unknown
+    >;
+    expect(contributionCreatedEventSchema.safeParse(preUpgrade).success).toBe(true);
+
+    // Optional is not "anything goes": a malformed value is still refused, and a
+    // current payload still carries it (the emitter always sets it — the fold
+    // key that `pwatt/aggregation.ts` depends on).
+    expect(
+      contributionCreatedEventSchema.safeParse({ ...preUpgrade, story_id: 'not-a-uuid' }).success,
+    ).toBe(false);
+    const current = contributionCreatedEventSchema.safeParse(
+      EVENT_FIXTURES['contribution.created'],
+    );
+    expect(current.success).toBe(true);
+    if (current.success) expect(current.data.story_id).toBeDefined();
+  });
+
   it('validates claim status transitions and rejects illegal ones', () => {
     // retracted is terminal; nothing returns to unverified.
     expect(isLegalClaimTransition('unverified', 'supported')).toBe(true);

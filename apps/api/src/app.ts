@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { createLcapRoutes } from './lcap/routes.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { csrfMiddleware, csrfTokenRoute } from './middleware/csrf.js';
+import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { loggerMiddleware } from './middleware/logger.js';
 import { securityHeadersMiddleware } from './middleware/security-headers.js';
 import { cspReportRoute } from './routes/csp-report.js';
@@ -24,6 +25,11 @@ export interface CreateAppOptions {
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono<AppEnv>();
+
+  // Registered BEFORE the middleware so nothing an uncaught throw can reach
+  // falls back to Hono's `console.error` + `text/plain` default.
+  app.onError(errorHandler);
+  app.notFound(notFoundHandler);
 
   app.use('*', loggerMiddleware());
   app.use('*', securityHeadersMiddleware());

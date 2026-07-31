@@ -162,6 +162,42 @@ describe('real-time counters (WS-E.3.2)', () => {
     expect(await fixture.events.realtime.snapshot(storyId, windowStart)).toEqual(original);
   });
 
+  it('resolves a LEGACY contribution payload from its thread during a rolling upgrade', async () => {
+    // An old pod emitting `contribution.created` after migration 0111 has run sends
+    // a payload with only `thread_id` — the NORMAL state mid-deployment, not a
+    // corrupt event.  Both readers used to skip it: the live consumer threw (a
+    // permanent dead letter the one-time backfill can never repair, because the
+    // event was written after it ran) and the rebuild dropped it, so those
+    // contributions reached neither the realtime counters nor the early-aggregation
+    // trigger.  The fold's thread → story seam answers the question in both.
+    const threadId = randomUUID();
+    const storyId = randomUUID();
+    const userId = randomUUID();
+    const windowStart = realtimeWindowStart(Date.now());
+    const legacy = [
+      {
+        eventId: randomUUID(),
+        topic: 'contribution.created',
+        timestamp: new Date(windowStart + 1_000).toISOString(),
+        payload: { thread_id: threadId, user_id: userId },
+      },
+    ] as unknown as Parameters<typeof rebuildRealtimeFromEvents>[1];
+
+    // WITHOUT the resolver the rebuild is a no-op, which is the old behaviour…
+    await rebuildRealtimeFromEvents(fixture.events.realtime, legacy, actorKeyOfPayload);
+    expect(await fixture.events.realtime.snapshot(storyId, windowStart)).toBeNull();
+
+    // …and with it the contribution lands under the OWNING STORY.
+    await rebuildRealtimeFromEvents(
+      fixture.events.realtime,
+      legacy,
+      actorKeyOfPayload,
+      async (id) => (id === threadId ? storyId : null),
+    );
+    const snapshot = await fixture.events.realtime.snapshot(storyId, windowStart);
+    expect(snapshot?.contributions).toBeGreaterThan(0);
+  });
+
   it('reconciles against the durable aggregation within the HLL bound', async () => {
     const { userId } = await seedUserWithSession(fixture.identity);
     const storyId = randomUUID();

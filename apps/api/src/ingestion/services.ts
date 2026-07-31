@@ -38,6 +38,7 @@ import {
 import { RobotsCache, type RobotsFetcher } from './robots.js';
 import { type SafeFetchLimits, type SafeFetchResult, safeFetch } from './safe-fetch.js';
 import { InMemorySearchIndex, type SearchDocument, type SearchIndex } from './search.js';
+import type { StoryHiddenState } from './stores.js';
 import {
   type ClaimStore,
   type EmbeddingStore,
@@ -282,7 +283,7 @@ interface StoryRecordLike {
   sourceId: string | null;
   language: string | null;
   createdAt: string;
-  hiddenState: 'takedown' | 'safety' | null;
+  hiddenState: StoryHiddenState | null;
   /** WS-T dispute posture (absent ⇒ `none`) — the search validation weight. */
   disputeStatus?: ContributionDisputeStatus;
   /** WS-Q.2.5a — the home room + item visibility (the global tier predicate). */

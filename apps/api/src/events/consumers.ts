@@ -86,13 +86,57 @@ export function registerDefaultConsumers(
         await events.realtime.recordSourceOpen(sourceOpen, actorKey);
         itemIds.push(sourceOpen.story_id);
       } else if (event.event_type === 'contribution.created') {
-        const contribution = event as { thread_id: string; user_id: string; timestamp: string };
+        // By the OWNING STORY: `itemIds` feeds the early-aggregation trigger,
+        // whose items are the same ones the durable fold and every reader key
+        // by, and those are story ids.
+        //
+        // GUARDED, because `story_id` is deliberately OPTIONAL on the wire: a
+        // pre-upgrade payload has none, and an operator redriving such a dead
+        // letter reached here with `undefined`.  That recorded participation
+        // under an undefined realtime key and then DELETED the dead letter as
+        // handled — the event's last copy, spent on a no-op.  `realtime.ts`'s
+        // rebuild path has always guarded this shape; the two disagreed about
+        // the same event, which is the only reason one of them looked correct.
+        const contribution = event as {
+          story_id?: string;
+          thread_id?: string;
+          user_id?: string;
+          timestamp: string;
+        };
+        // RESOLVE BEFORE REFUSING.  A rolling deployment has old pods emitting
+        // `contribution.created` after migration 0111 has already run, so a payload
+        // legitimately carrying only `thread_id` is the NORMAL state mid-upgrade —
+        // not a corrupt event.  Dead-lettering it stranded those contributions
+        // outside the realtime counters and the early-aggregation trigger, and the
+        // one-time backfill cannot repair an event written after it ran.  The fold's
+        // own thread → story seam is right here and answers the question.
+        if (contribution.story_id === undefined && contribution.thread_id !== undefined) {
+          const resolved = await events.storyIdForThread(contribution.thread_id);
+          if (resolved !== null) {
+            events.metrics.increment('events.contribution_legacy_resolved');
+            contribution.story_id = resolved;
+          }
+        }
+        if (contribution.story_id === undefined || contribution.user_id === undefined) {
+          // Metered, not silently dropped: a legacy payload that cannot be keyed
+          // is a fact about the upgrade, and a redrive must not report success
+          // for work it did not do.  Returning REFUSES the event rather than
+          // acknowledging it, so the dead letter survives for a redrive after
+          // the payloads are migrated.
+          events.metrics.increment('events.contribution_legacy_unkeyed');
+          throw new Error(
+            'contribution.created carries no story_id and its thread resolves to none ' +
+              '(pre-upgrade payload, deleted thread, or missing user_id); migrate the ' +
+              'stored payload before redriving',
+          );
+        }
+        const storyId = contribution.story_id;
         await events.realtime.recordContribution(
-          contribution.thread_id,
+          storyId,
           contribution.user_id,
           contribution.timestamp,
         );
-        itemIds.push(contribution.thread_id);
+        itemIds.push(storyId);
       } else if (event.event_type === 'content.saved') {
         const saved = event as ContentSavedAggregateEvent;
         await events.realtime.recordSave(saved, actorKey);

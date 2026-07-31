@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../../lib/api.js';
 import { useFeatureFlagStore } from '../../../stores/index.js';
 import { checkA11y } from '../../../test/axe.js';
 import { StoryComposer } from './StoryComposer.js';
@@ -118,6 +119,33 @@ describe('StoryComposer (WS-Q.5.1/5.2)', () => {
       room_id: COMMONS_ROOM_ID,
       topic_ids: [TECHNOLOGY_TOPIC_ID],
     });
+  });
+
+  it('shows a server field error on the control the WIRE name does not match', async () => {
+    // Four of the submission's wire names are not the control names this component
+    // renders — `topic_ids`/`room_id`/`alt_text`/`captions_text` against
+    // topics/room/altText/captions — and none of the four is fully length-validated
+    // locally, so ordinary input reaches the server's refusal.  Without the mapping
+    // the field message was parsed and then stored under a key nothing reads, so the
+    // author saw only the generic banner and had to guess which control was meant.
+    fetchRooms.mockResolvedValue({ items: [], nextCursor: null });
+    createStory.mockRejectedValue(
+      new ApiClientError('invalid_request', 'Invalid request json.', 400, {
+        topic_ids: 'Pick a topic from the catalog.',
+      }),
+    );
+    const user = userEvent.setup();
+    renderComposer();
+    await screen.findByText('Commons');
+    await user.click(screen.getByRole('radio', { name: /^text$/i }));
+    await user.type(screen.getByLabelText(/^title/i), 'A field note');
+    await user.type(screen.getByRole('textbox', { name: /^text/i }), 'Some context.');
+    await user.click(screen.getByRole('button', { name: 'Topics' }));
+    await user.click(screen.getByRole('option', { name: 'Technology' }));
+    await user.click(screen.getByRole('button', { name: /post/i }));
+    await waitFor(() => expect(createStory).toHaveBeenCalledTimes(1));
+    // The message reaches the TOPICS control, not just the banner.
+    expect(await screen.findByText('Pick a topic from the catalog.')).toBeInTheDocument();
   });
 
   it('locks visibility to in-room for a private room (derived value shown)', async () => {

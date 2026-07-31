@@ -122,6 +122,24 @@ export const uploadPublicSchema = z
     url: z.string().min(1).max(512),
     /** True once metadata stripping ran (images; EXIF/GPS removed). */
     metadata_stripped: z.boolean(),
+    /** Intrinsic pixel dimensions, so the renderer reserves the image's real
+     *  box and the LCP surface stops shifting on load.  ABSENT (not zero, not a
+     *  default) when unknown — video/caption uploads, AVIF, and rows written
+     *  before the columns existed — because an image told the wrong size shifts
+     *  the layout just as badly, only wrongly.
+     *
+     *  DELIBERATELY without an in-repo reader on THIS response.  The composer
+     *  previews from a local blob before the upload happens, so it has the file's
+     *  own dimensions and does not need the server's; the SERVED paths carry
+     *  their own copies (`stories.media_width`, `contribution.media[].width`),
+     *  which is what the renderers read.  What this field is for is the upload
+     *  ACK: the server's authoritative parse — after EXIF stripping — so any
+     *  client (the native courier, the offline queue, a future one) knows the
+     *  dimensions it will be serving without re-reading the bytes.  A response
+     *  field is a contract, not a call site, so "nothing reads it here" is not
+     *  the same finding it would be for an exported value. */
+    image_width: z.number().int().min(1).max(65_535).optional(),
+    image_height: z.number().int().min(1).max(65_535).optional(),
     /** WS-J.2.6b gate: `pending` cannot attach or serve yet (flagged
      *  uploads are rejected at creation and never appear on the wire). */
     scan_state: z.enum(['clear', 'pending']),

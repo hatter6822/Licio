@@ -22,7 +22,6 @@ import {
   reasonCodeAppealable,
   type StewardCapability,
 } from '@licio/shared';
-import { writeAudit } from './audit.js';
 import {
   type CapabilityDenial,
   denyCapability,
@@ -32,7 +31,11 @@ import {
 import { createActionNotice } from './notices.js';
 import type { AccountActionState, ContentVisibilityState } from './ports.js';
 import type { ModerationServices } from './services.js';
-import type { ModerationActionRecord } from './stores.js';
+import type {
+  ModerationActionRecord,
+  ModerationCaseRecord,
+  ModerationCaseStore,
+} from './stores.js';
 
 export type ActionOutcome =
   | { ok: true; response: ModerationActionResponse }
@@ -195,18 +198,21 @@ export async function applyAction(
   // action's target — a stale/forged `case_id` for a DIFFERENT target must not
   // leak that case's report ids into this action's accountability record (paired
   // with the same target-match guard in resolveCaseForAction below).
-  const linkedCase = request.case_id ? await services.cases.getById(request.case_id) : null;
-  const caseMatches =
-    linkedCase !== null &&
-    linkedCase.targetType === request.target_type &&
-    linkedCase.targetId === request.target_id;
+  //
+  // ONE binding, not a predicate applied per consumer.  The match used to be a separate
+  // boolean, and every consumer had to remember to consult it: the report list did, the
+  // case resolution recomputed it from its own re-read, and the two `case_id` columns
+  // did not — so an unmatched case still reached both the action row and the audit row,
+  // the one place the comment claimed was verified.  A steward could file an action into
+  // any case they could name, and the case-history panel would render it as that case's.
+  // Non-null here MEANS matched, so there is nothing left to forget.
+  const matchedCase = await matchCase(services, request);
   // The action/audit report list is the matching case's aggregated reports (the
   // console passes `case_id` but not the ids; the audit view exposes
   // `report_ids` but not `case_id`), so the resolved reports stay traceable.
-  const caseReportIds =
-    linkedCase && caseMatches
-      ? (await services.reports.listByCase(linkedCase.caseId)).map((r) => r.reportId)
-      : [];
+  const caseReportIds = matchedCase
+    ? (await services.reports.listByCase(matchedCase.caseId)).map((r) => r.reportId)
+    : [];
   // Client-supplied `report_ids` are accountability claims — trust them ONLY
   // when they belong to the matched case.  A forged/stale id, or one from a
   // DIFFERENT case/target, must never enter this action's record: it would
@@ -267,12 +273,11 @@ export async function applyAction(
     }
   }
 
-  // 1. Record the action FIRST — a durable record before any enforcement side
-  //    effect.  The ports span separate stores with no shared transaction, so
-  //    insert-first is the outbox ordering: a failure AFTER the insert leaves
-  //    "recorded, not enforced" (the distribution seam reads the item-safety /
-  //    account state, NOT this row, so content stays visible and the row is a
-  //    revert handle), never the unrecoverable "enforced, not recorded".
+  // 1. Work out what this action changes.  The record and the enforcement now commit
+  //    TOGETHER (one unit, below), so neither has to come first: the ordering note that
+  //    used to stand here — insert the row before the side effect, so a failure between
+  //    them leaves "recorded, not enforced" rather than "enforced, not recorded" — was
+  //    picking the less-bad half of a gap that no longer exists.
   const contentState = CONTENT_ACTIONS.has(request.action) ? contentStateFor(request.action) : null;
   const accountState = ACCOUNT_ACTIONS.has(request.action) ? accountStateFor(request.action) : null;
   // An account sanction (NOT shadow — its mapping is null) records the account's
@@ -294,92 +299,144 @@ export async function applyAction(
   }
   const priorState = contentState ? 'visible' : accountState ? priorAccount : null;
   const nextState = contentState ?? accountState ?? null;
-  const action = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: request.action,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    subjectUserId: subjectUserId ?? null,
-    reasonCode,
-    duration: request.duration ?? null,
-    reviewerNote: request.reviewer_note ?? null,
-    priorState,
-    nextState,
-    reversible,
-    reverted: false,
-    linkedActionId: null,
-    caseId: request.case_id ?? null,
-    coApproverUserId: null,
-    reportIds,
-  });
-
-  // 2. Apply the effect (idempotent at the port; an already-removed item is a
-  //    no-op there).  Reflected to distribution (the ranking seam).
-  if (contentState && request.target_type === 'content') {
-    await services.content.applyContentState(
-      request.target_id,
-      resolution.contentKind,
-      contentState,
-      request.case_id ?? null,
-      actor.userId,
-    );
-  }
-  if (accountState && subjectUserId) {
-    await services.content.applyAccountState(subjectUserId, accountState, durationDays);
-  }
-
-  // 3. Resolve the linked case/reports.
-  await resolveCaseForAction(services, request, action.actionId);
-
-  // 4. Notice + appealability (significant actions only; never silent).
+  // NOTHING IS RECORDED UNLESS THE EFFECT LANDED.
+  //
+  // The action row used to be written FIRST, on the reasoning that it is the revert
+  // handle: `applyContentState` writes two tables, so a throw between them leaves content
+  // partially hidden, and without an action id no steward can undo it (`clear` maps to no
+  // content state, so the palette offers no restore).  The concern is real.  The handle is
+  // not — it costs more than it buys.
+  //
+  // `performRevert` asks `listActiveByTarget` whether some OTHER action still suppresses
+  // the item, and skips restoring visibility when one does.  A row from an enforcement
+  // that FAILED answers yes.  So a member whose content is removed, whose steward hits a
+  // port failure and retries successfully, and who then WINS THEIR APPEAL, stays hidden —
+  // defeated by the record of an attempt that never took effect.  The same row shows in
+  // the reviewer's history panel as a standing sanction.  An orphan that enforces is not
+  // a handle; it is a phantom sanction, and the safe thing is not to write one.
+  //
+  // A port failure now leaves at most a partial ranking-exclusion and no record at all.
+  // That is UNDER-enforcement — the safe direction, nothing wrongly removed — and the
+  // steward's retry completes it, the port being idempotent.  Closing even that means
+  // making the port's own two writes atomic with each other, which belongs inside the
+  // content port rather than here.
+  //
+  // ONE UNIT — THE ENFORCEMENT INCLUDED.
+  //
+  // The effect and every artifact that records it now commit together.  That is possible
+  // because the enforcement writes reach WS-E item-safety state, WS-G contributions,
+  // WS-F stories and WS-D accounts, and all four are the same Postgres: `tx.content` is
+  // the same port bound to this transaction, supplied by the composition root.
+  //
+  // It removes the last two failure states rather than choosing between them.  A port
+  // that throws part-way no longer leaves content partially hidden — the rollback takes
+  // the safety-state write with it — so there is no orphaned suppression to recover from
+  // and no need for the phantom "revert handle" that used to defeat appeals.  And a
+  // record that fails no longer leaves an enforced action unrecorded, because the
+  // enforcement goes back with it.
+  //
+  // The effect stays FIRST inside the unit: the ports are idempotent, and ordering them
+  // ahead of the record keeps the trail's claim behind the thing it claims even while
+  // both are provisional.
   let appealable = false;
   let noticeSent = false;
-  if (enfType !== null) {
-    const eligibility: AppealEligibility = appealEligibility(enfType, {
-      reasonCode,
-      banCooldownHours: services.config().banAppealCooldownHours,
-      shadowUserNotified: true,
-      emergencyReviewComplete: false,
-    });
-    // A ban is not appealable until its cooldown elapses; the notice must not
-    // advertise an Appeal affordance that would be rejected (WS-J.1.3a) — it
-    // carries the "appeal available after N hours" note instead.  `appealable`
-    // reflects current availability, not eventual eligibility.
-    appealable =
-      eligibility.appealable && !(enfType === 'ban' && (eligibility.availableAfterHours ?? 0) > 0);
-    if (isSignificantAction(enfType) && subjectUserId) {
-      const banNote =
-        enfType === 'ban' && eligibility.availableAfterHours
-          ? `You may appeal this ban once, after ${eligibility.availableAfterHours} hours.`
-          : null;
-      await createActionNotice(services, {
-        userId: subjectUserId,
-        actionId: action.actionId,
-        action: request.action,
-        reasonCode,
-        appealable,
-        appealAvailableNote: banNote,
-      });
-      noticeSent = true;
+  const action = await services.transactor.run(async (tx) => {
+    // Idempotent at the port; an already-removed item is a no-op there.  Reflected to
+    // distribution through the ranking seam.
+    if (contentState && request.target_type === 'content') {
+      await tx.content.applyContentState(
+        request.target_id,
+        resolution.contentKind,
+        contentState,
+        request.case_id ?? null,
+        actor.userId,
+      );
     }
-  }
+    if (accountState && subjectUserId) {
+      await tx.content.applyAccountState(subjectUserId, accountState, durationDays);
+    }
 
-  // 5. Audit (complete field set, WS-J.2.5a).
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: action.actorRole,
-    action: request.action,
-    reasonCode,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    subjectUserId: subjectUserId ?? null,
-    priorState,
-    nextState,
-    reversible,
-    reportIds,
-    notes: request.reviewer_note ?? null,
+    const inserted = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: request.action,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      reasonCode,
+      duration: request.duration ?? null,
+      reviewerNote: request.reviewer_note ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reverted: false,
+      linkedActionId: null,
+      caseId: matchedCase?.caseId ?? null,
+      coApproverUserId: null,
+      reportIds,
+    });
+
+    await resolveCaseForAction(matchedCase, request.action, inserted.actionId, tx.cases);
+
+    // The member notice (significant actions only; never silent).  A DURABLE row, so it
+    // belongs here: a rolled-back record must not leave the member holding a statement of
+    // reasons the trail does not show.
+    if (enfType !== null) {
+      const eligibility: AppealEligibility = appealEligibility(enfType, {
+        reasonCode,
+        banCooldownHours: services.config().banAppealCooldownHours,
+        shadowUserNotified: true,
+        emergencyReviewComplete: false,
+      });
+      // A ban is not appealable until its cooldown elapses; the notice must not advertise
+      // an Appeal affordance that would be rejected (WS-J.1.3a) — it carries the "appeal
+      // available after N hours" note instead.  `appealable` reflects current
+      // availability, not eventual eligibility.
+      appealable =
+        eligibility.appealable &&
+        !(enfType === 'ban' && (eligibility.availableAfterHours ?? 0) > 0);
+      if (isSignificantAction(enfType) && subjectUserId) {
+        const banNote =
+          enfType === 'ban' && eligibility.availableAfterHours
+            ? `You may appeal this ban once, after ${eligibility.availableAfterHours} hours.`
+            : null;
+        await createActionNotice(
+          services,
+          {
+            userId: subjectUserId,
+            actionId: inserted.actionId,
+            action: request.action,
+            reasonCode,
+            appealable,
+            appealAvailableNote: banNote,
+          },
+          tx.notices,
+        );
+        noticeSent = true;
+      }
+    }
+
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: inserted.actorRole,
+      action: request.action,
+      // The MATCHED case, never the client's `request.case_id` — the same value the
+      // action row was written with, so the history cannot be steered onto another case
+      // by a forged or stale field.
+      caseId: matchedCase?.caseId ?? null,
+      reasonCode,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reportIds,
+      notes: request.reviewer_note ?? null,
+    });
+    return inserted;
   });
+
   services.metrics.increment(`moderation.action.${request.action}`);
 
   return {
@@ -396,31 +453,73 @@ export async function applyAction(
 }
 
 /** Move the action's case/reports to their resolved/escalated state. */
+/** Resolve or escalate the case this action was taken on.
+ *
+ *  Takes the MATCHED case rather than the request's id: the target-match check lives in
+ *  `matchCase` and is discharged by the type here, so this cannot drift from the check
+ *  the two `case_id` columns were written under — which is what happened when it
+ *  re-read and re-checked for itself. */
 async function resolveCaseForAction(
-  services: ModerationServices,
-  request: ModerationActionRequest,
+  matchedCase: ModerationCaseRecord | null,
+  action: ModerationActionRequest['action'],
   actionId: string,
+  /** The case store to write through — a unit's, so the case resolution commits with
+   *  the action that performed it. */
+  cases: ModerationCaseStore,
 ): Promise<void> {
-  if (!request.case_id) return;
-  const theCase = await services.cases.getById(request.case_id);
-  if (!theCase) return;
-  // The case_id must reference the SAME target this action enforced.  A stale or
-  // forged case_id for a DIFFERENT target would otherwise resolve/escalate an
-  // unrelated case (silently dropping it from the queue) while the enforcement
-  // landed on request.target_id.  On mismatch the action still stands on its
-  // own target; we simply do not touch the unrelated case.
-  if (theCase.targetType !== request.target_type || theCase.targetId !== request.target_id) {
-    return;
-  }
-  if (request.action === 'escalate') {
-    await services.cases.update(theCase.caseId, { status: 'escalated' });
+  if (matchedCase === null) return;
+  if (action === 'escalate') {
+    await cases.update(matchedCase.caseId, { status: 'escalated' });
     return;
   }
   // clear (dismiss not-actionable) and all enforcement actions resolve the case.
-  await services.cases.update(theCase.caseId, {
+  await cases.update(matchedCase.caseId, {
     status: 'resolved',
-    resolvedActionId: request.action === 'clear' ? null : actionId,
+    resolvedActionId: action === 'clear' ? null : actionId,
   });
+}
+
+/** The case named by `case_id`, but ONLY when it is about the same target this action
+ *  enforces on.
+ *
+ *  A stale or forged id for a DIFFERENT target must not resolve that case (silently
+ *  dropping someone else's report from the queue), leak its report ids into this
+ *  action's accountability record, or file this action into its history.  On a mismatch
+ *  the action still stands on its own target — it simply carries no case — and the
+ *  mismatch is METERED, because a console that keeps sending one is sending its
+ *  reviewers' resolutions nowhere and nothing else would say so. */
+async function matchCase(
+  services: ModerationServices,
+  request: ModerationActionRequest,
+): Promise<ModerationCaseRecord | null> {
+  if (!request.case_id) return null;
+  const theCase = await services.cases.getById(request.case_id);
+  if (!theCase) {
+    services.metrics.increment('moderation.action.case_unknown');
+    return null;
+  }
+  if (theCase.targetType !== request.target_type || theCase.targetId !== request.target_id) {
+    services.metrics.increment('moderation.action.case_target_mismatch');
+    return null;
+  }
+  return theCase;
+}
+
+/** The scope a revert must be serialised within — the set its reversal-integrity scan
+ *  reads.  Content actions scan BY TARGET, account sanctions BY SUBJECT; anything else
+ *  scans nothing and only needs to not collide, so it takes its own action's scope. */
+function revertScopeKey(original: ModerationActionRecord): string {
+  if (
+    CONTENT_ACTIONS.has(original.action as ConsoleAction) &&
+    original.targetType === 'content' &&
+    original.targetId !== null
+  ) {
+    return `content:${original.targetId}`;
+  }
+  if (accountStateFor(original.action as ConsoleAction) !== null && original.subjectUserId) {
+    return `account:${original.subjectUserId}`;
+  }
+  return `action:${original.actionId}`;
 }
 
 export type RevertOutcome =
@@ -494,116 +593,177 @@ export async function performRevert(
   // action's reason (an appeal-driven revert inherits its context).
   const revertReason = context.reasonCode ?? original.reasonCode;
   const revertNote = context.reviewerNote ?? null;
-  // Reversal integrity (WS-J.2.3b): restore prior state ONLY when no OTHER
-  // active enforcement action still holds the item/account down — a revert
-  // never resurrects content that a separate, still-standing removal suppresses.
-  // The state restore runs BEFORE marking the original reverted, so a transient
-  // store failure leaves `reverted=false` and a retry re-attempts the restore
-  // (rather than taking the idempotent path with the state still sanctioned).
-  // Both scans EXCLUDE this action explicitly (by id) since it is not yet marked.
-  // `targetId` is null only for an erased `account` target; a content action's
-  // target is never scrubbed, so the guard also narrows the type.
-  if (
-    CONTENT_ACTIONS.has(original.action as ConsoleAction) &&
-    original.targetType === 'content' &&
-    original.targetId !== null
-  ) {
-    const stillSuppressed = (
-      await services.actions.listActiveByTarget('content', original.targetId)
-    ).some(
-      (a) => a.actionId !== original.actionId && CONTENT_ACTIONS.has(a.action as ConsoleAction),
-    );
-    if (!stillSuppressed) {
-      await services.content.applyContentState(
-        original.targetId,
-        null,
-        'visible',
-        original.caseId,
-        actor.userId,
-      );
-    }
-  }
-  // Only actions that actually WRITE an account state gate the restore.  `shadow`
-  // is an account action but maps to no WS-D state (accountStateFor → null), so a
-  // standing shadow must NOT block restoring an expiring/reverted suspend/restrict
-  // (its reach reduction is lifted by reverting the shadow itself, not here).
-  if (accountStateFor(original.action as ConsoleAction) !== null && original.subjectUserId) {
-    // Scan the SUBJECT's other active account sanctions BY SUBJECT, not by the
-    // action's target: an account sanction taken from a CONTENT case has the
-    // content as its target, so a target scan would miss the user's sanctions
-    // from other reports and prematurely lift them.  This action is excluded by
-    // id (it is not yet marked reverted), and `shadow` is excluded (no WS-D state).
-    const stillRestricted = (await services.actions.listBySubject(original.subjectUserId)).some(
-      (a) =>
-        a.actionId !== original.actionId &&
-        !a.reverted &&
-        accountStateFor(a.action as ConsoleAction) !== null,
-    );
-    if (!stillRestricted) {
-      // Restore the TRUE prior account state (e.g. `restricted` if the user was
-      // already restricted before this sanction stacked), not an unconditional
-      // `active` — and never a `deactivated`/`deleted` tombstone (applyAction
-      // refuses to sanction those, so `priorState` is never one).
-      await services.content.applyAccountState(
-        original.subjectUserId,
-        restoreStateFrom(original.priorState),
-        null,
-      );
-    }
-  }
-  // Restore succeeded — NOW mark the original reverted (idempotency point).
-  await services.actions.update(original.actionId, { reverted: true });
-  const revert = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: 'revert',
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    reasonCode: revertReason,
-    duration: null,
-    reviewerNote: revertNote,
-    priorState: original.nextState,
-    nextState: original.priorState,
-    reversible: false,
-    reverted: false,
-    linkedActionId: original.actionId,
-    caseId: original.caseId,
-    coApproverUserId: null,
-    reportIds: [],
-  });
+  // REVERSAL INTEGRITY, INSIDE THE UNIT AND BEHIND A SCOPE LOCK.
+  //
+  // The scans below ask "is any OTHER sanction still holding this down?" and skip the
+  // restore when one is.  Run before the unit, they read a snapshot taken before this
+  // revert's compare-and-set — and two reverts of DIFFERENT actions never contend, since
+  // each marks only its own row.  So each saw the other still active, each deferred, and
+  // the subject was left sanctioned with nothing active to revert: `listActive…` filters
+  // on `reverted = false`, so the expiry sweep never revisits it, and a retried revert
+  // takes the idempotent path without restoring.  Permanently suspended, no way back.
+  //
+  // The compare-and-set cannot fix that by itself, which is why the lock is here: it
+  // serialises the units that share a subject, so the second one's scan sees the first's
+  // reversal committed and performs the restore.  The LAST reverter restores, which is
+  // the intended rule.
+  //
+  // The restores moved inside with the scans, so the ordering note they used to carry —
+  // restore first, mark second, so a failure leaves a retryable state — is obsolete:
+  // there is no longer an interval between them for a failure to land in.
+  const claimed = await services.transactor.run(async (tx) => {
+    // Serialise against the other reverts whose scan reads the SAME set as this one's.
+    // The key follows the scan rather than the record: the content scan is by target and
+    // the account scan is by subject, so keying both on `subjectUserId ?? targetId` would
+    // put two content reverts on one target into DIFFERENT scopes whenever their subjects
+    // differ — which they do once an erasure scrub NULLs one author.  Both would then
+    // scan concurrently, both defer, and the content stays suppressed with nothing active
+    // to revert, which is the defect this lock exists to prevent.
+    //
+    // At most one branch below applies (`CONTENT_ACTIONS` and the account-state actions
+    // are disjoint), so this is one lock, not two.  Taken FIRST: scope → rows → chain.
+    await tx.lockRevertScope(revertScopeKey(original));
+    const marked = await tx.actions.revertIfNotReverted(original.actionId);
+    // Someone else reverted it between the read above and here.  Nothing written, so the
+    // empty unit commits and the caller answers idempotently rather than recording a
+    // second reversal of the same action.
+    if (marked === null) return null;
 
-  // Re-notify the subject if the original carried a notice (no silent undo).
-  let noticeSent = false;
-  if (original.subjectUserId && isSignificantAction(original.action)) {
-    await services.notices.insert({
-      userId: original.subjectUserId,
-      kind: 'action',
-      actionId: revert.actionId,
-      title: 'A moderation action was reversed',
-      body: `A previous moderation action on your ${original.targetType} was reversed. No further action is required.`,
-      reasonCode: original.reasonCode,
-      appealable: false,
-      appealStatus: null,
-      readAt: null,
+    // Reversal integrity (WS-J.2.3b): restore prior state ONLY when no OTHER
+    // active enforcement action still holds the item/account down — a revert
+    // never resurrects content that a separate, still-standing removal suppresses.
+    // A failure here rolls the claim back with it, so `reverted` returns to false and a
+    // retry re-attempts the restore rather than taking the idempotent path with the
+    // state still sanctioned.  That is what the old restore-then-mark ordering was
+    // reaching for without a transaction to get it.
+    // Neither scan needs to exclude this action any more: the compare-and-set above
+    // already marked it, so `listActiveByTarget` no longer returns it and the
+    // `!a.reverted` filter drops it — but both still exclude it by id, because that
+    // holds whether or not the claim precedes the scan.
+    // `targetId` is null only for an erased `account` target; a content action's
+    // target is never scrubbed, so the guard also narrows the type.
+    if (
+      CONTENT_ACTIONS.has(original.action as ConsoleAction) &&
+      original.targetType === 'content' &&
+      original.targetId !== null
+    ) {
+      const stillSuppressed = (
+        await tx.actions.listActiveByTarget('content', original.targetId)
+      ).some(
+        (a) => a.actionId !== original.actionId && CONTENT_ACTIONS.has(a.action as ConsoleAction),
+      );
+      if (!stillSuppressed) {
+        await tx.content.applyContentState(
+          original.targetId,
+          null,
+          'visible',
+          original.caseId,
+          actor.userId,
+        );
+      }
+    }
+    // Only actions that actually WRITE an account state gate the restore.  `shadow`
+    // is an account action but maps to no WS-D state (accountStateFor → null), so a
+    // standing shadow must NOT block restoring an expiring/reverted suspend/restrict
+    // (its reach reduction is lifted by reverting the shadow itself, not here).
+    if (accountStateFor(original.action as ConsoleAction) !== null && original.subjectUserId) {
+      // Scan the SUBJECT's other active account sanctions BY SUBJECT, not by the
+      // action's target: an account sanction taken from a CONTENT case has the
+      // content as its target, so a target scan would miss the user's sanctions
+      // from other reports and prematurely lift them.  This action is excluded by
+      // id (it is not yet marked reverted), and `shadow` is excluded (no WS-D state).
+      const stillRestricted = (await tx.actions.listBySubject(original.subjectUserId)).some(
+        (a) =>
+          a.actionId !== original.actionId &&
+          !a.reverted &&
+          accountStateFor(a.action as ConsoleAction) !== null,
+      );
+      if (!stillRestricted) {
+        // Restore the TRUE prior account state (e.g. `restricted` if the user was
+        // already restricted before this sanction stacked), not an unconditional
+        // `active` — and never a `deactivated`/`deleted` tombstone (applyAction
+        // refuses to sanction those, so `priorState` is never one).
+        await tx.content.applyAccountState(
+          original.subjectUserId,
+          restoreStateFrom(original.priorState),
+          null,
+        );
+      }
+    }
+    // The reversal is already claimed above and the state already restored; what remains
+    // is the record of it: the `revert` action row, the member notice, and the audit
+    // entry.  The compare-and-set is what makes a reversal happen once — it replaced a
+    // blind `update` guarded by a read taken far above, under which two concurrent
+    // reverts both passed the check, both wrote, and the trail recorded one reversal
+    // twice.
+    const revert = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: 'revert',
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      reasonCode: revertReason,
+      duration: null,
+      reviewerNote: revertNote,
+      priorState: original.nextState,
+      nextState: original.priorState,
+      reversible: false,
+      reverted: false,
+      linkedActionId: original.actionId,
+      caseId: original.caseId,
+      coApproverUserId: null,
+      reportIds: [],
     });
-    noticeSent = true;
-  }
 
-  await writeAudit(services, {
-    actorUserId: actor.userId,
-    actorRole: revert.actorRole,
-    action: 'revert',
-    reasonCode: revertReason,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    priorState: original.nextState,
-    nextState: original.priorState,
-    reversible: false,
-    linkedActionId: original.actionId,
-    notes: revertNote,
+    // Re-notify the subject if the original carried a notice (no silent undo).
+    let noticeSent = false;
+    if (original.subjectUserId && isSignificantAction(original.action)) {
+      await tx.notices.insert({
+        userId: original.subjectUserId,
+        kind: 'action',
+        actionId: revert.actionId,
+        title: 'A moderation action was reversed',
+        body: `A previous moderation action on your ${original.targetType} was reversed. No further action is required.`,
+        reasonCode: original.reasonCode,
+        appealable: false,
+        appealStatus: null,
+        readAt: null,
+      });
+      noticeSent = true;
+    }
+
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: revert.actorRole,
+      action: 'revert',
+      // The REVERTED action's case, so a revert lands in the history of the case that
+      // produced it rather than nowhere.
+      caseId: original.caseId,
+      reasonCode: revertReason,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      priorState: original.nextState,
+      nextState: original.priorState,
+      reversible: false,
+      linkedActionId: original.actionId,
+      notes: revertNote,
+    });
+    return { revert, noticeSent };
   });
+
+  if (claimed === null) {
+    // The idempotent answer, matching the shape the early `original.reverted` check
+    // returns — a retried request must not become a conflict, and a lost race IS a retry.
+    return {
+      revert_action_id: original.linkedActionId ?? original.actionId,
+      reverted_action_id: original.actionId,
+      notice_sent: false,
+      created_at: new Date(services.now()).toISOString(),
+    };
+  }
+  const { revert, noticeSent } = claimed;
   services.metrics.increment('moderation.revert');
 
   return {

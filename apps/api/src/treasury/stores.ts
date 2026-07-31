@@ -22,6 +22,7 @@
 
 import type {
   CharterSections,
+  GrantPayoutState,
   PauseFlags,
   PaymentIntentState,
   PaymentTargetType,
@@ -143,7 +144,18 @@ export interface GrantRecord {
   milestones: GrantMilestoneRecord[];
   milestoneState: GrantMilestoneRecord['state'];
   reviewState: 'pending' | 'independent_review' | 'cleared' | 'flagged';
-  payoutState: 'not_started' | 'scheduled' | 'partially_paid' | 'paid' | 'clawed_back';
+  /** `closed` (migration 0109) is terminal-but-unpaid: every milestone was
+   *  rejected, so nothing can ever pay.  Distinct from `paid` (money moved) and
+   *  `clawed_back` (money returned) because it is neither, and distinct from
+   *  `not_started` because it is FINISHED — the unsettled predicates exclude it,
+   *  so it no longer blocks the recipient's wallet unlink.
+   *
+   *  DERIVED from the wire vocabulary rather than re-spelled here.  This union
+   *  and `GRANT_PAYOUT_STATES` are the same set by definition — the route parses
+   *  these rows against that enum — and while both were hand-written they
+   *  drifted the moment one gained a state, with `z.parse(unknown)` leaving the
+   *  compiler nothing to object to. */
+  payoutState: GrantPayoutState;
   auditSummary: string | null;
   createdAt: string;
 }
@@ -493,6 +505,30 @@ export interface DelegationStore {
   revoke(delegationId: string, revokedAt: string): Promise<DelegationRecordEntity | null>;
   listActiveByDelegate(roomId: string, delegateUserId: string): Promise<DelegationRecordEntity[]>;
   listActiveByDelegator(roomId: string, delegatorUserId: string): Promise<DelegationRecordEntity[]>;
+  /** EVERY delegation this delegator granted, revoked ones included.
+   *
+   *  A revoked delegation is still historically load-bearing: if the delegate
+   *  voted while it was live, the delegator's unit is inside that ballot's
+   *  frozen `weightSnapshot` for ever.  An active-only read cannot see that, so
+   *  revoking after the delegate signs used to erase the EVIDENCE of the vote
+   *  without erasing the counted weight — and the delegator could then cast the
+   *  same unit again directly. */
+  listByDelegator(roomId: string, delegatorUserId: string): Promise<DelegationRecordEntity[]>;
+  /**
+   * EVERY delegation granted by ANY of `delegatorUserIds`, in one query.
+   *
+   * The double-count guard called `listByDelegator` once per candidate, and a
+   * delegate can have many incoming delegations — so one ballot performed N
+   * sequential reads of a table that has no index for this predicate (the active
+   * partial unique cannot serve a read that must include REVOKED rows, and the
+   * other index is on the delegate).  A verified member can grow that history
+   * without limit by revoking and re-creating a delegation, so the cost is
+   * attacker-controlled, not merely proportional.
+   */
+  listByDelegators(
+    roomId: string,
+    delegatorUserIds: readonly string[],
+  ): Promise<DelegationRecordEntity[]>;
   listByRoom(roomId: string, limit: number): Promise<DelegationRecordEntity[]>;
   clear(): Promise<void>;
 }
@@ -1091,7 +1127,8 @@ export class InMemoryGrantStore implements GrantStore {
         (r) =>
           r.recipientRef === recipientRef &&
           r.payoutState !== 'paid' &&
-          r.payoutState !== 'clawed_back',
+          r.payoutState !== 'clawed_back' &&
+          r.payoutState !== 'closed',
       )
       .slice(0, limit)
       .map(clone);
@@ -1107,7 +1144,8 @@ export class InMemoryGrantStore implements GrantStore {
         (r) =>
           r.treasuryId === treasuryId &&
           r.payoutState !== 'paid' &&
-          r.payoutState !== 'clawed_back',
+          r.payoutState !== 'clawed_back' &&
+          r.payoutState !== 'closed',
       )
       .sort((a, b) => (a.grantId < b.grantId ? -1 : 1))
       .filter((r) => afterId === null || r.grantId > afterId)
@@ -1209,6 +1247,27 @@ export class InMemoryDelegationStore implements DelegationStore {
     return [...this.#rows.values()]
       .filter(
         (r) => r.roomId === roomId && r.delegatorUserId === delegatorUserId && r.state === 'active',
+      )
+      .map(clone);
+  }
+
+  async listByDelegator(
+    roomId: string,
+    delegatorUserId: string,
+  ): Promise<DelegationRecordEntity[]> {
+    return [...this.#rows.values()]
+      .filter((r) => r.roomId === roomId && r.delegatorUserId === delegatorUserId)
+      .map(clone);
+  }
+  async listByDelegators(
+    roomId: string,
+    delegatorUserIds: readonly string[],
+  ): Promise<DelegationRecordEntity[]> {
+    if (delegatorUserIds.length === 0) return [];
+    const wanted = new Set(delegatorUserIds);
+    return [...this.#rows.values()]
+      .filter(
+        (r) => r.roomId === roomId && r.delegatorUserId !== null && wanted.has(r.delegatorUserId),
       )
       .map(clone);
   }

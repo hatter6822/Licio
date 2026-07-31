@@ -31,9 +31,10 @@ export interface RoomAxes {
 export interface CandidateDataPorts {
   recentStories(limit: number): Promise<StoryRecord[]>;
   storyById(storyId: string): Promise<StoryRecord | null>;
-  threadByStoryId(storyId: string): Promise<ThreadShellRecord | null>;
-  /** Batch thread-shell read for a set of story ids (ONE query) — the catch-up
-   *  retriever resolves every seen story's room at once, not per-item. */
+  /** Batch thread-shell read for a set of story ids (ONE query) — the ONLY
+   *  thread-shell seam: the catch-up retriever resolves every seen story's AND
+   *  every candidate's room at once, so no caller can reintroduce the per-item
+   *  lookup this replaced. */
   threadsByStoryIds(storyIds: readonly string[]): Promise<Map<string, ThreadShellRecord>>;
   /** Active room subscriptions of the requesting user ([] signed out). */
   subscribedRoomIds(userId: string): Promise<string[]>;
@@ -76,6 +77,14 @@ export interface RetrieveContext {
    *  context is passed to every retriever, so concurrent/repeated room reads
    *  across all retrievers coalesce onto one in-flight read per distinct room. */
   roomAxesCache?: Map<string, Promise<RoomAxes | null>>;
+  /** Per-SERVE recent-stories memo (lazily created by `loadRecentStories`):
+   *  every retriever reads the SAME newest-first prefix, so the five scans one
+   *  serve used to issue coalesce onto one `recentStories` read. */
+  recentStoriesCache?: Promise<StoryRecord[]>;
+  /** Per-SERVE seen-history memo (lazily created by `loadSeenStories`): the
+   *  requesting user is fixed for the serve, so the retrievers that need the
+   *  30-day seen map share one scan instead of one each. */
+  seenStoriesCache?: Promise<Map<string, string>>;
 }
 
 /** Read a room's axes through the per-serve memo (coalesces + dedupes reads). */
@@ -93,6 +102,50 @@ function loadRoomAxes(
   if (hit !== undefined) return hit;
   const pending = ports.roomAxes(roomId);
   cache.set(roomId, pending);
+  return pending;
+}
+
+/**
+ * How many pages of recent stories one serve scans: every global retriever
+ * filters the SAME newest-first prefix down to its own eligible subset, so the
+ * scan is sized once for the widest consumer.
+ */
+const RECENT_SCAN_FACTOR = 4;
+
+/**
+ * Read the serve's recent-story prefix through the per-serve memo. One
+ * `recentStories(limit * RECENT_SCAN_FACTOR)` per serve, shared by every
+ * retriever — deliberately UNKEYED by limit: the retrievers run concurrently
+ * under one `Promise.allSettled`, so a limit-keyed map would both issue a
+ * second query for the narrower prefix and race on which size wins. A narrower
+ * consumer slices the shared newest-first snapshot instead (the port orders by
+ * `created_at desc`). Sharing one snapshot across a serve is read-only and
+ * strictly more internally consistent than five independent scans.
+ */
+function loadRecentStories(
+  ports: CandidateDataPorts,
+  context: RetrieveContext,
+): Promise<StoryRecord[]> {
+  let pending = context.recentStoriesCache;
+  if (pending === undefined) {
+    pending = ports.recentStories(context.limit * RECENT_SCAN_FACTOR);
+    context.recentStoriesCache = pending;
+  }
+  return pending;
+}
+
+/** Read the requesting user's seen history through the per-serve memo. The
+ *  user is fixed for the serve, so every consumer shares one 30-day scan. */
+function loadSeenStories(
+  ports: CandidateDataPorts,
+  context: RetrieveContext,
+  userId: string,
+): Promise<Map<string, string>> {
+  let pending = context.seenStoriesCache;
+  if (pending === undefined) {
+    pending = ports.userSeenStories(userId);
+    context.seenStoriesCache = pending;
+  }
   return pending;
 }
 
@@ -219,7 +272,7 @@ export class LocalNewsRetriever implements CandidateRetriever {
     const locale = await this.ports.userLocale(context.userId);
     const region = localeRegion(locale);
     if (region === null) return [];
-    const stories = await this.ports.recentStories(context.limit * 4);
+    const stories = await loadRecentStories(this.ports, context);
     const out: Candidate[] = [];
     for (const story of stories) {
       if (!(await globallyRetrievable(this.ports, story, context))) continue;
@@ -263,7 +316,7 @@ export class GlobalCandidatesRetriever implements CandidateRetriever {
   ) {}
 
   async retrieve(context: RetrieveContext): Promise<Candidate[]> {
-    const stories = await this.ports.recentStories(context.limit * 4);
+    const stories = await loadRecentStories(this.ports, context);
     const out: Candidate[] = [];
     for (const story of stories) {
       if (!(await globallyRetrievable(this.ports, story, context))) continue;
@@ -307,7 +360,7 @@ export class EmergingDiscussionsRetriever implements CandidateRetriever {
   ) {}
 
   async retrieve(context: RetrieveContext): Promise<Candidate[]> {
-    const stories = await this.ports.recentStories(context.limit * 4);
+    const stories = await loadRecentStories(this.ports, context);
     const out: Candidate[] = [];
     for (const story of stories) {
       if (!(await globallyRetrievable(this.ports, story, context))) continue;
@@ -340,9 +393,9 @@ export class IndependentSourceAdditionsRetriever implements CandidateRetriever {
 
   async retrieve(context: RetrieveContext): Promise<Candidate[]> {
     if (context.userId === null) return [];
-    const seen = await this.ports.userSeenStories(context.userId);
+    const seen = await loadSeenStories(this.ports, context, context.userId);
     if (seen.size === 0) return [];
-    const stories = await this.ports.recentStories(context.limit * 4);
+    const stories = await loadRecentStories(this.ports, context);
     const out: Candidate[] = [];
     for (const story of stories) {
       if (!(await globallyRetrievable(this.ports, story, context))) continue;
@@ -429,19 +482,26 @@ export class ChronologicalCatchUpRetriever implements CandidateRetriever {
   constructor(private readonly ports: CandidateDataPorts) {}
 
   async retrieve(context: RetrieveContext): Promise<Candidate[]> {
-    const stories = await this.ports.recentStories(context.limit * 3);
+    // The catch-up window is narrower than the shared scan, so it takes a
+    // PREFIX of the per-serve snapshot (newest-first) rather than issuing its
+    // own query for the same rows.
+    const stories = (await loadRecentStories(this.ports, context)).slice(0, context.limit * 3);
     const seen =
       context.userId === null
         ? new Map<string, string>()
-        : await this.ports.userSeenStories(context.userId);
+        : await loadSeenStories(this.ports, context, context.userId);
     // Per-room last-seen: the newest instant the user saw ANY story of that
     // room; catch-up serves only items newer than that mark.
     const lastSeenByRoom = new Map<string, string>();
-    // ONE batch read for every seen story's room — the seen set is unbounded by
-    // the user's whole reading history, so a per-item lookup here does not scale.
-    const seenThreads = await this.ports.threadsByStoryIds([...seen.keys()]);
+    // ONE batch read for every story whose room this retriever needs — the seen
+    // set (unbounded by the user's whole reading history) AND the candidate
+    // prefix, whose per-item lookup inside the loop below was the same
+    // non-scaling shape the seen set already avoided.
+    const threadsByStory = await this.ports.threadsByStoryIds([
+      ...new Set([...seen.keys(), ...stories.map((story) => story.storyId)]),
+    ]);
     for (const [storyId, seenAt] of seen) {
-      const roomId = seenThreads.get(storyId)?.roomId ?? null;
+      const roomId = threadsByStory.get(storyId)?.roomId ?? null;
       if (roomId === null) continue;
       const current = lastSeenByRoom.get(roomId);
       if (current === undefined || seenAt > current) lastSeenByRoom.set(roomId, seenAt);
@@ -450,7 +510,7 @@ export class ChronologicalCatchUpRetriever implements CandidateRetriever {
     for (const story of stories) {
       if (!(await globallyRetrievable(this.ports, story, context))) continue;
       if (seen.has(story.storyId)) continue;
-      const thread = await this.ports.threadByStoryId(story.storyId);
+      const thread = threadsByStory.get(story.storyId);
       const roomMark = thread?.roomId != null ? lastSeenByRoom.get(thread.roomId) : undefined;
       if (roomMark !== undefined && story.createdAt <= roomMark) continue;
       out.push(

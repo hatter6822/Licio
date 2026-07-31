@@ -256,6 +256,37 @@ export const aiGovernanceSummaries = pgTable(
   (t) => [index('ai_governance_summaries_proposal_idx').on(t.proposalRef)],
 );
 
+/** Governance ADVISORIES (WS-K §24.5) — the COI / scam-pattern flags a steward
+ *  reads, edits around, or knowingly ignores.  Advisory by construction: the
+ *  record exists so a human decides with it, never so the system acts on it. */
+export const aiGovernanceAdvisories = pgTable(
+  'ai_governance_advisories',
+  {
+    advisoryId: text('advisory_id').primaryKey(),
+    proposalRef: text('proposal_ref').notNull(),
+    kind: text('kind').notNull(),
+    advisory: jsonb('advisory').$type<Record<string, unknown>>().notNull(),
+    outputId: text('output_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('ai_governance_advisories_proposal_idx').on(t.proposalRef)],
+);
+
+/**
+ * Durable position of a maintenance SWEEP (WS-K.1.4a), so progress survives the
+ * process holding it.  The tick runs under a distributed lease, so a restart or
+ * a lease handover to another pod used to reset an in-process cursor to the
+ * newest page — leaving a large installation's older threads permanently
+ * unreached.  Composite, because the sweep's order is `(created_at, id)` and a
+ * bare timestamp cannot break a tie.
+ */
+export const aiSweepCursors = pgTable('ai_sweep_cursors', {
+  sweepName: text('sweep_name').primaryKey(),
+  cursorCreatedAt: timestamp('cursor_created_at', { withTimezone: true }),
+  cursorRef: text('cursor_ref'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** Runtime AI monitoring metric time series (WS-K.1.2f). */
 export const aiRuntimeMetrics = pgTable(
   'ai_runtime_metrics',
@@ -308,6 +339,12 @@ export const aiReviewQueue = pgTable(
   (t) => [
     index('ai_review_queue_status_idx').on(t.status, t.createdAt),
     index('ai_review_queue_kind_idx').on(t.kind, t.createdAt),
+    // At most ONE pending item per subject: the report ROUTES are what write
+    // here, and an unbounded per-caller write would otherwise bury the queue.
+    // Partial on `pending` so a resolved item never blocks a later re-report.
+    uniqueIndex('ai_review_queue_pending_subject_uq')
+      .on(t.kind, t.subjectRef)
+      .where(sql`${t.status} = 'pending'`),
     check('ai_review_queue_status', sql`${t.status} in ('pending', 'resolved')`),
     check(
       'ai_review_queue_kind',
@@ -356,6 +393,7 @@ export type AiSummaryReportRow = typeof aiSummaryReports.$inferSelect;
 export type AiTranslationRow = typeof aiTranslations.$inferSelect;
 export type AiTranslationReportRow = typeof aiTranslationReports.$inferSelect;
 export type AiGovernanceSummaryRow = typeof aiGovernanceSummaries.$inferSelect;
+export type AiGovernanceAdvisoryRow = typeof aiGovernanceAdvisories.$inferSelect;
 export type AiRuntimeMetricRow = typeof aiRuntimeMetrics.$inferSelect;
 export type AiRuntimeAlertRow = typeof aiRuntimeAlerts.$inferSelect;
 export type AiReviewQueueRow = typeof aiReviewQueue.$inferSelect;

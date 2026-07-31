@@ -19,8 +19,12 @@ import {
   proveRendezvousPresence,
   pseudonymToBytes,
   rendezvousContext,
+  rendezvousPresentationHeader,
   type VerifiablePresence,
 } from '../index.js';
+
+/** The announcement's dial identity a Tier-2 proof binds to (see `rendezvousPresentationHeader`). */
+const BIND = new Uint8Array(32).fill(9);
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
@@ -43,8 +47,21 @@ function presence(
   value: string,
 ): VerifiablePresence<string> {
   const ctx = rendezvousContext(ROOM, enc(EPOCH), bucket);
-  const { proof, pseudonym } = proveRendezvousPresence(issuer.pk, cred, enc(EPOCH), ctx);
-  return { pseudonym: pseudonymToBytes(pseudonym), proof, epoch: EPOCH, bucket, value };
+  const { proof, pseudonym } = proveRendezvousPresence(
+    issuer.pk,
+    cred,
+    enc(EPOCH),
+    ctx,
+    rendezvousPresentationHeader(BIND),
+  );
+  return {
+    pseudonym: pseudonymToBytes(pseudonym),
+    proof,
+    epoch: EPOCH,
+    bucket,
+    binding: BIND,
+    value,
+  };
 }
 
 describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
@@ -69,6 +86,7 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
         proof: new Uint8Array(272).fill(7),
         epoch: EPOCH,
         bucket: BUCKET,
+        binding: BIND,
         value: 'GARBAGE',
       },
       // wrong issuer: a genuine proof under a DIFFERENT room/issuer key
@@ -97,6 +115,7 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
       proof: attackerProof,
       epoch: EPOCH,
       bucket: BUCKET,
+      binding: BIND,
       value: `fake-${i}`,
     }));
     const records = [presence(issuer, honest, BUCKET, 'real'), ...flood];
@@ -125,5 +144,94 @@ describe('Tier-2 client-side verified-dedup (serverless cap)', () => {
       nowMs: NOW + 99 * 86_400_000,
     });
     expect(verified).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The proof is BOUND to the announcement it rides in.
+//
+// Unbound, a proof attested only to "a member of this room is present in this
+// bucket" — true of the honest device that made it, and still true wherever the
+// proof is subsequently attached.  Any member could poll, lift an honest
+// device's (proof, pseudonym) pair, and re-publish it under their own dial info;
+// dedup is by PSEUDONYM with first occurrence winning, so the forged record took
+// the honest device's one slot and evicted it from discovery.
+//
+// The binding rides as the BBS PRESENTATION HEADER, not in the pseudonym
+// context — the last test here is why.
+// ---------------------------------------------------------------------------
+describe('Tier-2 presence proofs are bound to their announcement', () => {
+  const HONEST_DIAL = new Uint8Array(32).fill(1);
+  const ATTACKER_DIAL = new Uint8Array(32).fill(2);
+
+  /** A presence proof made for `dial`, PUBLISHED claiming `publishedWith`. */
+  function boundPresence(
+    issuer: ReturnType<typeof generateIssuerKeyPair>,
+    cred: ReturnType<typeof enroll>,
+    dial: Uint8Array,
+    publishedWith: Uint8Array,
+    value: string,
+  ): VerifiablePresence<string> {
+    const ctx = rendezvousContext(ROOM, enc(EPOCH), BUCKET);
+    const { proof, pseudonym } = proveRendezvousPresence(
+      issuer.pk,
+      cred,
+      enc(EPOCH),
+      ctx,
+      rendezvousPresentationHeader(dial),
+    );
+    return {
+      pseudonym: pseudonymToBytes(pseudonym),
+      proof,
+      epoch: EPOCH,
+      bucket: BUCKET,
+      binding: publishedWith,
+      value,
+    };
+  }
+
+  it('verifies against the dial identity it was made for', () => {
+    const issuer = generateIssuerKeyPair();
+    const honest = boundPresence(issuer, enroll(issuer), HONEST_DIAL, HONEST_DIAL, 'honest');
+    expect(
+      filterVerifiedPresence([honest], issuer.pk, ROOM, { nowMs: NOW }).map((v) => v.value),
+    ).toEqual(['honest']);
+  });
+
+  it('a LIFTED proof re-published under another dial identity does not verify', () => {
+    const issuer = generateIssuerKeyPair();
+    const lifted = boundPresence(issuer, enroll(issuer), HONEST_DIAL, ATTACKER_DIAL, 'lifted');
+    expect(filterVerifiedPresence([lifted], issuer.pk, ROOM, { nowMs: NOW })).toEqual([]);
+  });
+
+  it('a lifted copy placed FIRST cannot evict the honest record from its dedup slot', () => {
+    // The ordering that matters: dedup keeps the FIRST occurrence of a pseudonym,
+    // so an attacker who gets their forged record in first would take the slot.
+    // The forgery never verifies now, so it never reaches the dedup step at all.
+    const issuer = generateIssuerKeyPair();
+    const cred = enroll(issuer);
+    const lifted = boundPresence(issuer, cred, HONEST_DIAL, ATTACKER_DIAL, 'lifted');
+    const honest = boundPresence(issuer, cred, HONEST_DIAL, HONEST_DIAL, 'honest');
+    expect(
+      filterVerifiedPresence([lifted, honest], issuer.pk, ROOM, { nowMs: NOW }).map((v) => v.value),
+    ).toEqual(['honest']);
+  });
+
+  it('the binding leaves the pseudonym — and therefore THE CAP — exactly where it was', () => {
+    // The reason the binding is a presentation header and not part of the
+    // pseudonym context.  A device re-announcing in the same bucket uses a FRESH
+    // ephemeral key, so a context-carried binding would mint a fresh pseudonym
+    // per announcement — and since the one-slot-per-device-per-bucket cap is
+    // enforced by deduping on the pseudonym, it would have stopped capping
+    // anything at all.  (An earlier attempt at this fix did exactly that; this
+    // assertion is what caught it.)
+    const issuer = generateIssuerKeyPair();
+    const cred = enroll(issuer);
+    const first = boundPresence(issuer, cred, HONEST_DIAL, HONEST_DIAL, 'first');
+    const second = boundPresence(issuer, cred, ATTACKER_DIAL, ATTACKER_DIAL, 'second');
+    expect(first.pseudonym).toEqual(second.pseudonym);
+    expect(
+      filterVerifiedPresence([first, second], issuer.pk, ROOM, { nowMs: NOW }).map((v) => v.value),
+    ).toEqual(['first']);
   });
 });

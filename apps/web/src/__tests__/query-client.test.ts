@@ -15,27 +15,32 @@ describe('createAppQueryClient', () => {
   });
 
   it('retries idempotent failures with exponential backoff up to 3 times', () => {
-    const retry = createAppQueryClient().getDefaultOptions().queries?.retry;
-    const retryDelay = createAppQueryClient().getDefaultOptions().queries?.retryDelay;
-    expect(typeof retry).toBe('function');
-    if (typeof retry === 'function') {
-      const serverError = new ApiClientError('http_500', 'boom', 500);
-      expect(retry(0, serverError)).toBe(true);
-      expect(retry(3, serverError)).toBe(false);
+    // Narrow ONCE, and fail if the narrowing does not hold: both settings are
+    // typed `number | fn`, so a plain-number `retryDelay` is type-valid and would
+    // otherwise skip every backoff assertion below rather than fail it.
+    const { retry, retryDelay } = createAppQueryClient().getDefaultOptions().queries ?? {};
+    if (typeof retry !== 'function' || typeof retryDelay !== 'function') {
+      expect.unreachable('retry policy must be configured as functions');
     }
-    if (typeof retryDelay === 'function') {
-      expect(retryDelay(0, new Error())).toBe(1_000);
-      expect(retryDelay(1, new Error())).toBe(2_000);
-      expect(retryDelay(99, new Error())).toBe(30_000); // capped
-    }
+    const serverError = new ApiClientError('http_500', 'boom', 500);
+    expect(retry(0, serverError)).toBe(true);
+    expect(retry(3, serverError)).toBe(false);
+    // Pin the SHAPE of the curve, not only its endpoints: a flat or linear delay
+    // would otherwise satisfy the base and the cap.
+    expect(retryDelay(0, new Error())).toBe(1_000);
+    expect(retryDelay(1, new Error())).toBe(2_000);
+    expect(retryDelay(2, new Error())).toBe(4_000);
+    expect(retryDelay(0, new Error())).toBeLessThan(retryDelay(1, new Error()));
+    expect(retryDelay(99, new Error())).toBe(30_000); // capped
   });
 
   it('does not retry client errors or invalid responses', () => {
-    const retry = createAppQueryClient().getDefaultOptions().queries?.retry;
-    if (typeof retry === 'function') {
-      expect(retry(0, new ApiClientError('not_found', 'x', 404))).toBe(false);
-      expect(retry(0, new ApiClientError('invalid_response', 'x', 200))).toBe(false);
+    const { retry } = createAppQueryClient().getDefaultOptions().queries ?? {};
+    if (typeof retry !== 'function') {
+      expect.unreachable('retry must be configured as a function');
     }
+    expect(retry(0, new ApiClientError('not_found', 'x', 404))).toBe(false);
+    expect(retry(0, new ApiClientError('invalid_response', 'x', 200))).toBe(false);
   });
 
   it('creates independent instances', () => {

@@ -69,6 +69,33 @@ describe('UgcBody interaction branches', () => {
     await waitFor(() => expect(window.open).toHaveBeenCalled());
   });
 
+  it('intercepts a MIDDLE-click (auxclick, not click) so the verdict is still consulted', async () => {
+    // The sanitizer stamps every anchor `target="_blank"`, so an un-intercepted
+    // middle-click natively opens the destination in a new tab — with no
+    // blocklist verdict and no interstitial (WS-G.4.2c).
+    mockBlocklist(['drainer.example']);
+    await warmLinkSafety();
+    const user = userEvent.setup();
+    render(<UgcBody markdown={'[claim your airdrop](https://drainer.example/approve)'} />);
+    const link = screen.getByRole('link', { name: 'claim your airdrop' });
+    await user.pointer({ keys: '[MouseMiddle]', target: link });
+    expect(await screen.findByText(/may interact with your wallet/i)).toBeInTheDocument();
+    expect(screen.getByText('https://drainer.example/approve')).toBeInTheDocument();
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it('leaves the RIGHT button alone — auxclick gating is button===1, never button!==0', async () => {
+    // A right-click also raises `auxclick`. Cancelling it would remove the
+    // context menu ("copy link address", "open in new window") from every UGC
+    // link, so the guard must not fire and must not navigate either.
+    const user = userEvent.setup();
+    render(<UgcBody markdown={'[news](https://news.example/story)'} />);
+    const link = screen.getByRole('link', { name: 'news' });
+    await user.pointer({ keys: '[MouseRight]', target: link });
+    expect(window.open).not.toHaveBeenCalled();
+    expect(screen.queryByText(/may interact with your wallet/i)).not.toBeInTheDocument();
+  });
+
   it('lets mailto links pass through untouched', async () => {
     const user = userEvent.setup();
     render(<UgcBody markdown={'[mail](mailto:tips@example.org)'} />);

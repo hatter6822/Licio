@@ -176,6 +176,9 @@ export async function rebuildRealtimeFromEvents(
   aggregator: RealtimeAggregator,
   events: readonly StoredEvent[],
   actorKeyOf: (payload: Record<string, unknown>) => string,
+  /** The fold's thread → story seam, for payloads written before migration 0111
+   *  keyed the event on its story. */
+  storyIdForThread?: (threadId: string) => Promise<string | null>,
 ): Promise<void> {
   for (const event of events) {
     if (event.topic === 'attention.aggregate') {
@@ -189,13 +192,31 @@ export async function rebuildRealtimeFromEvents(
         actorKeyOf(event.payload),
       );
     } else if (event.topic === 'contribution.created') {
-      const payload = event.payload as { thread_id?: string; user_id?: string; timestamp?: string };
-      if (payload.thread_id && payload.user_id) {
-        await aggregator.recordContribution(
-          payload.thread_id,
-          actorKeyOf(event.payload),
-          event.timestamp,
-        );
+      // The OWNING STORY, matching every other branch here and the durable
+      // fold in `pwatt/aggregation.ts`.  Recording by thread id counted a
+      // story's commenters under an id no reader of this layer ever asks for,
+      // so "live participants" for a story never included them — and the
+      // hourly reconciliation against `uniqueActiveUsers` agreed only because
+      // both sides were wrong the same way.
+      const payload = event.payload as {
+        story_id?: string;
+        thread_id?: string;
+        user_id?: string;
+        timestamp?: string;
+      };
+      // The SAME thread → story resolution the live consumer does, for the same
+      // reason: a payload from before migration 0111 (or from an old pod still
+      // running during a rolling upgrade) carries only `thread_id`, and skipping it
+      // here made the rebuild reproduce the gap it exists to repair.  Optional
+      // because the recovery caller may have no resolver wired; without one this
+      // behaves exactly as it did.
+      const storyId =
+        payload.story_id ??
+        (payload.thread_id === undefined
+          ? undefined
+          : ((await storyIdForThread?.(payload.thread_id)) ?? undefined));
+      if (storyId && payload.user_id) {
+        await aggregator.recordContribution(storyId, actorKeyOf(event.payload), event.timestamp);
       }
     } else if (event.topic === 'content.saved') {
       await aggregator.recordSave(

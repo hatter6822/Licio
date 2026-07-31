@@ -16,7 +16,11 @@ import {
   SHADOW_RANKING_ENFORCEMENT,
 } from '../pipeline.js';
 import { FEATURE_SCHEMA_VERSION, type FeatureVector } from '../schemas/feature-vector.js';
-import { BREAKING_NEWS_PROFILE, EVERGREEN_PROFILE } from '../schemas/profile.js';
+import {
+  BREAKING_NEWS_PROFILE,
+  EVERGREEN_PROFILE,
+  type RankingProfileConfig,
+} from '../schemas/profile.js';
 import { makeCandidate, makeContext, makeFeatures, T0, uuidOf } from './fixtures.js';
 
 const FULL_ENFORCEMENT: RankingEnforcement = {
@@ -490,5 +494,117 @@ describe('WS-I.2.5b replay diff', () => {
       [{ itemId: uuidOf(1), score: 1.0 + 1e-12 }],
     );
     expect(diff).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §11.5 — the conservative decay curve on sensitive content.
+//
+// `features.freshness_decay ?? freshnessFromAge(…, curve)` made the profile's
+// curve an ALTERNATIVE to the stored WS-F score rather than a bound on it, so
+// for every story WS-F had scored — which is every story with a freshness row —
+// the sensitive/non-sensitive curve selection was dead and sensitive content
+// decayed exactly like breaking news.
+// ---------------------------------------------------------------------------
+describe('WS-I §11.5 conservative freshness curve', () => {
+  const sensitive = (over: Partial<FeatureVector> = {}): FeatureVector =>
+    makeFeatures(1, { sensitivity_labels: ['self-harm'], ...over });
+
+  function freshnessOf(
+    features: FeatureVector,
+    nowMs: number,
+    profile: RankingProfileConfig = BREAKING_NEWS_PROFILE,
+    // Defaults to the LIVE-SERVING answer; replay tests pass what their decision
+    // recorded.
+    sensitiveFreshnessCap = true,
+  ): number {
+    const { selected } = rankFeasibleSet(
+      [makeCandidate(1)],
+      featureMap([features]),
+      profile,
+      FULL_ENFORCEMENT,
+      makeContext({ nowMs, sensitiveFreshnessCap }),
+    );
+    return selected[0]?.baseline.freshness_decay ?? Number.NaN;
+  }
+
+  it('an OLD sensitive story is capped by the conservative curve, not left at its stored score', () => {
+    // Four weeks old.  The evergreen half-life is one week, so the envelope is
+    // 2^-4 = 0.0625 — well under the 0.9 WS-F recorded.  Before the fix the
+    // stored score was taken verbatim and the curve never ran.
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const value = freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0);
+    expect(value).toBeLessThan(0.1);
+  });
+
+  it('the cap can only LOWER a sensitive item, never raise one', () => {
+    // A young story in a fast-cadence topic: WS-F says 0.2 while the flat
+    // evergreen envelope is ~1.  Substituting the curve outright would have
+    // PROMOTED it; the bound leaves WS-F's own assessment standing.
+    const created = new Date(T0 - 3_600_000).toISOString();
+    expect(freshnessOf(sensitive({ created_at: created, freshness_decay: 0.2 }), T0)).toBe(0.2);
+  });
+
+  it('non-sensitive scoring is untouched — this closed a guard, it did not re-tune the feed', () => {
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const ordinary = makeFeatures(1, { created_at: created, freshness_decay: 0.9 });
+    expect(freshnessOf(ordinary, T0)).toBe(0.9);
+  });
+
+  it('a PRE-CAP DECISION replays the formula it was decided under', () => {
+    // Replay is a real consumer: the regression job re-scores historical
+    // decisions and reports a mismatch as a defect, so shipping this cap with no
+    // way to say "that decision predates me" would have turned every genuine old
+    // sensitive decision into a false alarm.
+    //
+    // What says so is the POLICY the decision recorded, carried verbatim in
+    // `replay_inputs.sensitive_freshness_cap` and defaulted false for logs
+    // written before the cap existed.
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const features = sensitive({ created_at: created, freshness_decay: 0.9 });
+    expect(freshnessOf(features, T0, BREAKING_NEWS_PROFILE, false)).toBe(0.9);
+    // …while a decision served under the cap caps the same item.
+    expect(freshnessOf(features, T0)).toBeLessThan(0.1);
+  });
+
+  it("NO profile_version buys an exemption — the cap is not the operator's to opt out of", () => {
+    // This is the whole reason the gate moved off `profile_version`.  That string
+    // is operator-writable: `rankingProfileConfigSchema` accepts any 1–32
+    // characters, nothing inspects it, and `PUT /v1/ranking/admin/config`
+    // installs a profile set wholesale.  A house profile numbered `1.0.0` — the
+    // obvious shape for an operator numbering their own, and the shape this
+    // repo's own fixtures use — read as "predates the cap" and served sensitive
+    // content UNCAPPED with no rejection, warning or log.  A malformed version
+    // did fail closed, and a plausible NUMERIC one failed open, which is the
+    // direction that matters.
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    for (const version of [
+      '1.0.0', // the live bypass: numeric, plausible, below any cap version
+      '1.3.0', // the exact predecessor version the old gate exempted
+      '0.9.9',
+      '2.0.0', // and the other direction: above, so it must not change anything
+      'operator-a',
+      '1beta.3.0',
+      '1.3',
+      '1.3.0.0',
+      '-1.3.0',
+      '1.3.x',
+      ' 1.3.0',
+    ]) {
+      const custom: RankingProfileConfig = { ...BREAKING_NEWS_PROFILE, profile_version: version };
+      expect(
+        freshnessOf(sensitive({ created_at: created, freshness_decay: 0.9 }), T0, custom),
+        `version ${version} must not exempt sensitive content from the cap`,
+      ).toBeLessThan(0.1);
+    }
+  });
+
+  it('with no stored score the curve is still the fallback for both kinds', () => {
+    const created = new Date(T0 - 28 * 24 * 3_600_000).toISOString();
+    const bare = makeFeatures(1, { created_at: created });
+    delete (bare as { freshness_decay?: number }).freshness_decay;
+    expect(freshnessOf(bare, T0)).toBeLessThan(0.01); // breaking, 6h half-life
+    const bareSensitive = { ...bare, sensitivity_labels: ['self-harm'] };
+    expect(freshnessOf(bareSensitive, T0)).toBeGreaterThan(freshnessOf(bare, T0));
   });
 });

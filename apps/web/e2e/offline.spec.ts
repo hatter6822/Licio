@@ -24,6 +24,24 @@ test.describe('offline app shell (WS-C.2)', () => {
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, {
       timeout: 15_000,
     });
+    // A CONTROLLING worker is not the same as a POPULATED precache, and this
+    // test needs the second.  Waiting only for the controller made the offline
+    // reload fail with ERR_INTERNET_DISCONNECTED on a loaded machine — a
+    // genuine race the assertion could not distinguish from a broken shell.
+    // Ask the cache directly for the one entry the navigation fallback serves.
+    await page.waitForFunction(
+      async () => {
+        for (const name of await caches.keys()) {
+          const cache = await caches.open(name);
+          for (const request of await cache.keys()) {
+            if (new URL(request.url).pathname === '/index.html') return true;
+          }
+        }
+        return false;
+      },
+      null,
+      { timeout: 15_000 },
+    );
 
     await context.setOffline(true);
     try {

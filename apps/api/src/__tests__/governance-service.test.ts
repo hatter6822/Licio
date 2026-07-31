@@ -17,6 +17,9 @@ interface Harness {
   svc: GovernanceService;
   stores: GovernanceStores;
   advance: (ms: number) => void;
+  /** The harness clock, for tests that need to reason about an instant the
+   *  service recorded (e.g. an election's `opensAt`). */
+  now: () => number;
 }
 
 function makeService(cryptoEnabled = false, proposer?: ModerationProposer): Harness {
@@ -37,6 +40,7 @@ function makeService(cryptoEnabled = false, proposer?: ModerationProposer): Harn
     advance: (ms) => {
       t += ms;
     },
+    now: () => t,
   };
 }
 
@@ -113,6 +117,58 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     expect(settled.ok && settled.value.winnerUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('cand');
     expect((await h.svc.getSeat('r1'))?.bootstrap).toBe(false);
+  });
+
+  it('opensAt IS the instant the electorate was measured at', async () => {
+    // Neither ordering of "read the clock" and "count the electorate" is sound.
+    // Instant first leaks a DEPARTURE: the leaver is hard-deleted from the rows the
+    // count reads, so the denominator is smaller than the electorate at the instant
+    // it claims — turnout inflated, and an election can settle that missed its
+    // `minTurnout` floor.  Instant second leaks a JOIN: the joiner is outside the
+    // count and inside the cutoff.  One measurement reporting both leaks in neither,
+    // which is why `opensAt` is now taken FROM the measurement.
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const measuredAt = '2026-07-29T12:00:00.000Z';
+    const sched = await h.svc.scheduleElection('r1', {
+      measureElectorate: async () => ({ count: 5, asOf: measuredAt }),
+    });
+    expect(sched.ok).toBe(true);
+    const election = await h.stores.elections.get(sched.ok ? sched.value : '');
+    // The recorded open IS the measurement's instant — not a clock read beside it,
+    // which is what a `deps.now()` fallback would have produced.
+    expect(election?.opensAt).toBe(measuredAt);
+    expect(election?.eligibleCount).toBe(5);
+  });
+
+  it('a voter who joined AFTER the election opened cannot cast a ballot', async () => {
+    // The electorate freeze, on the NUMERATOR as well as the denominator.
+    // `eligibleCount` is snapshotted when the election opens, so a member who
+    // joins afterwards is still `eligible` at vote time and would raise
+    // `distinctVoters` against a denominator they were never counted in —
+    // enough of them satisfy `minTurnout` and decide a winner from outside the
+    // recorded electorate.  Freezing only the count is half a freeze.
+    await h.svc.bootstrapSeat('r1', 'creator');
+    h.advance(YEAR_MS);
+    const openedAt = new Date(h.now()).toISOString();
+    const sched = await h.svc.scheduleElection('r1');
+    const eid = sched.ok ? sched.value : '';
+
+    // A member who was there when it opened votes normally.
+    const before = new Date(Date.parse(openedAt) - 86_400_000).toISOString();
+    expect((await h.svc.castVote('r1', eid, 'v1', 'cand', true, true, before)).ok).toBe(true);
+
+    // One who joined a minute later is refused, with a code that says why.
+    h.advance(60_000);
+    const after = new Date(h.now()).toISOString();
+    const late = await h.svc.castVote('r1', eid, 'latecomer', 'cand', true, true, after);
+    expect(late.ok).toBe(false);
+    expect(late.ok === false && late.code).toBe('joined_after_open');
+
+    // An UNJUDGEABLE join instant (the steward-role arm carries no subscription
+    // row) still votes — refusing there would lock out a legitimate steward to
+    // close a narrower hole than it opens.
+    expect((await h.svc.castVote('r1', eid, 'steward', 'cand', true, true, null)).ok).toBe(true);
   });
 
   it('never seats an election winner who is no longer a room member (fail-safe to incumbent)', async () => {
@@ -232,6 +288,64 @@ describe('GovernanceService — Stage 1 seat + elections', () => {
     // The next term honours the law-pack's short termSeconds (10s) — proof the
     // term length is law-pack-driven, never a hardcoded config constant.
     expect(Date.parse(seat?.termEnd ?? '') - Date.parse(seat?.termStart ?? '')).toBe(10_000);
+  });
+
+  it('settle divides by the electorate FROZEN at open, not a fresh read', async () => {
+    // `tallyElection` fails an election when `distinctVoters / eligibleCount <
+    // minTurnout`.  That denominator used to be a LIVE read taken at settle
+    // (active subscribers ∪ stewards — a set any account can join at will), so
+    // inflating membership after the last ballot pushed turnout under the bar
+    // and failed an election that had met it; the fail-safe then hands the
+    // incumbent a full new term.  The snapshot taken at OPEN is the electorate
+    // the voters actually faced.
+    await h.svc.bootstrapSeat('r1', 'creator');
+    const lp = await h.svc.proposeLawPack('r1', 'creator', {
+      lawPackId: 'turnout',
+      version: '1',
+      allowedProposalTypes: ['steward_election'],
+      permittedCapabilities: ['moderate.flag'],
+      treasury: {
+        caps: [],
+        minIntervalSeconds: 0,
+        timelockSeconds: 0,
+        materialThreshold: 0,
+        requireCoiFor: [],
+        investment: null,
+      },
+      election: {
+        weightModel: 'one_civic_account_one_vote',
+        perAccountCap: 1,
+        minQuorum: 1,
+        // Two of three must vote — met at open, missed if the denominator grows.
+        minTurnout: 0.5,
+        termSeconds: 10,
+      },
+    });
+    if (!lp.ok) throw new Error('law-pack proposal failed');
+    const proposed = await h.svc.proposeModel('r1', 'creator', goodBundle(), 'prompt', true);
+    if (!proposed.ok) throw new Error('model proposal failed');
+    await h.svc.evaluateModel(proposed.value.modelId);
+    expect(
+      (await h.svc.approveModel('r1', proposed.value.modelId, null, lp.value.lawPackId)).ok,
+    ).toBe(true);
+
+    h.advance(YEAR_MS);
+    // THREE eligible voters at open — recorded on the row.
+    const sched = await h.svc.scheduleElection('r1', {
+      // The harness clock, because that is what stands in for the database's
+      // `now()` here — a wall-clock instant would put `opensAt` (and the window
+      // computed from it) a year away from the clock `castVote` reads.
+      measureElectorate: async () => ({ count: 3, asOf: new Date(h.now()).toISOString() }),
+    });
+    const eid = sched.ok ? sched.value : '';
+    await h.svc.castVote('r1', eid, 'v1', 'challenger', true);
+    await h.svc.castVote('r1', eid, 'v2', 'challenger', true);
+
+    // A THOUSAND by the time the scheduler ticks. 2/1000 is far under 0.5; the
+    // frozen 2/3 is over it, so the challenger takes the seat.
+    const settled = await h.svc.settleElection(eid, 1_000);
+    expect(settled.ok && settled.value.settled).toBe(true);
+    expect((await h.svc.getSeat('r1'))?.holderUserId).toBe('challenger');
   });
 
   it('rejects an election ballot bound to another room (cross-room guard)', async () => {

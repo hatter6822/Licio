@@ -265,6 +265,8 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
                       captionsText: data.media.captions_text,
                       captionsUrl: data.media.captions_url,
                       posterUrl: data.media.poster_url,
+                      width: data.media.width,
+                      height: data.media.height,
                     },
                   }
                 : {})}
@@ -331,6 +333,12 @@ function StoryDetailContent({ storyId }: { storyId: string }): React.ReactElemen
             {/* WS-Q.5.4a — the author's visibility control (owner only). */}
             {data.is_owner ? (
               <AuthorVisibilityControl
+                // KEYED, like `CommentSection` twelve lines above and for the same
+                // reason: the route reuses this instance across story→story
+                // navigation, so an unkeyed control carried one story's collision
+                // report into another's.  The component now derives that away too,
+                // but the key is what makes it structural rather than defensive.
+                key={data.story_id}
                 storyId={data.story_id}
                 visibility={data.visibility ?? 'public'}
                 {...(data.room_visibility ? { roomVisibility: data.room_visibility } : {})}

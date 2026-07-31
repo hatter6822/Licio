@@ -6,29 +6,24 @@
 // digest offline. Same-origin Blob + object URL; no network beyond the
 // already-fetched payload, and the temporary object URL is revoked on the next
 // tick (via the shared saveBlob helper) so the click's download can begin first.
-import type { GovernanceModelDownloadResponse } from '@licio/shared';
+import { canonicalJson, type GovernanceModelDownloadResponse } from '@licio/shared';
 import { saveBlob } from './privacy-api.js';
 
 /**
- * Recursively key-sorted, whitespace-free JSON — byte-identical to the
- * `@licio/governance` `canonicalize()` the SERVER digests (apps/web cannot depend
- * on that package, so the tiny algorithm is inlined). Writing these exact bytes is
- * what makes `sha256(downloaded file) === artifact_digest`; pretty-printing (the
- * prior behaviour) produced bytes that did NOT hash to the advertised digest,
- * silently defeating the member offline-verification the UI promises.
+ * The exact canonical bytes the server digested (key-sorted, no whitespace).
+ *
+ * Writing these bytes is what makes `sha256(downloaded file) === artifact_digest`;
+ * pretty-printing (the original behaviour) produced bytes that did NOT hash to
+ * the advertised digest, silently defeating the member offline-verification the
+ * UI promises. The algorithm used to be INLINED here with a comment asking the
+ * reader to keep it byte-identical to `@licio/governance`'s `canonicalize()`,
+ * because `apps/web` may not depend on that package. It does not have to: both
+ * are now `@licio/shared`'s `canonicalJson`, which `apps/web` and
+ * `@licio/governance` may each depend on — so byte-identity is a fact about the
+ * import graph rather than a request to a future editor.
  */
-function toCanonical(value: unknown): unknown {
-  if (value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(toCanonical);
-  const obj = value as Record<string, unknown>;
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(obj).sort()) sorted[key] = toCanonical(obj[key]);
-  return sorted;
-}
-
-/** The exact canonical bytes the server digested (key-sorted, no whitespace). */
 export function canonicalBundleBytes(bundle: unknown): string {
-  return JSON.stringify(toCanonical(bundle));
+  return canonicalJson(bundle);
 }
 
 export function downloadModelBundle(model: GovernanceModelDownloadResponse): void {

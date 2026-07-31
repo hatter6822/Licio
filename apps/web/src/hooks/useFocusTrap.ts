@@ -31,6 +31,30 @@ function getFocusable(container: HTMLElement): HTMLElement[] {
   );
 }
 
+/**
+ * Every currently active trap's container.
+ *
+ * NESTED DIALOGS ARE THE REASON.  `Dialog` portals to `document.body`, so a
+ * dialog rendered as a JSX child of another dialog is a DOM SIBLING of it — the
+ * outer trap's container never contains the inner one.  Both traps listen on
+ * `document` in the CAPTURE phase, and the outer one registered first, so it ran
+ * first, saw `!container.contains(activeEl)`, and `preventDefault()`ed EVERY Tab
+ * raised inside the inner dialog.  With `inert` support its own `first.focus()`
+ * then no-ops, so focus never moved at all: the moderation console's revert
+ * dialog (the app's only nested `Dialog`) was completely unreachable by keyboard
+ * — a steward could neither choose a reversal reason nor activate the confirm.
+ * Before the reason existed as a separate question the Revert button fired
+ * directly, so this made a working keyboard path stop working.
+ *
+ * A trap therefore stands down while a DIFFERENT active trap holds focus.
+ *
+ * Keyed on CONTAINMENT of `document.activeElement`, deliberately not on
+ * "last registered wins": React runs child effects before parent effects, so a
+ * parent and child mounting in the same commit register inner-first and would
+ * invert a stack.  Containment is order-independent.
+ */
+const activeTraps: HTMLElement[] = [];
+
 export interface FocusTrapOptions {
   /** Called when Escape is pressed inside the trap. */
   onEscape?: () => void;
@@ -76,7 +100,18 @@ export function useFocusTrap<T extends HTMLElement = HTMLDivElement>(
     }
     initial.focus();
 
+    activeTraps.push(container);
+
     const onKeyDown = (event: KeyboardEvent): void => {
+      // STAND DOWN while a nested trap holds focus — see `activeTraps`.  This also
+      // stops one Escape reaching two `onEscape` handlers and closing both dialogs.
+      const focused = document.activeElement;
+      if (
+        focused !== null &&
+        activeTraps.some((other) => other !== container && other.contains(focused))
+      ) {
+        return;
+      }
       if (event.key === 'Escape') {
         optionsRef.current.onEscape?.();
         return;
@@ -110,6 +145,8 @@ export function useFocusTrap<T extends HTMLElement = HTMLDivElement>(
     document.addEventListener('keydown', onKeyDown, true);
 
     return () => {
+      const index = activeTraps.indexOf(container);
+      if (index !== -1) activeTraps.splice(index, 1);
       document.removeEventListener('keydown', onKeyDown, true);
       for (const el of inerted) el.removeAttribute('inert');
       // Restore focus to the trigger if it is still in the document.

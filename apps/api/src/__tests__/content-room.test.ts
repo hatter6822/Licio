@@ -5,12 +5,18 @@
 // cross-tier linking, the item read bar, author visibility transitions, and
 // the per-event classification firewall for in-room content.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID, type RoomCreateRequest } from '@licio/shared';
+import {
+  COMMONS_ROOM_ID,
+  type RoomCreateRequest,
+  roomVisibilityConflictSchema,
+} from '@licio/shared';
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { changeRoomVisibility, updateRoomGovernanceSettings } from '../forum/room-visibility.js';
 import { resolveRoomCreateAxes, roomContentVisibleToUser } from '../forum/rooms.js';
 import { setContentFlagByName } from '../ingestion/content-flags.js';
+import { changeStoryVisibility } from '../ingestion/visibility.js';
+import { UniqueViolationError } from '../lib/pg-errors.js';
 import { createV1Routes } from '../routes/v1.js';
 import {
   articleHtml,
@@ -256,6 +262,25 @@ describe('WS-Q.2.1 submission guards', () => {
     expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(true);
     await fixture.identity.store.updateUser(admin.userId, { accountState: 'suspended' });
     expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(false);
+  });
+
+  it('a RESTRICTED admin KEEPS the read arm — the soft resolver must admit exactly what authMiddleware does', async () => {
+    // The complementary direction to the test above, and the one the active-only
+    // spelling got wrong.  A `restrict` sanction is permitted on any
+    // non-deactivated subject with no staff immunity, and it costs the WRITE
+    // paths — not the account.  With the resolver reading `=== 'active'` a
+    // restricted admin had its roles collapsed to `[]` and silently lost
+    // private-server-room READ, while the same session authenticated normally,
+    // `/auth/status` reported it authenticated, and requireSteward/requireCounsel
+    // still authorized it.  That disagreement between an authenticated route and
+    // a soft resolver about one account is precisely what the `restricted` work
+    // set out to remove.
+    const room = await makeRoom('private');
+    const admin = await seedUserWithSession(fixture.identity, { handle: 'padmin5', admin: true });
+    const record = await fixture.forum.rooms.getById(room);
+    if (!record) throw new Error('setup');
+    await fixture.identity.store.updateUser(admin.userId, { accountState: 'restricted' });
+    expect(await roomContentVisibleToUser(fixture.forum, record, admin.userId)).toBe(true);
   });
 
   it('the debate-override platform-admin arm carries the per-session MFA bar (codex: require MFA before admin overrides)', async () => {
@@ -579,6 +604,109 @@ describe('WS-Q.2.4 author visibility transitions', () => {
     expect(((await again.json()) as { changed: boolean }).changed).toBe(false);
   });
 
+  it('narrowing onto an EXISTING in-room twin answers 409, and the story stays public', async () => {
+    // `stories_canonical_url_room_uq` is a partial unique on
+    // `(canonical_url, room_id) where visibility = 'room_only'`, and a room may
+    // legitimately hold a public story AND a room_only one for the same link
+    // (the cross-tier pointer above records exactly that pair).  Narrowing the
+    // public copy therefore collides.  The WIDEN branch has always screened for
+    // this; the NARROW branch screened for nothing, so the collision surfaced
+    // as an unhandled 23505 — a 500 with the story still PUBLIC.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/narrow-onto-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'nt-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    const twin = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+        twinAuthor.cookie,
+      ),
+    );
+    expect(twin.status).toBe(201);
+    const twinId = ((await twin.json()) as { story_id: string }).story_id;
+
+    const author = await seedUserWithSession(fixture.identity, { handle: 'nt-pub' });
+    await joinAsMember(room, author.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), author.cookie),
+    );
+    expect(published.status).toBe(201);
+    const publicId = ((await published.json()) as { story_id: string }).story_id;
+
+    const narrow = await app().request(
+      new Request(`http://local/v1/stories/${publicId}/visibility`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', cookie: author.cookie },
+        body: JSON.stringify({ visibility: 'room_only' }),
+      }),
+    );
+    // A typed duplicate that names the incumbent — not a 500.
+    expect(narrow.status).toBe(409);
+    // REQUIRED, not optional: `?? twinId` let the field go missing entirely and
+    // still pass, so the assertion could not enforce the contract it states.
+    const body = (await narrow.json()) as {
+      error: { code: string };
+      existing_story_id: string;
+    };
+    expect(body.error.code).toBe('duplicate_story');
+    expect(body.existing_story_id).toBe(twinId);
+    // And the refusal left the story exactly as it was.
+    expect((await fixture.ingestion.stories.getById(publicId))?.visibility).toBe('public');
+  });
+
+  it('a collision whose blocker VANISHED is retried, not blamed on the caller', async () => {
+    // The refusal and the lookup that names the winner are two statements, and
+    // between them the incumbent can be hidden, deleted, or moved to another
+    // tier — after which the write this refused would succeed.  Returning the
+    // caller's OWN story as the duplicate was false on its face, and for a
+    // NARROWING request it left the story public because of a blocker that no
+    // longer existed.
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'vanish' });
+    await joinAsMember(room, author.userId);
+    const created = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/vanished-blocker', { room_id: room }),
+        author.cookie,
+      ),
+    );
+    expect(created.status).toBe(201);
+    const storyId = ((await created.json()) as { story_id: string }).story_id;
+
+    // The FIRST update loses the race; nothing holds the constraint by the time
+    // the winner is looked up (there is no twin), so the retry must succeed.
+    const realUpdate = fixture.ingestion.stories.update.bind(fixture.ingestion.stories);
+    let refused = false;
+    const spy = vi
+      .spyOn(fixture.ingestion.stories, 'update')
+      .mockImplementation(async (id, patch) => {
+        if (!refused && patch.visibility === 'room_only') {
+          refused = true;
+          throw new UniqueViolationError('stories_canonical_url_room_uq');
+        }
+        return realUpdate(id, patch);
+      });
+    try {
+      const out = await changeStoryVisibility(
+        fixture.ingestion,
+        fixture.events,
+        fixture.identity,
+        fixture.forum,
+        author.userId,
+        storyId,
+        'room_only',
+      );
+      expect(out.ok).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(refused).toBe(true);
+    // The privacy-reducing operation ACTUALLY took effect.
+    expect((await fixture.ingestion.stories.getById(storyId))?.visibility).toBe('room_only');
+  });
+
   it('widening a room_only LINK keeps its fetched (extracted) signature, not the thin submitted note', async () => {
     const room = await makeRoom('public');
     const author = await seedUserWithSession(fixture.identity, { handle: 'wl' });
@@ -728,6 +856,50 @@ function jpegWithExif(): Uint8Array {
   ]);
 }
 
+/** A minimal JPEG that carries real dimensions: `jpegWithExif` above has no SOF
+ *  segment (it exists for the EXIF-strip assertions), so the parser correctly
+ *  answers `null` for it — a poster test needs a header to read. */
+function jpegWithSize(width: number, height: number): Uint8Array {
+  const seg = (marker: number, payload: number[]): number[] => [
+    0xff,
+    marker,
+    ((payload.length + 2) >> 8) & 0xff,
+    (payload.length + 2) & 0xff,
+    ...payload,
+  ];
+  const a = (t: string): number[] => [...t].map((c) => c.charCodeAt(0));
+  return new Uint8Array([
+    0xff,
+    0xd8,
+    ...seg(0xe0, [...a('JFIF\0'), 1, 2, 0, 0, 1, 0, 1, 0, 0]),
+    // SOF0: precision, height, width, one component.
+    ...seg(0xc0, [
+      0x08,
+      (height >> 8) & 0xff,
+      height & 0xff,
+      (width >> 8) & 0xff,
+      width & 0xff,
+      0x01,
+      0x01,
+      0x11,
+      0x00,
+    ]),
+    0xff,
+    0xda,
+    0x00,
+    0x04,
+    0x00,
+    0x00,
+    // ENTROPY-CODED BYTES.  This fixture ended immediately after a sized SOS
+    // header, which is exactly the undecodable file `stripJpeg` now refuses — a
+    // marker is not a scan.  `jpegWithExif` above always carried scan data.
+    0x12,
+    0x34,
+    0xff,
+    0xd9,
+  ]);
+}
+
 async function uploadRaw(
   cookie: string,
   bytes: Uint8Array,
@@ -794,7 +966,13 @@ describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
       'text/vtt',
       'c.vtt',
     );
-    const poster = await uploadRaw(author.cookie, jpegWithExif(), 'image/jpeg', 'p.jpg', 'Poster');
+    const poster = await uploadRaw(
+      author.cookie,
+      jpegWithSize(1280, 720),
+      'image/jpeg',
+      'p.jpg',
+      'Poster',
+    );
     expect([video.status, captions.status, poster.status]).toEqual([201, 201, 201]);
     const created = await app().request(
       post(
@@ -823,6 +1001,15 @@ describe('WS-Q.5.2c video-post sub-uploads (captions track + poster)', () => {
     expect(media.url).toBe(`/v1/uploads/${video.uploadId}`);
     expect(media.captions_url).toBe(`/v1/uploads/${captions.uploadId}`);
     expect(media.poster_url).toBe(`/v1/uploads/${poster.uploadId}`);
+    // THE POSTER'S dimensions reach the story, so the card can reserve the
+    // preview box.  A video upload has none — the upload route parses them only
+    // for images — so copying the video's left a video card with nulls while the
+    // loop that validated the poster discarded exactly the numbers needed.
+    if (poster.uploadId === null) throw new Error('poster upload returned no id');
+    const posterRecord = await fixture.forum.uploads.getRecord(poster.uploadId);
+    expect([posterRecord?.imageWidth, posterRecord?.imageHeight]).toEqual([1280, 720]);
+    const story = await fixture.ingestion.stories.getById(story_id);
+    expect([story?.mediaWidth, story?.mediaHeight]).toEqual([1280, 720]);
   });
 
   it('rejects a video post referencing a caption upload owned by someone else', async () => {
@@ -1223,6 +1410,45 @@ describe('WS-Q.3.3b/3.4 room governance + visibility cascade (steward)', () => {
     expect(room?.visibility).toBe('private');
     expect(room?.joinModel).toBe('request_approval'); // open collapsed
   });
+
+  it('the 409 NAMES the blocking stories, so the steward can resolve them', async () => {
+    // The cascade identified every story a tier-unique collision refused to
+    // contain precisely so an operator could act on each one; the route
+    // serialized the generic `{ error }` and dropped the list, leaving the
+    // caller a count and no way to find them.
+    const { roomId, cookie } = await stewardOfNewRoom('public');
+    const url = 'https://example.com/route-409-twin';
+    const author = await seedUserWithSession(fixture.identity, { handle: 'r409' });
+    await joinAsMember(roomId, author.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: roomId, visibility: 'room_only' }),
+            author.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: roomId }), author.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    const res = await app().request(
+      new Request(`http://local/v1/rooms/${roomId}/visibility`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ visibility: 'private' }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    const body = roomVisibilityConflictSchema.parse(await res.json());
+    expect(body.error.code).toBe('duplicate_story');
+    expect(body.blocked_story_ids).toEqual([blockedId]);
+  });
 });
 
 describe('WS-Q room-axis coherence (a public room is always open-join)', () => {
@@ -1287,6 +1513,298 @@ describe('WS-Q room-visibility cascade + governance settings', () => {
     const after = await fixture.forum.rooms.getById(room);
     expect(after?.visibility).toBe('private');
     expect(after?.joinModel).toBe('request_approval'); // open collapsed
+  });
+
+  it('the sweep pages PAST a full page of blocked stories, and names each once', async () => {
+    // Two failures the cumulative `converted === 0` guard could not see.  A
+    // blocked story stays public, so a cursor-less re-query returns the same
+    // rows for ever — and once ANY earlier page had converted something the
+    // guard could never fire again, so the request never returned.  While it
+    // spun it appended the same ids once per pass into a count the steward was
+    // supposed to act on.  With `sweepLimit: 1` the first page is entirely
+    // blocked, which is exactly the state that used to be unrecoverable: the
+    // convertible story sits BEHIND it and must still be contained.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/cascade-page-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+            twinAuthor.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    // The BLOCKED one is authored LAST, so it is newest and heads page one.
+    const cleanAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-clean' });
+    await joinAsMember(room, cleanAuthor.userId);
+    const clean = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/cascade-page-clean', { room_id: room }),
+        cleanAuthor.cookie,
+      ),
+    );
+    expect(clean.status).toBe(201);
+    const cleanId = ((await clean.json()) as { story_id: string }).story_id;
+    const pubAuthor = await seedUserWithSession(fixture.identity, { handle: 'cp-pub' });
+    await joinAsMember(room, pubAuthor.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), pubAuthor.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'cp-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+      1,
+    );
+    // ASSERTED UNCONDITIONALLY, narrowed on the CODE.  Wrapping the id check in
+    // `if (!out.ok && out.status === 409)` meant it evaporated silently for any
+    // other failure — a 404 from the storageMode/not_found paths would have
+    // passed this test while proving nothing.
+    if (out.ok) throw new Error('expected the cascade to refuse');
+    expect(out.code).toBe('duplicate_story');
+    if (out.code !== 'duplicate_story') throw new Error('unreachable');
+    // Named ONCE, not once per pass.
+    expect(out.blockedStoryIds).toEqual([blockedId]);
+    // …and the story BEHIND the blocked page was still contained.
+    expect((await fixture.ingestion.stories.getById(cleanId))?.visibility).toBe('room_only');
+  });
+
+  it('a NON-tier unique violation PROPAGATES instead of being called a link duplicate', async () => {
+    // The cascade treated ANY unique violation as `duplicate_story`, so a refusal from
+    // e.g. `stories_media_upload_ref_uq` was reported to the steward as "shares a link
+    // with an existing in-room story" — a claim the code never verified and the steward
+    // could not act on.  The story path discriminates on the CONSTRAINT NAME; this one
+    // now does too.
+    // A story WITH a real in-room twin, so the mislabel would find an incumbent to
+    // name — otherwise both the fixed and the broken version end up throwing and the
+    // test distinguishes nothing.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/cx-mislabel';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'cx-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+            twinAuthor.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+    const author = await seedUserWithSession(fixture.identity, { handle: 'cx-a' });
+    await joinAsMember(room, author.userId);
+    const created = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), author.cookie),
+    );
+    expect(created.status).toBe(201);
+    const realUpdate = fixture.ingestion.stories.update.bind(fixture.ingestion.stories);
+    fixture.ingestion.stories.update = async (id, patch) => {
+      if (patch.visibility === 'room_only') {
+        throw new UniqueViolationError('stories_media_upload_ref_uq');
+      }
+      return realUpdate(id, patch);
+    };
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'cx-sw' });
+    await expect(
+      changeRoomVisibility(
+        fixture.forum,
+        fixture.ingestion,
+        fixture.events,
+        fixture.identity,
+        steward.userId,
+        room,
+        'private',
+      ),
+    ).rejects.toThrow(/stories_media_upload_ref_uq/);
+    fixture.ingestion.stories.update = realUpdate;
+  });
+
+  it('a tier collision whose blocker has VANISHED is retried, not reported', async () => {
+    // The story path retries a tier-unique refusal that names no readable incumbent —
+    // the blocker may have been hidden, deleted or moved between the refusal and the
+    // lookup.  The cascade did not, so a privacy-reducing operation failed for a stale
+    // reason and left the ROOM public: the same harm as the story case, at room scale.
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'cv-a' });
+    await joinAsMember(room, author.userId);
+    const created = await app().request(
+      post('/v1/stories', briefSubmission({ room_id: room }), author.cookie),
+    );
+    expect(created.status).toBe(201);
+    const realUpdate = fixture.ingestion.stories.update.bind(fixture.ingestion.stories);
+    let refusals = 0;
+    fixture.ingestion.stories.update = async (id, patch) => {
+      // Refuse ONCE with a tier unique whose incumbent does not exist, then relent.
+      if (patch.visibility === 'room_only' && refusals === 0) {
+        refusals += 1;
+        throw new UniqueViolationError('stories_canonical_url_room_uq');
+      }
+      return realUpdate(id, patch);
+    };
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'cv-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+    );
+    fixture.ingestion.stories.update = realUpdate;
+    // The retry succeeded, so the room went private rather than being left public with
+    // a blocker nobody could resolve.
+    expect(refusals).toBe(1);
+    expect(out.ok).toBe(true);
+    expect((await fixture.forum.rooms.getById(room))?.visibility).toBe('private');
+  });
+
+  it('a story submitted ABOVE the cursor is still contained before the flip', async () => {
+    // The cursor only moves one way, so a submission that read the room as
+    // public can land after its page was fetched: its `createdAt` sorts ABOVE
+    // the cursor and every later cursored page excludes it.  The room would flip
+    // to private with that story still `public`, and nothing would revisit it —
+    // the retry short-circuits on `room.visibility === target`, and making the
+    // room public again would re-publish content the steward had contained.
+    const room = await makeRoom('public');
+    const author = await seedUserWithSession(fixture.identity, { handle: 'strag' });
+    await joinAsMember(room, author.userId);
+    const first = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/straggler-a', { room_id: room }),
+        author.cookie,
+      ),
+    );
+    expect(first.status).toBe(201);
+
+    // Simulate the race: the SECOND story appears only after the cascade's first
+    // page has been read, and it is NEWER, so a cursored re-query skips it.
+    const realList = fixture.ingestion.stories.listByRoom.bind(fixture.ingestion.stories);
+    let pages = 0;
+    let lateId = '';
+    const spy = vi
+      .spyOn(fixture.ingestion.stories, 'listByRoom')
+      .mockImplementation(async (roomId, limit, visibility, before) => {
+        const rows = await realList(roomId, limit, visibility, before);
+        if (pages === 0) {
+          pages += 1;
+          const late = await app().request(
+            post(
+              '/v1/stories',
+              linkSubmission('https://example.com/straggler-b', { room_id: room }),
+              author.cookie,
+            ),
+          );
+          lateId = ((await late.json()) as { story_id: string }).story_id;
+        }
+        return rows;
+      });
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'strag-sw' });
+    let out: Awaited<ReturnType<typeof changeRoomVisibility>>;
+    try {
+      out = await changeRoomVisibility(
+        fixture.forum,
+        fixture.ingestion,
+        fixture.events,
+        fixture.identity,
+        steward.userId,
+        room,
+        'private',
+        1,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(out.ok).toBe(true);
+    // The late arrival was contained BEFORE the flip, not left published.
+    expect((await fixture.ingestion.stories.getById(lateId))?.visibility).toBe('room_only');
+    expect((await fixture.forum.rooms.getById(room))?.visibility).toBe('private');
+  });
+
+  it('a public story that collides with an in-room twin blocks the flip instead of 500-ing', async () => {
+    // The cascade converts every public story to room_only in a loop.  A room
+    // may legitimately hold a public story AND a room_only one for the same
+    // link, and converting the public copy then violates
+    // `stories_canonical_url_room_uq`.  Unhandled, that 23505 escaped the loop
+    // as a 500 with the room still PUBLIC and an arbitrary prefix of its
+    // stories already converted — a containment failure reported as a server
+    // error, and a retry would hit the `room.visibility === target`
+    // short-circuit and answer `{ ok: true, converted: 0 }` had the room been
+    // flipped first.
+    const room = await makeRoom('public');
+    const url = 'https://example.com/cascade-twin';
+    const twinAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-twin' });
+    await joinAsMember(room, twinAuthor.userId);
+    expect(
+      (
+        await app().request(
+          post(
+            '/v1/stories',
+            linkSubmission(url, { room_id: room, visibility: 'room_only' }),
+            twinAuthor.cookie,
+          ),
+        )
+      ).status,
+    ).toBe(201);
+
+    const pubAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-pub' });
+    await joinAsMember(room, pubAuthor.userId);
+    const published = await app().request(
+      post('/v1/stories', linkSubmission(url, { room_id: room }), pubAuthor.cookie),
+    );
+    expect(published.status).toBe(201);
+    const blockedId = ((await published.json()) as { story_id: string }).story_id;
+
+    // A SECOND public story with no twin must still be contained.
+    const otherAuthor = await seedUserWithSession(fixture.identity, { handle: 'ct-other' });
+    await joinAsMember(room, otherAuthor.userId);
+    const other = await app().request(
+      post(
+        '/v1/stories',
+        linkSubmission('https://example.com/cascade-clean', { room_id: room }),
+        otherAuthor.cookie,
+      ),
+    );
+    expect(other.status).toBe(201);
+    const containedId = ((await other.json()) as { story_id: string }).story_id;
+
+    const steward = await seedUserWithSession(fixture.identity, { handle: 'ct-sw' });
+    const out = await changeRoomVisibility(
+      fixture.forum,
+      fixture.ingestion,
+      fixture.events,
+      fixture.identity,
+      steward.userId,
+      room,
+      'private',
+    );
+
+    if (out.ok) throw new Error('expected the cascade to refuse');
+    expect(out.code).toBe('duplicate_story');
+    if (out.code !== 'duplicate_story') throw new Error('unreachable');
+    expect(out.blockedStoryIds).toEqual([blockedId]);
+    // Everything containable WAS contained…
+    expect((await fixture.ingestion.stories.getById(containedId))?.visibility).toBe('room_only');
+    // …and the room stays PUBLIC, so the operator's retry re-runs the sweep
+    // rather than short-circuiting on an already-private room.
+    expect((await fixture.forum.rooms.getById(room))?.visibility).toBe('public');
   });
 
   it('changing visibility to the current value is a no-op (converted: 0)', async () => {

@@ -41,6 +41,33 @@ export class RedisEphemeralStore implements EphemeralStore {
     return result !== null;
   }
 
+  async setIfAbsent(key: string, value: string, ttlMs: number): Promise<boolean> {
+    // `SET … PX ttl NX` writes ONLY if the key is absent — atomic in Redis, so
+    // exactly one of N concurrent callers gets the slot.
+    const result = await this.#redis.set(
+      `${this.#prefix}${key}`,
+      value,
+      'PX',
+      Math.max(1, Math.ceil(ttlMs)),
+      'NX',
+    );
+    return result !== null;
+  }
+
+  async increment(key: string, ttlMs: number): Promise<number> {
+    // INCR is atomic, but arming the expiry needs to happen in the SAME
+    // atomic step and only on creation — a script rather than two round
+    // trips, so a crash between them cannot leave the counter immortal and a
+    // later caller cannot push the window forward.
+    const result = await this.#redis.eval(
+      "local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end return n",
+      1,
+      `${this.#prefix}${key}`,
+      String(Math.max(1, Math.ceil(ttlMs))),
+    );
+    return typeof result === 'number' ? result : Number(result ?? 0);
+  }
+
   async get(key: string): Promise<string | null> {
     return this.#redis.get(`${this.#prefix}${key}`);
   }

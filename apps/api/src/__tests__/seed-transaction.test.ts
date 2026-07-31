@@ -93,6 +93,8 @@ describe.skipIf(!DB_URL)('atomic development seed transaction (live Postgres)', 
     return {
       storyId,
       canonicalUrl: null,
+      mediaWidth: null,
+      mediaHeight: null,
       title: `Seed Tx Story ${storyId.slice(0, 8)}`,
       titleHash: randomUUID().replaceAll('-', ''),
       submittedBy: authorId,

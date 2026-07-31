@@ -12,6 +12,7 @@ import {
   type ProjectedContribution,
   reduceThreadProjection,
   type ThreadRecord,
+  type UnresolvedSupersede,
 } from '../records/projection.js';
 import type { TrustState } from '../validate/states.js';
 
@@ -45,19 +46,38 @@ export interface ProjectVisibleOptions {
   readonly safetyMode?: SafetyMode;
 }
 
+/**
+ * The visible thread, plus the refusals that belong to no contribution in it.
+ *
+ * Carried through this layer for the reason the header states as its own guarantee —
+ * "conflicting evidence remains INSPECTABLE (flagged, never dropped)".  Dropping
+ * `unresolvedSupersedes` here would have re-broken it one layer above the fix.
+ */
+export interface VisibleThread {
+  readonly contributions: readonly VisibleContribution[];
+  readonly unresolvedSupersedes: readonly UnresolvedSupersede[];
+}
+
 /** Project the visible thread with trust + safety overlays. */
 export function projectVisibleThread(
   records: readonly ThreadRecord[],
   options: ProjectVisibleOptions,
-): VisibleContribution[] {
+): VisibleThread {
   const safetyMode = options.safetyMode ?? 'normal';
   const conflicting = options.conflictingCids ?? new Set<string>();
-  return reduceThreadProjection(records).map((projected) => {
+  const projection = reduceThreadProjection(records);
+  const contributions = projection.contributions.map((projected) => {
     const trustState = options.trustOf(projected.visibleCid);
     const isConflicting =
       conflicting.has(projected.visibleCid) ||
       conflicting.has(projected.rootCid) ||
-      projected.editChain.some((cid) => conflicting.has(cid));
+      projected.editChain.some((cid) => conflicting.has(cid)) ||
+      // `supersededEdits` TOO.  `editChain` is only the VISIBLE path, so an
+      // authorized edit on the branch `pickLatestEdit` passed over was retained in
+      // the projection and then invisible to this test — a device or checkpoint
+      // conflict touching it left the contribution `conflicting: false`, which is
+      // the overlay declining to flag the very evidence §25.1 made it retain.
+      (projected.supersededEdits ?? []).some((cid) => conflicting.has(cid));
     const restrictedBySafety = safetyMode === 'strict' && !STRICT_VISIBLE.has(trustState);
     return {
       ...projected,
@@ -69,4 +89,5 @@ export function projectVisibleThread(
       shownByDefault: !projected.hidden && !restrictedBySafety,
     };
   });
+  return { contributions, unresolvedSupersedes: projection.unresolvedSupersedes };
 }

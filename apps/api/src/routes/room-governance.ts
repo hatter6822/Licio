@@ -11,7 +11,6 @@
 // crypto gate); room membership gates participation; comprehension gates the
 // first action (enforced in the simulation service).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   comprehensionQuizResponseSchema,
   comprehensionSubmitRequestSchema,
@@ -20,12 +19,14 @@ import {
   governanceAuditLogResponseSchema,
   governanceProposalCreateSchema,
   governanceProposalListResponseSchema,
+  governanceProposalResponseSchema,
   governanceTabWithProductionSchema,
   modeTransitionRequestSchema,
   type ProductionProposal,
   productionProposalCreateSchema,
   productionProposalListResponseSchema,
   productionProposalResponseSchema,
+  proposalTallyWireSchema,
   proposalVoteRequestSchema,
   READINESS_TARGET_MODES,
   type ReadinessTargetMode,
@@ -37,6 +38,7 @@ import {
 } from '@licio/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { tryGetAiGovernanceServices } from '../ai-governance/services.js';
 import {
   checkGovernanceEligibility,
   requireGovernanceEligibility,
@@ -67,6 +69,7 @@ import type {
   GovernanceProposalRecord,
   ProposalVoteStore,
 } from '../knomosis/stores.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -164,13 +167,17 @@ function toWireProductionProposal(record: GovernanceProposalRecord): ProductionP
     expected_deliverable: record.expectedDeliverable,
     law_pack_version_id: record.lawPackVersionId ?? null,
     preflight_state: record.preflightState,
-    voting_state:
-      record.votingState === 'open'
-        ? 'open'
-        : (record.votingState as ProductionProposal['voting_state']),
+    // No cast: the wire unions are derived from the same stored vocabularies
+    // these fields hold, so the assignment is proved rather than asserted.
+    voting_state: record.votingState,
     challenge_state: record.challengeState,
     execution_state: record.executionState,
-    tally: (record.tallySnapshot as ProductionProposal['tally']) ?? null,
+    // `tallySnapshot` is a `jsonb` column — genuinely `unknown` at this
+    // boundary, so it is PARSED rather than asserted.  The old cast claimed a
+    // shape of an untyped column, which is the one place a cast can be wrong
+    // without anything upstream having changed at all.
+    tally:
+      record.tallySnapshot === null ? null : proposalTallyWireSchema.parse(record.tallySnapshot),
     deliberation_ends_at: record.deliberationEndsAt ?? null,
     voting_ends_at: record.votingEndsAt ?? null,
     challenge_window_ends_at: record.challengeWindowEndsAt ?? null,
@@ -320,6 +327,65 @@ export function createRoomGovernanceSimRoutes() {
           }),
         );
       })
+      // The §24.5 AI advice ATTACHED to one proposal — the reader that made the
+      // advisory pipeline mean something.  `highlightConflictOfInterest` and
+      // `detectScamPatterns` produced concrete findings that the caller
+      // discarded, so nothing a steward could open ever showed them; advice
+      // nobody can read is not restraint, it is absence.  Advisory by
+      // construction (`advisory_only` is pinned true): this endpoint informs a
+      // decision, it never gates one.
+      .get(
+        '/rooms/:roomId/governance/proposals/:proposalId/advisories',
+        authMiddleware(),
+        proposalParams,
+        async (c) => {
+          const auth = requireAuth(c);
+          const services = getKnomosisServices();
+          const { roomId, proposalId } = c.req.valid('param');
+          const gate = await simGate(services, roomId, auth.userId, false);
+          if (!gate.ok) return c.json(deny(gate.code, gate.message), gate.status);
+          // STEWARDS ONLY.  `simGate(..., false)` asks whether the caller may
+          // READ the room, which in a public production room is every
+          // authenticated account — and these records are decision support for
+          // the room's decision-makers: a COI flag naming the proposer, a
+          // scam-pattern hit on their wording.  Publishing an internal
+          // assessment of a member's proposal to that member's audience is not
+          // transparency, it is a different disclosure than the one the
+          // advisory pipeline was built for.  Platform staff pass without room
+          // stewardship, mirroring the mode-transition gate below.
+          const platformStaff =
+            denyCapability(
+              {
+                userId: auth.userId,
+                platformRoles: auth.roles,
+                stewardRoles: auth.stewardRoles,
+                mfaActive: auth.mfaActive,
+                mfaVerified: auth.mfaVerified,
+              },
+              'restrict',
+            ) === null;
+          if (
+            !platformStaff &&
+            (services.rooms === null || !(await services.rooms.isSteward(roomId, auth.userId)))
+          ) {
+            return c.json(deny('not_found', 'Resource not found'), 404); // 404-over-403
+          }
+          const proposal = await services.proposals.getById(proposalId);
+          // 404-over-403 on a cross-room id: an outsider learns nothing about
+          // which proposals exist elsewhere.
+          if (proposal === null || proposal.roomId !== roomId) {
+            return c.json(deny('not_found', 'Resource not found'), 404);
+          }
+          const ai = tryGetAiGovernanceServices();
+          // No AI wired ⇒ no advice, and full governance regardless.  That is
+          // what "advisory" has to mean.
+          const advisories =
+            ai === null ? [] : await ai.governanceAdvisories.listByProposal(proposalId);
+          const summaries =
+            ai === null ? [] : await ai.governanceSummaries.listByProposal(proposalId);
+          return c.json({ advisories, summaries });
+        },
+      )
       .post(
         '/rooms/:roomId/governance/proposals',
         authMiddleware(),
@@ -407,12 +473,26 @@ export function createRoomGovernanceSimRoutes() {
           // Same mode branch as the list: a production proposal opened by id
           // must carry its production shape (law-pack pin, windows, tally) —
           // never a simulated-shaped row with zero sim votes.
+          // Both branches parse through the EGRESS schema, as the list, create,
+          // vote and execute siblings all do.  This was the one proposal path
+          // that returned a hand-built object — so the schema that four other
+          // routes rely on to catch a projection drift did not run on the fifth,
+          // and the web client's `parseResponse` was the first thing in the
+          // system to look at the shape.
           if (gate.mode !== 'simulated') {
             if (proposal.simulationMode) return c.json(notFound, 404);
-            return c.json({ proposal: toWireProductionProposal(proposal) });
+            return c.json(
+              productionProposalResponseSchema.parse({
+                proposal: toWireProductionProposal(proposal),
+              }),
+            );
           }
           if (!proposal.simulationMode) return c.json(notFound, 404);
-          return c.json({ proposal: await toWireProposal(proposal, services.votes) });
+          return c.json(
+            governanceProposalResponseSchema.parse({
+              proposal: await toWireProposal(proposal, services.votes),
+            }),
+          );
         },
       )
       .post(

@@ -230,50 +230,68 @@ export default defineConfig({
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
-        manualChunks(id) {
-          if (id.includes('node_modules/react-dom') || id.includes('node_modules/react')) {
-            return 'react';
-          }
-          // WS-S.2.1 — keep the entire Private P2P plane in ONE lazily loaded chunk
-          // whose file name contains `private-p2p`, so it is measured against its OWN
-          // budget and excluded from the core total (PRIVATE_SPEC §9.8 — the private
-          // plane is separately budgeted, never part of the public app's weight).  This
-          // covers: the `@licio/private-p2p` core + its MLS/HPKE/curve deps, AND the
-          // apps/web private-plane GLUE (`apps/web/src/private-p2p/*` — the room manager,
-          // the live carrier, the sync session, the rendezvous client, the storage
-          // adapter).  All of it is reached ONLY through the dynamic import in
-          // `private-p2p/room-manager.ts`, so it never enters the initial bundle.
-          if (
-            id.includes('packages/private-p2p') ||
-            id.includes('@licio/private-p2p') ||
-            id.includes('apps/web/src/private-p2p') ||
-            id.includes('node_modules/ts-mls') ||
-            id.includes('node_modules/@noble') ||
-            id.includes('node_modules/@hpke')
-          ) {
-            return 'private-p2p';
-          }
-          // WS-R — the LCAP P2P decentralization TRANSPORT plane (the optional WebRTC/IPFS
-          // carriers + the courier sync transports) is, like the private plane, an
-          // optional lazy plane reached ONLY through dynamic imports (check:lcap-p2p-split)
-          // — it carries no weight for a user who never opts into P2P/courier sync.  Keep
-          // it in ONE `lcap-p2p` chunk with its OWN budget, excluded from the core total
-          // (separately budgeted, never silently exempt — see check-bundle-size.ts).
-          // `jsqr` is the QR-carrier decoder of this SAME transport plane
-          // (reached only through the lazy decode in
-          // `apps/web/src/lcap/transports/qr/`) — folded into the plane chunk
-          // exactly like the private plane's @noble/@hpke vendor deps, so it
-          // is measured under the plane's own budget rather than the core
-          // total (it previously escaped into a `jsQR-*` vendor chunk on
-          // name alone).
-          if (
-            id.includes('packages/lcap-p2p') ||
-            id.includes('@licio/lcap-p2p') ||
-            id.includes('apps/web/src/lcap/transports') ||
-            id.includes('node_modules/jsqr')
-          ) {
-            return 'lcap-p2p';
-          }
+        // Rolldown's NATIVE grouping, not the `manualChunks` shim.
+        //
+        // A group captures its members AND, by default
+        // (`includeDependenciesRecursively`), everything they depend on.  Both
+        // lazy planes depend on `@licio/shared` — hence on `zod` and
+        // `dompurify` — and the LCAP transport plane depends on the
+        // `@licio/lcap` core, so those shared modules were pulled INTO the
+        // plane chunks.  Every eager chunk that needed them then carried a
+        // STATIC import of a plane chunk, Vite emitted a
+        // `<link rel="modulepreload">` for each, and 262 KiB gz of
+        // MLS/HPKE/curve and QR-decoder code was downloaded on every first
+        // paint.
+        //
+        // All three guards meant to prevent that reported green:
+        // `check:private-p2p-split` / `check:lcap-p2p-split` police the
+        // `@licio/*` package SPECIFIERS in app source — which genuinely are
+        // dynamic-only, and still are (the leak was in the chunker, not the
+        // imports) — and `check-bundle-size.ts` skipped these chunks by FILE
+        // NAME before doing its initial-payload accounting.  That gate now
+        // fails if a plane chunk is preloaded, which is the property these
+        // groups exist to keep true.
+        //
+        // `includeDependenciesRecursively: false` is therefore the load-bearing
+        // setting: each plane group captures ONLY its own modules, and the
+        // shared cores stay in the ordinary graph, where the eager app needs
+        // them anyway.
+        codeSplitting: {
+          groups: [
+            // WS-S.2.1 — the Private P2P plane: the `@licio/private-p2p` core
+            // and the MLS/HPKE/curve vendors nothing else uses.  Reached only
+            // through the dynamic import in `private-p2p/room-manager.ts`.  The
+            // apps/web GLUE (`apps/web/src/private-p2p/*`) is deliberately NOT
+            // captured: eleven components and the private route page import it
+            // directly, so capturing it made the plane a static dependency of
+            // the eager graph.
+            {
+              name: 'private-p2p',
+              test: /(?:packages|@licio)[\\/]private-p2p[\\/]|node_modules[\\/](?:ts-mls|@noble|@hpke)[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 100,
+            },
+            // WS-R — the LCAP P2P TRANSPORT plane (optional WebRTC/IPFS +
+            // courier carriers) plus `jsqr`, the QR carrier's decoder, reached
+            // only through the lazy decode in `apps/web/src/lcap/transports/qr/`
+            // (it would otherwise escape into a `jsQR-*` chunk on name alone).
+            // `apps/web/src/lcap/transports/*` is likewise not captured: the
+            // courier controls, the QR panel and the security page import it
+            // statically.  The `-p2p` suffix in the test is what keeps the
+            // `@licio/lcap` CORE out of the transport plane.
+            {
+              name: 'lcap-p2p',
+              test: /(?:packages|@licio)[\\/]lcap-p2p[\\/]|node_modules[\\/]jsqr[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 100,
+            },
+            {
+              name: 'react',
+              test: /node_modules[\\/]react(?:-dom)?[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 50,
+            },
+          ],
         },
       },
     },

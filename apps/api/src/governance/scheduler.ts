@@ -33,7 +33,7 @@ export type GovernanceSchedulerTask =
 export interface GovernanceSchedulerDeps {
   service: GovernanceService;
   /** Eligible voters for a room's election/ratification quorum (soft cross-context read). */
-  eligibleVoterCount: (roomId: string) => Promise<number>;
+  eligibleVoterCount: (roomId: string, asOf: string) => Promise<number>;
   /** Whether a user is currently a member of a room (soft cross-context read) — used
    *  to re-validate an election winner is still a member before seating them. */
   isRoomMember?: (roomId: string, userId: string) => Promise<boolean>;
@@ -49,6 +49,12 @@ export interface GovernanceSchedulerDeps {
   applyDeferredRemoderation?: DeferredRemoderationApplier | null;
   /** Max deferred re-moderation items drained per tick (default REMODERATION_SWEEP_LIMIT). */
   remoderationSweepLimit?: number;
+  /** The FREEZE reader for a newly scheduled election: the electorate count AND the
+   *  instant it was measured at, from one read.  Distinct from `eligibleVoterCount`,
+   *  which answers about an election's ALREADY-RECORDED open for the settle
+   *  fallback — a different question, and rightly a different read.  Absent ⇒ a
+   *  scheduled election freezes a zero denominator, as before. */
+  measureElectorate?: (roomId: string) => Promise<{ count: number; asOf: string }>;
   log: (event: string, meta: Record<string, unknown>) => void;
   now: () => number;
 }
@@ -64,6 +70,7 @@ export async function runGovernanceTick(
       deps.eligibleVoterCount,
       nowMs,
       deps.isRoomMember,
+      deps.measureElectorate,
     );
     if (scheduled > 0 || settled > 0) {
       deps.log('governance.election_lifecycle', { scheduled, settled });
@@ -139,7 +146,9 @@ export async function runGovernanceTick(
 /** Start the interval runner (lease-guarded in production). */
 export function startGovernanceScheduler(
   deps: GovernanceSchedulerDeps,
-  onError: (err: unknown, task: GovernanceSchedulerTask) => void = () => {},
+  // `'lease'` widens the channel exactly as the ai-governance and invariants
+  // schedulers already do, so a lease failure is REPORTED rather than lost.
+  onError: (err: unknown, task: GovernanceSchedulerTask | 'lease') => void = () => {},
   intervalMs: number = GOVERNANCE_SCHEDULER_INTERVAL_MS,
   runner?: { lease: JobLeaseStore; holder?: string },
 ): () => void {
@@ -148,11 +157,25 @@ export function startGovernanceScheduler(
       await runGovernanceTick(deps, onError);
       return;
     }
-    const acquired = await runner.lease.tryAcquire(
-      GOVERNANCE_JOB_LEASE,
-      Math.ceil(intervalMs * 0.9),
-      runner.holder ?? hostname(),
-    );
+    // The lease acquire is the one await in this callback nothing else guards:
+    // `runGovernanceTick` catches per task, but a `tryAcquire` rejection (any
+    // transient Postgres error — the Drizzle store issues raw SQL and catches
+    // nothing) escapes an async `setInterval` callback whose promise nobody
+    // holds, and Node's default `--unhandled-rejections=throw` then takes the
+    // whole BFF down over a blip in a background job.  Every sibling scheduler
+    // already fails closed here; this one and the debate scheduler were the two
+    // that did not.
+    let acquired: boolean;
+    try {
+      acquired = await runner.lease.tryAcquire(
+        GOVERNANCE_JOB_LEASE,
+        Math.ceil(intervalMs * 0.9),
+        runner.holder ?? hostname(),
+      );
+    } catch (err) {
+      onError(err, 'lease');
+      return; // fail closed: no lease, no tick — the next interval retries
+    }
     if (acquired) await runGovernanceTick(deps, onError);
   }, intervalMs);
   timer.unref();

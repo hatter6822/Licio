@@ -15,7 +15,7 @@
 // The privacy boundary (WS-N.2.2d) is structural here too: no response in
 // this file can carry attention/reading/social data because no store it
 // reads HAS such a field.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   type CaseResolution,
   type CaseTriggerType,
@@ -100,6 +100,7 @@ import { isComplianceReviewer, isCounsel } from '../identity/rbac.js';
 import { getIdentityServices } from '../identity/services.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import { rateLimit } from '../lib/rate-limit.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

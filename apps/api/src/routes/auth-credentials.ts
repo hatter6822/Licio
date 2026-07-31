@@ -7,7 +7,6 @@
 // audited, and a step-up satisfies the fresh-assertion requirement WITHOUT losing
 // the in-progress action.
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   credentialListResponseSchema,
   webauthnAuthenticateVerifyRequestSchema,
@@ -32,6 +31,7 @@ import {
   verifyAuthentication,
   verifyRegistration,
 } from '../identity/webauthn.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, requireStepUp } from '../middleware/auth.js';
 import {
   ATTEMPT_COOKIES,
@@ -87,6 +87,8 @@ export function createCredentialRoutes(resolve: () => IdentityServices) {
             email: {
               present: !!(await services.store.getUser(auth.userId))?.email,
               verified: userAuth?.emailVerified ?? false,
+              // So the staged-change code form survives a reload — see the schema.
+              change_pending: userAuth?.pendingEmail != null,
             },
             totp: {
               enabled: userAuth?.mfaEnabled ?? false,

@@ -6,8 +6,10 @@
 
 import type { TreasuryBounds } from '@licio/governance';
 import type { KnomosisSignedActionType, SubmissionState } from '@licio/shared';
+import { treasuryGrantSchema } from '@licio/shared';
 import { describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import { hashFinancialWalletAddress } from '../identity/siwe.js';
 import { DEFAULT_KNOMOSIS_CONFIG } from '../knomosis/config.js';
 import { activateKillSwitch } from '../knomosis/killswitch.js';
 import { KNOMOSIS_PIN } from '../knomosis/pin.js';
@@ -34,6 +36,7 @@ import {
   markIntentSigned,
   preflightIntent,
   quoteIntent,
+  reconcileGrantPayouts,
   reconcileIntents,
   retryIntent,
 } from '../treasury/intents.js';
@@ -2311,5 +2314,400 @@ describe('grant payout finality (PR #144 review: paid ⇐ reconciliation only)',
     expect((await deps.intents.getById(intentId))?.executionState).toBe('finalized');
     // Reconciliation — not scheduling — declares the grant paid.
     expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
+  });
+
+  /** A two-tranche grant with a linked recipient wallet — the fixture BOTH
+   *  rejection-ordering tests need (accept-then-reject, and reject-then-accept). */
+  async function seedTwoTrancheGrant() {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const payableId = crypto.randomUUID();
+    const refusedId = crypto.randomUUID();
+    const recipientRef = `user:${OTHER}`;
+    const inserted = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef,
+      purpose: 'Two tranches, one deliverable refused',
+      amount: '200',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId: payableId,
+          description: 'Delivered',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+        {
+          milestoneId: refusedId,
+          description: 'Not delivered',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (inserted === null) throw new Error('fixture grant collision');
+    // A `user:` payout binds to that member's wallet on the deployment chain —
+    // the very wallet the unsettled-grant obligation refuses to release.
+    const recipientAddress = `0x${'aa'.repeat(20)}`;
+    await deps.wallets.insert({
+      walletAccountId: crypto.randomUUID(),
+      userId: OTHER,
+      addressHashHex: hashFinancialWalletAddress(deps.masterSecret, recipientAddress),
+      addressTruncated: `${recipientAddress.slice(0, 6)}…${recipientAddress.slice(-4)}`,
+      chainId: KNOMOSIS_PIN.deployments[0]?.chain_id ?? 0,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date(deps.now()).toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    return { deps, inserted, recipientRef, payableId, refusedId, recipientAddress };
+  }
+
+  /** Drive a minted payout intent all the way to `finalized`. */
+  async function finalizePayoutIntent(
+    deps: ReturnType<typeof buildDeps>,
+    grantId: string,
+    intentId: string,
+    recipientAddress: string,
+  ): Promise<void> {
+    await preflightIntent(deps, intentId, USER);
+    await quoteIntent(deps, intentId, USER);
+    await markIntentSigned(deps, intentId, USER);
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'4'.repeat(64)}`,
+      typedDataHash: `0x${'5'.repeat(64)}`,
+      signedAction: {
+        message: {
+          amount: '100',
+          asset: 'USDC',
+          grantId: grantId,
+          recipient: recipientAddress,
+        },
+        signature: '0xsig',
+      },
+      submissionState: 'finalized' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'matched',
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    const attached = await attachIntentSubmission(deps, intentId, action.actionRecordId, USER);
+    expect(attached).toMatchObject({ ok: true });
+    await deps.receipts.upsert({
+      receiptId: crypto.randomUUID(),
+      actionRecordId: action.actionRecordId,
+      kind: 'public',
+      payload: {},
+      summaryPayloadHash: `0x${'6'.repeat(64)}`,
+      ownerUserId: null,
+      finalState: 'finalized',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(intentId))?.executionState).toBe('finalized');
+  }
+
+  it('a REJECTED tranche leaves the denominator: the grant still reaches paid', async () => {
+    const deps = buildDeps();
+    await provisionTreasury(deps);
+    const treasury = await deps.treasuries.getByRoom(ROOM);
+    if (treasury === null) throw new Error('fixture treasury missing');
+    const payableId = crypto.randomUUID();
+    const refusedId = crypto.randomUUID();
+    const recipientRef = `user:${OTHER}`;
+    const inserted = await deps.grants.insert({
+      grantId: crypto.randomUUID(),
+      roomId: ROOM,
+      treasuryId: treasury.treasuryId,
+      proposalId: crypto.randomUUID(),
+      recipientRef,
+      purpose: 'Two tranches, one deliverable refused',
+      amount: '200',
+      asset: 'USDC',
+      milestones: [
+        {
+          milestoneId: payableId,
+          description: 'Delivered',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+        {
+          milestoneId: refusedId,
+          description: 'Not delivered',
+          amount: '100',
+          state: 'submitted',
+          paymentIntentId: null,
+        },
+      ],
+      milestoneState: 'submitted',
+      reviewState: 'cleared',
+      payoutState: 'not_started',
+      auditSummary: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (inserted === null) throw new Error('fixture grant collision');
+    // A `user:` payout binds to that member's wallet on the deployment chain —
+    // the very wallet the unsettled-grant obligation refuses to release.
+    const recipientAddress = `0x${'aa'.repeat(20)}`;
+    await deps.wallets.insert({
+      walletAccountId: crypto.randomUUID(),
+      userId: OTHER,
+      addressHashHex: hashFinancialWalletAddress(deps.masterSecret, recipientAddress),
+      addressTruncated: `${recipientAddress.slice(0, 6)}…${recipientAddress.slice(-4)}`,
+      chainId: KNOMOSIS_PIN.deployments[0]?.chain_id ?? 0,
+      walletType: 'eoa',
+      unlinkState: 'active',
+      riskState: 'normal',
+      label: null,
+      linkedAt: new Date(deps.now()).toISOString(),
+      lastUsedAt: null,
+      unlinkRequestedAt: null,
+      unlinkFinalizeAfter: null,
+      unlinkedAt: null,
+    });
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    // `rejected` is TERMINAL and only the `accepted` branch mints a payout
+    // intent, so this tranche can never be scheduled or finalized — counting it
+    // in the denominator pinned the whole grant at `partially_paid` forever.
+    const refused = await updateGrantMilestone(grantDeps, {
+      roomId: ROOM,
+      grantId: inserted.grantId,
+      milestoneId: refusedId,
+      state: 'rejected',
+      actorUserId: USER,
+    });
+    if ('code' in refused) throw new Error(refused.message);
+    const accepted = await updateGrantMilestone(grantDeps, {
+      roomId: ROOM,
+      grantId: inserted.grantId,
+      milestoneId: payableId,
+      state: 'accepted',
+      actorUserId: USER,
+    });
+    if ('code' in accepted) throw new Error(accepted.message);
+    const intentId = accepted.grant.milestones.find(
+      (m) => m.milestoneId === payableId,
+    )?.paymentIntentId;
+    if (intentId == null) throw new Error('payout intent missing');
+
+    await preflightIntent(deps, intentId, USER);
+    await quoteIntent(deps, intentId, USER);
+    await markIntentSigned(deps, intentId, USER);
+    const action: KnomosisActionRecordEntity = {
+      actionRecordId: crypto.randomUUID(),
+      deploymentId: DEPLOYMENT,
+      actionType: 'grant_payout' as KnomosisSignedActionType,
+      roomId: ROOM,
+      actorWalletAccountId: crypto.randomUUID(),
+      actorUserId: USER,
+      payloadHash: `0x${'4'.repeat(64)}`,
+      typedDataHash: `0x${'5'.repeat(64)}`,
+      signedAction: {
+        message: {
+          amount: '100',
+          asset: 'USDC',
+          grantId: inserted.grantId,
+          recipient: recipientAddress,
+        },
+        signature: '0xsig',
+      },
+      submissionState: 'finalized' as SubmissionState,
+      failureReason: null,
+      indexedEventRef: null,
+      reconciliationState: 'matched',
+      idempotencyKey: crypto.randomUUID(),
+      paymentIntentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await deps.actions.insert(action);
+    const attached = await attachIntentSubmission(deps, intentId, action.actionRecordId, USER);
+    expect(attached).toMatchObject({ ok: true });
+    await deps.receipts.upsert({
+      receiptId: crypto.randomUUID(),
+      actionRecordId: action.actionRecordId,
+      kind: 'public',
+      payload: {},
+      summaryPayloadHash: `0x${'6'.repeat(64)}`,
+      ownerUserId: null,
+      finalState: 'finalized',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileIntents(deps);
+    expect((await deps.intents.getById(intentId))?.executionState).toBe('finalized');
+
+    // Every tranche that COULD pay has paid: the grant is finished.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
+    // …and WS-L.2.5b therefore stops pinning the recipient's last wallet: an
+    // unsettled grant is what `buildTreasuryObligationsPort` reads to block the
+    // unlink, so a grant stuck at `partially_paid` blocked it forever.
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+  });
+
+  it('a rejection AFTER the last payable tranche finalized still settles the grant', async () => {
+    // The order the previous test does not cover, and the one with no later
+    // intent transition to re-project on: accept + finalize tranche A, THEN
+    // reject tranche B.  `reconcileIntents` sweeps INTENT states, so a rejection
+    // with nothing in flight is invisible to it — the grant would sit at
+    // `partially_paid` forever and keep blocking the recipient's last wallet
+    // unlink, which is exactly the condition the sibling test proves must clear.
+    const { deps, inserted, recipientRef, recipientAddress, payableId, refusedId } =
+      await seedTwoTrancheGrant();
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+
+    const accepted = await updateGrantMilestone(grantDeps, {
+      roomId: ROOM,
+      grantId: inserted.grantId,
+      milestoneId: payableId,
+      state: 'accepted',
+      actorUserId: USER,
+    });
+    if ('code' in accepted) throw new Error(accepted.message);
+    const intentId = accepted.grant.milestones.find(
+      (m) => m.milestoneId === payableId,
+    )?.paymentIntentId;
+    if (intentId == null) throw new Error('payout intent missing');
+    await finalizePayoutIntent(deps, inserted.grantId, intentId, recipientAddress);
+
+    // One tranche paid, one still open ⇒ partially paid, and still blocking.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('partially_paid');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).not.toEqual([]);
+
+    const refused = await updateGrantMilestone(grantDeps, {
+      roomId: ROOM,
+      grantId: inserted.grantId,
+      milestoneId: refusedId,
+      state: 'rejected',
+      actorUserId: USER,
+    });
+    if ('code' in refused) throw new Error(refused.message);
+
+    // The rejection re-projects directly: nothing payable remains, so the grant
+    // is finished and the wallet is released.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('paid');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+  });
+
+  it('the tick re-projects an all-rejected grant whose inline projection FAILED', async () => {
+    // The inline projection on the rejection path is deliberately non-fatal — the
+    // transition is already durable and a projection failure must not turn a
+    // recorded rejection into a 409 the steward retries.  Its comment justified
+    // that with "the next intent finality re-projects anyway", which is true for
+    // every grant that HAS an intent and false for the one case that most needs
+    // it: an all-rejected grant has no payment intent, so no finality arrives and
+    // `reconcileIntents` sweeps intents and never sees it.  The grant then sat
+    // outside paid/clawed_back for ever, blocking the recipient's last wallet
+    // unlink — the exact bug `closed` was introduced to end, reachable again
+    // through a single transient write failure.
+    const { deps, inserted, recipientRef, payableId, refusedId } = await seedTwoTrancheGrant();
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    // Break the projection's only write for the duration of both transitions.
+    const realSetPayoutState = deps.grants.setPayoutState.bind(deps.grants);
+    deps.grants.setPayoutState = async () => {
+      throw new Error('transient write failure');
+    };
+    for (const milestoneId of [payableId, refusedId]) {
+      const rejected = await updateGrantMilestone(grantDeps, {
+        roomId: ROOM,
+        grantId: inserted.grantId,
+        milestoneId,
+        state: 'rejected',
+        actorUserId: USER,
+      });
+      // The rejection still succeeds — that is the point of swallowing it.
+      if ('code' in rejected) throw new Error(rejected.message);
+    }
+    // Unsettled, and blocking, with nothing left that could ever pay.
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('not_started');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).not.toEqual([]);
+
+    deps.grants.setPayoutState = realSetPayoutState;
+    // The sweep is what reaches it.
+    const grant = await deps.grants.getById(inserted.grantId);
+    if (!grant) throw new Error('grant missing');
+    expect(await reconcileGrantPayouts(deps, grant.treasuryId)).toBeGreaterThan(0);
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('closed');
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+    // And it is idempotent: a second pass finds nothing unsettled to re-project.
+    expect(await reconcileGrantPayouts(deps, grant.treasuryId)).toBe(0);
+  });
+
+  it('a grant whose EVERY milestone is rejected settles closed, not not_started', async () => {
+    // The empty-payable-set case.  `projectGrantPayout` returned early on
+    // `finalized === 0`, so a grant with nothing payable sat at `not_started` for
+    // ever — and `listUnsettledByRecipient` counts every state except
+    // paid/clawed_back as an outstanding obligation, so tranches that can NEVER
+    // pay permanently blocked the recipient's last wallet unlink.
+    const { deps, inserted, recipientRef, payableId, refusedId } = await seedTwoTrancheGrant();
+    const grantDeps = { ...deps, proposals: new InMemoryGovernanceProposalStore() };
+    for (const milestoneId of [payableId, refusedId]) {
+      const rejected = await updateGrantMilestone(grantDeps, {
+        roomId: ROOM,
+        grantId: inserted.grantId,
+        milestoneId,
+        state: 'rejected',
+        actorUserId: USER,
+      });
+      if ('code' in rejected) throw new Error(rejected.message);
+    }
+    // `closed` says what happened: nothing paid, nothing reversed, nothing left
+    // to do — which is why it is neither `paid` nor `clawed_back`…
+    expect((await deps.grants.getById(inserted.grantId))?.payoutState).toBe('closed');
+    // …and why the recipient's wallet is released.
+    expect(await deps.grants.listUnsettledByRecipient(recipientRef, 10)).toEqual([]);
+    // AND why it must be spellable on the wire.  A state the store can produce
+    // that `GRANT_PAYOUT_STATES` cannot name does not degrade the one grant — the
+    // grants route parses its WHOLE answer through this schema server-side, and a
+    // `ZodError` is not an `HTTPException`, so it turned every read of the room's
+    // grants into a 500.  Permanently, `closed` being terminal.
+    const grant = await deps.grants.getById(inserted.grantId);
+    expect(
+      treasuryGrantSchema.safeParse({
+        grant_id: grant?.grantId,
+        room_id: ROOM,
+        treasury_id: grant?.treasuryId,
+        proposal_id: grant?.proposalId,
+        recipient_ref: recipientRef,
+        purpose: grant?.purpose,
+        amount: grant?.amount,
+        asset: grant?.asset,
+        milestones: [],
+        milestone_state: grant?.milestoneState,
+        review_state: grant?.reviewState,
+        payout_state: grant?.payoutState,
+        audit_summary: grant?.auditSummary ?? null,
+        created_at: grant?.createdAt,
+      }).error?.issues ?? [],
+    ).toEqual([]);
   });
 });

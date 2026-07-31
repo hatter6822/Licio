@@ -15,14 +15,23 @@ import {
   expireOldSnapshots,
   isStorySaved,
   listSavedStories,
+  MAX_STORY_COMMENT_SNAPSHOTS,
+  MAX_THREAD_SNAPSHOTS,
   readCachedSignalLedger,
   readStoryCommentsSnapshot,
   readThreadSnapshot,
   SNAPSHOT_MAX_AGE_MS,
+  SNAPSHOT_TRIM_RATIO,
   saveStory,
   unsaveStory,
 } from './read-through.js';
-import { savedStories, signalLedger, storyComments, threadSnapshots } from './store.js';
+import {
+  draftContributions,
+  savedStories,
+  signalLedger,
+  storyComments,
+  threadSnapshots,
+} from './store.js';
 
 const STORY: StoryDetail = {
   story_id: '11111111-1111-4111-8111-111111111111',
@@ -158,6 +167,85 @@ describe('thread snapshot cache', () => {
   });
 });
 
+describe('snapshot count caps (the bound age alone does not give)', () => {
+  /** A distinct valid UUID per index (the record schema requires one). */
+  function threadId(index: number): string {
+    return `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`;
+  }
+
+  /** Distinct, strictly increasing `cachedAt` values so LRU order is exact. */
+  function monotonicClock(): void {
+    let clock = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      clock += 1_000;
+      return clock;
+    });
+  }
+
+  it('caps story-comment snapshots and drops the OLDEST first', async () => {
+    monotonicClock();
+    // One story, many option keys — the real growth shape: each sort order /
+    // filter / drill-down root / depth mints its own full-tree record.
+    for (let i = 0; i <= MAX_STORY_COMMENT_SNAPSHOTS; i += 1) {
+      await cacheStoryCommentsSnapshot(STORY.story_id, { order: `o${i}` }, COMMENTS);
+    }
+    const target = Math.floor(MAX_STORY_COMMENT_SNAPSHOTS * SNAPSHOT_TRIM_RATIO);
+    expect(await storyComments.count()).toBe(target);
+    // The first write is gone; the last survives.
+    expect(await readStoryCommentsSnapshot(STORY.story_id, { order: 'o0' })).toBeUndefined();
+    expect(
+      await readStoryCommentsSnapshot(STORY.story_id, {
+        order: `o${MAX_STORY_COMMENT_SNAPSHOTS}`,
+      }),
+    ).toBeDefined();
+  });
+
+  it('caps thread snapshots and drops the OLDEST first', async () => {
+    monotonicClock();
+    for (let i = 0; i <= MAX_THREAD_SNAPSHOTS; i += 1) {
+      await cacheThreadSnapshot({ ...THREAD, thread_id: threadId(i) });
+    }
+    const target = Math.floor(MAX_THREAD_SNAPSHOTS * SNAPSHOT_TRIM_RATIO);
+    expect(await threadSnapshots.count()).toBe(target);
+    expect(await readThreadSnapshot(threadId(0))).toBeUndefined();
+    expect(await readThreadSnapshot(threadId(MAX_THREAD_SNAPSHOTS))).toBeDefined();
+  });
+
+  it('leaves an under-budget store completely alone', async () => {
+    await cacheStoryCommentsSnapshot(STORY.story_id, { order: 'oldest' }, COMMENTS);
+    await cacheStoryCommentsSnapshot(STORY.story_id, { order: 'newest' }, COMMENTS);
+    expect(await storyComments.count()).toBe(2);
+  });
+
+  it('an index-invisible record does not steal the budget', async () => {
+    monotonicClock();
+    // A record with no `cachedAt` is omitted from the index, so the LRU trim can
+    // never list it — while `count()` counted it against the cap regardless.  The
+    // store therefore settled BELOW the budget in real snapshots and ABOVE it in
+    // records, and every write past the crossover re-ran the full scan that the
+    // 90% trim ratio exists to amortise.
+    const ORPHANS = 50;
+    for (let i = 0; i < ORPHANS; i += 1) {
+      await rawPut(STORE.storyComments, { cacheKey: `orphan-${i}` });
+    }
+    for (let i = 0; i < MAX_STORY_COMMENT_SNAPSHOTS; i += 1) {
+      await cacheStoryCommentsSnapshot(STORY.story_id, { order: `o${i}` }, COMMENTS);
+    }
+    // Every slot the budget promises is available to real snapshots.
+    expect(await storyComments.countByIndex('cachedAt')).toBe(MAX_STORY_COMMENT_SNAPSHOTS);
+    // The store as a whole is over budget, which is what the reap below is for.
+    expect(await storyComments.count()).toBe(MAX_STORY_COMMENT_SNAPSHOTS + ORPHANS);
+  });
+
+  it('is best-effort: a trim failure never throws into the read path', async () => {
+    // `countByIndex`, not `count`: the guard counts the population the trim can
+    // actually see, and mocking the method it no longer calls made this pass
+    // without exercising a failure at all.
+    vi.spyOn(storyComments, 'countByIndex').mockRejectedValueOnce(new Error('quota'));
+    await expect(cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS)).resolves.toBeUndefined();
+  });
+});
+
 describe('snapshot expiry (unbounded-growth control)', () => {
   it('deletes stale snapshots while fresh snapshots and user data survive', async () => {
     // Snapshots + unrelated durable user data, all cached "now".
@@ -174,6 +262,29 @@ describe('snapshot expiry (unbounded-growth control)', () => {
     // Explicit saves, the private ledger, and the pending queue are untouched.
     expect(await isStorySaved(STORY.story_id)).toBe(true);
     expect(await readCachedSignalLedger()).toHaveLength(1);
+  });
+
+  it('reaps snapshots the cachedAt index cannot see, and never user data', async () => {
+    // Invisible to the age sweep AND the LRU trim: nothing could remove these, so
+    // they held their share of the quota until the browser evicted the whole
+    // database — which takes the reader's UNSENT drafts with it.  Both snapshot
+    // stores are server-refetchable, so dropping them costs a refetch.
+    await rawPut(STORE.storyComments, { cacheKey: 'orphan-comments' });
+    await rawPut(STORE.threadSnapshots, { threadId: 'orphan-thread' });
+    await cacheStoryCommentsSnapshot(STORY.story_id, {}, COMMENTS);
+    // User data with no indexable `updatedAt` — equally unreachable, and NOT ours
+    // to delete: an unreachable draft is still the user's words.
+    await rawPut(STORE.draftContributions, { draftId: 'orphan-draft' });
+
+    await expireOldSnapshots();
+
+    expect(await storyComments.count()).toBe(1);
+    expect(await readStoryCommentsSnapshot(STORY.story_id, {})).toBeDefined();
+    expect(await threadSnapshots.count()).toBe(0);
+    expect(await draftContributions.count()).toBe(1);
+    // And the quarantine policy refuses the reap outright, not just in this sweep.
+    expect(await draftContributions.reapUnindexed('updatedAt')).toBe(0);
+    expect(await draftContributions.count()).toBe(1);
   });
 
   it('leaves fresh snapshots in place', async () => {

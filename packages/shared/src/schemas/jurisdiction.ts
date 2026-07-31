@@ -13,6 +13,7 @@
 // `.strict()` so an unknown/injected key can never silently enable a feature.
 import { z } from 'zod';
 import { KNOMOSIS_ASSET_DECIMALS } from '../knomosis/assets.js';
+import { canonicalJson } from '../utils/canonical-json.js';
 import { isoTimestampSchema, uuidSchema } from './common.js';
 
 /** The closed six-value cell vocabulary (`JURISDICTION_MATRIX.md`). */
@@ -216,17 +217,6 @@ export function validatePolicy(input: unknown): ValidatePolicyResult {
 // The WS-N.1.1e counsel-gate delta (the four-eyes boundary on policy WRITES).
 // ---------------------------------------------------------------------------
 
-/** Deterministic key-sorted serialization for policy-field comparison.  The
- *  inputs are zod-parsed policy sub-shapes, so every value is JSON-safe. */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`);
-  return `{${entries.join(',')}}`;
-}
-
 /** The document fields, beyond the cells themselves, that govern WHAT an
  *  `enabled` cell legally means: which assets it covers, who may use it (age/
  *  KYC), what must be disclosed first, and which legal approval authorizes it.
@@ -298,7 +288,7 @@ export function policyChangeRequiresCounsel(
     );
   const changedGoverningFields = retainsEnabledCell
     ? COUNSEL_GOVERNED_FIELDS.filter(
-        (field) => prior !== null && stableStringify(next[field]) !== stableStringify(prior[field]),
+        (field) => prior !== null && canonicalJson(next[field]) !== canonicalJson(prior[field]),
       )
     : [];
   return {

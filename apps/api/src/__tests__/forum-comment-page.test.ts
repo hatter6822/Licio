@@ -316,3 +316,80 @@ describe('WS-T — story active-debate discovery route', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The reply forest is built ONE QUERY PER LEVEL.
+//
+// It used to recurse per node — `listChildren` for the root, then for each of
+// its previewed replies, then for each of theirs — which is one query per NODE:
+// roughly 200 for a single `/stories/:id/comments` request at a full page and
+// the default depth.  The shape of the work is per LEVEL, and these assert the
+// reads are too, AND that the rendered forest did not change in the process.
+// ---------------------------------------------------------------------------
+describe('WS-T.7.2 — the comment forest costs one read per level, not per node', () => {
+  /** Count store calls without changing behaviour. */
+  function countReads(): { childCalls: number; batchCalls: number; parentsSeen: number[] } {
+    const store = fixture.forum.contributions;
+    const stats = { childCalls: 0, batchCalls: 0, parentsSeen: [] as number[] };
+    const realChildren = store.listChildren.bind(store);
+    const realBatch = store.listChildrenForParents.bind(store);
+    store.listChildren = async (...args: Parameters<typeof realChildren>) => {
+      stats.childCalls += 1;
+      return realChildren(...args);
+    };
+    store.listChildrenForParents = async (...args: Parameters<typeof realBatch>) => {
+      stats.batchCalls += 1;
+      stats.parentsSeen.push(args[0].length);
+      return realBatch(...args);
+    };
+    return stats;
+  }
+
+  it('a WIDE page of roots costs the same number of reads as a narrow one', async () => {
+    // Twelve roots, each with two replies: 12 + 24 = 36 nodes.  Per-node
+    // recursion would issue a read for every one of them.
+    for (let i = 0; i < 12; i += 1) {
+      const root = await createOk(contributionBody('comment', threadId));
+      await createOk(contributionBody('comment', threadId, { parentId: root }));
+      await createOk(contributionBody('comment', threadId, { parentId: root }));
+    }
+    const stats = countReads();
+    const res = await getComments('?depth=2');
+    expect(res.status).toBe(200);
+    const body = storyCommentsResponseSchema.parse(await res.json());
+    expect(body.comments.length).toBeGreaterThanOrEqual(12);
+    // depth=2 ⇒ exactly two level reads, whatever the page contains.
+    expect(stats.batchCalls).toBe(2);
+    expect(stats.childCalls).toBe(0);
+    // …and the second level asked about EVERY root at once, not one at a time.
+    expect(stats.parentsSeen[1]).toBeGreaterThanOrEqual(12);
+  });
+
+  it('renders the SAME forest a per-node walk did (bounds, ordering, has-more)', async () => {
+    // Four replies against a REPLY_PREVIEW of 3, so the preview bound and the
+    // "more replies" flag both matter, and newest-first ordering is visible.
+    const root = await createOk(contributionBody('comment', threadId));
+    const replies: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      replies.push(await createOk(contributionBody('comment', threadId, { parentId: root })));
+    }
+    const res = await getComments('?depth=2');
+    const body = storyCommentsResponseSchema.parse(await res.json());
+    const rendered = body.comments.find((c) => c.contribution_id === root);
+    if (!rendered) throw new Error('root not rendered');
+    // Newest-first, capped at the preview bound.
+    expect(rendered.replies?.map((r) => r.contribution_id)).toEqual(
+      [...replies].reverse().slice(0, 3),
+    );
+    expect(rendered.has_more_replies).toBe(true);
+  });
+
+  it('an EMPTY level stops the walk instead of issuing an empty read', async () => {
+    // A root with no replies: level 2 has no parents to ask about, and a query
+    // for zero parents is a round-trip that can only return nothing.
+    await createOk(contributionBody('comment', threadId));
+    const stats = countReads();
+    await getComments('?depth=2');
+    expect(stats.batchCalls).toBe(1);
+  });
+});

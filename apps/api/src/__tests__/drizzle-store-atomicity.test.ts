@@ -36,6 +36,11 @@ import { describe, expect, it } from 'vitest';
 const STORE_FILES = [
   'src/compliance/drizzle-compliance-stores.ts',
   'src/knomosis/drizzle-knomosis-stores.ts',
+  // Added when the moderation handle widened to `DbExecutor` (the `transact` seam).
+  // A store that can run inside a caller's transaction is exactly a store whose
+  // read-modify-write methods must open their own scope — the widening is what makes
+  // this scan apply to it, so the two belong in the same change.
+  'src/moderation/drizzle-moderation-stores.ts',
 ] as const;
 
 /** A statement issued directly against the store's handle, tagged read/write. */

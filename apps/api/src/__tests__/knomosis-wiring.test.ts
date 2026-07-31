@@ -89,19 +89,50 @@ describe('WS-L wiring ports over real in-memory services', () => {
     expect(await rooms.contentVisibleToUser(roomId, steward.userId)).toBe(false);
   });
 
-  it('isMember treats a room STEWARD (no subscription) as a governance member (M5)', async () => {
+  it('governance membership is STAKE IN THE ROOM, not a platform role (M5)', async () => {
+    // `isMember` gates voting, proposing, delegating and knomosis submits, and it read
+    // `isRoomSteward` — whose first line returns true for any platform `admin`, and for
+    // any platform `steward` in a room it can see (which is every PUBLIC room).  A
+    // platform admin was therefore a governance member of every server room and could
+    // cast a ballot in all of them.  Admins do not vote.
+    //
+    // What survives is the WS-L.3.1a intent: a PER-ROOM steward grant participates
+    // without a separate subscription.  That is the set the electorate roster
+    // enumerates, so the ballot gate and the quorum denominator now agree by
+    // construction.
     const forumFixture = freshForumServices();
     const knomosisFixture = await freshKnomosisServices();
     const roomId = await seedRoom(forumFixture.forum, { governanceMode: 'simulated' });
     const rooms = buildRoomGovernancePort(forumFixture.forum, knomosisFixture.identity);
-    // A platform steward who never subscribed to the room.
-    const steward = await seedUserWithSession(knomosisFixture.identity, { steward: true });
-    expect(await forumFixture.forum.rooms.getSubscription(roomId, steward.userId)).toBeNull();
-    // Governance eligibility = active subscribers ∪ stewards, so the steward IS a
-    // member (preflight/simulation write gates must accept them).
-    expect(await rooms.isMember(roomId, steward.userId)).toBe(true);
-    expect(await rooms.isSteward(roomId, steward.userId)).toBe(true);
-    // A non-subscriber, non-steward is still NOT a member.
+
+    // A platform ADMIN who never subscribed: not a governance member.
+    const admin = await seedUserWithSession(knomosisFixture.identity, { admin: true });
+    expect(await rooms.isMember(roomId, admin.userId)).toBe(false);
+    // A platform STEWARD who never subscribed: likewise.
+    const platformSteward = await seedUserWithSession(knomosisFixture.identity, {
+      steward: true,
+    });
+    expect(
+      await forumFixture.forum.rooms.getSubscription(roomId, platformSteward.userId),
+    ).toBeNull();
+    expect(await rooms.isMember(roomId, platformSteward.userId)).toBe(false);
+    // …but ADMINISTRATION is untouched: `isSteward` still answers yes for both, because
+    // that is a different question and 13 call sites depend on it.
+    expect(await rooms.isSteward(roomId, admin.userId)).toBe(true);
+    expect(await rooms.isSteward(roomId, platformSteward.userId)).toBe(true);
+
+    // A PER-ROOM steward grant, with no subscription, IS a governance member.
+    const roomSteward = await seedUserWithSession(knomosisFixture.identity, {});
+    await forumFixture.forum.rooms.addSteward({
+      roomId,
+      userId: roomSteward.userId,
+      role: 'community_steward',
+      assignedAt: new Date().toISOString(),
+    });
+    expect(await forumFixture.forum.rooms.getSubscription(roomId, roomSteward.userId)).toBeNull();
+    expect(await rooms.isMember(roomId, roomSteward.userId)).toBe(true);
+
+    // A non-subscriber with no grant is still NOT a member.
     const outsider = await seedUserWithSession(knomosisFixture.identity, {});
     expect(await rooms.isMember(roomId, outsider.userId)).toBe(false);
   });

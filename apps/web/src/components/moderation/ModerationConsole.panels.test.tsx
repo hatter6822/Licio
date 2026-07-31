@@ -16,8 +16,9 @@ import type {
   IncidentQueueResponse,
   ReportQueueResponse,
 } from '@licio/shared';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n/I18nProvider.js';
@@ -56,6 +57,27 @@ vi.mock('../../lib/safety-api.js', () => ({
   fetchUrlVerdict: vi.fn(),
   decideAppeal: vi.fn(),
   resolveIncident: vi.fn(),
+  assignCase: vi.fn(),
+  revertModerationAction: vi.fn(),
+  setReviewerStatus: vi.fn(),
+  fetchReviewerStatus: vi.fn(),
+  exportAudit: vi.fn(),
+}));
+
+// The self-assign control needs the signed-in reviewer's own id; nothing else
+// in these panels reads the auth store.
+const SELF_ID = '00000000-0000-4000-8000-00000000005e';
+vi.mock('../../stores/auth.js', () => ({
+  useAuthStore: (select: (s: { user: { id: string } | null }) => unknown) =>
+    select({ user: { id: SELF_ID } }),
+}));
+
+// `exportAudit` writes a file; capture the download instead of performing it.
+const savedBlobs: Array<{ filename: string; blob: Blob }> = [];
+vi.mock('../../lib/privacy-api.js', () => ({
+  saveBlob: (blob: Blob, filename: string) => {
+    savedBlobs.push({ filename, blob });
+  },
 }));
 
 const api = await import('../../lib/safety-api.js');
@@ -155,6 +177,7 @@ const caseReview: CaseReviewResponse = {
     contribution_types: { question: 3 },
     rooms_active_in: 1,
   },
+  case_history: [],
   invariant_signals: {
     mfci: { available: true, state: 'elevated', detail: null },
     scoi: { available: false, state: null, detail: null },
@@ -879,5 +902,517 @@ describe('console pagination (Load more)', () => {
     expect(await screen.findByText('remove')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /load more/i }));
     expect(await screen.findByText('restrict')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The four console calls that had live server routes and no surface at all
+// (`assignCase`, `revertModerationAction`, `setReviewerStatus`, `exportAudit`).
+// Each test drives the CONTROL, not the client function, so deleting the
+// control fails here rather than leaving a green suite over an unreachable
+// endpoint — which is the state these were found in.
+// ---------------------------------------------------------------------------
+describe('WS-J.2 console surfaces for the previously unreachable routes', () => {
+  it('WS-J.2.1d: a reviewer can take an unassigned case, and it posts their own id', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue(caseReview);
+    vi.mocked(api.assignCase).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Unassigned')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /take this case/i }));
+    await waitFor(() => expect(api.assignCase).toHaveBeenCalledWith(CASE_ID, SELF_ID));
+  });
+
+  it('WS-J.2.1d: a case already assigned to this reviewer offers no claim button', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({ ...caseReview, assigned_to_id: SELF_ID });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Assigned to you')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: DISMISSING the revert dialog forgets the reason', async () => {
+    // Clearing the reason only on SUCCESS meant a steward could pick one,
+    // cancel, open Revert on a DIFFERENT action, and find that reason already
+    // selected with confirmation enabled — recording a justification they never
+    // chose for that action.  A dialog that asks a question has to forget the
+    // answer when it is dismissed.
+    const A = '00000000-0000-4000-8000-0000000000e1';
+    const B = '00000000-0000-4000-8000-0000000000e2';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: A,
+            action: 'hide',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+          {
+            action_id: B,
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // Open Revert on the FIRST action, pick a reason, then cancel.
+    const reverts = await screen.findAllByRole('button', { name: /^revert$/i });
+    fireEvent.click(reverts[0] as HTMLElement);
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    // The outer case dialog has a Cancel too — take the one inside the revert
+    // dialog, which is the last mounted.
+    const cancels = screen.getAllByRole('button', { name: /^cancel$/i });
+    fireEvent.click(cancels[cancels.length - 1] as HTMLElement);
+
+    // Open Revert on the SECOND action: no reason carried over, and confirmation
+    // is refused until this reversal gets its own answer.
+    const again = await screen.findAllByRole('button', { name: /^revert$/i });
+    fireEvent.click(again[1] as HTMLElement);
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
+    expect(screen.getByRole('button', { name: /^revert action$/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  });
+
+  it('WS-J.2.3b: SWITCHING rows without dismissing does not carry the reason over', async () => {
+    // The path the dismiss test above does NOT cover, and the one that mattered:
+    // the row button set a new target and never touched the reason, so a steward
+    // could pick a code for action A, click Revert on action B WITHOUT cancelling,
+    // and find B's dialog already armed with A's answer and its confirm enabled.
+    // One click wrote that justification into `moderation_actions.reason_code` and
+    // into the hash-chained audit row, and re-noticed the subject — none of which
+    // can be corrected in place.
+    //
+    // In a real browser `inert` on the background portal happens to block that
+    // click; jsdom does not enforce `inert`, so this drives the state machine
+    // directly rather than relying on a DOM modality property of a hook.
+    const A = '00000000-0000-4000-8000-0000000000f1';
+    const B = '00000000-0000-4000-8000-0000000000f2';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: A,
+            action: 'hide',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+          {
+            action_id: B,
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    const reverts = await screen.findAllByRole('button', { name: /^revert$/i });
+    // A: choose a reason…
+    fireEvent.click(reverts[0] as HTMLElement);
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    // …then open B's dialog WITHOUT cancelling A's.
+    fireEvent.click(reverts[1] as HTMLElement);
+    // B's question is unanswered, and cannot be confirmed until it is.
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
+    const confirm = screen.getByRole('button', { name: /^revert action$/i });
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
+    // And nothing was submitted for either action.
+    fireEvent.click(confirm);
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+  });
+
+  it('WS-J.2.1d: a case held by ANOTHER reviewer offers no silent claim', async () => {
+    // The claim mutation overwrites the assignment and sends no reason, so the
+    // audit entry records the handover with `notes: null`.  Offering it here
+    // let any report reviewer quietly take a colleague's in-progress case —
+    // taking a case off someone is a reasoned reassignment, a different flow
+    // with a different record, and this control is not it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      assigned_to_id: '99999999-9999-4999-8999-999999999999',
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Assigned to another reviewer')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /take this case/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: a prior action can be reverted with the selected reason code', async () => {
+    const ACTION_ID = '00000000-0000-4000-8000-0000000000f1';
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: ACTION_ID,
+            action: 'hide',
+            reason_code: 'MOD_HARASS_001',
+            created_at: NOW,
+            reverted: false,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    vi.mocked(api.revertModerationAction).mockResolvedValue({
+      revert_action_id: '00000000-0000-4000-8000-0000000000f2',
+      reverted_action_id: ACTION_ID,
+      notice_sent: true,
+      created_at: NOW,
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    // Revert opens its OWN reason prompt rather than firing immediately with
+    // whatever the action palette happened to be showing.
+    fireEvent.click(await screen.findByRole('button', { name: /^revert$/i }));
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+    const dialog = await screen.findByText(/why is this action being undone/i);
+    expect(dialog).toBeInTheDocument();
+    // NO PRE-SELECTED REASON, and confirmation is refused until one is chosen.
+    // A default plus an enabled button is a reason the dialog can record
+    // without anyone deciding anything: open it on a mistaken spam sanction,
+    // click Revert, and the audit trail says harassment.  Asking the question
+    // is only asking it if an answer is required.
+    const confirm = screen.getByRole('button', { name: /^revert action$/i });
+    // `aria-disabled`, not the native attribute — the design system keeps a
+    // refused control focusable and announced — and the handler refuses the
+    // activation, so this is the real block and not just a label.
+    expect(confirm).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(confirm);
+    expect(api.revertModerationAction).not.toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: /reversal reason/i })).toHaveTextContent(
+      /choose a reason/i,
+    );
+    // Choose a reversal reason DIFFERENT from the palette's default, and assert
+    // that is what reaches the server: the server records this as the reason for
+    // the reversal, so inheriting the palette's `MOD_HARASS_001` would write a
+    // false justification into the action row and the audit trail.
+    await userEvent.click(screen.getByRole('combobox', { name: /reversal reason/i }));
+    await userEvent.click(screen.getByRole('option', { name: /MOD_SPAM_001/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^revert action$/i }));
+    await waitFor(() =>
+      expect(api.revertModerationAction).toHaveBeenCalledWith(ACTION_ID, 'MOD_SPAM_001'),
+    );
+    expect(await screen.findByText(/action reverted/i)).toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: an already-reverted action shows the badge and offers no second revert', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: '00000000-0000-4000-8000-0000000000f3',
+            action: 'warn',
+            reason_code: null,
+            created_at: NOW,
+            reverted: true,
+            reversible: true,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Reverted')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^revert$/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.3b: a NON-reversible action offers no control that could only fail', async () => {
+    // Bans, lawful-basis removals and the workflow verbs are recorded
+    // `reversible: false`, and `revertAction` refuses them with
+    // `not_reversible` — so a Revert button on them is a control whose only
+    // outcome is an error toast.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchCase).mockResolvedValue({
+      ...caseReview,
+      user_history: {
+        ...caseReview.user_history,
+        past_actions: [
+          {
+            action_id: '00000000-0000-4000-8000-0000000000f4',
+            action: 'suspend',
+            reason_code: 'MOD_HARASS_001',
+            created_at: NOW,
+            reverted: false,
+            reversible: false,
+          },
+        ],
+      },
+    });
+    render(<ModerationConsole />, { wrapper: Providers });
+    fireEvent.click(await screen.findByRole('button', { name: /MOD_HARASS_001/ }));
+    expect(await screen.findByText('Not reversible')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^revert$/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: the control INITIALISES from the server, not a local default', async () => {
+    // A fixed `available` default told a reviewer they were in the
+    // auto-assignment pool while `availableIds()` still excluded them, and
+    // opening the console did not correct it — the control stated the opposite
+    // of the truth for as long as the reviewer believed it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'offline' });
+    render(<ModerationConsole />, { wrapper: Providers });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+        'offline',
+      ),
+    );
+  });
+
+  it('WS-J.2.1d: a steward who cannot be assigned sees NO availability control', async () => {
+    // Both the status GET and its POST reject a steward who can reach neither
+    // the report nor the appeal queue — an evidence-only or integrity-only
+    // grant, which legitimately opens this console for its OWN tabs.  Rendering
+    // the control for them meant a 403 on open and a 403 on every change: a
+    // switch that can only fail.  The refusal IS the authorization answer, so
+    // nothing here re-derives the rule from `steward_roles` and drifts from it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(
+      new ApiClientError('forbidden', 'Your role cannot set a reviewer status.', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    // The console itself still renders — this steward has tabs of their own.
+    expect(await screen.findByRole('tab', { name: /integrity/i })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: a NON-403 read failure shows no interactive control', async () => {
+    // The gate keyed off `isLoading || isForbidden`, so it failed OPEN for
+    // everything that is not a 403: with `retry: false` a single 502 left the
+    // error in place and `?? 'offline'` rendered a CONFIDENT `offline` the server
+    // had never said — fully interactive — to a reviewer the server still had in
+    // the auto-assignment pool.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(
+      new ApiClientError('http_502', 'bad gateway', 502),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: a bare network reject is not an ApiClientError, and still closes', async () => {
+    // `fetch` rejects with a plain TypeError that never passes through
+    // `normalizeError`, so `isForbidden` is false and the old gate let it through.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    render(<ModerationConsole />, { wrapper: Providers });
+    expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+  });
+
+  it('WS-J.2.1d: OFFLINE renders no control and posts nothing', async () => {
+    // The case no flag-based predicate closes: the default `online` networkMode
+    // PAUSES the query, so `isLoading` is false AND `error` is null — the control
+    // rendered, was fully interactive, and the write was queued to replay on
+    // reconnect.  `isLoading` is `isPending && isFetching` and a paused query is
+    // pending-but-not-fetching, which is why the gate reads the DATA instead.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
+    onlineManager.setOnline(false);
+    try {
+      render(<ModerationConsole />, { wrapper: Providers });
+      expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+      expect(screen.queryByRole('combobox', { name: /my availability/i })).not.toBeInTheDocument();
+      expect(api.setReviewerStatus).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it('WS-J.2.1d: a successful write survives UNMOUNT — it reaches the cache, not local state', async () => {
+    // The write recorded the new value in a `useState`, so navigating away and
+    // back inside the 30 s staleTime re-rendered the stale cached GET with no
+    // refetch: the reviewer saw `available` while the server had them `offline`.
+    // ONE QueryClient across both renders — `Providers` builds a fresh one per
+    // render, so a naive remount test starts from an empty cache and passes for
+    // the wrong reason (it passes against the live bug).
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const Shared = ({ children }: { children: ReactNode }): React.ReactElement => (
+      <I18nProvider locale="en">
+        <QueryClientProvider client={client}>
+          <ToastProvider>{children}</ToastProvider>
+        </QueryClientProvider>
+      </I18nProvider>
+    );
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'offline' });
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    const first = render(<ModerationConsole />, { wrapper: Shared });
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole('combobox', { name: /my availability/i }));
+    await user.click(await screen.findByRole('option', { name: /available/i }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('available'));
+    first.unmount();
+    render(<ModerationConsole />, { wrapper: Shared });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+        'available',
+      ),
+    );
+  });
+
+  it('WS-J.2.1d: a change made after the network DROPS fails now, not on reconnect', async () => {
+    // The control is rendered from cached data, so it can still be on screen when
+    // connectivity goes.  Under the default `online` networkMode the write would be
+    // PAUSED and replayed by `resumePausedMutations` — the reviewer sees no error,
+    // and the write lands minutes later, or surfaces its 403 then.  `networkMode:
+    // 'always'` makes the attempt happen now so the existing error toast fires.
+    //
+    // The distinguishing assertion is that the mutation function RAN: a paused
+    // mutation never calls it.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'offline' });
+    vi.mocked(api.setReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    render(<ModerationConsole />, { wrapper: Providers });
+    const user = userEvent.setup();
+    const control = await screen.findByRole('combobox', { name: /my availability/i });
+    onlineManager.setOnline(false);
+    try {
+      await user.click(control);
+      await user.click(screen.getByRole('option', { name: 'busy' }));
+      await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+      expect(await screen.findByText(/could not update your availability/i)).toBeInTheDocument();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it('WS-J.2.1d: a FAILED post-write refetch does not roll the display back', async () => {
+    // Why the seed goes in BEFORE the invalidate.  react-query keeps the last data
+    // on a refetch error, so without `setQueryData` the display would fall back to
+    // the PRE-write value while the server had already accepted the new one — the
+    // control contradicting a write it had just made.
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'offline' });
+    vi.mocked(api.fetchReviewerStatus).mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await user.click(screen.getByRole('option', { name: 'busy' }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+    // The accepted value stands, even though the confirming read failed.
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy'),
+    );
+  });
+
+  it('WS-J.2.1d: availability posts the chosen status', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    // The display now comes from the CACHE, and a successful write invalidates it —
+    // so the mocked server has to agree with the write it just accepted.  Leaving
+    // it reporting `available` forever made the refetch contradict the POST, which
+    // is a mock inconsistency rather than a product defect.
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValueOnce({ status: 'available' });
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'busy' });
+    vi.mocked(api.setReviewerStatus).mockResolvedValue({ ok: true });
+    render(<ModerationConsole />, { wrapper: Providers });
+    // The design-system Select is a listbox combobox, not a native <select>.
+    await userEvent.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await userEvent.click(screen.getByRole('option', { name: 'busy' }));
+    await waitFor(() => expect(api.setReviewerStatus).toHaveBeenCalledWith('busy'));
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent('busy'),
+    );
+  });
+
+  it('WS-J.2.1d: a rejected availability change does not leave the control lying', async () => {
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchReviewerStatus).mockResolvedValue({ status: 'available' });
+    vi.mocked(api.setReviewerStatus).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    await userEvent.click(await screen.findByRole('combobox', { name: /my availability/i }));
+    await userEvent.click(screen.getByRole('option', { name: 'offline' }));
+    expect(await screen.findByText(/cannot set a reviewer status/i)).toBeInTheDocument();
+    // Still showing what the server actually believes, not the failed choice —
+    // this control is the only place a steward learns their own availability.
+    expect(screen.getByRole('combobox', { name: /my availability/i })).toHaveTextContent(
+      'available',
+    );
+  });
+
+  it('WS-J.2.5: the audit tab exports the transparency report VERBATIM', async () => {
+    savedBlobs.length = 0;
+    const report = {
+      generated_at: NOW,
+      period_start: '2026-04-01T00:00:00.000Z',
+      period_end: '2026-05-01T00:00:00.000Z',
+      suppression_threshold: 5,
+      by_action: [{ key: 'remove', count: 12, suppressed: false }],
+      by_reason_code: [{ key: 'MOD_HARASS_001', count: null, suppressed: true }],
+      by_severity: [{ key: 'moderate', count: 12, suppressed: false }],
+      total: { key: 'total', count: 12, suppressed: false },
+    };
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAudit).mockResolvedValue(auditList);
+    vi.mocked(api.exportAudit).mockResolvedValue(report);
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Audit log');
+    fireEvent.click(await screen.findByRole('button', { name: /export transparency report/i }));
+    await waitFor(() => expect(savedBlobs).toHaveLength(1));
+    const saved = savedBlobs[0];
+    if (!saved) throw new Error('no blob saved');
+    // The suppression flag must survive to the published file — an export that
+    // dropped it would publish a small cell as a plain absence.
+    const parsed: unknown = JSON.parse(await saved.blob.text());
+    expect(parsed).toEqual(report);
+    expect(saved.filename).toBe('moderation-transparency-2026-04-01-to-2026-05-01.json');
+  });
+
+  it('WS-J.2.5: a forbidden export says so instead of downloading an empty file', async () => {
+    savedBlobs.length = 0;
+    vi.mocked(api.fetchReportQueue).mockResolvedValue(queueWithCase);
+    vi.mocked(api.fetchAudit).mockResolvedValue(auditList);
+    vi.mocked(api.exportAudit).mockRejectedValue(
+      new ApiClientError('insufficient_capability', 'no', 403),
+    );
+    render(<ModerationConsole />, { wrapper: Providers });
+    tab('Audit log');
+    fireEvent.click(await screen.findByRole('button', { name: /export transparency report/i }));
+    expect(await screen.findByText(/cannot export the audit log/i)).toBeInTheDocument();
+    expect(savedBlobs).toHaveLength(0);
   });
 });

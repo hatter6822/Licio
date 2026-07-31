@@ -81,17 +81,76 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
 
     // the member is now enrolled → hooks present, build + filterVerified work
     const hooks = await memberMgr.hooks(EPOCH);
-    expect(hooks).toBeDefined();
+    if (!hooks) throw new Error('expected enrolled hooks');
     // Per-epoch bucket (-1) so the verify is clock-independent (the time-bucket window is
     // covered by poll-filter.test.ts). filterVerified returns the surviving candidate indices.
-    // biome-ignore lint/style/noNonNullAssertion: asserted defined
-    const cap = hooks!.build('room-blind', EPOCH, -1);
-    expect(cap).not.toBeNull();
-    // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.filterVerified([cap!], 'room-blind', EPOCH, -1, 0)).toEqual([0]);
+    const DIAL = new Uint8Array(32).fill(7); // the announcement's ephemeral signaling key
+    const cap = hooks.build('room-blind', EPOCH, -1, DIAL, 'dev-a');
+    if (!cap) throw new Error('expected a built cap');
+    const bound = { ...cap, signalingPublicKey: DIAL, peerDeviceId: 'dev-a' };
+    expect(hooks.filterVerified([bound], 'room-blind', EPOCH, -1, 0)).toEqual([0]);
     // a wrong-context verify drops it (the proof binds the room blind id)
-    // biome-ignore lint/style/noNonNullAssertion: cap built
-    expect(hooks!.filterVerified([cap!], 'other-room', EPOCH, -1, 0)).toEqual([]);
+    expect(hooks.filterVerified([bound], 'other-room', EPOCH, -1, 0)).toEqual([]);
+  });
+
+  it('a LIFTED cap cannot be re-published under another dial identity (no eviction)', async () => {
+    // The attack the binding closes.  Any member can poll, open an honest device's
+    // announcement, and lift its `(proof, pseudonym)` pair.  Dedup is by PSEUDONYM with
+    // first occurrence winning, so re-publishing that pair under the attacker's own dial
+    // info would take the honest device's one slot and evict it from discovery — a
+    // targeted eviction primitive available to every room member.
+    const engine = new FakeEngine();
+    const mgr = new RendezvousCapManager(memStorage());
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    const hooks = await mgr.hooks(EPOCH);
+    if (!hooks) throw new Error('expected enrolled hooks');
+
+    const HONEST_DEVICE = 'honest-dev';
+    const honestDial = new Uint8Array(32).fill(1);
+    const attackerDial = new Uint8Array(32).fill(2);
+    const honestCap = hooks.build('room-blind', EPOCH, -1, honestDial, HONEST_DEVICE);
+    if (!honestCap) throw new Error('expected a built cap');
+
+    // Bound to its own announcement: verifies.
+    expect(
+      hooks.filterVerified(
+        [{ ...honestCap, signalingPublicKey: honestDial, peerDeviceId: HONEST_DEVICE }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([0]);
+
+    // The SAME proof + pseudonym, re-published under the attacker's dial identity: the
+    // proof verifies against nothing, so it never reaches the dedup step and cannot
+    // occupy the honest device's slot.
+    expect(
+      hooks.filterVerified(
+        [{ ...honestCap, signalingPublicKey: attackerDial, peerDeviceId: HONEST_DEVICE }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([]);
+
+    // And with BOTH present — the attacker's lifted copy first, which is the ordering
+    // that would win the first-occurrence dedup — the honest record still survives.
+    expect(
+      hooks.filterVerified(
+        [
+          { ...honestCap, signalingPublicKey: attackerDial, peerDeviceId: HONEST_DEVICE },
+          { ...honestCap, signalingPublicKey: honestDial, peerDeviceId: HONEST_DEVICE },
+        ],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([1]);
   });
 
   it('a non-enrolled device gets no hooks (rides Tier-1)', async () => {
@@ -108,23 +167,86 @@ describe('RendezvousCapManager (carrier orchestration)', () => {
     await mgr.sync(ctxFor(engine, 'dev', true)); // install
     const hooks = await mgr.hooks(EPOCH);
     if (!hooks) throw new Error('expected enrolled hooks');
-    const valid = hooks.build('room-blind', EPOCH, -1);
-    if (!valid) throw new Error('expected a built cap');
+    const DIAL = new Uint8Array(32).fill(3);
+    const built = hooks.build('room-blind', EPOCH, -1, DIAL, 'flood-dev');
+    if (!built) throw new Error('expected a built cap');
+    const valid = { ...built, signalingPublicKey: DIAL, peerDeviceId: 'flood-dev' };
 
     // A hostile member floods malformed sealed caps around the one valid cap.  The OLD eager
     // decode threw out of the whole `.map` (a discovery DoS); the hardened filter SKIPS each
     // malformed cap and still returns the valid one's ORIGINAL index — and never throws.
     const batch = [
-      { proof: 'not-base64url!@#', pseudonym: '***' },
+      { proof: 'not-base64url!@#', pseudonym: '***', signalingPublicKey: DIAL, peerDeviceId: 'x' },
       valid,
-      { proof: 'AAAA', pseudonym: 'AAAA' }, // decodes but is the wrong length / not a valid point
-      { proof: '', pseudonym: '' },
+      // decodes but is the wrong length / not a valid point
+      { proof: 'AAAA', pseudonym: 'AAAA', signalingPublicKey: DIAL, peerDeviceId: 'x' },
+      { proof: '', pseudonym: '', signalingPublicKey: DIAL, peerDeviceId: 'x' },
     ];
     let survivors: number[] = [];
     expect(() => {
       survivors = hooks.filterVerified(batch, 'room-blind', EPOCH, -1, 0);
     }).not.toThrow();
     expect(survivors).toEqual([1]); // only the valid cap, at its original index 1
+  });
+
+  it('a cap cannot be re-sealed under a FORGED device id (dial-critical binding)', async () => {
+    // Binding the signalling key alone left this open: a hostile member opens an
+    // honest announcement, KEEPS its `signaling_public_key` so the proof still
+    // verifies, swaps `peer_device_id`, and re-seals under the room key with a
+    // later expiry.  `selectFreshestCandidates` dedups by the signalling key
+    // BEFORE cap verification, so the forgery replaces the honest record — and
+    // the dial then reaches the honest peer, fails the §15.5 claimed-device
+    // check, and cools down the honest device's deterministic key.  A cap that
+    // authorises a dial has to cover everything the dial acts on.
+    const engine = new FakeEngine();
+    const mgr = new RendezvousCapManager(memStorage());
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    await mgr.sync(ctxFor(engine, 'dev', true));
+    const hooks = await mgr.hooks(EPOCH);
+    if (!hooks) throw new Error('expected enrolled hooks');
+
+    const dial = new Uint8Array(32).fill(5);
+    const honest = hooks.build('room-blind', EPOCH, -1, dial, 'honest-dev');
+    if (!honest) throw new Error('expected a built cap');
+    // Its own announcement verifies…
+    expect(
+      hooks.filterVerified(
+        [{ ...honest, signalingPublicKey: dial, peerDeviceId: 'honest-dev' }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([0]);
+
+    // …and the SAME proof and pseudonym, under the SAME signalling key but a
+    // swapped device id, verifies against nothing — so it never reaches the
+    // dedup and cannot replace the honest record.
+    expect(
+      hooks.filterVerified(
+        [{ ...honest, signalingPublicKey: dial, peerDeviceId: 'attacker-dev' }],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([]);
+
+    // With BOTH present and the forgery first — the ordering that would win a
+    // first-occurrence dedup — the honest record still survives.
+    expect(
+      hooks.filterVerified(
+        [
+          { ...honest, signalingPublicKey: dial, peerDeviceId: 'attacker-dev' },
+          { ...honest, signalingPublicKey: dial, peerDeviceId: 'honest-dev' },
+        ],
+        'room-blind',
+        EPOCH,
+        -1,
+        0,
+      ),
+    ).toEqual([1]);
   });
 
   it('PR3b: memoizes load() so two concurrent first calls generate exactly ONE nid (PRIV-CAP-4)', async () => {

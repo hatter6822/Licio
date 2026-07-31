@@ -8,6 +8,10 @@
 //     chain is retained, and a deterministic tip is chosen on conflict;
 //   - a `tombstone` / `moderation_action` (`target_record_cid`) hides the whole
 //     logical contribution (the stricter visible state wins, §25.1);
+//   - an `edit` / `tombstone` is honoured ONLY over its own author's record;
+//     acting on another member's contribution is the `moderate` operation, i.e.
+//     a `moderation_action`.  A refused relation is retained and surfaced
+//     (`unauthorizedSupersedes`), never silently dropped (§25.2);
 //   - ordering follows the §12.4 precedence ladder, never trusting phone clocks
 //     for canonical order.
 // The projection output is independent of record arrival order.
@@ -164,12 +168,64 @@ export interface ProjectedContribution {
   readonly visibleCid: string;
   /** The latest visible version's record. */
   readonly record: ContributionEventRecordV2;
-  /** Every CID from root to tip (the full retained edit chain). */
+  /** Every CID on the VISIBLE path, root to tip — what a renderer walks. */
   readonly editChain: readonly string[];
+  /**
+   * Authorized edits of this contribution that `pickLatestEdit` passed over:
+   * present in the retained edit graph, absent from the visible path.
+   *
+   * §25.1 requires the full edit chain to be preserved, and with competing edits
+   * the retained structure is a graph rather than a path — so the losing variants
+   * had to appear somewhere or the guarantee held only while no two edits
+   * conflicted.  Sorted, so the projection stays arrival-order independent.
+   * Absent when nothing competed.
+   */
+  readonly supersededEdits?: readonly string[];
   /** True if the contribution is tombstoned/moderated out. */
   readonly hidden: boolean;
   /** The CID of the tombstone/moderation record, when hidden. */
   readonly hiddenBy?: string;
+  /**
+   * CIDs of `edit` / `tombstone` records that named a record in this chain but
+   * were authored by someone ELSE — refused (they never move the tip or hide the
+   * contribution) yet RETAINED here, because §25.2 forbids silently discarding
+   * conflicting evidence.  Sorted, so the projection stays arrival-order
+   * independent.
+   */
+  readonly unauthorizedSupersedes?: readonly string[];
+}
+
+/**
+ * A refusal whose TARGET this record set does not resolve — evidence with no
+ * contribution to hang off.
+ *
+ * `ownsTarget` records every refused supersession against the target it named, and
+ * the per-root walk surfaces those reachable from a projected chain.  On a PARTIAL
+ * replica the named target may not have arrived, so no root can reach the entry and
+ * the refusal was dropped from every output field — while §25.2 says conflicting
+ * evidence is never silently discarded, with no exception for a target that is
+ * merely absent.  These carry it until the target arrives and the projection
+ * re-runs over the larger set, at which point the refusal resolves normally.
+ */
+export interface UnresolvedSupersede {
+  /** The record the refused supersessions named, which this set does not resolve. */
+  readonly targetCid: string;
+  /** The refused `edit`/`tombstone` CIDs that named it. Sorted. */
+  readonly recordCids: readonly string[];
+}
+
+/**
+ * A projected thread: the visible contributions, plus the refusals that belong to
+ * no contribution here.
+ *
+ * The evidence rides in the RETURN rather than a sibling function a caller has to
+ * know to call — an unwired guarantee is the shape this defect had in the first
+ * place.
+ */
+export interface ThreadProjection {
+  readonly contributions: readonly ProjectedContribution[];
+  /** Sorted by `targetCid`. Empty when every refusal found its contribution. */
+  readonly unresolvedSupersedes: readonly UnresolvedSupersede[];
 }
 
 /**
@@ -195,14 +251,47 @@ function pickLatestEdit(edits: readonly ThreadRecord[]): ThreadRecord {
  * order.  Deterministic and arrival-order-independent: edit chains and
  * tombstones are resolved over the whole record set before ordering.
  */
-export function reduceThreadProjection(records: readonly ThreadRecord[]): ProjectedContribution[] {
+export function reduceThreadProjection(records: readonly ThreadRecord[]): ThreadProjection {
+  const byCid = new Map(records.map((r) => [r.recordCid, r]));
   const editsByTarget = new Map<string, ThreadRecord[]>();
   const tombstoneByTarget = new Map<string, string>();
+  /** Refused cross-author (or unresolvable) supersessions, keyed by the target they named. */
+  const refusedByTarget = new Map<string, string[]>();
   const roots: ThreadRecord[] = [];
+
+  /**
+   * May `r` supersede/hide `targetCid`?  Only when it authored the target.
+   * `replaces_record_cid` / `target_record_cid` are author-supplied CIDs and NOTHING
+   * upstream binds them to the actor: `capabilityAuthorizes` checks that the
+   * capability's subject is the record's OWN author and has no notion of the target's
+   * author, and neither `validateIdentityChain` nor `validate()` reads
+   * `replaces_record_cid` at all.  So without this check a signed, fully-`authorized`
+   * `edit` by member B over member A's post is indistinguishable from A's own edit and
+   * takes the visible tip — content replacement in the deterministic projection.
+   * Acting on ANOTHER member's contribution is the distinct `moderate` operation, i.e.
+   * a `moderation_action` record, which stays ungated below.
+   *
+   * Compare `author_account_id`, NOT `author_device_key_id`: a member legitimately
+   * edits from a second device.  A target absent from this record set leaves the
+   * relation unresolvable, so it cannot be honoured either.
+   */
+  const ownsTarget = (r: ThreadRecord, targetCid: string): boolean => {
+    const target = byCid.get(targetCid);
+    if (target !== undefined && target.record.author_account_id === r.record.author_account_id) {
+      return true;
+    }
+    // Retain the refused record instead of dropping it (§25.2: conflicting evidence
+    // stays inspectable); it is surfaced on the projection it tried to act on.
+    const refused = refusedByTarget.get(targetCid) ?? [];
+    refused.push(r.recordCid);
+    refusedByTarget.set(targetCid, refused);
+    return false;
+  };
 
   for (const r of records) {
     const eventType = r.record.event_type;
     if (eventType === 'edit' && r.record.replaces_record_cid) {
+      if (!ownsTarget(r, r.record.replaces_record_cid)) continue;
       const list = editsByTarget.get(r.record.replaces_record_cid) ?? [];
       list.push(r);
       editsByTarget.set(r.record.replaces_record_cid, list);
@@ -210,6 +299,9 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       (eventType === 'tombstone' || eventType === 'moderation_action') &&
       r.record.target_record_cid
     ) {
+      // `moderation_action` is the SANCTIONED cross-author path (the `moderate`
+      // capability operation), so only the `tombstone` half is ownership-gated.
+      if (eventType === 'tombstone' && !ownsTarget(r, r.record.target_record_cid)) continue;
       const existing = tombstoneByTarget.get(r.record.target_record_cid);
       // The deterministically-smallest tombstone CID wins (stricter state, §25.1).
       if (existing === undefined || r.recordCid < existing) {
@@ -220,6 +312,47 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
     }
   }
 
+  /** Refused CIDs that a root's walk actually reached (the rest are unresolved). */
+  const surfacedRefusals = new Set<string>();
+
+  /**
+   * The whole hostile chain hanging off some TARGET cids, transitively.
+   *
+   * Two kinds of edge, and the second is why this is a function rather than a loop
+   * over `refusedByTarget`.  From a target, the hostile records are the ones REFUSED
+   * against it.  From a refused record, they are also its AUTHORIZED descendants: a
+   * second edit by the same hostile author, aimed at their own already-refused edit,
+   * passes `ownsTarget` — its immediate target really is theirs — and lands in
+   * `editsByTarget` under a record that belongs to no authorized branch.  No root's
+   * chain reaches that key and the record was never refused, so it appeared in
+   * neither output field and half of the hostile chain went unrecorded.  A tombstone
+   * aimed at a refused record hides the same way, so both maps are followed.
+   *
+   * The `fromRefused` flag is load-bearing: following `editsByTarget` from the
+   * ANCHORS would pull the author's own legitimate edits into the refusal evidence,
+   * which is what `editChain` and `supersededEdits` are for.
+   */
+  const hostileChainFrom = (targets: Iterable<string>): Set<string> => {
+    const found = new Set<string>();
+    const frontier: Array<{ cid: string; fromRefused: boolean }> = [];
+    for (const cid of targets) frontier.push({ cid, fromRefused: false });
+    while (frontier.length > 0) {
+      const item = frontier.pop() as { cid: string; fromRefused: boolean };
+      const children = [...(refusedByTarget.get(item.cid) ?? [])];
+      if (item.fromRefused) {
+        for (const edit of editsByTarget.get(item.cid) ?? []) children.push(edit.recordCid);
+        const tomb = tombstoneByTarget.get(item.cid);
+        if (tomb !== undefined) children.push(tomb);
+      }
+
+      for (const child of children) {
+        if (found.has(child)) continue; // cycle guard
+        found.add(child);
+        frontier.push({ cid: child, fromRefused: true });
+      }
+    }
+    return found;
+  };
   const projectedByRoot = new Map<string, ProjectedContribution>();
   for (const root of roots) {
     const chain = [root.recordCid];
@@ -234,14 +367,71 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       chain.push(next.recordCid);
       tip = next;
     }
-    let hiddenBy: string | undefined;
-    for (const cid of chain) {
-      const tomb = tombstoneByTarget.get(cid);
-      if (tomb !== undefined) {
-        hiddenBy = tomb;
-        break;
+    // THE WHOLE AUTHORIZED EDIT GRAPH, not the visible path.  With competing
+    // authorized edits `pickLatestEdit` selects ONE branch, so a record aimed at
+    // a variant it did not select has a target CID absent from `chain` — and
+    // everything below that keys on `chain` silently forgot the conflict case it
+    // exists to handle.
+    const branch = new Set<string>([root.recordCid]);
+    const frontier = [root.recordCid];
+    while (frontier.length > 0) {
+      const cid = frontier.pop() as string;
+      for (const edit of editsByTarget.get(cid) ?? []) {
+        if (branch.has(edit.recordCid)) continue; // cycle guard
+        branch.add(edit.recordCid);
+        frontier.push(edit.recordCid);
       }
     }
+
+    // HIDING IS BRANCH-SCOPED, because §25.1's stricter visible state wins over
+    // the whole LOGICAL contribution — which is what this file's own header says
+    // a tombstone or moderation_action hides.
+    //
+    // Scoping it to the visible path was a moderation and deletion BYPASS, not a
+    // narrower reading.  An author posts `p`, edits it to `v1`, a moderator hides
+    // `v1`; the author then publishes a second authorized edit `v2` of `p` at a
+    // higher room-log seq.  The visible chain becomes [p, v2], `v1` is off-chain,
+    // and the moderation record disappeared from every output field — the content
+    // is readable again, by a move available to the moderated author alone.  The
+    // author's own `tombstone` aimed at the losing variant failed the same way, so
+    // an offline-plane deletion silently did nothing on any peer holding both
+    // variants.
+    //
+    // Deterministically the SMALLEST CID across the branch, matching how
+    // `tombstoneByTarget` already resolves competing tombstones of one target:
+    // stricter state wins, and which record gets the credit must not depend on
+    // arrival order.
+    let hiddenBy: string | undefined;
+    for (const cid of branch) {
+      const tomb = tombstoneByTarget.get(cid);
+      if (tomb !== undefined && (hiddenBy === undefined || tomb < hiddenBy)) hiddenBy = tomb;
+    }
+
+    // REFUSED records, TRANSITIVELY.  The walk seeds from the authorized graph
+    // plus the tombstone/moderation records acting on it — the full logical
+    // contribution — and then follows refusals of refusals: a hostile edit aimed
+    // at an already-refused hostile edit named a CID in none of those sets, so it
+    // was dropped, and whether a chain of hostile records survived depended on
+    // whether its earliest link happened to be authorized.  §25.2 is that
+    // conflicting evidence is never silently discarded, with no such condition.
+    const anchors = new Set<string>(branch);
+    for (const cid of branch) {
+      const tomb = tombstoneByTarget.get(cid);
+      if (tomb !== undefined) anchors.add(tomb);
+    }
+    const refusedSet = hostileChainFrom(anchors);
+    // Sorted, not in arrival order — this field is part of the projection output and
+    // the §25.2 guarantee is that the whole output is input-order independent.
+    const refused = [...refusedSet].sort();
+    for (const cid of refusedSet) surfacedRefusals.add(cid);
+
+    // THE LOSING AUTHORIZED EDITS.  `editChain` is the visible path, which is what
+    // a renderer needs; the variants `pickLatestEdit` passed over were computed
+    // here and then discarded, so §25.1's "preserve full edit chain" held only
+    // while no two edits competed.  They are the author's own records, so this is
+    // retention, not evidence of an attack — hence a field of their own rather
+    // than `unauthorizedSupersedes`.
+    const superseded = [...branch].filter((cid) => !seen.has(cid)).sort();
     projectedByRoot.set(root.recordCid, {
       rootCid: root.recordCid,
       visibleCid: tip.recordCid,
@@ -249,12 +439,35 @@ export function reduceThreadProjection(records: readonly ThreadRecord[]): Projec
       editChain: chain,
       hidden: hiddenBy !== undefined,
       ...(hiddenBy !== undefined ? { hiddenBy } : {}),
+      ...(refused.length > 0 ? { unauthorizedSupersedes: refused } : {}),
+      ...(superseded.length > 0 ? { supersededEdits: superseded } : {}),
     });
   }
 
-  // Order by the roots' display order so an edit never changes a contribution's
-  // position (the original post's place in the thread is stable).
-  return displayOrder(roots).map(
-    (root) => projectedByRoot.get(root.recordCid) as ProjectedContribution,
-  );
+  // WHAT NO ROOT COULD REACH.  Asking which refusals were SURFACED, rather than
+  // which targets look reachable, is what makes this exact: a target present in the
+  // set but itself dropped for an absent target of its own strands the refusals
+  // naming it just as thoroughly as a target that never arrived.
+  const unresolvedSupersedes: UnresolvedSupersede[] = [];
+  for (const targetCid of refusedByTarget.keys()) {
+    // The stranded target's WHOLE chain, not just the refusals named against it
+    // directly — a descendant of a stranded refusal is no more reachable than its
+    // parent, and reporting one without the other retains half the evidence.
+    const stranded = [...hostileChainFrom([targetCid])]
+      .filter((cid) => !surfacedRefusals.has(cid))
+      .sort();
+    if (stranded.length > 0) unresolvedSupersedes.push({ targetCid, recordCids: stranded });
+  }
+  // Sorted, like every other field here: the whole output is arrival-order
+  // independent or the §25.2 determinism guarantee is not one.
+  unresolvedSupersedes.sort((x, y) => (x.targetCid < y.targetCid ? -1 : 1));
+
+  return {
+    // Order by the roots' display order so an edit never changes a contribution's
+    // position (the original post's place in the thread is stable).
+    contributions: displayOrder(roots).map(
+      (root) => projectedByRoot.get(root.recordCid) as ProjectedContribution,
+    ),
+    unresolvedSupersedes,
+  };
 }

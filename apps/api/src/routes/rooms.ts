@@ -8,7 +8,6 @@
 // room join requests with steward decisions), and the SCOI lens read
 // (WS-G.2.4 — interpretation contexts, never scoreboards).
 import { randomUUID } from 'node:crypto';
-import { zValidator } from '@hono/zod-validator';
 import {
   lensCreateRequestSchema,
   lensPublicSchema,
@@ -31,6 +30,7 @@ import {
   roomSummarySchema,
   roomTypeSchema,
   roomVisibilityChangeRequestSchema,
+  roomVisibilityConflictSchema,
   storyLensesResponseSchema,
   uuidSchema,
 } from '@licio/shared';
@@ -66,6 +66,7 @@ import type { Role } from '../identity/rbac.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { readSessionToken, validateSession } from '../identity/sessions.js';
 import { getIngestionServices } from '../ingestion/services.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,
@@ -110,7 +111,17 @@ async function softUserContext(
   // read paths never run authMiddleware's account-state check, and a
   // suspended account's still-valid session must not keep member/steward/
   // admin visibility the authenticated routes would refuse it.
-  if (user?.accountState !== 'active') return { userId: null, roles: [] };
+  //
+  // `restricted` IS ADMITTED, because the restrict sanction costs the WRITE
+  // paths and not the account: `authMiddleware` lets it through, `/auth/status`
+  // reports it authenticated, and the member is allowed in precisely so they can
+  // read, appeal, and exercise data rights.  Collapsing it to anonymous here
+  // hid member-only lenses and steward state from a member who still holds
+  // both — the authenticated routes and this soft resolver disagreeing about
+  // the same account.  Suspended, deleted, and deactivated stay anonymous.
+  if (user?.accountState !== 'active' && user?.accountState !== 'restricted') {
+    return { userId: null, roles: [] };
+  }
   return { userId, roles: user.roles };
 }
 
@@ -383,17 +394,15 @@ export function createRoomsRoutes() {
         const summary = await toRoomSummary(forum, room, threadCount, userId, roles);
         const lenses = canReadContent ? await forum.lenses.listByRoom(roomId) : [];
         const stewards = await forum.rooms.listStewards(roomId);
+        // ONE read for the whole steward list, not a serial point lookup each:
+        // the batch getter already exists, and this is the room-shell path every
+        // visitor hits.  A steward whose account is gone is simply absent from
+        // the result and filtered out below, exactly as before.
         const resolveHandles = new Map<string, { handle: string; displayName: string | null }>();
-        for (const steward of stewards) {
-          if (!resolveHandles.has(steward.userId)) {
-            const user = await identity.store.getUser(steward.userId);
-            if (user) {
-              resolveHandles.set(steward.userId, {
-                handle: user.handle,
-                displayName: user.displayName,
-              });
-            }
-          }
+        for (const user of await identity.store.getUsersByIds(
+          stewards.map((steward) => steward.userId),
+        )) {
+          resolveHandles.set(user.userId, { handle: user.handle, displayName: user.displayName });
         }
         const subscription =
           userId !== null ? await forum.rooms.getSubscription(roomId, userId) : null;
@@ -596,9 +605,21 @@ export function createRoomsRoutes() {
             return c.json(deny('forbidden', 'Steward role required'), 403);
           }
           const requests = await forum.rooms.listJoinRequests(roomId);
+          // ONE read for the whole queue: the pending set is populated by third
+          // parties (any account may request to join), so its size is
+          // attacker-influenceable — a serial `getUser` per row turns a sock-
+          // puppet flood into thousands of round trips holding a pooled
+          // connection.  A requester whose account is gone is absent from the
+          // batch and skipped, exactly as the per-row `if (!user) continue` did.
+          const users = new Map(
+            (await identity.store.getUsersByIds(requests.map((r) => r.userId))).map((user) => [
+              user.userId,
+              user,
+            ]),
+          );
           const items = [];
           for (const request of requests) {
-            const user = await identity.store.getUser(request.userId);
+            const user = users.get(request.userId);
             if (!user) continue;
             items.push(
               roomJoinRequestPublicSchema.parse({
@@ -728,7 +749,22 @@ export function createRoomsRoutes() {
             roomId,
             c.req.valid('json').visibility,
           );
-          if (!outcome.ok) return c.json(deny(outcome.code, outcome.message), outcome.status);
+          if (!outcome.ok) {
+            // NAME the blockers.  The cascade identified every public story a
+            // tier-unique collision refused to contain precisely so a steward
+            // could resolve each one; serializing only `{ error }` handed back a
+            // count and no way to act on it.
+            if (outcome.code === 'duplicate_story') {
+              return c.json(
+                roomVisibilityConflictSchema.parse({
+                  ...deny(outcome.code, outcome.message),
+                  blocked_story_ids: outcome.blockedStoryIds,
+                }),
+                outcome.status,
+              );
+            }
+            return c.json(deny(outcome.code, outcome.message), outcome.status);
+          }
           return c.json({
             visibility: c.req.valid('json').visibility,
             converted: outcome.converted,

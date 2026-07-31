@@ -183,6 +183,32 @@ function virtualPath(path: string): string {
  * The project is torn down when `body` returns, so every handle it yields —
  * nodes, symbols, types — must be consumed inside it.  One project for the
  * whole batch: opening one per file is the cost that matters, not the files.
+ *
+ * ---
+ * WHERE THE `context canceled` LINES IN THE TEST OUTPUT COME FROM.
+ *
+ * `new API(...)` spawns the native (Go) compiler as a child process and
+ * `close()` destroys its stdio pipes and kills it.  That child's stderr is
+ * INHERITED — `typescript/dist/api/syncChannel.js` hard-codes
+ * `stdio: ['pipe', 'pipe', 'inherit']` — so on its way out it writes
+ * `context canceled` straight to ours.  One host per call means one spawn, one
+ * kill and (racily, under load) one stray line per batch: a
+ * `vitest --project policy` run prints a few hundred of them, interleaved with
+ * the test output.  They are the child's exit noise and nothing else — the
+ * gates and their tests are unaffected, which is why the count varies run to
+ * run while the results do not.
+ *
+ * It is not silenceable from here: the `stdio` triple is not configurable
+ * through the public API, and a child inherits fd 2 at spawn time, so no
+ * JS-side redirection reaches it.
+ *
+ * REUSING one host across calls WAS tried, and it is wrong.  The server keeps
+ * its own view of the (mutable) virtual tree, and neither removing the batch's
+ * files nor `api.clearSourceFileCache()` makes the next `updateSnapshot` see
+ * the new ones: 496 of the 1235 policy tests fail, i.e. gates silently judge
+ * the WRONG source.  A quieter log is not worth a gate that reads stale text,
+ * so the per-call host stays until the API offers a reusable one.  Tracked in
+ * `docs/planning/audit-residuals-2026-07.md`.
  */
 export function withParsedSources<T>(
   sources: readonly Source[],

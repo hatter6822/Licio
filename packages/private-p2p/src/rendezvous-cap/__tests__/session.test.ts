@@ -15,6 +15,9 @@ import {
   type VerifiablePresence,
 } from '../index.js';
 
+/** The announcement's dial identity a Tier-2 proof binds to (see `rendezvousPresentationHeader`). */
+const BIND = new Uint8Array(32).fill(9);
+
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 const ROOM = enc('room-blind-id');
 const NOW = 1_700_000_000_000;
@@ -35,7 +38,7 @@ describe('Tier-2 rendezvous-cap session', () => {
     enroll(alice, admin, EPOCH);
     enroll(bob, admin, EPOCH);
 
-    const presence = alice.announce(ROOM, EPOCH, BUCKET);
+    const presence = alice.announce(ROOM, EPOCH, BUCKET, BIND);
     expect(presence).not.toBeNull();
     // Bob (a peer holding the same issuer key) verifies Alice's announce client-side.
     const record: VerifiablePresence<string> = {
@@ -45,6 +48,7 @@ describe('Tier-2 rendezvous-cap session', () => {
       proof: presence!.proof,
       epoch: EPOCH,
       bucket: BUCKET,
+      binding: BIND,
       value: 'alice',
     };
     const issuerKey = bob.issuerKey(EPOCH);
@@ -69,7 +73,7 @@ describe('Tier-2 rendezvous-cap session', () => {
   it('a device not enrolled for an epoch announces nothing (rides Tier-1)', () => {
     const member = new RendezvousMember();
     expect(member.isEnrolled(EPOCH)).toBe(false);
-    expect(member.announce(ROOM, EPOCH, BUCKET)).toBeNull();
+    expect(member.announce(ROOM, EPOCH, BUCKET, BIND)).toBeNull();
   });
 
   it('a credential under a DIFFERENT issuer does not verify against this room', () => {
@@ -78,7 +82,7 @@ describe('Tier-2 rendezvous-cap session', () => {
     const outsider = new RendezvousMember();
     enroll(outsider, otherAdmin, EPOCH); // credentialed by a different issuer
 
-    const presence = outsider.announce(ROOM, EPOCH, BUCKET);
+    const presence = outsider.announce(ROOM, EPOCH, BUCKET, BIND);
     expect(presence).not.toBeNull();
     const record: VerifiablePresence<string> = {
       // biome-ignore lint/style/noNonNullAssertion: asserted not-null
@@ -87,6 +91,7 @@ describe('Tier-2 rendezvous-cap session', () => {
       proof: presence!.proof,
       epoch: EPOCH,
       bucket: BUCKET,
+      binding: BIND,
       value: 'outsider',
     };
     // verified against the ROOM admin's key → rejected
@@ -108,8 +113,8 @@ describe('Tier-2 rendezvous-cap session', () => {
     expect(member.isEnrolled(e1)).toBe(true);
     expect(member.isEnrolled(e2)).toBe(true);
     // a per-bucket pseudonym differs across epochs (independent issuer keys + contexts)
-    const p1 = member.announce(ROOM, e1, BUCKET);
-    const p2 = member.announce(ROOM, e2, BUCKET);
+    const p1 = member.announce(ROOM, e1, BUCKET, BIND);
+    const p2 = member.announce(ROOM, e2, BUCKET, BIND);
     const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
     // biome-ignore lint/style/noNonNullAssertion: both enrolled
     expect(hex(pseudonymToBytes(p1!.pseudonym))).not.toBe(hex(pseudonymToBytes(p2!.pseudonym)));
@@ -132,7 +137,7 @@ describe('Tier-2 issuer fromSeed (deterministic)', () => {
     // a derived issuer issues a usable credential
     const member = new RendezvousMember();
     member.installCredential('5', a1.issueForCommitment(member.commitment), a1.publicKey);
-    const presence = member.announce(enc('room'), '5', currentBucket(1_700_000_000_000));
+    const presence = member.announce(enc('room'), '5', currentBucket(1_700_000_000_000), BIND);
     expect(presence).not.toBeNull();
     expect(
       filterVerifiedPresence(
@@ -144,6 +149,7 @@ describe('Tier-2 issuer fromSeed (deterministic)', () => {
             proof: presence!.proof,
             epoch: '5',
             bucket: currentBucket(1_700_000_000_000),
+            binding: BIND,
             value: 'ok',
           },
         ],

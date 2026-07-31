@@ -13,7 +13,7 @@
 // serve a deterministic in-memory demo dataset (see `lib/demo-data.ts`) so the PWA
 // has stable, structurally honest content to render — clearly fixture data, never
 // a fabricated production source of truth.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   type AttentionIngestAck,
   attentionAggregateBatchSchema,
@@ -84,6 +84,7 @@ import { rateLimit } from '../lib/rate-limit.js';
 import { replyNotifications } from '../lib/reply-notifications.js';
 import { feedMediaOf } from '../lib/story-media.js';
 import { getUserSettingsStore } from '../lib/user-settings.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { serveFeed } from '../ranking/service.js';
 import { getRankingServices } from '../ranking/services.js';
@@ -323,11 +324,16 @@ export function createV1Routes() {
       // legacy WS-C demo fixture serves unchanged — clearly fixture data,
       // outside the ranking pipeline, and logged as demo serving.
       .get('/feed', zValidator('query', feedQuerySchema), async (c) => {
-        const ingestion = getIngestionServices();
-        const hasStories = (await ingestion.stories.listRecent(1)).length > 0;
         // Fixture serving is a DEV/TEST affordance only: a production boot with
-        // an empty store serves an empty feed, never demo data.
-        if (!hasStories && process.env['NODE_ENV'] !== 'production') {
+        // an empty store serves an empty feed, never demo data — so the FREE
+        // predicate gates the store read rather than the other way round, and a
+        // production feed request issues no query that cannot change its answer.
+        // (`listRecent` uses `.select()`, so it also drags the row's generated
+        // `search_tsv` back with it.)
+        if (
+          process.env['NODE_ENV'] !== 'production' &&
+          (await getIngestionServices().stories.listRecent(1)).length === 0
+        ) {
           const response: FeedResponse = { items: [...DEMO_FEED], nextCursor: null };
           return c.json(feedResponseSchema.parse(response));
         }

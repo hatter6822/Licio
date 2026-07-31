@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { AttentionAggregate } from '@licio/shared';
+import { type AttentionAggregate, sessionBucket } from '@licio/shared';
 import { describe, expect, it, vi } from 'vitest';
 import { AggregateUploader } from './aggregate.js';
 import { CadenceTracker } from './cadence.js';
@@ -126,6 +126,66 @@ describe('SignalProcessor collection gating', () => {
     });
     s.processor.setCollectionPolicy(ENABLED);
     expect(s.purgeQueuedAttention).toHaveBeenCalledTimes(1);
+  });
+
+  it('opt-out clears the cap / open / traversal trackers, so pre-opt-out attention never uploads after a re-opt-in', async () => {
+    const s = setup();
+    s.processor.setCollectionPolicy(ENABLED);
+    s.processor.setActiveStory(STORY);
+    s.accrue(60_000); // 60s of counted dwell
+    s.processor.recordSourceOpen('open-1', STORY);
+    s.advanceWall(10_000);
+    s.processor.recordSourceClose('open-1'); // a counted source open (>= 3s)
+    s.processor.recordReplyDepth(STORY, 2);
+    s.processor.setActiveStory(null);
+
+    // Opt OUT, then straight back IN. Everything captured before the opt-out must
+    // be gone — not just the buffers, but the three trackers `captureAggregate`
+    // reads (capped dwell, source/context opens, reply-depth traversal). The
+    // re-opted-in session starts from zero attention.
+    s.processor.setCollectionPolicy({
+      collect: false,
+      privacyLevel: 'standard',
+      identifier: 'privacy-bucket',
+    });
+    s.processor.setCollectionPolicy(ENABLED);
+
+    // Re-enter and leave the story WITHOUT accruing any new engaged time: there is
+    // nothing left to describe, so nothing may be buffered or uploaded.
+    s.processor.setActiveStory(STORY);
+    s.processor.setActiveStory(null);
+    expect(s.uploader.size).toBe(0);
+    await s.processor.flush();
+    expect(s.upload).not.toHaveBeenCalled();
+  });
+
+  it('ages the session bucket out while opted out, so a post-opt-in aggregate is never stamped with a stale session', async () => {
+    const s = setup();
+    s.processor.setCollectionPolicy(ENABLED);
+    s.processor.setCollectionPolicy({
+      collect: false,
+      privacyLevel: 'standard',
+      identifier: 'privacy-bucket',
+    });
+    // Six hours opted out. The 1 Hz tick still runs; it must roll the session
+    // bucket forward, or the first aggregate after re-opting-in would carry the
+    // bucket label from before the opt-out.
+    s.advanceWall(6 * 3_600_000);
+    s.processor.tick();
+
+    // Re-opt-in and capture through a path that needs NO tick of its own: a
+    // source open is committed on wall-clock time alone, so this aggregate is
+    // stamped with whatever `sessionBucketLabel` the opted-out period left behind.
+    s.processor.setCollectionPolicy(ENABLED);
+    s.processor.setActiveStory(STORY);
+    s.processor.recordSourceOpen('open-1', STORY);
+    s.advanceWall(10_000);
+    s.processor.recordSourceClose('open-1');
+    s.processor.setActiveStory(null);
+    await s.processor.flush();
+    expect(s.lastBatch()[0]?.session_bucket).toBe(
+      sessionBucket(Date.UTC(2026, 5, 9, 19, 0, 10), 3_600_000),
+    );
   });
 });
 

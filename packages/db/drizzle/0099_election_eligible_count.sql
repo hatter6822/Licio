@@ -1,0 +1,22 @@
+-- Freeze the steward-election turnout ELECTORATE at open.
+--
+-- `tallyElection` computes `turnout = distinctVoters / ctx.eligibleCount` and
+-- fails the election when `turnout < rules.minTurnout`.  That denominator was a
+-- LIVE read taken at settle (`forum.rooms.countEligibleVoters`, i.e. active
+-- subscribers ∪ stewards — a set any account can join or leave at will), so
+-- inflating room membership between the last ballot and the scheduler tick
+-- pushed turnout below the bar and failed an election that had in fact met it.
+-- The fail-safe then returns the incumbent, who receives a full new term: a
+-- cheap, unattributable way to keep a seat.
+--
+-- The sibling ratification path already does exactly this — `eligible_count` on
+-- `knomosis.ratification_vote`, "Freeze the turnout electorate at open (M4) —
+-- the settle tally divides by this, not a fresh membership read, so churn
+-- cannot flip the outcome".  Elections now match.
+--
+-- DEFAULT 0 for the backfill: an in-flight election opened before this column
+-- existed has no recorded electorate, and `tallyElection` already treats
+-- `eligibleCount === 0` as turnout 0 rather than dividing by zero.  The
+-- scheduler snapshots on every future open.
+ALTER TABLE "knomosis"."steward_election"
+  ADD COLUMN IF NOT EXISTS "eligible_count" integer NOT NULL DEFAULT 0;

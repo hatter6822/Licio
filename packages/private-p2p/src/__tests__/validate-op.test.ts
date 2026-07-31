@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildBodyAad, sealBody, wrapKey } from '../crypto/aead.js';
 import { canonicalizeRecord } from '../crypto/record-encoding.js';
-import { randomBytes, sha256, toBase64Url } from '../crypto/runtime.js';
+import { fromBase64Url, randomBytes, sha256, toBase64Url } from '../crypto/runtime.js';
 import { generateDeviceSigningKeyPair, signEnvelope } from '../crypto/signatures.js';
 import { deriveOpId } from '../reducer/op-id.js';
 import { reduceRoom } from '../reducer/reduce.js';
@@ -74,6 +74,19 @@ async function setup() {
     deviceIdForBlind: (b: string) => (b === blind ? 'founder-dev' : undefined),
   };
   return { device, roomIdCommitment, contentWrapKey, blind, sealParams, ctx };
+}
+
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/**
+ * A byte-distinct SPELLING of the same 64-byte Ed25519 signature.  86 unpadded
+ * base64url characters carry 516 bits, so the final character's 4 low bits are
+ * ignored on decode and 15 alternates decode identically.  The last character's
+ * top two bits are the real data, hence `idx & 0x30` is preserved.
+ */
+function nonCanonicalTwin(signature: string): string {
+  const idx = B64URL.indexOf(signature[signature.length - 1] as string);
+  return signature.slice(0, -1) + (B64URL[(idx & 0x30) | (((idx & 0x0f) + 1) % 16)] as string);
 }
 
 const memberAdd = (
@@ -233,6 +246,20 @@ describe('§14.2 stage-1 reject matrix', () => {
     // 'A' passes the loose base64url regex but is an invalid encoding length; the
     // wire-intake path must quarantine it, not let `fromBase64Url` throw.
     const result = await openOp({ ...env, signature: 'A' }, ctx);
+    expect(result).toMatchObject({ ok: false, reason: 'malformed_encoding' });
+  });
+
+  it('a non-canonical base64url signature → malformed_encoding (no fabricated fork)', async () => {
+    const { sealParams, ctx } = await setup();
+    const env = await sealOp(await mkOp(memberAdd('f', 'fd', 'admin')), sealParams);
+    const twin = nonCanonicalTwin(env.signature);
+    expect(twin).not.toBe(env.signature);
+    // The twin decodes to the SAME 64 bytes, so the signature itself still
+    // verifies and the op opens identically — only the canonical-encoding check
+    // stops the engine from reading it as "same op_id, different signed
+    // content" and quarantining the honest author's envelope as a device fork.
+    expect(fromBase64Url(twin)).toStrictEqual(fromBase64Url(env.signature));
+    const result = await openOp({ ...env, signature: twin }, ctx);
     expect(result).toMatchObject({ ok: false, reason: 'malformed_encoding' });
   });
 

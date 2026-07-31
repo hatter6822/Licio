@@ -224,7 +224,28 @@ export const credentialListResponseSchema = z
         })
         .strict(),
     ),
-    email: z.object({ present: z.boolean(), verified: z.boolean() }).strict(),
+    email: z
+      .object({
+        present: z.boolean(),
+        verified: z.boolean(),
+        /**
+         * A NEW address is staged, awaiting its confirmation code.
+         *
+         * The client needs this to survive a reload: the staged-change form was
+         * driven by component state alone, so refreshing the page left a member
+         * with a code in their inbox, no form to type it into, and no way back to
+         * one.  `verified` cannot stand in — changing an ALREADY-VERIFIED address
+         * keeps it true while the new address is pending.
+         *
+         * `.default(false)` rather than required, deliberately: both sides of this
+         * `.strict()` schema parse it (the route parses its own answer, and
+         * `fetchCredentials` parses the response), so a required field would fail
+         * at runtime with a green `tsc` if either side lagged — including a
+         * correct server answering a stale cached bundle.
+         */
+        change_pending: z.boolean().default(false),
+      })
+      .strict(),
     /** TOTP enrolment state (drives the two-factor management UI, WS-D.1.5). */
     totp: z.object({ enabled: z.boolean(), pending: z.boolean() }).strict(),
   })

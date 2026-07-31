@@ -7,8 +7,12 @@ the identity-free jurisdiction engine, sanctions screening, fraud/velocity
 detection, the financial-compliance case system, SAR/STR records, the lawful
 access process, risk disclosures, and compliance-grade retention.  The
 planning document is `docs/planning/15-compliance.md`; the doctrine artefacts
-are `docs/policy/JURISDICTION_MATRIX.md`, `docs/policy/PRIVACY_POLICY.md`, and
-`docs/policy/CRYPTO_ASSET_POLICY.md`.
+are `docs/policy/JURISDICTION_MATRIX.md`, `docs/policy/PRIVACY_REGULATION_MAP.md`,
+and `docs/policy/CRYPTO_FEATURE_MATRIX.md`.  (This list previously named
+`PRIVACY_POLICY.md` and `CRYPTO_ASSET_POLICY.md`, which exist nowhere — the
+artefacts are real, the names were not.  The counsel-authored POLICIES proper
+are a separate, still-empty set: WS-N ships fail-closed with zero policies
+populated until counsel writes them.)
 
 The load-bearing constraint is **SPEC §19.1 (identity-free service)**: the
 platform never reads, logs, or hashes a client network address, and there is

@@ -12,6 +12,7 @@ import type {
   StewardRoleId,
   UserAccountState,
 } from '@licio/shared';
+import { accountMayHoldSession } from '@licio/shared';
 import type { MiddlewareHandler } from 'hono';
 import { hasVerifiedCredential } from '../identity/auth-methods.js';
 import {
@@ -88,7 +89,7 @@ export function authMiddleware(
       // its public-contribution attempts are denied at the write routes (403
       // `account_restricted`), not here.  `suspended`/`deleted`/non-grace
       // `deactivated` are denied outright.
-      if (user.accountState !== 'active' && user.accountState !== 'restricted') {
+      if (!accountMayHoldSession(user.accountState)) {
         // A deactivated account in its deletion grace period may reach ONLY the
         // deletion cancel/status routes (so a no-email account can still cancel).
         const inGrace =

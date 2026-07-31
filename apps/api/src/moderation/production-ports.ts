@@ -9,6 +9,7 @@
 // Deps are narrow structural interfaces so the ports are unit-testable without
 // the full service container.
 import { randomUUID } from 'node:crypto';
+import type { DbExecutor } from '@licio/db';
 import {
   type Citation,
   type ContributionPublic,
@@ -65,15 +66,22 @@ export interface ContributionSnapshotInput {
   edits: ReadonlyArray<{ previousBody: string; editedAt: string }>;
 }
 
-export interface ContentPortDeps {
+/**
+ * The deps that WRITE — the enforcement itself.
+ *
+ * Split out from the reads because they alone need to be bindable to a handle.  Every one
+ * of them lands in the same Postgres (WS-E item-safety state, WS-G contributions, WS-F
+ * stories, WS-D accounts), so an enforcement CAN commit in the same transaction as the
+ * moderation record that describes it — but only if something can construct them over a
+ * transaction rather than reading them off a mutable service container.
+ *
+ * A container-backed binding cannot do that: it resolves whatever store the container
+ * happens to hold, which is by definition the autocommit one.  Naming the write set makes
+ * `(exec) => ContentEnforcementDeps` expressible, and that function is the whole
+ * difference between an enforcement that can join a unit of work and one that cannot.
+ */
+export interface ContentEnforcementDeps {
   safetyStore: ItemSafetyStateStore;
-  getStory(storyId: string): Promise<StorySlice | null>;
-  getContribution(contributionId: string): Promise<ContributionSlice | null>;
-  /** WS-J #23: resolve a thread report target → its story owner (or null). */
-  getThread?(threadId: string): Promise<{ submittedBy: string | null } | null>;
-  /** WS-J #17: whether the account exists (else an action against a deleted
-   *  account would no-op `setAccountState` and fail the notice FK as a 500). */
-  accountExists?(userId: string): Promise<boolean>;
   setContributionModerationState(
     contributionId: string,
     state: 'published' | 'hidden' | 'removed',
@@ -84,6 +92,22 @@ export interface ContentPortDeps {
    *  takedown). */
   setStoryHiddenState?(storyId: string, hiddenState: 'safety' | null): Promise<unknown>;
   setAccountState(userId: string, accountState: UserAccountState): Promise<unknown>;
+}
+
+/** Binds the enforcement writes to one executor — the base client for ordinary calls, an
+ *  open transaction inside a unit of work.  Supplied by the composition root, which is
+ *  the only place that knows all four domains; moderation declares the need and never
+ *  constructs another domain's stores itself. */
+export type ContentEnforcementOver = (exec: DbExecutor) => ContentEnforcementDeps;
+
+export interface ContentPortDeps extends ContentEnforcementDeps {
+  getStory(storyId: string): Promise<StorySlice | null>;
+  getContribution(contributionId: string): Promise<ContributionSlice | null>;
+  /** WS-J #23: resolve a thread report target → its story owner (or null). */
+  getThread?(threadId: string): Promise<{ submittedBy: string | null } | null>;
+  /** WS-J #17: whether the account exists (else an action against a deleted
+   *  account would no-op `setAccountState` and fail the notice FK as a 500). */
+  accountExists?(userId: string): Promise<boolean>;
   /** WS-J.2.2d: the reported contribution's body + edit history (or null). */
   getContributionSnapshot?(contributionId: string): Promise<ContributionSnapshotInput | null>;
   /** WS-J.2.2a: the thread context for the reported target, projected to the

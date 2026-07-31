@@ -13,7 +13,7 @@ import type {
   ModerationReasonCode,
 } from '@licio/shared';
 import type { ModerationServices } from './services.js';
-import type { ModerationNoticeRecord } from './stores.js';
+import type { ModerationNoticeRecord, ModerationNoticeStore } from './stores.js';
 
 /** Human-readable phrasing for an action's statement of reasons. */
 const ACTION_PHRASING: Readonly<Record<string, { title: string; verb: string }>> = {
@@ -68,16 +68,23 @@ export interface ActionNoticeInput {
   appealAvailableNote?: string | null;
 }
 
-/** Create + persist the statement-of-reasons notice for a significant action. */
+/**
+ * Create + persist the statement-of-reasons notice for a significant action.
+ *
+ * `store` defaults to the services' own, and is overridden with a unit's notice store by
+ * callers that write the notice INSIDE their unit — a rolled-back sanction must not leave
+ * the member holding a statement of reasons for something that did not happen.
+ */
 export async function createActionNotice(
   services: ModerationServices,
   input: ActionNoticeInput,
+  store: ModerationNoticeStore = services.notices,
 ): Promise<ModerationNoticeRecord> {
   const phrasing = ACTION_PHRASING[input.action] ?? {
     title: 'A moderation action was taken',
     verb: '',
   };
-  const notice = await services.notices.insert({
+  const notice = await store.insert({
     userId: input.userId,
     kind: 'action',
     actionId: input.actionId,
@@ -115,8 +122,9 @@ export interface AppealOutcomeNoticeInput {
 export async function createAppealOutcomeNotice(
   services: ModerationServices,
   input: AppealOutcomeNoticeInput,
+  store: ModerationNoticeStore = services.notices,
 ): Promise<ModerationNoticeRecord> {
-  const notice = await services.notices.insert({
+  const notice = await store.insert({
     userId: input.userId,
     kind: 'appeal_outcome',
     actionId: input.actionId,

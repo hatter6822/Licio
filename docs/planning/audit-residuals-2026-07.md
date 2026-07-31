@@ -42,12 +42,12 @@ All four items below are now FIXED (see the branch history). Kept here as a reco
 
 ## Export hygiene — the internal-only sweep
 
-**Tracked debt — 967 exported values used only inside their declaring file.**
+**Tracked debt — 726 exported values used only inside their declaring file.**
 `check:dead-exports` reports an exported value nothing references *anywhere*.
 The narrower question — "is the `export` keyword buying anything?" — is
 implemented in the same script (`findInternalOnlyExports`, surfaced by
 `pnpm survey:internal-exports`) but is **not** in CI, because the answer today
-is 967 declarations and they are not one defect repeated:
+is 726 declarations and they are not one defect repeated:
 
 | Share | Category | Is the export deliberate? |
 |-------|----------|---------------------------|
@@ -134,10 +134,10 @@ gate skipping it is a real blind spot: an entry nothing imports through the
 barrel is unused public surface.
 
 The enumeration now exists — `pnpm survey:barrel-reexports` (the resolver's
-`judgeRepublished`) — and reports **254** across the repository. It is NOT in
+`judgeRepublished`) — and reports **165** across the repository. It is NOT in
 CI, because the overwhelming majority are module barrels publishing their
-schemas and constants as the SSOT surface: 53 in `packages/lcap/src/schemas`,
-35 in `apps/web/src/offline`, 17 in `apps/web/src/update`. That is the same
+schemas and constants as the SSOT surface: 35 in `apps/web/src/offline`, 17 in
+`apps/web/src/update`, 16 in `apps/web/src/signals`. That is the same
 idiom the gate's own guidance names for `@licio/shared` and `@licio/db` —
 "whether or not a consumer exists today" — so failing CI on it would be failing
 on a convention, which is how a gate gets switched off rather than obeyed.
@@ -250,6 +250,103 @@ recorded here:
   for a role_class type) — NOT an unconditional runtime-mirror. `eligibleCount` is
   documented as ignored for a role_class fixture; a governance-package test locks
   in that only signer ballots count toward the signer-set quorum.
+
+- **Route-PAGE coverage** — the exclusion is fixed, the tests are partial.
+  `vitest.config.ts` excluded `apps/web/src/routes/**` wholesale, which
+  discarded ~5.8k lines of real page components (`routes/-pages/**`) AND the ten
+  page test files that already existed.  The exclusion is now narrowed to the
+  route SHELLS (`routes/*.tsx` — `createFileRoute` declarations), so the pages
+  are measured; the global gate still passes (branches 80.5%).  What the
+  measurement now SHOWS is the residual gap: `privacy-data.tsx` 2%, `profile.tsx` 10%,
+  `auth.tsx` 21%, `security.tsx` 24%, and `mode.tsx` / `offline.tsx` /
+  `private-rooms.tsx` at 0%.  `dev-simulator.tsx` (its production kill-branch),
+  `moderation.tsx`, `compliance-console.tsx` and the two safety pages now have
+  behavioural tests.
+  **Closure target:** the four low-coverage pages, `security.tsx` first — it is
+  the largest (194 statements) and hosts the MFA/session surfaces.
+
+- **WS-S mesh flake** — **FIXED**, and the quarantine is lifted.
+  Found by wiring `test:e2e:webrtc` into CI (it ran in no workflow, so all five
+  real-WebRTC specs had never executed; the first run also surfaced a dead codec stub
+  in the carrier spec, since fixed).  `private-mesh.realwebrtc.spec.ts` passed ~1 run
+  in 3 and was `test.fixme`'d.
+
+  **Mechanism** (instrumented per member, not inferred).  The §15.4 signal queue was
+  keyed on the RECIPIENT's ephemeral alone, and the drain is DELIVER-ONCE.  In a
+  3-peer mesh every member dials every other at once and each addresses the SAME
+  (freshest) announcement of the member it is dialling — so two offers land in ONE
+  queue.  The session that drains it can open only the one matching its channel key;
+  the other is dropped as un-openable AND the poll has already cleared it.  Not
+  delayed — destroyed.  That peer then burns its dial deadline against a view that has
+  moved on: the `skipped a signal` warnings, on the member everyone is dialling.
+
+  The old docstring asserted this could not happen ("gives every pairwise channel its
+  own queue").  It holds only while every session has its own recipient ephemeral,
+  which stops being true the moment two peers pick the same announcement — the ordinary
+  case in a mesh, since they all sort freshest-first.
+
+  **The fix.**  `deriveSignalAddress` is now PAIRWISE and DIRECTED, keyed on the
+  sender's signalling identity as well as the recipient's, so those two offers land in
+  different queues and neither is destroyed.  `deriveSignalingKeyPair` lands with it —
+  ONE signalling identity per device per `(room, epoch, bucket)`, derived from the
+  rendezvous key — which fixes the separate announcement fan-out (three live candidates
+  for one device; ~a dozen dead addresses a minute) and makes `connect-peer.ts`'s own
+  "one slot per device per bucket" true.  Which half carries the flake is MEASURED, not
+  assumed: the address change alone, with the old per-call ephemeral still in place,
+  passes the spec.  The identity change is only SAFE alongside it — with a
+  recipient-only address, one identity per device would give a device a single queue
+  shared by all its sessions, the worst case of the same bug.
+
+  **Measured (2026-07-29)** — the load condition is part of the result:
+
+  | | pre-fix | fixed |
+  |---|---|---|
+  | idle machine | 5/5 pass | 10/10 |
+  | under load | 0/2 pass | 13/14 |
+
+  "Under load" is three Chromium instances against a looping api+web vitest run (load
+  average 15-17), well beyond CI, which runs this suite alone with one worker.  The
+  flake does NOT reproduce idle, so an idle pass rate is not evidence either way — the
+  earlier 1-in-3 and 6-in-8 figures were both taken while heavy parallel suites ran.
+  The single under-load failure did not recur in a second six-run pass and its output
+  was not captured, so its cause is unestablished rather than explained.
+
+  Because any pass rate depends on the machine, the load-independent evidence is a
+  deterministic pair in `packages/private-p2p/src/__tests__/rendezvous.test.ts` ("a
+  SHARED signal queue destroys a third party's offer"), which exhibits the destruction
+  and its absence with no timing in it at all.
+
+  An earlier mitigation (dial the freshest candidate and RE-POLL rather than grinding a
+  stale list — PRIV-CARRIER-FRESH-VIEW) moved this from 1-in-3 to 6-in-8 and is kept:
+  still the right dial strategy, and it lowers the cost of a miss.  It did not remove
+  the mechanism, which is why it was a mitigation and this is the fix.
+
+  Rejected, with the property each would cost: keying the SERVER slot by
+  `peer_blind_id` restores one-slot-per-device but hands any current-epoch member a
+  targeted EVICTION vector — the sharper cousin of the DoS `selectFreshestCandidates`
+  refuses to enable (PRIV-CARRIER-FRESHEST-NOSPOOF); a CI retry count would hide the
+  defect rather than fix it.
+
+- **`context canceled` noise from the TypeScript 7 native host** — blocked
+  upstream. `new API(...)` in `scripts/ts-source.ts` /
+  `scripts/resolve-export-references.ts` spawns the Go compiler as a child whose
+  stderr is INHERITED (`typescript/dist/api/syncChannel.js` hard-codes
+  `stdio: ['pipe', 'pipe', 'inherit']`), and `close()` kills it — so it writes
+  `context canceled` to our stderr on the way out. A `vitest --project policy`
+  run prints a few hundred of them, interleaved with the test output; the count
+  varies run to run (it is a teardown race, worse under load) while the results
+  do not. Nothing is failing.
+  Not fixable from here: the `stdio` triple is not configurable through the
+  public API, and a child inherits fd 2 at spawn time, so no JS-side redirection
+  reaches it. **Reusing one host across calls was tried and rejected**: the
+  server keeps its own view of the mutable virtual tree, and neither removing
+  the batch's files nor `api.clearSourceFileCache()` makes the next
+  `updateSnapshot` see the new ones — 496 of 1235 policy tests fail, i.e. gates
+  judge the WRONG source. A quieter log is not worth a gate that reads stale
+  text.
+  **Closure target:** revisit when the TS 7 API exposes either child stdio
+  control or a host that can be reused across virtual-tree mutations; until
+  then the per-call host stays and the noise is documented at the call site.
 
 - **MFCI cheap-intake attribution** (`invariants/services.ts`): the window-global
   concentration statistic is attributed to the flagged item and pinned at `high`.
@@ -389,3 +486,191 @@ The BOUNDED guarantees these gates rest on are unaffected and stay enforced:
 `eval`/`Function` are never NAMED in first-party source, no unreadable key is
 taken off the global object, every file registering a mutation route is
 classified, and every `packages:` entry carries its own digest.
+
+## Deep audit 2026-07-28 — confirmed findings NOT yet fixed
+
+A three-workflow adversarial audit (201 agents; every finding independently
+re-derived by a verifier instructed to REFUTE it) raised 181 findings and
+confirmed 131.  Twenty-seven are fixed in the commits that introduced this
+section — the critical PWAtt fold-key defect, the three non-atomic bounds, the
+two schedulers that could kill the process, the two 23505 crashes and the
+missing index behind them, the initial-bundle regression and the size gate that
+could not see it, the missing `app.onError`, six classes of test that could not
+fail, the coverage exclusion that discarded 5.8k lines of page components, and
+the documentation drift.
+
+The 104 below are CONFIRMED and open.  They are listed at the granularity the
+audit produced so each is actionable on its own; the ordering inside each group
+is by severity.  Nothing here is speculative — every one names a file, a line
+and a reachable failure.
+
+**Read the HIGH items first.**  The four governance/treasury ones are a single
+theme (a bound computed at settle from live state that a voter can move after
+ballots are cast, and delegated weight that can be consumed twice), and they
+need a hand-authored migration each to snapshot the basis at open — the WS-U
+ratification path already does exactly that and is the model to copy.
+
+### Governance + treasury correctness
+
+- ~~**[HIGH]** `apps/api/src/treasury/proposals.ts:898` — Delegated voting weight is counted twice when one member splits an `all` and a `type:` delegation across two different delegates~~ — **FIXED**
+- ~~**[HIGH]** `apps/api/src/treasury/proposals.ts:881` — Revoking a delegation after the delegate has voted lets the delegator cast the same unit a second time~~ — **FIXED**.  Both were one defect wearing two faces: the outgoing and incoming guards were asking different questions about the same fact.  `delegatorsAlreadyConsumed` is now the single predicate both call, and it reads EVERY delegation state (`listByDelegator`) rather than only `active`.
+- ~~**[HIGH]** `apps/api/src/governance/service.ts:563` — Steward-election turnout denominator is read live at settle~~ — **FIXED** (migration 0099 freezes it at open)
+- ~~**[HIGH]** `apps/api/src/treasury/proposals.ts:278` — WS-M proposal quorum denominator is recomputed at settle~~ — **FIXED** (migration 0100 freezes it at the `deliberation → open` transition)
+- **[MEDIUM]** `apps/api/src/treasury/proposals.ts:828` — The `reputation_bounded` weight model always resolves weight 0, so every proposal in a room that adopts it is rejected
+- **[MEDIUM]** `apps/api/src/treasury/intents.ts:1009` — A grant with any rejected milestone can never reach `paid`, permanently blocking the recipient's last wallet unlink
+
+### Untested security deny-paths
+
+- **[HIGH]** `apps/api/src/identity/__tests__/software-authenticator.ts:119` — WebAuthn `requireUserVerification: true` cannot fail — every test fixture hard-codes the UV flag
+- **[MEDIUM]** `apps/api/src/__tests__/csrf.test.ts:327` — `RedisTokenStore.consume` — the PRODUCTION single-use CSRF path — is never called by any test
+- **[MEDIUM]** `apps/api/src/__tests__/auth-extended.test.ts:315` — The per-account auth lockout (429 + Retry-After) is never exercised at any /v1/auth route
+- **[MEDIUM]** `apps/web/src/offline/draft-crypto.test.ts:21` — AES-GCM IV uniqueness in draft encryption is never asserted — a fixed nonce would keep every test green
+- **[MEDIUM]** `packages/shared/src/__tests__/env.test.ts:69` — Two of seven all-or-none env groups (EMBEDDING, COMPLIANCE_SCREENING) have no partial-group test
+- **[LOW]** `apps/api/src/__tests__/cors.test.ts:34` — Nothing asserts the dev-only `http://localhost:5173` origin is absent in production — it feeds both CORS and the CSRF Origin allowlist
+- **[LOW]** `packages/shared/src/__tests__/ugc-render.test.ts:47` — The UGC sanitizer's attribute/URI configuration is never given hostile input — only its tag allow-list is tested
+- **[LOW]** `apps/api/src/identity/__tests__/siwe.test.ts:232` — SIWE nonce burn on a MALFORMED message — the deliberate pre-validation `take` — is untested
+- **[LOW]** `apps/api/src/identity/__tests__/siwe.test.ts:165` — SIWE `notBefore` in the future is never tested — only the `issuedAt` skew branch is
+
+### E2E fidelity
+
+- **[HIGH]** `.github/workflows/ci.yml:246` — The three WS-S launch-gate real-WebRTC specs are never executed by any CI job
+- **[MEDIUM]** `apps/web/playwright.config.ts:44` — The frontend-only Playwright suite asserts against 502 'Loading…' skeletons — the front-page and Rooms WCAG gates cover no product content
+- **[MEDIUM]** `apps/web/e2e/routing.spec.ts:47` — The not-found routing test asserts only the app-shell nav, which is present on every route
+- **[MEDIUM]** `apps/api/src/routes/private-rendezvous.ts:87` — The E2E harness multiplies the WS-S rendezvous rate limits by 50, so the private-room specs never meet the production budgets
+- **[LOW]** `apps/web/e2e/comments.bff.spec.ts:14` — comments.bff.spec.ts is the designated WS-T comment-flow E2E and never posts a comment
+- **[LOW]** `apps/web/e2e/routing.spec.ts:56` — smoke.test.ts and routing.spec.ts drop the wcag21aa tag every other spec includes
+
+### Coverage-gate honesty
+
+- **[HIGH]** `vitest.config.ts:33` — `**/index.ts` is an unexplained blanket that removes five entire WS-H invariant implementations — including the anti-gaming detectors — from coverage
+- **[HIGH]** `vitest.config.ts:15` — `scripts/**` — 15,067 lines of CI static-gate logic with 24 test files — is absent from coverage.include, so the enforcement layer for the project's ABSOLUTE invariants is never measured
+- **[LOW]** `apps/web/vitest.config.ts:11` — Every workspace-local vitest.config.ts omits the coverage block, so `pnpm --filter <ws> test --coverage` prints a number and always exits 0
+- **[LOW]** `vitest.config.ts:54` — `apps/api/src/knomosis/redis-stores.ts` is the one gated infrastructure adapter left in the denominator, and no test — unit or gated — ever loads it
+
+### Dead / unwired code
+
+- **[HIGH]** `apps/api/src/knomosis/reconciliation.ts:459` — WS-L §28.3 treasury-expansion gate `canExpandTreasury` has zero production call sites — five sibling comments reason about it as if it were live
+- **[MEDIUM]** `apps/api/src/treasury/treasury-reconciliation.ts:221` — WS-M §28.3 gate `canExpandWsmTreasury` is dead while `readiness.ts` re-implements its predicate inline
+- **[MEDIUM]** `apps/web/src/lib/safety-api.ts:183` — Four moderation-console client calls with live server routes are unreachable from any UI — the console cannot assign a case, revert an action, set reviewer status, or export the audit
+- **[LOW]** `apps/api/src/pwatt/shadow.ts:3` — `pwatt/shadow.ts` claims `rankFrontPageV0` is the WS-I safe fallback's ordering, but the served fallback uses `chronologicalOrder` and the shadow boundary never runs on any request path
+- **[LOW]** `apps/api/src/ai-governance/wiring.ts:127` — The WS-K §24.5 governance-advisory pipeline (`governance-ai.ts`, 247 lines) is reachable from no route — its dependency builder `buildGovernanceAiDeps` is the only wiring builder with no production caller
+- **[LOW]** `apps/api/src/ai-governance/summaries.ts:118` — WS-K thread summaries can be reported but never generated: `generateThreadSummary` has no production caller while `reportSummary` from the same module is routed
+- **[LOW]** `packages/shared/src/env/client.ts:38` — `VITE_LCAP_NETWORK_ID` is read at runtime but absent from `clientEnvSchema`, so it is silently unvalidated
+
+### Redundancy + duplicated sources of truth
+
+- **[HIGH]** `scripts/check-no-applause.ts:34` — Two spellings of the applause denylist: `check:no-applause` misses every snake_case wire field the `check-lcap-schema-egress` list catches
+- **[HIGH]** `scripts/private-p2p-gates.ts:44` — Five hand-rolled `stripComments` beside the parser-based SSOT — the private-p2p gate copy reports the WRONG source line
+- **[MEDIUM]** `apps/web/src/lcap/db.ts:152` — Copy-pasted IndexedDB opener lost its `versionchange` fix in the LCAP copy — the memoised connection is never dropped
+- **[LOW]** `apps/web/src/lib/governance-download.ts:20` — Five implementations of canonical JSON, provably disagreeing, including a verbatim inline copy in apps/web that is load-bearing for member bundle verification
+- **[LOW]** `scripts/knomosis-pin-checks.ts:24` — `KNOMOSIS_SIGNED_ACTION_TYPES` re-spelled in the CI pin gate, under a header claiming the gate imports the app's schema
+- **[LOW]** `packages/shared/src/utils/url.ts:126` — `MAX_URL_LENGTH` is the documented URL bound but every production consumer spells the literal `2048`
+- **[LOW]** `packages/shared/src/schemas/contribution.ts:256` — `MAX_CONTRIBUTION_BODY_WIRE_LENGTH` is documented as derived from the per-type caps but hard-codes 5_000, which `contributionUpdateSchema` then spells a third time
+- **[LOW]** `packages/shared/src/constants/moderation.ts:72` — The moderation SSOT points at a drift test that does not exist under that name
+
+### Server performance (N+1, missing indexes, unbounded work)
+
+- **[HIGH]** `apps/api/src/ranking/retrievers.ts:270` — Feed serving path issues one query per candidate story across four retrievers (~1500 sequential round-trips per /v1/feed request)
+- **[HIGH]** `apps/api/src/events/drizzle-event-stores.ts:678` — `invariantStore.latest()` has no index supporting its ORDER BY; every call sorts a story's full year of invariant rows
+- **[HIGH]** `apps/api/src/routes/forum.ts:314` — /v1/threads directory scan: three uncached queries per scanned thread, up to 15,000 per page request
+- **[MEDIUM]** `apps/api/src/ranking/features.ts:300` — `attentionVelocity` loads a target's ENTIRE invariant-output history to find one previous window
+- **[MEDIUM]** `apps/api/src/forum/comments.ts:146` — Comment page fetches the reply forest one parent at a time — 200 queries per /stories/:id/comments request
+- **[MEDIUM]** `apps/api/src/routes/invariants-admin.ts:185` — Admin invariant dashboards full-table-scan `invariant_outputs` into the Node heap
+- **[MEDIUM]** `apps/api/src/routes/forum.ts:174` — `makeAuthorResolver` documents "no N+1 on a 50-row page" but issues one getUser per distinct author
+- **[MEDIUM]** `apps/api/src/ranking/retrievers.ts:222` — Five identical `stories.listRecent()` scans per feed serve, each transferring the generated tsvector column
+- **[MEDIUM]** `apps/api/src/ranking/services.ts:175` — The user's 30-day attention history is re-queried three times per feed serve, with no supporting composite index
+- **[MEDIUM]** `apps/api/src/ingestion/drizzle-ingestion-stores.ts:1061` — MinHash candidate retrieval has no LIMIT — a hot LSH band degenerates the "sub-linear" dedup screen
+- **[MEDIUM]** `apps/api/src/treasury/scheduler.ts:57` — Treasury scheduler sweeps every room per tick with per-room queries, and one failure aborts the remainder
+- **[LOW]** `apps/api/src/lcap/routes.ts:658` — LCAP /exchange: one request drives up to 4096 sequential single-row DB probes (remote amplification DoS)
+- **[LOW]** `apps/api/src/routes/rooms.ts:600` — /rooms/:roomId/join-requests: unbounded SELECT plus one user lookup per pending request
+- **[LOW]** `apps/api/src/events/retention.ts:139` — Retention sweep runs one to two statements per identifiable owner, serially, over an unbounded owner list
+- **[LOW]** `apps/api/src/pwatt/scoring.ts:666` — PWAtt scoring resolves one user per actor per item and does a linear `find` inside the actor loop
+- **[LOW]** `apps/api/src/routes/v1.ts:327` — /v1/feed pays a stories query on every production request purely to gate a DEV-only fixture path
+
+### Documentation drift
+
+- **[HIGH]** `CLAUDE.md:290` — CLAUDE.md claims apps/web loads `@licio/lcap` by dynamic import only and that split gates enforce it; no such gate exists and the tree is full of static value imports
+- **[LOW]** `CLAUDE.md:805` — CLAUDE.md's stated test counts are stale to the point of inversion: the "with live Postgres/Redis" figure is now lower than the measured bare-run figure
+- **[LOW]** `CLAUDE.md:395` — The export-hygiene debt counts in CLAUDE.md and docs/planning/audit-residuals-2026-07.md are stale by 13% and 35%
+- **[LOW]** `CLAUDE.md:601` — Six rows of CLAUDE.md's Key dependencies table name version ranges the workspaces no longer declare
+
+### WS-S private-plane crypto
+
+- **[MEDIUM]** `packages/private-p2p/src/rendezvous-cap/credential.ts:221` — Tier-2 rendezvous presence proof is not bound to the announcement it rides in, so any member can lift an honest device's cap and evict it from discovery
+- **[MEDIUM]** `packages/private-p2p/src/reducer/validate-op.ts:213` — `envelope.signature` accepts non-canonical base64url, so 15 byte-distinct envelopes verify for one op and are misreported as a device fork
+- **[MEDIUM]** `apps/web/src/private-p2p/connect-peer.ts:347` — The §15.3.2 announce-jitter, cover-record and risk-tier discovery mitigations have no runtime consumer, so the rendezvous server sees an exact, un-decoyed, synchronized per-room online-device count
+- **[LOW]** `packages/private-p2p/src/crypto/bbs/blind.ts:244` — An over-long Tier-2 credential passes install-time verification but makes every announce THROW, hard-failing the whole dial instead of degrading to Tier-1
+
+### WS-R LCAP codec + checkpoint
+
+- **[MEDIUM]** `packages/lcap/src/validate/validate.ts:250` — validate() binds a checkpoint inclusion proof to the record's room using the UNSIGNED proof.room_id, so any room authority can elevate another room's record to `checkpointed`
+- **[MEDIUM]** `packages/lcap/src/records/projection.ts:205` — reduceThreadProjection accepts an `edit` from ANY author, so a room member can replace another member's contribution content in the deterministic visible projection
+
+### Authentication / authorization
+
+- **[MEDIUM]** `apps/api/src/routes/auth-support.ts:124` — A `restricted` account can never mint a session, so the WS-J restrict sanction locks the user out of the appeal path the middleware promises them
+- **[MEDIUM]** `apps/api/src/routes/auth-register.ts:281` — POST /v1/auth/register is an account-existence oracle: the duplicate-email branch returns the same body but omits the session cookie the new-account branch sets
+- **[MEDIUM]** `apps/api/src/ai-governance/summaries.ts:239` — POST /v1/ai/summaries/:id/report and /v1/ai/translations/:id/report let one authenticated account insert unbounded rows into the steward review queue
+
+### Injection, SSRF, database
+
+- **[MEDIUM]** `apps/api/src/ingestion/search.ts:65` — Search cursor `created_at` is validated with Date.parse, which accepts strings Postgres's ::timestamptz rejects — unauthenticated 500 on GET /v1/search
+- **[LOW]** `apps/api/src/forum/drizzle-forum-stores.ts:849` — Room-directory search escapes LIKE wildcards but not the escape character, so a caller can inject `%` wildcards
+- **[LOW]** `apps/api/src/ingestion/robots.ts:77` — An empty `User-agent:` value in robots.txt out-ranks the `*` group, so the crawler fetches paths the publisher disallowed
+
+### Privacy + egress (including gate holes)
+
+- **[MEDIUM]** `apps/web/src/signals/processor.ts:109` — Turning personalization OFF does not clear the dwell-cap / source-open / traversal trackers, so pre-opt-out attention is uploaded after re-opt-in
+- **[MEDIUM]** `scripts/check-no-raw-egress.ts:141` — check:no-raw-egress BFF-import allowlist only matches named imports — a namespace or dynamic import of lib/api evades it entirely
+- **[MEDIUM]** `scripts/check-no-raw-egress.ts:115` — Gate comment-stripping blanks source from a `/*` inside a string literal to the next `*/`, hiding an egress call in between
+- **[LOW]** `scripts/private-p2p-gates.ts:281` — The private-plane egress gates never scan apps/api/src/private-rendezvous/ — the server-blind rendezvous module
+- **[LOW]** `packages/db/src/private-room-guard.ts:52` — The private-room server-table allowlist is a hand-maintained two-table list, so a third private-room table is never checked
+
+### Invariants + ranking math
+
+- **[MEDIUM]** `packages/ranking/src/pipeline.ts:145` — The ranking profile's freshness decay curves — and the §11.5 sensitive-content conservative curve — are dead code for every story that has a stored `freshness_decay`
+- **[MEDIUM]** `apps/api/src/ranking/features.ts:354` — The bounded near-duplicate BFS assigns DIFFERENT cluster keys to members of one connected component, so `meri_max_per_cluster` can be exceeded many times over
+- **[LOW]** `packages/invariants/src/pwatt/v1-components.ts:233` — `actorV1Contribution` violates its documented monotonicity when the citation bonus is applied to an already-saturated per-type value
+
+### Fail-closed posture / configuration
+
+- **[MEDIUM]** `apps/api/src/routes/stories.ts:290` — POST /v1/takedowns is public, unauthenticated and CSRF-exempt but has no body cap, unlike every sibling in that class
+- **[LOW]** `apps/api/src/ai-governance/llm/provider.ts:419` — The Anthropic SDK client is constructed with no logger, so it logs through console — bypassing pino, and dumping governed-room content when ANTHROPIC_LOG is set
+
+### Tests that cannot fail
+
+- **[MEDIUM]** `apps/api/src/__tests__/moderation-review.test.ts:186` — buildReportQueue severity / date-window / status filters are called and never asserted — the moderation queue can drop all three filters and 289 moderation tests stay green
+- **[MEDIUM]** `apps/api/src/__tests__/treasury-integration.test.ts:1131` — `countQualifyingByRoomActor(...) >= 0` is the only assertion on the governance-eligibility contribution count, in the only test that exercises its Drizzle SQL
+- **[LOW]** `apps/web/src/__tests__/query-client.test.ts:26` — The exponential-backoff assertions sit inside `if (typeof retryDelay === 'function')` — deleting retryDelay from the query client entirely leaves all 8 tests green
+
+### Flaky / order-dependent tests
+
+- **[MEDIUM]** `apps/api/src/__tests__/forum-integration.test.ts:634` — DSAR 'oldest first' ordering is asserted with a one-element array, so the ORDER BY is untested
+- **[MEDIUM]** `apps/web/src/components/lcap/OfflineBundlePanel/OfflineBundlePanel.test.tsx:156` — OfflineBundlePanel private-room tests accumulate real rooms in shared IndexedDB; only the LCAP connection is reset
+- **[MEDIUM]** `apps/api/src/events/__tests__/redis-event-stores.integration.test.ts:53` — Live-Redis latency budget of 5 ms average asserted against a container round-trip
+- **[LOW]** `apps/api/src/__tests__/treasury-integration.test.ts:297` — Five live-Postgres treasury adapter tests FK-depend on a row inserted inside another `it()`
+- **[LOW]** `apps/api/src/__tests__/compliance-integration.test.ts:1142` — Redis pub/sub subscription registration awaited with a fixed 200 ms sleep before publishing
+
+### Client performance
+
+- **[MEDIUM]** `apps/web/src/components/story/StoryMedia/StoryMedia.tsx:66` — Feed and comment images reserve no space — no width/height and no aspect-ratio box on the LCP surface
+- **[LOW]** `apps/web/src/offline/read-through.ts:189` — The story-comments snapshot store has a time sweep but no count or byte cap, so it can grow until the browser evicts the origin
+
+### API shape + error handling
+
+- **[MEDIUM]** `packages/shared/src/schemas/common.ts:43` — ~300 `zValidator` call sites with no hook: every request-validation failure returns a body that violates `apiErrorSchema`, whose own docstring claims otherwise
+- **[MEDIUM]** `apps/api/src/lib/rate-limit.ts:44` — The shared `rateLimit` middleware returns a string-valued error body, so the sign-in and security pages' `case 'rate_limited'` branch can never match it
+- **[MEDIUM]** `apps/api/src/routes/auth-register.ts:299` — `await services.mailer.sendCode(...)` is unguarded on four auth routes — asymmetric with the sibling login route that deliberately fire-and-forgets — so an SES hiccup 500s registration after the account row is already created
+- **[LOW]** `apps/api/src/index.ts:1906` — The only writer to the WS-K moderation-decision transparency log swallows every failure, contradicting the "record every decided in-room moderation" guarantee two lines above it
+- **[LOW]** `apps/api/src/routes/room-governance.ts:412` — `GET /rooms/:roomId/governance/proposals/:proposalId` is the one proposal path that skips the egress schema its four siblings apply
+- **[LOW]** `apps/web/src/lib/wallet-api.ts:84` — `requestWalletUnlink` throws a raw `ZodError` where every other client call path throws `ApiClientError`, and the wallet UI renders `error.message` verbatim
+- **[LOW]** `apps/api/src/routes/treasury-governance.ts:107` — `tgError` types its context as `{ json: (body: unknown, status: never) => Response }`, erasing the RPC contract for ~20 treasury-governance error branches
+- **[LOW]** `apps/api/src/routes/moderation-console.ts:790` — `PATCH /moderation/config` invents a sixth error shape (`fields: [{key, message}]`) for a validation failure the contract already has a channel for
+- **[LOW]** `apps/api/src/routes/room-governance.ts:170` — `toWireProductionProposal` widens two DB values into narrower wire unions with `as`, disabling the compile error that would catch a future union divergence
+- **[LOW]** `apps/web/src/lib/api.ts:710` — `existingStoryId` is written and read on `ApiClientError` through matching casts, so a rename on either side is silent
+
+### Browser application security
+
+- **[LOW]** `apps/web/public/sw-push.js:30` — Workbox's generated ungated SKIP_WAITING listener nullifies the private-bundle service-worker activation gate
+- **[LOW]** `apps/web/src/components/ugc/UgcBody.tsx:62` — Middle-click (auxclick) on a UGC/citation link navigates to a blocklisted drainer domain without the §18.5 interstitial
+

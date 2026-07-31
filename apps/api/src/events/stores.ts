@@ -332,6 +332,17 @@ export interface AttentionAggregateStore {
   anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number>;
   /** Delete an owner's rows older than the cutoff (preference `none`). */
   deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number>;
+  /**
+   * The same two operations over MANY owners sharing one cutoff.
+   *
+   * The retention sweep walks every identifiable owner and issues one to two
+   * statements per owner, serially, over a list with no bound — it is the whole
+   * user base, so the tick's cost grows with the platform.  The cutoff is a
+   * function of the owner's PREFERENCE, not of the owner, so the work
+   * partitions into a handful of groups that each need exactly one statement.
+   */
+  anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number>;
+  deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number>;
   /** Delete already-anonymized rows older than the hard cap. */
   deleteAnonymizedOlderThan(cutoffIso: string): Promise<number>;
   /** Compliance audit: identifiable rows older than the cutoff (expect 0). */
@@ -389,10 +400,19 @@ export class InMemoryAttentionAggregateStore implements AttentionAggregateStore 
   }
 
   async anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+    return this.anonymizeOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+    return this.deleteOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
     const cutoff = Date.parse(cutoffIso);
+    const wanted = new Set(owners);
     let changed = 0;
     for (const row of this.#rows.values()) {
-      if (row.user_id_or_privacy_bucket === owner && Date.parse(row.created_at) < cutoff) {
+      if (wanted.has(row.user_id_or_privacy_bucket) && Date.parse(row.created_at) < cutoff) {
         row.user_id_or_privacy_bucket = PRIVACY_BUCKET;
         row.privacy_level = 'minimum';
         changed += 1;
@@ -401,11 +421,12 @@ export class InMemoryAttentionAggregateStore implements AttentionAggregateStore 
     return changed;
   }
 
-  async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
+  async deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
     const cutoff = Date.parse(cutoffIso);
+    const wanted = new Set(owners);
     let removed = 0;
     for (const [id, row] of this.#rows) {
-      if (row.user_id_or_privacy_bucket === owner && Date.parse(row.created_at) < cutoff) {
+      if (wanted.has(row.user_id_or_privacy_bucket) && Date.parse(row.created_at) < cutoff) {
         this.#rows.delete(id);
         removed += 1;
       }
@@ -590,6 +611,30 @@ export interface InvariantOutputStore {
   /** Latest output of a type for a target (by createdAt, then window start). */
   latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null>;
   /**
+   * The most recent SAME-SIZE window of `invariantType` for `targetId` that
+   * starts strictly before `beforeStartIso` — the `rising`-mode velocity's
+   * previous window.
+   *
+   * A dedicated query rather than a filter over `listForTarget`, which loads
+   * every row the target has ever had — all types, all windows, all history —
+   * into the heap.  That ran per CANDIDATE on the feed path, so a story with a
+   * year of hourly windows cost thousands of rows to answer a question about
+   * one of them.
+   *
+   * Ordering is `window start DESC, createdAt DESC, version DESC`: a total
+   * order, and the same tie-break the caller applied, so the answer is
+   * replay-stable independent of the store's physical row order.
+   */
+  previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    /** Rows to consider before giving up; each is re-checked against the §30.5
+     *  serving gate in code, which no SQL predicate can express in full. */
+    limit: number;
+  }): Promise<InvariantOutputRecord[]>;
+  /**
    * Paired outputs of two versions of one invariant over the same targets
    * (WS-H.1.1b A/B comparison), optionally bounded to a time window.
    */
@@ -601,12 +646,26 @@ export interface InvariantOutputStore {
   ): Promise<InvariantOutputRecord[]>;
   /** Rows of ONE invariant type created at/after `sinceIso`, newest first,
    *  capped at `limit` (the WS-I GWEI-gate input — a targeted read, never a
-   *  full-table scan on the serving path). */
+   *  full-table scan on the serving path).
+   *
+   *  `untilIso` bounds the read ABOVE, and a caller that PRINTS the interval it
+   *  covers must pass it: the transparency export captured `generated_at`, then
+   *  ran two unbounded-above reads, so an output created while those queries were
+   *  in flight landed in a report whose declared `period_end` predates it.  The
+   *  same omission let the count observe a row the list could not, reporting
+   *  truncation that had not happened. */
   listByTypeSince(
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]>;
+  /** How many rows of ONE invariant type exist at/after `sinceIso` — the
+   *  DENOMINATOR a capped read cannot report about itself.  A transparency
+   *  export that silently drops everything past its cap reads as a complete
+   *  account of the period and cannot be reproduced from the logged outputs;
+   *  this is what lets it state its own coverage. */
+  countByTypeSince(invariantType: string, sinceIso: string, untilIso?: string): Promise<number>;
   listAll(): Promise<InvariantOutputRecord[]>;
   deleteOlderThan(cutoffIso: string): Promise<number>;
   countOlderThan(cutoffIso: string): Promise<number>;
@@ -640,15 +699,66 @@ export class InMemoryInvariantOutputStore implements InvariantOutputStore {
     return [...this.#rows.values()].filter((r) => r.targetId === targetId);
   }
 
+  async previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    limit: number;
+  }): Promise<InvariantOutputRecord[]> {
+    const before = Date.parse(input.beforeStartIso);
+    return [...this.#rows.values()]
+      .filter(
+        (r) =>
+          r.targetId === input.targetId &&
+          r.invariantType === input.invariantType &&
+          // The §30.5 boundary's row-level half, mirroring the Drizzle
+          // adapter's `shadow_mode = false`: an in-memory store more permissive
+          // than production lets a defect pass every unit test.
+          r.shadowMode === false &&
+          Date.parse(r.timeWindow.start) < before &&
+          Date.parse(r.timeWindow.end) - Date.parse(r.timeWindow.start) === input.spanMs,
+      )
+      .sort(
+        (a, b) =>
+          Date.parse(b.timeWindow.start) - Date.parse(a.timeWindow.start) ||
+          Date.parse(b.createdAt) - Date.parse(a.createdAt) ||
+          // A TOTAL order — two revisions written in the same instant must
+          // still have one answer, or serving and replay could disagree.
+          b.version.localeCompare(a.version),
+      )
+      .slice(0, Math.max(0, input.limit));
+  }
+
   async listByTypeSince(
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]> {
     return [...this.#rows.values()]
-      .filter((r) => r.invariantType === invariantType && r.createdAt >= sinceIso)
+      .filter(
+        (r) =>
+          r.invariantType === invariantType &&
+          r.createdAt >= sinceIso &&
+          (untilIso === undefined || r.createdAt <= untilIso),
+      )
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(0, limit));
+  }
+
+  async countByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    untilIso?: string,
+  ): Promise<number> {
+    let count = 0;
+    for (const row of this.#rows.values()) {
+      if (row.invariantType !== invariantType || row.createdAt < sinceIso) continue;
+      if (untilIso !== undefined && row.createdAt > untilIso) continue;
+      count += 1;
+    }
+    return count;
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {
@@ -1063,6 +1173,8 @@ export interface ActorBehaviorStore {
   deleteAuthenticityOlderThan(cutoffIso: string): Promise<number>;
   /** Deletion-path purge: behavior state never outlives the account. */
   purgeActor(actorRef: string): Promise<number>;
+  /** The same purge over many actors — see `anonymizeOwnedOlderThanMany`. */
+  purgeActors(actorRefs: readonly string[]): Promise<number>;
   clear(): Promise<void>;
 }
 
@@ -1144,14 +1256,19 @@ export class InMemoryActorBehaviorStore implements ActorBehaviorStore {
   }
 
   async purgeActor(actorRef: string): Promise<number> {
+    return this.purgeActors([actorRef]);
+  }
+
+  async purgeActors(actorRefs: readonly string[]): Promise<number> {
+    const wanted = new Set(actorRefs);
     let removed = 0;
     for (const [key, row] of this.#windows) {
-      if (row.actorRef === actorRef) {
+      if (wanted.has(row.actorRef)) {
         this.#windows.delete(key);
         removed += 1;
       }
     }
-    if (this.#scores.delete(actorRef)) removed += 1;
+    for (const actorRef of wanted) if (this.#scores.delete(actorRef)) removed += 1;
     return removed;
   }
 

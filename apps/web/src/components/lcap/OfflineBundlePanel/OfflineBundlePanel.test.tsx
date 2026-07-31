@@ -20,8 +20,20 @@ import {
   openLcapDb,
   resetLcapDbConnection,
 } from '../../../lcap/db.js';
+import { PRIVATE_P2P_DB_NAME } from '../../../private-p2p/storage.js';
 import { checkA11y } from '../../../test/axe.js';
 import { OfflineBundlePanel } from './OfflineBundlePanel.js';
+
+/** Drop the shared WS-S room store so each private-room case sees ONLY the rooms
+ *  it founded. `openPrivateP2pDb` recreates it on next use. */
+function deletePrivateP2pDatabase(): Promise<void> {
+  return new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase(PRIVATE_P2P_DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => resolve();
+    request.onblocked = () => resolve();
+  });
+}
 
 describe('OfflineBundlePanel', () => {
   it('always offers the import file picker, room or not', () => {
@@ -153,8 +165,17 @@ describe('OfflineBundlePanel — import to done (WS-R.17.1 honest trust badge)',
 });
 
 describe('OfflineBundlePanel — WS-R.16.1 cross-plane private-room bridge', () => {
-  afterEach(() => {
+  afterEach(async () => {
     resetLcapDbConnection();
+    // `foundPrivateRoom` persists into the SHARED `licio_private_p2p` database,
+    // which lives for the whole test FILE — resetting the LCAP connection does
+    // nothing for it. Without this, rooms accumulate across cases and every
+    // singular `findByRole` below holds only in declaration order (a shuffle
+    // turns the file red on "found multiple elements"), while a regression that
+    // rendered only `privateRooms[0]` would pass unnoticed.
+    // `openPrivateP2pDb` memoises nothing and every caller closes its handle,
+    // so deleting the database is complete isolation with no production hook.
+    await deletePrivateP2pDatabase();
   });
 
   /** Found a REAL device-local private room (the shipped MLS/HPKE/Ed25519 crypto) so the
@@ -170,26 +191,44 @@ describe('OfflineBundlePanel — WS-R.16.1 cross-plane private-room bridge', () 
     return session.roomId;
   }
 
-  it('shows the private-room export section once a private room exists', async () => {
-    await foundPrivateRoom('My Secret Room');
+  it('offers EVERY device-local private room for export, not just the first', async () => {
+    await foundPrivateRoom('Room One');
+    await foundPrivateRoom('Room Two');
     render(<OfflineBundlePanel />);
     // The discovery effect resolves async; the private export heading then appears.
     expect(
       await screen.findByRole('heading', { name: /export a private room/i }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByRole('button', { name: /export encrypted file/i }),
-    ).toBeInTheDocument();
+    // Multiplicity is the assertion that matters: a singular query holds while
+    // exactly one room exists, so it cannot tell "renders every room" from
+    // "renders `privateRooms[0]`".
+    expect(await screen.findAllByRole('button', { name: /export encrypted file/i })).toHaveLength(
+      2,
+    );
+    expect(screen.getByText('Room One')).toBeInTheDocument();
+    expect(screen.getByText('Room Two')).toBeInTheDocument();
   });
 
   it('hides the private surface when enablePrivateRooms is false', async () => {
     await foundPrivateRoom('Hidden Room');
-    render(<OfflineBundlePanel enablePrivateRooms={false} />);
-    // Give the (skipped) discovery effect a tick; the heading must never appear.
-    await new Promise((r) => setTimeout(r, 0));
+    // Render with the flag ON first, so the heading is OBSERVED to appear for
+    // this room. Otherwise the case passes whenever discovery merely has not
+    // resolved yet (a cold room-manager import), i.e. even if the flag is ignored.
+    const enabled = render(<OfflineBundlePanel />);
     expect(
-      screen.queryByRole('heading', { name: /export a private room/i }),
-    ).not.toBeInTheDocument();
+      await screen.findByRole('heading', { name: /export a private room/i }),
+    ).toBeInTheDocument();
+    enabled.unmount();
+
+    render(<OfflineBundlePanel enablePrivateRooms={false} />);
+    // The import surface renders synchronously; once it is up, discovery has had
+    // its chance and the private heading must still be absent.
+    await screen.findByRole('heading', { name: /import an offline bundle/i });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('heading', { name: /export a private room/i }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it('routes a contains_private_encrypted bundle to the private engine (not the public store)', async () => {
@@ -225,11 +264,26 @@ describe('OfflineBundlePanel — WS-R.16.1 cross-plane private-room bridge', () 
     const target = await screen.findByRole('combobox', { name: /add to private room/i });
     expect(target).toBeInTheDocument();
 
-    // Add it to the chosen room → the private engine re-verifies + accepts (same room).
+    // Add it to the chosen room → the private engine re-verifies every envelope.
     await user.click(screen.getByRole('button', { name: /^add to room$/i }));
     await waitFor(
       () => expect(screen.getByText(/encrypted items to the room/i)).toBeInTheDocument(),
       { timeout: 10_000 },
     );
+    // The bundle came FROM this room, so the engine's verify-before-use path
+    // opens every envelope and finds each op ALREADY held — an exact idempotent
+    // re-receive (`existingSig === envelope.signature`), reported in neither the
+    // accepted nor the quarantined list.  That is the single most likely thing a
+    // person does with a private bundle: restore their own backup.
+    //
+    // Asserting only `/encrypted items to the room/` could not tell that apart
+    // from a total verification failure — both render it — and the panel used to
+    // end that same line with "The rest were held back — they do not verify
+    // against this room's keys", telling the user their intact backup was
+    // corrupt.  So: no held-back line, and the already-present line instead.
+    expect(
+      screen.queryByText(/were not added \(wrong room keys or malformed\)/i),
+    ).not.toBeInTheDocument();
+    expect(await screen.findByText(/were already in this room/i)).toBeInTheDocument();
   });
 });

@@ -1,0 +1,29 @@
+-- `InvariantOutputStore.latest()` fetched a target's whole history to take one row.
+--
+-- The query is `where invariant_type = $1 and target_id = $2
+-- order by created_at desc, time_window->>'start' desc limit 1`, and it runs on
+-- the FEED path — `ranking/features.ts` calls it per candidate story to read the
+-- PWAtt row.  No existing index serves both halves:
+--
+--   invariant_outputs_type_target_idx   (invariant_type, target_type, target_id)
+--       `target_type` sits in the MIDDLE, and this query does not filter on it,
+--       so the index cannot be used as a prefix for `(type, target_id)`.
+--   invariant_outputs_target_idx        (target_id, invariant_type)
+--       serves the WHERE, but says nothing about `created_at` — so every
+--       matching row is fetched and sorted to return one.
+--   invariant_outputs_type_target_created_idx  (invariant_type, target_type, created_at DESC)
+--       again keyed through `target_type`, and not by target.
+--
+-- Measured on this schema with 4000 targets × 25 windows (100k rows):
+--
+--   before  Bitmap Heap Scan → 25 rows over 25 heap blocks → top-N heapsort
+--   after   Index Scan on this index → 2 rows, presorted by created_at
+--
+-- The fetched-row count is the target's HISTORY DEPTH, so it grows with time: a
+-- year of hourly windows is ~8760 rows read and sorted, per candidate story, per
+-- feed request.  The index turns that into a single descending seek.
+--
+-- `invariant_outputs_type_target_latest_idx` is 41 bytes, inside Postgres's
+-- 63-byte identifier limit (`pnpm check:sql-identifiers`).
+CREATE INDEX IF NOT EXISTS "invariant_outputs_type_target_latest_idx"
+  ON "invariant_outputs" USING btree ("invariant_type", "target_id", "created_at" DESC);

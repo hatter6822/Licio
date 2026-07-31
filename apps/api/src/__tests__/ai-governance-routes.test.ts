@@ -203,6 +203,117 @@ describe('WS-K routes', () => {
     ).toBe(200);
   });
 
+  it('the review queue carries EVERY report for a deduped subject', async () => {
+    // A repeat report about a pending subject is deliberately deduped at the
+    // queue so a steward triages one entry — but the incumbent's `context` is a
+    // frozen snapshot of the FIRST report, so every later reason and correction
+    // text was persisted and then unreachable (the report stores had no
+    // production reader at all).  The steward saw one reason and decided on it.
+    const reporterA = await seedUserWithSession(forum.identity);
+    const reporterB = await seedUserWithSession(forum.identity);
+    const steward = await seedUserWithSession(forum.identity, { steward: true });
+    await ai.summaries.putDraft({
+      summaryId: 'sum-dedup',
+      threadId: 'thread-dedup',
+      draft: {},
+      outputId: 'out-dedup',
+      qualityPassed: true,
+      createdAt: new Date(ai.now()).toISOString(),
+    });
+    for (const [reporter, reason, correction] of [
+      [reporterA, 'fake_citation', null],
+      [reporterB, 'factual_error', 'The vote was on Wednesday, not Tuesday.'],
+    ] as const) {
+      const res = await app.request(
+        jsonReq(
+          '/v1/ai/summaries/sum-dedup/report',
+          'POST',
+          correction === null ? { reason } : { reason, correction_text: correction },
+          reporter.cookie,
+        ),
+      );
+      expect(res.status).toBe(201);
+    }
+    const queue = await app.request(
+      jsonReq('/v1/ai/admin/review', 'GET', undefined, steward.cookie),
+    );
+    expect(queue.status).toBe(200);
+    const body = (await queue.json()) as {
+      items: {
+        subject_ref?: string;
+        subjectRef: string;
+        report_count: number;
+        reports: { reason: string }[];
+      }[];
+    };
+    const item = body.items.find((i) => i.subjectRef === 'sum-dedup');
+    // ONE queue entry — the dedup still holds…
+    expect(body.items.filter((i) => i.subjectRef === 'sum-dedup')).toHaveLength(1);
+    // …carrying BOTH reports.
+    expect(item?.report_count).toBe(2);
+    expect(item?.reports.map((r) => r.reason).sort()).toEqual(['factual_error', 'fake_citation']);
+  });
+
+  it('the attached reports are BOUNDED per item; the count is not', async () => {
+    // The queue read is capped at 100 items, but each expanded to a report list
+    // written by third parties — anyone may report a subject — so the response
+    // size was attacker-influenceable and the 100 bounded nothing.  The count
+    // must stay the TRUE total: a steward's sense of scale cannot shrink with
+    // the page size.
+    const steward = await seedUserWithSession(forum.identity, { steward: true });
+    await ai.summaries.putDraft({
+      summaryId: 'sum-flood-q',
+      threadId: 'thread-flood-q',
+      draft: {},
+      outputId: 'out-flood-q',
+      qualityPassed: true,
+      createdAt: new Date(ai.now()).toISOString(),
+    });
+    for (let i = 0; i < 30; i += 1) {
+      const reporter = await seedUserWithSession(forum.identity);
+      const res = await app.request(
+        jsonReq(
+          '/v1/ai/summaries/sum-flood-q/report',
+          'POST',
+          { reason: 'fake_citation' },
+          reporter.cookie,
+        ),
+      );
+      expect(res.status).toBe(201);
+    }
+    // THE READ IS BOUNDED TOO, which is where the cost actually was: slicing
+    // after loading fixed the payload while still transferring every row for up
+    // to 100 subjects at once — and nothing prunes these tables, so any
+    // authenticated account can grow one subject's reports without limit.  Since
+    // this route is the ONLY reader of them, degrading it hides every report from
+    // every steward.  Recorded via the store, so the assertion is about the query
+    // the route issues rather than about the shape of its answer.
+    const limits: number[] = [];
+    const realList = ai.summaries.listReports.bind(ai.summaries);
+    ai.summaries.listReports = async (summaryId: string, limit: number) => {
+      limits.push(limit);
+      return realList(summaryId, limit);
+    };
+    const queue = await app.request(
+      jsonReq('/v1/ai/admin/review', 'GET', undefined, steward.cookie),
+    );
+    const body = (await queue.json()) as {
+      items: {
+        subjectRef: string;
+        report_count: number;
+        reports: unknown[];
+        reports_truncated: boolean;
+      }[];
+    };
+    const item = body.items.find((i) => i.subjectRef === 'sum-flood-q');
+    expect(item?.report_count).toBe(30); // the whole truth…
+    expect(item?.reports).toHaveLength(20); // …in a bounded payload
+    expect(item?.reports_truncated).toBe(true);
+    // …read with a CONSTANT limit — not a function of how much was reported.
+    expect(limits.length).toBeGreaterThan(0);
+    for (const limit of limits) expect(limit).toBeLessThanOrEqual(21);
+  });
+
   it('translates content and accepts reports for any authenticated user', async () => {
     const user = await seedUserWithSession(forum.identity);
     const res = await app.request(

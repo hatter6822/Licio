@@ -203,6 +203,10 @@ export class LcapIngestServer {
     return true;
   }
 
+  hasObjects(cids: readonly string[]): Promise<Set<string>> {
+    return this.store.hasObjects(cids);
+  }
+
   hasObject(cid: string): Promise<boolean> {
     return this.store.hasObject(cid);
   }

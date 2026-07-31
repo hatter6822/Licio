@@ -5,6 +5,7 @@
 // (zod-on-response, WS-C.1.2/6.12.7) and the server validate identically — a
 // single source of truth for the wire shapes that cross the trust boundary.
 import { z } from 'zod';
+import { MAX_URL_LENGTH } from '../utils/url.js';
 
 /** A v4 UUID identifier (stories, threads, rooms, users, aggregates). */
 export const uuidSchema = z.string().uuid();
@@ -19,10 +20,17 @@ export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
  * (`javascript`, `data`, `vbscript`), which must never enter the cache and reach a
  * renderer/href (XSS). This narrows the trust boundary to web URLs only — defence
  * in depth with the reader's own sandbox + the strict CSP.
+ *
+ * The length bound is {@link MAX_URL_LENGTH} and lives HERE rather than at each
+ * call site. `normalizeUrl` — whose docstring already called 2048 "the
+ * request-schema bound" — rejects a longer URL as `url_too_long`, so a schema
+ * that admitted one would accept a value the very next stage always refuses.
+ * Every site that used to re-spell `.max(2048)` inherits it now.
  */
 export const httpUrlSchema = z
   .string()
   .url()
+  .max(MAX_URL_LENGTH)
   .refine((value) => /^https?:\/\//i.test(value), { message: 'URL must be http(s)' });
 
 /**

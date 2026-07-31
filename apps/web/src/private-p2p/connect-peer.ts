@@ -156,10 +156,33 @@ export type DeviceResolver = (
  * candidates (defensive-decoded + per-poll-bounded against a flood, PR3b).
  */
 export interface RendezvousCapHooks {
+  /**
+   * The cap is BOUND to the announcement's DIAL-CRITICAL fields — the ephemeral
+   * signalling key AND the device id it claims — so a cap lifted out of a polled
+   * announcement cannot be re-published under someone else's dial info, which,
+   * because dedup is by pseudonym with first occurrence winning, would evict the
+   * honest device from discovery.
+   *
+   * Binding the signalling key alone was not enough: a hostile member could keep
+   * the honest key (so the proof still verified), swap `peerDeviceId`, and
+   * re-seal with a later expiry — the dial then reached the honest peer, failed the
+   * §15.5 claimed-device check, and cooled its key down.
+   *
+   * The binding closes that, but it could not close the ORDERING that made it
+   * reachable: the carrier deduped by signalling key BEFORE verifying any cap, so a
+   * forgery keeping the honest key evicted the honest record and was then itself
+   * dropped for failing verification — the honest device in NEITHER set.  The
+   * carrier now verifies FIRST and dedups WITHIN each tier, so an unverified record
+   * can never compete with a verified one for the same slot.  Binding and ordering
+   * are two different holes; this doc used to describe the ordering one as though the
+   * binding had fixed it.
+   */
   build(
     roomBlindId: string,
     epoch: number,
     bucket: number,
+    signalingPublicKey: Uint8Array,
+    peerDeviceId: string,
   ): { proof: string; pseudonym: string } | null;
   /**
    * Verify + DEDUP a batch of opened announcement caps under the room's per-epoch issuer key.
@@ -169,7 +192,14 @@ export interface RendezvousCapHooks {
    * SKIPPED (never crash the batch) and the per-poll verify count is bounded (PR3b).
    */
   filterVerified(
-    caps: ReadonlyArray<{ proof: string; pseudonym: string }>,
+    /** Each cap WITH the dial identity of the announcement it came from — the proof is
+     *  verified against that key, never one the caller picks. */
+    caps: ReadonlyArray<{
+      proof: string;
+      pseudonym: string;
+      signalingPublicKey: Uint8Array;
+      peerDeviceId: string;
+    }>,
     roomBlindId: string,
     epoch: number,
     bucket: number,
@@ -274,6 +304,15 @@ interface DiscoveredPeer {
  * honest candidate is dialed in the SAME round).  Flood amplification stays bounded by the orthogonal
  * Tier-2 cap + Tier-1 sample-poll, never by this dedup.
  */
+/**
+ * ONLY SOUND WITHIN ONE TIER of equal verification status.
+ *
+ * `record.expires_at` is ANNOUNCER-CHOSEN, so this resolves a key collision using a
+ * value the attacker writes.  Applied across a mixed set that is exactly the
+ * eviction primitive: a forgery reusing an honest signalling key with a later expiry
+ * wins the slot.  The carrier therefore verifies caps first and calls this once per
+ * tier — never over verified and unverified records together.
+ */
 export function selectFreshestCandidates<
   C extends { record: { expires_at: number }; ann: { signaling_public_key: string } },
 >(opened: readonly C[]): C[] {
@@ -287,6 +326,87 @@ export function selectFreshestCandidates<
   return [...freshestByEphemeral.values()].sort(
     (a, b) => b.record.expires_at - a.record.expires_at,
   );
+}
+
+/**
+ * Which candidate this round dials.
+ *
+ * TWO POLICIES FAILED HERE BEFORE THIS ONE, both because they keyed on an order
+ * the attacker writes.
+ *
+ *   1. `triable[0]` — freshest-first.  The failed-dial cooldown is keyed by the
+ *      record's ephemeral key, so a hostile member that rotates that key puts a
+ *      NEW record at the head of every re-polled sample and takes every dial
+ *      until the deadline.
+ *   2. Alternating head/tail.  `selectFreshestCandidates` sorts by
+ *      `record.expires_at`, and that value is ANNOUNCER-CHOSEN: the rendezvous
+ *      service accepts anything inside `(now, now + maxTtl + skew]`, while every
+ *      honest client uses exactly `now + 30min`.  An honest record's sort key is
+ *      therefore pinned to one point in the interior of a range the attacker
+ *      spans freely, so TWO records — one above, one below — bracket it, and the
+ *      endpoints-only policy never selects anything else.  The anti-starvation
+ *      mechanism became the starvation channel.
+ *
+ * Three mechanisms, and what each one is MEASURED to do (each was isolated by
+ * disabling it and watching which test went red — they are not
+ * interchangeable):
+ *
+ *   • THE VERIFIED CAP TIER LEADS, AND ALTERNATES.  A verified Tier-2 cap is
+ *     deduped by verified pseudonym — one slot per device per `(epoch, bucket)` —
+ *     so a flooder contributes exactly ONE verified candidate however many records
+ *     it mints.  This is the only one of the three that bounds a FLOOD; ordering
+ *     fixes cannot, because ordering is the attacker's input.
+ *
+ *     VERIFIED, never merely present: `ann.cap` is bounded base64url and nothing
+ *     more, so partitioning on presence let any current-epoch member choose their
+ *     own tier and put an honest uncapped peer OUTSIDE the pool entirely (measured:
+ *     100 dial attempts, honest peer dialled 0 times).  And the tier yields on odd
+ *     rounds — owning every round is the same monopoly one step in, since a capped
+ *     member can refresh a valid cap under a new signalling key after each failed
+ *     dial and defeat the key-based cooldown, and three stale capped presences
+ *     exhaust the candidate timeouts on their own.
+ *   • ROTATION over the selected subset (`round % length`).  Defeats a fixed
+ *     bracketing set on its own: every position is reachable, not just the ends.
+ *   • UNTRIED FIRST.  Also defeats bracketing on its own (the untried pool
+ *     shrinks each round until the bracketed candidate is all that is left), and
+ *     independently stops the rotation re-spending budget on a candidate this
+ *     connect already dialled.
+ *
+ * HONEST RESIDUAL, stated because the previous two policies both claimed a bound
+ * they did not have: in a room with NO Tier-2 cap configured, the Tier-1 subset
+ * is unbounded by construction, every flooded record is `untried`, and no
+ * selection policy here can promise to reach a specific peer within a bounded
+ * number of dials.  Bounding the flood is what the cap is for and this function
+ * is not a substitute for it.  What it does guarantee, with or without a cap, is
+ * that no ORDERING an attacker can author keeps a triable candidate permanently
+ * unselected.
+ */
+export function pickDialCandidate<
+  C extends { ann: { signaling_public_key: string }; capVerified?: boolean },
+>(triable: readonly C[], round: number, tried: ReadonlySet<string> = new Set()): C | undefined {
+  if (triable.length === 0) return undefined;
+  // VERIFIED, not merely PRESENT.  `ann.cap` is bounded base64url and nothing more,
+  // so any current-epoch member can stamp one on: partitioning on presence let the
+  // attacker pick their own tier, and an honest uncapped peer was not deprioritized
+  // but outside the pool entirely — 100 dial attempts, honest peer dialled 0 times.
+  const verified = triable.filter((c) => c.capVerified === true);
+  const rest = triable.filter((c) => c.capVerified !== true);
+  // THE TIERS ALTERNATE.  The verified tier is the only BOUNDED one — one slot per
+  // device per (epoch, bucket) — so it leads.  But letting it own EVERY round is the
+  // same monopoly one step in: a capped member can refresh a valid cap under a new
+  // signalling key after each failed dial, which defeats the key-based cooldown and
+  // consumes the whole 30 s deadline, and even without an attacker three stale
+  // capped presences exhaust the candidate timeouts before any reachable Tier-1 peer
+  // is tried.  Alternating gives a flooder at most every other dial and reaches an
+  // honest Tier-1 peer within two rounds.
+  const useVerified = verified.length > 0 && (rest.length === 0 || round % 2 === 0);
+  const pool = useVerified ? verified : rest.length > 0 ? rest : verified;
+  // Not-yet-dialled first, so a rotation cannot re-spend the budget on a
+  // candidate already known to have failed this connect; if everything in the
+  // pool has been tried, rotate over all of it rather than giving up.
+  const untried = pool.filter((c) => !tried.has(c.ann.signaling_public_key));
+  const from = untried.length > 0 ? untried : pool;
+  return from[round % from.length];
 }
 
 /**
@@ -331,13 +451,36 @@ export async function connectPrivatePeer(
   //    the §27 Tier-1 sample-poll).  The cap's BBS `pseudonym` is DISTINCT from `peer_blind_id` (the
   //    latter is the HMAC-derived per-(device, epoch, bucket) id); a polling MEMBER opens the sealed
   //    cap and dedups by the verified pseudonym.
-  const ephemeral = await p2p.generateX25519KeyPair();
+  // ONE signalling identity per (room, epoch, time bucket), derived DETERMINISTICALLY from this
+  // device's own signing key rather than freshly generated per call.  A mesh member runs `connectPrivatePeer` CONCURRENTLY, once per
+  // peer, so a fresh-per-call ephemeral gave a device several live dial identities at once — and a
+  // polling peer took whichever announcement was freshest, which belonged to the call dialling
+  // SOMEONE ELSE.  That call's pump then failed to open the offer (a channel key for a different
+  // peer), and a handshake completed only when both sides happened to pick the announcements of the
+  // calls dialling each other.  One identity removes the coincidence instead of narrowing it; see
+  // `deriveSignalingKeyPair`.
+  const ephemeral = await p2p.deriveSignalingKeyPair(
+    // A DEVICE secret, not the room's.  Deriving this scalar from the rendezvous
+    // key made it computable by every member — see `deriveSignalingKeyPair`.
+    params.selfSigningKey,
+    roomIdCommitment,
+    selfDeviceId,
+    epoch,
+    timeBucket,
+  );
   // The per-announcer cap rides SEALED INSIDE the announcement only (PRIV-API-RENDEZVOUS-1: the
   // server-visible top-level cap was removed because the server-held issuer key is a cross-bucket
   // linking handle).  A member-only verifier opens it from the polled announcement and
   // `filterVerified`s by the verified pseudonym; the server sees only the per-device derived blind id
   // (one slot per device per bucket) and runs the §27 Tier-1 sample-poll.
-  const cap = params.rendezvousCap?.build(roomBlindId, epoch, timeBucket) ?? undefined;
+  const cap =
+    params.rendezvousCap?.build(
+      roomBlindId,
+      epoch,
+      timeBucket,
+      ephemeral.publicKey,
+      selfDeviceId,
+    ) ?? undefined;
   const selfPeerBlindId = await p2p.derivePeerBlindId(
     rendezvousKey,
     selfDeviceId,
@@ -369,7 +512,19 @@ export async function connectPrivatePeer(
   //    before any dial; nothing here trusts the relay.
   type OpenedAnn = Awaited<ReturnType<typeof p2p.openRendezvousAnnouncement>>;
   type PolledRecord = Awaited<ReturnType<typeof rendezvous.poll>>[number];
-  type Candidate = { record: PolledRecord; ann: OpenedAnn };
+  /**
+   * `capVerified` is the VERDICT, never the presence of `ann.cap`.
+   *
+   * `cap` is `{proof, pseudonym}` — bounded base64url and nothing more — so any
+   * current-epoch member can stamp `{proof:'AAAA…', pseudonym:'BBBB…'}` on an
+   * announcement.  Partitioning on presence therefore let an attacker choose which
+   * TIER their record landed in, and the honest uncapped peer was not
+   * deprioritized but OUTSIDE the pool entirely: measured at 100 dial attempts, the
+   * honest peer dialled 0 times.
+   */
+  /** Straight out of `openRendezvousAnnouncement` — no verdict yet. */
+  type OpenedCandidate = { record: PolledRecord; ann: OpenedAnn };
+  type Candidate = OpenedCandidate & { capVerified: boolean };
 
   // Dial ONE discovered candidate to a live, membership-proven channel.  Resolves to the channel on
   // success; on ANY failure it tears down its OWN pc + signaling loop and throws (the caller cools
@@ -396,30 +551,51 @@ export async function connectPrivatePeer(
       p2p.CHANNEL_LABEL_SIGNALING,
     );
 
-    // Per-RECIPIENT §15.4 signaling addresses (keyed on the RECIPIENT's ephemeral signaling key, NOT
-    // the device-level `selfPeerBlindId`).  The rendezvous signal drain is deliver-once, so a
-    // device-level queue shared by every dial would let one session's pump consume — and drop as
-    // un-openable — a signal meant for another session's channel; that stalls the 2nd+ dial of a mesh.
-    // Each dial mints a fresh ephemeral ⇒ its own inbound queue (`selfSignalAddr`, derivable from our
-    // OWN ephemeral so we drain it from the START — before we have discovered the peer — so a first
-    // offer is never lost to a not-yet-draining answerer).  We send to the peer's inbound queue
-    // (`peerSignalAddr`, from its announced ephemeral).  The two directions use distinct ephemerals, so
-    // a peer never drains a signal it itself sent — no mutual-discovery round-trip.
+    // PAIRWISE, DIRECTED §15.4 signaling addresses.  The signal drain is deliver-once, so two live
+    // sessions on one device must never share an inbound address — the first pump to poll would
+    // consume, and drop as un-openable, a signal meant for the other session's channel.  A per-CALL
+    // ephemeral used to provide that separation; now that a device has ONE identity per bucket, the
+    // SENDER's key is what separates its sessions, so the address is keyed on both.  Directed
+    // (sender first) so A→B and B→A are distinct queues and a peer never drains its own signal.
+    //
+    // The cost is that this can only be derived AFTER discovering the peer, so draining starts one
+    // poll later than the old self-only address allowed.  Nothing is lost: the queue is a TTL'd
+    // server-side mailbox, not a live socket, and an offer sent before the answerer began draining
+    // is still waiting when it does — the property ICE candidates arriving ahead of their offer
+    // already depend on.
     const selfSignalAddr = await p2p.deriveSignalAddress(
       rendezvousKey,
+      peer.peerSignalingPublicKey,
       ephemeral.publicKey,
       epoch,
       timeBucket,
     );
     const peerSignalAddr = await p2p.deriveSignalAddress(
       rendezvousKey,
+      ephemeral.publicKey,
       peer.peerSignalingPublicKey,
       epoch,
       timeBucket,
     );
 
-    // Deterministic role: the bytewise-smaller peer blind id offers (a stable tiebreak).
-    const isOfferer = selfPeerBlindId < peer.peerBlindId;
+    // Deterministic role from the DIAL IDENTITIES, not from `peer_blind_id`.
+    //
+    // The blind id is a server-visible field on the record, chosen freely by
+    // whoever announces it and — unlike the signalling key and the claimed
+    // device id — outside the cap's binding.  A member could copy an honest
+    // capped announcement, keep the bound fields so the proof still verified,
+    // republish under an attacker-chosen blind id with a later expiry, and win
+    // the pre-verification dedup: the two honest peers then disagreed about who
+    // offers (both, or neither), the dial failed, and the honest signalling key
+    // was cooled down.  Binding the blind id too would close that, but the
+    // better answer is not to depend on it: the two SIGNALLING keys are the
+    // identities the dial actually uses, both sides hold both of them, and the
+    // signalling ADDRESS is already derived from exactly this pair — so the role
+    // is symmetric by construction and needs no extra field to be trustworthy.
+    // It also holds for a Tier-1 peer, where there is no cap to bind anything.
+    const selfDialId = p2p.toBase64Url(ephemeral.publicKey);
+    const peerDialId = p2p.toBase64Url(peer.peerSignalingPublicKey);
+    const isOfferer = selfDialId < peerDialId;
     const pc = factory({
       ...(params.iceServers ? { iceServers: params.iceServers } : {}),
       // relay-only ⇒ the browser gathers ONLY TURN candidates (never learns/leaks a host IP).
@@ -595,6 +771,14 @@ export async function connectPrivatePeer(
   // the instant a FRESH candidate appears, so discovery stays fast when there is someone to dial.
   const maxDiscoveryPollBackoffMs = Math.max(pollIntervalMs, 4_000);
   let discoveryPollBackoffMs = pollIntervalMs;
+  /** Dial attempts made this connect — the rotation counter (see
+   *  `pickDialCandidate`). */
+  let dialRound = 0;
+  /** Ephemerals already dialled this connect, so the rotation prefers candidates
+   *  it has not spent budget on yet.  Distinct from `failedPeers`, which EXPIRES:
+   *  a cooled-down candidate becomes triable again, and this remembers that it
+   *  was already given a turn. */
+  const triedEphemerals = new Set<string>();
   for (;;) {
     // The whole discovery loop is deadline/abort-bounded.  An explicit abort ends it with the
     // `aborted` error; when the DEADLINE runs out, surface the typed DIAL failure if we attempted one
@@ -606,7 +790,7 @@ export async function connectPrivatePeer(
       throwIfAborted();
     }
     const records = await rendezvous.poll(roomBlindId);
-    const opened: Candidate[] = [];
+    const opened: OpenedCandidate[] = [];
     for (const record of records) {
       if (record.peer_blind_id === selfPeerBlindId) continue;
       try {
@@ -622,12 +806,32 @@ export async function connectPrivatePeer(
     // sort freshest-first — NEVER by the unauthenticated claimed `peer_device_id`; see
     // `selectFreshestCandidates` for why keying on the claimed id would let a spoof evict an honest peer
     // (PRIV-CARRIER-FRESHEST / -NOSPOOF).
-    let candidates: Candidate[] = selectFreshestCandidates(opened);
+    // VERIFY BEFORE DEDUP, AND DEDUP WITHIN EACH TIER.
+    //
+    // The merge ran FIRST and is last-write-wins keyed only on
+    // `signaling_public_key`, resolved by the ANNOUNCER-CHOSEN `expires_at` — so a
+    // forgery that KEPT the honest signalling key evicted the honest record before
+    // any cap was looked at, and was then itself dropped for failing verification.
+    // The honest capped device ended up in NEITHER set and was not dialled at all.
+    // The binding added to the cap could not help: the attacker authors a TIER, not
+    // an order.  Deduping per tier makes it unreachable by construction — an
+    // unverified record can never compete with a verified one for the same map slot.
+    let candidates: Candidate[];
     if (params.rendezvousCap) {
-      const capped = candidates.filter((o) => o.ann.cap !== undefined);
-      const uncapped = candidates.filter((o) => o.ann.cap === undefined);
+      // Split the RAW opened set, before any dedup can evict.
+      const cappedOpened = opened.filter((o) => o.ann.cap !== undefined);
+      const uncappedOpened = opened.filter((o) => o.ann.cap === undefined);
       const survivors = params.rendezvousCap.filterVerified(
-        capped.map((o) => o.ann.cap as { proof: string; pseudonym: string }),
+        cappedOpened.map((o) => {
+          const c = o.ann.cap as { proof: string; pseudonym: string };
+          // The dial identity from THIS announcement: the proof is bound to it, so a
+          // lifted cap verifies against nothing here.
+          return {
+            ...c,
+            signalingPublicKey: p2p.fromBase64Url(o.ann.signaling_public_key),
+            peerDeviceId: o.ann.peer_device_id,
+          };
+        }),
         roomBlindId,
         epoch,
         timeBucket,
@@ -643,7 +847,28 @@ export async function connectPrivatePeer(
       // prioritization/anti-flood layer, not the sole discovery path.  Degrading unverifiable caps to
       // Tier-1 here would instead hand the dial budget straight back to the flood (the exact attack the
       // cap exists to bound), so it is deliberately NOT done (PRIV-CAP-DROP-UNVERIFIED).
-      candidates = [...survivors.map((i) => capped[i] as Candidate), ...uncapped];
+      // BOUNDS-CHECKED rather than cast.  `filterVerified` is an injected hook
+      // returning bare indices; `capped[i] as Candidate` suppressed exactly the
+      // `undefined` `noUncheckedIndexedAccess` would have surfaced, and an
+      // out-of-range index would have crashed later and elsewhere — inside the async
+      // discovery loop, rejecting the connect with an untyped error instead of a
+      // `ConnectPrivatePeerReason`.
+      candidates = [
+        ...selectFreshestCandidates(
+          survivors.flatMap((i) => {
+            const c = cappedOpened[i];
+            return c === undefined ? [] : [{ ...c, capVerified: true }];
+          }),
+        ),
+        ...selectFreshestCandidates(uncappedOpened.map((o) => ({ ...o, capVerified: false }))),
+      ];
+    } else {
+      // NO issuer key for this epoch ⇒ no verification is possible, so a present
+      // `cap` proves NOTHING and must not buy a tier.  Everything rides Tier-1; the
+      // §15.5 handshake remains the membership authority either way.  This is the
+      // NORMAL state of a device not yet credentialed for the epoch — exactly when a
+      // dial is the only way to obtain the credential.
+      candidates = selectFreshestCandidates(opened).map((o) => ({ ...o, capVerified: false }));
     }
 
     // Drop peers still in their failure cooldown (pruning expired cooldowns so a peer can be retried
@@ -666,7 +891,42 @@ export async function connectPrivatePeer(
     // A fresh candidate appeared — return to the responsive discovery cadence.
     discoveryPollBackoffMs = pollIntervalMs;
 
-    for (const candidate of triable) {
+    // ONE candidate per round — the FRESHEST — then re-poll (PRIV-CARRIER-FRESH-VIEW).
+    //
+    // A handshake needs BOTH peers to pick each OTHER'S CURRENT announcement: the
+    // signalling channel key is ECDH(own ephemeral, the peer's ANNOUNCED ephemeral),
+    // and each dial mints a fresh ephemeral whose inbound queue only THAT dial
+    // drains.  Every superseded announcement therefore names an address nobody
+    // answers at — and it stays live for the §15.3.2 TTL (5-minute floor), because
+    // there is no retraction and the store keys presence by the sealed ciphertext,
+    // so a re-announce ADDS a slot instead of replacing the device's.
+    //
+    // Draining the whole `triable` list before re-polling is what turned that into a
+    // LIVE-LOCK.  Each stale candidate costs a full per-candidate deadline, so a
+    // round could burn `candidates × deadline` against a view that was already out
+    // of date when the round began — while the peer, symmetrically stuck, kept
+    // announcing newer ephemerals this round would never see.  Measured on the
+    // three-browser mesh gate: one peer held THREE live candidates for a single
+    // device and the pair converged in roughly one run in three.
+    //
+    // Freshest-first ORDER was already correct; what was missing is that the choice
+    // must be made against a CURRENT view.  Taking one candidate per round makes the
+    // two sides' selections converge within a poll interval instead of a
+    // list-length multiple of the dial deadline.
+    //
+    // The anti-spoof property is unchanged (PRIV-CARRIER-FRESHEST-NOSPOOF): a spoof
+    // sealed with a later `expires_at` is still dialled FIRST, still rejected by the
+    // §15.5 mismatch check, and still suppressed by the ephemeral-keyed cooldown —
+    // the honest candidate is simply reached on the next round rather than later in
+    // the same one, and the cooldown guarantees the spoof is not retried ahead of it.
+    //
+    // A flooder ROTATING its ephemeral defeats that cooldown, though — every
+    // re-poll hands it a fresh head-of-list record — so the round alternates
+    // between the freshest and the most starved candidate (`pickDialCandidate`).
+    const candidate = pickDialCandidate(triable, dialRound, triedEphemerals);
+    dialRound += 1;
+    if (candidate !== undefined) triedEphemerals.add(candidate.ann.signaling_public_key);
+    if (candidate !== undefined) {
       throwIfAborted();
       const peer: DiscoveredPeer = {
         peerBlindId: candidate.record.peer_blind_id,
@@ -677,14 +937,16 @@ export async function connectPrivatePeer(
         return await dialCandidate(peer);
       } catch (error) {
         // An overall abort/deadline propagates (the whole connect is cancelled); otherwise THIS peer
-        // just failed — remember the typed error, cool the peer down, and try the next candidate.
+        // just failed — remember the typed error, cool the peer down, and re-poll for a fresher view.
         throwIfAborted();
         lastDialError = error;
         failedPeers.set(candidate.ann.signaling_public_key, nowMs() + failedPeerCooldownMs);
       }
     }
-    // Tried every fresh candidate this round; loop to re-poll (a new peer may appear, or all are now
-    // cooled down → the `triable.length === 0` branch above surfaces `lastDialError`).
+    // Loop to RE-POLL: the peer may have announced a newer ephemeral while this
+    // candidate was being dialled, and that newer one is the only address it now
+    // answers at.  (All cooled down → the `triable.length === 0` branch above
+    // surfaces `lastDialError` when the deadline runs out.)
   }
 }
 

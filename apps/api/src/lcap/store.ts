@@ -63,6 +63,18 @@ export interface ForkEvidence {
  */
 export interface LcapServerStore {
   hasObject(cid: string): Promise<boolean>;
+  /**
+   * Which of `cids` the CAS holds, as ONE lookup.
+   *
+   * `POST /exchange` resolves the client pulse's referenced CIDs — up to
+   * `MAX_PULSE_REFERENCED_CIDS` (4096) of them — into a synchronous `have`
+   * predicate.  Asking `hasObject` per CID makes one remote round-trip per
+   * entry, so a single well-formed request from an unauthenticated peer drives
+   * thousands of sequential queries: a remote amplifier, which is the exact
+   * class the §27.1 hardening bounds the COUNT for.  Bounding the count is
+   * necessary; not multiplying it by a round-trip is the other half.
+   */
+  hasObjects(cids: readonly string[]): Promise<Set<string>>;
   getObject(cid: string): Promise<StoredObject | undefined>;
   /** Persist a (caller-CID-verified) object; idempotent by CID. */
   storeObject(cid: string, kind: LcapContentKind, bytes: Uint8Array): Promise<void>;
@@ -170,6 +182,10 @@ export class InMemoryLcapServerStore implements LcapServerStore {
 
   hasObject(cid: string): Promise<boolean> {
     return Promise.resolve(this.cas.has(cid));
+  }
+
+  hasObjects(cids: readonly string[]): Promise<Set<string>> {
+    return Promise.resolve(new Set(cids.filter((cid) => this.cas.has(cid))));
   }
 
   getObject(cid: string): Promise<StoredObject | undefined> {

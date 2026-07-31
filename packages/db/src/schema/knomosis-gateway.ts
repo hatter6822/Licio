@@ -369,6 +369,17 @@ export const governanceProposals = knomosisSchema.table(
     deliberationEndsAt: tz('deliberation_ends_at'),
     votingEndsAt: tz('voting_ends_at'),
     challengeWindowEndsAt: tz('challenge_window_ends_at'),
+    /** The quorum DENOMINATOR, frozen at the `deliberation → open` transition
+     *  (migration 0100).  NULL on a row opened before it existed, which the
+     *  tally reads as "fall back to the live count" — 0 would fail quorum
+     *  unconditionally.  Mirrors `eligible_count` on the ratification vote and
+     *  the steward election. */
+    eligibleBasisCount: integer('eligible_basis_count'),
+    /** WHEN that basis was frozen (migration 0107) — the ACTUAL transition
+     *  instant, not the scheduled `deliberation_ends_at`.  The ballot cutoff
+     *  reads this so the denominator and the numerator answer to one instant;
+     *  scheduler lag between the two made quorum unreachable. */
+    eligibleBasisAt: tz('eligible_basis_at'),
     /** The settled tally snapshot (proposalTallyWireSchema) — recorded once at
      *  settle so later weight/eligibility changes cannot rewrite history. */
     tallySnapshot: jsonb('tally_snapshot'),
@@ -427,6 +438,10 @@ export const governanceSignatures = knomosisSchema.table(
     purpose: text('purpose').notNull().default('vote'), // vote|approval|multisig|delegation (CHECK)
     choice: text('choice'), // approve|reject|abstain for purpose=vote (CHECK)
     nonce: text('nonce'),
+    // --- WS-M.4.2c-3 (migration 0105).  The delegators whose unit this ballot's
+    // weight actually consumed; NULL = not recorded (pre-migration rows and
+    // every non-delegated model).
+    countedDelegatorIds: jsonb('counted_delegator_ids').$type<string[]>(),
   },
   (t) => [
     // One signature per (proposal, wallet, PURPOSE): a designated signer who
@@ -444,6 +459,54 @@ export const governanceSignatures = knomosisSchema.table(
   ],
 );
 export type GovernanceSignatureRow = typeof governanceSignatures.$inferSelect;
+
+/**
+ * WS-M.4.2c — one claim per (proposal, delegator), enforced by the DATABASE.
+ *
+ * `counted_delegator_ids` on the signature is the frozen record of which delegated
+ * units a ballot consumed, and the pre-insert `delegatorsAlreadyConsumed` read is
+ * what kept two ballots from consuming the same one.  A read cannot: a member who
+ * splits an `all` delegation to one delegate and a `type:<proposal>` delegation to
+ * another lets both delegates resolve their weight from the same uncommitted view,
+ * both see an empty consumed set, and both record the delegator — the unit counted
+ * twice.  Nothing existing catches it: `governance_signature_unique_idx` is keyed on
+ * the WALLET, and a JSONB array cannot carry a cross-row uniqueness constraint.
+ *
+ * So each consumed unit becomes a ROW, written in the same transaction as the
+ * signature.  The primary key is the guarantee, and the loser of the race rolls
+ * back whole rather than recording a weight it did not win.
+ *
+ * ON DELETE CASCADE from the signature is load-bearing, not tidiness: a ballot
+ * reverted by `removeByAction` or erased by `purgeByUser` must RELEASE its claims,
+ * or the delegator's unit is disenfranchised for that proposal for ever.  It is also
+ * the ONLY event that should free a unit, which is why the delegator column carries
+ * no cascade of its own.
+ */
+export const governanceDelegatedUnitClaims = knomosisSchema.table(
+  'governance_delegated_unit_claim',
+  {
+    proposalId: uuid('proposal_id')
+      .notNull()
+      .references(() => governanceProposals.proposalId, { onDelete: 'cascade' }),
+    // NO `users` reference, deliberately — see the migration: the signature's
+    // `counted_delegator_ids` is the same reference and carries none either, so
+    // constraining one of two spellings of one fact is how they come to disagree.
+    delegatorUserId: uuid('delegator_user_id').notNull(),
+    signatureId: uuid('signature_id')
+      .notNull()
+      .references(() => governanceSignatures.signatureId, { onDelete: 'cascade' }),
+    createdAt: tz('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({
+      name: 'governance_delegated_unit_claim_pk',
+      columns: [t.proposalId, t.delegatorUserId],
+    }),
+    // The release path deletes by signature (cascade uses this too).
+    index('governance_delegated_unit_claim_signature_idx').on(t.signatureId),
+  ],
+);
+export type GovernanceDelegatedUnitClaimRow = typeof governanceDelegatedUnitClaims.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // Simulated treasury (WS-L.4.1c) — SEPARATE from any real treasury table.

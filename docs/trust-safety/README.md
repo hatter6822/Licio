@@ -48,8 +48,39 @@ wins.
                             nullable; NULLs stay distinct in the open-target
                             partial unique indexes), so a hard purge leaves no
                             stable account id in ANY moderation table
+  drizzle/0115_*.sql        moderation_audit.ordinal — the append sequence, and the
+                            only sound keyset cursor over this table.  `event_time`
+                            cannot be one: Postgres stores it to the microsecond
+                            and the driver truncates to a millisecond `Date`, so a
+                            cursor built from a read row landed BELOW the row it
+                            named and the next page skipped the rest of that
+                            millisecond.  Bursts cluster inside one millisecond, so
+                            the busiest stretches of the trail lost the most
+  drizzle/0116_*.sql        the append-only trigger INVERTED.  It enumerated the
+                            columns an UPDATE may not change, which is an allowlist
+                            by omission — `ordinal` landed outside it and was
+                            freely rewritable.  Now every column must be identical
+                            except the four the erasure scrub may NULL, so a column
+                            added later is immutable the moment it exists
+  drizzle/0117_*.sql        moderation_audit.case_id — the case a record belongs
+                            to, so the review panel can show THIS case's history
+                            rather than everything about the same subject.  A plain
+                            uuid, not an FK: an ON DELETE SET NULL cascade is an
+                            UPDATE, which the append-only trigger rejects
+  drizzle/0118_*.sql        the per-table integrity-hash chain (prev_hash +
+                            integrity_hash, fork-proof parent/genesis partial
+                            uniques).  Append-only is not tamper-evident: the
+                            trigger cannot speak for a superuser session or a
+                            restore from a doctored dump.  KEYED, so repairing a
+                            doctored chain needs a secret the database lacks
 
 apps/api/src/moderation/
+  transactor.ts    the UNIT OF WORK: a state change and its audit record commit
+                            together, so the trail's order is the order things
+                            happened in.  The in-memory twin serialises units and
+                            rolls back on a throw; production opens one Postgres
+                            transaction and rebinds every store — including the
+                            chained audit store — onto it
   stores.ts        store interfaces + in-memory adapters (Postgres drop-in seam)
   drizzle-moderation-stores.ts  the gated production Postgres adapters (same
                             interfaces; the audit clear() is TRUNCATE, never a
@@ -167,7 +198,11 @@ platform `admin` role implicitly holds all five doctrine roles.
   pagination, filters, assignment + reviewer availability, and bulk actions
   (per-item audited + reversible).
 - **Review (WS-J.2.2).** Full-context panel: reports (reporter identity only for
-  ROLE_SAFETY/ROLE_INTEGRITY — §19.5), the user-history sidebar with prior-
+  ROLE_SAFETY/ROLE_INTEGRITY — §19.5), **this case's audit trail** (distinct from
+  the user history: a reviewer deciding one case needs the events OF that case,
+  including the ones naming no target at all — the routing and assignment that put
+  it in front of them — while a subject-keyed reconstruction both sweeps in
+  unrelated cases and misses those), the user-history sidebar with prior-
   contribution count + per-type tally + distinct rooms (**no
   wallet/payment/treasury/donor field exists, by construction** — §13.6), the
   REAL WS-H invariant decision-support signals (MFCI risk state, SCOI context,
@@ -298,6 +333,78 @@ These are structural guarantees the code holds (each covered by a test):
 - **The audit log audits its own reads.** Both the transparency export AND the
   `/audit` viewer write a meta-audit record (the query scope), so steward
   inspection of the accountability trail is itself accountable.
+- **A reversal happens ONCE.**  `performRevert` read `reverted`, decided, and then wrote
+  unconditionally — so two concurrent reverts both passed the check and both wrote a
+  revert action, a member notice and an audit row, and the trail said one sanction was
+  reversed twice.  `revertIfNotReverted` moves the predicate into the UPDATE; a lost race
+  returns the idempotent answer instead of a second reversal.  The live pairings are a
+  steward's revert against the expiry sweep, and an appeal overturn against a steward
+  revert — the distributed lease keeps two SWEEPS apart and says nothing about a human
+  arriving mid-sweep.  `delayEnforcementIfNotDelayed` does the same for the MFCI-2 flag,
+  so a brigade's many detection runs page and audit exactly once.
+- **The report aggregate no longer writes back a status it read.**  The recompute carried
+  `status` verbatim from a snapshot taken ~85 lines and two round trips earlier, so a
+  steward `escalate` or `resolve` landing in that window was silently reverted — its audit
+  row still standing, and nothing recording the undo.  The key is gone: it could only ever
+  write back what it read, and the reopen its dead ternary reached for is already
+  structural, since `findOpenByTarget` skips resolved cases and a new report therefore
+  opens a fresh one.
+- **A state change and its audit record are ONE unit.**  Assignment was already a
+  compare-and-set, so no case could be moved from a stale snapshot; what remained was the
+  gap between the CAS committing and the row being appended, in which a delayed reviewer's
+  row could land behind a later one's and leave the most recent entry naming the wrong
+  holder.  `ModerationTransactor` closes it: the CAS and the chained append commit
+  together, so a unit that depends on another's outcome cannot begin until that outcome —
+  audit row included — has committed.  The guarantee is VISIBILITY, not lock contention,
+  which is why it holds however the two requests are scheduled.  Applied to all three
+  assignment paths (auto-route, console assign, bulk assign), per case rather than per
+  batch so two bulk operations over overlapping sets cannot deadlock — and since extended
+  to the action palette, the revert, the automated pre-publication block, the appeal
+  decision and its replacement sanction, and the expiry sweep's lift.
+- **The enforcement and its record are ONE transaction.**  The effect reaches WS-E
+  item-safety state, WS-G contributions, WS-F stories and WS-D accounts — four bounded
+  contexts, and all of them the same Postgres, so one transaction spans them.  What was
+  in the way was never the domains but the wiring: the content port was a ~190-line
+  literal passed inline at the boot, every dep closing over a service CONTAINER, and a
+  container-backed dep resolves whatever store the container holds, which is by
+  definition not a transaction.  Naming the write set (`ContentEnforcementDeps`) makes
+  `(exec) => ContentEnforcementDeps` expressible, and the composition root — the only
+  place that knows all four domains — supplies it, so moderation still constructs nobody
+  else's stores.
+  This removes two failure states rather than choosing between them.  A port that throws
+  part-way no longer leaves content partially hidden, because the rollback takes the
+  safety-state write with it — so there is no orphaned suppression, and no need for the
+  phantom "revert handle" that used to answer `stillSuppressed` and defeat a granted
+  appeal.  And a record that fails no longer leaves an enforced action unrecorded,
+  because the enforcement goes back with it.  Proved against live Postgres by failing a
+  unit after the effect and asserting no `item_safety_states` row survives; mutation-
+  tested by binding the enforcement to the base client, which leaves one behind.
+  Only the APPLY direction is taken through a unit.  Restoring a story clears its hidden
+  state, which re-enters a partial unique index behind a retry-on-23505 loop correct only
+  under autocommit, and which deliberately rethrows a live conflict to leave the action
+  un-reverted and retryable — so the revert path keeps its restore outside the unit.
+- **The trail is tamper-EVIDENT, not merely append-only.** Every record is
+  MAC-chained to its predecessor over the append ordinal, so altering one
+  invalidates every hash after it, and the chain is keyed from the identity master
+  secret — an unkeyed chain is recomputable by exactly the person it defends
+  against.  Identifiers enter the preimage as `accountRef` HMACs, so a chain hash
+  never doubles as an oracle for "was this person involved".  Verification reports
+  three things: an entry that does not recompute, a fork or orphan, and an
+  UNCHAINED row appended after the genesis — the last being what an INSERT around
+  the application looks like.  Rows predating the chain are legitimately unchained;
+  the genesis ordinal is the boundary.
+- **`writeAudit` is the single funnel, and now literally.** Two callers appended
+  directly (`reports.ts`, `scheduler.ts`) while the writer's header already claimed
+  otherwise.  Harmless while every append was equal — and not once the funnel
+  started chaining, since a direct append writes an unchained row the verifier
+  reports as tampering.
+- **Pagination cannot silently drop a record.** The trail pages on the ordinal, an
+  integer that round-trips the wire exactly.  Every other `(timestamp, id)` keyset
+  in the API had the same defect and the same fix (`lib/keyset.ts`): the cursor's
+  ID is exact, so the boundary row supplies its own position through a subquery and
+  no timestamp crosses the wire.  The id tiebreakers those cursors carried could
+  never have helped — a tiebreaker is only consulted once the timestamps compare
+  equal, and a rounded cursor never equals the value it came from.
 - **Config is an enforcement surface.** Reading or writing `moderation.*` runtime
   config requires report-queue or integrity-queue access (not an evidence-only or
   appeals-only steward), and every write is audited with the keys it touched.

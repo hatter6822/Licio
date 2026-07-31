@@ -31,6 +31,17 @@ function u32be(n: number): Uint8Array {
   return b;
 }
 
+/** Per-ceremony knobs.  UV defaults to SET, so every existing call site keeps
+ *  minting the verified ceremony it already expected. */
+export interface CeremonyOptions {
+  /** False ⇒ user PRESENCE only (no PIN/biometric): the UV bit is cleared. */
+  userVerified?: boolean;
+}
+
+function uvFlag(opts: CeremonyOptions): number {
+  return opts.userVerified === false ? 0 : FLAG_UV;
+}
+
 export class SoftwareAuthenticator {
   readonly #privateKey: KeyObject;
   readonly #cosePublicKey: Uint8Array;
@@ -84,9 +95,17 @@ export class SoftwareAuthenticator {
     );
   }
 
-  /** Produce a registration (attestation) response for the given options challenge. */
-  register(challenge: string, rpID: string, origin: string): RegistrationResponseJSON {
-    const authData = this.#authData(rpID, FLAG_UP | FLAG_UV | FLAG_AT, 0, true);
+  /** Produce a registration (attestation) response for the given options challenge.
+   *  `userVerified: false` clears the UV flag — a key that only proved user
+   *  PRESENCE (a touch), never a PIN/biometric — so the relying party's
+   *  `requireUserVerification: true` has something to reject. */
+  register(
+    challenge: string,
+    rpID: string,
+    origin: string,
+    opts: CeremonyOptions = {},
+  ): RegistrationResponseJSON {
+    const authData = this.#authData(rpID, FLAG_UP | uvFlag(opts) | FLAG_AT, 0, true);
     const attestationObject = isoCBOR.encode(
       new Map<string, CborValue>([
         ['fmt', 'none'],
@@ -109,14 +128,16 @@ export class SoftwareAuthenticator {
     };
   }
 
-  /** Produce an authentication (assertion) response with the given signature counter. */
+  /** Produce an authentication (assertion) response with the given signature
+   *  counter.  `userVerified: false` clears the UV flag (see {@link register}). */
   authenticate(
     challenge: string,
     rpID: string,
     origin: string,
     signCount: number,
+    opts: CeremonyOptions = {},
   ): AuthenticationResponseJSON {
-    const authData = this.#authData(rpID, FLAG_UP | FLAG_UV, signCount, false);
+    const authData = this.#authData(rpID, FLAG_UP | uvFlag(opts), signCount, false);
     const clientDataJSON = this.#clientDataJSON('webauthn.get', challenge, origin);
     const signedData = new Uint8Array([...authData, ...sha256(clientDataJSON)]);
     const signature = cryptoSign('sha256', signedData, this.#privateKey); // DER ECDSA

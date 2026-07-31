@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  accountMayHoldSession,
   attentionAggregateEventSchema,
   contributionCreateSchema,
   createReportRequestSchema,
@@ -2118,7 +2119,9 @@ export class DevTrafficSimulator {
    *  input and open moderation cases a real client never could. */
   async #accountMayAuthenticate(userId: string): Promise<boolean> {
     const state = (await this.#graph.identity.store.getUser(userId))?.accountState;
-    return state === 'active' || state === 'restricted';
+    // The shared predicate, not a fourth copy of the rule — "mirror
+    // authMiddleware" is only true while the two cannot drift.
+    return accountMayHoldSession(state);
   }
 
   status(): SimulatorStatus {

@@ -32,7 +32,14 @@ export default defineConfig({
         '**/*.test.tsx',
         '**/index.ts',
         'apps/web/src/main.tsx',
-        'apps/web/src/routes/**',
+        // The route SHELLS only: `createFileRoute` wrappers plus `beforeLoad`/
+        // `validateSearch` wiring, ~580 lines of declaration.  The real page
+        // components live in `routes/-pages/**` (~5.8k lines: the security
+        // console, the profile surfaces, auth, the story/comment pages) and are
+        // MEASURED — excluding the whole tree also discarded the ten page test
+        // files that already existed, so their coverage counted for nothing and
+        // an untested page was invisible to the gate.
+        'apps/web/src/routes/*.tsx',
         'apps/web/src/routeTree.gen.ts',
         'apps/web/src/test/**',
         'packages/db/src/client.ts',

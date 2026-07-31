@@ -143,11 +143,39 @@ describe('LDC encoder — rejections (WS-R.0.2a)', () => {
   });
 
   it('reports the offending path', () => {
+    // Both assertions used to live ONLY inside the catch, so an encoder that
+    // stopped throwing here finished the test with zero assertions and vitest
+    // reported a pass.  This is the only test in the repository that feeds a
+    // plain (non-Map, non-Array, non-Uint8Array) object to `encode`, and the
+    // sibling "rejects undefined and other unsupported types" does not cover
+    // the same branch — `undefined` and a function fall through to the
+    // `default:` arm, not the `case 'object'` arm this guards.  Verified by
+    // mutation: replacing that throw with `encodeMap(new Map(), path)` — so
+    // every distinct object body encodes to the same one-byte map, and two
+    // different records share a CID — kept all 419 @licio/lcap tests green.
+    // The `reason` helper above already fails on a non-throw; use it.
+    expect(reason(() => encode([0, { not: 'a map' } as never]))).toBe('unsupported_type');
     try {
       encode([0, { not: 'a map' } as never]);
+      expect.unreachable('encode must reject a plain object');
     } catch (error) {
       expect(error).toBeInstanceOf(LdcEncodeError);
       expect((error as LdcEncodeError).path).toBe('[1]');
+    }
+  });
+
+  it('rejects an EXOTIC object — a Date, Set, RegExp or class instance', () => {
+    // The realm-crossing and wrapper cases the `case 'object'` arm exists for.
+    // `packages/private-p2p`'s canonical encoder has had this table since
+    // WS-S.2.2 ("fail-closed on EXOTIC objects — forgery / collision defense");
+    // the LDC encoder is the same kind of canonical serializer, feeding
+    // `cidFor()` and COSE Sign1, and had no equivalent.
+    for (const value of [new Date(0), new Set([1]), /re/, Object.create(null), { a: 1 }]) {
+      expect(reason(() => encode(value as never))).toBe('unsupported_type');
+      // …and nested, where a permissive encoder would corrupt a body rather
+      // than refuse a top-level call.
+      expect(reason(() => encode([value] as never))).toBe('unsupported_type');
+      expect(reason(() => encode(new Map([['k', value]]) as never))).toBe('unsupported_type');
     }
   });
 });

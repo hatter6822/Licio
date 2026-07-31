@@ -2,7 +2,9 @@
 //
 // GATED live-Redis integration tests for the WS-E Redis adapters (replay
 // nonces, sliding-window rate limiting, real-time aggregation). Run ONLY when
-// REDIS_URL is set (`docker compose up redis`); CI skips them.
+// REDIS_URL is set (`docker compose up redis`); CI skips them. Every case here
+// asserts a VALUE; the one latency benchmark is additionally behind RUN_PERF=1,
+// so a loaded runner's clock can never redden the correctness cases.
 import { randomUUID } from 'node:crypto';
 import IORedis from 'ioredis';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -16,6 +18,7 @@ import {
 } from '../redis-event-stores.js';
 
 const REDIS_URL = process.env['REDIS_URL'];
+const PERF = process.env['RUN_PERF'] === '1';
 
 describe.skipIf(!REDIS_URL)('Redis event-pipeline adapters integration (WS-E)', () => {
   const redis = REDIS_URL ? new IORedis(REDIS_URL) : null;
@@ -41,16 +44,46 @@ describe.skipIf(!REDIS_URL)('Redis event-pipeline adapters integration (WS-E)', 
       expect(await store.putIfAbsent(short, 150)).toBe(true); // expired
     });
 
-    it('stays within the WS-E.1.3b latency budget (< 5ms average per check)', async () => {
+    it('admits exactly one of N concurrent claims on the same nonce (SET NX PX)', async () => {
+      if (!redis) return;
+      // The atomicity `putIfAbsent` promises (redis-event-stores.ts) and that
+      // SPEC §25.5 replay protection rests on — asserted nowhere else: all the
+      // sequential cases above pass equally well against a GET-then-SET rewrite,
+      // which loses the race and admits every concurrent claim.
+      const store = new RedisReplayNonceStore(redis, `${prefix}race:`);
+      const key = `user:${randomUUID()}`;
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => store.putIfAbsent(key, 60_000)),
+      );
+      expect(results.filter(Boolean)).toHaveLength(1);
+    });
+
+    // WS-E.1.3b's "< 5 ms per nonce check" acceptance criterion, kept
+    // mechanically checked but OFF the correctness suite (the RUN_PERF
+    // convention this repo already uses for every other timing assertion:
+    // ranking-performance / ingestion-performance / invariants performance).
+    // A wall clock in the gated suite is wrong in both directions — a CI
+    // scheduler stall reddens 20-odd deterministic cases, while on unloaded
+    // hardware even a fresh-connection-per-call adapter clears 5 ms, so it
+    // detects no regression it names.  Warm up first (the cold trial measures
+    // ~8x the warm median: connection setup + the ioredis command queue) and
+    // report the MEDIAN and p99, which a mean over one GC pause cannot.
+    it.skipIf(!PERF)('meets the WS-E.1.3b nonce-check latency budget', async () => {
       if (!redis) return;
       const store = new RedisReplayNonceStore(redis, `${prefix}noncebench:`);
-      const rounds = 200;
-      const startedAt = process.hrtime.bigint();
-      for (let i = 0; i < rounds; i += 1) {
+      for (let i = 0; i < 20; i += 1) await store.putIfAbsent(`warmup:${i}`, 60_000);
+      const samples: number[] = [];
+      for (let i = 0; i < 200; i += 1) {
+        const startedAt = process.hrtime.bigint();
         await store.putIfAbsent(`bench:${i}`, 60_000);
+        samples.push(Number(process.hrtime.bigint() - startedAt) / 1e6);
       }
-      const averageMs = Number(process.hrtime.bigint() - startedAt) / 1e6 / rounds;
-      expect(averageMs).toBeLessThan(5);
+      samples.sort((a, b) => a - b);
+      const at = (p: number) =>
+        samples[Math.min(samples.length - 1, Math.floor(p * 200))] as number;
+      const [median, p99] = [at(0.5), at(0.99)];
+      expect(median, `median ${median.toFixed(3)}ms, p99 ${p99.toFixed(3)}ms`).toBeLessThan(5);
+      expect(p99, `median ${median.toFixed(3)}ms, p99 ${p99.toFixed(3)}ms`).toBeLessThan(5);
     });
   });
 

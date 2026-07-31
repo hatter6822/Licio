@@ -6,7 +6,12 @@
 // bodies. The ingestion bundle's `settle()` makes the detached pipeline
 // deterministic in tests.
 import { randomUUID } from 'node:crypto';
-import { COMMONS_ROOM_ID, type StoryCreateRequest, topicIdForSlug } from '@licio/shared';
+import {
+  accountMayHoldSession,
+  COMMONS_ROOM_ID,
+  type StoryCreateRequest,
+  topicIdForSlug,
+} from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import {
   createInMemoryForumServices,
@@ -98,7 +103,7 @@ export function freshIngestionServices(
     // as in production.
     platformRolesReader: async (id) => {
       const user = await identity.store.getUser(id);
-      return user?.accountState === 'active' ? user.roles : [];
+      return accountMayHoldSession(user?.accountState) ? (user?.roles ?? []) : [];
     },
   });
   setForumServices(forum);

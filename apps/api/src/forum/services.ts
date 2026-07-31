@@ -462,14 +462,22 @@ export function registerForumConsumers(
         now: forum.now,
       };
       for (const itemId of signal.target_ids) {
-        // Cascade target ids are HETEROGENEOUS: attention-driven items carry
-        // story ids, while contribution/evidence-driven items carry THREAD
-        // ids (pwatt/aggregation.ts folds those events by payload.thread_id).
-        // Resolve thread-first so forum-driven cascades — the common case
-        // for harassment — are never silently skipped.
+        // A cascade target is a fold ITEM id.  Every branch of the fold now keys
+        // by the owning story (`pwatt/aggregation.ts`), so a signal emitted by
+        // THIS release carries story ids uniformly — the `contribution.created`
+        // branch used to key by thread id, which is what made them heterogeneous.
+        //
+        // The thread-id lookup stays as a FALLBACK, and it is not vestigial:
+        // `integrity.signal.detected` is durable and replayable, and a
+        // `harassment_cascade` emitted before the fold-key change still names a
+        // THREAD.  Resolving story-first and falling back keeps those pending
+        // signals applying their safety/conversation escalation instead of being
+        // silently skipped for the life of the retained window.  Story-first is
+        // the right order: it is the only shape new signals take, so the
+        // fallback costs one extra read only on the legacy residue.
         const thread =
-          (await ingestion.stories.getThreadById(itemId)) ??
-          (await ingestion.stories.getThreadByStoryId(itemId));
+          (await ingestion.stories.getThreadByStoryId(itemId)) ??
+          (await ingestion.stories.getThreadById(itemId));
         if (!thread) continue;
         const applied = await escalateThreadOnIntegritySignal(
           deps,

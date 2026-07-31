@@ -44,6 +44,8 @@ export function feedItemToCard(item: FeedItem): StoryCardData {
             captionsText: item.media.captions_text,
             captionsUrl: item.media.captions_url,
             posterUrl: item.media.poster_url,
+            width: item.media.width,
+            height: item.media.height,
           },
         }
       : {}),

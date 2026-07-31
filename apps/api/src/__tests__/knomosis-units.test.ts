@@ -23,6 +23,7 @@ import {
   writeReceipts,
 } from '../knomosis/receipts.js';
 import {
+  canExpandForRoom,
   canExpandTreasury,
   classifyDivergence,
   compareActorLedger,
@@ -281,6 +282,99 @@ describe('reconciliation decision math (WS-L.3.4a/b)', () => {
     // The divergence blocks treasury expansion (§28.3) even though action states agree.
     const gate = await canExpandTreasury(fixture.knomosis, deploymentId);
     expect(gate.allowed).toBe(false);
+
+    // …but ONLY for a room bound to THAT deployment.  A production
+    // `TreasuryRecord` is bound to exactly one `deploymentId`, and the
+    // all-active-deployments read this replaced held every room in the
+    // installation until an unrelated deployment was repaired — a gate
+    // answering about the wrong deployment is not conservative, it is wrong.
+    // A REAL second active deployment, registered.  It used to be a bare
+    // `randomUUID()` — an id the registry had never heard of — so the assertion
+    // passed by scoping to a deployment that did not exist and finding it clean,
+    // which is not the thing it claims to prove.
+    const bound = await fixture.knomosis.deployments.getById(deploymentId);
+    if (!bound) throw new Error('expected the pinned local deployment');
+    const clean = crypto.randomUUID();
+    await fixture.knomosis.deployments.upsert({
+      ...bound,
+      deploymentId: clean,
+      status: 'active',
+    });
+    const scoped = {
+      reconciliation: fixture.knomosis.reconciliation,
+      deployments: fixture.knomosis.deployments,
+      treasuries: { getByRoom: async () => ({ deploymentId: clean }) },
+    };
+    expect((await canExpandForRoom(scoped, 'room-on-clean')).allowed).toBe(true);
+
+    // A room bound to a RETIRED deployment is NOT held for ever.  Scoping to the
+    // room's deployment without checking that it is active kept the room half of the
+    // §28.3 rule and lost the active half: a retired deployment accepts no new
+    // submits, so its unresolved mismatch cannot describe an imminent expansion, and
+    // scoping to it unconditionally held the room until a deployment that will never
+    // be repaired was repaired.  An explicit fake here rather than the fixture — the
+    // branch under test reads exactly three things, and naming them is the clearest
+    // way to show which one decides.
+    // Only the deployment REGISTRY is stubbed; the mismatch data is the real one
+    // `reconcileDeployment` just recorded against `deploymentId`.
+    const withStatuses = (statuses: Record<string, string>, roomDeployment: string) => ({
+      ...scoped,
+      deployments: {
+        list: async () =>
+          Object.entries(statuses).map(([id, status]) => ({ deploymentId: id, status })),
+      },
+      treasuries: { getByRoom: async () => ({ deploymentId: roomDeployment }) },
+    });
+    // Bound to the diverged deployment, now RETIRED; the only ACTIVE one is clean.
+    expect(
+      (
+        await canExpandForRoom(
+          withStatuses({ [deploymentId]: 'retired', [clean]: 'active' }, deploymentId),
+          'room-on-retired',
+        )
+      ).allowed,
+    ).toBe(true);
+    // Same room, same mismatch — but that deployment ACTIVE, so it holds.
+    expect(
+      (
+        await canExpandForRoom(
+          withStatuses({ [deploymentId]: 'active', [clean]: 'active' }, deploymentId),
+          'room-on-active',
+        )
+      ).allowed,
+    ).toBe(false);
+    // An UNKNOWN deployment id is not clearable by absence either: it falls back to
+    // the conservative all-active read rather than passing for having no recorded
+    // mismatches of its own.
+    expect(
+      (
+        await canExpandForRoom(
+          withStatuses({ [deploymentId]: 'active' }, crypto.randomUUID()),
+          'room-on-unknown',
+        )
+      ).allowed,
+    ).toBe(false);
+
+    // A room bound to the DIVERGED deployment is still held.
+    expect(
+      (
+        await canExpandForRoom(
+          { ...scoped, treasuries: { getByRoom: async () => ({ deploymentId }) } },
+          'room-on-diverged',
+        )
+      ).allowed,
+    ).toBe(false);
+    // An UNBOUND room has no deployment to judge, so it falls back to the
+    // all-active read — explicitly conservative, and no more permissive than
+    // the behaviour this replaced.
+    expect(
+      (
+        await canExpandForRoom(
+          { ...scoped, treasuries: { getByRoom: async () => null } },
+          'room-unbound',
+        )
+      ).allowed,
+    ).toBe(false);
   });
 
   it('EVENT_STATE_OF_TYPE covers EVERY known gateway event type (N6 parity)', () => {
@@ -2620,15 +2714,27 @@ describe('in-memory store adapters + services getter', () => {
     const fixture = await freshKnomosisServices();
     const { startKnomosisScheduler } = await import('../knomosis/scheduler.js');
     let granted = true;
-    const lease = { tryAcquire: async () => granted };
-    const stop = startKnomosisScheduler(fixture.knomosis, () => {}, 10_000, {
-      lease,
+    let checks = 0;
+    const countingLease = {
+      tryAcquire: async () => {
+        checks += 1;
+        return granted;
+      },
+    };
+    const stop = startKnomosisScheduler(fixture.knomosis, () => {}, 5, {
+      lease: countingLease,
       holder: 'test',
     });
-    // Immediate tick already ran under the granted lease; a denied lease is a no-op.
+    // Neither half of this test's NAME was asserted: `typeof stop` is true of
+    // any returned function, so the scheduler could have consulted no lease and
+    // run no tick.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBeGreaterThan(0);
     granted = false;
     stop();
-    expect(typeof stop).toBe('function');
+    const afterStop = checks;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(checks).toBe(afterStop);
   });
 
   it('a simulated execution blocks when the sim treasury cannot cover it', async () => {

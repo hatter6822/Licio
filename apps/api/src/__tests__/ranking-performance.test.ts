@@ -137,6 +137,7 @@ describe.skipIf(!PERF)(`WS-I ranking-core stress (RUN_PERF) @ N=${RANK_N}`, () =
       sensitiveTopicIds: new Set(['topic-7']),
       maxSourceSharePctOverride: null,
       lensByItem: null,
+      sensitiveFreshnessCap: true,
     };
     // Warm-up (JIT), then measure.
     for (let i = 0; i < 3; i += 1) {

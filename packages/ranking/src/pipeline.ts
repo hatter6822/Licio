@@ -80,6 +80,31 @@ export interface RankingRequestContext {
    * affect the ordering (WS-I.2.5b).
    */
   lensByItem: ReadonlyMap<string, string> | null;
+  /**
+   * Whether the §11.5 sensitive-freshness CAP binds for this evaluation.
+   *
+   * LIVE SERVING ALWAYS PASSES TRUE.  Replay passes what the decision it is
+   * reproducing actually recorded, which is why this is a request input and not
+   * a constant: the scheduled replay-regression job re-scores historical
+   * decisions and reports a mismatch as a defect, so a scoring change with no
+   * way to say "that decision predates me" turns every genuine old decision
+   * into a false alarm.
+   *
+   * It replaces a gate on `profile_snapshot.profile_version`, which conflated
+   * two different facts in one string.  `profile_version` is OPERATOR-WRITABLE
+   * — `rankingProfileConfigSchema` accepts any 1–32 characters, nothing
+   * inspects it, and `PUT /v1/ranking/admin/config` installs a profile set
+   * wholesale — so a house profile numbered `1.0.0`, the obvious shape for an
+   * operator numbering their own and the shape this repo's own fixtures use,
+   * read as "predates the cap" and served sensitive content UNCAPPED, with no
+   * rejection, warning or log.  It failed in the other direction too: an
+   * operator profile at `2.0.0` served before this deploy replayed under a cap
+   * it was never served with.  The platform's scoring epoch is not the
+   * operator's label for their profile, and asking the operator's label to
+   * answer for the platform's epoch cannot be made safe by comparing it more
+   * carefully.
+   */
+  sensitiveFreshnessCap: boolean;
 }
 
 export interface RankedSelection {
@@ -144,8 +169,36 @@ export function scoreItem(
   const ageMs = Math.max(0, context.nowMs - Date.parse(features.created_at));
   const curve = sensitiveTopic ? profile.decay_curves.evergreen : profile.decay_curves.breaking;
   const relevance = context.topicRelevanceByItem?.get(candidate.item_id);
+  // The §11.5 conservative curve BINDS on sensitive content.
+  //
+  // `features.freshness_decay ?? freshnessFromAge(…, curve)` made the curve an
+  // ALTERNATIVE to the stored WS-F score rather than a bound on it — so for
+  // every story WS-F had scored, which is every story with a freshness row, the
+  // curve selection above was dead and sensitive content decayed exactly like
+  // breaking news.  The comment two paragraphs up said the opposite.
+  //
+  // A sensitive item is now capped by the conservative envelope AND by WS-F's
+  // own cadence-relative assessment, so the cap can only ever LOWER a sensitive
+  // item's freshness — never raise one, which a bare curve substitution would
+  // do for a young item in a fast-cadence topic.  Non-sensitive scoring is
+  // unchanged, including the breaking curve's role as the fallback when WS-F
+  // has not scored a story yet: this closes a hole in the sensitive-content
+  // guard, and is deliberately not a re-tune of the whole feed.
+  //
+  // RECORDED, not re-derived, because replay is a real consumer.  The scheduled
+  // replay-regression job re-scores historical decisions and reports a mismatch
+  // as a defect, so a scoring change with no way to say "that decision predates
+  // me" turns every genuine old decision into a false alarm.  What says it is
+  // `context.sensitiveFreshnessCap`, which the decision log carries verbatim
+  // from the serve that produced it — see that field for why the operator's
+  // `profile_version` cannot answer this question.
+  const storedFreshness = features.freshness_decay;
+  const freshnessDecay =
+    sensitiveTopic && context.sensitiveFreshnessCap
+      ? Math.min(storedFreshness ?? 1, freshnessFromAge(ageMs, curve.half_life_hours))
+      : (storedFreshness ?? freshnessFromAge(ageMs, curve.half_life_hours));
   const baseline = computeBaseline({
-    freshnessDecay: features.freshness_decay ?? freshnessFromAge(ageMs, curve.half_life_hours),
+    freshnessDecay,
     sourceReliability: features.source_reliability,
     topicRelevance: relevance,
     personalizationEnabled: context.topicRelevanceByItem !== null,

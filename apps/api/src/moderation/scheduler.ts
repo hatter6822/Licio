@@ -81,23 +81,31 @@ export async function runModerationTick(
           );
         }
       }
-      await services.actions.update(action.actionId, { reverted: true });
-      await services.audit.append({
-        actorUserId: null,
-        actorRole: null,
-        action: 'revert',
-        reasonCode: action.reasonCode,
-        targetType: action.targetType,
-        targetId: action.targetId,
-        subjectUserId: action.subjectUserId,
-        priorState: action.nextState,
-        nextState: action.priorState,
-        reversible: false,
-        linkedActionId: action.actionId,
-        reportIds: [],
-        coApproverUserId: null,
-        notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
+      // ONE UNIT: the compare-and-set that claims the lift, and the audit row for it.
+      //
+      // COMPARE-AND-SET, not a blind write.  The distributed lease keeps two SWEEPS
+      // apart and says nothing about a steward reverting the same action mid-sweep —
+      // both used to succeed, and the append-only trail recorded one reversal twice.
+      const claimed = await services.transactor.run(async (tx) => {
+        if ((await tx.actions.revertIfNotReverted(action.actionId)) === null) return false;
+        await tx.audit({
+          actorUserId: null,
+          actorRole: null,
+          action: 'revert',
+          caseId: action.caseId,
+          reasonCode: action.reasonCode,
+          targetType: action.targetType,
+          targetId: action.targetId,
+          subjectUserId: action.subjectUserId,
+          priorState: action.nextState,
+          nextState: action.priorState,
+          reversible: false,
+          linkedActionId: action.actionId,
+          notes: 'Temporary account action auto-lifted on expiry (WS-J.2.3a).',
+        });
+        return true;
       });
+      if (!claimed) continue;
       lifted += 1;
     }
     if (lifted > 0) {

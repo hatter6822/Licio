@@ -15,7 +15,7 @@ import {
   aggregationWindows,
   attentionAggregates,
   consumerCheckpoints,
-  type createDbClient,
+  type DbExecutor,
   eventDeadLetters,
   events as eventsTable,
   invariantOutputs,
@@ -24,7 +24,21 @@ import {
   signalLedgerEntries,
 } from '@licio/db';
 import type { PrivacyClassification, RetentionTier } from '@licio/shared';
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 import {
   type ActorAuthenticityRecord,
   type ActorBehaviorStore,
@@ -52,7 +66,10 @@ import {
   type StoredEvent,
 } from './stores.js';
 
-type Db = ReturnType<typeof createDbClient>;
+// The base client OR an open transaction — the seam the forum/ingestion adapters already
+// take.  Without it these stores can only ever run standalone, which is what kept a
+// moderation enforcement out of the transaction that records it.
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -414,30 +431,58 @@ export class DrizzleAttentionAggregateStore implements AttentionAggregateStore {
   }
 
   async anonymizeOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
-    const updated = await this.#db
-      .update(attentionAggregates)
-      .set({ userIdOrPrivacyBucket: PRIVACY_BUCKET, privacyLevel: 'minimum' })
-      .where(
-        and(
-          eq(attentionAggregates.userIdOrPrivacyBucket, owner),
-          sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
-        ),
-      )
-      .returning({ aggregateId: attentionAggregates.aggregateId });
-    return updated.length;
+    return this.anonymizeOwnedOlderThanMany([owner], cutoffIso);
   }
 
   async deleteOwnedOlderThan(owner: string, cutoffIso: string): Promise<number> {
-    const removed = await this.#db
-      .delete(attentionAggregates)
-      .where(
-        and(
-          eq(attentionAggregates.userIdOrPrivacyBucket, owner),
-          sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
-        ),
-      )
-      .returning({ aggregateId: attentionAggregates.aggregateId });
-    return removed.length;
+    return this.deleteOwnedOlderThanMany([owner], cutoffIso);
+  }
+
+  async anonymizeOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
+    return this.#ownerChunks(owners, async (chunk) => {
+      const updated = await this.#db
+        .update(attentionAggregates)
+        .set({ userIdOrPrivacyBucket: PRIVACY_BUCKET, privacyLevel: 'minimum' })
+        .where(
+          and(
+            inArray(attentionAggregates.userIdOrPrivacyBucket, chunk),
+            sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
+          ),
+        )
+        .returning({ aggregateId: attentionAggregates.aggregateId });
+      return updated.length;
+    });
+  }
+
+  async deleteOwnedOlderThanMany(owners: readonly string[], cutoffIso: string): Promise<number> {
+    return this.#ownerChunks(owners, async (chunk) => {
+      const removed = await this.#db
+        .delete(attentionAggregates)
+        .where(
+          and(
+            inArray(attentionAggregates.userIdOrPrivacyBucket, chunk),
+            sql`${attentionAggregates.createdAt} < ${cutoffIso}::timestamptz`,
+          ),
+        )
+        .returning({ aggregateId: attentionAggregates.aggregateId });
+      return removed.length;
+    });
+  }
+
+  /** Run `fn` over de-duplicated owner chunks, summing the counts.  Chunked well
+   *  under Postgres's 65535 bind-parameter ceiling: the owner list is the whole
+   *  user base and has no bound of its own. */
+  async #ownerChunks(
+    owners: readonly string[],
+    fn: (chunk: string[]) => Promise<number>,
+  ): Promise<number> {
+    const unique = [...new Set(owners)];
+    const CHUNK = 1000;
+    let total = 0;
+    for (let at = 0; at < unique.length; at += CHUNK) {
+      total += await fn(unique.slice(at, at + CHUNK));
+    }
+    return total;
   }
 
   async deleteAnonymizedOlderThan(cutoffIso: string): Promise<number> {
@@ -656,10 +701,46 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async previousWindow(input: {
+    invariantType: string;
+    targetId: string;
+    beforeStartIso: string;
+    spanMs: number;
+    limit: number;
+  }): Promise<InvariantOutputRecord[]> {
+    const startExpr = sql`(${invariantOutputs.timeWindow}->>'start')::timestamptz`;
+    const endExpr = sql`(${invariantOutputs.timeWindow}->>'end')::timestamptz`;
+    const rows = await this.#db
+      .select()
+      .from(invariantOutputs)
+      .where(
+        and(
+          eq(invariantOutputs.invariantType, input.invariantType),
+          eq(invariantOutputs.targetId, input.targetId),
+          sql`${startExpr} < ${input.beforeStartIso}::timestamptz`,
+          // Same-size window. Milliseconds, matching the caller's arithmetic.
+          sql`extract(epoch from (${endExpr} - ${startExpr})) * 1000 = ${input.spanMs}`,
+          // The §30.5 boundary's row-level half, applied here so a shadow row
+          // never occupies a slot in the bounded page below. The degradation
+          // reason codes are re-checked in code (`pwattRowForRanking`), which
+          // is the single definition of "usable".
+          eq(invariantOutputs.shadowMode, false),
+        ),
+      )
+      .orderBy(
+        sql`${startExpr} DESC`,
+        desc(invariantOutputs.createdAt),
+        desc(invariantOutputs.version),
+      )
+      .limit(Math.max(0, input.limit));
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async listByTypeSince(
     invariantType: string,
     sinceIso: string,
     limit: number,
+    untilIso?: string,
   ): Promise<InvariantOutputRecord[]> {
     const rows = await this.#db
       .select()
@@ -668,11 +749,30 @@ export class DrizzleInvariantOutputStore implements InvariantOutputStore {
         and(
           eq(invariantOutputs.invariantType, invariantType),
           gte(invariantOutputs.createdAt, new Date(sinceIso)),
+          ...(untilIso === undefined ? [] : [lte(invariantOutputs.createdAt, new Date(untilIso))]),
         ),
       )
       .orderBy(desc(invariantOutputs.createdAt))
       .limit(Math.max(0, limit));
     return rows.map((row) => this.#toRecord(row));
+  }
+
+  async countByTypeSince(
+    invariantType: string,
+    sinceIso: string,
+    untilIso?: string,
+  ): Promise<number> {
+    const [row] = await this.#db
+      .select({ n: count() })
+      .from(invariantOutputs)
+      .where(
+        and(
+          eq(invariantOutputs.invariantType, invariantType),
+          gte(invariantOutputs.createdAt, new Date(sinceIso)),
+          ...(untilIso === undefined ? [] : [lte(invariantOutputs.createdAt, new Date(untilIso))]),
+        ),
+      );
+    return row?.n ?? 0;
   }
 
   async latest(invariantType: string, targetId: string): Promise<InvariantOutputRecord | null> {
@@ -1243,15 +1343,39 @@ export class DrizzleActorBehaviorStore implements ActorBehaviorStore {
   }
 
   async purgeActor(actorRef: string): Promise<number> {
-    const windows = await this.#db
-      .delete(actorBehaviorWindows)
-      .where(eq(actorBehaviorWindows.actorRef, actorRef))
-      .returning({ actorRef: actorBehaviorWindows.actorRef });
-    const scores = await this.#db
-      .delete(actorAuthenticityScores)
-      .where(eq(actorAuthenticityScores.actorRef, actorRef))
-      .returning({ actorRef: actorAuthenticityScores.actorRef });
-    return windows.length + scores.length;
+    return this.purgeActors([actorRef]);
+  }
+
+  async purgeActors(actorRefs: readonly string[]): Promise<number> {
+    const unique = [...new Set(actorRefs)];
+    const CHUNK = 1000;
+    let total = 0;
+    for (let at = 0; at < unique.length; at += CHUNK) {
+      const chunk = unique.slice(at, at + CHUNK);
+      // ONE TRANSACTION per chunk.  As two independent statements, a transient failure
+      // on the second left the authenticity SCORE behind for up to `CHUNK` owners whose
+      // behaviour windows had already gone — and that residue is not self-healing.  The
+      // retention sweep deletes an owner's expired attention aggregates before calling
+      // this, and `listIdentifiableOwners()` discovers work only from the aggregates that
+      // remain, so an owner with none left never reappears in a later sweep: an
+      // attention-derived score would sit there indefinitely, which is the one outcome
+      // the retention path exists to prevent.
+      //
+      // Per CHUNK rather than around the whole loop, because the chunking exists to bound
+      // the lock footprint — atomicity is needed for the PAIR, not for the sweep.
+      const [windows, scores] = await this.#db.transaction(async (tx) => [
+        await tx
+          .delete(actorBehaviorWindows)
+          .where(inArray(actorBehaviorWindows.actorRef, chunk))
+          .returning({ actorRef: actorBehaviorWindows.actorRef }),
+        await tx
+          .delete(actorAuthenticityScores)
+          .where(inArray(actorAuthenticityScores.actorRef, chunk))
+          .returning({ actorRef: actorAuthenticityScores.actorRef }),
+      ]);
+      total += windows.length + scores.length;
+    }
+    return total;
   }
 
   async clear(): Promise<void> {

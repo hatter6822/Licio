@@ -57,9 +57,11 @@ import {
   type ReportQueueResponse,
   type RevertActionResponse,
   type ReviewerAvailability,
+  type ReviewerStatusResponse,
   reportCreatedResponseSchema,
   reportQueueResponseSchema,
   revertActionResponseSchema,
+  reviewerStatusResponseSchema,
   type SupportContactResponse,
   supportContactResponseSchema,
   type UrlVerdictResponse,
@@ -224,6 +226,14 @@ export async function revertModerationAction(
     json: { reason_code: reasonCode },
   });
   return parseResponse(response, revertActionResponseSchema);
+}
+
+/** The caller's OWN stored availability — what the console initialises from.
+ *  A fixed local default told a reviewer they were `available` while the server
+ *  still had them out of the auto-assignment pool. */
+export async function fetchReviewerStatus(): Promise<ReviewerStatusResponse> {
+  const response = await client.v1.moderation['reviewer-status'].$get();
+  return parseResponse(response, reviewerStatusResponseSchema);
 }
 
 export async function setReviewerStatus(status: ReviewerAvailability): Promise<OkResponse> {

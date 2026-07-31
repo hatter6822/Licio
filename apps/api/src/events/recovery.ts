@@ -91,7 +91,15 @@ export async function recoverEventPipeline(
   );
   await events.realtime.clear();
   if (rows.length > 0) {
-    await rebuildRealtimeFromEvents(events.realtime, rows, actorKeyOfPayload);
+    // PASS THE RESOLVER.  Leaving it off would make the rebuild reproduce exactly
+    // the gap it exists to repair: a pre-0111 payload carries only `thread_id`, and
+    // an unwired seam is a guarantee that exists and is consulted by nobody.
+    await rebuildRealtimeFromEvents(
+      events.realtime,
+      rows,
+      actorKeyOfPayload,
+      events.storyIdForThread,
+    );
     report.realtimeRebuilt = rows.length;
     events.log('events.recovery.realtime_rebuilt', { events: rows.length });
   }

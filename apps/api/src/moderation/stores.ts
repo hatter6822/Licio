@@ -23,6 +23,7 @@ import type {
   ReviewerAvailability,
   StewardRoleId,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 type Clock = () => number;
 const iso = (now: Clock): string => new Date(now()).toISOString();
@@ -95,6 +96,11 @@ export interface ModerationActionRecord {
 
 export interface ModerationAuditRecord {
   auditId: string;
+  /** The APPEND ORDER — strictly increasing, and the ONLY sound pagination key here.
+   *  `eventTime` cannot be one: Postgres stores it to the microsecond and the driver
+   *  truncates to a millisecond `Date`, so a cursor built from a read row sits below the
+   *  row it names and the next page drops that whole millisecond (migration 0115). */
+  ordinal: number;
   eventTime: string;
   actorUserId: string | null;
   actorRole: StewardRoleId | null;
@@ -107,6 +113,13 @@ export interface ModerationAuditRecord {
   nextState: string | null;
   reversible: boolean;
   linkedActionId: string | null;
+  /** The case this record belongs to; null when the event is not case-scoped. */
+  caseId: string | null;
+  /** The predecessor's `integrityHash`; null on the genesis AND on any row written
+   *  before the chain existed (migration 0118). */
+  prevHash: string | null;
+  /** The keyed MAC over this entry and its parent; null ⇒ the row is not chained. */
+  integrityHash: string | null;
   reportIds: string[];
   coApproverUserId: string | null;
   notes: string | null;
@@ -253,6 +266,45 @@ export interface ModerationCaseStore {
     caseId: string,
     patch: Partial<ModerationCaseRecord>,
   ): Promise<ModerationCaseRecord | null>;
+  /**
+   * COMPARE-AND-SET: take the case only while it is unassigned.  Null ⇒ someone
+   * else holds it, or there is no such case.
+   *
+   * A read-then-`update` cannot express this.  The route's pre-read and the write
+   * are two statements, so two reviewers could both see `assigned_to === null`
+   * and both write — last writer wins, both told 200, and the loser's audit row
+   * records a handover naming neither holder.  The client's own check is worse
+   * still: it reads a 30-second-stale snapshot.  Only one statement that both
+   * tests and writes closes it, which is why this is its own method rather than a
+   * predicate bolted onto `update` — the other six `cases.update` callers do not
+   * touch `assignedTo` and must not start paying for a precondition.
+   */
+  claimIfUnassigned(caseId: string, reviewerId: string): Promise<ModerationCaseRecord | null>;
+  /**
+   * Set the MFCI-2 enforcement delay, ONLY if it is not already set.
+   *
+   * Null ⇒ some other detection run already delayed this case, so the page and the audit
+   * row that accompany the delay must not fire a second time.  A read-then-write left
+   * that to a check taken before the write, which under a brigade — many reports landing
+   * at once, each triggering detection — is exactly when it is least true.
+   */
+  delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null>;
+  /**
+   * REASSIGN only if the case is still held by `expectedAssignee`.
+   *
+   * The reasoned-reassignment path used an unconditional `update`, so two reviewers
+   * taking a case off the same colleague both succeeded and last-writer-won — the
+   * defect `claimIfUnassigned` already closed for the unassigned case, left open one
+   * branch along.  It also means the audit trail can name the holder this transition
+   * ACTUALLY came from: the route's read of `assignedTo` is stale by the time the
+   * write happens, and recording that stale value described an edge that never
+   * existed.  Null ⇒ someone else moved it first.
+   */
+  reassignIfHeldBy(
+    caseId: string,
+    expectedAssignee: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null>;
   list(filter: CaseQueueFilter): Promise<ModerationCaseRecord[]>;
   count(filter: Omit<CaseQueueFilter, 'limit'>): Promise<number>;
   countOpenByAssignee(userId: string): Promise<number>;
@@ -310,6 +362,20 @@ export interface ModerationActionStore {
     actionId: string,
     patch: Partial<ModerationActionRecord>,
   ): Promise<ModerationActionRecord | null>;
+  /**
+   * Mark an action reverted, ONLY if it is not already — the compare-and-set that makes
+   * a revert happen once.
+   *
+   * The revert path used to read `reverted`, decide, and then write unconditionally.  Two
+   * concurrent reverts of the same action both read false, both passed the check and both
+   * wrote — producing TWO `revert` action rows and TWO audit rows for one reversal, in an
+   * append-only record that then says the action was reverted twice.  The scheduler's
+   * auto-lift raced a steward's revert the same way; the distributed lease only keeps two
+   * SWEEPS apart, and says nothing about a human arriving mid-sweep.
+   *
+   * Null ⇒ someone else got there first, and the caller takes its idempotent path.
+   */
+  revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null>;
   listBySubject(userId: string): Promise<ModerationActionRecord[]>;
   /** Active (non-reverted) actions against an item, newest first. */
   listActiveByTarget(targetType: string, targetId: string): Promise<ModerationActionRecord[]>;
@@ -330,12 +396,19 @@ export interface AuditQueryFilter {
   subjectUserId?: string;
   action?: string;
   reasonCode?: string;
+  /** Restrict to ONE case's history — the review panel's read. */
+  caseId?: string;
   createdAfter?: string;
   createdBefore?: string;
-  /** Keyset cursor on the (eventTime, auditId) DESC order (exclusive).  Preferred
-   *  over `offset`: stable when new audit rows are inserted between page reads
-   *  (e.g. the `audit_view` meta-record the viewer itself writes). */
-  afterEventTime?: string;
+  /** Keyset cursor on the `ordinal` DESC order (exclusive).  Preferred over `offset`:
+   *  stable when new audit rows are inserted between page reads (e.g. the `audit_view`
+   *  meta-record the viewer itself writes).  An integer, so it survives the round trip
+   *  through the wire cursor EXACTLY — which the old `(eventTime, auditId)` pair did
+   *  not, and that cost whole milliseconds of the trail per page (migration 0115). */
+  afterOrdinal?: number;
+  /** The LEGACY cursor form, still honoured so a page open across the deploy does not
+   *  break: the id is exact, so the store resolves that row's own ordinal and pages from
+   *  there.  Ignored when `afterOrdinal` is present. */
   afterAuditId?: string;
   limit: number;
   offset?: number;
@@ -344,9 +417,27 @@ export interface AuditQueryFilter {
 export interface ModerationAuditStore {
   /** Append-only: the only write path. */
   append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord>;
   list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]>;
+  /** The chain head — the chained entry with the greatest ordinal, or null before the
+   *  first chained append. */
+  chainHead(): Promise<ModerationAuditRecord | null>;
+  /**
+   * Append a CHAINED entry, returning null when the parent slot was taken by a
+   * concurrent writer (the caller re-reads the head and retries).
+   *
+   * `hashOf` is a callback rather than a value because the hash commits to the ordinal
+   * and the event time, and the STORE assigns both — computing the hash outside would
+   * either omit them or guess.
+   */
+  appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null>;
   listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]>;
   /** Records in [start, end) for the transparency export aggregation. */
   listInPeriod(startIso: string, endIso: string): Promise<ModerationAuditRecord[]>;
@@ -532,7 +623,12 @@ function afterCreated<T extends { createdAt: string }>(rows: T[], after: string 
   return after === null ? rows : rows.filter((r) => r.createdAt < after);
 }
 
-export class InMemoryModerationCaseStore implements ModerationCaseStore {
+export class InMemoryModerationCaseStore implements ModerationCaseStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationCaseRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -576,6 +672,57 @@ export class InMemoryModerationCaseStore implements ModerationCaseStore {
     const r = this.#rows.get(caseId);
     if (!r) return null;
     const updated: ModerationCaseRecord = { ...r, ...patch, updatedAt: iso(this.#now) };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+  async reassignIfHeldBy(
+    caseId: string,
+    expectedAssignee: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle
+    // adapter's one-statement `UPDATE … WHERE assigned_to = $expected`.
+    const r = this.#rows.get(caseId);
+    if (!r || r.assignedTo !== expectedAssignee) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      assignedTo: reviewerId,
+      status: 'in_progress',
+      updatedAt: iso(this.#now),
+    };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
+  async delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them, matching the Drizzle adapter's
+    // one-statement `UPDATE … WHERE enforcement_delayed = false`.
+    const r = this.#rows.get(caseId);
+    if (!r || r.enforcementDelayed) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      enforcementDelayed: true,
+      updatedAt: iso(this.#now),
+    };
+    this.#rows.set(caseId, updated);
+    return { ...updated };
+  }
+
+  async claimIfUnassigned(
+    caseId: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // Read, test and write with NO `await` between them — on a single-threaded
+    // event loop that is as atomic as the Drizzle adapter's one-statement
+    // `UPDATE … WHERE assigned_to IS NULL`, which is the semantics this emulates.
+    const r = this.#rows.get(caseId);
+    if (!r || r.assignedTo !== null) return null;
+    const updated: ModerationCaseRecord = {
+      ...r,
+      assignedTo: reviewerId,
+      status: 'in_progress',
+      updatedAt: iso(this.#now),
+    };
     this.#rows.set(caseId, updated);
     return { ...updated };
   }
@@ -737,7 +884,22 @@ export class InMemoryModerationReportStore implements ModerationReportStore {
   }
 }
 
-export class InMemoryModerationActionStore implements ModerationActionStore {
+export class InMemoryModerationActionStore implements ModerationActionStore, InMemoryRollback {
+  async revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null> {
+    // Read, test and write with NO `await` between them — on a single-threaded event
+    // loop that is as atomic as the Drizzle adapter's one-statement
+    // `UPDATE … WHERE reverted = false`, which is the semantics this emulates.
+    const row = this.#rows.get(actionId);
+    if (!row || row.reverted) return null;
+    const updated: ModerationActionRecord = { ...row, reverted: true };
+    this.#rows.set(actionId, updated);
+    return { ...updated };
+  }
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationActionRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -812,22 +974,84 @@ export class InMemoryModerationActionStore implements ModerationActionStore {
   }
 }
 
-export class InMemoryModerationAuditStore implements ModerationAuditStore {
+export class InMemoryModerationAuditStore implements ModerationAuditStore, InMemoryRollback {
+  /** @see InMemoryRollback.
+   *
+   *  The ORDINAL COUNTER IS NOT REWOUND, deliberately.  Postgres assigns it from a
+   *  sequence, and `nextval` is not transactional — a rolled-back unit burns its value
+   *  for good.  A twin that rewound would be MORE contiguous than production, and the
+   *  first thing that costs is a test: assert contiguous ordinals, watch it pass
+   *  in-memory and fail against Postgres.  Nothing may read the ordinal as a gapless
+   *  counter; proving no row was removed is the chain's job. */
+  beginRollback(): () => void {
+    const saved = [...this.#rows];
+    return () => {
+      this.#rows.length = 0;
+      this.#rows.push(...saved);
+    };
+  }
+
   readonly #rows: ModerationAuditRecord[] = [];
   readonly #now: Clock;
+  /** Mirrors the Postgres sequence: assigned on append, never reused. */
+  #nextOrdinal = 1;
   constructor(now: Clock = Date.now) {
     this.#now = now;
   }
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord> {
     const at = iso(this.#now);
     const full: ModerationAuditRecord = {
       ...record,
       auditId: randomUUID(),
+      ordinal: this.#nextOrdinal++,
+      eventTime: at,
+      createdAt: at,
+      // UNCHAINED.  `append` is the primitive fixtures use; production writes go through
+      // `writeAudit` → `appendChained`, and the verifier reports an unchained row after
+      // the genesis as exactly the anomaly it is.
+      prevHash: null,
+      integrityHash: null,
+    };
+    this.#rows.push(full);
+    return { ...full };
+  }
+  async chainHead(): Promise<ModerationAuditRecord | null> {
+    let head: ModerationAuditRecord | null = null;
+    for (const r of this.#rows) {
+      if (r.integrityHash !== null && (head === null || r.ordinal > head.ordinal)) head = r;
+    }
+    return head === null ? null : { ...head };
+  }
+  async appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null> {
+    // The in-memory stand-in for the fork-proof partial unique.  A single-threaded fold
+    // cannot actually race, but the CONTRACT has to be the same one the SQL adapter
+    // offers, or the retry loop is exercised by only one of them.
+    if (entry.prevHash !== null && this.#rows.some((r) => r.prevHash === entry.prevHash)) {
+      return null;
+    }
+    if (
+      entry.prevHash === null &&
+      this.#rows.some((r) => r.integrityHash !== null && r.prevHash === null)
+    ) {
+      return null; // a second genesis
+    }
+    const at = iso(this.#now);
+    const staged: ModerationAuditRecord = {
+      ...entry,
+      auditId: randomUUID(),
+      ordinal: this.#nextOrdinal++,
       eventTime: at,
       createdAt: at,
     };
+    const full: ModerationAuditRecord = { ...staged, integrityHash: hashOf(staged) };
     this.#rows.push(full);
     return { ...full };
   }
@@ -836,20 +1060,31 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     if (f.subjectUserId && r.subjectUserId !== f.subjectUserId) return false;
     if (f.action && r.action !== f.action) return false;
     if (f.reasonCode && r.reasonCode !== f.reasonCode) return false;
+    if (f.caseId && r.caseId !== f.caseId) return false;
     if (f.createdAfter && r.eventTime < f.createdAfter) return false;
     if (f.createdBefore && r.eventTime > f.createdBefore) return false;
     return true;
   }
   async list(filter: AuditQueryFilter): Promise<ModerationAuditRecord[]> {
+    // DESC by the append ORDINAL — a total order, so it needs no tiebreaker and admits
+    // an exact cursor.  Ordering by eventTime cannot: rows tie there constantly (an
+    // action burst lands inside one millisecond) and the tie is unresolvable from a
+    // read row, because the driver has already dropped the microseconds.
     const matched = this.#rows
       .filter((r) => this.#matches(r, filter))
-      // Stable DESC order with an id tiebreaker (rows can share an eventTime).
-      .sort((a, b) => b.eventTime.localeCompare(a.eventTime) || b.auditId.localeCompare(a.auditId));
-    if (filter.afterEventTime !== undefined && filter.afterAuditId !== undefined) {
-      const at = filter.afterEventTime;
-      const ai = filter.afterAuditId;
+      .sort((a, b) => b.ordinal - a.ordinal);
+    // The legacy `(eventTime, auditId)` cursor is resolved through the row it names —
+    // the id is exact, so its own ordinal is the true position.
+    if (filter.afterOrdinal !== undefined || filter.afterAuditId !== undefined) {
+      const after =
+        filter.afterOrdinal ??
+        this.#rows.find((r) => r.auditId === filter.afterAuditId)?.ordinal ??
+        // An id that resolves to nothing ends the walk, matching the SQL adapter (its
+        // scalar subquery yields NULL ⇒ unknown ⇒ no rows).  Restarting from the head
+        // instead would loop a paging reader forever while looking like progress.
+        0;
       return matched
-        .filter((r) => r.eventTime < at || (r.eventTime === at && r.auditId < ai))
+        .filter((r) => r.ordinal < after)
         .slice(0, filter.limit)
         .map((r) => ({ ...r }));
     }
@@ -857,11 +1092,15 @@ export class InMemoryModerationAuditStore implements ModerationAuditStore {
     return matched.slice(offset, offset + filter.limit).map((r) => ({ ...r }));
   }
   async listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]> {
-    return this.#rows
-      .filter((r) => r.subjectUserId === userId)
-      .sort((a, b) => b.eventTime.localeCompare(a.eventTime))
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+    return (
+      this.#rows
+        .filter((r) => r.subjectUserId === userId)
+        // Ordinal DESC, as `list` — sorting on eventTime alone left tied rows in an
+        // arbitrary order, so a `limit` could cut the tie differently on each call.
+        .sort((a, b) => b.ordinal - a.ordinal)
+        .slice(0, limit)
+        .map((r) => ({ ...r }))
+    );
   }
   async listInPeriod(startIso: string, endIso: string): Promise<ModerationAuditRecord[]> {
     return this.#rows
@@ -1022,7 +1261,12 @@ export class InMemoryAccountMuteStore implements AccountMuteStore {
   }
 }
 
-export class InMemoryModerationAppealStore implements ModerationAppealStore {
+export class InMemoryModerationAppealStore implements ModerationAppealStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationAppealRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -1120,7 +1364,12 @@ export class InMemoryModerationAppealStore implements ModerationAppealStore {
   }
 }
 
-export class InMemoryModerationNoticeStore implements ModerationNoticeStore {
+export class InMemoryModerationNoticeStore implements ModerationNoticeStore, InMemoryRollback {
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, ModerationNoticeRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {
@@ -1196,7 +1445,14 @@ export class InMemoryReviewerStatusStore implements ReviewerStatusStore {
   }
 }
 
-export class InMemoryCoordinatedReportIncidentStore implements CoordinatedReportIncidentStore {
+export class InMemoryCoordinatedReportIncidentStore
+  implements CoordinatedReportIncidentStore, InMemoryRollback
+{
+  /** @see InMemoryRollback — replace-only writes make the shallow copy complete. */
+  beginRollback(): () => void {
+    return mapRollback(this.#rows);
+  }
+
   readonly #rows = new Map<string, CoordinatedReportIncidentRecord>();
   readonly #now: Clock;
   constructor(now: Clock = Date.now) {

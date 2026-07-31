@@ -169,6 +169,32 @@ export interface IngestReport {
   readonly accepted: string[];
   /** Envelopes that did not open (unknown device / decrypt failed / …). */
   readonly quarantined: QuarantinedEnvelope[];
+  /**
+   * Envelopes that OPENED and were already held — an exact idempotent
+   * re-receive, or an op already folded into the snapshot base.
+   *
+   * REPORTED, not derived.  A caller subtracting accepted+quarantined from what
+   * it handed in cannot distinguish this from `pending` below, and the two mean
+   * opposite things to a user: one is "your backup was already here", the other
+   * is "none of this entered the room yet".  The offline panel was reporting
+   * the second as the first.
+   */
+  readonly duplicate: number;
+  /**
+   * Envelopes FROM THIS BATCH retained awaiting material (a missing epoch key
+   * or device cert).  They are in neither `accepted` nor `quarantined` and are
+   * not in room state: they re-open automatically once the material arrives.
+   *
+   * BATCH-LOCAL, not the pool size.  `load()` restores previously-retained
+   * envelopes into the pending pool, and this fixpoint deliberately reprocesses
+   * them alongside the new batch (that is the cross-epoch self-heal) — so
+   * reporting the pool would attribute a room's whole backlog to whatever was
+   * just handed in, and could report more pending than the caller submitted.
+   * `pendingPoolSize` is the backlog, for a caller that wants it.
+   */
+  readonly pending: number;
+  /** The engine's WHOLE retained pool after this call, batch and backlog alike. */
+  readonly pendingPoolSize: number;
 }
 
 /** A §14.5 snapshot of the reduced state (the optimization that bounds replay +
@@ -457,9 +483,15 @@ export class PrivateRoomEngine {
     // after `addEpochKeys` drains them — the cross-epoch self-heal).
     const pending = new Map<string, PrivateEncryptedEnvelope>(this.pendingEnvelopes);
     for (const envelope of envelopes) pending.set(envelope.signature, envelope);
+    // WHICH signatures this call was handed, so the report can distinguish what
+    // THIS batch left pending from the backlog it was merged with.
+    const batch = new Set(envelopes.map((envelope) => envelope.signature));
 
     const accepted: string[] = [];
     const forks: QuarantinedEnvelope[] = [];
+    /** Opened, but already held (covered by the snapshot base, or a byte-exact
+     *  re-receive of an op this room already accepted). */
+    let duplicate = 0;
     let lastResultByKey = new Map<string, OpIntakeRejection>();
 
     let progressed = true;
@@ -483,7 +515,10 @@ export class PrivateRoomEngine {
         progressed = true;
         const opId = result.op.op_id;
         // A re-received op already folded into the snapshot base is a no-op.
-        if (this.coveredOpLamports.has(opId)) continue;
+        if (this.coveredOpLamports.has(opId)) {
+          duplicate += 1;
+          continue;
+        }
         const existingSig = this.acceptedSignatures.get(opId);
         if (existingSig === undefined) {
           this.acceptedOps.set(opId, result.op);
@@ -492,7 +527,10 @@ export class PrivateRoomEngine {
           await this.storage.putEnvelope(opId, envelope);
           continue;
         }
-        if (existingSig === envelope.signature) continue; // exact idempotent re-receive
+        if (existingSig === envelope.signature) {
+          duplicate += 1;
+          continue; // exact idempotent re-receive
+        }
         // A device FORK: two valid envelopes, same op_id, different signed content.
         // Keep the bytewise-smaller signature so every peer converges on the SAME
         // variant regardless of arrival order; the loser is fork evidence, excluded
@@ -533,7 +571,17 @@ export class PrivateRoomEngine {
       if (oldest === undefined) break;
       this.pendingEnvelopes.delete(oldest);
     }
-    return { accepted, quarantined };
+    let batchPending = 0;
+    for (const key of this.pendingEnvelopes.keys()) {
+      if (batch.has(key)) batchPending += 1;
+    }
+    return {
+      accepted,
+      quarantined,
+      duplicate,
+      pending: batchPending,
+      pendingPoolSize: this.pendingEnvelopes.size,
+    };
   }
 
   /** Re-attempt the retained recoverable-failure envelopes (e.g. after `addEpochKeys`

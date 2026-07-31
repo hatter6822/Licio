@@ -11,7 +11,6 @@
 // the action-submission kill switch (preflight stays available during an
 // incident — WS-L.3.5c — so users can see WHY an action would fail).
 
-import { zValidator } from '@hono/zod-validator';
 import {
   decCompare,
   isValidDecimal,
@@ -61,6 +60,7 @@ import {
   readBudget,
 } from '../knomosis/standing.js';
 import { type SubmissionDeps, submitAction } from '../knomosis/submission.js';
+import { zValidator } from '../lib/validate.js';
 import {
   type AuthEnv,
   authMiddleware,

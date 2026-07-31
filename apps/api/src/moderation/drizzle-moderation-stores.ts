@@ -13,11 +13,13 @@
 //   • `moderation_reports.reporter_user_id` is the highest-sensitivity field —
 //     surfaced only through the role-gated console projection, never widened.
 //   • No financial column exists on any moderation table (enforced by ABSENCE).
+
+import { randomUUID } from 'node:crypto';
 import {
   accountBlocks,
   accountMutes,
   coordinatedReportIncidents,
-  type createDbClient,
+  type DbExecutor,
   evidenceDecisions,
   moderationActions,
   moderationAppeals,
@@ -43,11 +45,16 @@ import {
   isNotNull,
   isNull,
   like,
+  lt,
   lte,
   or,
   type SQL,
   sql,
 } from 'drizzle-orm';
+import { keysetAfterRow } from '../lib/keyset.js';
+import { isUniqueViolation } from '../lib/pg-errors.js';
+import { appendAudit } from './audit.js';
+import type { AuditChainDeps } from './audit-chain.js';
 import type {
   AccountBlockRecord,
   AccountBlockStore,
@@ -75,8 +82,15 @@ import type {
   ReviewerStatusRecord,
   ReviewerStatusStore,
 } from './stores.js';
+import type { ModerationTransactor, ModerationTx } from './transactor.js';
 
-type Db = ReturnType<typeof createDbClient>;
+/** Binds the enforcement writes to one executor (see `ModerationTx.content`). */
+type TxEnforcement = (exec: Db) => ModerationTx['content'];
+
+// The base client OR an open transaction, the same seam the forum/ingestion adapters
+// take.  Without it these stores can only ever run standalone — which is what kept the
+// assignment CAS and its audit row in two separate transactions.
+type Db = DbExecutor;
 
 const iso = (d: Date): string => d.toISOString();
 const isoOrNull = (d: Date | null): string | null => (d === null ? null : d.toISOString());
@@ -150,6 +164,7 @@ function mapAction(row: typeof moderationActions.$inferSelect): ModerationAction
 function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditRecord {
   return {
     auditId: row.auditId,
+    ordinal: row.ordinal,
     eventTime: iso(row.eventTime),
     actorUserId: row.actorUserId,
     actorRole: row.actorRole as ModerationAuditRecord['actorRole'],
@@ -162,6 +177,9 @@ function mapAudit(row: typeof moderationAudit.$inferSelect): ModerationAuditReco
     nextState: row.nextState,
     reversible: row.reversible,
     linkedActionId: row.linkedActionId,
+    caseId: row.caseId,
+    prevHash: row.prevHash,
+    integrityHash: row.integrityHash,
     reportIds: row.reportIds,
     coApproverUserId: row.coApproverUserId,
     notes: row.notes,
@@ -306,6 +324,56 @@ export class DrizzleModerationCaseStore implements ModerationCaseStore {
         ),
       )
       .limit(1);
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
+  async delayEnforcementIfNotDelayed(caseId: string): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT: the `enforcement_delayed = false` predicate lives in the UPDATE, so
+    // Postgres decides which detection run under a brigade actually engages the delay —
+    // and therefore which one pages and audits.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ enforcementDelayed: true, updatedAt: new Date() })
+      .where(and(eq(moderationCases.caseId, caseId), eq(moderationCases.enforcementDelayed, false)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
+  async claimIfUnassigned(
+    caseId: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT.  The `assigned_to IS NULL` predicate lives in the UPDATE, so
+    // Postgres decides the winner of a concurrent claim; an empty `returning()`
+    // means someone else already held it.  A read-then-write here would leave the
+    // race exactly where it was, just with more code around it.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ assignedTo: reviewerId, status: 'in_progress', updatedAt: new Date() })
+      .where(and(eq(moderationCases.caseId, caseId), isNull(moderationCases.assignedTo)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapCase(row);
+  }
+
+  async reassignIfHeldBy(
+    caseId: string,
+    expectedAssignee: string,
+    reviewerId: string,
+  ): Promise<ModerationCaseRecord | null> {
+    // ONE STATEMENT, like `claimIfUnassigned` above: the expected holder lives in
+    // the UPDATE predicate, so Postgres decides the winner of two reviewers taking
+    // the case off the same colleague.  The unconditional `update` this replaces let
+    // both win.
+    const rows = await this.#db
+      .update(moderationCases)
+      .set({ assignedTo: reviewerId, status: 'in_progress', updatedAt: new Date() })
+      .where(
+        and(eq(moderationCases.caseId, caseId), eq(moderationCases.assignedTo, expectedAssignee)),
+      )
+      .returning();
     const row = rows[0];
     return row === undefined ? null : mapCase(row);
   }
@@ -654,6 +722,20 @@ export class DrizzleModerationActionStore implements ModerationActionStore {
     return row === undefined ? null : mapAction(row);
   }
 
+  async revertIfNotReverted(actionId: string): Promise<ModerationActionRecord | null> {
+    // ONE STATEMENT.  The `reverted = false` predicate lives in the UPDATE, so Postgres
+    // decides the winner of two concurrent reverts; an empty `returning()` means someone
+    // else already marked it.  A read-then-write here would leave the race exactly where
+    // it was, just with more code around it.
+    const rows = await this.#db
+      .update(moderationActions)
+      .set({ reverted: true })
+      .where(and(eq(moderationActions.actionId, actionId), eq(moderationActions.reverted, false)))
+      .returning();
+    const row = rows[0];
+    return row === undefined ? null : mapAction(row);
+  }
+
   async listBySubject(userId: string): Promise<ModerationActionRecord[]> {
     const rows = await this.#db
       .select()
@@ -730,7 +812,10 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
   }
 
   async append(
-    record: Omit<ModerationAuditRecord, 'auditId' | 'eventTime' | 'createdAt'>,
+    record: Omit<
+      ModerationAuditRecord,
+      'auditId' | 'ordinal' | 'eventTime' | 'createdAt' | 'prevHash' | 'integrityHash'
+    >,
   ): Promise<ModerationAuditRecord> {
     const rows = await this.#db
       .insert(moderationAudit)
@@ -746,6 +831,7 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
         nextState: record.nextState,
         reversible: record.reversible,
         linkedActionId: record.linkedActionId,
+        caseId: record.caseId,
         reportIds: record.reportIds,
         coApproverUserId: record.coApproverUserId,
         notes: record.notes,
@@ -766,23 +852,37 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     }
     if (filter.action !== undefined) c.push(eq(moderationAudit.action, filter.action));
     if (filter.reasonCode !== undefined) c.push(eq(moderationAudit.reasonCode, filter.reasonCode));
+    if (filter.caseId !== undefined) c.push(eq(moderationAudit.caseId, filter.caseId));
     if (filter.createdAfter !== undefined) {
       c.push(gte(moderationAudit.eventTime, new Date(filter.createdAfter)));
     }
     if (filter.createdBefore !== undefined) {
       c.push(lte(moderationAudit.eventTime, new Date(filter.createdBefore)));
     }
-    const keyset = filter.afterEventTime !== undefined && filter.afterAuditId !== undefined;
-    if (keyset) {
+    // The cursor is the ORDINAL, never a timestamp.  `event_time` is microsecond
+    // `timestamptz` that the driver truncates to a millisecond `Date` on read, so the
+    // old `(event_time, audit_id) < (…)` predicate compared the true stored value
+    // against a rounded-DOWN copy of itself and skipped every row in the cursor row's
+    // millisecond (migration 0115 carries the measurement).
+    let keyset = false;
+    if (filter.afterOrdinal !== undefined) {
+      c.push(lt(moderationAudit.ordinal, filter.afterOrdinal));
+      keyset = true;
+    } else if (filter.afterAuditId !== undefined) {
+      // LEGACY cursor: the id is exact, so the row's own ordinal is the true position.
+      // A scalar subquery keeps it one round trip; an id that no longer resolves yields
+      // NULL, the predicate is unknown, and the page comes back empty — the safe
+      // direction for an accountability read (no silent re-listing from the head).
       c.push(
-        sql`(${moderationAudit.eventTime}, ${moderationAudit.auditId}) < (${new Date(filter.afterEventTime as string).toISOString()}::timestamptz, ${filter.afterAuditId as string}::uuid)`,
+        sql`${moderationAudit.ordinal} < (SELECT a2.ordinal FROM ${moderationAudit} a2 WHERE a2.audit_id = ${filter.afterAuditId}::uuid)`,
       );
+      keyset = true;
     }
     const rows = await this.#db
       .select()
       .from(moderationAudit)
       .where(c.length > 0 ? and(...c) : undefined)
-      .orderBy(desc(moderationAudit.eventTime), desc(moderationAudit.auditId))
+      .orderBy(desc(moderationAudit.ordinal))
       .limit(Math.max(0, filter.limit))
       // Keyset supersedes offset (stable under concurrent inserts); offset is the
       // legacy fallback when no cursor is supplied.
@@ -790,12 +890,106 @@ export class DrizzleModerationAuditStore implements ModerationAuditStore {
     return rows.map(mapAudit);
   }
 
+  async chainHead(): Promise<ModerationAuditRecord | null> {
+    // The greatest chained ordinal IS the head: the ordinal is a total order and the
+    // chain is appended along it, so there is no need to walk parent links to find the
+    // tip (the governance chain does, because its `created_at` order can tie).
+    const rows = await this.#db
+      .select()
+      .from(moderationAudit)
+      .where(isNotNull(moderationAudit.integrityHash))
+      .orderBy(desc(moderationAudit.ordinal))
+      .limit(1);
+    const row = rows[0];
+    return row === undefined ? null : mapAudit(row);
+  }
+
+  async appendChained(
+    entry: ModerationAuditRecord,
+    hashOf: (staged: ModerationAuditRecord) => string,
+  ): Promise<ModerationAuditRecord | null> {
+    // The ordinal is RESERVED before the insert, because the hash commits to it.  Taking
+    // it from the sequence by hand (rather than the column default) is what lets the
+    // staged row be hashed and then written unchanged.  A burned value on a losing retry
+    // is fine — the sequence was never gapless, and the chain is what proves nothing was
+    // removed.
+    const reserved = (await this.#db.execute(
+      sql`SELECT nextval('moderation_audit_ordinal_seq')::bigint AS ordinal, now() AS at`,
+    )) as unknown as Array<{ ordinal: string | number; at: Date }>;
+    const head = reserved[0];
+    if (head === undefined) throw new Error('failed to reserve a moderation audit ordinal');
+    // Millisecond resolution on BOTH sides: the driver hands back a millisecond `Date`,
+    // so hashing anything finer would produce a digest that can never be recomputed from
+    // a read row.
+    const eventTime = new Date(head.at).toISOString();
+    const staged: ModerationAuditRecord = {
+      ...entry,
+      auditId: randomUUID(),
+      ordinal: Number(head.ordinal),
+      eventTime,
+      createdAt: eventTime,
+    };
+    const full: ModerationAuditRecord = { ...staged, integrityHash: hashOf(staged) };
+    try {
+      // A SAVEPOINT around the insert, which is what lets the retry loop survive when
+      // this store runs inside a wrapping transaction (the `transact` seam).  A unique
+      // violation aborts the transaction it happens in — so without the nested scope the
+      // parent collision would kill the OUTER transaction, taking the state change with
+      // it, and the retry's own `chainHead()` would fail with "current transaction is
+      // aborted".  Rolling back to the savepoint leaves the outer work intact.
+      //
+      // `#db.transaction` is a savepoint when `#db` is already a transaction and an
+      // ordinary transaction when it is the base client, so both callers get the scope
+      // they need from one spelling.
+      //
+      // The retry CONVERGES because the isolation level is READ COMMITTED: each
+      // statement takes a fresh snapshot, so the re-read of `chainHead()` sees the row
+      // the winner just committed.  Under REPEATABLE READ it would keep seeing the old
+      // head and burn the whole budget.
+      await this.#db.transaction(async (tx) => {
+        await tx.insert(moderationAudit).values({
+          auditId: full.auditId,
+          ordinal: full.ordinal,
+          eventTime: new Date(full.eventTime),
+          createdAt: new Date(full.createdAt),
+          actorUserId: full.actorUserId,
+          actorRole: full.actorRole,
+          action: full.action,
+          reasonCode: full.reasonCode,
+          targetType: full.targetType,
+          targetId: full.targetId,
+          subjectUserId: full.subjectUserId,
+          priorState: full.priorState,
+          nextState: full.nextState,
+          reversible: full.reversible,
+          linkedActionId: full.linkedActionId,
+          caseId: full.caseId,
+          prevHash: full.prevHash,
+          integrityHash: full.integrityHash,
+          reportIds: full.reportIds,
+          coApproverUserId: full.coApproverUserId,
+          notes: full.notes,
+        });
+      });
+      return full;
+    } catch (error) {
+      // A collision on the fork-proof parent/genesis indexes means a concurrent writer
+      // took this slot: the caller re-reads the head and retries.  Anything else is a
+      // real failure and must not be swallowed as contention.
+      if (isUniqueViolation(error)) return null;
+      throw error;
+    }
+  }
+
   async listBySubject(userId: string, limit: number): Promise<ModerationAuditRecord[]> {
     const rows = await this.#db
       .select()
       .from(moderationAudit)
       .where(eq(moderationAudit.subjectUserId, userId))
-      .orderBy(desc(moderationAudit.eventTime))
+      // Ordinal DESC, as `list` — `event_time` alone leaves tied rows unordered, so the
+      // `limit` could cut a burst differently on each call and the two adapters could
+      // disagree about which records a subject's history contains.
+      .orderBy(desc(moderationAudit.ordinal))
       .limit(Math.max(0, limit));
     return rows.map(mapAudit);
   }
@@ -1468,9 +1662,18 @@ export class DrizzleCoordinatedReportIncidentStore implements CoordinatedReportI
   ): Promise<CoordinatedReportIncidentRecord[]> {
     const conditions = [eq(coordinatedReportIncidents.status, 'open')];
     if (after) {
-      // Keyset on (createdAt, incidentId) ascending — stable under inserts.
+      // Keyset on (createdAt, incidentId) ASCENDING — stable under inserts, and resolved
+      // from the id rather than the cursor's rounded-down timestamp.  Ascending is the
+      // worse direction to get wrong: a rounded-DOWN cursor re-serves rows already shown,
+      // and a page whose rows all share one millisecond never advances at all — the
+      // integrity queue would page forever without reaching the end.
       conditions.push(
-        sql`(${coordinatedReportIncidents.createdAt}, ${coordinatedReportIncidents.incidentId}) > (${new Date(after.createdAt).toISOString()}::timestamptz, ${after.incidentId}::uuid)`,
+        keysetAfterRow(
+          coordinatedReportIncidents.createdAt,
+          coordinatedReportIncidents.incidentId,
+          after.incidentId,
+          'asc',
+        ),
       );
     }
     const rows = await this.#db
@@ -1538,6 +1741,16 @@ export interface DrizzleModerationStores {
   reviewerStatus: DrizzleReviewerStatusStore;
   incidents: DrizzleCoordinatedReportIncidentStore;
   evidenceDecisions: DrizzleEvidenceDecisionStore;
+  /**
+   * The unit of work, returned from the SAME factory as the stores.
+   *
+   * Not a separate wiring step on purpose: the boot installs these stores with one
+   * assignment, and a transactor left behind would leave production running Postgres
+   * stores beside an in-memory unit of work — stores that commit immediately, under a
+   * seam whose whole claim is that they do not.  Coming out of one factory, that state
+   * is unreachable.
+   */
+  transactor: ModerationTransactor;
 }
 
 function mapEvidenceDecision(row: typeof evidenceDecisions.$inferSelect): EvidenceDecisionRecord {
@@ -1624,8 +1837,16 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
   }): Promise<EvidenceDecisionRecord[]> {
     const conditions: SQL[] = [];
     if (opts.after) {
+      // The cursor's TIMESTAMP is ignored on purpose — it arrives already rounded down to
+      // the millisecond, and comparing it to the microsecond column drops the rest of
+      // that millisecond.  The id is exact, so the row states its own position.
       conditions.push(
-        sql`(${evidenceDecisions.createdAt}, ${evidenceDecisions.decisionId}) < (${opts.after.createdAt}::timestamptz, ${opts.after.decisionId}::uuid)`,
+        keysetAfterRow(
+          evidenceDecisions.createdAt,
+          evidenceDecisions.decisionId,
+          opts.after.decisionId,
+          'desc',
+        ),
       );
     }
     const rows = await this.#db
@@ -1638,8 +1859,91 @@ export class DrizzleEvidenceDecisionStore implements EvidenceDecisionStore {
   }
 }
 
-export function createDrizzleModerationStores(db: Db): DrizzleModerationStores {
+/**
+ * The production `ModerationTransactor`: one Postgres transaction per unit.
+ *
+ * Every store the unit touches is rebuilt on the TRANSACTION handle — the moderation
+ * adapters take a `DbExecutor`, so one class serves an autocommit call and a unit alike.
+ * Rebinding the AUDIT store is the load-bearing half: on the outer handle it would read a
+ * chain head from outside the unit and write its row outside the change it describes,
+ * which is precisely the gap this closes.
+ */
+/** The advisory-lock key serialising appends to the global moderation audit chain.
+ *  A distinct constant in the same space as the migration lock (`4_021_997`); the
+ *  rendezvous store's locks are `hashtext`-derived and cannot collide with a literal. */
+const MODERATION_CHAIN_LOCK_KEY = 4_021_998;
+
+export class DrizzleModerationTransactor implements ModerationTransactor {
+  readonly #db: Db;
+  readonly #auditChain: () => AuditChainDeps;
+  readonly #enforcementOver: TxEnforcement;
+
+  constructor(db: Db, auditChain: () => AuditChainDeps, enforcementOver: TxEnforcement) {
+    this.#db = db;
+    this.#auditChain = auditChain;
+    this.#enforcementOver = enforcementOver;
+  }
+
+  async run<T>(work: (tx: ModerationTx) => Promise<T>): Promise<T> {
+    return this.#db.transaction(async (tx) =>
+      work({
+        cases: new DrizzleModerationCaseStore(tx),
+        actions: new DrizzleModerationActionStore(tx),
+        notices: new DrizzleModerationNoticeStore(tx),
+        appeals: new DrizzleModerationAppealStore(tx),
+        incidents: new DrizzleCoordinatedReportIncidentStore(tx),
+        // `hashtext` rather than a literal: the scope is a uuid, and the lock space is
+        // shared, so it is namespaced to keep it clear of the chain key and of the
+        // rendezvous store's own `hashtext` pairs.
+        lockRevertScope: async (key) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mod-revert:${key}`}))`);
+        },
+        // Supplied by the composition root: moderation declares that it needs the
+        // enforcement bound to THIS handle, and never constructs another domain's store.
+        content: this.#enforcementOver(tx),
+        audit: async (input) => {
+          // SERIALISE the chain append, rather than colliding and retrying.
+          //
+          // The chain is GLOBAL — one parent slot for the whole trail — so concurrent
+          // units all read the same head and all but one lose the fork-proof unique.  The
+          // savepoint retry recovers, but the work is quadratic: measured here, N writers
+          // spend N(N+1)/2 attempts (3, 10, 36, 108 for N = 2, 4, 8, 16), and at 16 a
+          // writer EXHAUSTS `MAX_CHAIN_RETRIES` and fails outright.  Since the append is
+          // now inside the state change's transaction, that failure aborts the change —
+          // a steward's action refused because fifteen others were in flight.  The
+          // auto-block sink and brigade detection make that burst reachable.
+          //
+          // A transaction-scoped advisory lock turns the collision into a queue: each
+          // writer waits, reads the true head, and inserts once.  Taken HERE rather than
+          // at the top of the unit so it covers only the append, and taken lazily so a
+          // unit that writes no audit never serialises against one that does.  It is
+          // re-entrant, so several audits in one unit take it once, and it releases at
+          // commit or rollback with no unlock path to leak.
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(${MODERATION_CHAIN_LOCK_KEY})`);
+          return appendAudit(
+            { ...this.#auditChain(), store: new DrizzleModerationAuditStore(tx) },
+            input,
+          );
+        },
+      }),
+    );
+  }
+}
+
+/**
+ * `auditChain` is a THUNK because the chain's key is derived at boot from the identity
+ * master secret, which is not necessarily resolved when the stores are built — and
+ * because the transactor must read it at CALL time, not capture a copy that a later
+ * rewire would leave stale.  Only `key` and `refOf` are taken from it; the store is
+ * replaced with one bound to the open transaction, which is the entire point.
+ */
+export function createDrizzleModerationStores(
+  db: Db,
+  auditChain: () => AuditChainDeps,
+  enforcementOver: TxEnforcement,
+): DrizzleModerationStores {
   return {
+    transactor: new DrizzleModerationTransactor(db, auditChain, enforcementOver),
     cases: new DrizzleModerationCaseStore(db),
     reports: new DrizzleModerationReportStore(db),
     actions: new DrizzleModerationActionStore(db),

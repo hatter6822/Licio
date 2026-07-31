@@ -4,13 +4,19 @@ import { createApp } from '../app.js';
 import { SoftwareAuthenticator } from '../identity/__tests__/software-authenticator.js';
 import { sha256Hex } from '../identity/crypto.js';
 import {
+  AUTH_RATE_LIMITS,
+  AuthRateLimiter,
+  InMemoryAuthRateLimitStore,
+} from '../identity/rate-limit-auth.js';
+import {
   createInMemoryIdentityServices,
   type IdentityConfig,
   type IdentityServices,
-  type RecordingMailer,
+  RecordingMailer,
   setIdentityServices,
 } from '../identity/services.js';
 import { createSession } from '../identity/sessions.js';
+import { accountRefForUser } from '../routes/auth-support.js';
 import { signupCaptcha } from './pow-test-helpers.js';
 
 const CONFIG: IdentityConfig = {
@@ -191,6 +197,36 @@ describe('email factor verify/resend gating', () => {
     expect((await app.request('/v1/privacy/settings', { headers: { cookie: sid2 } })).status).toBe(
       200,
     );
+  });
+
+  it('resend targets the STAGED address when an email change is pending', async () => {
+    // `/email/add` stages a `pendingEmail` and sends its code DETACHED, so an SES
+    // fault leaves the address staged and the code undelivered.  This route used
+    // to send only to the address ON FILE and refuse outright when that factor
+    // was already verified — so a member changing an already-verified email
+    // waited for a code that was never sent, and the advertised resend path
+    // answered `not_applicable`: the one state where resend is most obviously
+    // needed was the one it excluded.
+    const app = createApp();
+    const sid = await registerEmail(app, 'staged-from@example.com', 'stageduser');
+    // Verify the current factor, so the OLD guard would refuse the resend.
+    const user = await services.store.getUserByEmail('staged-from@example.com');
+    if (!user) throw new Error('fixture user missing');
+    await services.store.setAuth(user.userId, {
+      emailVerified: true,
+      pendingEmail: 'staged-to@example.com',
+    });
+    const mailer = services.mailer as RecordingMailer;
+    const before = mailer.codes.length;
+    const res = await app.request('/v1/auth/email/resend', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    expect(res.status).toBe(200);
+    // The code went to the STAGED address — the one the member is waiting on —
+    // not to the verified address already on file.
+    const sent = mailer.codes.slice(before);
+    expect(sent.map((entry) => entry.to)).toEqual(['staged-to@example.com']);
   });
 
   it('enforces the 60-second resend cooldown', async () => {
@@ -374,6 +410,61 @@ describe('account-state login gate (fail closed at the session mint)', () => {
     expect(verify.status).toBe(403);
     expect((await readJson<{ error: { code: string } }>(verify)).error.code).toBe(
       'account_suspended',
+    );
+  });
+
+  // The mint chokepoint must ADMIT exactly what the middleware admits.  A
+  // `restricted` account (WS-J `restrict` sanction) is allowed to authenticate
+  // and self-serve — appeals, notices, data rights — so refusing it a session
+  // would turn the sanction into a silent lockout the moment the old session
+  // expired, with the appeal path locked behind the very sanction being
+  // appealed.  Write denial stays where it belongs: `requireUnrestricted()`.
+  it('MINTS a session for a RESTRICTED account, then denies only its public writes', async () => {
+    const app = createApp();
+    const user = await services.store.createUser({
+      handle: 'restrictme',
+      displayName: 'R',
+      email: 'restrict@example.com',
+      accountState: 'restricted',
+      locale: null,
+      ageBand: 'adult',
+      privacySettings: (await import('@licio/shared')).defaultPrivacySettings(),
+      personalizationSettings: (await import('@licio/shared')).defaultPersonalizationSettings(),
+      roles: ['user'],
+    });
+    await services.store.setAuth(user.userId, { emailVerified: true });
+    const start = await app.request('/v1/auth/email/start', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ email: 'restrict@example.com' }),
+    });
+    const attempt = cookie(start, '__Host-otp');
+    const code = (services.mailer as RecordingMailer).codes.at(-1)?.code as string;
+    const verify = await app.request('/v1/auth/email/verify-login', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({ code }),
+    });
+    expect(verify.status).toBe(200);
+    const sid = cookie(verify, '__Host-sid');
+    expect(sid.startsWith('__Host-sid=')).toBe(true);
+    expect(await services.sessions.listForUser(user.userId)).toHaveLength(1);
+
+    // The self-serve surface the sanction promises is reachable with that session.
+    const settings = await app.request('/v1/privacy/settings', { headers: headers(sid) });
+    expect(settings.status).toBe(200);
+
+    // ...and public contribution is still refused, by the write guard, not the mint.
+    const tokenRes = await app.request('/api/csrf-token', { headers: headers(sid) });
+    const { token } = await readJson<{ token: string }>(tokenRes);
+    const post = await app.request('/v1/stories', {
+      method: 'POST',
+      headers: { ...headers(sid), 'x-csrf-token': token },
+      body: JSON.stringify({ url: 'https://example.com/a', title: 'T' }),
+    });
+    expect(post.status).toBe(403);
+    expect((await readJson<{ error: { code: string } }>(post)).error.code).toBe(
+      'account_restricted',
     );
   });
 });
@@ -646,5 +737,218 @@ describe('email account recovery + pending email change', () => {
     expect(attack.status).toBe(400);
     expect((await services.store.getUser(userId))?.email).toBe('a@example.com');
     expect((await services.store.getAuth(userId))?.pendingEmail).toBe('b@example.com');
+  });
+});
+
+describe('mail delivery is best-effort, never a 500 on the response path', () => {
+  /** A mailer that fails the way `SesMailer` does: a throw carrying only a status. */
+  function failingMailer(): RecordingMailer {
+    const mailer = new RecordingMailer();
+    mailer.sendCode = async () => {
+      throw new Error('SES send failed: 429');
+    };
+    mailer.sendNotice = async () => {
+      throw new Error('SES send failed: 429');
+    };
+    return mailer;
+  }
+
+  it('completes /v1/auth/register with a session when the verification mail throws', async () => {
+    services.mailer = failingMailer();
+    const app = createApp();
+    const res = await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'sesdown',
+        display_name: 'S',
+        email: 'sesdown@example.com',
+        date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
+      }),
+    });
+    // The user row is committed BEFORE the send, so a throwing mailer must not
+    // turn the request into a 500 that strands a real account with no session:
+    // the user is signed in and can pull a fresh code from /email/resend.
+    expect(res.status).toBe(200);
+    expect(cookie(res, '__Host-sid').startsWith('__Host-sid=')).toBe(true);
+    const user = await services.store.getUserByHandle('sesdown');
+    expect(user).not.toBeNull();
+    expect(await services.sessions.listForUser(user?.userId as string)).toHaveLength(1);
+  });
+
+  it('answers /v1/auth/email/resend 200 when the mail throws', async () => {
+    const app = createApp();
+    const res = await app.request('/v1/auth/register', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        handle: 'resenddown',
+        display_name: 'R',
+        email: 'resenddown@example.com',
+        date_of_birth: '1990-01-01',
+        captcha: await signupCaptcha(app),
+      }),
+    });
+    const sid = cookie(res, '__Host-sid');
+    services.mailer = failingMailer();
+    // The cooldown is the real bound on this route; delivery is best-effort, so
+    // an SES fault must not 500 a resend the caller then has to wait out.
+    const resend = await app.request('/v1/auth/email/resend', {
+      method: 'POST',
+      headers: headers(sid),
+    });
+    expect(resend.status).toBe(200);
+  });
+});
+
+// The per-account limiter itself is unit-tested in
+// identity/__tests__/rate-limit-auth.test.ts; what is exercised here is the
+// WIRING at the route.  The passkey path has no other throttle — unlike the
+// email path there is no per-code attempt cap behind it — so `checkRateLimit`
+// running BEFORE `verifyAuthentication` is the whole brute-force defence for a
+// named account, and every existing route test performs exactly one attempt.
+describe('per-account auth lockout at the /v1/auth route boundary', () => {
+  // Any string the ceremony's stored challenge cannot equal.
+  const WRONG_CHALLENGE = 'bm90LXRoZS1yZWFsLWNoYWxsZW5nZQ';
+
+  /** One passkey login attempt end-to-end: fresh options (the challenge is
+   *  single-use, so every attempt needs its own), then an assertion over either
+   *  the REAL challenge or a bogus one. */
+  async function loginAttempt(
+    app: ReturnType<typeof createApp>,
+    authenticator: SoftwareAuthenticator,
+    opts: { challenge: 'real' | 'wrong'; counter: number },
+  ): Promise<Response> {
+    const optRes = await app.request('/v1/auth/webauthn/authenticate/options', {
+      method: 'POST',
+      headers: headers(),
+    });
+    const attempt = cookie(optRes, '__Host-wa');
+    const { challenge } = await readJson<{ challenge: string }>(optRes);
+    return app.request('/v1/auth/webauthn/authenticate/verify', {
+      method: 'POST',
+      headers: headers(attempt),
+      body: JSON.stringify({
+        response: authenticator.authenticate(
+          opts.challenge === 'real' ? challenge : WRONG_CHALLENGE,
+          RP,
+          ORIGIN,
+          opts.counter,
+        ),
+      }),
+    });
+  }
+
+  /** Swap in a clock-injected limiter (the module's documented deterministic-test
+   *  seam) so `Retry-After` is the exact configured cooldown rather than "the
+   *  cooldown minus however long the requests took". */
+  function pinRateLimitClock(): { advance: (ms: number) => void } {
+    let clock = Date.now();
+    services.rateLimit = new AuthRateLimiter(new InMemoryAuthRateLimitStore(), () => clock);
+    return {
+      advance: (ms: number) => {
+        clock += ms;
+      },
+    };
+  }
+
+  const errorCode = async (res: Response): Promise<string> =>
+    (await readJson<{ error: { code: string } }>(res)).error.code;
+
+  it('429s the passkey path past the soft threshold — including a VALID assertion', async () => {
+    const { app, authenticator } = await passkeySignup('lockme');
+    pinRateLimitClock();
+    let counter = 1;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AUTH_RATE_LIMITS.account.softDelayAt; i += 1) {
+      const res = await loginAttempt(app, authenticator, {
+        challenge: 'wrong',
+        counter: counter++,
+      });
+      statuses.push(res.status);
+      expect(await errorCode(res)).toBe('auth_failed');
+    }
+    expect(statuses).toEqual(Array(AUTH_RATE_LIMITS.account.softDelayAt).fill(400));
+
+    const blocked = await loginAttempt(app, authenticator, {
+      challenge: 'wrong',
+      counter: counter++,
+    });
+    expect(blocked.status).toBe(429);
+    expect(await errorCode(blocked)).toBe('rate_limited');
+    expect(Number(blocked.headers.get('retry-after'))).toBe(
+      AUTH_RATE_LIMITS.account.softDelayMs / 1000,
+    );
+
+    // The gate runs AHEAD of the signature check: the genuine credential is
+    // refused too, and mints nothing.  Ordering the two the other way would let
+    // an attacker keep probing assertions while the cooldown only shaped the
+    // error body.
+    const valid = await loginAttempt(app, authenticator, { challenge: 'real', counter: counter++ });
+    expect(valid.status).toBe(429);
+    expect(cookie(valid, '__Host-sid')).toBe('');
+  });
+
+  it('escalates to the 30-minute hard lock and alerts the account owner', async () => {
+    const { app, authenticator } = await passkeySignup('lockhard');
+    const userId = (await services.store.getUserByHandle('lockhard'))?.userId as string;
+    const clock = pinRateLimitClock();
+
+    // One failure short of the lock.  A single sequential attacker cannot walk
+    // the ladder there — each cooldown must elapse first, and the 15-minute
+    // sliding window prunes older failures faster than the spacing accumulates
+    // new ones — but a burst whose attempts all clear `check()` before any
+    // failure records does exactly this, which is the case `lockAt` exists for.
+    const accountKey = accountRefForUser(services, userId);
+    for (let i = 0; i < AUTH_RATE_LIMITS.account.lockAt - 1; i += 1) {
+      await services.rateLimit.recordFailure(accountKey);
+    }
+    // Past the cooldown those failures armed, but far inside the window that
+    // keeps them counted.
+    clock.advance(AUTH_RATE_LIMITS.account.hardDelayMs + 1);
+
+    // The final failure goes through the ROUTE, so the owner alert fires from
+    // the route's own recordAuthFailure rather than from a direct store call.
+    const last = await loginAttempt(app, authenticator, { challenge: 'wrong', counter: 1 });
+    expect(last.status).toBe(400);
+    const activity = await services.audit.securityActivityForUser(userId);
+    expect(activity.filter((e) => e.event_type === 'account_lockout')).toHaveLength(1);
+
+    // Locked for thirty minutes, not the thirty-second soft cooldown.
+    const locked = await loginAttempt(app, authenticator, { challenge: 'real', counter: 2 });
+    expect(locked.status).toBe(429);
+    expect(Number(locked.headers.get('retry-after'))).toBe(AUTH_RATE_LIMITS.account.lockMs / 1000);
+  });
+
+  it('clears the failure counter on a successful login', async () => {
+    const { app, authenticator } = await passkeySignup('clearme');
+    pinRateLimitClock();
+    let counter = 1;
+    const shortOfThreshold = AUTH_RATE_LIMITS.account.softDelayAt - 1;
+
+    for (let i = 0; i < shortOfThreshold; i += 1) {
+      const res = await loginAttempt(app, authenticator, {
+        challenge: 'wrong',
+        counter: counter++,
+      });
+      expect(res.status).toBe(400);
+    }
+    const ok = await loginAttempt(app, authenticator, { challenge: 'real', counter: counter++ });
+    expect(ok.status).toBe(200);
+
+    // Without the reset the counter would stand at 4 and this batch would cross
+    // the threshold on its first failure, 429ing the second — so an all-400
+    // batch is what proves `recordSuccess` ran.
+    const after: number[] = [];
+    for (let i = 0; i < shortOfThreshold; i += 1) {
+      const res = await loginAttempt(app, authenticator, {
+        challenge: 'wrong',
+        counter: counter++,
+      });
+      after.push(res.status);
+    }
+    expect(after).toEqual(Array(shortOfThreshold).fill(400));
   });
 });

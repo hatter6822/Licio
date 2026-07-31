@@ -50,9 +50,49 @@ export interface SummaryPipelineDeps {
   now: () => number;
 }
 
+/**
+ * The schema's text bound, in ONE place.
+ *
+ * `aiSummaryDraftSchema` caps every text field at 2,000 while
+ * `CONTRIBUTION_BODY_LIMITS` allows 5,000, so anything copied out of a comment has
+ * to be clamped — and `unresolved_questions` was not.  A single 3,000-character
+ * question sentence therefore made `parse` throw for that thread on every tick,
+ * from ordinary legal content rather than an attack: the statements path clamped
+ * and the questions path did not, two spellings of one obligation with only one
+ * applied.
+ */
+const CLAMP = 2_000;
+function clampText(text: string): string {
+  return text.slice(0, CLAMP).trim();
+}
+
+/**
+ * The thread's open questions — ONE extraction, for both consumers.
+ *
+ * `signalsFor` used to decide `hasOpenQuestions` from `/\?/` over the raw body
+ * while this list requires a sentence-FINAL `?`, so the two disagreed on any
+ * thread whose only `?` sits inside a URL (`…/a?b=1`) or mid-sentence: the
+ * signal said questions exist, the list came back empty, and constraint 2
+ * ("open questions not listed") withheld the summary for ever.  Deriving the
+ * signal from the list itself is what makes the two answers unable to differ.
+ */
+function extractQuestions(roots: readonly ContributionRecord[]): string[] {
+  return (
+    roots
+      .flatMap((r) => sentenceSplit(r.body))
+      .filter((s) => s.endsWith('?'))
+      // Clamped like every other text here, and empties dropped — the schema's
+      // `.min(1)` refuses a string that trims to nothing just as firmly as an
+      // over-long one.
+      .map(clampText)
+      .filter((s) => s.length > 0)
+      .slice(0, 5)
+  );
+}
+
 function firstSentence(body: string): string {
   const sentence = sentenceSplit(body)[0] ?? body.trim();
-  return (sentence.slice(0, 2000) || '(no content)').trim();
+  return clampText(sentence) || '(no content)';
 }
 
 /** Build a structured draft from the thread's root contributions. */
@@ -73,10 +113,7 @@ function buildDraft(
       cited_contribution_ids: [root.contributionId],
     };
   });
-  const unresolved = roots
-    .flatMap((r) => sentenceSplit(r.body))
-    .filter((s) => s.endsWith('?'))
-    .slice(0, 5);
+  const unresolved = extractQuestions(roots);
   const minorityRoot = roots.length >= 3 ? roots[roots.length - 1] : undefined;
   const minority = minorityRoot
     ? [
@@ -102,9 +139,10 @@ function buildDraft(
 /** Thread-derived signals the quality check uses (independent of the draft). */
 function signalsFor(roots: readonly ContributionRecord[]): ThreadQualitySignals {
   const unsourcedRoots = roots.filter((r) => r.citations.length === 0).length;
-  const hasOpenQuestions = roots.some((r) => /\?/.test(r.body));
   return {
-    hasOpenQuestions,
+    // The SAME extraction the draft's `unresolved_questions` comes from, so the
+    // signal cannot claim a question the list does not carry.
+    hasOpenQuestions: extractQuestions(roots).length > 0,
     hasMinorityView: roots.length >= 3,
     hasDisputedClaim: unsourcedRoots >= 2,
   };
@@ -173,37 +211,81 @@ export async function generateThreadSummary(
     { rateThreshold: 0 },
   );
 
-  const summaryId = `sum-ai-${randomUUID()}`;
+  // DERIVED FROM THE THREAD, not random.
+  //
+  // The withheld path writes the steward-review entry first (so a draft-write failure
+  // cannot lose it), and the queue dedups pending items on `(kind, subjectRef)`.  With
+  // a random id per attempt that dedup could never fire: a transient draft failure
+  // made the retry mint a NEW subject, so each attempt left a pending review item
+  // pointing at a draft that does not exist — up to three per tick from the in-tick
+  // retries, and more on every later sweep, because `getLatestForThread` still finds
+  // nothing.  A thread-derived id makes the retry reuse the same subject, so the
+  // unique index collapses it and `putDraft` (an upsert on `summaryId`) overwrites
+  // rather than accumulating.  One summary per thread is already the sweep's own
+  // policy — `getLatestForThread` is what enforces it — so a stable id per thread
+  // says the same thing the id was previously only pretending to be unique about.
+  const summaryId = `sum-ai-${threadId}`;
   const passed = quality.passed && grounding.passed;
-  await deps.aiSummaries.putDraft({
-    summaryId,
-    threadId,
-    draft: draft as unknown as Record<string, unknown>,
-    outputId: output.output_id,
-    qualityPassed: passed,
-    createdAt: nowIso,
-  });
+  const putDraft = (): Promise<void> =>
+    deps.aiSummaries.putDraft({
+      summaryId,
+      threadId,
+      draft: draft as unknown as Record<string, unknown>,
+      outputId: output.output_id,
+      qualityPassed: passed,
+      createdAt: nowIso,
+    });
 
   if (!passed) {
+    // WITHHELD: the steward-review entry is written BEFORE the draft.
+    //
+    // The draft used to be written first, and the sweep's "already done" test is
+    // `getLatestForThread` — so a failure on the queue insert left a draft with no
+    // review entry, the next tick skipped the thread, and the entry that withholding
+    // DEPENDS ON was lost permanently.  A summary withheld with nobody told is the
+    // one outcome this branch must not produce.
+    //
+    // Reversing it means a failure on the DRAFT write leaves a pending queue entry
+    // with no draft, and the retry mints a second one.  That is the better failure:
+    // a duplicate steward item is visible and actionable, a missing one is neither.
+    //
     // Withhold publication; route to steward review (never publish a summary
     // that fails the quality or grounding gate — §24.3).
+    const evidence = {
+      thread_id: threadId,
+      quality_failures: quality.constraints.filter((c) => !c.passed).map((c) => c.constraint),
+      hallucination_rate: grounding.hallucination_rate,
+      output_id: output.output_id,
+    };
     await deps.reviewQueue.insert({
       kind: 'flagged_hallucination',
       subjectRef: summaryId,
-      context: {
-        thread_id: threadId,
-        quality_failures: quality.constraints.filter((c) => !c.passed).map((c) => c.constraint),
-        hallucination_rate: grounding.hallucination_rate,
-        output_id: output.output_id,
-      },
+      context: evidence,
       status: 'pending',
       resolution: null,
       resolvedBy: null,
     });
+    // THE ITEM FOLLOWS THE DRAFT.
+    //
+    // `summaryId` is stable per thread, so a retry after a failed draft write reuses
+    // the subject and the queue's `(kind, subjectRef)` dedup returns the INCUMBENT —
+    // deliberately, because for a repeat report that first context is an independent
+    // event worth keeping.  A re-evaluated summary is the opposite: the retry re-ran
+    // the whole pipeline and minted a fresh `output_id` with fresh quality failures and
+    // a fresh hallucination rate, and `putDraft` upserts to exactly that.  Leaving the
+    // item on the first attempt's evidence would show a steward one evaluation while
+    // they read the draft of another, and let them accept or correct the wrong
+    // immutable output record — worse the more the thread changed in between.
+    //
+    // A no-op on the insert-fresh path (the context is already this), so it costs one
+    // statement on the branch that is already the slow one.
+    await deps.reviewQueue.refreshPendingContext('flagged_hallucination', summaryId, evidence);
+    await putDraft();
     deps.metrics.increment('ai.summary.withheld');
     deps.log('summary.quality.evaluated', { thread_id: threadId, passed: false });
     return { ok: true, published: false, summaryId };
   }
+  await putDraft();
 
   // The §24.3 thread-summary Overview feature was removed, so a passing draft is
   // no longer published to a reader-facing surface — the pipeline still evaluates

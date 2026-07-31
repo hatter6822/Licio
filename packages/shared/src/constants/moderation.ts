@@ -69,9 +69,11 @@ export function isModerationReasonCode(value: string): value is ModerationReason
 // code, and severity → SLA).  It is the single source WS-J's report routing
 // (WS-J.1.1a/b), SLA tracking (WS-J.2.1a), and appeal eligibility (WS-J.1.3a)
 // read — so a code's severity/appealability is decided in exactly one place.
-// `taxonomy-metadata.test.ts` parses MODERATION_TAXONOMY.md and asserts this
-// map equals the ratified JSON, so any drift fails CI (the no-drift discipline
-// used throughout the codebase).
+// `apps/api/src/__tests__/moderation-doctrine-consistency.test.ts` parses
+// MODERATION_TAXONOMY.md's canonical JSON block and asserts this map's
+// severity / appealability / SLA code-for-code against it (hosted in the api
+// node project because it reads the doc from disk), so any drift fails CI —
+// the no-drift discipline used throughout the codebase.
 // ---------------------------------------------------------------------------
 
 /**

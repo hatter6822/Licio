@@ -32,11 +32,13 @@
 import { createHash } from 'node:crypto';
 import {
   checkVoterEligibility,
+  decCompare,
   type EligibilityRules,
   type LawPack,
   resolveVotingWeight,
   tallyProposalVotes,
   type VoterFacts,
+  type WeightModel,
   type WeightResolution,
 } from '@licio/governance';
 import {
@@ -63,9 +65,14 @@ import type {
 } from '../knomosis/stores.js';
 import { isUniqueViolation } from '../lib/pg-errors.js';
 import { appendChainedAudit } from './audit-chain.js';
+import { buildVoterFacts, DEFAULT_ELIGIBILITY_RULES } from './ballot-predicate.js';
 import { chargeRoomActionBudget, NO_BUDGET_RULES, refundActionBudget } from './budgets.js';
 import { readabilityProblems } from './charter.js';
-import { incomingDelegationsFor } from './delegations.js';
+import {
+  delegatorsAlreadyConsumed,
+  incomingDelegationsFor,
+  type PriorBallot,
+} from './delegations.js';
 import { createGrantFromProposal, type GrantDeps, hasValidMilestonePlan } from './grants.js';
 import {
   activeLawPack,
@@ -96,18 +103,111 @@ export interface MembershipFactsPort {
   memberFacts(
     roomId: string,
     userId: string,
+    /**
+     * The facts AS THEY STOOD at this instant; omitted ⇒ live.
+     *
+     * The electorate freeze covered only the JOIN instant, so a member the frozen
+     * basis EXCLUDED for tenure, contributions or identity could satisfy those rules
+     * mid-window and then vote against a denominator they were never counted in —
+     * satisfying quorum, or turning a treasury decision, against a smaller frozen
+     * figure.  The numerator has to answer to the instant the denominator was
+     * counted at.
+     *
+     * UNKNOWN STAYS ADMISSIBLE: a fact whose history cannot be established (a
+     * pre-field row) is not evidence of ineligibility, and refusing it would lock
+     * every such member out of governance with no error they could act on.
+     */
+    asOf?: string,
   ): Promise<{
     membershipDays: number | null;
     contributionCount: number | null;
     verifiedIdentity: boolean;
+    /** When this member joined (ISO), or null when it cannot be determined (a
+     *  steward-role grant carries no subscription row).  The ballot gate uses it
+     *  to enforce eligibility AS OF the instant the electorate was frozen. */
+    memberSince?: string | null;
   } | null>;
-  /** The quorum-basis population.  With `eligibility` set, the SAME law-pack
-   *  predicate that gates ballots filters the denominator — otherwise members
-   *  who can never vote would inflate the basis and starve quorum (WS-M.4.2c). */
+  /**
+   * The quorum-basis population.  With `eligibility` set, the SAME law-pack
+   * predicate that gates ballots filters the denominator — otherwise members
+   * who can never vote would inflate the basis and starve quorum (WS-M.4.2c).
+   *
+   * `weight` extends that invariant to the WEIGHT MODEL, which is the other half
+   * of the ballot gate.  `signProposal` refuses a zero-weight ballot outright
+   * (a `0` adds nothing to approve/reject, so recording one would let an
+   * all-zero electorate read as unanimous approval), and quorum is measured in
+   * DISTINCT RECORDED VOTERS — so a member who resolves to zero can never count
+   * toward it.  Under `reputation_bounded` with `minContributions: 0` such a
+   * member still passes `checkVoterEligibility` and so entered the frozen basis:
+   * enough of them made quorum unreachable even if every eligible member voted.
+   * Excluding them keeps the denominator equal to the population that can
+   * actually record a ballot, which is what the sentence above already claims.
+   */
   eligibleMemberCount(
     roomId: string,
-    eligibility?: { rules: EligibilityRules; treasuryControlling: boolean },
-  ): Promise<number>;
+    eligibility?: {
+      rules: EligibilityRules;
+      treasuryControlling: boolean;
+      weight?: {
+        model: WeightModel;
+        maxVotingWeightPerAccount: number;
+        /** The pinned pack's multisig signer set. The basis hard-coded
+         *  `isDesignatedSigner: false`, so under `multisig_steward` — where
+         *  `resolveVotingWeight` refuses every non-signer — it froze at ZERO and
+         *  quorum was unreachable however many signers voted, while the gate read the
+         *  same fact from the pack and let them sign. */
+        signers?: readonly string[];
+      };
+      /** Count the electorate AS OF this instant — the SAME instant the ballot
+       *  gate compares a voter's join against.  Stamping an instant beside a
+       *  live count leaves a window in which a member is inside the count and
+       *  outside the cutoff, which is the mismatch the freeze exists to
+       *  remove. */
+      asOf?: string;
+    },
+  ): Promise<{
+    /** The electorate size. */
+    count: number;
+    /** The instant the count DESCRIBES — the snapshot's own clock, not a reading
+     *  taken beside it.  Returned rather than supplied so the caller need not take a
+     *  second read to learn it: two reads leave a window in which a member who leaves
+     *  between them is hard-deleted out of a count still claiming the earlier instant,
+     *  which makes quorum easier than the pack asks for. */
+    asOf: string;
+  }>;
+  /**
+   * The basis AND the instant it was measured at, for the FREEZE.
+   *
+   * Same defect, same fix as `RoomStore.measureEligibleVoters`: a clock reading
+   * passed into a live count leaks a JOIN in one ordering and a DEPARTURE in the
+   * other, and membership is hard-deleted on leave so neither is recoverable
+   * afterwards.  The instant has to come from the measurement.
+   *
+   * EXACT on the fast count (one statement).  On the per-member walk that a
+   * participation-denominated pack requires, `asOf` is the instant the ROSTER was
+   * enumerated — which removes the join direction entirely and narrows the departure
+   * one to the walk's own duration, since a member who leaves mid-walk can still
+   * lose their facts read.  Closing that last window needs the whole walk under one
+   * database snapshot, which the port boundary does not currently offer; tracked in
+   * `docs/treasury/README.md`.
+   */
+  measureEligibleMembers(
+    roomId: string,
+    eligibility?: {
+      rules: EligibilityRules;
+      treasuryControlling: boolean;
+      weight?: {
+        model: WeightModel;
+        maxVotingWeightPerAccount: number;
+        /** The pinned pack's multisig signer set. The basis hard-coded
+         *  `isDesignatedSigner: false`, so under `multisig_steward` — where
+         *  `resolveVotingWeight` refuses every non-signer — it froze at ZERO and
+         *  quorum was unreachable however many signers voted, while the gate read the
+         *  same fact from the pack and let them sign. */
+        signers?: readonly string[];
+      };
+    },
+  ): Promise<{ count: number; asOf: string }>;
 }
 
 /** The shipped WS-U executor seam (GovernanceService.executeTreasuryAction). */
@@ -161,6 +261,27 @@ export interface ProposalDeps extends LawPackDeps, GrantDeps {
   };
   /** Operational alert sink (the container provides it; optional for tests). */
   alert?: (event: string, meta: Record<string, unknown>) => void;
+  /**
+   * WS-K.2.2a §24.5 advisory pass over a newly published proposal.
+   *
+   * A PORT, not an import: WS-M must not depend on WS-K (the advisory is
+   * decision-support for stewards, and the treasury domain has to stay
+   * runnable — and testable — with no AI wired at all). Optional for the same
+   * reason; absent means no advisory, never a failure.
+   *
+   * Advisory by construction: it returns nothing the proposal lifecycle reads.
+   * The §24.5 capabilities are permitted only as advice a steward may edit or
+   * ignore, so a port that could influence the outcome would be the prohibited
+   * shape rather than the permitted one.
+   */
+  governanceAdvisor?: (input: {
+    proposalRef: string;
+    roomId: string;
+    proposerRef: string;
+    recipientRef: string | null;
+    fields: Record<string, string>;
+    text: string;
+  }) => Promise<void>;
 }
 
 /** Real-asset modes where production proposals run (sim rooms use WS-L.4). */
@@ -241,6 +362,76 @@ function recordedVotes(signatures: readonly GovernanceSignatureRecord[]) {
     }));
 }
 
+/**
+ * The quorum basis for a proposal — ONE reader, so the value STAMPED at open
+ * and the value a legacy row falls back to are computed identically.  Two
+ * spellings of this predicate is how the denominator drifted from the ballots
+ * in the first place.
+ */
+async function eligibleBasisFor(
+  deps: ProposalDeps,
+  proposal: GovernanceProposalRecord,
+  pack: LawPack,
+  /** The instant the basis is frozen at, recorded as `eligibleBasisAt` and read
+   *  back by the ballot gate.  Omitted on the tally's live fallback, where
+   *  there is no frozen basis to agree with. */
+  asOf?: string,
+): Promise<number> {
+  // The COUNT only.  This path is the tally's fallback against a basis already
+  // recorded, so the instant is the one it was given — `measureEligibleBasis` is the
+  // caller that needs the snapshot's own instant reported back.
+  const { count } = await deps.membership.eligibleMemberCount(proposal.roomId, {
+    ...(asOf === undefined ? {} : { asOf }),
+    rules: pack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: isTreasuryControlling(proposal),
+    // The weight model is half the ballot gate, so it is half the basis too —
+    // see `eligibleMemberCount`.  Defaulted exactly as `signProposal` defaults it
+    // so the two cannot disagree about which model is in force.
+    weight: {
+      model: pack.weightModel ?? 'one_civic_account_one_vote',
+      maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
+      ...(pack.multisig === undefined ? {} : { signers: pack.multisig.signers }),
+    },
+  });
+  return count;
+}
+
+/**
+ * The basis AND its instant, for the freeze at `deliberation → open`.
+ *
+ * Separate from `eligibleBasisFor` because they answer different questions:
+ * that one counts as of an instant it is GIVEN (the tally's fallback, against a
+ * basis already recorded), while this one reports the instant it measured at so the
+ * stamp cannot describe a different population from the count beside it.
+ */
+async function measureEligibleBasis(
+  deps: ProposalDeps,
+  proposal: GovernanceProposalRecord,
+  pack: LawPack,
+): Promise<{ count: number; asOf: string }> {
+  return deps.membership.measureEligibleMembers(proposal.roomId, {
+    rules: pack.eligibility ?? {
+      minMembershipDays: 0,
+      minContributions: 0,
+      requireVerifiedIdentity: false,
+      newWalletCoolingOffDays: 0,
+    },
+    treasuryControlling: isTreasuryControlling(proposal),
+    // Defaulted exactly as `signProposal` and `eligibleBasisFor` default it, so no
+    // two of the three can disagree about which model is in force.
+    weight: {
+      model: pack.weightModel ?? 'one_civic_account_one_vote',
+      maxVotingWeightPerAccount: pack.maxVotingWeightPerAccount ?? 1,
+      ...(pack.multisig === undefined ? {} : { signers: pack.multisig.signers }),
+    },
+  });
+}
+
 async function tallyFor(
   deps: ProposalDeps,
   proposal: GovernanceProposalRecord,
@@ -275,15 +466,23 @@ async function tallyFor(
       },
     );
   }
-  const eligibleCount = await deps.membership.eligibleMemberCount(proposal.roomId, {
-    rules: pack.eligibility ?? {
-      minMembershipDays: 0,
-      minContributions: 0,
-      requireVerifiedIdentity: false,
-      newWalletCoolingOffDays: 0,
-    },
-    treasuryControlling: isTreasuryControlling(proposal),
-  });
+  // The quorum DENOMINATOR, frozen when voting opened.
+  //
+  // This module's own header promises it "never recomputes weights, so a later
+  // cap/eligibility change cannot shift a result after votes were cast".  That
+  // covered the per-ballot weights and not this: `eligibleCount` was a LIVE
+  // membership read taken at settle, and `quorumMet` compares against it raw
+  // (the `Math.min(1, …)` clamp only sanitises the REPORTED turnout).  So
+  // growing the electorate after ballots were cast raised a bar the fixed voter
+  // set could no longer clear — a decided proposal nullified by people who did
+  // not vote — and shrinking it did the reverse.
+  //
+  // `eligibleBasisCount` is stamped at `deliberation → open`, the instant the
+  // electorate is fixed for the voters about to cast.  Null means the row
+  // predates migration 0100; only then is the live count used, which is the
+  // behaviour those rows have always had.
+  const eligibleCount =
+    proposal.eligibleBasisCount ?? (await eligibleBasisFor(deps, proposal, pack));
   return tallyProposalVotes(
     recordedVotes(signatures),
     { quorum, threshold },
@@ -455,7 +654,6 @@ export async function createProductionProposal(
     if (headroom === null) {
       return tgErr(409, 'no_cap_configured', `No spend cap for "${spendCategory}".`);
     }
-    const { decCompare } = await import('@licio/governance');
     // Per-ACTION cap preflight: a request above `perActionMax` can never be
     // reserved, so publishing it would only burn deliberation/voting time
     // before `reserveForProposal()` blocks it at approval.  Reject up front.
@@ -649,7 +847,68 @@ export async function createProductionProposal(
     },
     proposalId,
   });
+  // §24.5 advisory pass, AFTER the audit entry and outside the success value.
+  // A failure here must never unpublish a proposal that is already recorded —
+  // advice is not a precondition of governance — so it is reported through
+  // `alert` and the proposal stands.
+  if (deps.governanceAdvisor !== undefined) {
+    try {
+      await deps.governanceAdvisor({
+        proposalRef: proposalId,
+        roomId: input.roomId,
+        proposerRef: input.userId,
+        // THE CANONICAL FIELD.  The production contract carries the recipient
+        // in top-level `recipient_ref`, and an ordinary spend draft need not
+        // repeat it inside `requested_action` — so reading the action alone
+        // passed null for most proposals and the proposer-as-recipient check
+        // never fired on the ones it exists for.  Normalized past the accepted
+        // `user:<uuid>` form, which is how the COI recusal gate compares it
+        // (`proposal.recipientRef === \`user:\${userId}\``), so the advisor and
+        // the gate answer about the same party.
+        recipientRef: canonicalRecipientRef(
+          input.create.recipient_ref ?? input.create.requested_action['recipient'],
+        ),
+        fields: proposalAdvisoryFields(input.create),
+        text: `${input.create.title}\n${input.create.plain_language_summary}`,
+      });
+    } catch (error) {
+      deps.alert?.('governance.advisory.failed', {
+        proposal_id: proposalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   return { ok: true, proposal: record };
+}
+
+/**
+ * The §24.5 "missing budget fields, citations, or unclear recipients" input:
+ * the proposal's own fields, flattened to strings.
+ *
+ * `detectMissingFields` asks about `budget` / `recipient` / `citations` by
+ * those names, so the mapping from this domain's field names to those three is
+ * made here rather than left for each caller to guess.
+ */
+/** A recipient reference as the COI gate compares it: the bare id, with the
+ *  accepted `user:<uuid>` prefix stripped.  Null when there is no recipient. */
+function canonicalRecipientRef(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value.startsWith('user:') ? value.slice('user:'.length) : value;
+}
+
+function proposalAdvisoryFields(create: ProductionProposalCreate): Record<string, string> {
+  const action = create.requested_action;
+  const asText = (value: unknown): string =>
+    typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+  return {
+    budget: create.requested_amount ?? '',
+    // Same field, same reason: reading the action alone reported the recipient
+    // MISSING on every draft that carries it only at the top level.
+    recipient: asText(create.recipient_ref ?? action['recipient']),
+    citations: Array.isArray(action['citations'])
+      ? action['citations'].map(asText).join(', ')
+      : asText(action['citations']),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +1053,44 @@ export async function signProposal(
   const evalPack: LawPack | null = pinned !== null ? (pinned.lawPack as LawPack) : pack;
   if (evalPack === null) return tgErr(409, 'no_law_pack', 'No law-pack applies to this proposal.');
 
-  const facts = await deps.membership.memberFacts(input.roomId, input.userId);
+  // THE INSTANT THE BASIS WAS COUNTED — hoisted, because the ballot gate, the facts
+  // read and the delegation fold each derived it separately and could drift.  Null
+  // when this proposal has no frozen basis (a legacy row), which keeps live behaviour.
+  const frozenAt =
+    proposal.eligibleBasisCount == null
+      ? undefined
+      : (proposal.eligibleBasisAt ?? proposal.deliberationEndsAt ?? undefined);
+  // EVERY ELIGIBILITY FACT AT THAT INSTANT, not just the join.  Freezing only
+  // `memberSince` left tenure, contributions and identity LIVE, so a member the
+  // frozen basis excluded for any of those could satisfy the rule mid-window and then
+  // vote against a denominator they were never counted in — satisfying quorum, or
+  // turning a treasury decision, against a smaller frozen figure.  Half a freeze is
+  // what the surrounding comment already warned about, one field over.
+  const facts = await deps.membership.memberFacts(input.roomId, input.userId, frozenAt);
+  // ELECTORATE FREEZE, enforced on the BALLOT as well as the denominator.
+  //
+  // `eligibleBasisCount` is stamped at the `deliberation → open` transition, and
+  // `eligibleBasisAt` records WHEN — so the denominator is the population as it
+  // stood at that instant.  Eligibility, though, is checked live here, so a member
+  // who joined AFTER voting opened could record a ballot that raises
+  // `distinctVoters` against a denominator they were never counted in: enough of
+  // them satisfy quorum with people outside the recorded electorate.  Freezing
+  // only the COUNT is half a freeze.
+  //
+  // A null `memberSince` (the steward-role arm carries no subscription row)
+  // cannot be judged, so it passes — refusing there would lock out a legitimate
+  // long-standing steward to close a narrower hole than it opens.
+  if (input.purpose === 'vote' && frozenAt !== undefined) {
+    const joined = facts?.memberSince ?? null;
+    if (joined !== null && Date.parse(joined) > Date.parse(frozenAt)) {
+      return tgErr(
+        403,
+        'joined_after_open',
+        'The electorate for this proposal was fixed when voting opened; ' +
+          'members who joined afterwards vote on the next one.',
+      );
+    }
+  }
   // Treasury-CONTROLLING is broader than spend-bearing: a vote that rewrites
   // the treasury's rules (law-pack upgrade, treasury policy) controls the
   // treasury as surely as a vote that spends from it — the wallet cooling-off
@@ -810,32 +1106,28 @@ export async function signProposal(
     Date.parse(wallet.linkedAt),
   );
   const walletAgeDays = Math.floor((deps.now() - newestLinkedAt) / 86_400_000);
-  const voterFacts: VoterFacts = {
+  // THE SAME ASSEMBLY THE BASIS USES.  These facts were built here and, separately,
+  // twice inside the basis walk — three spellings of one projection, which is how
+  // `isDesignatedSigner` came to be read from the pinned pack on this side and
+  // hard-coded false on the other.  `buildVoterFacts` is now the only place either
+  // builds one; what the basis deliberately substitutes is named in `BASIS_EXCLUSIONS`.
+  const voterFacts: VoterFacts = buildVoterFacts({
     userId: input.userId,
-    membershipDays: facts?.membershipDays ?? null,
-    contributionCount: facts?.contributionCount ?? null,
-    verifiedIdentity: facts?.verifiedIdentity ?? false,
+    facts: facts ?? null,
     newestWalletAgeDays: walletAgeDays,
     walletClusterId: null, // cluster heuristics: WS-N seam (null = no cluster)
-    // Conflicted voters: the proposer who disclosed a COI, AND the actual
-    // grant/bounty RECIPIENT — a member being paid by the proposal has the
-    // definitional stake, whether or not anyone disclosed it (WS-M.2.3d).
+    // Conflicted voters: the proposer who disclosed a COI, AND the actual grant/bounty
+    // RECIPIENT — a member being paid by the proposal has the definitional stake,
+    // whether or not anyone disclosed it (WS-M.2.3d).
     hasDisclosedConflict:
       (proposal.conflictDisclosures !== null && proposal.proposerUserId === input.userId) ||
       proposal.recipientRef === input.userId ||
       proposal.recipientRef === `user:${input.userId}`,
     roleClasses: (await deps.rooms.isSteward(input.roomId, input.userId)) ? ['steward'] : [],
-    reputationScore: 0,
-    tokenVoteUnits: 0,
     isDesignatedSigner: evalPack.multisig?.signers.includes(input.userId) ?? false,
-  };
+  });
   const eligibility = checkVoterEligibility(voterFacts, {
-    rules: evalPack.eligibility ?? {
-      minMembershipDays: 0,
-      minContributions: 0,
-      requireVerifiedIdentity: false,
-      newWalletCoolingOffDays: 0,
-    },
+    rules: evalPack.eligibility ?? DEFAULT_ELIGIBILITY_RULES,
     treasuryControlling: spendControlling,
     recusalRequired:
       (evalPack.coiRequirements?.recusalRequired ?? false) &&
@@ -870,6 +1162,19 @@ export async function signProposal(
     if (existing === undefined || s.createdAt < existing) voteTimeByUser.set(s.userId, s.createdAt);
   }
   const alreadyVoted = new Set(voteTimeByUser.keys());
+  // Each prior ballot's facts, keyed by its voter — ONE map rather than parallel
+  // ones for the time, the weight and the consumed set, which are three facts
+  // about a single ballot and can only disagree if they are stored apart.
+  const ballotByUser = new Map<string, PriorBallot>();
+  for (const s of priorSignatures) {
+    if (s.purpose !== 'vote' || s.weightSnapshot == null) continue;
+    if (s.createdAt !== voteTimeByUser.get(s.userId)) continue;
+    ballotByUser.set(s.userId, {
+      createdAt: s.createdAt,
+      weightSnapshot: s.weightSnapshot,
+      countedDelegatorIds: s.countedDelegatorIds == null ? null : new Set(s.countedDelegatorIds),
+    });
+  }
   // The SYMMETRIC mitigation (WS-M.4.2c-1): the incoming-side guard above stops a
   // delegator-first double-count, but if the DELEGATE signed first, the
   // delegator's weight is already inside the delegate's snapshot — a later DIRECT
@@ -878,24 +1183,50 @@ export async function signProposal(
   // was actually in that snapshot); a delegation created AFTER the delegate voted
   // was never counted, so the delegator's direct vote stands.
   if (model === 'delegated' && input.purpose === 'vote') {
-    const outgoing = await deps.delegations.listActiveByDelegator(input.roomId, input.userId);
-    const delegateSnapshotIncludesMe = outgoing.some((d) => {
-      if (d.delegateUserId === null) return false;
-      if (d.scopeKey !== 'all' && d.scopeKey !== `type:${proposal.proposalType}`) return false;
-      const voteTime = voteTimeByUser.get(d.delegateUserId);
-      return voteTime !== undefined && d.createdAt <= voteTime;
-    });
-    if (delegateSnapshotIncludesMe) {
+    // The SHARED predicate, so this guard and the incoming one below cannot
+    // drift apart again.  It reads EVERY delegation state, not just `active`:
+    // revoking after the delegate signed removed this check's evidence while
+    // leaving the weight inside the delegate's frozen snapshot, so the
+    // delegator could cast the same unit a second time — and the error message
+    // two lines down ("revoke the delegation to vote directly") walked them
+    // straight through it.
+    const consumed = await delegatorsAlreadyConsumed(
+      deps.delegations,
+      input.roomId,
+      proposal.proposalType,
+      [input.userId],
+      ballotByUser,
+      null,
+    );
+    if (consumed.has(input.userId)) {
       return tgErr(
         409,
         'delegated_weight_already_cast',
-        'Your vote was already cast via your delegate; revoke the delegation to vote directly.',
+        'Your vote was already cast via your delegate. Revoking the delegation does not ' +
+          'return the weight — that ballot is already counted.',
       );
     }
   }
+  // …and the SAME predicate on the incoming side.  `incomingDelegationsFor`
+  // dedups a delegator who granted both an `all` and a `type:` delegation to
+  // THIS delegate, but it reads one delegate at a time — so a member who split
+  // the two across two DIFFERENT delegates had their unit counted once in each
+  // ballot.  `alreadyVoted` does not catch it either: that delegator never
+  // voted directly.
+  const consumedElsewhere = await delegatorsAlreadyConsumed(
+    deps.delegations,
+    input.roomId,
+    proposal.proposalType,
+    delegations.flatMap((d) => (d.delegatorUserId === null ? [] : [d.delegatorUserId])),
+    ballotByUser,
+    input.userId,
+  );
   const incoming = [];
   for (const delegation of delegations) {
     if (delegation.delegatorUserId !== null && alreadyVoted.has(delegation.delegatorUserId)) {
+      continue;
+    }
+    if (delegation.delegatorUserId !== null && consumedElsewhere.has(delegation.delegatorUserId)) {
       continue;
     }
     let delegatorEligible = false;
@@ -907,9 +1238,13 @@ export async function signProposal(
       // voter (membership age, contributions, identity) — otherwise ineligible
       // members boost a delegate's ballot they could never cast themselves.
       // Wallet arms are neutral here: delegating involves no wallet.
+      // The delegator's facts at the SAME frozen instant — its join test below was
+      // already frozen while its eligibility verdict was live, the identical
+      // asymmetry the direct arm had.
       const delegatorFacts = await deps.membership.memberFacts(
         input.roomId,
         delegation.delegatorUserId,
+        frozenAt,
       );
       const verdict = checkVoterEligibility(
         {
@@ -928,7 +1263,11 @@ export async function signProposal(
             proposal.recipientRef === delegation.delegatorUserId ||
             proposal.recipientRef === `user:${delegation.delegatorUserId}`,
           roleClasses: [],
-          reputationScore: 0,
+          // The SAME projection as the direct voter's facts above.  Only the
+          // eligibility gate reads it on this path (a delegated unit is the
+          // literal `weight: 1` below, never a resolver output), but the two
+          // fact projections must not be allowed to drift apart.
+          reputationScore: delegatorFacts?.contributionCount ?? 0,
           tokenVoteUnits: 0,
           isDesignatedSigner: false,
         },
@@ -947,7 +1286,24 @@ export async function signProposal(
           clustersAlreadyVoted: new Set(),
         },
       );
-      delegatorEligible = verdict.eligible;
+      // THE ELECTORATE FREEZE APPLIES TO A DELEGATED UNIT TOO.  The direct
+      // ballot above refuses a signer whose `memberSince` postdates
+      // `eligibleBasisAt`; without the same test here, one question — "is this
+      // member inside the population `eligibleBasisCount` was counted over?" —
+      // was answered against a stamped instant for a direct voter and against
+      // LIVE membership for a delegated one.  Delegation is then the way around
+      // the freeze: post-open joiners grant their units to a delegate whose cap
+      // admits them all, and delegated weight is what the threshold arithmetic
+      // consumes.  Unknown (`null`) stays unjudgeable, as everywhere else.
+      // The HOISTED instant — this used to re-derive its own copy, so the direct arm,
+      // the delegated arm and the facts read each had their own answer to "when was
+      // the basis counted".
+      const delegatorJoined = delegatorFacts?.memberSince ?? null;
+      const joinedAfterFreeze =
+        frozenAt !== undefined &&
+        delegatorJoined !== null &&
+        Date.parse(delegatorJoined) > Date.parse(frozenAt);
+      delegatorEligible = verdict.eligible && !joinedAfterFreeze;
     }
     incoming.push({
       delegatorUserId: delegation.delegatorUserId ?? '',
@@ -955,6 +1311,12 @@ export async function signProposal(
       weight: 1,
     });
   }
+  // CANONICAL fold order.  The resolver stops at the per-account cap, so the
+  // order decides which delegators the ceiling admits and which are left free
+  // to cast their own unit — store iteration order must not be what settles
+  // that.  Sorting by delegator id makes the same electorate produce the same
+  // consumed set on every replay, in this process and in any other.
+  incoming.sort((a, b) => (a.delegatorUserId < b.delegatorUserId ? -1 : 1));
   const resolution: WeightResolution = resolveVotingWeight({
     model,
     facts: voterFacts,
@@ -971,6 +1333,24 @@ export async function signProposal(
   if (!resolution.resolved) {
     return tgErr(409, resolution.code, resolution.reason);
   }
+  // A zero-weight BALLOT is not a vote, and recording one as if it were is how a
+  // room loses a decision it thought it made: `tallyProposalVotes` sums the
+  // recorded snapshots, so a 0 adds nothing to approve/reject while still
+  // counting toward QUORUM — an electorate that all resolves to 0 shows
+  // unanimous approval and settles `rejected` (decided '0' never crosses the
+  // threshold bar).  Refuse it at signing with the resolver's own explanation
+  // instead.  Only the participation-denominated models can reach 0
+  // (`maxVotingWeightPerAccount` is `.positive()`, so every 1-per-account model
+  // resolves above zero), and approval/multisig co-signatures are counted by
+  // SIGNER rather than by weight, so neither is affected.
+  if (input.purpose === 'vote' && decCompare(resolution.weight, 0) <= 0) {
+    return tgErr(
+      409,
+      'zero_voting_weight',
+      `${resolution.eligibilityReason} A zero-weight ballot cannot affect the tally, ` +
+        'so it is not recorded.',
+    );
+  }
 
   const record: GovernanceSignatureRecord = {
     signatureId: deps.uuid(),
@@ -982,13 +1362,33 @@ export async function signProposal(
     signatureRef: input.signature,
     weightSnapshot: resolution.weight,
     eligibilityReason: resolution.eligibilityReason,
+    // Freeze WHICH delegated units this weight consumed (null for every model
+    // that folds none), so a later ballot asks the ledger rather than
+    // re-deriving from delegations that may since have changed.
+    countedDelegatorIds: resolution.countedDelegatorIds ?? null,
     createdAt: new Date(deps.now()).toISOString(),
     purpose: input.purpose,
     choice: input.purpose === 'vote' ? input.choice : null,
     nonce,
   };
   const inserted = await deps.proposalSignatures.insert(record);
-  if (inserted === null) {
+  if (!inserted.ok) {
+    if (inserted.reason === 'delegated_unit_claimed') {
+      // NOT `already_signed`: this voter has not signed.  A delegator split an
+      // `all` delegation to one delegate and a `type:` delegation to another, both
+      // resolved weight from the same uncommitted view, and the other ballot
+      // committed first — so this one's snapshot counted a unit it does not hold.
+      // The claim table refuses it whole rather than letting the tally count that
+      // unit twice, and the remedy is to re-submit: the winner is now visible to
+      // `delegatorsAlreadyConsumed`, so the next attempt resolves a weight that
+      // excludes it and succeeds.
+      return tgErr(
+        409,
+        'delegated_unit_claimed',
+        `${inserted.delegatorUserIds.length} delegated unit(s) were counted by another ` +
+          'ballot first. Re-submit to vote with the weight that remains.',
+      );
+    }
     return tgErr(409, 'already_signed', 'A signature by this user/wallet/nonce already exists.');
   }
   await appendChainedAudit(deps, {
@@ -1001,7 +1401,7 @@ export async function signProposal(
     proposalId: input.proposalId,
   });
   const tally = await tallyFor(deps, proposal, evalPack, false);
-  return { ok: true, signature: inserted, tally: wireTally(tally) };
+  return { ok: true, signature: inserted.record, tally: wireTally(tally) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,11 +1437,41 @@ export async function settleDueProposals(deps: ProposalDeps, roomId: string): Pr
       proposal.deliberationEndsAt != null &&
       proposal.deliberationEndsAt <= nowIso
     ) {
+      // FREEZE the quorum basis here — this is the instant the electorate is
+      // fixed for the voters about to cast.  Reading it fresh at settle let
+      // membership growth after the last ballot nullify a decided proposal (and
+      // shrinkage pass a failed one); see `tallyFor`.  Resolved through the
+      // PINNED law pack, so the eligibility rules are the ones the proposal was
+      // published under.
+      const pinned =
+        proposal.lawPackVersionId != null
+          ? await deps.lawPacks.get(proposal.lawPackVersionId)
+          : null;
+      const pack = (pinned?.lawPack ?? (await activeLawPack(deps, roomId))?.pack) as
+        | LawPack
+        | undefined;
+      // No resolvable pack ⇒ no basis to record. The row stays null and the
+      // tally falls back to the live read, which is what it did before — a
+      // missing pack must not silently stamp a 0 and fail quorum outright.
+      // THE INSTANT COMES FROM THE MEASUREMENT.  Taking it first and passing it into
+      // a live count fixed the JOIN direction and left the DEPARTURE one: a member
+      // who leaves during the sweep's own runtime is hard-deleted from the rows the
+      // count reads, so the denominator ends up smaller than the electorate at the
+      // instant it claims — quorum easier to meet than the pack asks for.
+      const measured = pack === undefined ? null : await measureEligibleBasis(deps, proposal, pack);
+      const basisAt = measured?.asOf ?? new Date(deps.now()).toISOString();
+      const eligibleBasisCount = measured?.count ?? null;
       const opened = await deps.proposals.casVotingState(
         proposal.proposalId,
         'deliberation',
         'open',
-        {},
+        // The count and the INSTANT it was counted at, stamped together.  The
+        // ballot cutoff used to read `deliberationEndsAt` — the SCHEDULED
+        // deadline — while this count is the membership as it stands NOW, and
+        // ordinary tick lag puts the two apart: everyone who joined in between
+        // raised the denominator and was refused a ballot, so enough of them
+        // made quorum unreachable however many eligible members voted.
+        eligibleBasisCount === null ? {} : { eligibleBasisCount, eligibleBasisAt: basisAt },
       );
       if (opened !== null) settled += 1;
       continue;

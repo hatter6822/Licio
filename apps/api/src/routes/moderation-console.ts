@@ -6,7 +6,7 @@
 // interface (WS-J.2.4), and the audit viewer + transparency export (WS-J.2.5).
 // Every view/action is authorized by doctrine steward role + verified MFA, and
 // the reads/exports are themselves audited.  Financial data never appears.
-import { zValidator } from '@hono/zod-validator';
+
 import {
   appealDecisionRequestSchema,
   appealDecisionResponseSchema,
@@ -36,6 +36,7 @@ import {
   revertActionRequestSchema,
   revertActionResponseSchema,
   reviewerStatusRequestSchema,
+  reviewerStatusResponseSchema,
   stewardRolesCanAccessQueue,
   urlVerdictRequestSchema,
   urlVerdictResponseSchema,
@@ -44,6 +45,8 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { getIdentityServices } from '../identity/services.js';
+import { decodeKeysetCursor, isCursorUuid } from '../lib/keyset-cursor.js';
+import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth } from '../middleware/auth.js';
 import { applyAction, revertAction } from '../moderation/actions.js';
 import { decideAppeal } from '../moderation/appeals.js';
@@ -73,21 +76,43 @@ import {
   buildReportQueue,
 } from '../moderation/review.js';
 import { getModerationServices } from '../moderation/services.js';
+import type { ModerationTx } from '../moderation/transactor.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } });
 
-const CURSOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The `(timestamp, uuid)` keyset cursor as a tuple, for the store filters that take
+ *  the two parts separately.  Malformed cursors restart from the beginning. */
+function decodeKeysetTuple(cursor: string | undefined): [string, string] | [undefined, undefined] {
+  const at = decodeKeysetCursor(cursor);
+  return at === null ? [undefined, undefined] : [at.time, at.id];
+}
 
-/** Decode + shape-validate a `(timestamp|uuid)` keyset cursor.  Malformed
- *  cursors restart from the beginning (defensive, never a 500 from a failed
- *  `::timestamptz`/`::uuid` cast inside a store). */
-function decodeKeysetCursor(cursor: string | undefined): [string, string] | [undefined, undefined] {
-  if (!cursor) return [undefined, undefined];
-  const [time, id] = Buffer.from(cursor, 'base64url').toString('utf-8').split('|');
-  if (!time || !id || !Number.isFinite(Date.parse(time)) || !CURSOR_UUID_RE.test(id)) {
-    return [undefined, undefined];
+/** The audit cursor is the append ORDINAL — an integer, so it survives the wire round
+ *  trip exactly.  A timestamp cannot: the driver truncates `timestamptz` to a
+ *  millisecond `Date`, so the encoded value named a position BELOW the row it came
+ *  from and the next page dropped the remainder of that millisecond (migration 0115). */
+const encodeAuditCursor = (ordinal: number): string =>
+  Buffer.from(`o|${ordinal}`, 'utf-8').toString('base64url');
+
+/** Decode an audit cursor into the store filter fragment.  Accepts BOTH the ordinal
+ *  form and the legacy `timestamp|uuid` form, so a console page opened before this
+ *  deploy still pages correctly — the legacy id is exact, and the store resolves that
+ *  row's own ordinal from it.  A malformed cursor restarts from the head (defensive:
+ *  never a 500 from a failed cast inside a store). */
+function decodeAuditCursor(
+  cursor: string | undefined,
+): { afterOrdinal: number } | { afterAuditId: string } | Record<string, never> {
+  if (!cursor) return {};
+  const raw = Buffer.from(cursor, 'base64url').toString('utf-8');
+  if (raw.startsWith('o|')) {
+    const ordinal = Number(raw.slice(2));
+    return Number.isSafeInteger(ordinal) && ordinal > 0 ? { afterOrdinal: ordinal } : {};
   }
-  return [time, id];
+  // The legacy form's id is exact, so the timestamp beside it does not have to parse —
+  // only the id is used.  `decodeKeysetCursor` requires both, so this checks the id
+  // directly rather than discarding a usable cursor.
+  const [, id] = raw.split('|');
+  return id !== undefined && isCursorUuid(id) ? { afterAuditId: id } : {};
 }
 const uuidParam = <K extends string>(name: K) =>
   z.object({ [name]: uuidSchema } as Record<K, typeof uuidSchema>);
@@ -268,16 +293,96 @@ export function createModerationConsoleRoutes() {
               400,
             );
           }
-          await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
-          await writeAudit(mod, {
-            actorUserId: actor.userId,
-            actorRole: actor.stewardRoles[0] ?? null,
-            action: 'assign',
-            targetType: theCase.targetType,
-            targetId: theCase.targetId,
-            subjectUserId: null,
-            notes: reason ?? null,
+          // THE ASSIGNMENT IS NOW LIMITED, not just the button that offers it.
+          //
+          // This wrote `assignedTo` unconditionally: `theCase.assignedTo` was
+          // fetched above and never read, there is no `If-Match` and no version on
+          // the wire to echo, so two reviewers could both claim one case and both
+          // be told 200 — last writer wins.  Hiding the client's claim button when
+          // the case looks assigned narrowed the UI and left the route open, and
+          // that button reads a 30-second-stale snapshot anyway, so a colleague
+          // claiming mid-review still produced a silent takeover with ONE POST.
+          //
+          // Placed AFTER the assignee lookups on purpose: a precondition ahead of
+          // them would answer 409 where the honest answer is 404
+          // `reviewer_not_found` or 400 `reviewer_ineligible`.
+          if (theCase.assignedTo === reviewer_id) {
+            // Idempotent re-claim: the holder asking for what they already have is
+            // not a conflict, and a retried request must not become one.
+            return c.json(okResponseSchema.parse({ ok: true }));
+          }
+          // Held by someone else.  Taking a case off a colleague is a REASONED
+          // reassignment — the flow the console's own comment describes — so it requires
+          // the `reason` the schema already carries.  Without one the answer is a
+          // refusal, not a silent handover.  Checked BEFORE the unit: it is a validation
+          // of the request, not a write to roll back.
+          if (theCase.assignedTo !== null && reason === undefined) {
+            return c.json(
+              deny('already_assigned', 'This case is assigned to another reviewer'),
+              409,
+            );
+          }
+          // THE OBSERVED PRIOR HOLDER, from whichever CAS actually ran — not
+          // `theCase.assignedTo`, which is the read from before any of this and is
+          // what made the audit describe an edge that never existed.
+          // ONE UNIT (`moderation/transactor.ts`): the CAS and its audit row commit
+          // together, so a reviewer taking this case off the next one cannot observe the
+          // handover until the row recording it has landed too.  Appended after the
+          // commit instead, a delayed request could put its row behind a later
+          // reviewer's and the trail's most recent entry would name the wrong holder.
+          const outcome = await mod.transactor.run(async (tx: ModerationTx) => {
+            let priorHolder: string | null;
+            if (theCase.assignedTo === null) {
+              // THE CAS decides, not the read above — that read is already stale by
+              // the time this line runs, which is the whole defect.
+              const claimed = await tx.cases.claimIfUnassigned(caseId, reviewer_id);
+              // A refusal RETURNS rather than throws: nothing has been written, so the
+              // empty transaction commits and the caller answers 409.  What must never
+              // happen is falling through to the audit — a row for an act that did not
+              // occur, committed beside nothing.
+              if (!claimed) return 'already_assigned' as const;
+              priorHolder = null;
+            } else {
+              // A CAS HERE TOO.  This was an unconditional `update`, so two reviewers
+              // taking the case off the same colleague both succeeded and
+              // last-writer-won — the race `claimIfUnassigned` closed for an unassigned
+              // case, left open one branch along.
+              const reassigned = await tx.cases.reassignIfHeldBy(
+                caseId,
+                theCase.assignedTo,
+                reviewer_id,
+              );
+              if (!reassigned) return 'already_moved' as const;
+              priorHolder = theCase.assignedTo;
+            }
+            await tx.audit({
+              actorUserId: actor.userId,
+              actorRole: actor.stewardRoles[0] ?? null,
+              action: 'assign',
+              caseId: theCase.caseId,
+              targetType: theCase.targetType,
+              targetId: theCase.targetId,
+              // NAMES BOTH HOLDERS.  The row recorded an `assign` on the target with
+              // `subjectUserId: null` and no prior/next state, so the trail could not
+              // say who took the case or from whom — the takeover was unattributable,
+              // not merely unexplained.
+              subjectUserId: reviewer_id,
+              // The holder the CAS actually moved FROM, so this row is a true edge.
+              priorState: priorHolder ?? 'unassigned',
+              nextState: reviewer_id,
+              notes: reason ?? null,
+            });
+            return 'assigned' as const;
           });
+          if (outcome === 'already_assigned') {
+            return c.json(
+              deny('already_assigned', 'Another reviewer claimed this case first'),
+              409,
+            );
+          }
+          if (outcome === 'already_moved') {
+            return c.json(deny('already_assigned', 'Another reviewer moved this case first'), 409);
+          }
           mod.metrics.increment('moderation.assign');
           return c.json(okResponseSchema.parse({ ok: true }));
         },
@@ -381,14 +486,52 @@ export function createModerationConsoleRoutes() {
               results.push({ case_id: caseId, ok: false, error: 'reviewer_required' });
               continue;
             }
-            await mod.cases.update(caseId, { assignedTo: reviewer_id, status: 'in_progress' });
-            await writeAudit(mod, {
-              actorUserId: actor.userId,
-              actorRole: actor.stewardRoles[0] ?? null,
-              action: 'assign',
-              targetType: theCase.targetType,
-              targetId: theCase.targetId,
+            // THE SAME GUARD AS THE SINGLE ASSIGN, or this is a complete bypass
+            // of it — bulk assign overwrote ANY case's assignee and did not even
+            // forward the request's `reason_code`, so it could still silently steal
+            // a colleague's in-progress case one page at a time.
+            if (theCase.assignedTo === reviewer_id) {
+              // ALREADY HELD BY THIS REVIEWER: short-circuit exactly as the single
+              // route does, writing NO audit row.  My first version let this fall
+              // through to the write below, which recorded another assignment whose
+              // prior state was falsely `unassigned` — so an ordinary idempotent
+              // retry corrupted an append-only history.  A no-op is not an event.
+              results.push({ case_id: caseId, ok: true, error: null });
+              continue;
+            }
+            if (theCase.assignedTo !== null) {
+              results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
+              continue;
+            }
+            // ONE UNIT per case, as the single assign is — and per CASE rather than
+            // around the loop: locking many case rows in request order would let two
+            // bulk operations over overlapping sets deadlock on each other.
+            const assigned = await mod.transactor.run(async (tx: ModerationTx) => {
+              const claimed = await tx.cases.claimIfUnassigned(caseId, reviewer_id);
+              if (!claimed) return false;
+              await tx.audit({
+                actorUserId: actor.userId,
+                actorRole: actor.stewardRoles[0] ?? null,
+                action: 'assign',
+                caseId: theCase.caseId,
+                targetType: theCase.targetType,
+                targetId: theCase.targetId,
+                // Named here too — the bulk path wrote the row with no identities and
+                // no notes at all.
+                subjectUserId: reviewer_id,
+                // Reached only via the CAS above, so the case WAS unassigned — but
+                // stated from the row rather than as a literal, because a literal is
+                // what made the retry path lie.
+                priorState: theCase.assignedTo ?? 'unassigned',
+                nextState: reviewer_id,
+                notes: reason_code ?? null,
+              });
+              return true;
             });
+            if (!assigned) {
+              results.push({ case_id: caseId, ok: false, error: 'already_assigned' });
+              continue;
+            }
             results.push({ case_id: caseId, ok: true, error: null });
             continue;
           }
@@ -420,6 +563,24 @@ export function createModerationConsoleRoutes() {
       })
 
       // --- Reviewer availability (WS-J.2.1d) ------------------------------
+      // The caller's own availability.  The console needs this to INITIALISE its
+      // control: a fixed local default told a reviewer they were `available`
+      // while `availableIds()` still excluded them, and merely opening the
+      // console did not correct it.  Same authorization bar as the write.
+      .get('/reviewer-status', async (c) => {
+        const actor = mustActor(c);
+        if (denyQueue(actor, 'report-queue') && denyQueue(actor, 'appeal-queue')) {
+          return c.json(
+            deny('forbidden', 'Only report or appeal reviewers can read availability'),
+            DENIAL_STATUS,
+          );
+        }
+        const mod = getModerationServices();
+        const record = await mod.reviewerStatus.get(actor.userId);
+        // Never stored ⇒ `offline`: a reviewer who has not opted in is not in
+        // the pool, and reporting `available` would be the same lie in reverse.
+        return c.json(reviewerStatusResponseSchema.parse({ status: record?.status ?? 'offline' }));
+      })
       .post('/reviewer-status', zValidator('json', reviewerStatusRequestSchema), async (c) => {
         const actor = mustActor(c);
         // Only an actual report/appeal reviewer may enter the auto-assignment
@@ -532,7 +693,7 @@ export function createModerationConsoleRoutes() {
           const mod = getModerationServices();
           const limit = q.limit ?? 50;
           let nextCursor: string | null = null;
-          const [curTime, curId] = decodeKeysetCursor(q.cursor);
+          const [curTime, curId] = decodeKeysetTuple(q.cursor);
           let records = await mod.evidenceDecisions.listRecent({
             ...(curTime && curId ? { after: { createdAt: curTime, decisionId: curId } } : {}),
             limit: limit + 1,
@@ -672,10 +833,13 @@ export function createModerationConsoleRoutes() {
         }
         const q = c.req.valid('query');
         const mod = getModerationServices();
-        // Keyset cursor on (eventTime, auditId) DESC — stable when the
-        // `audit_view` meta-record below is inserted between page reads (an
-        // offset cursor would shift, duplicating/skipping rows).
-        const [curTime, curId] = decodeKeysetCursor(q.cursor);
+        // Keyset cursor on the append ORDINAL — stable when the `audit_view`
+        // meta-record below is inserted between page reads (an offset cursor would
+        // shift, duplicating/skipping rows), and EXACT across the wire round trip,
+        // which the previous `(eventTime, auditId)` pair was not: the timestamp came
+        // back from the driver already truncated to the millisecond, so each page
+        // silently dropped the rest of the cursor row's millisecond (migration 0115).
+        const cursor = decodeAuditCursor(q.cursor);
         const limit = q.limit ?? 50;
         const records = await mod.audit.list({
           ...(q.actor_id ? { actorUserId: q.actor_id } : {}),
@@ -684,7 +848,7 @@ export function createModerationConsoleRoutes() {
           ...(q.reason_code ? { reasonCode: q.reason_code } : {}),
           ...(q.created_after ? { createdAfter: q.created_after } : {}),
           ...(q.created_before ? { createdBefore: q.created_before } : {}),
-          ...(curTime && curId ? { afterEventTime: curTime, afterAuditId: curId } : {}),
+          ...cursor,
           limit: limit + 1,
         });
         const page = records.slice(0, limit);
@@ -700,10 +864,7 @@ export function createModerationConsoleRoutes() {
         for (const id of actorIds) handles.set(id, resolved.get(id)?.handle ?? null);
         const items = page.map((r) => auditToView(r, handles, true));
         const last = page[page.length - 1];
-        const nextCursor =
-          records.length > limit && last
-            ? Buffer.from(`${last.eventTime}|${last.auditId}`, 'utf-8').toString('base64url')
-            : null;
+        const nextCursor = records.length > limit && last ? encodeAuditCursor(last.ordinal) : null;
         // The audit log is itself an accountability surface — every successful
         // read is meta-audited with its query scope (parity with /audit/export
         // below), so steward inspection of the trail is never invisible.
@@ -776,18 +937,25 @@ export function createModerationConsoleRoutes() {
         }
         const mod = getModerationServices();
         const patch = c.req.valid('json');
-        const fields: Array<{ key: string; message: string }> = [];
+        // Per-key problems go in `apiErrorSchema`'s own `details` map — the
+        // field documented as "field-level details for form validation
+        // surfaces" — rather than in a `fields: [{key, message}]` array of this
+        // route's own invention.  The client validates every error body against
+        // that schema and keeps only what it declares, so the invented array
+        // was dropped on arrival: the console showed "Invalid config" and never
+        // which key was wrong, which is the entire content of the answer.
+        const details: Record<string, string> = {};
         for (const [key, value] of Object.entries(patch)) {
           if (!(MODERATION_CONFIG_KEYS as string[]).includes(key)) {
-            fields.push({ key, message: 'unknown key' });
+            details[key] = 'unknown key';
             continue;
           }
           const problem = validateModerationConfigValue(key, value);
-          if (problem) fields.push({ key, message: problem });
+          if (problem) details[key] = problem;
         }
-        if (fields.length > 0) {
+        if (Object.keys(details).length > 0) {
           return c.json(
-            { error: { code: 'validation_error', message: 'Invalid config', fields } },
+            { error: { code: 'validation_error', message: 'Invalid config', details } },
             422,
           );
         }

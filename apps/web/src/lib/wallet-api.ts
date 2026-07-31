@@ -34,7 +34,7 @@ import {
   walletUnlinkBlockedSchema,
 } from '@licio/shared';
 import { z } from 'zod';
-import { client, parseResponse } from './api.js';
+import { ApiClientError, client, parseResponse } from './api.js';
 import { parseWithStepUp } from './auth-api.js';
 
 // --- Wallet link lifecycle (WS-L.2) ----------------------------------------
@@ -78,10 +78,21 @@ export async function requestWalletUnlink(walletId: string): Promise<WalletUnlin
   const response = await client.v1.wallet.unlink.request.$post({
     json: { wallet_account_id: walletId },
   });
-  // 409 blocked is a valid, typed outcome (not an error) — read the body either way.
-  if (response.status === 200 || response.status === 409) {
-    const data: unknown = await response.json();
-    return unlinkResultSchema.parse(data);
+  // 409 blocked is a valid, typed outcome (not an error), and `parseResponse`
+  // rejects anything `!ok` — so ONLY the 409 needs to read the body here. A 200
+  // must NOT join it: it falls through to `parseResponse`, and routing it through
+  // a bare `.parse` was what let a malformed SUCCESS body escape as a raw
+  // ZodError. `WalletManager` renders `error.message` verbatim, and zod 4's
+  // message is the JSON-serialised issue array — internal schema paths, expected
+  // /received values and regex patterns, untranslated, in the user's status line.
+  // Normalise to the SAME ApiClientError `parseResponse` would have raised.
+  if (response.status === 409) {
+    const body: unknown = await response.json().catch(() => null);
+    const parsed = walletUnlinkBlockedSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new ApiClientError('invalid_response', 'Server response failed validation', 409);
+    }
+    return parsed.data;
   }
   // Unlink requires fresh step-up: a step-up 401 becomes the typed error that
   // opens the retry dialog rather than a generic failure (WS-L.2.5b).

@@ -336,6 +336,12 @@ export async function submitStory(
   //    claimed; `flagged` ⇒ rejected; `pending` ⇒ the story is held for review
   //    (fail-toward-caution), never published-then-hidden.
   let mediaUploadRef: string | null = null;
+  // Copied from the upload's SERVER-parsed dimensions, never from the request
+  // body: a dimension the client can state is one the client can lie about,
+  // and an attacker-chosen reserved box is a layout the page cannot recover
+  // from. Denormalized onto the story so the feed projection needs no lookup.
+  let mediaWidth: number | null = null;
+  let mediaHeight: number | null = null;
   let mediaType: StoryRecord['mediaType'] = null;
   let extractionState: StoryRecord['extractionState'] = 'pending';
   let heldForScan = false;
@@ -386,6 +392,13 @@ export async function submitStory(
       };
     }
     mediaUploadRef = upload.uploadId;
+    // A VIDEO upload has no parsed dimensions — the upload route extracts them
+    // only for images — so copying them here left a video story's card with
+    // nulls.  The POSTER is the image the card actually renders, and its
+    // dimensions are read from the sub-upload below; a video's own entry stays
+    // null rather than borrowing a number that describes nothing.
+    mediaWidth = upload.imageWidth;
+    mediaHeight = upload.imageHeight;
     mediaType = wantImage ? 'image' : 'video';
     // Media is never URL-normalized or crawled — but it STILL runs the §14.2
     // pipeline's non-link path (which classifies the local text: title + alt
@@ -430,6 +443,15 @@ export async function submitStory(
         };
       }
       if (sub.scanState === 'pending') heldForScan = true;
+      // THE POSTER'S dimensions are the ones the feed card reserves space with.
+      // `StoryMedia` renders the poster as the `<img>` for a video story and
+      // supports width/height, and this loop had already fetched and validated
+      // the upload carrying them — then discarded them, so the poster kept the
+      // layout shift the whole dimensions pass exists to remove.
+      if (typePrefix === 'image/' && sub.imageWidth !== null && sub.imageHeight !== null) {
+        mediaWidth = sub.imageWidth;
+        mediaHeight = sub.imageHeight;
+      }
     }
   }
 
@@ -493,6 +515,8 @@ export async function submitStory(
       roomId: room.roomId,
       visibility,
       mediaUploadRef,
+      mediaWidth,
+      mediaHeight,
       canonicalPublicStoryId,
       language: request.language !== undefined ? canonicalizeBcp47(request.language) : null,
       // WS-K §24.1 — author picks are UNTRUSTED proposals. The trusted topic
