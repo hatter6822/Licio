@@ -360,10 +360,19 @@ These are structural guarantees the code holds (each covered by a test):
   assignment paths (auto-route, console assign, bulk assign), per case rather than per
   batch so two bulk operations over overlapping sets cannot deadlock — and since extended
   to the action palette, the revert, the automated pre-publication block, the appeal
-  decision and its replacement sanction, and the expiry sweep's lift.  Where a WS-D/WS-G
-  port applies the effect, the record commits BEFORE it: a port failure already left the
-  action row committed and unaudited, so pairing them only completes a state that could
-  already occur, and the ports are idempotent where the record is not.
+  decision and its replacement sanction, and the expiry sweep's lift.
+- **Where an effect is enforced, the HANDLE precedes it and the CLAIM follows it.**  The
+  two artifacts want opposite orders and get them.  The action row is operational state —
+  the revert handle — and must exist before anything can be enforced, because
+  `applyContentState` writes two tables and a throw between them leaves content partially
+  hidden with no action id for a steward to undo.  The audit entry is a claim in an
+  append-only, tamper-evident trail, and must never assert something before it is true: a
+  false entry cannot be withdrawn, while a failed effect can simply be retried.  So the
+  row is written first, the effect applied, and then the case resolution, the member
+  notice and the audit entry commit together — every artifact that says it HAPPENED,
+  written only once it has.  The state between them, an action row the trail does not
+  mention, is the intended one: enforcement attempted, outcome not yet recorded, revert
+  handle in hand — and detectable, being an action row with no audit entry.
 - **No state change without its record.**  Inside a unit an audit failure aborts the
   change rather than degrading to an alert — the deliberate inversion of `writeAudit`'s
   best-effort posture, which remains correct for events that are NOT state changes (a

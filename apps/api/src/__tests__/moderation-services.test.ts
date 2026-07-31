@@ -838,8 +838,8 @@ describe('account-state prior-state preservation (D3)', () => {
   });
 });
 
-describe('action durability — record before enforcement (A2)', () => {
-  it('persists the action row even when the enforcement port throws', async () => {
+describe('action durability — the handle before enforcement, the claim after (A2)', () => {
+  it('keeps the revert handle but writes NO audit claim when the port throws', async () => {
     // The content store is down: applyContentState rejects.  With the action
     // recorded FIRST, the failure surfaces but the row survives as a revert
     // handle (pre-fix order enforced before recording, so a throw left the
@@ -862,11 +862,40 @@ describe('action durability — record before enforcement (A2)', () => {
         reason_code: 'MOD_HARASS_001',
       }),
     ).rejects.toThrow(/content store unavailable/);
-    // The durable action row exists (non-reverted) despite the enforcement throw.
+    // THE HANDLE SURVIVES.  `applyContentState` writes two tables, so a throw can leave
+    // the content partially hidden — and without a row there is no action id, so no
+    // steward can undo it through the normal path.  That is why the row comes first.
     const active = await services.actions.listActiveByTarget('content', TARGET);
     expect(active).toHaveLength(1);
     expect(active[0]?.action).toBe('remove');
     expect(active[0]?.reverted).toBe(false);
+
+    // AND THE TRAIL STAYS SILENT.  The audit entry is a claim in an append-only,
+    // tamper-evident record: it must not say a removal happened when the port refused,
+    // because a false entry cannot be withdrawn while a failed effect can be retried.
+    // The two artifacts want opposite orders, and get them.
+    const trail = await services.audit.list({ limit: 50 });
+    expect(trail.filter((r) => r.action === 'remove')).toHaveLength(0);
+    // Nor the notice, nor the case resolution — they assert it happened too.
+    const notices = await services.notices.listByUser(AUTHOR, null, 50);
+    expect(notices).toHaveLength(0);
+  });
+
+  it('writes the claim, the notice and the case resolution once the port SUCCEEDS', async () => {
+    services = createInMemoryModerationServices({
+      content: recordingContentPort(),
+      users: userPort({ [AUTHOR]: 100 }),
+    });
+    const out = await applyAction(services, safetyActor(), {
+      target_type: 'content',
+      target_id: TARGET,
+      action: 'remove',
+      reason_code: 'MOD_HARASS_001',
+    });
+    expect(out.ok).toBe(true);
+    const trail = await services.audit.list({ limit: 50 });
+    expect(trail.filter((r) => r.action === 'remove')).toHaveLength(1);
+    expect(await services.actions.listActiveByTarget('content', TARGET)).toHaveLength(1);
   });
 });
 

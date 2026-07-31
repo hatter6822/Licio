@@ -31,7 +31,7 @@ import {
 import { createActionNotice } from './notices.js';
 import type { AccountActionState, ContentVisibilityState } from './ports.js';
 import type { ModerationServices } from './services.js';
-import type { ModerationActionRecord } from './stores.js';
+import type { ModerationActionRecord, ModerationCaseStore } from './stores.js';
 
 export type ActionOutcome =
   | { ok: true; response: ModerationActionResponse }
@@ -293,61 +293,48 @@ export async function applyAction(
   }
   const priorState = contentState ? 'visible' : accountState ? priorAccount : null;
   const nextState = contentState ?? accountState ?? null;
-  // ONE UNIT: the action row and its audit record.
+  // THE RECORD AND THE CLAIM ARE DIFFERENT ARTIFACTS, and they want opposite orders.
   //
-  // They sit BEFORE the effect is applied, which is the ordering change.  The effect goes
-  // through WS-D/WS-G ports — external calls that no transaction spans and that must not
-  // be held open across one — so the choice is which side of them the record lands on.
+  //   The ACTION ROW is operational state: it is the revert handle.  If the enforcement
+  //   lands — even partially, and `applyContentState` writes two tables, so partially is
+  //   reachable — a row must already exist, or the content is hidden with no action id
+  //   and no steward can undo it through the normal path.  So it is written FIRST, and
+  //   `moderation-services.test.ts` pins exactly that.
   //
-  // It has to be this side.  A port failure ALREADY left the action row committed and
-  // unaudited (this function throws, and nothing rolls the insert back), so
-  // "recorded but not yet applied" is not a new state — it is today's failure state with
-  // its accountability record missing.  Pairing the two makes the steward's decision
-  // durable and chained whatever the port does next, and the ports are idempotent by
-  // design, so the effect is retryable in a way the record is not.
-  const action = await services.transactor.run(async (tx) => {
-    const inserted = await tx.actions.insert({
-      actorUserId: actor.userId,
-      actorRole: actor.stewardRoles[0] ?? null,
-      action: request.action,
-      targetType: request.target_type,
-      targetId: request.target_id,
-      subjectUserId: subjectUserId ?? null,
-      reasonCode,
-      duration: request.duration ?? null,
-      reviewerNote: request.reviewer_note ?? null,
-      priorState,
-      nextState,
-      reversible,
-      reverted: false,
-      linkedActionId: null,
-      caseId: request.case_id ?? null,
-      coApproverUserId: null,
-      reportIds,
-    });
-    await tx.audit({
-      actorUserId: actor.userId,
-      actorRole: inserted.actorRole,
-      action: request.action,
-      // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the
-      // same value the action row was written with, so the history cannot be steered
-      // onto another case by a forged field.
-      caseId: linkedCase?.caseId ?? null,
-      reasonCode,
-      targetType: request.target_type,
-      targetId: request.target_id,
-      subjectUserId: subjectUserId ?? null,
-      priorState,
-      nextState,
-      reversible,
-      reportIds,
-      notes: request.reviewer_note ?? null,
-    });
-    return inserted;
+  //   The AUDIT ENTRY is a historical claim in an append-only, tamper-evident trail.  It
+  //   must never assert something before that thing is true, because a false entry cannot
+  //   be withdrawn while a failed effect can simply be retried.  So it is written LAST,
+  //   after the effect it describes.
+  //
+  // Writing them together in either position sacrifices one of those.  Written apart,
+  // both hold — and the state between them (an action row with no audit entry) is not a
+  // hole but the intended one: enforcement attempted, outcome not yet recorded, revert
+  // handle in hand.  It is also detectable, being an action row the trail does not
+  // mention.
+  //
+  // 1. The revert handle, committed before anything can be enforced against it.
+  const action = await services.actions.insert({
+    actorUserId: actor.userId,
+    actorRole: actor.stewardRoles[0] ?? null,
+    action: request.action,
+    targetType: request.target_type,
+    targetId: request.target_id,
+    subjectUserId: subjectUserId ?? null,
+    reasonCode,
+    duration: request.duration ?? null,
+    reviewerNote: request.reviewer_note ?? null,
+    priorState,
+    nextState,
+    reversible,
+    reverted: false,
+    linkedActionId: null,
+    caseId: request.case_id ?? null,
+    coApproverUserId: null,
+    reportIds,
   });
 
-  // 2. Apply the effect (idempotent at the port; an already-removed item is a
-  //    no-op there).  Reflected to distribution (the ranking seam).
+  // 2. Apply the effect (idempotent at the port; an already-removed item is a no-op
+  //    there).  Reflected to distribution through the ranking seam.
   if (contentState && request.target_type === 'content') {
     await services.content.applyContentState(
       request.target_id,
@@ -361,44 +348,77 @@ export async function applyAction(
     await services.content.applyAccountState(subjectUserId, accountState, durationDays);
   }
 
-  // 3. Resolve the linked case/reports.
-  await resolveCaseForAction(services, request, action.actionId);
-
-  // 4. Notice + appealability (significant actions only; never silent).
+  // 3. ONE UNIT: the case resolution, the member notice, and the audit entry — everything
+  //    that asserts the action HAPPENED, committed together and only once it has.
+  //
+  //    This is what closes the pre-existing hole.  The audit write used to be
+  //    best-effort and unpaired, so any audit failure left an enforced action with a
+  //    resolved case and a notice sent to the member and nothing in the trail.  Now the
+  //    three stand or fall together, and a failure returns an error the steward retries —
+  //    the effect being idempotent, and the action row already in hand.
   let appealable = false;
   let noticeSent = false;
-  if (enfType !== null) {
-    const eligibility: AppealEligibility = appealEligibility(enfType, {
-      reasonCode,
-      banCooldownHours: services.config().banAppealCooldownHours,
-      shadowUserNotified: true,
-      emergencyReviewComplete: false,
-    });
-    // A ban is not appealable until its cooldown elapses; the notice must not
-    // advertise an Appeal affordance that would be rejected (WS-J.1.3a) — it
-    // carries the "appeal available after N hours" note instead.  `appealable`
-    // reflects current availability, not eventual eligibility.
-    appealable =
-      eligibility.appealable && !(enfType === 'ban' && (eligibility.availableAfterHours ?? 0) > 0);
-    if (isSignificantAction(enfType) && subjectUserId) {
-      const banNote =
-        enfType === 'ban' && eligibility.availableAfterHours
-          ? `You may appeal this ban once, after ${eligibility.availableAfterHours} hours.`
-          : null;
-      await createActionNotice(services, {
-        userId: subjectUserId,
-        actionId: action.actionId,
-        action: request.action,
-        reasonCode,
-        appealable,
-        appealAvailableNote: banNote,
-      });
-      noticeSent = true;
-    }
-  }
+  await services.transactor.run(async (tx) => {
+    await resolveCaseForAction(services, request, action.actionId, tx.cases);
 
-  // 5. Audited in step 1, with the action row it describes — see there for why the
-  //    record commits before the effect rather than after it.
+    // The member notice (significant actions only; never silent).  A DURABLE row, so it
+    // belongs here: a rolled-back record must not leave the member holding a statement of
+    // reasons the trail does not show.
+    if (enfType !== null) {
+      const eligibility: AppealEligibility = appealEligibility(enfType, {
+        reasonCode,
+        banCooldownHours: services.config().banAppealCooldownHours,
+        shadowUserNotified: true,
+        emergencyReviewComplete: false,
+      });
+      // A ban is not appealable until its cooldown elapses; the notice must not advertise
+      // an Appeal affordance that would be rejected (WS-J.1.3a) — it carries the "appeal
+      // available after N hours" note instead.  `appealable` reflects current
+      // availability, not eventual eligibility.
+      appealable =
+        eligibility.appealable &&
+        !(enfType === 'ban' && (eligibility.availableAfterHours ?? 0) > 0);
+      if (isSignificantAction(enfType) && subjectUserId) {
+        const banNote =
+          enfType === 'ban' && eligibility.availableAfterHours
+            ? `You may appeal this ban once, after ${eligibility.availableAfterHours} hours.`
+            : null;
+        await createActionNotice(
+          services,
+          {
+            userId: subjectUserId,
+            actionId: action.actionId,
+            action: request.action,
+            reasonCode,
+            appealable,
+            appealAvailableNote: banNote,
+          },
+          tx.notices,
+        );
+        noticeSent = true;
+      }
+    }
+
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: action.actorRole,
+      action: request.action,
+      // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the same
+      // value the action row was written with, so the history cannot be steered onto
+      // another case by a forged field.
+      caseId: linkedCase?.caseId ?? null,
+      reasonCode,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reportIds,
+      notes: request.reviewer_note ?? null,
+    });
+  });
+
   services.metrics.increment(`moderation.action.${request.action}`);
 
   return {
@@ -419,9 +439,12 @@ async function resolveCaseForAction(
   services: ModerationServices,
   request: ModerationActionRequest,
   actionId: string,
+  /** The case store to write through — a unit's, when this runs inside one, so the case
+   *  resolution commits with the action that performed it. */
+  cases: ModerationCaseStore = services.cases,
 ): Promise<void> {
   if (!request.case_id) return;
-  const theCase = await services.cases.getById(request.case_id);
+  const theCase = await cases.getById(request.case_id);
   if (!theCase) return;
   // The case_id must reference the SAME target this action enforced.  A stale or
   // forged case_id for a DIFFERENT target would otherwise resolve/escalate an
@@ -432,11 +455,11 @@ async function resolveCaseForAction(
     return;
   }
   if (request.action === 'escalate') {
-    await services.cases.update(theCase.caseId, { status: 'escalated' });
+    await cases.update(theCase.caseId, { status: 'escalated' });
     return;
   }
   // clear (dismiss not-actionable) and all enforcement actions resolve the case.
-  await services.cases.update(theCase.caseId, {
+  await cases.update(theCase.caseId, {
     status: 'resolved',
     resolvedActionId: request.action === 'clear' ? null : actionId,
   });

@@ -436,44 +436,27 @@ async function applyModifiedAction(
   // temporary sanction PERMANENT — harsher than the original).  Content
   // modifications carry no duration (auto-lift is account-only).
   const duration = accountState ? remainingDuration(original, services.now()) : null;
-  // ONE UNIT: the replacement sanction and its audit record, before the ports apply it —
-  // the same ordering `applyAction` uses, and for the same reason.  A port failure already
-  // left this action row committed and unaudited, so pairing them only completes the
-  // record of a state that could already occur.
-  await services.transactor.run(async (tx) => {
-    const inserted = await tx.actions.insert({
-      actorUserId: actor.userId,
-      actorRole: actor.stewardRoles[0] ?? null,
-      action: modifiedAction,
-      targetType: original.targetType,
-      targetId: original.targetId,
-      subjectUserId: original.subjectUserId,
-      reasonCode,
-      duration,
-      reviewerNote: 'Applied via appeal modification',
-      priorState,
-      nextState,
-      reversible,
-      reverted: false,
-      linkedActionId: original.actionId,
-      caseId: original.caseId,
-      coApproverUserId: null,
-      reportIds: [],
-    });
-    await tx.audit({
-      actorUserId: actor.userId,
-      actorRole: actor.stewardRoles[0] ?? null,
-      action: modifiedAction,
-      caseId: original.caseId,
-      reasonCode,
-      targetType: original.targetType,
-      targetId: original.targetId,
-      subjectUserId: original.subjectUserId,
-      priorState,
-      nextState,
-      reversible,
-      linkedActionId: inserted.actionId,
-    });
+  // SAME SPLIT AS `applyAction`, for the same reasons: the action row is the revert
+  // handle and must exist before anything can be enforced against it, while the audit
+  // entry is a claim in an append-only trail and must not precede the thing it claims.
+  const newAction = await services.actions.insert({
+    actorUserId: actor.userId,
+    actorRole: actor.stewardRoles[0] ?? null,
+    action: modifiedAction,
+    targetType: original.targetType,
+    targetId: original.targetId,
+    subjectUserId: original.subjectUserId,
+    reasonCode,
+    duration,
+    reviewerNote: 'Applied via appeal modification',
+    priorState,
+    nextState,
+    reversible,
+    reverted: false,
+    linkedActionId: original.actionId,
+    caseId: original.caseId,
+    coApproverUserId: null,
+    reportIds: [],
   });
   // `contentState` is set only for a content target, whose id is never scrubbed
   // (the null guard also narrows the type for the port call).
@@ -489,5 +472,20 @@ async function applyModifiedAction(
   if (accountState && original.subjectUserId) {
     await services.content.applyAccountState(original.subjectUserId, accountState, null);
   }
-  // (Audited in the unit above, with the action row it describes.)
+  await services.transactor.run(async (tx) => {
+    await tx.audit({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: modifiedAction,
+      caseId: original.caseId,
+      reasonCode,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      priorState,
+      nextState,
+      reversible,
+      linkedActionId: newAction.actionId,
+    });
+  });
 }
