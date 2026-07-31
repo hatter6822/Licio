@@ -288,6 +288,8 @@ import {
 import { malwareVerdictForUrl } from './moderation/malware-fetch.js';
 import { noticeToView } from './moderation/notices.js';
 import {
+  type ContentEnforcementDeps,
+  type ContentPortDeps,
   createCitedContributionReads,
   createProductionContentPort,
   createProductionEventPort,
@@ -810,199 +812,236 @@ setIdentityServices(identityServices);
 // — the documented seam) and the WS-G contribution state; an account action
 // writes the WS-D state; user resolution reads the WS-D directory.  Alerts log;
 // on-call paging is a WS-O binding.
+/**
+ * The moderation content port, split into the deps that READ and the deps that WRITE.
+ *
+ * It used to be one ~190-line literal passed inline, every dep closing over a service
+ * CONTAINER whose store fields are replaced later by the Postgres swap.  That works for
+ * autocommit and cannot work for anything else: a container-backed dep resolves whatever
+ * store the container holds, which is by definition not a transaction.  So the enforcement
+ * could never join the unit of work that records it, and the shape of the wiring — not any
+ * property of the domains — was the reason.
+ *
+ * Named and split, the writes become a FUNCTION of the executor, and the same definition
+ * serves the base client and an open transaction.
+ */
+const moderationContentReads: Omit<ContentPortDeps, keyof ContentEnforcementDeps> = {
+  getStory: async (id) => {
+    const story = await ingestionServices.stories.getById(id);
+    return story
+      ? {
+          submittedBy: story.submittedBy,
+          title: story.title,
+          excerpt: story.excerpt,
+          createdAt: story.createdAt,
+        }
+      : null;
+  },
+  getContribution: async (id) => {
+    const c = await forumServices.contributions.getById(id);
+    return c ? { userId: c.userId } : null;
+  },
+  // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
+  // real WS-G/WS-F stores (the testable factory in production-ports.ts).
+  ...createCitedContributionReads({
+    contributions: forumServices.contributions,
+    stories: ingestionServices.stories,
+    // WS-J thread removal rides the WS-E item-safety row (the same read the
+    // thread routes consult) — a removed thread's citations never surface.
+    threadRemoved: async (threadId) =>
+      (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
+  }),
+  // WS-J #23: a thread report target → the thread's story owner.
+  getThread: async (threadId) => {
+    const thread = await ingestionServices.stories.getThreadById(threadId);
+    if (!thread) return null;
+    const story = await ingestionServices.stories.getById(thread.storyId);
+    return { submittedBy: story?.submittedBy ?? null };
+  },
+  // WS-J #17: an account action only proceeds against a REAL account.
+  accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
+  // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
+  getContributionSnapshot: async (id) => {
+    const c = await forumServices.contributions.getById(id);
+    if (!c) return null;
+    const edits = await forumServices.contributions.listEditHistory(id);
+    return {
+      body: c.body,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
+    };
+  },
+  // WS-J.2.2a thread context: the full thread centered on the reported item.
+  // The reviewer sees ALL moderation states (so removed/flagged items are
+  // visible in context) — never the public visibility filter.
+  getThreadContext: async (targetId, contentKind, requesterUserId) => {
+    // Resolve which thread to project, and (for a contribution target) which
+    // row the review centers on.  A story/thread report has no contribution id,
+    // so it projects the story's/thread's own thread — without this branch the
+    // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
+    let threadId: string | null = null;
+    let reportedContributionId: string | null = null;
+    if (contentKind === 'story') {
+      const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
+      threadId = thread?.threadId ?? null;
+    } else if (contentKind === 'thread') {
+      threadId = targetId;
+    } else {
+      const reported = await forumServices.contributions.getById(targetId);
+      if (reported) {
+        threadId = reported.threadId;
+        reportedContributionId = targetId;
+      }
+    }
+    if (threadId === null) return { items: [], reportedContributionId: null };
+    const rows = await forumServices.contributions.listByThread(threadId, {
+      states: ['published', 'under_review', 'hidden', 'removed'],
+      limit: 200,
+    });
+    // The reviewed contribution must ALWAYS appear in its context — a row late
+    // in a long thread can fall outside the first window, so include it
+    // explicitly if the window missed it (WS-J.2.2a).
+    if (
+      reportedContributionId !== null &&
+      !rows.some((r) => r.contributionId === reportedContributionId)
+    ) {
+      const reported = await forumServices.contributions.getById(reportedContributionId);
+      if (reported) rows.push(reported);
+    }
+    const authorIds = [
+      ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
+    ];
+    const authorList = await identityServices.store.getUsersByIds(authorIds);
+    const authors = new Map(
+      authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
+    );
+    const childCounts = await forumServices.contributions.childCounts(
+      rows.map((r) => r.contributionId),
+    );
+    const items = rows.map((r) =>
+      toContributionPublic(
+        r,
+        r.userId !== null ? (authors.get(r.userId) ?? null) : null,
+        childCounts.get(r.contributionId) ?? 0,
+        requesterUserId,
+        r.userId === null,
+      ),
+    );
+    return { items, reportedContributionId };
+  },
+  // WS-J #7: the report intake's read bar — resolve the target through the
+  // SAME WS-Q visibility gate as a direct content read (story read bar /
+  // thread read bar), so a reporter cannot probe existence of private /
+  // room_only content they cannot see.  Fail-closed on an unreachable shell.
+  isContentReadable: async (targetId, contentKind, requesterUserId) => {
+    if (contentKind === 'story') {
+      const story = await ingestionServices.stories.getById(targetId);
+      if (!story) return false;
+      const room = await forumServices.rooms.getById(story.roomId);
+      if (!room) return false;
+      return storyReadableByUser(forumServices, story, room, requesterUserId);
+    }
+    const bundle = {
+      forum: forumServices,
+      ingestion: ingestionServices,
+      events: eventServices,
+    };
+    if (contentKind === 'thread') {
+      const thread = await ingestionServices.stories.getThreadById(targetId);
+      return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+    }
+    if (contentKind === 'contribution') {
+      const contribution = await forumServices.contributions.getById(targetId);
+      if (!contribution) return false;
+      const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
+      return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
+    }
+    return true;
+  },
+  now: () => Date.now(),
+};
+
+/**
+ * The enforcement writes over the ambient service containers — the autocommit binding.
+ *
+ * Every member resolves its store at CALL time.  `safetyStore` was the one exception: a
+ * bare property capture, evaluated once when this object is built, so it froze whichever
+ * store the container happened to hold at that line.  It was correct only because the
+ * events Postgres swap sits ~490 lines earlier in this file — an ordering constraint
+ * nothing states and nothing checks.  Move either block past the other and production
+ * writes item-safety state to the in-memory store: moderation removals would stop
+ * reaching the WS-I ranking filter, silently, with no error anywhere.
+ *
+ * A getter costs nothing and removes the constraint, so the ten lazy members and this one
+ * now bind the same way.
+ */
+const moderationEnforcementWrites: ContentEnforcementDeps = {
+  get safetyStore() {
+    return eventServices.safetyStore;
+  },
+  setContributionModerationState: (id, state) =>
+    forumServices.contributions.setModerationState(id, state),
+  // WS-J #9: a story hide/removal must also leave it inaccessible via the
+  // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
+  // the canonical hiddenState (both the detail route and ranking honour it).
+  // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
+  setStoryHiddenState: async (id, next) => {
+    const story = await ingestionServices.stories.getById(id);
+    if (!story) return;
+    if (next === 'safety') {
+      if (story.hiddenState === null) {
+        await ingestionServices.stories.update(id, { hiddenState: 'safety' });
+      }
+    } else if (story.hiddenState === 'safety') {
+      // UN-HIDING RE-ENTERS THE URL SLOT.  Both tier uniques are partial on
+      // `hidden_state IS NULL`, so clearing it puts the row back into the index —
+      // and if a re-submission took that slot while the story was hidden, the write
+      // raises 23505.  Unhandled, that surfaced as a 500 from the moderation
+      // reinstate port with the story still hidden and no explanation.
+      //
+      // Retried, because the occupant may have vanished (the actual race).  A LIVE
+      // occupant is a real conflict, so it is METERED and rethrown rather than
+      // swallowed: `performRevert` leaves the action un-reverted, which keeps the
+      // reinstate retryable once a steward resolves the duplicate — silently
+      // reporting success while the story stayed hidden would not.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await ingestionServices.stories.update(id, { hiddenState: null });
+          break;
+        } catch (error) {
+          if (!isTierUniqueViolation(error)) throw error;
+          const occupant =
+            story.canonicalUrl === null
+              ? null
+              : await ingestionServices.stories.getByCanonicalUrl(
+                  story.canonicalUrl,
+                  // The DISCRIMINATED tier — the union requires `roomId` on the
+                  // room_only arm and forbids it on the public one, so it cannot be
+                  // built by spreading.
+                  story.visibility === 'room_only'
+                    ? { visibility: 'room_only', roomId: story.roomId }
+                    : { visibility: 'public' },
+                );
+          if (occupant === null && attempt < TIER_COLLISION_RETRIES) continue;
+          ingestionServices.metrics.increment('moderation.reinstate_url_collision');
+          logger.warn(
+            { storyId: id, canonicalUrl: story.canonicalUrl },
+            'story reinstate refused: its URL slot is occupied',
+          );
+          throw error;
+        }
+      }
+    }
+  },
+  setAccountState: (userId, accountState) =>
+    identityServices.store.updateUser(userId, { accountState }),
+};
+
 const moderationServices = createInMemoryModerationServices({
   content: createProductionContentPort({
-    safetyStore: eventServices.safetyStore,
-    getStory: async (id) => {
-      const story = await ingestionServices.stories.getById(id);
-      return story
-        ? {
-            submittedBy: story.submittedBy,
-            title: story.title,
-            excerpt: story.excerpt,
-            createdAt: story.createdAt,
-          }
-        : null;
-    },
-    getContribution: async (id) => {
-      const c = await forumServices.contributions.getById(id);
-      return c ? { userId: c.userId } : null;
-    },
-    // STEWARD_ROLES.md evidence queue: the published-only cited reads over the
-    // real WS-G/WS-F stores (the testable factory in production-ports.ts).
-    ...createCitedContributionReads({
-      contributions: forumServices.contributions,
-      stories: ingestionServices.stories,
-      // WS-J thread removal rides the WS-E item-safety row (the same read the
-      // thread routes consult) — a removed thread's citations never surface.
-      threadRemoved: async (threadId) =>
-        (await eventServices.safetyStore.get(threadId))?.safetyState === 'removed',
-    }),
-    // WS-J #23: a thread report target → the thread's story owner.
-    getThread: async (threadId) => {
-      const thread = await ingestionServices.stories.getThreadById(threadId);
-      if (!thread) return null;
-      const story = await ingestionServices.stories.getById(thread.storyId);
-      return { submittedBy: story?.submittedBy ?? null };
-    },
-    // WS-J #17: an account action only proceeds against a REAL account.
-    accountExists: async (id) => (await identityServices.store.getUser(id)) !== null,
-    setContributionModerationState: (id, state) =>
-      forumServices.contributions.setModerationState(id, state),
-    // WS-J #9: a story hide/removal must also leave it inaccessible via the
-    // direct read (/v1/stories/:id), not just absent from feeds — reflect it in
-    // the canonical hiddenState (both the detail route and ranking honour it).
-    // Never clobber a stronger takedown, and only lift a moderation 'safety' hide.
-    setStoryHiddenState: async (id, next) => {
-      const story = await ingestionServices.stories.getById(id);
-      if (!story) return;
-      if (next === 'safety') {
-        if (story.hiddenState === null) {
-          await ingestionServices.stories.update(id, { hiddenState: 'safety' });
-        }
-      } else if (story.hiddenState === 'safety') {
-        // UN-HIDING RE-ENTERS THE URL SLOT.  Both tier uniques are partial on
-        // `hidden_state IS NULL`, so clearing it puts the row back into the index —
-        // and if a re-submission took that slot while the story was hidden, the write
-        // raises 23505.  Unhandled, that surfaced as a 500 from the moderation
-        // reinstate port with the story still hidden and no explanation.
-        //
-        // Retried, because the occupant may have vanished (the actual race).  A LIVE
-        // occupant is a real conflict, so it is METERED and rethrown rather than
-        // swallowed: `performRevert` leaves the action un-reverted, which keeps the
-        // reinstate retryable once a steward resolves the duplicate — silently
-        // reporting success while the story stayed hidden would not.
-        for (let attempt = 0; ; attempt += 1) {
-          try {
-            await ingestionServices.stories.update(id, { hiddenState: null });
-            break;
-          } catch (error) {
-            if (!isTierUniqueViolation(error)) throw error;
-            const occupant =
-              story.canonicalUrl === null
-                ? null
-                : await ingestionServices.stories.getByCanonicalUrl(
-                    story.canonicalUrl,
-                    // The DISCRIMINATED tier — the union requires `roomId` on the
-                    // room_only arm and forbids it on the public one, so it cannot be
-                    // built by spreading.
-                    story.visibility === 'room_only'
-                      ? { visibility: 'room_only', roomId: story.roomId }
-                      : { visibility: 'public' },
-                  );
-            if (occupant === null && attempt < TIER_COLLISION_RETRIES) continue;
-            ingestionServices.metrics.increment('moderation.reinstate_url_collision');
-            logger.warn(
-              { storyId: id, canonicalUrl: story.canonicalUrl },
-              'story reinstate refused: its URL slot is occupied',
-            );
-            throw error;
-          }
-        }
-      }
-    },
-    setAccountState: (userId, accountState) =>
-      identityServices.store.updateUser(userId, { accountState }),
-    // WS-J.2.2d side-by-side diff: the reported contribution's body + edits.
-    getContributionSnapshot: async (id) => {
-      const c = await forumServices.contributions.getById(id);
-      if (!c) return null;
-      const edits = await forumServices.contributions.listEditHistory(id);
-      return {
-        body: c.body,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-        edits: edits.map((e) => ({ previousBody: e.previousBody, editedAt: e.editedAt })),
-      };
-    },
-    // WS-J.2.2a thread context: the full thread centered on the reported item.
-    // The reviewer sees ALL moderation states (so removed/flagged items are
-    // visible in context) — never the public visibility filter.
-    getThreadContext: async (targetId, contentKind, requesterUserId) => {
-      // Resolve which thread to project, and (for a contribution target) which
-      // row the review centers on.  A story/thread report has no contribution id,
-      // so it projects the story's/thread's own thread — without this branch the
-      // console showed an EMPTY context for story/thread reports (WS-J.2.2a).
-      let threadId: string | null = null;
-      let reportedContributionId: string | null = null;
-      if (contentKind === 'story') {
-        const thread = await ingestionServices.stories.getThreadByStoryId(targetId);
-        threadId = thread?.threadId ?? null;
-      } else if (contentKind === 'thread') {
-        threadId = targetId;
-      } else {
-        const reported = await forumServices.contributions.getById(targetId);
-        if (reported) {
-          threadId = reported.threadId;
-          reportedContributionId = targetId;
-        }
-      }
-      if (threadId === null) return { items: [], reportedContributionId: null };
-      const rows = await forumServices.contributions.listByThread(threadId, {
-        states: ['published', 'under_review', 'hidden', 'removed'],
-        limit: 200,
-      });
-      // The reviewed contribution must ALWAYS appear in its context — a row late
-      // in a long thread can fall outside the first window, so include it
-      // explicitly if the window missed it (WS-J.2.2a).
-      if (
-        reportedContributionId !== null &&
-        !rows.some((r) => r.contributionId === reportedContributionId)
-      ) {
-        const reported = await forumServices.contributions.getById(reportedContributionId);
-        if (reported) rows.push(reported);
-      }
-      const authorIds = [
-        ...new Set(rows.map((r) => r.userId).filter((x): x is string => x !== null)),
-      ];
-      const authorList = await identityServices.store.getUsersByIds(authorIds);
-      const authors = new Map(
-        authorList.map((u) => [u.userId, { handle: u.handle, displayName: u.displayName }]),
-      );
-      const childCounts = await forumServices.contributions.childCounts(
-        rows.map((r) => r.contributionId),
-      );
-      const items = rows.map((r) =>
-        toContributionPublic(
-          r,
-          r.userId !== null ? (authors.get(r.userId) ?? null) : null,
-          childCounts.get(r.contributionId) ?? 0,
-          requesterUserId,
-          r.userId === null,
-        ),
-      );
-      return { items, reportedContributionId };
-    },
-    // WS-J #7: the report intake's read bar — resolve the target through the
-    // SAME WS-Q visibility gate as a direct content read (story read bar /
-    // thread read bar), so a reporter cannot probe existence of private /
-    // room_only content they cannot see.  Fail-closed on an unreachable shell.
-    isContentReadable: async (targetId, contentKind, requesterUserId) => {
-      if (contentKind === 'story') {
-        const story = await ingestionServices.stories.getById(targetId);
-        if (!story) return false;
-        const room = await forumServices.rooms.getById(story.roomId);
-        if (!room) return false;
-        return storyReadableByUser(forumServices, story, room, requesterUserId);
-      }
-      const bundle = {
-        forum: forumServices,
-        ingestion: ingestionServices,
-        events: eventServices,
-      };
-      if (contentKind === 'thread') {
-        const thread = await ingestionServices.stories.getThreadById(targetId);
-        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
-      }
-      if (contentKind === 'contribution') {
-        const contribution = await forumServices.contributions.getById(targetId);
-        if (!contribution) return false;
-        const thread = await ingestionServices.stories.getThreadById(contribution.threadId);
-        return thread ? threadReadableToUser(bundle, thread, requesterUserId) : false;
-      }
-      return true;
-    },
-    now: () => Date.now(),
+    ...moderationContentReads,
+    ...moderationEnforcementWrites,
   }),
   users: createProductionUserPort({
     getUser: async (id) => {
