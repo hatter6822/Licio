@@ -361,32 +361,20 @@ These are structural guarantees the code holds (each covered by a test):
   batch so two bulk operations over overlapping sets cannot deadlock — and since extended
   to the action palette, the revert, the automated pre-publication block, the appeal
   decision and its replacement sanction, and the expiry sweep's lift.
-- **Where an effect is enforced, the HANDLE precedes it and the CLAIM follows it.**  The
-  two artifacts want opposite orders and get them.  The action row is operational state —
-  the revert handle — and must exist before anything can be enforced, because
-  `applyContentState` writes two tables and a throw between them leaves content partially
-  hidden with no action id for a steward to undo.  The audit entry is a claim in an
-  append-only, tamper-evident trail, and must never assert something before it is true: a
-  false entry cannot be withdrawn, while a failed effect can simply be retried.  So the
-  row is written first, the effect applied, and then the case resolution, the member
-  notice and the audit entry commit together — every artifact that says it HAPPENED,
-  written only once it has.  The state between them, an action row the trail does not
-  mention, is the intended one: enforcement attempted, outcome not yet recorded, revert
-  handle in hand — and detectable, being an action row with no audit entry.
-- **No state change without its record.**  Inside a unit an audit failure aborts the
-  change rather than degrading to an alert — the deliberate inversion of `writeAudit`'s
-  best-effort posture, which remains correct for events that are NOT state changes (a
-  queue view, an export).  The failure that actually happens, a chain parent collision, is
-  absorbed beneath the seam by a savepoint and a retry and never reaches a unit.
-- **Chain appends are SERIALISED, not collided-and-retried.**  The chain is global — one
-  parent slot for the whole trail — so concurrent units all read the same head and all but
-  one lose the fork-proof unique.  The savepoint retry recovers, but the work is
-  quadratic: measured, N writers spend N(N+1)/2 attempts (3, 10, 36, 108 for N = 2, 4, 8,
-  16), and at 16 a writer exhausts `MAX_CHAIN_RETRIES` and fails — which, with the append
-  inside the state change's transaction, aborts the change.  A transaction-scoped advisory
-  lock turns the collision into a queue: every writer then commits on its first attempt,
-  32 concurrent writers included, in linear time.  Taken lazily and only around the
-  append, so a unit writing no audit never serialises against one that does.
+- **Nothing is recorded unless the effect landed.**  The action row used to be written
+  BEFORE the ports, on the reasoning that it is the revert handle — `applyContentState`
+  writes two tables, so a throw between them leaves content partially hidden, and `clear`
+  maps to no content state, so the palette offers no restore.  The concern is real; the
+  handle is not.  `performRevert` asks `listActiveByTarget` whether some OTHER action
+  still suppresses the item and skips restoring when one does, so a row left by a FAILED
+  enforcement answers yes — and a member whose steward retried successfully and who then
+  WINS THEIR APPEAL stays hidden, defeated by the record of an attempt that never took
+  effect.  An orphan that enforces is a phantom sanction, not a handle.  The effect is
+  applied first, and then the action row, the case resolution, the member notice and the
+  audit entry commit together.  A port failure leaves at most a partial ranking-exclusion
+  and no record: UNDER-enforcement, the safe direction, completed by the steward's retry
+  since the port is idempotent.  Closing even that means making the port's own two writes
+  atomic with each other, inside the content port.
 - **The trail is tamper-EVIDENT, not merely append-only.** Every record is
   MAC-chained to its predecessor over the append ordinal, so altering one
   invalidates every hash after it, and the chain is keyed from the identity master

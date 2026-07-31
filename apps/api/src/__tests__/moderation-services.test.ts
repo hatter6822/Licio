@@ -11,7 +11,12 @@ import {
 } from '@licio/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
-import { applyAction, parseDurationDays, revertAction } from '../moderation/actions.js';
+import {
+  applyAction,
+  parseDurationDays,
+  performRevert,
+  revertAction,
+} from '../moderation/actions.js';
 import { checkEligibility, decideAppeal, submitAppeal } from '../moderation/appeals.js';
 import { buildTransparencyExport, writeAudit } from '../moderation/audit.js';
 import {
@@ -838,12 +843,13 @@ describe('account-state prior-state preservation (D3)', () => {
   });
 });
 
-describe('action durability — the handle before enforcement, the claim after (A2)', () => {
-  it('keeps the revert handle but writes NO audit claim when the port throws', async () => {
-    // The content store is down: applyContentState rejects.  With the action
-    // recorded FIRST, the failure surfaces but the row survives as a revert
-    // handle (pre-fix order enforced before recording, so a throw left the
-    // content hidden with no action id / notice / revert handle).
+describe('action durability — nothing is recorded unless the effect landed (A2)', () => {
+  it('writes NOTHING when the enforcement port throws', async () => {
+    // This replaces a test that asserted the opposite — that the action row survives a
+    // port failure "as a revert handle".  The handle is a phantom sanction:
+    // `performRevert` consults `listActiveByTarget` to decide whether some OTHER action
+    // still suppresses the item, and a row from an enforcement that FAILED answers yes.
+    // The next test shows what that costs.
     const throwingPort: ModerationContentPort = {
       ...recordingContentPort(),
       async applyContentState(): Promise<void> {
@@ -862,40 +868,69 @@ describe('action durability — the handle before enforcement, the claim after (
         reason_code: 'MOD_HARASS_001',
       }),
     ).rejects.toThrow(/content store unavailable/);
-    // THE HANDLE SURVIVES.  `applyContentState` writes two tables, so a throw can leave
-    // the content partially hidden — and without a row there is no action id, so no
-    // steward can undo it through the normal path.  That is why the row comes first.
-    const active = await services.actions.listActiveByTarget('content', TARGET);
-    expect(active).toHaveLength(1);
-    expect(active[0]?.action).toBe('remove');
-    expect(active[0]?.reverted).toBe(false);
 
-    // AND THE TRAIL STAYS SILENT.  The audit entry is a claim in an append-only,
-    // tamper-evident record: it must not say a removal happened when the port refused,
-    // because a false entry cannot be withdrawn while a failed effect can be retried.
-    // The two artifacts want opposite orders, and get them.
-    const trail = await services.audit.list({ limit: 50 });
-    expect(trail.filter((r) => r.action === 'remove')).toHaveLength(0);
-    // Nor the notice, nor the case resolution — they assert it happened too.
-    const notices = await services.notices.listByUser(AUTHOR, null, 50);
-    expect(notices).toHaveLength(0);
+    // No action row, no audit claim, no notice.  The effect did not land, so nothing
+    // asserts that it did — and the steward's retry re-applies the idempotent port.
+    expect(await services.actions.listActiveByTarget('content', TARGET)).toHaveLength(0);
+    expect(
+      (await services.audit.list({ limit: 50 })).filter((r) => r.action === 'remove'),
+    ).toHaveLength(0);
+    expect(await services.notices.listByUser(AUTHOR, null, 50)).toHaveLength(0);
   });
 
-  it('writes the claim, the notice and the case resolution once the port SUCCEEDS', async () => {
+  it('a phantom row from a FAILED enforcement would defeat a later appeal', async () => {
+    // Why the row above must not exist, demonstrated on the mechanism itself.  A leftover
+    // active content action makes `performRevert` skip restoring visibility, so a member
+    // who wins their appeal stays hidden.
     services = createInMemoryModerationServices({
       content: recordingContentPort(),
       users: userPort({ [AUTHOR]: 100 }),
     });
-    const out = await applyAction(services, safetyActor(), {
+    const real = await applyAction(services, safetyActor(), {
       target_type: 'content',
       target_id: TARGET,
       action: 'remove',
       reason_code: 'MOD_HARASS_001',
     });
-    expect(out.ok).toBe(true);
-    const trail = await services.audit.list({ limit: 50 });
-    expect(trail.filter((r) => r.action === 'remove')).toHaveLength(1);
-    expect(await services.actions.listActiveByTarget('content', TARGET)).toHaveLength(1);
+    expect(real.ok).toBe(true);
+    // The orphan a failed attempt used to leave behind.
+    await services.actions.insert({
+      actorUserId: safetyActor().userId,
+      actorRole: 'ROLE_SAFETY',
+      action: 'remove',
+      targetType: 'content',
+      targetId: TARGET,
+      subjectUserId: AUTHOR,
+      reasonCode: 'MOD_HARASS_001',
+      duration: null,
+      reviewerNote: null,
+      priorState: 'visible',
+      nextState: 'removed',
+      reversible: true,
+      reverted: false,
+      linkedActionId: null,
+      caseId: null,
+      coApproverUserId: null,
+      reportIds: [],
+    });
+
+    // Revert the REAL one, as a granted appeal would.
+    const active = await services.actions.listActiveByTarget('content', TARGET);
+    const originalAction = active[active.length - 1];
+    expect(originalAction).toBeDefined();
+    await performRevert(
+      services,
+      safetyActor(),
+      originalAction as NonNullable<typeof originalAction>,
+    );
+
+    // The appeal was granted and the content is STILL suppressed — `stillSuppressed` saw
+    // the orphan and skipped the restore.  That is the cost the removed test protected.
+    const port = services.content as RecordingContentPort;
+    const restored = port.contentStates.filter(
+      (c) => c.targetId === TARGET && c.state === 'visible',
+    );
+    expect(restored).toHaveLength(0);
   });
 });
 

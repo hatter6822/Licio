@@ -293,47 +293,29 @@ export async function applyAction(
   }
   const priorState = contentState ? 'visible' : accountState ? priorAccount : null;
   const nextState = contentState ?? accountState ?? null;
-  // THE RECORD AND THE CLAIM ARE DIFFERENT ARTIFACTS, and they want opposite orders.
+  // NOTHING IS RECORDED UNLESS THE EFFECT LANDED.
   //
-  //   The ACTION ROW is operational state: it is the revert handle.  If the enforcement
-  //   lands — even partially, and `applyContentState` writes two tables, so partially is
-  //   reachable — a row must already exist, or the content is hidden with no action id
-  //   and no steward can undo it through the normal path.  So it is written FIRST, and
-  //   `moderation-services.test.ts` pins exactly that.
+  // The action row used to be written FIRST, on the reasoning that it is the revert
+  // handle: `applyContentState` writes two tables, so a throw between them leaves content
+  // partially hidden, and without an action id no steward can undo it (`clear` maps to no
+  // content state, so the palette offers no restore).  The concern is real.  The handle is
+  // not — it costs more than it buys.
   //
-  //   The AUDIT ENTRY is a historical claim in an append-only, tamper-evident trail.  It
-  //   must never assert something before that thing is true, because a false entry cannot
-  //   be withdrawn while a failed effect can simply be retried.  So it is written LAST,
-  //   after the effect it describes.
+  // `performRevert` asks `listActiveByTarget` whether some OTHER action still suppresses
+  // the item, and skips restoring visibility when one does.  A row from an enforcement
+  // that FAILED answers yes.  So a member whose content is removed, whose steward hits a
+  // port failure and retries successfully, and who then WINS THEIR APPEAL, stays hidden —
+  // defeated by the record of an attempt that never took effect.  The same row shows in
+  // the reviewer's history panel as a standing sanction.  An orphan that enforces is not
+  // a handle; it is a phantom sanction, and the safe thing is not to write one.
   //
-  // Writing them together in either position sacrifices one of those.  Written apart,
-  // both hold — and the state between them (an action row with no audit entry) is not a
-  // hole but the intended one: enforcement attempted, outcome not yet recorded, revert
-  // handle in hand.  It is also detectable, being an action row the trail does not
-  // mention.
+  // A port failure now leaves at most a partial ranking-exclusion and no record at all.
+  // That is UNDER-enforcement — the safe direction, nothing wrongly removed — and the
+  // steward's retry completes it, the port being idempotent.  Closing even that means
+  // making the port's own two writes atomic with each other, which belongs inside the
+  // content port rather than here.
   //
-  // 1. The revert handle, committed before anything can be enforced against it.
-  const action = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: request.action,
-    targetType: request.target_type,
-    targetId: request.target_id,
-    subjectUserId: subjectUserId ?? null,
-    reasonCode,
-    duration: request.duration ?? null,
-    reviewerNote: request.reviewer_note ?? null,
-    priorState,
-    nextState,
-    reversible,
-    reverted: false,
-    linkedActionId: null,
-    caseId: request.case_id ?? null,
-    coApproverUserId: null,
-    reportIds,
-  });
-
-  // 2. Apply the effect (idempotent at the port; an already-removed item is a no-op
+  // 1. Apply the effect (idempotent at the port; an already-removed item is a no-op
   //    there).  Reflected to distribution through the ranking seam.
   if (contentState && request.target_type === 'content') {
     await services.content.applyContentState(
@@ -348,18 +330,37 @@ export async function applyAction(
     await services.content.applyAccountState(subjectUserId, accountState, durationDays);
   }
 
-  // 3. ONE UNIT: the case resolution, the member notice, and the audit entry — everything
-  //    that asserts the action HAPPENED, committed together and only once it has.
+  // 2. ONE UNIT: the action row, the case resolution, the member notice and the audit
+  //    entry — every durable artifact asserting this happened, written only once it has.
   //
-  //    This is what closes the pre-existing hole.  The audit write used to be
-  //    best-effort and unpaired, so any audit failure left an enforced action with a
-  //    resolved case and a notice sent to the member and nothing in the trail.  Now the
-  //    three stand or fall together, and a failure returns an error the steward retries —
-  //    the effect being idempotent, and the action row already in hand.
+  //    Grouping them is what closes the older hole too: the audit write was best-effort
+  //    and unpaired, so any audit failure left an enforced action with a resolved case and
+  //    a notice sent to the member and nothing in the trail.  Now the four stand or fall
+  //    together, and a failure returns an error the steward retries.
   let appealable = false;
   let noticeSent = false;
-  await services.transactor.run(async (tx) => {
-    await resolveCaseForAction(services, request, action.actionId, tx.cases);
+  const action = await services.transactor.run(async (tx) => {
+    const inserted = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: request.action,
+      targetType: request.target_type,
+      targetId: request.target_id,
+      subjectUserId: subjectUserId ?? null,
+      reasonCode,
+      duration: request.duration ?? null,
+      reviewerNote: request.reviewer_note ?? null,
+      priorState,
+      nextState,
+      reversible,
+      reverted: false,
+      linkedActionId: null,
+      caseId: request.case_id ?? null,
+      coApproverUserId: null,
+      reportIds,
+    });
+
+    await resolveCaseForAction(services, request, inserted.actionId, tx.cases);
 
     // The member notice (significant actions only; never silent).  A DURABLE row, so it
     // belongs here: a rolled-back record must not leave the member holding a statement of
@@ -387,7 +388,7 @@ export async function applyAction(
           services,
           {
             userId: subjectUserId,
-            actionId: action.actionId,
+            actionId: inserted.actionId,
             action: request.action,
             reasonCode,
             appealable,
@@ -401,7 +402,7 @@ export async function applyAction(
 
     await tx.audit({
       actorUserId: actor.userId,
-      actorRole: action.actorRole,
+      actorRole: inserted.actorRole,
       action: request.action,
       // The VERIFIED case (`linkedCase`), never the client's `request.case_id` — the same
       // value the action row was written with, so the history cannot be steered onto
@@ -417,6 +418,7 @@ export async function applyAction(
       reportIds,
       notes: request.reviewer_note ?? null,
     });
+    return inserted;
   });
 
   services.metrics.increment(`moderation.action.${request.action}`);

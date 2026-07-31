@@ -436,30 +436,10 @@ async function applyModifiedAction(
   // temporary sanction PERMANENT — harsher than the original).  Content
   // modifications carry no duration (auto-lift is account-only).
   const duration = accountState ? remainingDuration(original, services.now()) : null;
-  // SAME SPLIT AS `applyAction`, for the same reasons: the action row is the revert
-  // handle and must exist before anything can be enforced against it, while the audit
-  // entry is a claim in an append-only trail and must not precede the thing it claims.
-  const newAction = await services.actions.insert({
-    actorUserId: actor.userId,
-    actorRole: actor.stewardRoles[0] ?? null,
-    action: modifiedAction,
-    targetType: original.targetType,
-    targetId: original.targetId,
-    subjectUserId: original.subjectUserId,
-    reasonCode,
-    duration,
-    reviewerNote: 'Applied via appeal modification',
-    priorState,
-    nextState,
-    reversible,
-    reverted: false,
-    linkedActionId: original.actionId,
-    caseId: original.caseId,
-    coApproverUserId: null,
-    reportIds: [],
-  });
-  // `contentState` is set only for a content target, whose id is never scrubbed
-  // (the null guard also narrows the type for the port call).
+  // SAME RULE AS `applyAction`: nothing is recorded unless the effect landed.  A row
+  // written before the ports and left behind by a failure reads as live suppression to
+  // `performRevert`, which is how a phantom sanction defeats a later appeal — and this
+  // function IS the appeal path, so it is the last place that should leave one.
   if (contentState && original.targetId !== null) {
     await services.content.applyContentState(
       original.targetId,
@@ -473,6 +453,25 @@ async function applyModifiedAction(
     await services.content.applyAccountState(original.subjectUserId, accountState, null);
   }
   await services.transactor.run(async (tx) => {
+    const newAction = await tx.actions.insert({
+      actorUserId: actor.userId,
+      actorRole: actor.stewardRoles[0] ?? null,
+      action: modifiedAction,
+      targetType: original.targetType,
+      targetId: original.targetId,
+      subjectUserId: original.subjectUserId,
+      reasonCode,
+      duration,
+      reviewerNote: 'Applied via appeal modification',
+      priorState,
+      nextState,
+      reversible,
+      reverted: false,
+      linkedActionId: original.actionId,
+      caseId: original.caseId,
+      coApproverUserId: null,
+      reportIds: [],
+    });
     await tx.audit({
       actorUserId: actor.userId,
       actorRole: actor.stewardRoles[0] ?? null,
