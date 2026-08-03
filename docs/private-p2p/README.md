@@ -208,7 +208,22 @@ room view's "Manage members & verify devices" toggle, all jsdom + axe tested):
   admin admit side (`admitJoinRequest`: `verifyJoinRequest` → `inviteDevice` (MLS
   Add) → `buildMemberAddOp` carrying `proposed_display_name`, persisting the
   advanced group + new epoch keys), surfacing every rejection
-  (expired/exhausted/invite-id/proof/key-package) honestly.
+  (expired/exhausted/invite-id/proof/key-package) honestly.  The §12.3 grant also
+  CARRIES the §21 directory capability (`room_server_id` + the epoch-0-derived
+  `bootstrap_blind_id`), which is the only way a member admitted at a later epoch
+  can resolve the room's directory record at all — it cannot re-derive a token
+  bound to an epoch key it never held.
+- `DirectoryRecordPanel` (§21.2–§21.4) reads that record with the stored
+  capability and, for an admin, refreshes its manifest commitment, delists it, or
+  removes it — the §21.3/§21.4 client calls' first production caller.  It renders
+  NOTHING for a room with no stub (a `detached` room has nothing to manage), and
+  the removal confirmation reads back the server's own wording, because
+  "removed Licio's record" quietly becoming "deleted the room" is exactly the
+  §21.4 failure mode.
+- `PrivateRoomDirectory` (§4.2, on `/private`) browses the PUBLIC directory of
+  `listed` rooms: display metadata only, keyset-paged, and with no join
+  affordance — a P2P room is invite-only, so the honest offer is "this room
+  exists, ask a member".
 
 These panels are the COPY-PASTE membership path (the §15.5 live-transport delivery
 of the MLS Welcome that finishes a remote joiner's session is the device-session

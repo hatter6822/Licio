@@ -17,6 +17,7 @@ import { Card } from '../../ui/Card/index.js';
 import { EmptyState } from '../../ui/EmptyState/index.js';
 import { Input } from '../../ui/Input/index.js';
 import { LoadingState } from '../../ui/LoadingState/index.js';
+import { DirectoryRecordPanel } from '../DirectoryRecordPanel/index.js';
 import { InvitePanel } from '../InvitePanel/index.js';
 import { JoinPanel } from '../JoinPanel/index.js';
 import type { VerifiableDevice } from '../SafetyNumberPanel/index.js';
@@ -218,6 +219,9 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
           <SafetyNumberPanel session={session} devices={otherDevices} />
           {isAdmin ? <InvitePanel session={session} /> : null}
           <JoinPanel session={isAdmin ? session : undefined} />
+          {/* §21.2–§21.4 — renders nothing for a room with no directory record,
+              so a detached room's manage view is unchanged. */}
+          <DirectoryRecordPanel session={session} isAdmin={isAdmin} />
         </section>
       ) : null}
 
