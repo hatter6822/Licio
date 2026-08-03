@@ -318,7 +318,7 @@ function coarseBucket(date = new Date()): string {
 /** The §10.3 HPKE invite public key (base64url) from the opaque stored manifest;
  *  an invitee seals the room secret to it.  `undefined` if the manifest is the
  *  display-only fallback (a join cannot be minted without it). */
-function manifestRoomPublicKey(manifest: unknown): string | undefined {
+export function manifestRoomPublicKey(manifest: unknown): string | undefined {
   if (manifest && typeof manifest === 'object' && 'crypto' in manifest) {
     const crypto = (manifest as { crypto?: unknown }).crypto;
     if (crypto && typeof crypto === 'object' && 'room_public_key' in crypto) {

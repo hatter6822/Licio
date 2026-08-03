@@ -8,7 +8,7 @@ import 'fake-indexeddb/auto';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
+import { PrivateRoomSession, serializeJoinGrant } from '../../../private-p2p/room-manager.js';
 import { PRIVATE_P2P_DB_NAME } from '../../../private-p2p/storage.js';
 import { checkA11y } from '../../../test/axe.js';
 import { JoinPanel } from './JoinPanel.js';
@@ -123,14 +123,77 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
 
   it('shows the public name from the record the invite unlocks', async () => {
     const admin = await makeSession();
-    await registerStub(admin);
+    const roomKey = await registerStub(admin);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      jsonResponse({ display_name: 'Neighbourhood watch' }),
+      // The record names the room it belongs to, and the panel checks it: a
+      // name is only evidence about THIS room when the keys agree.
+      jsonResponse({ display_name: 'Neighbourhood watch', room_public_key: roomKey }),
+    );
+    await openInvite(admin);
+    expect(await screen.findByText(/published as “Neighbourhood watch”/i)).toBeInTheDocument();
+  });
+
+  it('does NOT present a resolved record as evidence about the room being joined', async () => {
+    // An inviter who belongs to room A and administers room B can put A's
+    // handle and capability into B's invite: neither field is bound to the
+    // invite's own room, and the two keys available BEFORE joining are not
+    // comparable — the record carries the founder device signing key, the invite
+    // carries the room's manifest key. So the copy may report what resolved and
+    // must not call it this room's, which would launder another room's good name
+    // onto the one about to be joined.
+    const admin = await makeSession();
+    const roomKey = await registerStub(admin);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      jsonResponse({ display_name: 'Another room’s good name', room_public_key: roomKey }),
     );
     await openInvite(admin);
     expect(
-      await screen.findByText(/listed publicly as “Neighbourhood watch”/i),
-    ).toBeInTheDocument();
+      await screen.findByText(/not yet evidence about the room you are joining/i),
+    ).toBeVisible();
+    expect(screen.queryByText(/Licio’s record for this room resolves/i)).toBeNull();
+  });
+
+  it('refuses a grant that answers a DIFFERENT invite than the one on screen', async () => {
+    // One preparation reuses one KeyPackage for every invite it opens, so room
+    // A's grant verifies perfectly against a request built for room B — and
+    // `completeJoin` would take it, joining A while B's invite is displayed.
+    // Clearing the field on an invite change only helps when the grant is
+    // already there; A's grant arriving afterwards is the case left open.
+    const roomA = await makeSession();
+    const roomB = await makeSession();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse({}));
+    const user = userEvent.setup();
+    render(<JoinPanel />);
+    await user.type(screen.getByLabelText(/your display name/i), 'Bob');
+    await user.click(screen.getByRole('button', { name: /get my recipient key/i }));
+    const keyField = (await screen.findByLabelText(/your recipient key/i)) as HTMLTextAreaElement;
+
+    // A's invite is opened first, and A admits the request…
+    const inviteA = await roomA.createInvite({ inviteePublicKey: keyField.value });
+    await user.type(screen.getByLabelText(/paste the invite link/i), inviteA.inviteUrl);
+    await user.click(screen.getByRole('button', { name: /build join request/i }));
+    const requestA = JSON.parse(
+      ((await screen.findByLabelText(/your join request/i)) as HTMLTextAreaElement).value,
+    ) as never;
+    const { grant } = await roomA.admitJoinRequest(inviteA.invite, requestA);
+    if (!grant) throw new Error('expected a grant');
+
+    // …but by the time it comes back, the panel is showing B's invite.
+    const inviteB = await roomB.createInvite({ inviteePublicKey: keyField.value });
+    await user.clear(screen.getByLabelText(/paste the invite link/i));
+    await user.type(screen.getByLabelText(/paste the invite link/i), inviteB.inviteUrl);
+    await user.click(screen.getByRole('button', { name: /build join request/i }));
+    await screen.findByLabelText(/your join request/i);
+
+    // `fireEvent`, not `type`: a serialized grant is JSON, and userEvent reads
+    // `{` as a keyboard-modifier escape.
+    fireEvent.change(screen.getByLabelText(/paste the grant/i), {
+      target: { value: serializeJoinGrant(grant) },
+    });
+    await user.click(screen.getByRole('button', { name: /finish joining/i }));
+    expect(
+      await screen.findByText(/for a different room than the invite on screen/i),
+    ).toBeVisible();
   });
 
   it('WARNS when the invite names a record that does not resolve', async () => {
@@ -167,18 +230,16 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
     // old join request standing beside a new link — stale evidence read as a
     // check of what is on screen.
     const admin = await makeSession();
-    await registerStub(admin);
+    const roomKey = await registerStub(admin);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      jsonResponse({ display_name: 'Neighbourhood watch' }),
+      jsonResponse({ display_name: 'Neighbourhood watch', room_public_key: roomKey }),
     );
     await openInvite(admin);
-    expect(
-      await screen.findByText(/listed publicly as “Neighbourhood watch”/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/published as “Neighbourhood watch”/i)).toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/paste the invite link/i), 'x');
-    expect(screen.queryByText(/listed publicly as “Neighbourhood watch”/i)).toBeNull();
+    expect(screen.queryByText(/published as “Neighbourhood watch”/i)).toBeNull();
     expect(screen.queryByLabelText(/your join request/i)).toBeNull();
   });
 

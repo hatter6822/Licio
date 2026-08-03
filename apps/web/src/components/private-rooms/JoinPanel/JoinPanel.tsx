@@ -21,6 +21,7 @@ import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
 import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
 import {
+  manifestRoomPublicKey,
   PrivateRoomSession,
   parseJoinGrant,
   serializeJoinGrant,
@@ -92,7 +93,12 @@ function JoinerSection({
    *  the directory verdict below: the crypto is async, so a slow `complete` can
    *  resolve after the field has moved on, and a request for the previous room
    *  beside a replacement link leads to completing the wrong join. */
-  const [request, setRequest] = useState<{ fragment: string; json: string } | null>(null);
+  const [request, setRequest] = useState<{
+    fragment: string;
+    json: string;
+    /** The room the invite this request was built from names. */
+    roomPublicKey: string;
+  } | null>(null);
   const [grantJson, setGrantJson] = useState('');
   const [joined, setJoined] = useState(false);
   /**
@@ -141,7 +147,13 @@ function JoinerSection({
     try {
       const fragment = extractInviteFragment(sealedInvite.trim());
       const { invite, request: built } = await pending.complete(fragment);
-      setRequest({ fragment, json: JSON.stringify(built) });
+      // The invite's ROOM travels with the request: a grant pasted later has to
+      // answer THIS invite, and only the invite knows which room that is.
+      setRequest({
+        fragment,
+        json: JSON.stringify(built),
+        roomPublicKey: invite.room_public_key,
+      });
       // Resolve Licio's record for the room, using the §21.2 capability the
       // invite carries — the reason it rides the SEALED invite rather than the
       // post-admission grant. See `lookUpDirectory` for what this does and does
@@ -173,6 +185,28 @@ function JoinerSection({
       const grant = parseJoinGrant(grantJson.trim());
       if (grant === null) {
         setError(t('privateRoom.join.badGrant', 'That join grant is not valid.'));
+        return;
+      }
+      // THE GRANT MUST ANSWER THE INVITE ON SCREEN.
+      //
+      // One preparation reuses one KeyPackage across every invite it opens, so
+      // a grant for room A verifies perfectly against a request built for room
+      // B — and `completeJoin` would take it, joining A while the panel shows
+      // B's invite. Clearing the field when the invite changes only helps when
+      // the grant is already there; A's grant arriving afterwards is the case
+      // that is left. The invite names its room, the grant's manifest names
+      // its room, and they have to be the same room.
+      const expected =
+        request !== null && request.fragment === currentFragment
+          ? request.roomPublicKey
+          : undefined;
+      if (expected !== undefined && manifestRoomPublicKey(grant.manifest) !== expected) {
+        setError(
+          t(
+            'privateRoom.join.grantRoomMismatch',
+            'That grant is for a different room than the invite on screen. Paste the grant that answers this invite.',
+          ),
+        );
         return;
       }
       const room = await pending.completeJoin(grant);
@@ -443,15 +477,25 @@ function directoryMessage(t: ReturnType<typeof useT>, lookup: DirectoryLookup): 
         'Licio holds no record of this room — expected if it was created without one. Nothing else about the invite is affected.',
       );
     case 'resolved':
+      // NOT "this room's record" — nothing here can establish that yet.
+      //
+      // The invite names a record and carries the token that opens it, and both
+      // fields are chosen by whoever built the invite. An inviter who belongs to
+      // room A and administers room B can put A's handle into B's invite, and
+      // the two keys available before joining are not comparable: the record
+      // carries the founder DEVICE signing key, the invite carries the room's
+      // MANIFEST key. The tie is the manifest commitment, which arrives with the
+      // grant — so the honest report is what resolved, and that the panel checks
+      // it against the room once joined (`verifyDirectoryRecord`).
       return lookup.name !== null
         ? t(
             'privateRoom.join.recordListed',
-            'Licio’s record for this room resolves. It is listed publicly as “{name}”.',
+            'The invite names a Licio record, and it resolves — published as “{name}”. That name is not yet evidence about the room you are joining: it is checked against the room itself once you are in.',
             { name: lookup.name },
           )
         : t(
             'privateRoom.join.recordUnlisted',
-            'Licio’s record for this room resolves. The room publishes no name.',
+            'The invite names a Licio record, and it resolves. It publishes no name, and it is checked against the room itself once you are in.',
           );
   }
 }
