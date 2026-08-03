@@ -153,17 +153,27 @@ export function createPrivacyRoutes(resolve: () => IdentityServices = getIdentit
           const auth = c.get('auth');
           if (!auth) return c.json(u, 401);
           const { mode } = c.req.valid('json');
-          // The attention purge is a WS-E store the identity unit cannot bind,
-          // so the RECORD gates it: appended first, inside the unit, with the
-          // purge inside it too — a failed purge aborts the record rather than
-          // claiming an erasure that did not happen.
+          // The erasure and its record are ONE COMMIT — through `tx`, not
+          // through the service-level hook.
+          //
+          // Nesting the ordinary hook inside the unit was lexical only: it
+          // writes through separately-composed WS-E stores, so a purge that
+          // succeeded before a later failure destroyed the user's attention
+          // history irreversibly while the `attention_delete` row rolled back
+          // and the endpoint answered 500 — an erasure that happened, is
+          // denied, and has no record. `tx.purgeAttention` is the same purge
+          // built over the identity transaction's own executor (the WS-E tables
+          // are in the same database), so the two commit or fail together. A
+          // root that cannot bind it says so by ABSENCE, and the fallback keeps
+          // the ordering guarantee that is available without binding.
           const removed = await services.transact(async (tx) => {
             await tx.audit.append({
               actorUserId: auth.userId,
               eventType: 'attention_delete',
               context: {},
             });
-            return (await services.purgeAttention?.(auth.userId, mode)) ?? 0;
+            const purge = tx.purgeAttention ?? services.purgeAttention;
+            return (await purge?.(auth.userId, mode)) ?? 0;
           });
           // WS-E.1.1e producer: the privacy pipeline observes the request.
           await emitPrivacyRequestEvent(

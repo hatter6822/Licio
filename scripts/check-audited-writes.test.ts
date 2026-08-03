@@ -96,9 +96,12 @@ describe('check:audited-writes', () => {
     expect(issues).toHaveLength(1);
   });
 
-  it('reports the file and line a reviewer can open', () => {
+  it('points at the unguarded WRITE, which is the line to fix', () => {
+    // Not the append: the append is where the defect becomes visible, the write
+    // is where it is. `actThenAudit` writes on line 4 and audits on line 5, and
+    // a reviewer opening line 5 sees a correct-looking audit call.
     const issues = runAuditedWriteGate(new Map([['things.ts', actThenAudit]]));
-    expect(issues[0]).toMatch(/^things\.ts:5 /);
+    expect(issues[0]).toMatch(/^things\.ts:4 /);
   });
 
   it('flags a write whose UNIT IS ONE CALL AWAY, in a same-file helper', () => {

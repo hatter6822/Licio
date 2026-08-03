@@ -30,6 +30,7 @@ import type {
   ThreadConversationState,
   ThreadSafetyState,
 } from '@licio/shared';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 import {
   TIER_UNIQUE_PUBLIC_CONSTRAINT,
   TIER_UNIQUE_ROOM_CONSTRAINT,
@@ -643,7 +644,7 @@ function nowIso(now: () => number): string {
   return new Date(now()).toISOString();
 }
 
-export class InMemoryStoryStore implements StoryStore {
+export class InMemoryStoryStore implements StoryStore, InMemoryRollback {
   readonly #stories = new Map<string, StoryRecord>();
   readonly #threads = new Map<string, ThreadShellRecord>();
   // WS-Q.2.2a — tier-scoped URL slots, faithful to the two partial unique
@@ -659,6 +660,35 @@ export class InMemoryStoryStore implements StoryStore {
 
   constructor(now: () => number = Date.now) {
     this.#now = now;
+  }
+
+  /**
+   * The unit of work's undo.
+   *
+   * Without it this store was simply ABSENT from the ingestion unit's rollback
+   * list — the filter keeps only stores that declare `beginRollback`, so a
+   * takedown that hid a story and then failed its audit append left the story
+   * hidden with the takedown rolled back. The twin was quietly weaker than the
+   * production transaction it stands in for, which is the one way a twin can
+   * mislead: every test over it passes while the guarantee is not there.
+   *
+   * All five maps, because the URL-slot indexes are as much state as the rows:
+   * a rolled-back insert that kept its slot would refuse the retry as a
+   * duplicate of a story that no longer exists.
+   */
+  beginRollback(): () => void {
+    const stories = mapRollback(this.#stories);
+    const threads = mapRollback(this.#threads);
+    const publicByUrl = mapRollback(this.#publicByUrl);
+    const roomByUrl = mapRollback(this.#roomByUrl);
+    const sourceLinks = mapRollback(this.#sourceLinks);
+    return () => {
+      stories();
+      threads();
+      publicByUrl();
+      roomByUrl();
+      sourceLinks();
+    };
   }
 
   /** The room-tier URL-dedup map key. A NUL separator (impossible in a UUID
@@ -1087,8 +1117,13 @@ export class InMemoryStoryStore implements StoryStore {
   }
 }
 
-export class InMemorySourceStore implements SourceStore {
+export class InMemorySourceStore implements SourceStore, InMemoryRollback {
   readonly #sources = new Map<string, SourceRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#sources);
+  }
   readonly #byDomain = new Map<string, string>();
   readonly #now: () => number;
   #counter = 0;
@@ -1179,8 +1214,13 @@ export class InMemorySourceStore implements SourceStore {
   }
 }
 
-export class InMemorySyndicationStore implements SyndicationStore {
+export class InMemorySyndicationStore implements SyndicationStore, InMemoryRollback {
   readonly #records = new Map<string, SyndicationRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -1395,8 +1435,13 @@ export class InMemoryFreshnessStore implements FreshnessStore {
   }
 }
 
-export class InMemoryTakedownStore implements TakedownStore {
+export class InMemoryTakedownStore implements TakedownStore, InMemoryRollback {
   readonly #records = new Map<string, TakedownRecordRow>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -1533,8 +1578,13 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export class InMemoryEmbeddingStore implements EmbeddingStore {
+export class InMemoryEmbeddingStore implements EmbeddingStore, InMemoryRollback {
   readonly #records = new Map<string, EmbeddingRecord>();
+
+  /** The unit of work's undo — see `InMemoryStoryStore.beginRollback`. */
+  beginRollback(): () => void {
+    return mapRollback(this.#records);
+  }
   readonly #now: () => number;
 
   constructor(now: () => number = Date.now) {

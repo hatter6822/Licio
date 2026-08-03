@@ -317,39 +317,42 @@ export function createIngestionAdminRoutes() {
           const record = await ingestion.takedowns.getById(takedownId);
           if (!record) return c.json(deny('not_found', 'Takedown not found'), 404);
           const nowIso = new Date(ingestion.now()).toISOString();
-          if (action === 'actioned') {
-            // Hide/remove the target (WS-F.1.4f): stories leave every read +
-            // search surface; evidence retracts; source restrictions tighten.
-            if (record.targetType === 'story') {
-              const story = await ingestion.stories.getById(record.targetId);
-              if (story) {
-                await ingestion.stories.update(story.storyId, { hiddenState: 'takedown' });
-                // Best-effort submitter notice (WS-F.1.4f); passkey-only
-                // accounts have no email — silently skipped.
-                const submitter = await identity.store.getUser(story.submittedBy);
-                if (submitter?.email) {
-                  try {
-                    await identity.mailer.sendNotice(submitter.email, 'takedown_actioned', {
-                      story_title: story.title.slice(0, 120),
-                    });
-                  } catch {
-                    ingestion.log('ingestion.takedown_notice_failed', { takedown_id: takedownId });
+          // THE ENFORCEMENT AND ITS RECORD ARE ONE UNIT.
+          //
+          // The hide ran first and on its own: an append or commit failure then
+          // rolled the takedown back to `received` while the story stayed
+          // hidden and nothing recorded who hid it — a live enforcement with no
+          // decision behind it, on the one surface where "who removed this, and
+          // under what claim?" is the whole question. The notice is the only
+          // part that stays outside, because an email cannot be un-sent and so
+          // must never be part of something that can roll back.
+          const outcome = await ingestion.transact(async (tx) => {
+            let notify: { email: string; title: string } | null = null;
+            if (action === 'actioned') {
+              // Hide/remove the target (WS-F.1.4f): stories leave every read +
+              // search surface; evidence retracts; source restrictions tighten.
+              if (record.targetType === 'story') {
+                const story = await tx.stories.getById(record.targetId);
+                if (story) {
+                  await tx.stories.update(story.storyId, { hiddenState: 'takedown' });
+                  // Passkey-only accounts have no email — silently skipped.
+                  const submitter = await identity.store.getUser(story.submittedBy);
+                  if (submitter?.email) {
+                    notify = { email: submitter.email, title: story.title.slice(0, 120) };
                   }
                 }
+              } else {
+                await tx.sources.update(record.targetId, {
+                  displayRestrictions: { noindex: true, noarchive: true, excerpt_max_chars: 0 },
+                });
+                // Cascade (WS-F.1.4f): the publisher's EXISTING stories leave
+                // every read + search surface and shed their archived excerpts.
+                // Tightening the source's future-extraction flags alone would
+                // leave already-extracted content fully visible.
+                const hidden = await tx.stories.hideBySource(record.targetId, 'takedown');
+                ingestion.metrics.increment('takedowns.source_stories_hidden', hidden);
               }
-            } else {
-              await ingestion.sources.update(record.targetId, {
-                displayRestrictions: { noindex: true, noarchive: true, excerpt_max_chars: 0 },
-              });
-              // Cascade (WS-F.1.4f): the publisher's EXISTING stories leave
-              // every read + search surface and shed their archived excerpts.
-              // Tightening the source's future-extraction flags alone would
-              // leave already-extracted content fully visible.
-              const hidden = await ingestion.stories.hideBySource(record.targetId, 'takedown');
-              ingestion.metrics.increment('takedowns.source_stories_hidden', hidden);
             }
-          }
-          const updated = await ingestion.transact(async (tx) => {
             const written = await tx.takedowns.update(takedownId, {
               status: action,
               resolutionNote: resolution_note,
@@ -366,10 +369,24 @@ export function createIngestionAdminRoutes() {
                 new_value: action,
               },
             });
-            return written;
+            return { written, notify };
           });
+          // Best-effort submitter notice (WS-F.1.4f), AFTER the commit — telling
+          // someone their story was removed when the removal rolled back is a
+          // worse failure than a missed notice.
+          if (outcome.notify !== null) {
+            try {
+              await identity.mailer.sendNotice(outcome.notify.email, 'takedown_actioned', {
+                story_title: outcome.notify.title,
+              });
+            } catch {
+              ingestion.log('ingestion.takedown_notice_failed', { takedown_id: takedownId });
+            }
+          }
           ingestion.metrics.increment(`takedowns.${action}`);
-          return c.json({ takedown: updated === null ? null : toTakedownWire(updated) });
+          return c.json({
+            takedown: outcome.written === null ? null : toTakedownWire(outcome.written),
+          });
         },
       )
 

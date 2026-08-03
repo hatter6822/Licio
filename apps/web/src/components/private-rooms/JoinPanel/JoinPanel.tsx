@@ -425,11 +425,17 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
         return;
       }
       const { verdict, grant } = await session.admitJoinRequest(invite, request);
-      // The DEVICE IS ADMITTED either way — this is a display decision, not a
-      // crypto one, and dropping the render is the honest half: the admin is
-      // looking at another device's records, and `member.add` has committed to
-      // the room state they can see in the member list.
-      if (superseded()) return;
+      // PAST THIS LINE THE OUTCOME IS ALWAYS RENDERED — there is no superseding
+      // check here, deliberately.
+      //
+      // `admitJoinRequest` has committed `member.add`, advanced the epoch,
+      // persisted the session and spent one use of the invite. The grant it
+      // returns carries the MLS Welcome for THAT commit and cannot be produced
+      // again: dropping it leaves a roster entry and a consumed invite whose
+      // device can never finish joining, and the room has no way to re-issue it.
+      // Superseding is only ever safe BEFORE the admission — which is why the
+      // two checks above stand, and why the inputs are disabled while this runs
+      // so the case cannot arise at all.
       if (verdict.ok) {
         setStatus(
           t('privateRoom.admit.ok', 'Device admitted as {role}.', { role: verdict.grantedRole }),
@@ -469,6 +475,10 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
           setInviteJson(e.target.value);
           beginNewAdmission();
         }}
+        // Locked WHILE an admission runs: the grant that comes back cannot be
+        // reissued, so the admin must not be able to move on from an attempt
+        // whose result they still need.
+        disabled={busy}
         rows={2}
       />
       <TextArea
@@ -478,6 +488,7 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
           setRequestJson(e.target.value);
           beginNewAdmission();
         }}
+        disabled={busy}
         rows={3}
       />
 

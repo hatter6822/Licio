@@ -317,60 +317,48 @@ export function createRoomsRoutes() {
           }
           // WS-Q.3.3a — apply the documented visibility/join/posting defaults.
           const axes = resolveRoomCreateAxes(request);
-          const created = await forum.rooms.insert({
-            roomId: randomUUID(),
-            name: request.name,
-            slug,
-            description: request.description,
-            roomType: request.room_type,
-            visibility: axes.visibility,
-            joinModel: axes.joinModel,
-            postingPolicy: axes.postingPolicy,
-            // WS-S.1.3 — the server room-create endpoint ALWAYS mints a
-            // server-storage room; a Private P2P room is created client-side
-            // and never through this path (the §8 non-storage contract).
-            storageMode: 'server',
-            createdBy: auth.userId,
-            governanceMode: 'ordinary', // ALWAYS the default (§17.4)
-            charterSummary: null,
-            typeMetadata: roomTypeMetadata(request),
-            latestActivityAt: null,
-          });
-          if (!created.ok) {
-            return c.json(
-              deny('duplicate_room', 'A room with this name already exists for this type'),
-              409,
-            );
-          }
-          // Creator becomes community steward (WS-G.2.3c acceptance).
-          await forum.rooms.addSteward({
-            roomId: created.room.roomId,
-            userId: auth.userId,
-            role: 'community_steward',
-            assignedAt: new Date(forum.now()).toISOString(),
-          });
-          // WS-U §16.6: bootstrap the elected-room-steward seat to the creator
-          // (the first member); a Knomosis election re-seats it after the term.
-          // BEST-EFFORT + isolated: the seat lives in the separate `knomosis`
-          // context (no shared transaction), so a governance-store hiccup must
-          // never fail or roll back the room creation. `bootstrapSeat` is
-          // idempotent, so a later interaction (or a manual re-bootstrap) heals a
-          // missed seat.
-          try {
-            await getGovernanceService().bootstrapSeat(created.room.roomId, auth.userId);
-          } catch (error) {
-            forum.log('governance.seat_bootstrap_failed', {
-              room_id: created.room.roomId,
-              error: String(error),
+          // THE WHOLE ROOM IS ONE UNIT.
+          //
+          // The room, the creator's steward grant, their membership and the
+          // record of it are one act. They used to be four moments: the insert
+          // and `addSteward` committed on their own, and only the subscription
+          // and the audit shared a transaction — so an append failure answered
+          // 500 having left a durable room with a steward, no member, and no
+          // trail, and the retry the operator would obviously try then answered
+          // `duplicate_room` against the wreck of the first attempt.
+          const created = await forum.transact(async (tx) => {
+            const room = await tx.rooms.insert({
+              roomId: randomUUID(),
+              name: request.name,
+              slug,
+              description: request.description,
+              roomType: request.room_type,
+              visibility: axes.visibility,
+              joinModel: axes.joinModel,
+              postingPolicy: axes.postingPolicy,
+              // WS-S.1.3 — the server room-create endpoint ALWAYS mints a
+              // server-storage room; a Private P2P room is created client-side
+              // and never through this path (the §8 non-storage contract).
+              storageMode: 'server',
+              createdBy: auth.userId,
+              governanceMode: 'ordinary', // ALWAYS the default (§17.4)
+              charterSummary: null,
+              typeMetadata: roomTypeMetadata(request),
+              latestActivityAt: null,
             });
-          }
-          // The creator's membership and the record of their steward seat are
-          // one fact about one action, so they commit together: apart, a room
-          // could exist whose creator is not a member of it, or whose steward
-          // seat appears in no trail the creator can read.
-          await forum.transact(async (tx) => {
+            // The name collision is a REFUSAL, not a failure: it leaves the unit
+            // by returning rather than throwing, so nothing rolls back that was
+            // never written.
+            if (!room.ok) return null;
+            // Creator becomes community steward (WS-G.2.3c acceptance).
+            await tx.rooms.addSteward({
+              roomId: room.room.roomId,
+              userId: auth.userId,
+              role: 'community_steward',
+              assignedAt: new Date(forum.now()).toISOString(),
+            });
             await tx.rooms.upsertSubscription({
-              roomId: created.room.roomId,
+              roomId: room.room.roomId,
               userId: auth.userId,
               status: 'active',
               // WS-G.2.2 — a new room's creator starts Undecided (they can pick
@@ -383,14 +371,37 @@ export function createRoomsRoutes() {
             await tx.identityAudit.append({
               actorUserId: auth.userId,
               eventType: 'room_steward_change',
-              targetRef: created.room.roomId,
+              targetRef: room.room.roomId,
               context: { setting: 'community_steward', new_value: 'creator_auto_assigned' },
             });
+            return room.room;
           });
+          if (created === null) {
+            return c.json(
+              deny('duplicate_room', 'A room with this name already exists for this type'),
+              409,
+            );
+          }
+          // WS-U §16.6: bootstrap the elected-room-steward seat to the creator
+          // (the first member); a Knomosis election re-seats it after the term.
+          // BEST-EFFORT + isolated, and AFTER the commit: the seat lives in the
+          // separate `knomosis` context (no shared transaction), so a governance
+          // hiccup must never fail or roll back the room — and running it inside
+          // the unit would have made an un-rollback-able write part of something
+          // that can roll back. `bootstrapSeat` is idempotent, so a later
+          // interaction (or a manual re-bootstrap) heals a missed seat.
+          try {
+            await getGovernanceService().bootstrapSeat(created.roomId, auth.userId);
+          } catch (error) {
+            forum.log('governance.seat_bootstrap_failed', {
+              room_id: created.roomId,
+              error: String(error),
+            });
+          }
           forum.metrics.increment('rooms.created');
           return c.json(
             roomSummarySchema.parse(
-              await toRoomSummary(forum, created.room, 0, auth.userId, auth.roles),
+              await toRoomSummary(forum, created, 0, auth.userId, auth.roles),
             ),
             201,
           );

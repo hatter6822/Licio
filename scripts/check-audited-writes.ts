@@ -60,8 +60,15 @@ import { lineAt, newlineIndex, type Syntax, walk, withParsedSources } from './ts
 const ROOT = resolve(import.meta.dirname, '..');
 const ROUTES_DIR = resolve(ROOT, 'apps/api/src/routes');
 
-/** Calls that append to an audit trail. */
-const AUDIT_CALLS = [/\baudit\.append$/, /^writeAudit$/, /\bauditChain\b/];
+/** Calls that append to an audit trail.
+ *
+ *  The receiver is matched case-INSENSITIVELY on its last segment, because the
+ *  spellings in the tree are `audit.append`, `tx.audit.append` AND
+ *  `tx.identityAudit.append` — and a `\baudit\.append$` pattern silently missed
+ *  the third, which is every WS-F/WS-G/WS-Q handler that records to the WS-D
+ *  trail. A gate that cannot see a whole domain's audit calls reports that
+ *  domain as clean. */
+const AUDIT_CALLS = [/(?:^|\.)[A-Za-z]*[Aa]udit\.append$/, /^writeAudit$/, /\bauditChain\b/];
 /** Calls that change durable state. `.append` is excluded — that IS the audit.
  *
  *  `consume` earns its place the hard way: spending a single-use credential is
@@ -70,8 +77,25 @@ const AUDIT_CALLS = [/\baudit\.append$/, /^writeAudit$/, /\bauditChain\b/];
  *  that recorded the verification. */
 const WRITE_CALLS =
   /\.(insert|insertIfNoneOpen|update|updateUser|upsert|create|createWithThread|remove|delete|purge|consume|credit|rebaseline|setAuth|applyAction|apply|delist|claim|reassign)[A-Za-z]*$/;
-/** Opening a unit of work. */
-const UNIT_CALLS = /(\.transactor\.run|\.transact|\.runInUnit)$/;
+/** Opening a unit of work.
+ *
+ *  `runChainedUnit` is a free function rather than a method, and leaving it out
+ *  made every WS-N policy write read as uncommitted — the gate reported a
+ *  correctly-transacted handler as a violation, which is the failure mode that
+ *  teaches people to ignore it. */
+const UNIT_CALLS = /(\.transactor\.run|\.transact|\.runInUnit|^runChainedUnit)$/;
+
+/**
+ * Receivers whose writes are NOT the durable state an audit accounts for.
+ *
+ * Redis-backed ephemera — attempt counters, one-time codes, WebAuthn challenges,
+ * a policy cache — expire on their own and nothing audits them. They also cannot
+ * join a Postgres transaction, so demanding it would be demanding the
+ * impossible. (A Redis effect that MUST NOT outlive a failed record is a
+ * different matter, and those are placed inside the unit after the append so an
+ * append failure prevents them; see `finishMfa`.)
+ */
+const EPHEMERAL_RECEIVERS = /\.(otp|challenges|policyCache|cache|metrics)\./;
 
 interface Finding {
   readonly file: string;
@@ -115,6 +139,70 @@ function handlerLabel(fn: Syntax): string {
     if (first?.kind === SyntaxKind.StringLiteral) return first.text ?? '';
   }
   return '(unnamed handler)';
+}
+
+/**
+ * Is this a ROUTE REGISTRATION rather than a durable write?
+ *
+ * `app.delete('/things/:id', handler)` is Hono declaring an HTTP DELETE, and it
+ * matches the write vocabulary exactly as a store's `delete` does. Worse, a
+ * chained registration's `getStart()` is the start of the WHOLE chain, so the
+ * finding pointed at `new Hono()` on line 132 and named no handler at all — a
+ * report a reader cannot act on, attached to code that is not a defect.
+ *
+ * The discriminator is the first argument: a route path is a string literal
+ * beginning with `/`, and no store method here takes one.
+ */
+function isRouteRegistration(call: Syntax): boolean {
+  const first = call.arguments?.[0];
+  if (first?.kind !== SyntaxKind.StringLiteral) return false;
+  return (first.text ?? '').startsWith('/');
+}
+
+/**
+ * Is this write on an EXIT PATH that never reaches the handler's record?
+ *
+ * `if (await store.getUserByEmail(pending)) { await store.setAuth(userId,
+ * { pendingEmail: null }); return conflict; }` clears staged state and answers
+ * 409 — nothing was accomplished, so there is nothing to account for, and the
+ * audit later in the handler belongs to the path this one never reaches.
+ * Demanding a unit there would be demanding a transaction around a single
+ * statement to satisfy a rule about pairs.
+ *
+ * The test is deliberately narrow: the write's own block must RETURN, and that
+ * block must contain no audit of its own. A write on a path that both changes
+ * state and records it is judged normally.
+ */
+function onExitPathWithoutRecord(write: Syntax, helpers: ReadonlySet<string>): boolean {
+  for (let at = write.parent; at !== undefined; at = at.parent) {
+    if (at.kind === SyntaxKind.ArrowFunction || at.kind === SyntaxKind.FunctionDeclaration) break;
+    if (at.kind !== SyntaxKind.Block) continue;
+    // A function's OWN body is not an early exit — every handler ends in a
+    // `return c.json(...)`, so treating the body as an exit path would excuse
+    // every write in the tree. Only a block NESTED inside the handler counts.
+    const parent = at.parent;
+    if (
+      parent?.kind === SyntaxKind.ArrowFunction ||
+      parent?.kind === SyntaxKind.FunctionDeclaration ||
+      parent?.kind === SyntaxKind.FunctionExpression ||
+      parent?.kind === SyntaxKind.MethodDeclaration
+    ) {
+      break;
+    }
+    let returns = false;
+    let records = false;
+    for (const node of walk(at)) {
+      if (node.kind === SyntaxKind.ReturnStatement) returns = true;
+      if (node.kind !== SyntaxKind.CallExpression) continue;
+      const callee = calleeText(node);
+      // …and the record can be one call away here too.
+      if (AUDIT_CALLS.some((pattern) => pattern.test(callee)) || helpers.has(callee)) {
+        records = true;
+      }
+    }
+    if (returns && !records) return true;
+  }
+  return false;
 }
 
 /** Every function-ish node in a source, by declared name. */
@@ -166,75 +254,59 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
       const out: Finding[] = [];
       for (const source of parsed) {
         const newlines = newlineIndex(source.content);
-        // THE UNIT ONE CALL AWAY.
+        // THE RULE: in a handler that records, EVERY durable write is inside the
+        // unit that records.
         //
-        // A handler that writes and then calls a helper which opens the unit and
-        // audits inside it reads as two innocent halves: the handler has a write
-        // and no append, the helper has an append properly inside a unit. The
-        // defect is the seam between them, and it is not hypothetical — it is
-        // how `/mfa/totp/verify` spent a single-use recovery code with a
-        // `setAuth` and then called `finishMfa`, whose unit recorded the
-        // verification. An append failure there answered 500 having permanently
-        // burned the code, which on the user's last one costs them the account.
+        // Three shapes of the same defect, and only the first was ever asked
+        // about. (1) The append itself sits outside a unit. (2) The append is
+        // inside a unit the handler opens, but a write ran BEFORE that unit — so
+        // the audit rolls back and the change does not, which is how `POST
+        // /rooms` could leave a durable room and steward with no record and no
+        // creator subscription, answering 500 and then `duplicate_room` on
+        // retry. (3) The unit is one call away in a helper, which is how
+        // `/mfa/totp/verify` burned a single-use recovery code with a `setAuth`
+        // before `finishMfa` recorded the verification.
         //
-        // So a same-file helper that audits inside its own unit is attributed to
-        // its CALLER: whatever the caller wrote before calling it had to go in
-        // that unit too.
+        // So the question is asked of the WRITE rather than of the append: this
+        // handler records something, and here is a durable change of its that no
+        // unit covers.
         const helpers = namedFunctions(source.root);
         const auditingHelpers = new Set(
           [...helpers].filter(([, fn]) => auditsInsideItsOwnUnit(fn)).map(([name]) => name),
         );
+        /** Does this function record — directly, or through a helper that does? */
+        const records = (fn: Syntax): boolean => {
+          for (const inner of walk(fn)) {
+            if (inner.kind !== SyntaxKind.CallExpression) continue;
+            const callee = calleeText(inner);
+            if (AUDIT_CALLS.some((pattern) => pattern.test(callee))) return true;
+            if (auditingHelpers.has(callee)) return true;
+          }
+          return false;
+        };
         for (const write of walk(source.root)) {
           if (write.kind !== SyntaxKind.CallExpression) continue;
-          if (!WRITE_CALLS.test(calleeText(write))) continue;
+          const callee = calleeText(write);
+          if (!WRITE_CALLS.test(callee)) continue;
+          if (EPHEMERAL_RECEIVERS.test(callee)) continue;
+          if (isRouteRegistration(write)) continue;
+          if (onExitPathWithoutRecord(write, auditingHelpers)) continue;
+          // The audit is not the write it accounts for.
+          if (AUDIT_CALLS.some((pattern) => pattern.test(callee))) continue;
           if (insideUnit(write)) continue;
-          // Handed INTO the helper's unit — the fix, not the defect.
+          // Handed INTO a helper's unit — the fix, not the defect.
           if (insideCallbackTo(write, auditingHelpers)) continue;
           // The INNERMOST enclosing function owns the write: attributing it to
-          // every ancestor would report the same defect once per nesting level.
+          // every ancestor would report one defect once per nesting level.
           const fn = enclosingFunction(write);
           if (fn === undefined) continue;
           // A helper's own body is judged where it is CALLED, not here — else
           // every correct transactor flags itself for the writes inside its unit.
           if (auditingHelpers.has(fn.name?.getText() ?? '')) continue;
-          let auditsElsewhere = false;
-          for (const inner of walk(fn)) {
-            if (inner.kind !== SyntaxKind.CallExpression) continue;
-            if (auditingHelpers.has(calleeText(inner))) {
-              auditsElsewhere = true;
-              break;
-            }
-          }
-          if (!auditsElsewhere) continue;
+          if (!records(fn)) continue;
           out.push({
             file: source.path,
             line: lineAt(newlines, write.getStart()),
-            detail: handlerLabel(fn),
-          });
-        }
-        for (const node of walk(source.root)) {
-          if (node.kind !== SyntaxKind.CallExpression) continue;
-          const callee = calleeText(node);
-          if (!AUDIT_CALLS.some((pattern) => pattern.test(callee))) continue;
-          if (insideUnit(node)) continue;
-          const fn = enclosingFunction(node);
-          if (fn === undefined) continue;
-          // …and the same function performs a durable write. An audit-only
-          // handler (a read that records that it happened) is not this defect.
-          let writes = false;
-          for (const inner of walk(fn)) {
-            if (inner.kind !== SyntaxKind.CallExpression) continue;
-            const innerCallee = calleeText(inner);
-            if (AUDIT_CALLS.some((pattern) => pattern.test(innerCallee))) continue;
-            if (WRITE_CALLS.test(innerCallee)) {
-              writes = true;
-              break;
-            }
-          }
-          if (!writes) continue;
-          out.push({
-            file: source.path,
-            line: lineAt(newlines, node.getStart()),
             detail: handlerLabel(fn),
           });
         }
@@ -244,7 +316,13 @@ export function runAuditedWriteGate(files: Map<string, string>): string[] {
   );
 
   const issues: string[] = [];
+  // One line, one finding: a write reachable through two walks is still one
+  // defect, and a duplicated line reads as two sites to fix.
+  const seen = new Set<string>();
   for (const finding of findings) {
+    const key = `${finding.file}:${finding.line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     issues.push(
       `${finding.file}:${finding.line} handler '${finding.detail}' appends an audit row and ` +
         'performs a durable write outside a unit of work — an append failure would leave the ' +

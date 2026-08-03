@@ -381,13 +381,15 @@ describe('JoinPanel — admit half', () => {
     expect(screen.queryByLabelText(grantLabel)).not.toBeInTheDocument();
   });
 
-  it('drops a SUPERSEDED admission rather than overwriting the next one', async () => {
-    // Clearing the grant on input change fixed the display but not the race
-    // behind it: admission is several async crypto steps and the fields stay
-    // editable throughout, so device A's in-flight attempt can resolve after the
-    // admin has pasted device B's records — and its success branch writes A's
-    // grant AND blanks both fields, destroying B's input to show a grant for a
-    // different device.
+  it('never loses a completed admission’s grant to a mid-flight edit', async () => {
+    // Two wrong answers preceded this one. Rendering the stale grant labelled it
+    // for the wrong device; DROPPING it was worse — past `admitJoinRequest` the
+    // device is already in the roster, the epoch has advanced and one invite use
+    // is spent, so the MLS Welcome in that grant is the only one that will ever
+    // exist for that member. Discarding it strands them permanently.
+    //
+    // The fields are locked while an admission runs, so the admin cannot move on
+    // from a result they still need, and the outcome is always rendered.
     const user = userEvent.setup();
     const admin = await makeSession();
     const prepA = await PrivateRoomSession.prepareJoinRequest({ proposedDisplayName: 'Ann' });
@@ -417,18 +419,26 @@ describe('JoinPanel — admit half', () => {
     fireEvent.change(requestField, { target: { value: JSON.stringify(requestA) } });
     await user.click(screen.getByRole('button', { name: /verify and admit/i }));
 
-    // …the admin moves on to device B while A is still in flight.
-    fireEvent.change(inviteField, { target: { value: '{"device":"B invite"}' } });
-    fireEvent.change(requestField, { target: { value: '{"device":"B request"}' } });
+    // …the admin tries to move on to device B while A is still in flight. The
+    // fields are locked, so the attempt cannot be superseded out from under its
+    // own irreplaceable result.
+    await waitFor(() => expect(inviteField).toBeDisabled());
+    expect(requestField).toBeDisabled();
+    // `userEvent` honours the disabled state the way a person does; `fireEvent`
+    // would write the DOM value directly and prove nothing about the guard.
+    await user.type(inviteField, 'B');
+    expect((inviteField as HTMLTextAreaElement).value).toContain('licio.private');
+
     release?.();
 
-    await waitFor(() => expect(screen.queryByText(/admitting/i)).not.toBeInTheDocument());
-    // B's records are still where the admin put them, and no grant for A is on
-    // screen under a label pointing at B.
-    expect((inviteField as HTMLTextAreaElement).value).toBe('{"device":"B invite"}');
-    expect((requestField as HTMLTextAreaElement).value).toBe('{"device":"B request"}');
-    expect(screen.queryByLabelText(/send this back to the new device/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // A's grant lands and stays: it carries the MLS Welcome for a commit that
+    // already happened, and no later edit can take it away.
+    const grantLabel = /send this back to the new device/i;
+    await waitFor(() => expect(screen.getByLabelText(grantLabel)).toBeInTheDocument());
+    expect((screen.getByLabelText(grantLabel) as HTMLTextAreaElement).value.length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/device admitted/i);
   });
 
   it('has no accessibility violations', async () => {

@@ -712,8 +712,21 @@ What still keeps this closed is `scripts/check-audited-writes.test.ts`'s last
 case, which runs the gate over the LIVE route tree — with no allowlist, a
 regression has nowhere to be written down.
 
-The gate itself grew one leg after a defect walked past it: **the unit one call
-away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
+The gate itself grew two legs after defects walked past it.
+
+**The question is asked of the WRITE, not of the append.**  Asking only "is the
+audit inside a unit?" is blind to the commonest shape: the audit IS inside a
+unit the handler opens, and a durable write ran BEFORE it (`POST /rooms`
+inserting the room outside the transaction that recorded it; the takedown action
+hiding the story before the unit that recorded the enforcement).  Calibrating
+that against the tree corrected four things the gate had been wrong about —
+`identityAudit.append` invisible to a case-sensitive pattern, `runChainedUnit`
+unrecognised as a unit, Hono's `.delete('/path', …)` counted as a write, and
+ephemeral Redis stores counted too.  Each of those made it either silently blind
+to a domain or noisily wrong about correct code, and the second is worse: a gate
+that cries wolf is a gate people learn to skip.
+
+**The unit one call away.**  `/mfa/totp/verify` spent a single-use recovery code with a `setAuth` and
 then called `finishMfa`, whose own unit recorded the verification — two innocent
 halves (a handler with a write and no append, a helper with an append properly
 inside a unit) with the defect in the seam, so an append failure burned the code
@@ -722,6 +735,22 @@ now attributed to its CALLER; the sanctioned fix is to hand the write into that
 unit as a callback (`insideCallbackTo` recognises it), and `consume*` counts as
 the durable write it is.  Attribution stops at the file — a helper imported from
 another module is still invisible, which is the next leg if one is ever needed.
+
+### The in-memory unit can undo everything it hands out (`unit-of-work-rollback.test.ts`)
+
+The in-memory units take their undo as `[...stores].filter(s => typeof
+s.beginRollback === 'function')`, which converts a missing guarantee into
+silence.  `IngestionServices.transact` shipped with five stores on its tx and
+NONE of them declaring `beginRollback`, so the filter kept an empty list, every
+`transact` resolved, and every test over it passed while the atomicity it
+advertises did not exist.  WS-H's list was missing the identity audit for the
+same reason — audit-then-act reintroduced by a rollback list rather than by the
+code above it.
+
+Both are fixed, and the filter is now checked rather than trusted: the suite
+walks each domain's transaction surface and fails NAMING any store the unit
+cannot undo.  A store added to a tx without an undo fails there instead of in
+production.
 
 ### Cursor grammar — a malformed cursor must not restart pagination
 

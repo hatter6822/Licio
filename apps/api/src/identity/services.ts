@@ -177,6 +177,23 @@ export interface IdentityTx {
   readonly store: IdentityStore;
   /** The audit append, bound to the SAME handle as the writes above. */
   readonly audit: AuditStore;
+  /**
+   * The §19.3 attention purge, bound to THIS handle.
+   *
+   * Erasing attention history is the one identity action whose durable change
+   * lives in a different workstream's stores (WS-E events, aggregates, ledger,
+   * behaviour). Calling the ordinary hook from inside the unit only LOOKS
+   * transactional: it writes through separately-composed stores, so a purge
+   * that succeeded followed by a commit that failed destroyed the user's data
+   * irreversibly, rolled the `attention_delete` record back, and answered 500 —
+   * an erasure that happened, is denied, and has no record.
+   *
+   * The WS-E Drizzle stores all take an executor, so the production root binds
+   * them to the identity transaction and the two commit or fail together.
+   * Optional because a root that cannot bind them (a future split database)
+   * must say so by absence rather than by pretending.
+   */
+  readonly purgeAttention?: (userId: string, mode: 'delete' | 'reset') => Promise<number>;
 }
 
 export interface IdentityServices {
@@ -350,6 +367,15 @@ export function createInMemoryIdentityServices(config: IdentityConfig): Identity
       get audit(): AuditStore {
         return services.audit;
       },
+      // In-memory: the same hook, run inside the unit so the ORDER holds (the
+      // record is appended first, and a failing purge aborts it). It is NOT the
+      // full guarantee — the WS-E in-memory stores register no rollback, so a
+      // purge that succeeded before a later failure stays done here. The
+      // rollback is the PRODUCTION binding's, where the WS-E stores are built
+      // over the identity transaction's own executor; this twin deliberately
+      // does not pretend to more than it has.
+      purgeAttention: (userId, mode) =>
+        services.purgeAttention?.(userId, mode) ?? Promise.resolve(0),
     },
     () => [
       ...(services.store instanceof InMemoryIdentityStore ? [services.store] : []),

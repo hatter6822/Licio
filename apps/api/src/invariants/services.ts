@@ -36,7 +36,7 @@ import { isSentinelTopicId } from '@licio/shared';
 import type { EventPipelineServices } from '../events/services.js';
 import type { ForumServices } from '../forum/services.js';
 import type { RoomStore } from '../forum/stores.js';
-import type { AuditEntryInput } from '../identity/audit.js';
+import { type AuditEntryInput, InMemoryAuditStore } from '../identity/audit.js';
 import type { IdentityServices } from '../identity/services.js';
 import type { IngestionServices } from '../ingestion/services.js';
 import type { StoryStore } from '../ingestion/stores.js';
@@ -217,9 +217,15 @@ export function createInMemoryInvariantServices(
         return services.promotions;
       },
     },
+    // The AUDIT belongs in the undo too, and its absence was the same silent
+    // hole the ingestion stores had: `tx.audit` appends through the identity
+    // store, so a unit that recorded a promotion and then failed left the record
+    // of a change that never happened — audit-then-act, reintroduced by the
+    // rollback list rather than by the code that reads correctly above it.
     () => [
       ...(services.bridgeAttempts instanceof InMemoryBridgeAttemptStore ? [bridgeAttempts] : []),
       ...(services.promotions instanceof InMemoryPromotionStore ? [services.promotions] : []),
+      ...(identity.audit instanceof InMemoryAuditStore ? [identity.audit] : []),
     ],
   );
 

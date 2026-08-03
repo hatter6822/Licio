@@ -102,6 +102,7 @@ import {
   RedisReplayNonceStore,
   RedisSlidingWindowStore,
 } from './events/redis-event-stores.js';
+import { purgeUserAttention } from './events/retention.js';
 import {
   createInMemoryEventPipelineServices,
   setEventPipelineServices,
@@ -464,7 +465,32 @@ if (db) {
   const identityDb = db;
   identityServices.transact = (work) =>
     identityDb.transaction((tx) =>
-      work({ store: new DrizzleIdentityStore(tx), audit: new DrizzleAuditStore(tx) }),
+      work({
+        store: new DrizzleIdentityStore(tx),
+        audit: new DrizzleAuditStore(tx),
+        // The §19.3 attention purge, ON THIS TRANSACTION.
+        //
+        // The WS-E stores live in the same database, so the erasure and the
+        // `attention_delete` row that accounts for it are one commit. Bound
+        // here rather than reached through `identityServices.purgeAttention`,
+        // which writes through the separately-composed stores: calling that
+        // from inside the unit is lexical nesting and nothing more — the purge
+        // would commit on its own, and a later failure in the unit would leave
+        // the user's attention history irreversibly gone, the record rolled
+        // back, and a 500 telling them it did not happen.
+        purgeAttention: (userId, mode) =>
+          purgeUserAttention(
+            {
+              ...eventServices,
+              eventStore: new DrizzleEventStore(tx),
+              attentionStore: new DrizzleAttentionAggregateStore(tx),
+              ledgerStore: new DrizzleSignalLedgerStore(tx),
+              behaviorStore: new DrizzleActorBehaviorStore(tx),
+            },
+            userId,
+            mode,
+          ),
+      }),
     );
   // Web Push state (WS-C.2.4a/c): durable subscriptions + preferences, so a
   // restart/deploy never invalidates delivery and every replica can wake any
