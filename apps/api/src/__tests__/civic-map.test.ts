@@ -96,6 +96,29 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(basin?.topics[0]?.name).toBe(TOPIC_A?.name);
   });
 
+  it('reports a quiet hour as empty rather than inventing a landscape from old adjacency', async () => {
+    // Stories exist; none drew an event this hour. `reebGraph` would happily
+    // build basins and merges out of topic adjacency alone, and the panel would
+    // claim attention is grouping "this hour" from an hour in which nobody read
+    // anything.
+    const quiet = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'A',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 0,
+      },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'B',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 0,
+      },
+    ];
+    const { events, ingestion } = services(quiet);
+    expect(await buildCivicMap(events, ingestion, NOW)).toBeNull();
+  });
+
   it('never surfaces the UNCLASSIFIED sentinel as a topic', async () => {
     const { events, ingestion } = services([
       story('11111111-1111-4111-8111-111111111111', 10, [UNCLASSIFIED_TOPIC_ID]),

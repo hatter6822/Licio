@@ -3020,7 +3020,7 @@ not that someone believes it holds. The unchecked items are the honest residue;
 - [x] Local moderation ops work. (`reducer/overlay.ts` — the §14.6 device-local moderation overlays.)
 - [x] Member block/hide works. (Same overlay plane.)
 - [x] Voluntary report package preview works. (The §19.4 report schema; the package is member-assembled and member-sent.)
-- [x] Directory abuse tools work for listed stubs. (`POST /v1/private-rooms/:id/delist` and `DELETE /v1/private-rooms/:id` — the only two things platform staff can do to a P2P room, per §11.4.)
+- [x] Directory abuse tools work for listed stubs. (`POST /v1/private-rooms/:id/delist` — the ONLY thing platform staff can do to a P2P room, per §11.4, and it requires the same per-session MFA every other steward action does. `DELETE /v1/private-rooms/:id` is creator-owned: staff can stop a room advertising itself, and cannot remove its bootstrap record, because members holding the token must keep resolving it. Every staff delist writes an actor/target entry to the moderation audit trail.)
 - [x] Support docs do not promise impossible recovery/moderation. (The copy-lint rejects "secure"/"deleted everywhere" framing in the §6/§20 SSOT.)
 
 ---

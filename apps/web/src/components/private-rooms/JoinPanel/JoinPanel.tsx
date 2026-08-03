@@ -18,6 +18,7 @@
 import type { InviteSecret } from '@licio/private-p2p';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
+import { ApiClientError } from '../../../lib/api.js';
 import { fetchPrivateRoomBootstrap } from '../../../lib/private-rooms-api.js';
 import {
   PrivateRoomSession,
@@ -234,26 +235,7 @@ function JoinerSection({
           }
           role={recordCheck.kind === 'unresolved' ? 'alert' : 'status'}
         >
-          {recordCheck.kind === 'unresolved'
-            ? t(
-                'privateRoom.join.recordUnresolved',
-                'Warning: this invite points at a Licio directory record that does not resolve. Check with whoever sent it before joining.',
-              )
-            : recordCheck.kind === 'none'
-              ? t(
-                  'privateRoom.join.recordNone',
-                  'Licio holds no record of this room — expected if it was created without one. Nothing else about the invite is affected.',
-                )
-              : recordCheck.name !== null
-                ? t(
-                    'privateRoom.join.recordListed',
-                    'Licio’s record for this room resolves. It is listed publicly as “{name}”.',
-                    { name: recordCheck.name },
-                  )
-                : t(
-                    'privateRoom.join.recordUnlisted',
-                    'Licio’s record for this room resolves. The room publishes no name.',
-                  )}
+          {directoryMessage(t, recordCheck)}
         </p>
       ) : null}
 
@@ -399,10 +381,47 @@ function AdmitSection({ session }: { session: PrivateRoomSession }): React.React
   );
 }
 
+/**
+ * The one sentence a lookup outcome is worth, chosen by CASE rather than by a
+ * chain of ternaries — four outcomes is where that chain stops being readable,
+ * and only one of them may sound like a warning.
+ */
+function directoryMessage(t: ReturnType<typeof useT>, lookup: DirectoryLookup): string {
+  switch (lookup.kind) {
+    case 'unresolved':
+      return t(
+        'privateRoom.join.recordUnresolved',
+        'Warning: this invite points at a Licio directory record that does not resolve. Check with whoever sent it before joining.',
+      );
+    case 'unavailable':
+      return t(
+        'privateRoom.join.recordUnavailable',
+        'Licio’s record for this room could not be checked right now — that is about the connection, not the invite. You can still continue.',
+      );
+    case 'none':
+      return t(
+        'privateRoom.join.recordNone',
+        'Licio holds no record of this room — expected if it was created without one. Nothing else about the invite is affected.',
+      );
+    case 'resolved':
+      return lookup.name !== null
+        ? t(
+            'privateRoom.join.recordListed',
+            'Licio’s record for this room resolves. It is listed publicly as “{name}”.',
+            { name: lookup.name },
+          )
+        : t(
+            'privateRoom.join.recordUnlisted',
+            'Licio’s record for this room resolves. The room publishes no name.',
+          );
+  }
+}
+
 /** What Licio's directory says about the room an invite is for. */
 type DirectoryLookup =
   | { kind: 'resolved'; name: string | null }
   | { kind: 'unresolved' }
+  | { kind: 'unavailable' }
   | { kind: 'none' };
 
 /**
@@ -421,11 +440,16 @@ type DirectoryLookup =
  * them would fail on every honest invite, which is exactly the kind of check
  * that trains people to click through warnings.
  *
- * A room with no record at all is ordinary (`detached`, or a registration that
- * did not succeed), and a network failure is not the invite's fault, so both
- * read as "none" rather than a warning. A capability that is PRESENT and
- * resolves nothing is the one case worth flagging: the sender named a record
- * that is not there.
+ * A room with no record at all is ordinary — `detached`, or a registration that
+ * did not succeed — and reads as "none".
+ *
+ * Only a 404 is evidence AGAINST the invite, and it is decisive: §21.2 makes an
+ * unknown room, a wrong token and a malformed id one answer, so a 404 here means
+ * "no record you can reach with this capability" and nothing else. Every other
+ * failure — offline, a 5xx, a proxy — is evidence about the network, and
+ * reporting it as "this invite points at a record that does not exist" would put
+ * a security warning in front of someone whose only mistake was a bad
+ * connection. That is how people learn to click through warnings.
  */
 async function lookUpDirectory(invite: InviteSecret): Promise<DirectoryLookup> {
   const roomServerId = invite.room_stub_ref;
@@ -434,8 +458,9 @@ async function lookUpDirectory(invite: InviteSecret): Promise<DirectoryLookup> {
   try {
     const record = await fetchPrivateRoomBootstrap(roomServerId, token);
     return { kind: 'resolved', name: record.display_name };
-  } catch {
-    return { kind: 'unresolved' };
+  } catch (error) {
+    const status = error instanceof ApiClientError ? error.status : undefined;
+    return status === 404 ? { kind: 'unresolved' } : { kind: 'unavailable' };
   }
 }
 

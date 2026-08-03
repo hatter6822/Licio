@@ -80,7 +80,15 @@ export async function buildCivicMap(
   nowMs: number,
 ): Promise<CivicMapResponse | null> {
   const { nodes, edges } = await assembleEngagementLandscape(events, ingestion, nowMs);
-  if (nodes.length === 0) return null;
+  // An ALL-ZERO landscape is a quiet hour, not a landscape.
+  //
+  // The assembly returns the recent stories whether or not anything happened to
+  // them this hour, so a quiet window produced 100 nodes at level 0 and
+  // `reebGraph` dutifully manufactured basins and merges out of topic adjacency
+  // alone — a map asserting attention is grouping "this hour" from an hour in
+  // which nobody read anything. Emptiness is a real state this surface already
+  // knows how to render; the guard just has to recognise it.
+  if (nodes.length === 0 || nodes.every((node) => node.value === 0)) return null;
 
   const graph = reebGraph(nodes, edges);
 

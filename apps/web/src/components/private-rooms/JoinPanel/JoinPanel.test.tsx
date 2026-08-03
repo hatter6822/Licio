@@ -152,6 +152,18 @@ describe('JoinPanel — the §21.2 pre-join directory check', () => {
     expect(alerts.some((el) => /does not resolve/i.test(el.textContent ?? ''))).toBe(true);
   });
 
+  it('does not cry wolf when the CHECK fails rather than the record', async () => {
+    // Offline, a 5xx, a proxy: evidence about the network, not about the
+    // invite. Reporting it as "this points at a record that does not exist"
+    // is how people learn to click through security warnings.
+    const admin = await makeSession();
+    await registerStub(admin);
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    await openInvite(admin);
+    expect(await screen.findByText(/about the connection, not the invite/i)).toBeInTheDocument();
+    expect(screen.queryByText(/does not resolve/i)).toBeNull();
+  });
+
   it('says there is no record rather than blocking the join', async () => {
     // A `detached` room carries no capability at all, and refusing to proceed
     // would break the mode whose entire point is that Licio knows nothing.

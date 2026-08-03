@@ -19,7 +19,12 @@ import {
 } from '@licio/shared';
 import { useId, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
-import { createPrivateRoomStub, deletePrivateRoomStub } from '../../../lib/private-rooms-api.js';
+import { ApiClientError } from '../../../lib/api.js';
+import {
+  createPrivateRoomStub,
+  deletePrivateRoomStub,
+  listMyPrivateRoomStubs,
+} from '../../../lib/private-rooms-api.js';
 import { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
 import { Button } from '../../ui/Button/index.js';
 import { Checkbox } from '../../ui/Checkbox/index.js';
@@ -84,17 +89,18 @@ export function CreatePrivateRoomWizard({
       // discard the room the user just made.
       let directoryFailed = false;
       if (directory !== 'detached') {
-        // TWO steps, TWO catches. Sharing one was a leak: if the POST succeeded
-        // and the local write then failed (quota, a private-mode eviction), the
-        // single catch discarded `room_server_id` — and that id is the ONLY
-        // handle for delist and delete, with no endpoint that lists an account's
-        // stubs. The server record would survive, publicly enumerable for a
-        // listed room, unreachable by the person who created it. So the local
-        // failure ROLLS THE SERVER BACK rather than reporting the same warning as
-        // a network failure that wrote nothing.
+        // A failure ANYWHERE in here can leave a server record the client did
+        // not record the id of: the local write can fail after a successful
+        // POST (quota, a private-mode eviction), and the POST's response can be
+        // lost after it commits. Both used to strand a record its own creator
+        // could never address — publicly enumerable, if it was listed. The
+        // catch reconciles against the server instead of rolling back from what
+        // this client happens to be holding.
+        // Hoisted so the failure path can identify OUR record on the server by
+        // the room's own signing key, whatever stage the failure happened at.
+        const payload = await session.directoryStubPayload();
         let created: Awaited<ReturnType<typeof createPrivateRoomStub>> | null = null;
         try {
-          const payload = await session.directoryStubPayload();
           created = await createPrivateRoomStub({
             directoryMode: directory,
             // Display metadata is `listed`-only — the server REFUSES it on an
@@ -119,27 +125,43 @@ export function CreatePrivateRoomWizard({
             // this copy is what the join grant hands on.
             bootstrapBlindId: payload.bootstrapBlindId,
           });
-        } catch {
+        } catch (error) {
           directoryFailed = true;
-          const orphan = created;
           setDirectoryWarning(
             t(
               'privateRoom.create.directoryFailed',
               'The room was created on this device, but Licio could not save its directory record. Share an invite directly, or try listing it again later.',
             ),
           );
-          if (orphan !== null) {
+          // RECONCILE against the server, but only when the request PLAUSIBLY
+          // reached it.
+          //
+          // Three failures look alike from here and are not: the local write
+          // failing after a successful POST (a record exists, id known), the
+          // POST committing and its response being lost (a record exists, id
+          // unknown), and the POST never leaving the machine (no record). The
+          // last is the common offline case, and a follow-up read cannot answer
+          // there either — warning about a record that does not exist, on the
+          // one connection that cannot check, is noise.
+          //
+          // A response-bearing 4xx is the server REFUSING: nothing committed,
+          // nothing to reconcile.
+          const status = error instanceof ApiClientError ? error.status : undefined;
+          const mayHaveCommitted = created !== null || (status !== undefined && status >= 500);
+          if (mayHaveCommitted) {
             try {
-              await deletePrivateRoomStub(orphan.room_server_id);
+              // The room's founder signing key identifies OUR record among the
+              // account's: the local session knows it, and it is what the room
+              // signed. This is why the owner lookup exists — without it, a lost
+              // response left a record nobody could ever address.
+              const mine = await listMyPrivateRoomStubs();
+              const ours = mine.filter((stub) => stub.room_public_key === payload.roomPublicKey);
+              for (const stub of ours) await deletePrivateRoomStub(stub.room_server_id);
             } catch {
-              // The rollback itself failed, so a record this device can no longer
-              // address does exist. Say so with the id, which is now the only way
-              // back to it — silence here is what would make it unmanageable.
               setDirectoryWarning(
                 t(
-                  'privateRoom.create.directoryOrphan',
-                  'The room was created on this device, but Licio saved a directory record this device could not keep track of, and could not remove it either. Its id is {id} — keep it if you want support to remove the record later.',
-                  { id: orphan.room_server_id },
+                  'privateRoom.create.directoryUnreconciled',
+                  'The room was created on this device, but Licio could not confirm whether a directory record was saved for it. Open this room’s settings later to check and remove it if one is there.',
                 ),
               );
             }

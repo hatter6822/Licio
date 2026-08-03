@@ -111,6 +111,20 @@ export const privateRoomStubs = pgTable(
     /** At most one stub per P2P room shell — enforced STRUCTURALLY (unique),
      *  not just by convention. */
     uniqueIndex('private_room_stubs_room_uq').on(t.roomServerId),
+    /**
+     * The §4.2 public directory's keyset, in the order it reads.
+     *
+     * The endpoint is UNAUTHENTICATED and budgeted at 300/min, and `LIMIT` does
+     * not bound the work: without this the planner filters and sorts every
+     * listed row per request. PARTIAL on `directory_mode = 'listed'`, because
+     * that is the only mode the directory can serve and an unlisted stub has no
+     * business occupying the index.
+     */
+    index('private_room_stubs_directory_idx')
+      .on(t.createdAt.desc(), t.stubId.desc())
+      .where(sql`${t.directoryMode} = 'listed'`),
+    /** The owner lookup behind the DSAR export and the create-recovery read. */
+    index('private_room_stubs_account_idx').on(t.createdByAccountId, t.createdAt.desc()),
     /** `detached` rooms store no stub (§8.2). */
     check('private_room_stubs_not_detached', sql`${t.directoryMode} <> 'detached'`),
     /** Display metadata exists only for `listed` rooms (unlisted leaks no name). */

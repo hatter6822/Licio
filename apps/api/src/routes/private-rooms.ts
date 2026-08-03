@@ -25,7 +25,9 @@
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
-import { type AuthEnv, authMiddleware, requireUnrestricted } from '../middleware/auth.js';
+import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
+import { writeAudit } from '../moderation/audit.js';
+import { getModerationServices } from '../moderation/services.js';
 import {
   DIRECTORY_DEFAULT_LIMIT,
   DIRECTORY_MAX_LIMIT,
@@ -91,6 +93,19 @@ async function readJsonBounded(c: Context, maxBytes: number): Promise<unknown | 
     return undefined;
   }
 }
+
+/** The §21.1/§21.3 posting bar, applied to the PAYLOAD rather than the route —
+ *  only publishing display metadata is a public contribution. */
+function isRestricted(c: Context<AuthEnv>): boolean {
+  return c.get('auth')?.accountState === 'restricted';
+}
+
+const restrictedBody = {
+  error: {
+    code: 'account_restricted',
+    message: 'This account cannot publish a public room listing right now.',
+  },
+} as const;
 
 const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
 
@@ -184,12 +199,6 @@ export function createPrivateRoomsRoutes() {
   app.post(
     '/',
     authMiddleware(),
-    // A `listed` stub publishes a name, description and avatar to anyone with
-    // the id — a PUBLIC contribution, so the WS-J `restrict` sanction has to
-    // reach it exactly as it reaches story and comment creation. `authMiddleware`
-    // deliberately admits a restricted account (it may still read and
-    // self-serve), so the posting bar is a separate guard, here as elsewhere.
-    requireUnrestricted(),
     perAccountRateLimit({ limit: 20, windowMs: 60 * 60_000, accountId }),
     async (c) => {
       const auth = c.get('auth');
@@ -204,6 +213,16 @@ export function createPrivateRoomsRoutes() {
       const parsed = privateRoomCreateStubRequestSchema.safeParse(raw);
       if (!parsed.success) {
         return c.json({ error: { code: 'invalid_request', message: 'Invalid stub payload' } }, 400);
+      }
+      // The `restrict` sanction bars PUBLIC contribution, and only a `listed`
+      // stub is one — it publishes a name, description and avatar into a
+      // directory anyone can browse. An `unlisted` stub publishes nothing: it
+      // is an opaque bootstrap pointer, and §4.2 makes it the MANDATORY default,
+      // so barring it turned every restricted account's rooms into `detached`
+      // ones whose invites cannot resolve. That is a second, unlegislated
+      // sanction on private communication, which the restriction is not.
+      if (parsed.data.directory_mode === 'listed' && isRestricted(c)) {
+        return c.json(restrictedBody, 403);
       }
       const result = await getPrivateRoomStubService().create(parsed.data, auth.userId);
       if (!result.ok) {
@@ -238,6 +257,30 @@ export function createPrivateRoomsRoutes() {
     return c.json(page, 200);
   });
 
+  // §21.1 — the stubs THIS account created.
+  //
+  // The endpoint whose absence three separate defects were argued from: "no
+  // endpoint lists an account's stubs" made a create whose response was lost
+  // unrecoverable, made a failed local write strand a record its own creator
+  // could never address, and made the DSAR export the only way to learn a
+  // record existed. A POST that commits and whose response never arrives is not
+  // an exotic case; it is what a dropped connection looks like.
+  //
+  // It discloses nothing new: the same rows already reach this account through
+  // its Art. 15 archive, and the projection is the owner's own record.
+  app.get(
+    '/mine',
+    authMiddleware(),
+    perAccountRateLimit({ limit: 60, windowMs: 60 * 60_000, accountId }),
+    async (c) => {
+      const auth = c.get('auth');
+      if (!auth)
+        return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
+      const stubs = await getPrivateRoomStubService().exportForAccount(auth.userId);
+      return c.json({ stubs }, 200);
+    },
+  );
+
   // §21.2 — fetch the bootstrap record.  Listed: open.  Unlisted: the
   // invite-derived blind token, or the same 404 an unknown room returns.
   app.get('/:roomServerId/bootstrap', rateLimit({ limit: 600, windowMs: 60_000 }), async (c) => {
@@ -262,9 +305,6 @@ export function createPrivateRoomsRoutes() {
   app.patch(
     '/:roomServerId',
     authMiddleware(),
-    // Same reason as create: a PATCH can introduce or rewrite the public
-    // display metadata, so a restricted account must not reach it either.
-    requireUnrestricted(),
     perAccountRateLimit({ limit: 120, windowMs: 60 * 60_000, accountId }),
     async (c) => {
       const auth = c.get('auth');
@@ -282,6 +322,16 @@ export function createPrivateRoomsRoutes() {
       if (!parsed.success) {
         return c.json({ error: { code: 'invalid_request', message: 'Invalid stub patch' } }, 400);
       }
+      // Same rule as create, keyed on the patch rather than the route: SETTING
+      // display metadata is the public act. Clearing it, refreshing a
+      // commitment, or changing a rendezvous policy publishes nothing, and a
+      // restricted account must still be able to do those — not least because
+      // clearing a name is the thing a sanctioned account most plausibly needs.
+      const publishesDisplay =
+        typeof parsed.data.display_name === 'string' ||
+        typeof parsed.data.display_description === 'string' ||
+        typeof parsed.data.display_avatar_public_cid === 'string';
+      if (publishesDisplay && isRestricted(c)) return c.json(restrictedBody, 403);
       const result = await getPrivateRoomStubService().update(
         params.data.roomServerId,
         parsed.data,
@@ -313,14 +363,42 @@ export function createPrivateRoomsRoutes() {
       // other delist implementation exists. Delisting stops the room
       // ADVERTISING itself and touches nothing else: no content, no membership,
       // no keys, and the record stays resolvable for members holding its token.
+      // The staff arm requires the SAME per-session assurance every other
+      // steward action does. `admin` on the account is not the bar — a
+      // reduced-assurance session (MFA enrolled but not cleared this session) is
+      // exactly the stolen-cookie case `requireSteward` exists for, and this
+      // action irreversibly demotes a public listing. The OWNER arm is
+      // deliberately untouched: a room's own creator is not a steward and must
+      // not need MFA to stop advertising their own room.
+      const staff = auth.roles.includes('admin') && auth.mfaActive && auth.mfaVerified;
       const result = await getPrivateRoomStubService().delist(
         params.data.roomServerId,
         auth.userId,
-        { staff: auth.roles.includes('admin') },
+        { staff },
       );
       if (!result.ok) {
         const { status, body } = refuse(result.reason);
         return c.json(body, status);
+      }
+      // A staff delist is a platform moderation action taken against somebody
+      // else's record, so it leaves a durable actor/target entry. An aggregate
+      // counter cannot answer "who removed this listing" — best-effort, because
+      // the demotion has already committed and losing the record must not
+      // un-take an action that protects people.
+      if (staff && result.value.room_server_id !== undefined) {
+        await writeAudit(getModerationServices(), {
+          actorUserId: auth.userId,
+          // The doctrine-steward roles do not cover this: §11.4 gives the
+          // power to platform staff as such, not to a safety/appeals lane.
+          actorRole: null,
+          action: 'private_room_stub_delisted',
+          targetType: 'private_room_stub',
+          targetId: params.data.roomServerId,
+          priorState: 'listed',
+          nextState: 'unlisted',
+          reversible: false,
+          notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
+        });
       }
       return c.json(result.value, 200);
     },

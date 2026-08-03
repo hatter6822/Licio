@@ -211,6 +211,32 @@ export async function listPrivateRoomDirectory(options?: {
   return await parseResponse(response, directoryPageSchema);
 }
 
+const myStubSchema = z.object({
+  room_server_id: z.string(),
+  stub_id: z.string(),
+  directory_mode: z.enum(DIRECTORY_MODES),
+  room_public_key: z.string(),
+  signed_stub: z.record(z.string(), z.unknown()),
+});
+export type MyStub = z.infer<typeof myStubSchema>;
+
+const myStubsSchema = z.object({ stubs: z.array(myStubSchema) });
+
+/**
+ * §21.1 — the directory records this account created.
+ *
+ * The recovery read. A create whose POST commits but whose RESPONSE is lost
+ * leaves a server record the client never learned the id of; without a way to
+ * ask, that record is unreachable forever — publicly enumerable, if it was
+ * listed. Matching on `room_public_key` (the room's own founder signing key,
+ * which the local session knows) is how a device identifies its own record
+ * among them.
+ */
+export async function listMyPrivateRoomStubs(): Promise<MyStub[]> {
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms/mine`);
+  return (await parseResponse(response, myStubsSchema)).stubs;
+}
+
 /** §21.4 — stop advertising a listed room (it stays resolvable for members). */
 export async function delistPrivateRoomStub(roomServerId: string): Promise<BootstrapStub> {
   const response = await apiFetch(

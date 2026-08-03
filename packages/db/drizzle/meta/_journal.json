@@ -841,6 +841,13 @@
       "when": 1783728000044,
       "tag": "0120_private_stub_capability_column",
       "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1783728000045,
+      "tag": "0121_private_stub_directory_index",
+      "breakpoints": true
     }
   ]
 }

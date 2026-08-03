@@ -270,6 +270,24 @@ export class PrivateRoomStubService {
     return { ok: true, value: this.#project(stub) };
   }
 
+  /**
+   * What a caller who does not own this record is told.
+   *
+   * `forbidden` and `not_found` are different answers, and for an UNLISTED
+   * record the difference is an existence oracle: bootstrap makes an unlisted
+   * room indistinguishable from an unknown one without the blind token
+   * (§15.3.1), and a mutation route answering `forbidden` hands the same fact
+   * back for free. A LISTED record's existence is public by its creator's own
+   * choice, so `forbidden` is the honest answer there.
+   *
+   * It lives here, once, because it was got right for the staff arm of `delist`
+   * and wrong on the ordinary non-owner branch of all three — the same rule
+   * re-derived at each call site is the shape that produced that.
+   */
+  static #refuseNonOwner(stub: StoredPrivateRoomStub): { ok: false; reason: StubFailure } {
+    return { ok: false, reason: stub.directoryMode === 'listed' ? 'forbidden' : 'not_found' };
+  }
+
   /** §21.3 — patch the mutable stub fields (creator only). */
   async update(
     roomServerId: string,
@@ -278,7 +296,9 @@ export class PrivateRoomStubService {
   ): Promise<StubResult<BootstrapResponse>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
-    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
     const setsDisplay =
       (request.display_name !== undefined && request.display_name !== null) ||
       (request.display_description !== undefined && request.display_description !== null) ||
@@ -337,7 +357,7 @@ export class PrivateRoomStubService {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
     const owner = stub.createdByAccountId === accountId;
-    if (!owner && options.staff !== true) return { ok: false, reason: 'forbidden' };
+    if (!owner && options.staff !== true) return PrivateRoomStubService.#refuseNonOwner(stub);
     // A STAFF caller may only act on a LISTED record.
     //
     // Delist is idempotent for the owner, which is right — but for staff that
@@ -363,7 +383,9 @@ export class PrivateRoomStubService {
   async remove(roomServerId: string, accountId: string): Promise<StubResult<{ removed: true }>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
-    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    if (stub.createdByAccountId !== accountId) {
+      return PrivateRoomStubService.#refuseNonOwner(stub);
+    }
     const removed = await this.store.remove(roomServerId);
     if (!removed) return { ok: false, reason: 'not_found' };
     this.#metrics.removed += 1;
@@ -481,6 +503,8 @@ export class PrivateRoomStubService {
   }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Split `<iso>|<stubId>`; anything else is treated as no cursor at all. */
 function parseDirectoryCursor(
   cursor: string | undefined,
@@ -490,7 +514,11 @@ function parseDirectoryCursor(
   if (at <= 0) return undefined;
   const createdAt = cursor.slice(0, at);
   const stubId = cursor.slice(at + 1);
-  if (stubId.length === 0 || Number.isNaN(Date.parse(createdAt))) return undefined;
+  // The id half must be a UUID, not merely non-empty: the Drizzle adapter
+  // compares it against a `uuid` column, so `…|not-a-uuid` makes Postgres reject
+  // the statement — turning a mangled link on an UNAUTHENTICATED route into a
+  // 500. Fail-closed to "no cursor", like every other malformed shape here.
+  if (!UUID_RE.test(stubId) || Number.isNaN(Date.parse(createdAt))) return undefined;
   return { createdAt, stubId };
 }
 

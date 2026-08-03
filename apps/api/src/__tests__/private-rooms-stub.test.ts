@@ -404,7 +404,42 @@ describe('§21.4 delist and delete', () => {
   });
 });
 
+describe('non-owner refusals — the oracle rule, in one place', () => {
+  it('answers not_found for an UNLISTED record and forbidden for a listed one', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    if (!listed.ok || !unlisted.ok) throw new Error('create failed');
+
+    // An unlisted record's EXISTENCE is what the blind token protects, so a
+    // mutation route that answered `forbidden` would hand it back for free —
+    // §15.3.1 through a status code instead of a response body. A listed
+    // record's existence is public by its creator's own choice.
+    for (const [target, expected] of [
+      [unlisted.value.room_server_id, 'not_found'],
+      [listed.value.room_server_id, 'forbidden'],
+    ] as const) {
+      const patched = await svc.update(target, { rendezvous_policy: 'manual_only' }, OTHER_ACCOUNT);
+      const removed = await svc.remove(target, OTHER_ACCOUNT);
+      const delisted = await svc.delist(target, OTHER_ACCOUNT);
+      expect(patched.ok === false && patched.reason).toBe(expected);
+      expect(removed.ok === false && removed.reason).toBe(expected);
+      expect(delisted.ok === false && delisted.reason).toBe(expected);
+    }
+  });
+});
+
 describe('§4.2 directory — a listed room is one that can actually be found', () => {
+  it('treats a cursor whose id is not a uuid as no cursor, not a 500', async () => {
+    // The Drizzle adapter compares this half against a `uuid` column, so a
+    // mangled link on an UNAUTHENTICATED route would make Postgres reject the
+    // statement. Fail-closed to the first page, like every other bad shape.
+    const svc = freshService();
+    await svc.create(listedRequest(), ACCOUNT);
+    const page = await svc.listDirectory({ cursor: '2026-08-03T00:00:00.000Z|not-a-uuid' });
+    expect(page.entries).toHaveLength(1);
+  });
+
   it('enumerates listed rooms and NEVER an unlisted one', async () => {
     const svc = freshService();
     const listed = await svc.create(listedRequest(), ACCOUNT);

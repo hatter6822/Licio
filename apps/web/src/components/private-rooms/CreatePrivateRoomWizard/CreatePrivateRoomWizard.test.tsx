@@ -153,25 +153,45 @@ describe('CreatePrivateRoomWizard', () => {
     }
   });
 
-  it('rolls the SERVER record back when the local write fails', async () => {
+  it('reconciles the SERVER record away when the local write fails', async () => {
     // The POST succeeds, the IndexedDB attach does not (quota, a private-mode
     // eviction). `room_server_id` is the only handle for delist and delete and
     // no endpoint lists an account's stubs, so dropping it would strand a
     // publicly-enumerable record its own creator could never reach.
     const calls: { method: string; url: string }[] = [];
+    // The room's founder signing key is generated per run, so the owner lookup
+    // echoes back whatever the create actually signed — that key is how the
+    // client identifies ITS record among the account's.
+    let signedRoomKey = '';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       calls.push({ method: init?.method ?? 'GET', url });
+      if (typeof init?.body === 'string' && init.body.includes('signed_stub')) {
+        const parsed = JSON.parse(init.body) as { signed_stub?: { room_public_key?: string } };
+        signedRoomKey = parsed.signed_stub?.room_public_key ?? '';
+      }
       const body = url.includes('/csrf-token')
         ? { token: 'test-csrf-token' }
-        : init?.method === 'DELETE'
-          ? { removed: true, removed_what: 'licio_directory_record', message: 'Removed.' }
-          : {
-              room_server_id: '11111111-1111-4111-8111-111111111111',
-              stub_id: '22222222-2222-4222-8222-222222222222',
-              bootstrap_endpoints: [],
-              created_at: '2026-08-02T00:00:00.000Z',
-            };
+        : url.includes('/private-rooms/mine')
+          ? {
+              stubs: [
+                {
+                  room_server_id: '11111111-1111-4111-8111-111111111111',
+                  stub_id: '22222222-2222-4222-8222-222222222222',
+                  directory_mode: 'unlisted',
+                  room_public_key: signedRoomKey,
+                  signed_stub: {},
+                },
+              ],
+            }
+          : init?.method === 'DELETE'
+            ? { removed: true, removed_what: 'licio_directory_record', message: 'Removed.' }
+            : {
+                room_server_id: '11111111-1111-4111-8111-111111111111',
+                stub_id: '22222222-2222-4222-8222-222222222222',
+                bootstrap_endpoints: [],
+                created_at: '2026-08-02T00:00:00.000Z',
+              };
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -208,7 +228,7 @@ describe('CreatePrivateRoomWizard', () => {
     }
   });
 
-  it('surfaces the orphan id when even the rollback fails', async () => {
+  it('says the record could not be confirmed when reconciliation itself fails', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.includes('/csrf-token')) {
@@ -217,7 +237,9 @@ describe('CreatePrivateRoomWizard', () => {
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (init?.method === 'DELETE') throw new Error('offline');
+      if (init?.method === 'DELETE' || url.includes('/private-rooms/mine')) {
+        throw new Error('offline');
+      }
       return new Response(
         JSON.stringify({
           room_server_id: '11111111-1111-4111-8111-111111111111',
@@ -240,9 +262,11 @@ describe('CreatePrivateRoomWizard', () => {
       }
       await user.click(screen.getByRole('button', { name: /create private room/i }));
 
-      // A record this device cannot address DOES exist. Its id is the only way
-      // back to it, so silence here is what would make it unmanageable.
-      expect(await screen.findByText(/11111111-1111-4111-8111-111111111111/)).toBeInTheDocument();
+      // A record may exist that this device cannot address — but the ACCOUNT
+      // still can, through the owner lookup. Say what to do rather than nothing.
+      expect(
+        await screen.findByText(/could not confirm whether a directory record was saved/i),
+      ).toBeInTheDocument();
     } finally {
       attachSpy.mockRestore();
       fetchSpy.mockRestore();
