@@ -435,6 +435,15 @@ export interface StoryStore {
    */
   listRecentPublic(limit: number): Promise<StoryRecord[]>;
   /**
+   * The batched by-id read, restricted the same way.
+   *
+   * `listRecentPublic` and a later `getByIds` are two moments: a story can be
+   * hidden or turned `room_only` in between, and the enrichment would then
+   * return the title and topics of a row that is no longer public. Same
+   * restriction, same query, so the race closes rather than narrowing.
+   */
+  getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>>;
+  /**
    * One keyset page of a user's submitted stories (DSAR export, WS-D §19.3):
    * `(created_at, story_id)` ascending, strictly after `after`. The export
    * hook loops until a short page — NO truncation cap (a prolific submitter's
@@ -977,6 +986,17 @@ export class InMemoryStoryStore implements StoryStore {
       .filter((story) => story.visibility === 'public' && story.hiddenState === null)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
+  }
+
+  async getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    for (const id of storyIds) {
+      const story = this.#stories.get(id);
+      if (story && story.visibility === 'public' && story.hiddenState === null) {
+        out.set(id, story);
+      }
+    }
+    return out;
   }
 
   async listBySubmitter(

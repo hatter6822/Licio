@@ -140,6 +140,7 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
   async update(
     roomServerId: string,
     patch: PrivateRoomStubPatch,
+    options: { readonly requireListed?: boolean } = {},
   ): Promise<StoredPrivateRoomStub | null> {
     const updated = await this.db
       .update(privateRoomStubs)
@@ -171,7 +172,18 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
         ...(patch.stubSignature !== undefined ? { stubSignature: patch.stubSignature } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(privateRoomStubs.roomServerId, roomServerId))
+      .where(
+        options.requireListed === true
+          ? and(
+              eq(privateRoomStubs.roomServerId, roomServerId),
+              // ATOMIC with the write: a delist committing between the service's
+              // mode check and this statement would otherwise make Postgres
+              // reject a legal request on the display-only CHECK — a 500 the
+              // caller cannot act on. As a predicate it is simply a no-match.
+              eq(privateRoomStubs.directoryMode, 'listed'),
+            )
+          : eq(privateRoomStubs.roomServerId, roomServerId),
+      )
       .returning();
     const row = updated[0];
     return row ? toStub(row) : null;

@@ -324,24 +324,36 @@ export class PrivateRoomStubService {
     // A PATCH can no longer drop the capability or desynchronise the
     // commitments: the capability is not in the body it replaces, and the
     // columns are re-derived from the body the store is handed.
-    const next = await this.store.update(roomServerId, {
-      ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
-      ...(request.display_description !== undefined
-        ? { displayDescription: request.display_description }
-        : {}),
-      ...(request.display_avatar_public_cid !== undefined
-        ? { displayAvatarPublicCid: request.display_avatar_public_cid }
-        : {}),
-      ...(request.rendezvous_policy !== undefined
-        ? { rendezvousPolicy: request.rendezvous_policy }
-        : {}),
-      ...(request.bootstrap_hints !== undefined ? { bootstrapHints: request.bootstrap_hints } : {}),
-      ...(request.latest_manifest_commitment !== undefined
-        ? { latestManifestCommitment: request.latest_manifest_commitment }
-        : {}),
-      ...(request.signed_stub !== undefined ? { signedStub: request.signed_stub } : {}),
-      ...(request.stub_signature !== undefined ? { stubSignature: request.stub_signature } : {}),
-    });
+    const next = await this.store.update(
+      roomServerId,
+      {
+        ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
+        ...(request.display_description !== undefined
+          ? { displayDescription: request.display_description }
+          : {}),
+        ...(request.display_avatar_public_cid !== undefined
+          ? { displayAvatarPublicCid: request.display_avatar_public_cid }
+          : {}),
+        ...(request.rendezvous_policy !== undefined
+          ? { rendezvousPolicy: request.rendezvous_policy }
+          : {}),
+        ...(request.bootstrap_hints !== undefined
+          ? { bootstrapHints: request.bootstrap_hints }
+          : {}),
+        ...(request.latest_manifest_commitment !== undefined
+          ? { latestManifestCommitment: request.latest_manifest_commitment }
+          : {}),
+        ...(request.signed_stub !== undefined ? { signedStub: request.signed_stub } : {}),
+        ...(request.stub_signature !== undefined ? { stubSignature: request.stub_signature } : {}),
+      },
+      // Carry the mode check INTO the write when the patch publishes display
+      // metadata: the check above and this statement are different moments, and
+      // a delist between them is a legal race.
+      { requireListed: setsDisplay },
+    );
+    // `not_found` covers both "gone" and "no longer listed", which is the right
+    // answer for the racing case too: the record the caller described no longer
+    // exists in the state they described it in.
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.updated += 1;
     return { ok: true, value: this.#project(next) };
@@ -364,7 +376,7 @@ export class PrivateRoomStubService {
     roomServerId: string,
     accountId: string,
     options: { readonly staff?: boolean } = {},
-  ): Promise<StubResult<BootstrapResponse>> {
+  ): Promise<StubResult<BootstrapResponse & { readonly staff_action: boolean }>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
     const owner = stub.createdByAccountId === accountId;
@@ -383,7 +395,14 @@ export class PrivateRoomStubService {
     const next = await this.store.delist(roomServerId);
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;
-    return { ok: true, value: this.#project(next) };
+    // Whether STAFF AUTHORITY was actually used — not whether the caller holds
+    // it. A creator who is also an admin takes the owner arm, and an audit
+    // saying staff acted against somebody else's record would be false. Nor was
+    // anything demoted if the record was already `unlisted`: an idempotent owner
+    // delist is a no-op, and recording `listed → unlisted` for it would put a
+    // transition that did not happen into a tamper-evident trail.
+    const staffAction = !owner && stub.directoryMode === 'listed';
+    return { ok: true, value: { ...this.#project(next), staff_action: staffAction } };
   }
 
   /**

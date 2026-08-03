@@ -385,7 +385,11 @@ export function createPrivateRoomsRoutes() {
       // counter cannot answer "who removed this listing" — best-effort, because
       // the demotion has already committed and losing the record must not
       // un-take an action that protects people.
-      if (staff && result.value.room_server_id !== undefined) {
+      // `staff_action` is the SERVICE's answer to "was staff authority used",
+      // not this route's guess from the caller's roles: a creator who is also an
+      // admin takes the owner arm, and an already-unlisted record demotes
+      // nothing. Auditing on the guess wrote both as staff moderation.
+      if (result.value.staff_action) {
         await writeAudit(getModerationServices(), {
           actorUserId: auth.userId,
           // The doctrine-steward roles do not cover this: §11.4 gives the
@@ -400,7 +404,8 @@ export function createPrivateRoomsRoutes() {
           notes: 'Staff delist of a public directory listing (PRIVATE_SPEC §11.4/§21.4).',
         });
       }
-      return c.json(result.value, 200);
+      const { staff_action: _internal, ...body } = result.value;
+      return c.json(body, 200);
     },
   );
 

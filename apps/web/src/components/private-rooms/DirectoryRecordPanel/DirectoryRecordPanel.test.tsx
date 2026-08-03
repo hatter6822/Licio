@@ -49,10 +49,9 @@ function sessionDouble(
   stub:
     | { roomServerId: string; stubId: string; directoryMode: string; bootstrapBlindId: string }
     | undefined,
-  registeredHere = true,
 ): PrivateRoomSession {
   return {
-    directoryStub: stub === undefined ? undefined : { capability: stub, registeredHere },
+    directoryStub: stub === undefined ? undefined : { capability: stub },
     clearDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
       roomPublicKey: 'cm9vbS1rZXk',
@@ -71,10 +70,29 @@ const STUB = {
   bootstrapBlindId: TOKEN,
 };
 
+/** When true, `GET /private-rooms/mine` reports this account owns the record. */
+let ownsRecord = true;
+
 function mockApi(handler: (url: string, init?: RequestInit) => unknown): void {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
-    const body = url.includes('/csrf-token') ? { token: 'csrf' } : handler(url, init);
+    const body = url.includes('/csrf-token')
+      ? { token: 'csrf' }
+      : url.includes('/private-rooms/mine')
+        ? {
+            stubs: ownsRecord
+              ? [
+                  {
+                    room_server_id: ROOM_SERVER_ID,
+                    stub_id: STUB.stubId,
+                    directory_mode: 'listed',
+                    room_public_key: 'cm9vbS1rZXk',
+                    signed_stub: {},
+                  },
+                ]
+              : [],
+          }
+        : handler(url, init);
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -83,6 +101,7 @@ function mockApi(handler: (url: string, init?: RequestInit) => unknown): void {
 }
 
 afterEach(() => {
+  ownsRecord = true;
   vi.restoreAllMocks();
 });
 
@@ -138,14 +157,15 @@ describe('DirectoryRecordPanel', () => {
     expect(screen.queryByText(/deleted the room/i)).toBeNull();
   });
 
-  it('shows a member who does NOT own the record none of the controls', async () => {
-    // Ownership is the ACCOUNT that created the stub, which is what the
-    // §21.3/§21.4 endpoints authorize against — not the room role. A joined
-    // device holds the capability and owns nothing.
+  it('shows a member whose ACCOUNT does not own the record none of the controls', async () => {
+    // Ownership is resolved against the current account, not against device
+    // history: a private-room session survives a logout, so the next account to
+    // sign in on this device must not inherit the controls.
+    ownsRecord = false;
     mockApi(() => bootstrapBody());
-    render(<DirectoryRecordPanel session={sessionDouble(STUB, false)} />);
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
     await screen.findByText('Neighbourhood watch');
-    expect(screen.queryByRole('button')).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('button')).toBeNull());
   });
 
   it('forgets the handle once the record is deleted', async () => {

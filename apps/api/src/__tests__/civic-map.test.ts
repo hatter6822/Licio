@@ -54,7 +54,7 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
             .filter((s) => !omitted.has(s.storyId))
             .map((s) => ({ storyId: s.storyId, title: s.title, topicIds: s.topicIds })),
         ),
-      getByIds: (ids: readonly string[]) =>
+      getPublicByIds: (ids: readonly string[]) =>
         Promise.resolve(
           new Map(
             stories
@@ -119,6 +119,33 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     expect(await buildCivicMap(events, ingestion, NOW)).toBeNull();
   });
 
+  it('leaves a story with no activity this hour OUT of the landscape entirely', async () => {
+    // The all-zero guard covers a quiet window; this covers the mixed one. A
+    // single active story must not drag silent ones into the map as level-0
+    // peaks that then form basins out of topic adjacency alone.
+    const mixed = [
+      {
+        storyId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        title: 'Busy',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 12,
+      },
+      {
+        storyId: 'bbbbbbbb-2222-4222-8222-222222222222',
+        title: 'Silent',
+        topicIds: [TOPIC_A?.id ?? ''],
+        events: 0,
+      },
+    ];
+    const { events, ingestion } = services(mixed);
+    const map = await buildCivicMap(events, ingestion, NOW);
+    expect(map).not.toBeNull();
+    expect(map?.basins.map((basin) => basin.title)).toEqual(['Busy']);
+    // …and no merge, because the edge to a node outside the landscape is not an
+    // edge — the two stories share a topic but only one drew attention.
+    expect(map?.merges).toEqual([]);
+  });
+
   it('never surfaces the UNCLASSIFIED sentinel as a topic', async () => {
     const { events, ingestion } = services([
       story('11111111-1111-4111-8111-111111111111', 10, [UNCLASSIFIED_TOPIC_ID]),
@@ -153,7 +180,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
         listRecentPublic: () => Promise.resolve(rows),
         // …and by enrichment time a flood of newer stories has landed. A
         // window-based re-read would miss both; an id-based one cannot.
-        getByIds: (ids: readonly string[]) =>
+        getPublicByIds: (ids: readonly string[]) =>
           Promise.resolve(
             new Map(rows.filter((r) => ids.includes(r.storyId)).map((r) => [r.storyId, r])),
           ),
@@ -192,7 +219,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
         listRecentPublic: () => Promise.resolve(rows),
         // The row really is gone by enrichment time — the fallback now MEANS
         // deleted, because ordinary ingestion can no longer produce it.
-        getByIds: (ids: readonly string[]) =>
+        getPublicByIds: (ids: readonly string[]) =>
           Promise.resolve(
             new Map(
               rows

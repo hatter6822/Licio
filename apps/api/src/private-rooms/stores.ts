@@ -346,8 +346,24 @@ export interface PrivateRoomStubStore {
   create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub>;
   /** The stub for a room server id, or null when there is none. */
   getByRoomId(roomServerId: string): Promise<StoredPrivateRoomStub | null>;
-  /** Apply a §21.3 patch; null when the stub is gone. */
-  update(roomServerId: string, patch: PrivateRoomStubPatch): Promise<StoredPrivateRoomStub | null>;
+  /**
+   * Apply a §21.3 patch; null when the stub is gone — OR when
+   * `requireListed` was asked for and the record is no longer `listed`.
+   *
+   * `requireListed` exists because the mode check and the write are separate
+   * moments. A patch that SETS display metadata is legal only on a `listed`
+   * record, and a delist can commit in between: Postgres then rejects the write
+   * on `private_room_stubs_listed_display_only` (a 500 from a legal request)
+   * while the in-memory adapter cheerfully produced an `unlisted` record
+   * carrying a public name — the invariant broken in dev, and a crash in
+   * production, from the same race. Carrying the mode into the WHERE clause
+   * makes both adapters answer the same thing: the patch simply does not apply.
+   */
+  update(
+    roomServerId: string,
+    patch: PrivateRoomStubPatch,
+    options?: { readonly requireListed?: boolean },
+  ): Promise<StoredPrivateRoomStub | null>;
   /**
    * §21.4 delist — demote `listed → unlisted` and DROP the display metadata,
    * keeping the bootstrap record itself so existing members can still resolve
@@ -429,9 +445,18 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
     return Promise.resolve(this.#stubs.get(roomServerId) ?? null);
   }
 
-  update(roomServerId: string, patch: PrivateRoomStubPatch): Promise<StoredPrivateRoomStub | null> {
+  update(
+    roomServerId: string,
+    patch: PrivateRoomStubPatch,
+    options: { readonly requireListed?: boolean } = {},
+  ): Promise<StoredPrivateRoomStub | null> {
     const current = this.#stubs.get(roomServerId);
     if (!current) return Promise.resolve(null);
+    // The same predicate the Drizzle adapter puts in its WHERE clause — so a
+    // patch that races a delist is refused identically in both.
+    if (options.requireListed === true && current.directoryMode !== 'listed') {
+      return Promise.resolve(null);
+    }
     const next: StoredPrivateRoomStub = {
       ...current,
       ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),

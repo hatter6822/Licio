@@ -30,6 +30,7 @@ import {
   deletePrivateRoomStub,
   delistPrivateRoomStub,
   fetchPrivateRoomBootstrap,
+  listMyPrivateRoomStubs,
   updatePrivateRoomStub,
 } from '../../../lib/private-rooms-api.js';
 import type { PrivateRoomSession } from '../../../private-p2p/room-manager.js';
@@ -48,12 +49,16 @@ export function DirectoryRecordPanel({
   const t = useT();
   const headingId = useId();
   const stub = session.directoryStub?.capability;
-  // The mutating endpoints authorize by the ACCOUNT that created the record,
-  // not by room role. Using `isAdmin` as the proxy was wrong in both
-  // directions: a non-founder room admin saw controls that always 403, and a
-  // creator who is no longer a room admin lost controls they are still
-  // authorized to use.
-  const owned = session.directoryStub?.registeredHere === true;
+  // Ownership is resolved against the CURRENT ACCOUNT, by asking the server
+  // which records it owns.
+  //
+  // `registeredHere` was the second wrong proxy in a row. Room role was wrong
+  // because the endpoints authorize by account; the persisted flag was wrong
+  // because it records this DEVICE's history — private-room sessions survive a
+  // logout, so another account signing in on the same device inherits it, while
+  // the owning account opening the room through a grant on a second device does
+  // not. Only the server knows, and it now says: `GET /v1/private-rooms/mine`.
+  const [owned, setOwned] = useState(false);
   const [record, setRecord] = useState<BootstrapStub | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
   const [busy, setBusy] = useState<Action>(null);
@@ -84,6 +89,23 @@ export function DirectoryRecordPanel({
   useEffect(() => {
     void read();
   }, [read]);
+
+  useEffect(() => {
+    if (roomServerId === undefined) return;
+    let live = true;
+    // Fail CLOSED: an unanswerable ownership question hides the controls rather
+    // than offering ones that would 403.
+    void listMyPrivateRoomStubs()
+      .then((mine) => {
+        if (live) setOwned(mine.some((entry) => entry.room_server_id === roomServerId));
+      })
+      .catch(() => {
+        if (live) setOwned(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [roomServerId]);
 
   // A `detached` room, or one whose registration never succeeded, has no record
   // to show — and inventing an empty one would suggest there is something here

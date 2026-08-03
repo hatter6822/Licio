@@ -429,6 +429,53 @@ describe('non-owner refusals — the oracle rule, in one place', () => {
   });
 });
 
+describe('delist — what the audit trail is told', () => {
+  it('reports staff_action only when staff authority was ACTUALLY used', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    if (!listed.ok) throw new Error('create failed');
+
+    // The CREATOR takes the owner arm even holding staff powers, so an audit
+    // entry saying staff acted against somebody else's record would be false.
+    const own = await svc.delist(listed.value.room_server_id, ACCOUNT, { staff: true });
+    expect(own.ok && own.value.staff_action).toBe(false);
+
+    // …and an idempotent owner delist of an already-unlisted record demotes
+    // nothing, so it must not record a `listed → unlisted` that did not happen.
+    const again = await svc.delist(listed.value.room_server_id, ACCOUNT, { staff: true });
+    expect(again.ok && again.value.staff_action).toBe(false);
+  });
+
+  it('reports staff_action for a non-owner acting on a listed record', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    if (!listed.ok) throw new Error('create failed');
+    const staff = await svc.delist(listed.value.room_server_id, OTHER_ACCOUNT, { staff: true });
+    expect(staff.ok && staff.value.staff_action).toBe(true);
+  });
+});
+
+describe('§21.3 display patch — atomic with the mode it depends on', () => {
+  it('refuses a display patch against a record delisted underneath it', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    // Simulate the race by delisting first: the service's mode check ran on a
+    // `listed` record in the real race, and the write lands on an unlisted one.
+    await svc.delist(created.value.room_server_id, ACCOUNT);
+    const patched = await svc.update(
+      created.value.room_server_id,
+      { display_name: 'Snuck in' },
+      ACCOUNT,
+    );
+    // Refused — and NOT by producing an unlisted record carrying a public name,
+    // which is what the in-memory adapter used to do while Postgres 500ed.
+    expect(patched.ok).toBe(false);
+    const after = await svc.bootstrap(created.value.room_server_id, TOKEN);
+    expect(after.ok && after.value.display_name).toBeNull();
+  });
+});
+
 describe('§4.2 directory — a listed room is one that can actually be found', () => {
   it('treats a cursor whose id is not a uuid as no cursor, not a 500', async () => {
     // The Drizzle adapter compares this half against a `uuid` column, so a

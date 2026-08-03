@@ -66,7 +66,6 @@ const storedRoomSessionSchema = z
           directoryMode: z.enum(['listed', 'unlisted']),
           bootstrapBlindId: z.string().min(1),
         }),
-        registeredHere: z.boolean(),
       })
       .optional(),
   })
@@ -120,15 +119,17 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
 /**
  * The §21 directory handle a room holds locally.
  *
- * Split into the part that TRAVELS and the part that does not, because the
- * difference is not obvious at a call site and getting it wrong is silent.
- * `capability` is what a join grant and an invite carry — it is what any member
- * needs to resolve the record. `registeredHere` never leaves this device: it
- * records that THIS account created the record, which is what the §21.3/§21.4
- * endpoints authorize against. Room role is not a substitute — a non-founder
- * room admin gets 403 from every mutation, and a creator who is no longer a
- * room admin is still authorized server-side — so a UI that offered controls by
- * role offered the wrong ones in both directions.
+ * ONLY the capability — the thing any member needs to resolve the record, and
+ * the thing a join grant and an invite carry.
+ *
+ * It deliberately carries no notion of OWNERSHIP. Two proxies for that were
+ * tried and both were wrong: the room's admin role (the endpoints authorize by
+ * ACCOUNT, so a non-founder room admin got controls that 403 and a creator who
+ * lost the role lost controls they still had), and a persisted
+ * "registered on this device" flag (a device outlives a session, so the next
+ * account to sign in here inherited it, while the owner on a second device did
+ * not). Ownership is the server's answer to give — `GET /v1/private-rooms/mine`
+ * — and a local record cannot hold it without going stale.
  */
 export interface StoredDirectoryStub {
   readonly capability: {
@@ -137,9 +138,6 @@ export interface StoredDirectoryStub {
     readonly directoryMode: 'listed' | 'unlisted';
     readonly bootstrapBlindId: string;
   };
-  /** True only on the device whose account created the record. NEVER copied
-   *  into a grant or an invite: those go to somebody else's account. */
-  readonly registeredHere: boolean;
 }
 
 /** One persisted epoch's key material (mirrors the engine's `HeldEpochKeys`). */

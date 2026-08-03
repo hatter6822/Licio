@@ -773,14 +773,7 @@ export class PrivateRoomSession {
      *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
     readonly bootstrapBlindId: string;
   }): Promise<void> {
-    // The device that REGISTERS the record is the one whose account owns it:
-    // `attachDirectoryStub` is reached only from the create path. A device that
-    // receives the handle through a grant goes through `finishJoin`, which sets
-    // `registeredHere: false` — see `StoredDirectoryStub`.
-    this.session = {
-      ...this.session,
-      directoryStub: { capability: stub, registeredHere: true },
-    };
+    this.session = { ...this.session, directoryStub: { capability: stub } };
     await putRoomSession(this.session);
   }
 
@@ -1613,9 +1606,8 @@ export class PrivateRoomSession {
       // directory record cannot bootstrap from it, update it, or even see that
       // it exists — and the founder is not always the one who is around later.
       // The CAPABILITY only, named field by field rather than spread: a spread
-      // would carry whatever local bookkeeping the stored handle grows next, and
-      // `registeredHere` in particular would tell the joiner it owns a record
-      // created by somebody else's account.
+      // would carry whatever local bookkeeping the stored handle grows next,
+      // and this blob goes to somebody else's account.
       ...(this.session.directoryStub
         ? { directory: { ...this.session.directoryStub.capability } }
         : {}),
@@ -1706,11 +1698,7 @@ export class PrivateRoomSession {
       bootstrapDevices: grant.bootstrapDevices,
       ...(base ? { snapshotBase: base } : {}),
       createdAtBucket: coarseBucket(),
-      // A joined device holds the capability and does NOT own the record: the
-      // §21.3/§21.4 endpoints authorize by the account that created it.
-      ...(grant.directory
-        ? { directoryStub: { capability: grant.directory, registeredHere: false } }
-        : {}),
+      ...(grant.directory ? { directoryStub: { capability: grant.directory } } : {}),
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);

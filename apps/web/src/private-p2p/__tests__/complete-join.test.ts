@@ -303,9 +303,9 @@ describe('§21 directory capability carried through the join (WS-S.1.2b)', () =>
       '11111111-1111-4111-8111-111111111111',
     );
     expect(joiner.directoryStub?.capability.bootstrapBlindId).toBe(payload.bootstrapBlindId);
-    // A joined device HOLDS the capability and OWNS nothing: the §21.3/§21.4
-    // endpoints authorize by the account that created the record.
-    expect(joiner.directoryStub?.registeredHere).toBe(false);
+    // The handle carries the CAPABILITY and nothing else — no local notion of
+    // ownership, which the §21.3/§21.4 endpoints answer per ACCOUNT anyway.
+    expect(Object.keys(joiner.directoryStub ?? {})).toEqual(['capability']);
   });
 
   it('puts the capability in the SEALED INVITE, not only the post-admission grant', async () => {

@@ -360,6 +360,25 @@ export class DrizzleStoryStore implements StoryStore {
     return out;
   }
 
+  async getPublicByIds(storyIds: readonly string[]): Promise<Map<string, StoryRecord>> {
+    const out = new Map<string, StoryRecord>();
+    if (storyIds.length === 0) return out;
+    // The restriction is in the QUERY, matching `listRecentPublic` — so a story
+    // hidden between the two reads is simply absent rather than enriched.
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(
+        and(
+          inArray(storiesTable.storyId, [...storyIds]),
+          eq(storiesTable.visibility, 'public'),
+          isNull(storiesTable.hiddenState),
+        ),
+      );
+    for (const row of rows) out.set(row.storyId, this.#toRecord(row));
+    return out;
+  }
+
   async getByCanonicalUrl(canonicalUrl: string, tier: StoryDedupTier): Promise<StoryRecord | null> {
     // WS-Q.2.2a — tier-scoped lookup matching the two partial unique indexes:
     // a VISIBLE (hidden_state IS NULL) public story (global) or room_only story

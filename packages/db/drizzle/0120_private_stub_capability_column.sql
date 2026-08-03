@@ -25,40 +25,32 @@
 -- lose the record the moment it is delisted (the create path already refused a
 -- body without one — this makes the database refuse it too).
 
-ALTER TABLE "private_room_stubs"
-  ADD COLUMN "bootstrap_blind_id" text;
---> statement-breakpoint
-
--- Backfill from where the value used to live, then drop it from the blob so the
--- two can never disagree. Both statements are no-ops on a table with no rows.
-UPDATE "private_room_stubs"
-  SET "bootstrap_blind_id" = "signed_stub" ->> 'bootstrap_blind_id'
-  WHERE "signed_stub" ? 'bootstrap_blind_id';
---> statement-breakpoint
-
--- A pre-existing row with no token in its body cannot be repaired here: the
--- value derives from the room's epoch-0 rendezvous key, which the server has
--- never held. Such a row is already unresolvable for its members, so it is
--- removed rather than blocking the migration with a NOT NULL violation — the
--- room itself is untouched, since the server never held it.
+-- MIGRATING A ROW IN PLACE IS NOT POSSIBLE, and pretending otherwise is worse
+-- than dropping it.
 --
--- The SHELL goes with it, exactly as `remove()` does it. The FK cascades from
--- `rooms` to `private_room_stubs`, not in reverse, so deleting the stub alone
--- would leave a room row still asserting "this account created a private room
--- at time T" — the §8.1 activity trace — and unreachable besides: both the
--- purge and the DSAR export find shells THROUGH their stub, so nothing would
--- ever see it again. Deleting the shell cascades the stub, so this one
--- statement does both.
+-- `stub_signature` covers the canonical bytes of the ORIGINAL body. Lifting
+-- `bootstrap_blind_id` out of that body would leave every pre-existing record
+-- serving a body/signature pair that cannot verify — and carrying a v1 schema
+-- tag the current reader does not accept. The server holds no room key, so it
+-- cannot re-sign; only the room can, and only from a member device.
+--
+-- An unverifiable directory record is worse than an absent one: a member who
+-- checks the signature concludes their own room's entry was forged. So the
+-- pre-existing stubs are REMOVED, shell and all, and a member re-registers from
+-- the room's settings — which re-signs the v2 body with the room's own key,
+-- the only place that can.
+--
+-- The ROOM is untouched. It lives on member devices and the server never held
+-- it; what goes is Licio's bootstrap record, which is what §21.4 says a delete
+-- of this kind is. Deleting the shell cascades the stub (the FK runs that way
+-- and not the reverse), so this single statement takes both — leaving an
+-- orphaned shell would keep a row asserting "this account created a private
+-- room at time T" that nothing could ever find again.
 DELETE FROM "rooms"
-  WHERE "room_id" IN (
-    SELECT "room_server_id" FROM "private_room_stubs" WHERE "bootstrap_blind_id" IS NULL
-  );
+  WHERE "room_id" IN (SELECT "room_server_id" FROM "private_room_stubs");
 --> statement-breakpoint
 
+-- The capability, as its own column: NOT NULL, so a stub without one — whose
+-- members lose the record the moment it is delisted — cannot be constructed.
 ALTER TABLE "private_room_stubs"
-  ALTER COLUMN "bootstrap_blind_id" SET NOT NULL;
---> statement-breakpoint
-
-UPDATE "private_room_stubs"
-  SET "signed_stub" = "signed_stub" - 'bootstrap_blind_id'
-  WHERE "signed_stub" ? 'bootstrap_blind_id';
+  ADD COLUMN "bootstrap_blind_id" text NOT NULL;

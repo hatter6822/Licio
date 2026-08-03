@@ -92,7 +92,15 @@ export async function buildCivicMap(
 
   const graph = reebGraph(nodes, edges);
 
-  // Enrich BY THE GRAPH'S OWN IDS, not by a second `listRecent`.
+  // Enrich BY THE GRAPH'S OWN IDS, and through the PUBLIC-ONLY read.
+  //
+  // Assembly and enrichment are two moments: a story can be hidden or turned
+  // `room_only` in between, and an unrestricted by-id read would then hand an
+  // integrity analyst the title and topics of a row that is no longer public.
+  // Same restriction in both queries closes the race rather than narrowing it —
+  // a story that leaves the public set between them lands in the honest
+  // "Story unavailable" branch below, which is what it now is to this surface.
+  //
   //
   // A repeat `listRecent(n)` returns the n most recent stories AT THAT INSTANT,
   // so stories arriving between assembly and this read push older graph members
@@ -100,14 +108,19 @@ export async function buildCivicMap(
   // unavailable" with no topics, blaming ordinary concurrent ingestion on a
   // deletion. Fetching the exact ids removes the race and makes the fallback
   // mean what it says: the row really is gone.
-  const byId = await ingestion.stories.getByIds(nodes.map((node) => node.id));
+  const byId = await ingestion.stories.getPublicByIds(nodes.map((node) => node.id));
   const finalBasins = new Set(graph.finalBasins);
 
   // Only the basins' peak stories need a thread, not every node — and they are
   // fetched in ONE query. A per-basin `getThreadByStoryId` would be a round trip
   // per basin against Postgres on a surface a steward reloads by hand.
   const threadByStory = await ingestion.stories.getThreadsByStoryIds(
-    graph.peaks.map((peak) => peak.basin),
+    // Only for peaks whose story is STILL PUBLIC. A thread id is a handle to a
+    // conversation, so fetching one for a story that left the public set
+    // between the two reads would publish exactly what the public-only
+    // enrichment above just withheld — and it is also the bridge-request
+    // target, so an analyst could act on it.
+    graph.peaks.map((peak) => peak.basin).filter((basin) => byId.has(basin)),
   );
 
   // Topics for EVERY landscape node, not only the peaks: a saddle's subject

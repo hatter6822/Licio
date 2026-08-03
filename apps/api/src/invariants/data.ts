@@ -858,10 +858,23 @@ export async function assembleEngagementLandscape(
   const recent = await ingestion.stories.listRecentPublic(100);
   const hourMs = 3_600_000;
   const windowStart = new Date(Math.floor(nowMs / hourMs) * hourMs - hourMs).toISOString();
+  // Only stories with ACTIVITY IN THIS WINDOW are nodes.
+  //
+  // The landscape describes where attention went this hour, and a story with
+  // zero events received none. Including it as a level-0 node let `reebGraph`
+  // build basins and merges out of topic adjacency alone — clusters the panel
+  // then described as attention grouping "this hour" when nothing had happened
+  // to them. Excluding it entirely is the same rule the all-zero guard applies,
+  // held per node instead of per landscape, so a single active story cannot
+  // drag ninety-nine silent ones into the map with it.
   const nodes: ReebNode[] = [];
+  const active = new Set<string>();
   for (const story of recent) {
     const window = await events.windowStore.get(story.storyId, windowStart, '1h');
-    nodes.push({ id: story.storyId, value: window?.eventCount ?? 0 });
+    const value = window?.eventCount ?? 0;
+    if (value <= 0) continue;
+    active.add(story.storyId);
+    nodes.push({ id: story.storyId, value });
   }
   const edges: ReebEdge[] = [];
   for (let i = 0; i < recent.length; i += 1) {
@@ -869,6 +882,8 @@ export async function assembleEngagementLandscape(
       const a = recent[i];
       const b = recent[j];
       if (!a || !b) continue;
+      // An edge to a node that is not in the landscape is not an edge.
+      if (!active.has(a.storyId) || !active.has(b.storyId)) continue;
       // Two stories are topic-adjacent only through a REAL shared topic — the
       // sentinel must not create an engagement-landscape edge between unrelated
       // unclassified stories.
