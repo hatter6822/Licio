@@ -17,7 +17,7 @@ import {
   ROOM_TYPES,
   type RoomType,
 } from '@licio/shared';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '../../../i18n/index.js';
 import { ApiClientError } from '../../../lib/api.js';
 import {
@@ -126,9 +126,27 @@ export function CreatePrivateRoomWizard({
   // the select then showed one option while holding a different, stale value —
   // so the room was created and the stub POST 401'd, which is the bug the
   // account-aware default was meant to remove.
+  // Whether the signed-out branch is the reason `directory` says `detached`.
+  //
+  // The distinction matters on the TRANSITION: a session confirmed after mount
+  // (a valid cookie the client had not resolved yet) must release the value the
+  // signed-out branch forced — `detached` is not a quieter default, it is a room
+  // with no bootstrap record at all — while a `detached` the user CHOSE stays
+  // chosen. A flag, not a re-derivation, because only this component knows which
+  // of the two it wrote.
+  const forcedDetached = useRef(!signedIn);
   useEffect(() => {
-    if (!signedIn) setDirectory('detached');
-    else if (restricted) setDirectory((current) => (current === 'listed' ? 'unlisted' : current));
+    if (!signedIn) {
+      forcedDetached.current = true;
+      setDirectory('detached');
+      return;
+    }
+    if (forcedDetached.current) {
+      forcedDetached.current = false;
+      setDirectory(restricted ? 'unlisted' : DEFAULT_P2P_DIRECTORY_MODE);
+      return;
+    }
+    if (restricted) setDirectory((current) => (current === 'listed' ? 'unlisted' : current));
   }, [signedIn, restricted]);
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);

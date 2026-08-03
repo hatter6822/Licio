@@ -15,7 +15,8 @@
 //   • the stub surface authenticates writes (§21.1) and leaves reads open.
 
 import { randomUUID } from 'node:crypto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { canonicalDirectoryStubBytes, type SignedDirectoryStubBody } from '@licio/shared';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
 import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
 import {
@@ -31,13 +32,62 @@ import {
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const OTHER_ACCOUNT = '22222222-2222-4222-8222-222222222222';
 const TOKEN = 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A';
-/** The canonical §8.2 stub body — a CLOSED set of PUBLIC commitments.
- *  The capability is NOT in here: it is its own never-projected column. */
-const SIGNED_STUB = {
-  schema: 'licio.private.directory_stub.v2',
-  room_public_key: 'HxxbL613hDQCTxU3mGNGknkX9HVabn0_2R8iZTt8MTI',
-  manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8',
-} as const;
+const MANIFEST_COMMITMENT = 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZX8';
+
+/**
+ * REAL room keys, because registration now proves possession.
+ *
+ * The fixtures used to carry an invented `room_public_key` and an unrelated
+ * 64-byte `stub_signature`, which is precisely the forgery the server refuses:
+ * a founder public key is public, so the signature is the only evidence that
+ * the caller holds the room. A pool is generated once (Ed25519 keygen is not
+ * free) and handed out one room at a time.
+ */
+interface RoomKeys {
+  readonly publicKey: string;
+  readonly privateKey: CryptoKey;
+}
+const ROOM_KEYS: RoomKeys[] = [];
+let roomKeyAt = 0;
+
+async function mintRoomKeys(count: number): Promise<void> {
+  const { webcrypto } = await import('node:crypto');
+  for (let i = 0; i < count; i += 1) {
+    const pair = (await webcrypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+      'sign',
+      'verify',
+    ])) as unknown as { publicKey: CryptoKey; privateKey: CryptoKey };
+    const raw = new Uint8Array(await webcrypto.subtle.exportKey('raw', pair.publicKey));
+    ROOM_KEYS.push({
+      publicKey: Buffer.from(raw).toString('base64url'),
+      privateKey: pair.privateKey,
+    });
+  }
+}
+
+/** A genuinely signed §8.2 body for the NEXT room in the pool. */
+async function signedBody(keys: RoomKeys): Promise<{
+  signed_stub: SignedDirectoryStubBody;
+  stub_signature: string;
+}> {
+  const { webcrypto } = await import('node:crypto');
+  const body = {
+    schema: 'licio.private.directory_stub.v2' as const,
+    room_public_key: keys.publicKey,
+    manifest_key_commitment: MANIFEST_COMMITMENT,
+  };
+  const message = canonicalDirectoryStubBytes(body);
+  const bytes = new Uint8Array(new ArrayBuffer(message.byteLength));
+  bytes.set(message);
+  const signature = new Uint8Array(
+    await webcrypto.subtle.sign({ name: 'Ed25519' }, keys.privateKey, bytes),
+  );
+  return { signed_stub: body, stub_signature: Buffer.from(signature).toString('base64url') };
+}
+
+/** The DEFAULT room every fixture uses unless a test asks for another. */
+let SIGNED_STUB: SignedDirectoryStubBody;
+let SIGNATURE: string;
 
 /** Deterministic ids so a test can address the room it just created. */
 function freshService(): PrivateRoomStubService {
@@ -60,15 +110,14 @@ function freshService(): PrivateRoomStubService {
  * describe two ROOMS. Passing this explicitly keeps the common fixture
  * deterministic and makes "these are separate rooms" visible at the call site.
  */
-let roomKeySeq = 0;
-function anotherRoom(): { signed_stub: PrivateRoomCreateStubRequest['signed_stub'] } {
-  roomKeySeq += 1;
-  return {
-    signed_stub: {
-      ...SIGNED_STUB,
-      room_public_key: `${SIGNED_STUB.room_public_key.slice(0, 38)}${String(roomKeySeq).padStart(5, '0')}`,
-    },
-  };
+const PRESIGNED: Array<{ signed_stub: SignedDirectoryStubBody; stub_signature: string }> = [];
+function anotherRoom(): {
+  signed_stub: PrivateRoomCreateStubRequest['signed_stub'];
+  stub_signature: string;
+} {
+  const next = PRESIGNED[roomKeyAt++];
+  if (!next) throw new Error('room-key pool exhausted — mint more in beforeAll');
+  return next;
 }
 
 function listedRequest(
@@ -79,8 +128,7 @@ function listedRequest(
     display_name: 'Neighbourhood watch',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
-    stub_signature:
-      'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+    stub_signature: SIGNATURE,
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -93,8 +141,7 @@ function unlistedRequest(
     directory_mode: 'unlisted',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
-    stub_signature:
-      'pUOZfYTxJ5g1DAm97yzbFxv0HtPkpfgIry_rDFYmMAm_e1fNo_tkAcgXDt6Ecbtv53kTloLE6i_N5OMKpb47OQ',
+    stub_signature: SIGNATURE,
     bootstrap_blind_id: TOKEN,
     ...over,
   };
@@ -106,6 +153,22 @@ function unlistedRequest(
 function rawRequest(over: Record<string, unknown> = {}): unknown {
   return { ...listedRequest(), ...over };
 }
+
+/** One pool for the whole file: 40 rooms is more than any case needs, and
+ *  Ed25519 keygen is the only slow thing here. */
+beforeAll(async () => {
+  await mintRoomKeys(40);
+  const first = ROOM_KEYS[roomKeyAt++];
+  if (!first) throw new Error('no room keys');
+  const signed = await signedBody(first);
+  SIGNED_STUB = signed.signed_stub;
+  SIGNATURE = signed.stub_signature;
+  for (let at = roomKeyAt; at < ROOM_KEYS.length; at += 1) {
+    const keys = ROOM_KEYS[at];
+    if (keys) PRESIGNED.push(await signedBody(keys));
+  }
+  roomKeyAt = 0;
+});
 
 describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a handler', () => {
   it('rejects every forbidden §21.1 key by SHAPE (no private CID, op head, or member list)', () => {
@@ -766,6 +829,88 @@ describe('§11.4 — an abusive LISTED name has an intake', () => {
     // …and it stops being reportable the moment it is delisted.
     await svc.delist(listed.value.room_server_id, ACCOUNT);
     expect(await svc.isPubliclyListed(listed.value.room_server_id)).toBe(false);
+  });
+});
+
+describe('registration proves POSSESSION of the room key', () => {
+  /** A real room key pair + a genuinely signed v2 body. */
+  async function signedRequest(): Promise<{
+    request: PrivateRoomCreateStubRequest;
+    publicKey: string;
+  }> {
+    const { webcrypto } = await import('node:crypto');
+    const pair = (await webcrypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+      'sign',
+      'verify',
+    ])) as unknown as { publicKey: CryptoKey; privateKey: CryptoKey };
+    const raw = new Uint8Array(await webcrypto.subtle.exportKey('raw', pair.publicKey));
+    const publicKey = Buffer.from(raw).toString('base64url');
+    const body = {
+      schema: 'licio.private.directory_stub.v2' as const,
+      room_public_key: publicKey,
+      manifest_key_commitment: SIGNED_STUB.manifest_key_commitment,
+    };
+    const message = canonicalDirectoryStubBytes(body);
+    const bytes = new Uint8Array(new ArrayBuffer(message.byteLength));
+    bytes.set(message);
+    const signature = new Uint8Array(
+      await webcrypto.subtle.sign({ name: 'Ed25519' }, pair.privateKey, bytes),
+    );
+    return {
+      publicKey,
+      request: listedRequest({
+        signed_stub: body,
+        stub_signature: Buffer.from(signature).toString('base64url'),
+      }),
+    };
+  }
+
+  it('accepts a record the room actually signed', async () => {
+    const svc = freshService();
+    const { request } = await signedRequest();
+    const created = await svc.create(request, ACCOUNT);
+    expect(created.ok).toBe(true);
+  });
+
+  it('REFUSES a squat: the founder key is public, the signature is the only proof', async () => {
+    // A room'''s founder public key rides every invite and appears in every
+    // published record, so it is not a secret. Once one record per room made it
+    // the uniqueness key, an unverified create let anyone who had seen one take
+    // the row under their own account — after which the founder is refused their
+    // own room forever and only the squatter can remove the forgery.
+    const svc = freshService();
+    const { request, publicKey } = await signedRequest();
+    const forged = listedRequest({
+      signed_stub: {
+        schema: 'licio.private.directory_stub.v2',
+        room_public_key: publicKey,
+        manifest_key_commitment: SIGNED_STUB.manifest_key_commitment,
+      },
+      // Correctly SIZED and utterly unrelated — the shape checks pass.
+      stub_signature: Buffer.from(new Uint8Array(64).fill(7)).toString('base64url'),
+    });
+    expect(await svc.create(forged, OTHER_ACCOUNT)).toEqual({
+      ok: false,
+      reason: 'signature_invalid',
+    });
+    // …and the room'''s own registration still succeeds afterwards.
+    expect((await svc.create(request, ACCOUNT)).ok).toBe(true);
+  });
+
+  it('refuses a body whose signature covers DIFFERENT bytes', async () => {
+    const svc = freshService();
+    const { request } = await signedRequest();
+    const tampered = listedRequest({
+      signed_stub: {
+        ...(request.signed_stub as SignedDirectoryStubBody),
+        manifest_key_commitment: 'BbOr8leaXrZkA814vlV_2GBjOh_iEDx2QgMN7-MsZY8',
+      },
+      stub_signature: request.stub_signature,
+    });
+    expect(await svc.create(tampered, ACCOUNT)).toEqual({
+      ok: false,
+      reason: 'signature_invalid',
+    });
   });
 });
 

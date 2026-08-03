@@ -6,3 +6,4 @@ export {
   contentSecurityPolicyMeta,
   META_INELIGIBLE_DIRECTIVES,
 } from './csp.js';
+export * from './directory-stub-bytes.js';

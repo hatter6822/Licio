@@ -35,6 +35,7 @@ import {
   RoomAlreadyRegisteredError,
   type StoredPrivateRoomStub,
 } from './stores.js';
+import { verifyDirectoryStubSignature } from './stub-signature.js';
 
 /** The rendezvous endpoints a bootstrapping peer needs (§21.1 response). */
 export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
@@ -49,6 +50,9 @@ export const BOOTSTRAP_ENDPOINTS: readonly string[] = [
 export type StubFailure =
   | 'not_found'
   | 'forbidden'
+  /** The signed body does not verify under the room key it names — so the
+   *  caller does not hold that room. */
+  | 'signature_invalid'
   /** Another ACCOUNT already registered a directory record for this room.
    *  One room, one record — see `create`. */
   | 'room_already_registered'
@@ -245,6 +249,24 @@ export class PrivateRoomStubService {
     // NOT NULL column, so a stub without one cannot be constructed. The same
     // goes for the commitments, which are derived from the signed body rather
     // than sent beside it.
+
+    // POSSESSION FIRST — before the room's key is claimed as a unique row.
+    //
+    // A founder public key is not a secret: it rides every invite and appears in
+    // every published record. Once "one record per room" made that key the
+    // uniqueness key, an unverified create let anyone who had seen one take the
+    // row under their own account with any 64-byte string as the signature — and
+    // the founder is then permanently refused their own room, with only the
+    // squatter able to remove the forgery.
+    //
+    // The signature is the only evidence of possession available here (the
+    // server holds no room key, by construction), so it is checked before
+    // anything is claimed. A body the server cannot re-encode — a legacy v1
+    // shape — cannot be verified and so cannot be registered; those rows exist
+    // only because the capability migration preserved them.
+    if (!(await verifyDirectoryStubSignature(request.signed_stub, request.stub_signature))) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
 
     // ONE RECORD PER ROOM, not per account.
     //

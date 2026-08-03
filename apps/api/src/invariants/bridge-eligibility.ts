@@ -65,7 +65,7 @@ export type BridgeEligibility =
  * `archived` is terminal in the WS-G.1.1 graph, and `restricted` is the WS-J
  * safety lock — read here so the offer and the write agree.
  */
-function acceptsContributions(thread: ThreadShellRecord): boolean {
+export function acceptsContributions(thread: ThreadShellRecord): boolean {
   return thread.conversationState !== 'archived' && thread.safetyState !== 'restricted';
 }
 

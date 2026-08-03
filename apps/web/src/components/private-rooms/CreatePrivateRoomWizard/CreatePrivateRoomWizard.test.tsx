@@ -32,6 +32,27 @@ afterEach(async () => {
 });
 
 describe('CreatePrivateRoomWizard', () => {
+  it('applies the authenticated default when the session arrives AFTER mount', async () => {
+    // A valid cookie the client has not resolved yet mounts the wizard
+    // signed-out, where the only honest choice is `detached` (registering is an
+    // authenticated write). When the account arrives, that forced value has to
+    // be released: `detached` is not a quieter default — it is a room with no
+    // bootstrap record at all, which the user would then create without asking.
+    useAuthStore.setState({ status: 'unauthenticated', user: null } as never);
+    render(<CreatePrivateRoomWizard />);
+    // Signed out, `detached` is the only choice offered AND the value held.
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
+
+    await act(async () => {
+      useAuthStore.setState({ status: 'authenticated', user: { id: 'u1' } } as never);
+    });
+    // The §4.2 default now applies — the forced value is released rather than
+    // left standing as a room with no bootstrap record.
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(
+      /People you invite/i,
+    );
+  });
+
   it('shows the honest-limits disclosure and every acknowledgment', () => {
     render(<CreatePrivateRoomWizard />);
     expect(screen.getByText(/Licio does not host the room's content/i)).toBeInTheDocument();

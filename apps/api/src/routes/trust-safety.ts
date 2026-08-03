@@ -267,6 +267,14 @@ export function createTrustSafetyRoutes() {
           // case with no snapshot was the one that could never get one. The
           // trail is the authority on whether a capture exists, so it decides.
           //
+          // ASKED FOR EVERY REPORT, not only for a retry. A second, DISTINCT
+          // report about the same room joins the SAME open case (that is what a
+          // case is), and keying the question on this request's `idempotent`
+          // flag forced the answer to "no capture yet" — so the second reporter
+          // appended a second row, carrying text that may have been edited since
+          // the first report and labelled as what was reported. The invariant is
+          // one capture per CASE, so only the case can answer it.
+          //
           // But a retry reads the listing as it is NOW, and this route cannot
           // reconstruct what it was: the stub row is edited in place and keeps
           // no history. So the row's `updated_at` decides whether the claim is
@@ -274,7 +282,7 @@ export function createTrustSafetyRoutes() {
           // reported; edited since means the original is gone, and the trail
           // says exactly that rather than presenting the new text as evidence.
           const priorCapture =
-            outcome.ok && reportedListedRoom && outcome.response.idempotent
+            outcome.ok && reportedListedRoom
               ? (
                   await mod.audit.list({
                     caseId: outcome.caseId,

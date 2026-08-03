@@ -202,6 +202,17 @@ function refuse(reason: StubFailure): { status: 403 | 404 | 409 | 422; body: unk
           },
         },
       };
+    case 'signature_invalid':
+      return {
+        status: 403,
+        body: {
+          error: {
+            code: 'signature_invalid',
+            message:
+              'This record is not signed by the room it names. Only a device holding the room’s key can register its directory record.',
+          },
+        },
+      };
     case 'room_already_registered':
       return {
         status: 409,
@@ -509,7 +520,18 @@ export function createPrivateRoomsRoutes() {
       // the panel reports failure over stale listed state.
       const owner =
         (await getPrivateRoomStubService().ownerOf(params.data.roomServerId)) === auth.userId;
-      if (staff && !owner) {
+      // THE CASE decides the arm, not the ownership.
+      //
+      // A platform admin reviewing a listed-room case can also be the account
+      // that registered that record, and ownership was checked first — so the
+      // console's request took the OWNER path: the record was demoted with no
+      // moderation audit and no case resolution, and the console then failed to
+      // parse the owner shape and reported failure while the case stayed open.
+      //
+      // `case_id` is what distinguishes the two callers: the console sends one,
+      // the settings client does not. An owner delisting their own room from
+      // settings is unchanged.
+      if (staff && (!owner || caseId !== undefined)) {
         const mod = getModerationServices();
         const demoted = await mod.transactor.run(async (tx) => {
           if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;

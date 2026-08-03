@@ -41,7 +41,11 @@ import { type EventPipelineServices, getEventPipelineServices } from '../events/
 import { type ForumServices, getForumServices } from '../forum/services.js';
 import { getIdentityServices, type IdentityServices } from '../identity/services.js';
 import { getIngestionServices, type IngestionServices } from '../ingestion/services.js';
-import { type BridgeEligibilityDeps, bridgeEligibility } from '../invariants/bridge-eligibility.js';
+import {
+  acceptsContributions,
+  type BridgeEligibilityDeps,
+  bridgeEligibility,
+} from '../invariants/bridge-eligibility.js';
 import { buildCivicMap } from '../invariants/civic-map.js';
 import {
   INVARIANTS_CONFIG_KEYS,
@@ -621,6 +625,17 @@ export function createInvariantsAdminRoutes(
         // live request behind: the map withheld the target, every retry said
         // `already_open`, and the durable action had no record at all.
         const opened = await invariants.transact(async (tx) => {
+          // RE-READ the conversation INSIDE the unit.
+          //
+          // `bridgeEligibility` answered before the candidate lookup, and a
+          // thread can be archived or restricted in between — after which the
+          // insert still lands, `createContribution` refuses every possible
+          // answer to it, and there is no cancelled state, so the open-row
+          // uniqueness then blocks any future request on that thread forever.
+          // The state that gates the write is read in the same transaction as
+          // the write.
+          const current = await ingestion.stories.getThreadById(threadId);
+          if (current === null || !acceptsContributions(current)) return null;
           const attempt = await tx.bridgeAttempts.insertIfNoneOpen({
             attemptId: crypto.randomUUID(),
             threadId,
@@ -645,6 +660,15 @@ export function createInvariantsAdminRoutes(
           });
           return attempt;
         });
+        if (opened === null) {
+          return c.json(
+            deny(
+              'thread_closed',
+              'This conversation no longer accepts contributions, so a bridge request could not be answered',
+            ),
+            409,
+          );
+        }
         if (!opened.inserted) {
           return c.json(deny('already_open', 'A bridge request is already open'), 409);
         }
