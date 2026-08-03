@@ -521,9 +521,11 @@ export function createV1Routes() {
       .route('/ranking/admin', createRankingAdminRoutes())
 
       // --- Forum, conversation, rooms, and lenses (WS-G) ----------------------
-      // Thread reading (overview/branches/subtree/anchor), contributions,
-      // feed preferences, uploads, the drainer blocklist, room
-      // listing/creation/detail/subscription, and lenses.
+      // The story's comment section (+ its SSE stream), contributions and the
+      // per-comment anchor, the WS-T debate arenas, feed preferences, uploads,
+      // the drainer blocklist, room listing/creation/detail/subscription, and
+      // lenses.  (The thread overview and per-branch reads were retired with
+      // the WS-T comment remodel — SPEC §6.4/§24.3.)
       .route('/', createForumRoutes())
       .route('/', createRoomsRoutes())
 
