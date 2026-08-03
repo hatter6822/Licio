@@ -133,6 +133,12 @@ export default defineConfig({
             //     segment, and a FINANCIAL pipeline status must never replay
             //     stale from a cache anyway — a settled/failed action shown
             //     as pending misleads exactly when the network is flaky.
+            //   • /v1/private-rooms/*: the §21.2 bootstrap read is a CAPABILITY
+            //     check (an unlisted record needs its blind token) and its
+            //     answer changes on delist/DELETE.  A NetworkFirst replay would
+            //     serve an unlisted record — or a formerly-listed record's
+            //     public name — offline for up to 24h after it was removed,
+            //     without ever consulting the current token or directory state.
             //   • /api/csrf-token: the double-submit token is SINGLE-USE (each
             //     mutation fetches a fresh one). A NetworkFirst fallback would
             //     replay a consumed token, silently 403-ing the next mutation;
@@ -142,6 +148,7 @@ export default defineConfig({
               !url.pathname.startsWith('/v1/auth/') &&
               !url.pathname.startsWith('/v1/moderation') &&
               !url.pathname.startsWith('/v1/knomosis/actions') &&
+              !url.pathname.startsWith('/v1/private-rooms') &&
               !url.pathname.startsWith('/api/csrf-token') &&
               !url.pathname.includes('/admin'),
             handler: 'NetworkFirst',

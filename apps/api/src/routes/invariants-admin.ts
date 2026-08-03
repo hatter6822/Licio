@@ -56,6 +56,7 @@ import {
 import { getInvariantServices, type InvariantPlatformServices } from '../invariants/services.js';
 import { zValidator } from '../lib/validate.js';
 import { type AuthEnv, authMiddleware, getAuth, requireSteward } from '../middleware/auth.js';
+import { denyQueue, stewardActorOf } from '../moderation/authz.js';
 import { resolveItemSafetyState } from '../pwatt/scoring.js';
 
 const deny = (code: string, message: string) => ({ error: { code, message } }) as const;
@@ -420,6 +421,18 @@ export function createInvariantsAdminRoutes(
         // prompt, which goes through the existing SCOI bridge-request route
         // below with its own room-steward authorization.
         //
+        // INTEGRITY-QUEUE gated, not merely steward-gated. The enclosing
+        // `requireSteward()` is a PLATFORM-role check, so on its own it would
+        // hand per-story titles and exact hourly event-count levels to
+        // evidence-only, appeals-only and community stewards. This surface
+        // answers the same question as the coordinated-report incidents it
+        // renders beside, and that queue is ROLE_INTEGRITY — so the landscape
+        // takes the same doctrine bar, through the same helper, rather than
+        // inventing a second standard for one analyst view.
+        const auth = getAuth(c);
+        if (!auth) return c.json(deny('unauthenticated', 'Authentication required'), 401);
+        const queueDenial = denyQueue(stewardActorOf(auth), 'integrity-queue');
+        if (queueDenial) return c.json(deny(queueDenial.code, queueDenial.message), 403);
         // An empty landscape is a real state (a quiet hour, a fresh install),
         // so it answers 200 with an explicit `null` rather than 404 — the panel
         // renders "nothing to map yet", and a steward can tell that apart from

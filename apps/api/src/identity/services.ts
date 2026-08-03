@@ -218,6 +218,14 @@ export interface IdentityServices {
    *  — production deletion TOMBSTONES the users row, so FK cascades never
    *  fire there. */
   purgeClientState?: (userId: string) => Promise<void>;
+  /** WS-S §21.4 private-room DIRECTORY purge on hard deletion (default no-op).
+   *  A stub carries its creator's account reference, public display metadata
+   *  and timestamps; deletion tombstones the users row, so the FK `set null`
+   *  never fires and the record would otherwise outlive the account as exactly
+   *  the durable "this account created a private room at time T" trace that
+   *  `remove()` exists to erase. Removes the shell with the stub; member
+   *  devices keep the room, because the server never held it. */
+  purgePrivateRoomStubs?: (userId: string) => Promise<void>;
   /** WS-C/WS-T client-state DSAR export (GDPR Art. 15): the SAME durable
    *  per-user rows purgeClientState removes — settings sync, notification
    *  preferences, the reply-notification inbox — included in the export

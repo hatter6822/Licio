@@ -20,7 +20,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
-import { type AuthEnv, authMiddleware } from '../middleware/auth.js';
+import { type AuthEnv, authMiddleware, requireUnrestricted } from '../middleware/auth.js';
 import { getPrivateRoomStubService, type StubFailure } from '../private-rooms/service.js';
 import {
   privateRoomCreateStubRequestSchema,
@@ -112,6 +112,12 @@ export function createPrivateRoomsRoutes() {
   app.post(
     '/',
     authMiddleware(),
+    // A `listed` stub publishes a name, description and avatar to anyone with
+    // the id — a PUBLIC contribution, so the WS-J `restrict` sanction has to
+    // reach it exactly as it reaches story and comment creation. `authMiddleware`
+    // deliberately admits a restricted account (it may still read and
+    // self-serve), so the posting bar is a separate guard, here as elsewhere.
+    requireUnrestricted(),
     perAccountRateLimit({ limit: 20, windowMs: 60 * 60_000, accountId }),
     async (c) => {
       const auth = c.get('auth');
@@ -156,6 +162,9 @@ export function createPrivateRoomsRoutes() {
   app.patch(
     '/:roomServerId',
     authMiddleware(),
+    // Same reason as create: a PATCH can introduce or rewrite the public
+    // display metadata, so a restricted account must not reach it either.
+    requireUnrestricted(),
     perAccountRateLimit({ limit: 120, windowMs: 60 * 60_000, accountId }),
     async (c) => {
       const auth = c.get('auth');
@@ -194,9 +203,16 @@ export function createPrivateRoomsRoutes() {
         return c.json({ error: { code: 'unauthenticated', message: 'Sign in required' } }, 401);
       const params = roomIdParamSchema.safeParse({ roomServerId: c.req.param('roomServerId') });
       if (!params.success) return c.json(notFound, 404);
+      // §11.4 staff arm: an `admin` may delist ANY listed record. That is the
+      // single power staff hold over a P2P room, and without it an abusive
+      // public name has no removal path when its creator will not act — no
+      // other delist implementation exists. Delisting stops the room
+      // ADVERTISING itself and touches nothing else: no content, no membership,
+      // no keys, and the record stays resolvable for members holding its token.
       const result = await getPrivateRoomStubService().delist(
         params.data.roomServerId,
         auth.userId,
+        { staff: auth.roles.includes('admin') },
       );
       if (!result.ok) {
         const { status, body } = refuse(result.reason);

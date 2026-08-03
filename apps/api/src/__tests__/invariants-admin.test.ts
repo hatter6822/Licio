@@ -62,12 +62,35 @@ describe('reeb/landscape — the Civic Map (WS-H.7.4)', () => {
     expect(nonSteward.status).toBe(403);
   });
 
+  it('refuses a steward WITHOUT integrity-queue access (analyst-grade, not steward-grade)', async () => {
+    // `requireSteward()` is a PLATFORM-role check, so on its own it would hand
+    // per-story titles and exact event-count levels to evidence-only and
+    // appeals-only stewards. This surface answers the same question as the
+    // coordinated-report incidents beside it, and that queue is ROLE_INTEGRITY.
+    const fixture = freshInvariantServices();
+    // Platform steward, but an evidence-only doctrine grant — the health and
+    // outputs routes admit them; the landscape must not.
+    const steward = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_EVIDENCE'],
+    });
+    const response = await adminRequest(fixture, steward.cookie, '/reeb/landscape');
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(['insufficient_capability', 'mfa_required']).toContain(body.error.code);
+  });
+
   it('answers 200 with an explicit null when there is nothing to map', async () => {
-    // A quiet window is a REAL state, not a 404: a steward has to be able to
+    // A quiet window is a REAL state, not a 404: an analyst has to be able to
     // tell "nothing happened this hour" apart from "the endpoint is broken".
     const fixture = freshInvariantServices();
-    const steward = await seedUserWithSession(fixture.identity, { steward: true });
-    const response = await adminRequest(fixture, steward.cookie, '/reeb/landscape');
+    // BOTH bars: the platform `steward` role `requireSteward()` checks, AND the
+    // ROLE_INTEGRITY doctrine grant the landscape adds on top.
+    const analyst = await seedUserWithSession(fixture.identity, {
+      steward: true,
+      stewardRoles: ['ROLE_INTEGRITY'],
+    });
+    const response = await adminRequest(fixture, analyst.cookie, '/reeb/landscape');
     expect(response.status).toBe(200);
     const body = (await response.json()) as { landscape: unknown };
     expect(body).toHaveProperty('landscape');

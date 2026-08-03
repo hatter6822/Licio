@@ -18,7 +18,7 @@
 // + stub are one transaction: a shell without a stub is an orphan the directory
 // can neither reach nor clean up.
 import { type DbExecutor, privateRoomStubs, rooms } from '@licio/db';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import type {
   BootstrapHint,
   PrivateRoomStubInsertInput,
@@ -201,6 +201,24 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
       await tx.delete(rooms).where(eq(rooms.roomId, roomServerId));
       return true;
     });
+  }
+
+  async purgeForAccount(accountId: string): Promise<number> {
+    // Delete the SHELLS; the stubs cascade with them (`room_server_id` is
+    // `onDelete: cascade`). Deleting the stub alone would leave an orphan shell
+    // that still says an account created a private room at time T.
+    const targets = await this.db
+      .select({ roomServerId: privateRoomStubs.roomServerId })
+      .from(privateRoomStubs)
+      .where(eq(privateRoomStubs.createdByAccountId, accountId));
+    if (targets.length === 0) return 0;
+    await this.db.delete(rooms).where(
+      inArray(
+        rooms.roomId,
+        targets.map((row) => row.roomServerId),
+      ),
+    );
+    return targets.length;
   }
 
   async ownerOf(roomServerId: string): Promise<string | null> {

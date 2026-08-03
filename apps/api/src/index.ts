@@ -312,6 +312,7 @@ import {
   startRendezvousScheduler,
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
+import { getPrivateRoomStubService } from './private-rooms/service.js';
 import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -796,6 +797,15 @@ identityServices.purgeClientState = async (userId) => {
   await purgePushStateForUser(userId);
   await getUserSettingsStore().purge(userId);
   await replyNotifications.purgeForUser(userId);
+};
+// WS-S §21.4 — the private-room DIRECTORY record dies with its creator's
+// account. Deletion tombstones the users row, so the stub's
+// `created_by_account_id` FK action never fires and the record would otherwise
+// survive as exactly the "this account created a private room at time T" trace
+// the DELETE route exists to erase. The ROOM is untouched: it lives on member
+// devices, and the server never held it.
+identityServices.purgePrivateRoomStubs = async (userId) => {
+  await getPrivateRoomStubService().purgeForAccount(userId);
 };
 // …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
 // what deletion knows how to remove, export must know how to disclose.

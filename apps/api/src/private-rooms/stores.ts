@@ -113,23 +113,51 @@ export const FORBIDDEN_SIGNED_STUB_SEGMENTS: readonly string[] = [
   'embedding',
 ];
 
-/** Every object key in `value`, at any depth (arrays are walked, not keyed). */
-function collectKeys(value: unknown, out: string[], depth = 0): void {
-  if (depth > 16 || value === null || typeof value !== 'object') return;
+/**
+ * The deepest object nesting a signed stub may carry.
+ *
+ * The bound exists so the scan below terminates on a hostile payload, but a
+ * depth bound and a SCAN bound must not be the same thing: an earlier cut of
+ * this simply stopped descending past the limit, which meant a forbidden key
+ * placed at depth 17 of an otherwise-valid sub-8-KiB object was reported clean
+ * and persisted. Bounded recursion that silently stops looking is not a guard.
+ * So exceeding the depth is now itself a REJECTION — the scan never returns
+ * "clean" for a region it did not read.
+ */
+export const MAX_SIGNED_STUB_DEPTH = 16;
+
+/** Sentinel for "this object nests deeper than the scan will read". */
+export const SIGNED_STUB_TOO_DEEP = '__too_deep__';
+
+/** Every object key in `value`, at any depth (arrays are walked, not keyed).
+ *  Returns false when the value nests past {@link MAX_SIGNED_STUB_DEPTH}. */
+function collectKeys(value: unknown, out: string[], depth = 0): boolean {
+  if (value === null || typeof value !== 'object') return true;
+  if (depth > MAX_SIGNED_STUB_DEPTH) return false;
   if (Array.isArray(value)) {
-    for (const item of value) collectKeys(item, out, depth + 1);
-    return;
+    for (const item of value) {
+      if (!collectKeys(item, out, depth + 1)) return false;
+    }
+    return true;
   }
   for (const [key, child] of Object.entries(value)) {
     out.push(key);
-    collectKeys(child, out, depth + 1);
+    if (!collectKeys(child, out, depth + 1)) return false;
   }
+  return true;
 }
 
-/** The forbidden §8.1 segments present in a signed stub (empty ⇒ clean). */
+/**
+ * The forbidden §8.1 segments present in a signed stub (empty ⇒ clean).
+ *
+ * A stub nesting past the depth bound yields {@link SIGNED_STUB_TOO_DEEP},
+ * which callers treat exactly like a forbidden key: the server refuses what it
+ * cannot fully read, rather than persisting it on the strength of a partial
+ * scan.
+ */
 export function forbiddenSignedStubKeys(signedStub: unknown): string[] {
   const keys: string[] = [];
-  collectKeys(signedStub, keys);
+  if (!collectKeys(signedStub, keys)) return [SIGNED_STUB_TOO_DEEP];
   const hits = new Set<string>();
   for (const key of keys) {
     const lower = key.toLowerCase();
@@ -273,6 +301,15 @@ export interface PrivateRoomStubStore {
   remove(roomServerId: string): Promise<boolean>;
   /** The account that created the stub, for the §21.3/§21.4 owner check. */
   ownerOf(roomServerId: string): Promise<string | null>;
+  /**
+   * Remove every stub (and its room shell) an account created — the hard-
+   * deletion purge. Returns how many were removed.
+   *
+   * Needed because deletion TOMBSTONES the users row rather than deleting it,
+   * so the `created_by_account_id` FK action never fires and the record would
+   * survive its creator carrying display metadata and timestamps.
+   */
+  purgeForAccount(accountId: string): Promise<number>;
 }
 
 /** The in-memory stub store (local/dev default, and the unit-test substrate). */
@@ -344,5 +381,16 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
 
   ownerOf(roomServerId: string): Promise<string | null> {
     return Promise.resolve(this.#stubs.get(roomServerId)?.createdByAccountId ?? null);
+  }
+
+  purgeForAccount(accountId: string): Promise<number> {
+    let removed = 0;
+    for (const [roomServerId, stub] of this.#stubs) {
+      if (stub.createdByAccountId === accountId) {
+        this.#stubs.delete(roomServerId);
+        removed += 1;
+      }
+    }
+    return Promise.resolve(removed);
   }
 }

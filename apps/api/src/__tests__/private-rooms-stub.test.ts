@@ -19,8 +19,10 @@ import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-ro
 import {
   forbiddenSignedStubKeys,
   InMemoryPrivateRoomStubStore,
+  type PrivateRoomCreateStubRequest,
   privateRoomCreateStubRequestSchema,
   privateRoomStubUpdateRequestSchema,
+  SIGNED_STUB_TOO_DEEP,
 } from '../private-rooms/stores.js';
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
@@ -36,29 +38,44 @@ function freshService(): PrivateRoomStubService {
   );
 }
 
-function listedRequest(over: Record<string, unknown> = {}) {
+// TYPED fixtures. The overrides these tests need are all valid members of the
+// request type, so the helpers are typed rather than cast: `as any` is barred
+// outright by the project's no-`any` rule, and reaching for it here would have
+// hidden the fact that nothing actually required it.
+function listedRequest(
+  over: Partial<PrivateRoomCreateStubRequest> = {},
+): PrivateRoomCreateStubRequest {
   return {
-    directory_mode: 'listed' as const,
+    directory_mode: 'listed',
     display_name: 'Neighbourhood watch',
     room_public_key: 'cm9vbS1wdWJsaWMta2V5',
     manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
-    rendezvous_policy: 'licio_blind' as const,
-    signed_stub: { room_public_key: 'cm9vbS1wdWJsaWMta2V5' },
+    rendezvous_policy: 'licio_blind',
+    signed_stub: { bootstrap_blind_id: TOKEN },
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
     ...over,
   };
 }
 
-function unlistedRequest(over: Record<string, unknown> = {}) {
+function unlistedRequest(
+  over: Partial<PrivateRoomCreateStubRequest> = {},
+): PrivateRoomCreateStubRequest {
   return {
-    directory_mode: 'unlisted' as const,
+    directory_mode: 'unlisted',
     room_public_key: 'cm9vbS1wdWJsaWMta2V5',
     manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
-    rendezvous_policy: 'licio_blind' as const,
+    rendezvous_policy: 'licio_blind',
     signed_stub: { bootstrap_blind_id: TOKEN },
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
     ...over,
   };
+}
+
+/** The SCHEMA cases feed deliberately-invalid shapes; `safeParse` takes
+ *  `unknown`, so they need no type at all — and must not borrow the typed
+ *  helper, whose whole point is that its output is valid. */
+function rawRequest(over: Record<string, unknown> = {}): unknown {
+  return { ...listedRequest(), ...over };
 }
 
 describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a handler', () => {
@@ -70,14 +87,14 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
       { latest_manifest_commitment: 'c2V0LWF0LWNyZWF0ZQ' },
       { storage_mode: 'server' },
     ]) {
-      const parsed = privateRoomCreateStubRequestSchema.safeParse(listedRequest(forbidden));
+      const parsed = privateRoomCreateStubRequestSchema.safeParse(rawRequest(forbidden));
       expect(parsed.success, `expected ${Object.keys(forbidden)[0]} to be rejected`).toBe(false);
     }
   });
 
   it('rejects `detached` — a detached room stores no stub at all (§8.2)', () => {
     expect(
-      privateRoomCreateStubRequestSchema.safeParse(listedRequest({ directory_mode: 'detached' }))
+      privateRoomCreateStubRequestSchema.safeParse(rawRequest({ directory_mode: 'detached' }))
         .success,
     ).toBe(false);
   });
@@ -95,8 +112,7 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
   it('refuses a signed stub carrying a forbidden class (not a silent strip)', async () => {
     const svc = freshService();
     const result = await svc.create(
-      // biome-ignore lint/suspicious/noExplicitAny: exercising a rejected runtime shape
-      listedRequest({ signed_stub: { member_list: ['alice'] } }) as any,
+      listedRequest({ signed_stub: { member_list: ['alice'] } }),
       ACCOUNT,
     );
     expect(result.ok).toBe(false);
@@ -105,11 +121,7 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
 
   it('refuses display metadata on an unlisted room instead of silently dropping it', async () => {
     const svc = freshService();
-    const result = await svc.create(
-      // biome-ignore lint/suspicious/noExplicitAny: exercising a rejected runtime shape
-      unlistedRequest({ display_name: 'Leaky' }) as any,
-      ACCOUNT,
-    );
+    const result = await svc.create(unlistedRequest({ display_name: 'Leaky' }), ACCOUNT);
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.reason).toBe('display_requires_listed');
   });
@@ -117,8 +129,7 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
   it('refuses an unlisted room with no bootstrap token — it would be unreachable forever', async () => {
     const svc = freshService();
     const result = await svc.create(
-      // biome-ignore lint/suspicious/noExplicitAny: exercising a rejected runtime shape
-      unlistedRequest({ signed_stub: { note: 'no token' } }) as any,
+      unlistedRequest({ signed_stub: { note: 'no token' } }),
       ACCOUNT,
     );
     expect(result.ok).toBe(false);
@@ -132,6 +143,87 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
     if (!created.ok) return;
     expect(created.value.room_server_id).not.toBe(created.value.stub_id);
     expect(created.value.bootstrap_endpoints).toContain('/v1/private-rendezvous/announce');
+  });
+});
+
+describe('review fixes — the scan, the token invariant, and staff delisting', () => {
+  it('REFUSES a stub nesting past the scan depth rather than reporting it clean', () => {
+    // The scan used to stop descending at the cap, so a forbidden key below it
+    // was reported clean and persisted. Bounded recursion that silently stops
+    // looking is not a guard: exceeding the depth is now itself a rejection.
+    let deep: Record<string, unknown> = { member_list: ['alice'] };
+    for (let i = 0; i < 25; i += 1) deep = { nested: deep };
+    expect(forbiddenSignedStubKeys(deep)).toEqual([SIGNED_STUB_TOO_DEEP]);
+    // …and a normally-shaped stub is unaffected.
+    expect(forbiddenSignedStubKeys({ a: { b: { c: 'ok' } } })).toEqual([]);
+  });
+
+  it('requires the bootstrap token on a LISTED stub too — it can be delisted later', async () => {
+    const svc = freshService();
+    const result = await svc.create(listedRequest({ signed_stub: { note: 'no token' } }), ACCOUNT);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toBe('unlisted_requires_token');
+  });
+
+  it('a delisted record stays resolvable for members holding its token', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const room = created.value.room_server_id;
+    expect((await svc.delist(room, ACCOUNT)).ok).toBe(true);
+    // The whole point of §21.4: delisting stops advertising, it does not orphan
+    // the members who already hold an invite.
+    const read = await svc.bootstrap(room, TOKEN);
+    expect(read.ok).toBe(true);
+    expect(read.ok && read.value.directory_mode).toBe('unlisted');
+  });
+
+  it('refuses a PATCH that would strip the bootstrap token', async () => {
+    const svc = freshService();
+    const created = await svc.create(unlistedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const patched = await svc.update(
+      created.value.room_server_id,
+      { signed_stub: { note: 'token removed' } },
+      ACCOUNT,
+    );
+    expect(patched.ok).toBe(false);
+    expect(patched.ok === false && patched.reason).toBe('unlisted_requires_token');
+    // …and the record still resolves, because the patch was refused whole.
+    expect((await svc.bootstrap(created.value.room_server_id, TOKEN)).ok).toBe(true);
+  });
+
+  it('lets platform staff delist an abusive listed record the creator will not remove', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest({ display_name: 'Abusive name' }), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const room = created.value.room_server_id;
+    // A non-owner without the staff arm still cannot.
+    expect((await svc.delist(room, OTHER_ACCOUNT)).ok).toBe(false);
+    // §11.4: staff hold exactly this one power over a P2P room.
+    const staffed = await svc.delist(room, OTHER_ACCOUNT, { staff: true });
+    expect(staffed.ok).toBe(true);
+    expect(staffed.ok && staffed.value.display_name).toBe(null);
+  });
+
+  it('does NOT let staff delete or patch — delisting is the whole of the power', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const room = created.value.room_server_id;
+    expect((await svc.remove(room, OTHER_ACCOUNT)).ok).toBe(false);
+    expect((await svc.update(room, { display_name: 'Staff edit' }, OTHER_ACCOUNT)).ok).toBe(false);
+  });
+
+  it('purges every stub an account created (the hard-deletion hook)', async () => {
+    const svc = freshService();
+    const mine = await svc.create(listedRequest(), ACCOUNT);
+    const theirs = await svc.create(listedRequest(), OTHER_ACCOUNT);
+    if (!mine.ok || !theirs.ok) throw new Error('create failed');
+    expect(await svc.purgeForAccount(ACCOUNT)).toBe(1);
+    expect((await svc.bootstrap(mine.value.room_server_id, TOKEN)).ok).toBe(false);
+    // Another account's record is untouched.
+    expect((await svc.bootstrap(theirs.value.room_server_id, TOKEN)).ok).toBe(true);
   });
 });
 

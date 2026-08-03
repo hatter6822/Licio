@@ -57,6 +57,20 @@ async function makeP2pRoom(): Promise<string> {
   return roomId;
 }
 
+describe('WS-S §8/§21 — a p2p shell is not a server room surface', () => {
+  it('GET /v1/rooms/:roomId 404s a p2p room exactly as it 404s an unknown one', async () => {
+    // Without this the ordinary room API confirms an `unlisted` room exists and
+    // serves its shell, defeating the identical-404 contract the bootstrap
+    // endpoint enforces one route away.
+    const p2pRoom = await makeP2pRoom();
+    const found = await app().request(`/v1/rooms/${p2pRoom}`);
+    const unknown = await app().request('/v1/rooms/00000000-0000-4000-8000-999999999999');
+    expect(found.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    expect(await found.json()).toEqual(await unknown.json());
+  });
+});
+
 describe('WS-S.1.3 submission guard', () => {
   it('rejects POST /v1/stories to a p2p room with 409 p2p_room_requires_client_sync', async () => {
     const { cookie } = await seedUserWithSession(fixture.identity);

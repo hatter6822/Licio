@@ -136,6 +136,20 @@ export interface StoredRoomSession {
   readonly bootstrapDevices: ReadonlyArray<{ deviceId: string; signingPublicKey: string }>;
   /** A coarse creation bucket for the room list (never an exact timestamp). */
   readonly createdAtBucket: string;
+  /**
+   * The §21 directory record this room registered, when it registered one.
+   *
+   * Persisted because the server-minted `room_server_id` is the ONLY handle for
+   * every later bootstrap, patch, delist and delete — and there is no endpoint
+   * that lists an account's stubs, so discarding it at creation would leave the
+   * record unreachable and unmanageable forever. Absent ⇒ a `detached` room, or
+   * one whose registration did not succeed.
+   */
+  readonly directoryStub?: {
+    readonly roomServerId: string;
+    readonly stubId: string;
+    readonly directoryMode: 'listed' | 'unlisted';
+  };
 }
 
 /** Persist (insert or replace) a room session. */

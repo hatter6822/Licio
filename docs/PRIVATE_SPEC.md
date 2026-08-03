@@ -2035,7 +2035,23 @@ server can check it while holding no room key: at create time the client places
 §15.3 blind ids are — inside `signed_stub`, and the reader presents the same
 value as `?token=`. The server compares the two in constant time. It learns
 nothing from either: the value is an HMAC output over material it does not
-hold, and it rotates with the room's key schedule.
+hold.
+
+The token is derived from the room's **epoch-0** rendezvous key and therefore
+**does NOT rotate**, unlike the §15.3 rendezvous blind ids it is built the same
+way as. That is deliberate and load-bearing: an invite handed out today must
+still resolve the record tomorrow, and after the next membership change. A
+rotating capability would strand every outstanding invite at each epoch, which
+for a bootstrap pointer is a correctness bug rather than a hardening measure.
+
+The honest cost: a **removed member keeps a working token**. What it resolves is
+a record of commitments and bootstrap policy — no content, no keys, no member
+list, and for an `unlisted` room not even a name. Nothing there is anything an
+ex-member did not already know, having been in the room; rotating it would
+break every honest invite to withhold information the adversary already holds.
+Every stub therefore carries a token, whatever directory mode it was created
+in, because a `listed` record can always be delisted later and must stay
+resolvable for its members when it is (§21.4).
 
 **A wrong token, a missing token, an unknown room id, and a MALFORMED room id
 all return the identical 404.** This is §15.3.1's no-existence-oracle property

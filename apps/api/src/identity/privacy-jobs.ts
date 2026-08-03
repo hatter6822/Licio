@@ -183,6 +183,11 @@ export async function runDeletionPurge(
     // settings-sync rows (explicit — the tombstone below keeps the users row,
     // so FK cascades never fire).
     await services.purgeClientState?.(req.userId);
+    // WS-S §21.4: a private-room DIRECTORY stub (and its room shell) must not
+    // outlive its creator's account — the tombstone keeps the users row, so the
+    // FK action never fires. The room itself is unaffected: it lives on member
+    // devices and the server never held it.
+    await services.purgePrivateRoomStubs?.(req.userId);
     // ALL export archives for the user (completed ones included) are removed
     // from object storage before the job rows are dropped by the tombstone.
     for (const job of await services.store.listExportJobs(req.userId)) {

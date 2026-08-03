@@ -192,6 +192,10 @@ export function createRoomsRoutes() {
               for (const roomId of joinedSet) {
                 const room = await forum.rooms.getById(roomId);
                 if (!room) continue;
+                // WS-S §8 — never list a P2P shell, on any path. A p2p room has
+                // no server subscription row so this should be unreachable; the
+                // guard keeps the rule uniform rather than resting on that.
+                if (room.storageMode !== 'server') continue;
                 if (query.type !== undefined && room.roomType !== query.type) continue;
                 if (query.q !== undefined && !roomMatchesQuery(room, query.q)) continue;
                 rows.push(room);
@@ -234,7 +238,14 @@ export function createRoomsRoutes() {
             let after: { createdAt: string; id: string } | null = null;
             if (query.cursor !== undefined) {
               const lastRoom = await forum.rooms.getById(query.cursor);
-              if (lastRoom) after = { createdAt: lastRoom.createdAt, id: lastRoom.roomId };
+              // A cursor that RESOLVES starts the page after it; one that does
+              // not starts at the beginning — so accepting any room id here
+              // lets a caller probe existence by watching where the page
+              // begins. Only a server room may position this keyset, which
+              // makes a P2P id indistinguishable from a nonexistent one.
+              if (lastRoom && lastRoom.storageMode === 'server') {
+                after = { createdAt: lastRoom.createdAt, id: lastRoom.roomId };
+              }
             }
             const visible: RoomRecord[] = [];
             let exhausted = false;
@@ -384,6 +395,15 @@ export function createRoomsRoutes() {
         const { userId, roles } = await softUserContext(c.req.header('cookie'), identity);
         const room = await forum.rooms.getById(roomId);
         if (!room) return c.json(notFound, 404);
+        // WS-S §8/§21 — a Private P2P shell is NOT a server room surface, and
+        // this read resolves an arbitrary id directly. Without the guard,
+        // anyone holding or probing an `unlisted` `room_server_id` could
+        // confirm the room exists and read its shell here, which defeats the
+        // identical-404 contract `GET /v1/private-rooms/:id/bootstrap` enforces
+        // one route away. The same `notFound` the unknown-id case returns, so
+        // this adds no oracle of its own. (The list paths reach the same
+        // conclusion through `roomVisibleToUser`; this path never calls it.)
+        if (room.storageMode !== 'server') return c.json(notFound, 404);
         // WS-Q.3.1a — TIER ONE (existence) is universal: the room's shell
         // (name, description, visibility, stewards, join affordance) is visible
         // to ALL, so a private room is discoverable and joinable. TIER TWO

@@ -701,6 +701,29 @@ export class PrivateRoomSession {
   }
 
   /**
+   * Record the §21 directory stub this room registered.
+   *
+   * The server mints `room_server_id` at create time and it is the ONLY handle
+   * for every later bootstrap, patch, delist and delete — there is no endpoint
+   * that lists an account's stubs. Discarding it would leave the record
+   * unreachable and unmanageable, so the caller persists it here the moment
+   * registration succeeds.
+   */
+  async attachDirectoryStub(stub: {
+    readonly roomServerId: string;
+    readonly stubId: string;
+    readonly directoryMode: 'listed' | 'unlisted';
+  }): Promise<void> {
+    this.session = { ...this.session, directoryStub: stub };
+    await putRoomSession(this.session);
+  }
+
+  /** The §21 directory record for this room, if it registered one. */
+  get directoryStub(): StoredRoomSession['directoryStub'] {
+    return this.session.directoryStub;
+  }
+
+  /**
    * Build the SIGNED body of this room's §8.2 directory stub (PRIVATE_SPEC
    * §21.1), for a creator who wants the room reachable by id rather than only
    * by out-of-band invite.

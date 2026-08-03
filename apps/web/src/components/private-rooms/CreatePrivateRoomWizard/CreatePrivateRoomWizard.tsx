@@ -48,6 +48,9 @@ export function CreatePrivateRoomWizard({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [directoryWarning, setDirectoryWarning] = useState<string | null>(null);
+  /** Set when the room was created but its directory record was not, so the
+   *  wizard can stay open to report it and still let the user continue. */
+  const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
 
   const allAcked = PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS.every((a) => acked[a.id] === true);
   const canCreate = allAcked && name.trim().length > 0 && !creating;
@@ -69,10 +72,11 @@ export function CreatePrivateRoomWizard({
       // fails, the room is still perfectly usable through out-of-band invites,
       // so a network error here must not read as "creation failed" and must not
       // discard the room the user just made.
+      let directoryFailed = false;
       if (directory !== 'detached') {
         try {
           const payload = await session.directoryStubPayload();
-          await createPrivateRoomStub({
+          const created = await createPrivateRoomStub({
             directoryMode: directory,
             // Display metadata is `listed`-only — the server REFUSES it on an
             // unlisted room rather than dropping it silently, so send it only
@@ -84,7 +88,17 @@ export function CreatePrivateRoomWizard({
             signedStub: payload.signedStub,
             stubSignature: payload.stubSignature,
           });
+          // PERSIST the server-minted id. It is the only handle for every later
+          // bootstrap, patch, delist and delete, and no endpoint lists an
+          // account's stubs — dropping it here would create a record nobody
+          // could ever reach or remove.
+          await session.attachDirectoryStub({
+            roomServerId: created.room_server_id,
+            stubId: created.stub_id,
+            directoryMode: directory,
+          });
         } catch {
+          directoryFailed = true;
           setDirectoryWarning(
             t(
               'privateRoom.create.directoryFailed',
@@ -92,6 +106,17 @@ export function CreatePrivateRoomWizard({
             ),
           );
         }
+      }
+      // HOLD the wizard open on a directory failure. The parent's `onCreated`
+      // closes and navigates away, which would unmount this component before
+      // the warning above ever painted — the user would land in the room
+      // believing it was listed, and only discover otherwise when an invitee
+      // could not resolve it. The room itself is already created and safe, so
+      // this is a notice to acknowledge, not an error to retry.
+      if (directoryFailed) {
+        setCreating(false);
+        setCreatedRoomId(session.roomId);
+        return;
       }
       onCreated?.(session.roomId);
     } catch {
@@ -201,18 +226,33 @@ export function CreatePrivateRoomWizard({
       ) : null}
 
       {/* The directory step is best-effort: the room already exists locally, so
-          this is a WARNING, not the creation error above. */}
+          this is a WARNING, not the creation error above — and it comes with the
+          way forward, since the wizard deliberately stayed open to show it. */}
       {directoryWarning ? (
-        <p className="text-warning-on-soft text-sm" role="alert">
-          {directoryWarning}
-        </p>
+        <div className="flex flex-col gap-2">
+          <p className="text-warning-on-soft text-sm" role="alert">
+            {directoryWarning}
+          </p>
+          {createdRoomId !== null ? (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => onCreated?.(createdRoomId)}
+              className="self-start"
+            >
+              {t('privateRoom.create.continueAnyway', 'Open the room anyway')}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
 
-      <Button type="submit" variant="primary" disabled={!canCreate}>
-        {creating
-          ? t('privateRoom.create.creating', 'Creating…')
-          : t('privateRoom.create.submit', 'Create private room')}
-      </Button>
+      {createdRoomId === null ? (
+        <Button type="submit" variant="primary" disabled={!canCreate}>
+          {creating
+            ? t('privateRoom.create.creating', 'Creating…')
+            : t('privateRoom.create.submit', 'Create private room')}
+        </Button>
+      ) : null}
     </form>
   );
 }

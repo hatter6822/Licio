@@ -102,8 +102,17 @@ describe('CreatePrivateRoomWizard', () => {
       }
       await user.click(screen.getByRole('button', { name: /create private room/i }));
 
+      // The wizard HOLDS OPEN so the warning is actually seen: calling
+      // `onCreated` here would let the parent unmount this component before the
+      // notice painted, and the user would land in the room believing it was
+      // listed. The room itself is already created and safe.
+      expect(await screen.findByText(/could not save its directory record/i)).toBeInTheDocument();
+      expect(onCreated).not.toHaveBeenCalled();
+
+      // …and it is not a dead end: the user can continue into the room.
+      await user.click(screen.getByRole('button', { name: /open the room anyway/i }));
       await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
-      expect(screen.getByText(/could not save its directory record/i)).toBeInTheDocument();
+      expect(typeof onCreated.mock.calls[0]?.[0]).toBe('string');
     } finally {
       fetchSpy.mockRestore();
     }

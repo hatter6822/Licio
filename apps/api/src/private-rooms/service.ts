@@ -81,6 +81,11 @@ export interface BootstrapResponse {
   readonly updated_at: string;
 }
 
+/** Does this signed stub carry the §21.2 bootstrap capability? */
+function hasBootstrapToken(signedStub: Record<string, unknown>): boolean {
+  return typeof signedStub['bootstrap_blind_id'] === 'string';
+}
+
 /**
  * Constant-time string comparison for the §21.2 bootstrap token.
  *
@@ -138,14 +143,16 @@ export class PrivateRoomStubService {
     if (forbiddenSignedStubKeys(request.signed_stub).length > 0) {
       return { ok: false, reason: 'forbidden_stub_field' };
     }
-    // An `unlisted` room's bootstrap read is gated on a token the client commits
-    // to HERE.  Without it the room would be unreachable by anyone who was not
-    // already a member, so this is refused at create rather than discovered
-    // later as a permanently-404ing stub.
-    if (
-      request.directory_mode === 'unlisted' &&
-      typeof request.signed_stub['bootstrap_blind_id'] !== 'string'
-    ) {
+    // EVERY stub commits to a bootstrap token, not just one created `unlisted`.
+    //
+    // Gating this on the create-time mode was wrong in two directions: a
+    // `listed` stub could omit the token and then be DELISTED, and an unlisted
+    // stub could PATCH `signed_stub` to drop it. Either way `bootstrap()`
+    // afterwards returns `not_found` for every token, which silently breaks the
+    // §21.4 guarantee that delisting keeps the record resolvable for existing
+    // members. A listed room can always become unlisted, so the token is a
+    // property of HAVING a stub, not of the mode it was born in.
+    if (!hasBootstrapToken(request.signed_stub)) {
       return { ok: false, reason: 'unlisted_requires_token' };
     }
 
@@ -226,6 +233,13 @@ export class PrivateRoomStubService {
     if (request.signed_stub !== undefined && forbiddenSignedStubKeys(request.signed_stub).length) {
       return { ok: false, reason: 'forbidden_stub_field' };
     }
+    // A PATCH may REPLACE the signed stub, so it may also drop the capability
+    // the bootstrap read is gated on. Refuse: a stub that loses its token
+    // answers `not_found` for every token afterwards, which is indistinguishable
+    // from deletion for every member holding an invite.
+    if (request.signed_stub !== undefined && !hasBootstrapToken(request.signed_stub)) {
+      return { ok: false, reason: 'unlisted_requires_token' };
+    }
     const next = await this.store.update(roomServerId, {
       ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
       ...(request.display_description !== undefined
@@ -249,11 +263,29 @@ export class PrivateRoomStubService {
     return { ok: true, value: this.#project(next) };
   }
 
-  /** §21.4 — demote a `listed` record to `unlisted` and drop its display fields. */
-  async delist(roomServerId: string, accountId: string): Promise<StubResult<BootstrapResponse>> {
+  /**
+   * §21.4 — demote a `listed` record to `unlisted` and drop its display fields.
+   *
+   * The creator may always delist their own record. PLATFORM STAFF may also
+   * delist ANY listed record, and that is not an oversight in the ownership
+   * check — §11.4 grants staff exactly one power over a P2P room, and this is
+   * it. A listed stub publishes a name, description and avatar to anyone with
+   * the id; if the creator will not remove abusive display metadata, nobody
+   * else could either, since no other delist path exists. Note the shape of the
+   * power: staff can stop the room ADVERTISING itself, and can do nothing to
+   * the room — no content, no membership, no keys, and the record stays
+   * resolvable for the members who already hold its token.
+   */
+  async delist(
+    roomServerId: string,
+    accountId: string,
+    options: { readonly staff?: boolean } = {},
+  ): Promise<StubResult<BootstrapResponse>> {
     const stub = await this.store.getByRoomId(roomServerId);
     if (!stub) return { ok: false, reason: 'not_found' };
-    if (stub.createdByAccountId !== accountId) return { ok: false, reason: 'forbidden' };
+    if (stub.createdByAccountId !== accountId && options.staff !== true) {
+      return { ok: false, reason: 'forbidden' };
+    }
     const next = await this.store.delist(roomServerId);
     if (!next) return { ok: false, reason: 'not_found' };
     this.#metrics.delisted += 1;
@@ -273,6 +305,18 @@ export class PrivateRoomStubService {
     if (!removed) return { ok: false, reason: 'not_found' };
     this.#metrics.removed += 1;
     return { ok: true, value: { removed: true } };
+  }
+
+  /**
+   * §21.4 — remove every directory record an account created (hard deletion).
+   *
+   * Called by the WS-D purge, not by a route: there is no user-facing "delete
+   * all my stubs" action. Returns how many were removed.
+   */
+  async purgeForAccount(accountId: string): Promise<number> {
+    const removed = await this.store.purgeForAccount(accountId);
+    this.#metrics.removed += removed;
+    return removed;
   }
 
   /** A snapshot of the aggregate-only counters (no room identity). */
