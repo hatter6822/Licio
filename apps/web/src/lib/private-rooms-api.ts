@@ -259,7 +259,32 @@ export async function findMyPrivateRoomStub(
   return (await parseResponse(response, myStubsSchema)).stubs[0] ?? null;
 }
 
-/** §21.4 — stop advertising a listed room (it stays resolvable for members). */
+/**
+ * The §11.4 STAFF delist's answer: a confirmation, not a record.
+ *
+ * After the demotion staff hold no capability for the record, so the endpoint
+ * returns what happened rather than the bootstrap projection the owner path
+ * returns — and parsing one as the other threw AFTER the demotion had committed
+ * and been audited, so the console reported failure over a completed action.
+ */
+const staffDelistResponseSchema = z.object({
+  room_server_id: z.string(),
+  delisted: z.literal(true),
+});
+
+/** §11.4/§21.4 — platform staff stop a room advertising a public name. */
+export async function staffDelistPrivateRoom(
+  roomServerId: string,
+): Promise<{ room_server_id: string; delisted: true }> {
+  const response = await apiFetch(
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/delist`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
+  );
+  return await parseResponse(response, staffDelistResponseSchema);
+}
+
+/** §21.4 — the OWNER stops advertising their own room; it stays resolvable for
+ *  members, and the full record comes back because they still hold it. */
 export async function delistPrivateRoomStub(roomServerId: string): Promise<BootstrapStub> {
   const response = await apiFetch(
     `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/delist`,

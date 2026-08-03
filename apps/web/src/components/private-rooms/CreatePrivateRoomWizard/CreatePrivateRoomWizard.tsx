@@ -72,6 +72,12 @@ const DIRECTORY_LABELS: Record<DirectoryChoice, (t: ReturnType<typeof useT>) => 
     ),
 };
 
+/** The modes this caller can actually complete — see the two notes below. */
+function availableChoices(signedIn: boolean, restricted: boolean): readonly DirectoryChoice[] {
+  if (!signedIn) return ['detached'];
+  return restricted ? ['detached', 'unlisted'] : DIRECTORY_CHOICES;
+}
+
 export function CreatePrivateRoomWizard({
   onCreated,
 }: CreatePrivateRoomWizardProps): React.ReactElement {
@@ -89,6 +95,17 @@ export function CreatePrivateRoomWizard({
   // who cannot register one, `detached` is not a weaker choice, it is the only
   // true one.
   const signedIn = useAuthStore((state) => state.status === 'authenticated');
+  /**
+   * A restricted account may not PUBLISH, so `listed` is not offered.
+   *
+   * The route refuses it (`account_restricted`), and the wizard creates the
+   * local room BEFORE that request — so choosing it left an already-created
+   * detached room and a warning to try listing later, which is impossible:
+   * re-registration is unlisted-only and §21.3 does not make the mode
+   * patchable. An unlisted room stays available, which is the §4.2 default and
+   * publishes nothing.
+   */
+  const restricted = useAuthStore((state) => state.user?.account_state === 'restricted');
   const [directory, setDirectory] = useState<DirectoryChoice>(
     signedIn ? DEFAULT_P2P_DIRECTORY_MODE : 'detached',
   );
@@ -99,7 +116,8 @@ export function CreatePrivateRoomWizard({
   // account-aware default was meant to remove.
   useEffect(() => {
     if (!signedIn) setDirectory('detached');
-  }, [signedIn]);
+    else if (restricted) setDirectory((current) => (current === 'listed' ? 'unlisted' : current));
+  }, [signedIn, restricted]);
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -292,7 +310,7 @@ export function CreatePrivateRoomWizard({
         onValueChange={(v) => setDirectory(v as DirectoryChoice)}
         // A signed-out visitor cannot register a stub at all, so the two modes
         // that need one are not offered rather than offered-and-failing.
-        options={(signedIn ? DIRECTORY_CHOICES : (['detached'] as const)).map((value) => ({
+        options={availableChoices(signedIn, restricted).map((value) => ({
           value,
           label: DIRECTORY_LABELS[value](t),
         }))}

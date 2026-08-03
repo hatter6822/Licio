@@ -851,6 +851,29 @@ describe('mounted routes (PRIVATE_SPEC §21)', () => {
     expect(body.bootstrap_endpoints.length).toBeGreaterThan(0);
   });
 
+  it('never lets a bootstrap answer be cached — including the refusals', async () => {
+    const svc = freshService();
+    setPrivateRoomStubService(svc);
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const app2 = createApp();
+
+    // A cached 404 from a wrong token, replayed to an invitee presenting the
+    // right one, would lock a legitimate member out of their own room's record
+    // — and a cached 200 would serve a capability-gated read to someone who
+    // presented nothing. The URL no longer distinguishes them, so neither may
+    // be stored.
+    for (const path of [
+      `/v1/private-rooms/${created.value.room_server_id}/bootstrap`,
+      '/v1/private-rooms/00000000-0000-4000-8000-999999999999/bootstrap',
+      '/v1/private-rooms/not-a-uuid/bootstrap',
+    ]) {
+      const res = await app2.request(path);
+      expect(res.headers.get('cache-control'), path).toContain('no-store');
+      expect(res.headers.get('vary'), path).toContain('x-licio-bootstrap-token');
+    }
+  });
+
   it('answers a MALFORMED room id with the same 404 as an unknown one', async () => {
     const malformed = await app.request('/v1/private-rooms/not-a-uuid/bootstrap');
     const unknown = await app.request(

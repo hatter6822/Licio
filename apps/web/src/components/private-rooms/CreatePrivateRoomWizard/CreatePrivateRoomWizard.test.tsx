@@ -364,6 +364,24 @@ describe('CreatePrivateRoomWizard', () => {
     }
   });
 
+  it('does not offer LISTED to a restricted account', async () => {
+    // The route refuses it, and the room is created BEFORE that request — so
+    // offering it left an already-created detached room and a retry that cannot
+    // work: re-registration is unlisted-only and the mode is not patchable.
+    useAuthStore.setState({
+      status: 'authenticated',
+      user: { id: 'u1', account_state: 'restricted' },
+    } as never);
+    const user = userEvent.setup();
+    render(<CreatePrivateRoomWizard />);
+    await user.click(screen.getByLabelText(/who can find this room/i));
+    const options = screen.getAllByRole('option').map((o) => o.textContent ?? '');
+    expect(options.some((label) => /public directory/i.test(label))).toBe(false);
+    // …and `unlisted` remains available: it publishes nothing, and it is the
+    // §4.2 default.
+    expect(options.some((label) => /People you invite/i.test(label))).toBe(true);
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<CreatePrivateRoomWizard />);
     await checkA11y(container);

@@ -29,7 +29,7 @@ import { useT } from '../../i18n/I18nProvider.js';
 import { ApiClientError } from '../../lib/api.js';
 import { verifyTotp } from '../../lib/auth-api.js';
 import { saveBlob } from '../../lib/privacy-api.js';
-import { delistPrivateRoomStub } from '../../lib/private-rooms-api.js';
+import { staffDelistPrivateRoom } from '../../lib/private-rooms-api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
   applyEvidenceDecision,
@@ -674,7 +674,7 @@ function CaseReviewDialog({
    * demotion or neither does.
    */
   const delist = useMutation({
-    mutationFn: (roomServerId: string) => delistPrivateRoomStub(roomServerId),
+    mutationFn: (roomServerId: string) => staffDelistPrivateRoom(roomServerId),
     onSuccess: () => {
       toast({
         message: t(

@@ -348,6 +348,16 @@ export function createPrivateRoomsRoutes() {
   // §21.2 — fetch the bootstrap record.  Listed: open.  Unlisted: the
   // invite-derived blind token, or the same 404 an unknown room returns.
   app.get('/:roomServerId/bootstrap', rateLimit({ limit: 600, windowMs: 60_000 }), async (c) => {
+    // FIRST, so it covers every answer this route can give.
+    //
+    // Applying it only to the 200 left the refusals cacheable: a 404 produced by
+    // a missing or wrong token could be stored against the URL — which no longer
+    // distinguishes a capability-bearing request from a bare one — and replayed
+    // to a legitimate invitee presenting the right token. The identical-404
+    // contract makes the two indistinguishable to a cache as well as to a
+    // reader, which is exactly why neither may be stored.
+    c.header('Cache-Control', 'no-store, private');
+    c.header('Vary', BOOTSTRAP_TOKEN_HEADER);
     const params = roomIdParamSchema.safeParse({ roomServerId: c.req.param('roomServerId') });
     // A malformed id is answered with the SAME 404 as an unknown one — a 400
     // here would confirm that a well-formed id is the only kind that can exist.
@@ -362,17 +372,6 @@ export function createPrivateRoomsRoutes() {
       const { status, body } = refuse(result.reason);
       return c.json(body, status);
     }
-    // NEVER CACHED, and never keyed without the capability.
-    //
-    // A shared or browser HTTP cache would otherwise store a successful
-    // capability-gated read against a URL that no longer carries the token —
-    // the capability moved to a header precisely so it stays out of the URL —
-    // and serve that 200 to a later request that presented nothing. The
-    // service-worker exclusion does not reach the browser's own cache or an
-    // upstream proxy. `Vary` is belt-and-braces for anything that ignores
-    // `no-store` but honours a key.
-    c.header('Cache-Control', 'no-store, private');
-    c.header('Vary', BOOTSTRAP_TOKEN_HEADER);
     return c.json(result.value, 200);
   });
 
