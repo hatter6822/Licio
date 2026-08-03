@@ -68,6 +68,7 @@ function landscape(over: Partial<CivicMapResponse> = {}): CivicMapResponse {
         level: 12,
         connecting_edges: 2,
         fragile: true,
+        survivor: BASIN_A,
         shared_topics: [TOPIC],
       },
     ],
@@ -183,6 +184,71 @@ describe('CivicMap', () => {
       />,
     );
     expect(screen.getByText(/showing 12 in the diagram/i)).toBeInTheDocument();
+  });
+
+  it('orders the display neutrally, not by the engagement it was handed', async () => {
+    // The response arrives peak-order, which the sweep makes descending by
+    // level (4242, 17, 5). Rendering it as given would publish that ranking
+    // without a single sort in the component. The visible order must be
+    // alphabetical instead.
+    render(<CivicMap data={landscape()} />);
+    await userEvent.click(screen.getByText(/List every cluster/i));
+    // Scope to the cluster list: the fragile-join list above it names basins too.
+    const clusterList = screen.getByText(/List every cluster/i).parentElement;
+    const titles = [...(clusterList?.querySelectorAll('li') ?? [])].map(
+      (li) => li.textContent ?? '',
+    );
+    expect(titles[0]).toMatch(/Council budget vote/);
+    expect(titles[1]).toMatch(/Flooding on the ring road/);
+    expect(titles[2]).toMatch(/Untargetable basin/);
+  });
+
+  it('stops an absorbed stem at its saddle instead of drawing past it', () => {
+    // BASIN_B loses the merge at level 12. A merge tree in which both branches
+    // continue below their join is not a tree, and the phantom stem would
+    // contradict `final`.
+    const { container } = render(<CivicMap data={landscape()} />);
+    // The FIRST svg is the map; later ones are icons with lines of their own.
+    const lines = [...(container.querySelector('svg')?.querySelectorAll('line') ?? [])];
+    const baseline = lines.find((line) => line.getAttribute('x1') === '0');
+    const floor = baseline?.getAttribute('y1');
+    expect(floor).toBeDefined();
+
+    const stems = lines.filter((line) => line.getAttribute('x1') === line.getAttribute('x2'));
+    expect(stems).toHaveLength(3);
+    const cut = stems.filter((line) => line.getAttribute('y2') !== floor);
+    expect(cut).toHaveLength(1);
+
+    // …and it stops EXACTLY at the join, not merely somewhere short of the floor.
+    const join = lines.find((line) => line.getAttribute('stroke-dasharray') !== null);
+    expect(cut[0]?.getAttribute('y2')).toBe(join?.getAttribute('y1'));
+  });
+
+  it('describes every join in words, not only the actionable ones', async () => {
+    const data = landscape({
+      merges: [
+        ...landscape().merges,
+        {
+          basin_a: BASIN_A,
+          basin_b: BASIN_C,
+          level: 3,
+          connecting_edges: 9,
+          fragile: false,
+          survivor: BASIN_A,
+          shared_topics: [],
+        },
+      ],
+    });
+    render(<CivicMap data={data} />);
+    // The sturdy join has no bridge action, so the fragile list omits it — but
+    // the diagram draws it, and a screen-reader user must learn it exists.
+    await userEvent.click(screen.getByText(/List every join/i));
+    expect(
+      screen.getByText(
+        /“Flooding on the ring road” and “Untargetable basin” join by 9 connections/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/join by 2 connections.*fragile/)).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {

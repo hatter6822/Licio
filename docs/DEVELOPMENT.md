@@ -981,14 +981,18 @@ policy, and (for a `listed` room only) public display metadata, served by
 `/v1/private-rooms/*` (Section 21 of `docs/PRIVATE_SPEC.md`). It holds no
 content, no private CID, no operation head, and no member list; a `detached`
 room stores no stub at all. P2P rooms never appear in `GET /v1/rooms` — a
-`listed` room is discovered through `GET /v1/private-rooms/:id/bootstrap`, and
-an `unlisted` one only with its invite-derived blind token.
+`listed` room is browsable through `GET /v1/private-rooms/directory` (display
+metadata only; never the signed stub, which carries the bootstrap capability)
+and resolvable through `GET /v1/private-rooms/:id/bootstrap`, while an
+`unlisted` one resolves only with its invite-derived blind token and appears in
+no listing at all. Browsing is not a way in: every P2P room is invite-only, so
+the directory tells you a room exists and nothing more.
 
 Exercise them directly in the running app:
 
 | Route | Surface | What to try |
 |-------|---------|-------------|
-| `/private` | Private (E2EE) rooms list + `CreatePrivateRoomWizard` | Create a room (5 blocking acknowledgments); it is stored only on this device (`licio_private_p2p` IndexedDB). |
+| `/private` | Private (E2EE) rooms list + `CreatePrivateRoomWizard` + `PrivateRoomDirectory` | Create a room (5 blocking acknowledgments); it is stored only on this device (`licio_private_p2p` IndexedDB). The directory below the list shows only rooms created as `listed` — the default is `unlisted`, so a room you just made will not be there. |
 | `/private/$roomId` | `PrivateRoomView` | Post a story/comment; open `InvitePanel`/`JoinPanel` (copy-paste the recipient key → sealed invite → join request → **grant** → `completeJoin`); verify a device's safety number (`SafetyNumberPanel`); "Connect & sync with members" drives the live WebRTC carrier. |
 | `/private/migrate` | `MigrationWizard` | Re-author a server room's content into a destination private room (freeze → re-author → purge). |
 | `/profile/offline` | `OfflineBundlePanel` + `P2pSyncPanel` | Export/import a `.licio-bundle` (incl. a private room's ciphertext via the cross-plane bridge); run a live LCAP P2P sync over WebRTC. |

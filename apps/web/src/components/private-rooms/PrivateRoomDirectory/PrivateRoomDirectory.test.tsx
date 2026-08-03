@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// The properties that keep the §4.2 directory honest:
+//
+//   • it says what being listed does and does NOT buy you (no join button —
+//     a P2P room is invite-only and the server holds no key that could admit
+//     anyone, so any "join" affordance would be a promise it cannot keep);
+//   • a room with no published name is still shown, labelled, rather than
+//     rendered as an empty row;
+//   • paging APPENDS (a "show more" that reset the list would read as a bug);
+//   • a failed load says so instead of showing an empty directory, which would
+//     be indistinguishable from "there are no listed rooms".
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { checkA11y } from '../../../test/axe.js';
+import { PrivateRoomDirectory } from './PrivateRoomDirectory.js';
+
+function page(
+  entries: { id: string; name: string | null; description?: string | null }[],
+  nextCursor: string | null = null,
+): string {
+  return JSON.stringify({
+    entries: entries.map((e) => ({
+      room_server_id: e.id,
+      display_name: e.name,
+      display_description: e.description ?? null,
+      display_avatar_public_cid: null,
+      created_at: '2026-08-02T00:00:00.000Z',
+    })),
+    next_cursor: nextCursor,
+  });
+}
+
+function mockPages(...bodies: string[]): ReturnType<typeof vi.spyOn> {
+  let call = 0;
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+    const body = bodies[Math.min(call, bodies.length - 1)] ?? page([]);
+    call += 1;
+    return new Response(body, {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('PrivateRoomDirectory', () => {
+  it('lists rooms and offers no way to join one', async () => {
+    mockPages(page([{ id: 'r1', name: 'Neighbourhood watch', description: 'Local reports' }]));
+    render(<PrivateRoomDirectory />);
+
+    expect(await screen.findByText('Neighbourhood watch')).toBeInTheDocument();
+    expect(screen.getByText('Local reports')).toBeInTheDocument();
+    // The honest limit, stated on the surface rather than discovered later.
+    expect(screen.getByText(/still need an invite from a member/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /join/i })).toBeNull();
+  });
+
+  it('labels a room that published no name rather than rendering a blank row', async () => {
+    mockPages(page([{ id: 'r1', name: null }]));
+    render(<PrivateRoomDirectory />);
+    expect(await screen.findByText(/Room without a published name/i)).toBeInTheDocument();
+  });
+
+  it('appends the next page instead of replacing the list', async () => {
+    mockPages(
+      page([{ id: 'r1', name: 'First room' }], 'cursor-1'),
+      page([{ id: 'r2', name: 'Second room' }]),
+    );
+    render(<PrivateRoomDirectory />);
+    await screen.findByText('First room');
+
+    await userEvent.click(screen.getByRole('button', { name: /show more rooms/i }));
+    await screen.findByText('Second room');
+    expect(screen.getByText('First room')).toBeInTheDocument();
+    // The end of the list retires the control rather than looping on itself.
+    expect(screen.queryByRole('button', { name: /show more rooms/i })).toBeNull();
+  });
+
+  it('reports a failed load rather than showing an empty directory', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    render(<PrivateRoomDirectory />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load the directory/i);
+    // …and does NOT claim there are no listed rooms, which is a different fact.
+    expect(screen.queryByText(/No listed rooms yet/i)).toBeNull();
+  });
+
+  it('says the directory is empty when it genuinely is', async () => {
+    mockPages(page([]));
+    render(<PrivateRoomDirectory />);
+    expect(await screen.findByText(/No listed rooms yet/i)).toBeInTheDocument();
+  });
+
+  it('has no accessibility violations', async () => {
+    mockPages(page([{ id: 'r1', name: 'Neighbourhood watch' }]));
+    const { container } = render(<PrivateRoomDirectory />);
+    await waitFor(() => expect(screen.getByText('Neighbourhood watch')).toBeInTheDocument());
+    await checkA11y(container);
+  });
+});

@@ -807,6 +807,11 @@ identityServices.purgeClientState = async (userId) => {
 identityServices.purgePrivateRoomStubs = async (userId) => {
   await getPrivateRoomStubService().purgeForAccount(userId);
 };
+// …and the SAME rows are DISCLOSED (Art. 15). The purge above is the only thing
+// that knows a private-room creator has durable server rows at all; an export
+// that did not consult the same store would report an account with none.
+identityServices.exportPrivateRoomStubs = async (userId) =>
+  await getPrivateRoomStubService().exportForAccount(userId);
 // …and the SAME durable per-user state reaches the DSAR archive (Art. 15):
 // what deletion knows how to remove, export must know how to disclose.
 identityServices.exportClientState = async (userId) => ({

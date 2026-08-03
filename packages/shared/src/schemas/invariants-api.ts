@@ -107,7 +107,20 @@ export const civicMapSaddleSchema = z.object({
   connecting_edges: z.number().int().min(0),
   /** A fragile saddle is the §12.4 bridge-prompt trigger. */
   fragile: z.boolean(),
-  /** Topics both sides share — what a bridging comment would speak to. */
+  /** The basin that SURVIVES the join. A merge tree is only a tree if the
+   *  losing branch ends here; a renderer that draws both onward is drawing
+   *  something else. */
+  survivor: uuidSchema,
+  /**
+   * What the join is ABOUT — the topics carried by the edges that actually
+   * connect the two basins.
+   *
+   * NOT the intersection of the two peak stories' topics. Basins routinely meet
+   * through lower-level members, so the subject forming the saddle need not
+   * appear on either peak: a peak about X can join a peak about Z through an
+   * X/Y story and a Y/Z story, where the join is entirely about Y and
+   * intersecting the peaks yields nothing at all.
+   */
   shared_topics: z.array(civicMapTopicSchema).max(8),
 });
 export type CivicMapSaddle = z.infer<typeof civicMapSaddleSchema>;

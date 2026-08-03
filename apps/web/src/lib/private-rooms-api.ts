@@ -56,6 +56,24 @@ export const bootstrapStubSchema = z.object({
 });
 export type BootstrapStub = z.infer<typeof bootstrapStubSchema>;
 
+/** §4.2 — one public directory row. Display metadata only: the commitments and
+ *  the signed stub (which carries the bootstrap capability) stay behind
+ *  `GET /bootstrap`, so browsing never hands out a token. */
+export const directoryEntrySchema = z.object({
+  room_server_id: z.string(),
+  display_name: z.string().nullable(),
+  display_description: z.string().nullable(),
+  display_avatar_public_cid: z.string().nullable(),
+  created_at: z.string(),
+});
+export type DirectoryEntry = z.infer<typeof directoryEntrySchema>;
+
+export const directoryPageSchema = z.object({
+  entries: z.array(directoryEntrySchema),
+  next_cursor: z.string().nullable(),
+});
+export type DirectoryPage = z.infer<typeof directoryPageSchema>;
+
 const deleteStubResponseSchema = z.object({
   removed: z.literal(true),
   removed_what: z.string(),
@@ -170,6 +188,26 @@ export async function updatePrivateRoomStub(
     },
   );
   return await parseResponse(response, bootstrapStubSchema);
+}
+
+/**
+ * §4.2 — a page of the public directory of `listed` rooms.
+ *
+ * Only rooms whose creator explicitly chose `listed` appear. Being in the
+ * directory is not a way IN: a P2P room is invite-only, so what this buys a
+ * reader is knowing the room exists and whom to ask — which is exactly what
+ * `listed` was chosen for.
+ */
+export async function listPrivateRoomDirectory(options?: {
+  readonly limit?: number;
+  readonly cursor?: string;
+}): Promise<DirectoryPage> {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set('limit', String(options.limit));
+  if (options?.cursor !== undefined) params.set('cursor', options.cursor);
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  const response = await apiFetch(`${API_BASE}/v1/private-rooms/directory${query}`);
+  return await parseResponse(response, directoryPageSchema);
 }
 
 /** §21.4 — stop advertising a listed room (it stays resolvable for members). */

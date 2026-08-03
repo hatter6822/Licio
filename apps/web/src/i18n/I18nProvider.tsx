@@ -35,6 +35,12 @@ export function resolveDirection(locale: string): Direction {
   return RTL_LANGUAGES.has(language) ? 'rtl' : 'ltr';
 }
 
+/** The empty catalog, as ONE value: a `messages = {}` default parameter is a
+ *  fresh object per render, which busts the `useMemo` below and hands every
+ *  consumer a new `t` — the same dependency-array hazard the fallback below
+ *  documents, just inside the provider. */
+const NO_MESSAGES: Messages = {};
+
 export interface I18nProviderProps {
   locale?: string;
   /** Explicit direction; inferred from `locale` when omitted. */
@@ -46,7 +52,7 @@ export interface I18nProviderProps {
 export function I18nProvider({
   locale = 'en',
   dir,
-  messages = {},
+  messages = NO_MESSAGES,
   children,
 }: I18nProviderProps): React.ReactElement {
   const direction = dir ?? resolveDirection(locale);
@@ -85,17 +91,30 @@ export function I18nProvider({
 }
 
 /**
+ * The no-provider fallback, as ONE module-level value.
+ *
+ * It must not be built inside the hook. Doing so handed every caller a FRESH
+ * `t` on every render, so a `useCallback(..., [t])` feeding a `useEffect` never
+ * settled: each render made a new callback, which re-ran the effect, which
+ * re-rendered. For a data-loading component that is an unbounded request loop
+ * against the API, and it appears only outside a provider — which is precisely
+ * how components are unit-tested. The value is stateless, so hoisting it is
+ * both the fix and the whole of it.
+ */
+const FALLBACK_I18N: I18nContextValue = {
+  locale: 'en',
+  dir: 'ltr',
+  t: (_key, defaultMessage, params) => formatMessage(defaultMessage, params, 'en'),
+};
+
+/**
  * Access the i18n context. Outside a provider it degrades to English/LTR with a
- * pass-through translator, so components (and their tests) work standalone.
+ * pass-through translator, so components (and their tests) work standalone —
+ * and the fallback is REFERENTIALLY STABLE, so `t` is safe in a dependency array
+ * with or without a provider.
  */
 export function useI18n(): I18nContextValue {
-  return (
-    useContext(I18nContext) ?? {
-      locale: 'en',
-      dir: 'ltr',
-      t: (_key, defaultMessage, params) => formatMessage(defaultMessage, params, 'en'),
-    }
-  );
+  return useContext(I18nContext) ?? FALLBACK_I18N;
 }
 
 /** Convenience hook returning just the translator. */

@@ -831,8 +831,8 @@ workspace has a thin local config so `pnpm --filter <ws> test` runs
 standalone.  Coverage gate: 80% minimum (lines, functions, branches,
 statements).
 
-**Test counts.**  `pnpm test` is the canonical query (≈10620 pass without
-the gated integration env; ≈10940 with live Postgres/Redis — the gated env
+**Test counts.**  `pnpm test` is the canonical query (≈10680 pass without
+the gated integration env; ≈11000 with live Postgres/Redis — the gated env
 also drops the skip count from ≈340 to ≈12, the residual being the
 `RUN_PERF` benchmarks).  Only monotonic growth is enforced — exact numbers
 drift, so the per-suite breakdown lives in each `docs/*/README.md`, not

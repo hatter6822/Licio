@@ -59,6 +59,8 @@ interface Stem {
   x: number;
   /** y for the basin's peak (its birth) — higher level sits higher. */
   yPeak: number;
+  /** y where the stem STOPS: its absorbing saddle, or the floor if it survives. */
+  yEnd: number;
 }
 
 interface Join {
@@ -69,15 +71,33 @@ interface Join {
 }
 
 /**
+ * A NEUTRAL, engagement-independent order for basins.
+ *
+ * "Do not re-sort — preserve the sweep's own order" was exactly wrong. The
+ * sweep descends through levels highest-first and appends each peak as it is
+ * born, so the response order IS descending hourly engagement. Preserving it
+ * made the x-axis and the text list an exact popularity ranking while the
+ * component's own rule ("never re-order by level") was satisfied to the letter.
+ * A ranking nobody sorted is still a ranking.
+ *
+ * Alphabetical by title, basin id as tiebreak: deterministic, useful for a
+ * human scanning the list, and carrying no engagement signal at all.
+ */
+function neutralOrder(basins: readonly CivicMapBasin[]): CivicMapBasin[] {
+  return [...basins].sort(
+    (a, b) => a.title.localeCompare(b.title) || a.basin_id.localeCompare(b.basin_id),
+  );
+}
+
+/**
  * Place stems left-to-right and map levels onto the vertical axis.
  *
- * Order is by the sweep's own structure — the order basins appear in the
- * response, which is peak order from the graph — NOT a re-sort by level. A
- * re-sort would turn the x-axis into a ranking, which is exactly what this
- * surface must not become.
+ * Stems TERMINATE at the saddle where their basin is absorbed: a merge tree in
+ * which both branches continue past their join is not a merge tree, and
+ * successive joins would draw phantom basins contradicting `final`.
  */
 function layout(data: CivicMapResponse): { stems: Stem[]; joins: Join[]; drawn: number } {
-  const basins = data.basins.slice(0, MAX_DRAWN_BASINS);
+  const basins = neutralOrder(data.basins).slice(0, MAX_DRAWN_BASINS);
   if (basins.length === 0) return { stems: [], joins: [], drawn: 0 };
 
   const levels = [
@@ -91,14 +111,31 @@ function layout(data: CivicMapResponse): { stems: Stem[]; joins: Join[]; drawn: 
   const yFor = (level: number): number =>
     PAD_TOP + (1 - (level - minLevel) / span) * (VIEW_H - PAD_TOP - PAD_BOTTOM);
 
+  // Where each basin ENDS: the highest-level merge that absorbs it (the one it
+  // does not survive). Absent ⇒ it reaches the floor.
+  const absorbedAt = new Map<string, number>();
+  for (const saddle of data.merges) {
+    for (const basinId of [saddle.basin_a, saddle.basin_b]) {
+      if (basinId === saddle.survivor) continue;
+      const existing = absorbedAt.get(basinId);
+      // Descending sweep: the FIRST (highest-level) absorption is the real end.
+      if (existing === undefined || saddle.level > existing) absorbedAt.set(basinId, saddle.level);
+    }
+  }
+
   const usable = VIEW_W - PAD_X * 2;
   const step = basins.length === 1 ? 0 : usable / (basins.length - 1);
-  const stems: Stem[] = basins.map((basin, i) => ({
-    basinId: basin.basin_id,
-    title: basin.title,
-    x: basins.length === 1 ? VIEW_W / 2 : PAD_X + i * step,
-    yPeak: yFor(basin.level),
-  }));
+  const floor = VIEW_H - PAD_BOTTOM;
+  const stems: Stem[] = basins.map((basin, i) => {
+    const end = absorbedAt.get(basin.basin_id);
+    return {
+      basinId: basin.basin_id,
+      title: basin.title,
+      x: basins.length === 1 ? VIEW_W / 2 : PAD_X + i * step,
+      yPeak: yFor(basin.level),
+      yEnd: end === undefined ? floor : yFor(end),
+    };
+  });
 
   const xOf = new Map(stems.map((s) => [s.basinId, s.x]));
   const joins: Join[] = [];
@@ -168,14 +205,15 @@ export function CivicMap({
             className="stroke-line"
             strokeWidth={1}
           />
-          {/* Stems: each basin from its peak down to the floor. */}
+          {/* Stems: each basin from its peak down to where it ENDS — the saddle
+              that absorbs it, or the floor if it survives to the end. */}
           {stems.map((stem) => (
             <g key={stem.basinId}>
               <line
                 x1={stem.x}
                 y1={stem.yPeak}
                 x2={stem.x}
-                y2={VIEW_H - PAD_BOTTOM}
+                y2={stem.yEnd}
                 className="stroke-ink-muted"
                 strokeWidth={1.5}
               />
@@ -302,14 +340,54 @@ export function CivicMap({
         </div>
       ) : null}
 
+      {/* EVERY join in words, not only the actionable ones.
+          The diagram draws every merge; the fragile list above covers only the
+          ones with an action. Without this a screen-reader user could see the
+          aggregate count but never learn WHICH basins join — a relationship
+          plainly visible to a sighted user, which breaks the equivalence this
+          component claims. */}
+      {data.merges.length > 0 ? (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-ink-muted">
+            {t('civicMap.joinsToggle', 'List every join')}
+          </summary>
+          <ul className="mt-2 flex flex-col gap-1">
+            {data.merges.map((saddle) => {
+              const a = basinById.get(saddle.basin_a);
+              const b = basinById.get(saddle.basin_b);
+              const survivor = basinById.get(saddle.survivor);
+              return (
+                <li
+                  key={`${saddle.basin_a}-${saddle.basin_b}-${saddle.level}`}
+                  className="text-ink-muted"
+                >
+                  {t(
+                    'civicMap.joinRow',
+                    '“{a}” and “{b}” join by {n, plural, one {# connection} other {# connections}}; “{survivor}” continues',
+                    {
+                      a: a?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      b: b?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                      n: saddle.connecting_edges,
+                      survivor:
+                        survivor?.title ?? t('civicMap.unknownBasin', 'an unavailable story'),
+                    },
+                  )}
+                  {saddle.fragile ? ` · ${t('civicMap.fragileTag', 'fragile')}` : ''}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
+
       {/* The full landscape as text — the accessible equivalent of the diagram,
-          and the only place basins are enumerated. */}
+          and the only place basins are enumerated. Neutral order, as above. */}
       <details className="text-xs">
         <summary className="cursor-pointer text-ink-muted">
           {t('civicMap.listToggle', 'List every cluster')}
         </summary>
         <ul className="mt-2 flex flex-col gap-1">
-          {data.basins.map((basin) => (
+          {neutralOrder(data.basins).map((basin) => (
             <li key={basin.basin_id} className="text-ink-muted">
               <span className="text-ink">{basin.title}</span>
               {basin.topics.length > 0

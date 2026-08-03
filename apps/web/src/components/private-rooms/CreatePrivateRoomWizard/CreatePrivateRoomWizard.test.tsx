@@ -4,7 +4,7 @@
 // acknowledgments, BLOCKS creation until all are checked (and a name is given),
 // and creates a real local room on submit (real crypto in jsdom + fake-indexeddb).
 import 'fake-indexeddb/auto';
-import { PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS } from '@licio/shared';
+import { DEFAULT_P2P_DIRECTORY_MODE, PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS } from '@licio/shared';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -49,6 +49,23 @@ describe('CreatePrivateRoomWizard', () => {
   });
 
   it('creates a room and reports its id', async () => {
+    // The §4.2 default writes a directory stub, so the happy path is only happy
+    // when that POST succeeds — see the failure case below for the other half.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      const body = url.includes('/csrf-token')
+        ? { token: 'test-csrf-token' }
+        : {
+            room_server_id: '11111111-1111-4111-8111-111111111111',
+            stub_id: '22222222-2222-4222-8222-222222222222',
+            bootstrap_endpoints: [],
+            created_at: '2026-08-02T00:00:00.000Z',
+          };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
     const user = userEvent.setup();
     const onCreated = vi.fn();
     render(<CreatePrivateRoomWizard onCreated={onCreated} />);
@@ -61,13 +78,29 @@ describe('CreatePrivateRoomWizard', () => {
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
     expect(typeof onCreated.mock.calls[0]?.[0]).toBe('string');
+    fetchSpy.mockRestore();
   });
 
-  it('defaults the directory choice to the one that leaks nothing', () => {
+  it('defaults the directory choice to the mandated §4.2 mode, not the strictest one', () => {
     render(<CreatePrivateRoomWizard />);
-    // `detached` — no server record at all — is the default, and the note under
-    // the control states that limit rather than leaving it implied.
-    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(/Nobody/i);
+    // §4.2: "Default for P2P private rooms MUST be `unlisted`." `detached` looks
+    // stricter and IS stricter, which is why it was chosen here first — but it
+    // leaves no bootstrap record, so an invite link cannot resolve and the user
+    // finds out only when someone tries to join.
+    expect(DEFAULT_P2P_DIRECTORY_MODE).toBe('unlisted');
+    expect(screen.getByLabelText(/who can find this room/i)).toHaveTextContent(
+      /People you invite/i,
+    );
+    expect(
+      screen.getByText(/Only someone holding your invite can resolve it/i),
+    ).toBeInTheDocument();
+  });
+
+  it('still offers the stricter detached mode, with its limit stated', async () => {
+    const user = userEvent.setup();
+    render(<CreatePrivateRoomWizard />);
+    await user.click(screen.getByLabelText(/who can find this room/i));
+    await user.click(screen.getByRole('option', { name: /Licio keeps no record of it/i }));
     expect(screen.getByText(/Nothing about this room reaches Licio/i)).toBeInTheDocument();
   });
 
@@ -75,11 +108,12 @@ describe('CreatePrivateRoomWizard', () => {
     const user = userEvent.setup();
     render(<CreatePrivateRoomWizard />);
     await user.click(screen.getByLabelText(/who can find this room/i));
-    await user.click(screen.getByRole('option', { name: /Licio also stores the room name/i }));
-    // The listed note must say what the server LEARNS, and must not imply the
-    // content is any less encrypted than the other modes.
+    await user.click(screen.getByRole('option', { name: /public directory/i }));
+    // The listed note must say what the server LEARNS, must name the PUBLIC
+    // DIRECTORY (a listed room is browsable, not merely link-reachable), and
+    // must not imply the content is any less encrypted than the other modes.
     expect(
-      screen.getByText(/Licio also stores the room name and description/i),
+      screen.getByText(/shows them in a public directory anyone can browse/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/stay end-to-end encrypted/i)).toBeInTheDocument();
   });
@@ -96,7 +130,7 @@ describe('CreatePrivateRoomWizard', () => {
 
       await user.type(screen.getByLabelText(/room name/i), 'Listed Room');
       await user.click(screen.getByLabelText(/who can find this room/i));
-      await user.click(screen.getByRole('option', { name: /Licio also stores the room name/i }));
+      await user.click(screen.getByRole('option', { name: /public directory/i }));
       for (const ack of PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS) {
         await user.click(screen.getByLabelText(ack.label));
       }

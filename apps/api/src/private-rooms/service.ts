@@ -110,6 +110,53 @@ function constantTimeEquals(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * §4.2 — one row of the public room directory.
+ *
+ * DELIBERATELY not the §21.2 bootstrap projection. A browse surface needs the
+ * display metadata a `listed` room chose to publish and nothing else: the
+ * commitments, hints, and above all the `signed_stub` (which carries the
+ * `bootstrap_blind_id` capability) stay behind `GET /bootstrap`. Listing them
+ * here would hand every anonymous reader the token that gates unlisted records,
+ * for every room that ever gets delisted.
+ */
+export interface DirectoryEntry {
+  readonly room_server_id: string;
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly created_at: string;
+}
+
+/** A page of the §4.2 directory. `next_cursor` is null at the end. */
+export interface DirectoryPage {
+  readonly entries: readonly DirectoryEntry[];
+  readonly next_cursor: string | null;
+}
+
+/** The largest page the directory will serve, and its default. */
+export const DIRECTORY_MAX_LIMIT = 50;
+export const DIRECTORY_DEFAULT_LIMIT = 20;
+
+/** One DSAR row: what the server holds about a stub this account created. */
+export interface AccountStubExport {
+  readonly room_server_id: string;
+  readonly stub_id: string;
+  readonly directory_mode: 'listed' | 'unlisted';
+  readonly display_name: string | null;
+  readonly display_description: string | null;
+  readonly display_avatar_public_cid: string | null;
+  readonly room_public_key: string;
+  readonly manifest_key_commitment: string;
+  readonly latest_manifest_commitment: string | null;
+  readonly rendezvous_policy: string;
+  readonly bootstrap_hints: readonly { kind: string; value: string }[];
+  readonly signed_stub: Record<string, unknown>;
+  readonly stub_signature: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 /** Aggregate-only counters — no room, account, or token identity (§27.2). */
 export interface PrivateRoomStubMetrics {
   created: number;
@@ -336,6 +383,70 @@ export class PrivateRoomStubService {
     return removed;
   }
 
+  /**
+   * §4.2 — a page of the public directory of `listed` rooms.
+   *
+   * The cursor is `<createdAt>|<stubId>`, opaque to the client and rejected
+   * fail-closed: a malformed cursor starts from the beginning rather than
+   * throwing, because a browse surface must not 500 on a mangled link.
+   */
+  async listDirectory(options: {
+    readonly limit?: number;
+    readonly cursor?: string;
+  }): Promise<DirectoryPage> {
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? DIRECTORY_DEFAULT_LIMIT)),
+      DIRECTORY_MAX_LIMIT,
+    );
+    const cursor = parseDirectoryCursor(options.cursor);
+    // One row past the page decides whether there is a next cursor, without a
+    // second COUNT query that could disagree with the page it describes.
+    const rows = await this.store.listListed({
+      limit: limit + 1,
+      ...(cursor ? { cursor } : {}),
+    });
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      entries: page.map((stub) => ({
+        room_server_id: stub.roomServerId,
+        display_name: stub.displayName,
+        display_description: stub.displayDescription,
+        display_avatar_public_cid: stub.displayAvatarPublicCid,
+        created_at: stub.createdAt,
+      })),
+      next_cursor: rows.length > limit && last ? `${last.createdAt}|${last.stubId}` : null,
+    };
+  }
+
+  /**
+   * Art. 15 — every directory record this account created.
+   *
+   * The mirror of `purgeForAccount`: the export discloses exactly the rows the
+   * purge removes. It is the account's OWN data, so the full stub is included —
+   * including `signed_stub`, which the account's own device authored.
+   */
+  async exportForAccount(accountId: string): Promise<AccountStubExport[]> {
+    const stubs = await this.store.listForAccount(accountId);
+    return stubs.map((stub) => ({
+      room_server_id: stub.roomServerId,
+      stub_id: stub.stubId,
+      directory_mode: stub.directoryMode,
+      display_name: stub.displayName,
+      display_description: stub.displayDescription,
+      display_avatar_public_cid: stub.displayAvatarPublicCid,
+      room_public_key: stub.roomPublicKey,
+      manifest_key_commitment: stub.manifestKeyCommitment,
+      latest_manifest_commitment: stub.latestManifestCommitment,
+      rendezvous_policy: stub.rendezvousPolicy,
+      bootstrap_hints: stub.bootstrapHints.map((h) => ({ kind: h.kind, value: h.value })),
+      signed_stub: stub.signedStub,
+      stub_signature: stub.stubSignature,
+      created_at: stub.createdAt,
+      updated_at: stub.updatedAt,
+    }));
+  }
+
   /** A snapshot of the aggregate-only counters (no room identity). */
   metrics(): PrivateRoomStubMetrics {
     return { ...this.#metrics };
@@ -360,6 +471,19 @@ export class PrivateRoomStubService {
       updated_at: stub.updatedAt,
     };
   }
+}
+
+/** Split `<iso>|<stubId>`; anything else is treated as no cursor at all. */
+function parseDirectoryCursor(
+  cursor: string | undefined,
+): { createdAt: string; stubId: string } | undefined {
+  if (cursor === undefined) return undefined;
+  const at = cursor.indexOf('|');
+  if (at <= 0) return undefined;
+  const createdAt = cursor.slice(0, at);
+  const stubId = cursor.slice(at + 1);
+  if (stubId.length === 0 || Number.isNaN(Date.parse(createdAt))) return undefined;
+  return { createdAt, stubId };
 }
 
 function buildStore(): PrivateRoomStubStore {

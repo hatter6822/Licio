@@ -124,6 +124,9 @@ describe('assembleExport', () => {
       settings: { theme: 'dark' },
       reply_notifications: [{ notification_id: 'n1' }],
     });
+    services.exportPrivateRoomStubs = async () => [
+      { room_server_id: 'r1', directory_mode: 'unlisted' },
+    ];
 
     const archive = await assembleExport(services, user.userId);
     expect(archive['schema_version']).toBe(EXPORT_SCHEMA_VERSION);
@@ -147,6 +150,11 @@ describe('assembleExport', () => {
       settings: { theme: 'dark' },
       reply_notifications: [{ notification_id: 'n1' }],
     });
+    // WS-S §21: the same symmetry for the private-room directory stub — the
+    // purge already knew about these rows, so the archive has to as well.
+    expect(archive['private_room_directory']).toEqual([
+      { room_server_id: 'r1', directory_mode: 'unlisted' },
+    ]);
 
     // The raw wallet address hash is NEVER present anywhere in the archive.
     expect(JSON.stringify(archive)).not.toContain('SECRET_WALLET_HASH_NEVER_EXPORTED');
@@ -171,6 +179,7 @@ describe('assembleExport', () => {
     expect(archive['contributions']).toEqual([]);
     expect(archive['moderation_notices']).toEqual([]);
     expect(archive['client_state']).toEqual({});
+    expect(archive['private_room_directory']).toEqual([]);
   });
 
   it('throws for an unknown user', async () => {

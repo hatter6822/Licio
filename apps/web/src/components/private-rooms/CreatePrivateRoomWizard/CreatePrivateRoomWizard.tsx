@@ -10,6 +10,7 @@
 // promise "secure"/"deleted everywhere".
 
 import {
+  DEFAULT_P2P_DIRECTORY_MODE,
   PRIVATE_ROOM_CREATION_ACKNOWLEDGMENTS,
   PRIVATE_ROOM_CREATION_DISCLOSURE,
   ROOM_CLASS_UI_LABELS,
@@ -30,9 +31,18 @@ export interface CreatePrivateRoomWizardProps {
 }
 
 /** §4.2 — how discoverable the room's EXISTENCE is, chosen at creation.
- *  `detached` is the default because it is the one that leaks nothing: no
- *  server record of any kind. The other two trade a little of that for
- *  reachability, and the copy says which. */
+ *
+ *  The default is NOT a UI preference to be argued from first principles: §4.2
+ *  says it MUST be `unlisted`, and `DEFAULT_P2P_DIRECTORY_MODE` is where that
+ *  requirement lives, so this reads it rather than restating it. Defaulting to
+ *  `detached` (the reasoning being "it leaks nothing") inverted the rule — it
+ *  is the mode with no server record at all, so a room created under it can
+ *  only ever be joined by manual QR/file exchange, and most users would have
+ *  discovered that after the fact. `unlisted` leaks an opaque stub and nothing
+ *  else, which is what makes an invite link work.
+ *
+ *  Ordered least-to-most disclosure so the list still reads as a privacy
+ *  ladder; the default is selected, not first. */
 const DIRECTORY_CHOICES = ['detached', 'unlisted', 'listed'] as const;
 type DirectoryChoice = (typeof DIRECTORY_CHOICES)[number];
 
@@ -43,7 +53,7 @@ export function CreatePrivateRoomWizard({
   const headingId = useId();
   const [name, setName] = useState('');
   const [roomType, setRoomType] = useState<RoomType>('global_topic');
-  const [directory, setDirectory] = useState<DirectoryChoice>('detached');
+  const [directory, setDirectory] = useState<DirectoryChoice>(DEFAULT_P2P_DIRECTORY_MODE);
   const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +106,10 @@ export function CreatePrivateRoomWizard({
             roomServerId: created.room_server_id,
             stubId: created.stub_id,
             directoryMode: directory,
+            // Stored, not re-derived later: it comes from the EPOCH-0 rendezvous
+            // key, so a member admitted at a later epoch could never compute it —
+            // this copy is what the join grant hands on.
+            bootstrapBlindId: payload.bootstrapBlindId,
           });
         } catch {
           directoryFailed = true;
@@ -180,7 +194,7 @@ export function CreatePrivateRoomWizard({
             value: 'listed',
             label: t(
               'privateRoom.create.directory.listed',
-              'Anyone with the link — Licio also stores the room name',
+              'Anyone browsing Licio — the room is named in the public directory',
             ),
           },
         ]}
@@ -201,7 +215,7 @@ export function CreatePrivateRoomWizard({
               )
             : t(
                 'privateRoom.create.directory.listedNote',
-                'Licio also stores the room name and description so anyone with the link can see what it is. Messages and members stay end-to-end encrypted.',
+                'Licio stores the room name and description and shows them in a public directory anyone can browse — not only people you send the link to. Messages and members stay end-to-end encrypted, and joining still needs an invite from a member.',
               )}
       </p>
 

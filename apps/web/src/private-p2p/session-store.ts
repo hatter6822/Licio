@@ -55,6 +55,17 @@ const storedRoomSessionSchema = z
       z.object({ deviceId: z.string().min(1), signingPublicKey: z.string().min(1) }),
     ),
     createdAtBucket: z.string().min(1),
+    // Validated rather than passed through: the bootstrap capability inside it
+    // is what a joined device resolves the directory record with, so a
+    // half-written record must be discarded, not carried as a partial handle.
+    directoryStub: z
+      .object({
+        roomServerId: z.string().min(1),
+        stubId: z.string().min(1),
+        directoryMode: z.enum(['listed', 'unlisted']),
+        bootstrapBlindId: z.string().min(1),
+      })
+      .optional(),
   })
   .passthrough();
 
@@ -144,11 +155,19 @@ export interface StoredRoomSession {
    * that lists an account's stubs, so discarding it at creation would leave the
    * record unreachable and unmanageable forever. Absent ⇒ a `detached` room, or
    * one whose registration did not succeed.
+   *
+   * `bootstrapBlindId` is stored, not re-derived. It comes from the room's
+   * EPOCH-0 rendezvous key (§21.2 — it must not rotate, or every outstanding
+   * invite would break at the next membership change), and a device admitted at
+   * epoch N never holds epoch 0. Only a stored copy can be handed on through a
+   * join grant, so this is the field that makes the directory record reachable
+   * by anyone other than the founder.
    */
   readonly directoryStub?: {
     readonly roomServerId: string;
     readonly stubId: string;
     readonly directoryMode: 'listed' | 'unlisted';
+    readonly bootstrapBlindId: string;
   };
 }
 

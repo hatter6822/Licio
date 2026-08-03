@@ -327,6 +327,33 @@ export interface PrivateRoomStubStore {
    * survive its creator carrying display metadata and timestamps.
    */
   purgeForAccount(accountId: string): Promise<number>;
+  /**
+   * Every stub an account created — the DSAR (Art. 15) READ counterpart of
+   * `purgeForAccount`.
+   *
+   * Deletion and disclosure are the same obligation seen from two sides: a
+   * record the purge knows how to remove is a record the export must know how
+   * to disclose. Without this the archive silently omitted the one durable
+   * server row a private-room creator has.
+   */
+  listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]>;
+  /**
+   * §4.2 — one page of `listed` stubs for the public room directory, newest
+   * first.
+   *
+   * `listed` is the mode whose whole definition is "the room directory can show
+   * the room shell", so a `listed` stub that nothing can enumerate is a mode
+   * that does not exist. `unlisted` is excluded by the query, not by a caller
+   * filter — an unlisted room's existence is exactly what must not be
+   * enumerable.
+   *
+   * Keyset pagination on `(createdAt, stubId)`: an offset would skip or repeat
+   * rows as stubs are created and delisted underneath the reader.
+   */
+  listListed(options: {
+    readonly limit: number;
+    readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+  }): Promise<StoredPrivateRoomStub[]>;
 }
 
 /** The in-memory stub store (local/dev default, and the unit-test substrate). */
@@ -410,4 +437,40 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
     }
     return Promise.resolve(removed);
   }
+
+  listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]> {
+    return Promise.resolve(
+      [...this.#stubs.values()]
+        .filter((stub) => stub.createdByAccountId === accountId)
+        .sort(byNewestFirst),
+    );
+  }
+
+  listListed(options: {
+    readonly limit: number;
+    readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+  }): Promise<StoredPrivateRoomStub[]> {
+    const { cursor } = options;
+    const page = [...this.#stubs.values()]
+      .filter((stub) => stub.directoryMode === 'listed')
+      .sort(byNewestFirst)
+      .filter((stub) => cursor === undefined || isAfterCursor(stub, cursor))
+      .slice(0, options.limit);
+    return Promise.resolve(page);
+  }
+}
+
+/** Newest first, `stubId` descending as the tiebreak — the same total order the
+ *  Drizzle adapter's `ORDER BY` produces, so a cursor means one thing. */
+function byNewestFirst(a: StoredPrivateRoomStub, b: StoredPrivateRoomStub): number {
+  return b.createdAt.localeCompare(a.createdAt) || b.stubId.localeCompare(a.stubId);
+}
+
+/** Strictly past the cursor row in that same descending order. */
+function isAfterCursor(
+  stub: StoredPrivateRoomStub,
+  cursor: { readonly createdAt: string; readonly stubId: string },
+): boolean {
+  if (stub.createdAt !== cursor.createdAt) return stub.createdAt < cursor.createdAt;
+  return stub.stubId < cursor.stubId;
 }

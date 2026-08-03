@@ -67,6 +67,30 @@ describe('I18nProvider + t()', () => {
   });
 });
 
+describe('translator identity', () => {
+  it('is stable across renders WITHOUT a provider', () => {
+    // The no-provider fallback is what unit tests and any standalone render
+    // get. When it was rebuilt per render, `t` changed identity every time, so
+    // a `useCallback(..., [t])` driving a `useEffect` re-ran forever — an
+    // unbounded request loop in any data-loading component, visible only
+    // outside a provider.
+    const { result, rerender } = renderHook(() => useT());
+    const first = result.current;
+    rerender();
+    expect(result.current).toBe(first);
+  });
+
+  it('is stable across renders WITH a provider', () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <I18nProvider locale="en">{children}</I18nProvider>
+    );
+    const { result, rerender } = renderHook(() => useT(), { wrapper });
+    const first = result.current;
+    rerender();
+    expect(result.current).toBe(first);
+  });
+});
+
 describe('Intl formatters', () => {
   it('formats numbers per locale', () => {
     expect(formatNumber(1234.5, 'en-US')).toBe('1,234.5');

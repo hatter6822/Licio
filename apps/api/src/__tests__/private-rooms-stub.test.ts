@@ -367,6 +367,112 @@ describe('§21.4 delist and delete', () => {
   });
 });
 
+describe('§4.2 directory — a listed room is one that can actually be found', () => {
+  it('enumerates listed rooms and NEVER an unlisted one', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    const hidden = await svc.create(unlistedRequest(), ACCOUNT);
+    if (!listed.ok || !hidden.ok) throw new Error('create failed');
+
+    const page = await svc.listDirectory({});
+    expect(page.entries.map((e) => e.room_server_id)).toEqual([listed.value.room_server_id]);
+    expect(page.next_cursor).toBeNull();
+  });
+
+  it('never publishes the signed stub — browsing must not hand out the bootstrap token', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const [entry] = (await svc.listDirectory({})).entries;
+    // The token gates every UNLISTED record, and a listed room can be delisted
+    // tomorrow — so a directory row that carried `signed_stub` would leak the
+    // capability for every room that ever changes mode.
+    expect(JSON.stringify(entry)).not.toContain(TOKEN);
+    expect(entry).not.toHaveProperty('signed_stub');
+    expect(entry).not.toHaveProperty('room_public_key');
+  });
+
+  it('drops a room from the directory the moment it is delisted', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    await svc.delist(created.value.room_server_id, ACCOUNT);
+    expect((await svc.listDirectory({})).entries).toEqual([]);
+  });
+
+  it('pages with a keyset cursor that neither repeats nor skips a row', async () => {
+    const svc = freshService();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const created = await svc.create(listedRequest(), ACCOUNT);
+      if (!created.ok) throw new Error('create failed');
+      ids.push(created.value.room_server_id);
+    }
+    const first = await svc.listDirectory({ limit: 2 });
+    expect(first.entries).toHaveLength(2);
+    expect(first.next_cursor).not.toBeNull();
+
+    const seen = [...first.entries.map((e) => e.room_server_id)];
+    let cursor = first.next_cursor;
+    while (cursor !== null) {
+      const page = await svc.listDirectory({ limit: 2, cursor });
+      seen.push(...page.entries.map((e) => e.room_server_id));
+      cursor = page.next_cursor;
+    }
+    expect(new Set(seen).size).toBe(5);
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
+  it('treats a mangled cursor as no cursor rather than failing the browse', async () => {
+    const svc = freshService();
+    await svc.create(listedRequest(), ACCOUNT);
+    const page = await svc.listDirectory({ cursor: 'not-a-cursor' });
+    expect(page.entries).toHaveLength(1);
+  });
+
+  it('serves the directory over GET /v1/private-rooms/directory without a session', async () => {
+    const svc = freshService();
+    setPrivateRoomStubService(svc);
+    await svc.create(listedRequest(), ACCOUNT);
+    const res = await createApp().request('/v1/private-rooms/directory');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { entries: { display_name: string }[] };
+    expect(body.entries[0]?.display_name).toBe('Neighbourhood watch');
+  });
+
+  it('rejects an out-of-range limit instead of silently clamping it', async () => {
+    setPrivateRoomStubService(freshService());
+    const res = await createApp().request('/v1/private-rooms/directory?limit=5000');
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('Art. 15 — the export discloses exactly what the purge removes', () => {
+  it("exports every stub the account created, and none of anyone else's", async () => {
+    const svc = freshService();
+    await svc.create(listedRequest(), ACCOUNT);
+    await svc.create(unlistedRequest(), ACCOUNT);
+    await svc.create(listedRequest(), OTHER_ACCOUNT);
+
+    const mine = await svc.exportForAccount(ACCOUNT);
+    expect(mine).toHaveLength(2);
+    expect(mine.map((row) => row.directory_mode).sort()).toEqual(['listed', 'unlisted']);
+    // The account's own signed body IS its own data — this is the one place it
+    // belongs, because the account's device authored it.
+    expect(mine[0]?.signed_stub).toEqual(SIGNED_STUB);
+  });
+
+  it('exports nothing once the purge has run — the two agree by construction', async () => {
+    const svc = freshService();
+    await svc.create(listedRequest(), ACCOUNT);
+    await svc.create(unlistedRequest(), ACCOUNT);
+    expect(await svc.exportForAccount(ACCOUNT)).toHaveLength(2);
+
+    expect(await svc.purgeForAccount(ACCOUNT)).toBe(2);
+    expect(await svc.exportForAccount(ACCOUNT)).toEqual([]);
+  });
+});
+
 describe('mounted routes (PRIVATE_SPEC §21)', () => {
   let app: ReturnType<typeof createApp>;
 

@@ -292,6 +292,7 @@ const civicLandscape: CivicMapResponse = {
       level: 6,
       connecting_edges: 1,
       fragile: true,
+      survivor: 'aaaaaaaa-1111-4111-8111-111111111111',
       shared_topics: [{ id: '70b1c0de-0000-4000-8000-000000000001', name: 'Climate' }],
     },
   ],

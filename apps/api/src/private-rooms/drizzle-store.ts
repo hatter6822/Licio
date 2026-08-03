@@ -18,7 +18,7 @@
 // + stub are one transaction: a shell without a stub is an orphan the directory
 // can neither reach nor clean up.
 import { type DbExecutor, privateRoomStubs, rooms } from '@licio/db';
-import { eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import type {
   BootstrapHint,
   PrivateRoomStubInsertInput,
@@ -219,6 +219,46 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
       ),
     );
     return targets.length;
+  }
+
+  async listForAccount(accountId: string): Promise<StoredPrivateRoomStub[]> {
+    const rowsFound = await this.db
+      .select()
+      .from(privateRoomStubs)
+      .where(eq(privateRoomStubs.createdByAccountId, accountId))
+      .orderBy(desc(privateRoomStubs.createdAt), desc(privateRoomStubs.stubId));
+    return rowsFound.map(toStub);
+  }
+
+  async listListed(options: {
+    readonly limit: number;
+    readonly cursor?: { readonly createdAt: string; readonly stubId: string };
+  }): Promise<StoredPrivateRoomStub[]> {
+    const listed = eq(privateRoomStubs.directoryMode, 'listed');
+    const { cursor } = options;
+    // Strict keyset: everything ordered after (createdAt, stubId) descending.
+    // The `createdAt` tie branch is not decoration — stubs minted in the same
+    // millisecond would otherwise repeat or vanish across a page boundary.
+    const where =
+      cursor === undefined
+        ? listed
+        : and(
+            listed,
+            or(
+              lt(privateRoomStubs.createdAt, new Date(cursor.createdAt)),
+              and(
+                eq(privateRoomStubs.createdAt, new Date(cursor.createdAt)),
+                lt(privateRoomStubs.stubId, cursor.stubId),
+              ),
+            ),
+          );
+    const rowsFound = await this.db
+      .select()
+      .from(privateRoomStubs)
+      .where(where)
+      .orderBy(desc(privateRoomStubs.createdAt), desc(privateRoomStubs.stubId))
+      .limit(options.limit);
+    return rowsFound.map(toStub);
   }
 
   async ownerOf(roomServerId: string): Promise<string | null> {

@@ -362,7 +362,13 @@ type PrivateRoomStub = {
     value: string;
   }>;
 
-  signed_stub: unknown;
+  // The room-signed body.  A CLOSED set — see §21.1.
+  signed_stub: {
+    schema: 'licio.private.directory_stub.v1';
+    room_public_key: string;
+    manifest_key_commitment: string;
+    bootstrap_blind_id: string;
+  };
   stub_signature: string;
 
   created_by_account_id?: string;
@@ -1974,7 +1980,13 @@ type PrivateRoomCreateStubRequest = {
   manifest_key_commitment: string;
   rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
   bootstrap_hints?: unknown[];
-  signed_stub: unknown;
+  // A CLOSED set of commitments — see the validation notes below.
+  signed_stub: {
+    schema: 'licio.private.directory_stub.v1';
+    room_public_key: string;
+    manifest_key_commitment: string;
+    bootstrap_blind_id: string;
+  };
   stub_signature: string;
 };
 ```
@@ -2004,9 +2016,17 @@ schema is `.strict()`, so a forbidden key is rejected because no such field
 exists. The fifth is an explicit REFUSAL rather than a silent strip — an
 `unlisted` request carrying a display name is rejected, because dropping it
 quietly would leave the client believing the directory serves a name it can
-see locally. `signed_stub` gets its own treatment: it is one free-form jsonb
-column, invisible to the §8.2 column allowlist, so its keys are scanned at
-every depth for the §8.1 classes and the request is refused on a hit.
+see locally. `signed_stub` gets its own treatment, in two layers. It is
+one jsonb column, so the §8.2 column allowlist cannot see inside it — and a
+free-form body behind a strict envelope is a hole in the strictness, not an
+extension point. So the body is itself a CLOSED, `.strict()` set: a schema tag
+and three commitments (`room_public_key`, `manifest_key_commitment`,
+`bootstrap_blind_id`), each a fixed-length opaque string. There is no legal
+place to put a member list, and no nesting to hide one in. Behind that, the
+§8.1 key-class scan still runs on every write — an independent guard that would
+catch a future widening of the shape before it reached the column. It scans at
+every depth and REFUSES a body that nests past the depth bound, since a scan
+that stops looking cannot report clean.
 
 `detached` is absent from the create enum on purpose — a detached room stores
 no stub at all, which the `private_room_stubs_not_detached` CHECK also pins.
@@ -2063,7 +2083,53 @@ asked to be reachable this way.
 P2P rooms are also absent from `GET /v1/rooms`. Listing the shell would publish
 the existence of every `unlisted` room, and would render a `listed` one through
 a server room summary whose join/steward/lens affordances do not apply to it.
-This endpoint is the only directory read.
+The private-room endpoints below are the only directory reads.
+
+**Browse the listed directory.**
+
+```http
+GET /v1/private-rooms/directory?limit=<1..50>&cursor=<opaque>
+```
+
+```ts
+type PrivateRoomDirectoryResponse = {
+  entries: Array<{
+    room_server_id: string;
+    display_name: string | null;
+    display_description: string | null;
+    display_avatar_public_cid: string | null;
+    created_at: string;
+  }>;
+  next_cursor: string | null;
+};
+```
+
+§4.2 defines `listed` as the mode where *“room directory/search can show the
+room shell”*, so this is the endpoint that makes the mode real; without it
+`listed` and `unlisted` differed only in what the server was permitted to store.
+Four properties hold:
+
+- **`listed` only.** The mode is filtered in the QUERY, not by the caller.
+  `unlisted` existence is exactly what must never be enumerable (§15.3.1), and
+  `detached` rooms have no stub at all.
+- **Display metadata only.** The commitments, the bootstrap hints, and above all
+  `signed_stub` — which carries the `bootstrap_blind_id` capability — stay behind
+  `GET /bootstrap`. A browse row carrying the signed body would hand every
+  anonymous reader the token that gates unlisted records, for every room that is
+  ever delisted.
+- **Unauthenticated,** like the listed bootstrap read: the contents are public by
+  the creator's explicit choice, and requiring an account would only add an
+  identity to a read that needs none.
+- **Keyset paging** on `(created_at, stub_id)` descending. An offset would skip
+  or repeat rows as stubs are created and delisted underneath the reader.
+
+Delisting removes a room from this surface immediately (§21.4) — that is what
+delisting IS, and the bootstrap record survives it.
+
+Being in the directory is not a way in: a P2P room is `join_model='invite'` and
+the server holds no key that could admit anyone, so the client must not present a
+join affordance here. What the directory buys a reader is knowing the room exists
+and whom to ask.
 
 ### 21.3 Update stub
 

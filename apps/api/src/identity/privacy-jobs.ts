@@ -3,7 +3,8 @@
 // DSAR export assembly + the privacy background jobs (WS-D.2.2b/c, WS-D.2.4b/c).
 // The export gathers ONLY the requesting user's own data (account, enrolled
 // auth-method labels, settings, and — via injected WS-E/G/J hooks —
-// attention aggregates, contributions, and moderation notices).  It EXCLUDES other
+// attention aggregates, contributions, moderation notices, and private-room
+// directory stubs).  It EXCLUDES other
 // users' data, reporter identities, address hashes (truncated display only), model
 // weights, and any IP/location (none is ever stored, §19.1).
 import { hostname } from 'node:os';
@@ -71,6 +72,11 @@ export async function assembleExport(
     // WS-N: region declaration + disclosure acknowledgments + case metadata
     // (no notes, never SAR detail — the anti-tipping-off carve-out).
     compliance: (await services.exportComplianceData?.(userId)) ?? {},
+    // WS-S §21: the directory STUBS this account created — the read mirror of
+    // the purge below.  Bootstrap pointers and commitments only; the rooms
+    // themselves live on member devices and the server never held them, which
+    // is why this list can be complete and still contain no room content.
+    private_room_directory: (await services.exportPrivateRoomStubs?.(userId)) ?? [],
   };
 }
 

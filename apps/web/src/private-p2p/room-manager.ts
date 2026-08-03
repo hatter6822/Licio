@@ -45,6 +45,27 @@ export interface JoinGrant {
     readonly signingPublicKey: string;
   }[];
   readonly archive: Uint8Array;
+  /**
+   * The §21 directory CAPABILITY, when the room registered a stub.
+   *
+   * Without it a joined device has the room and no way to reach its directory
+   * record: `room_server_id` is server-minted (nothing in the room's own state
+   * carries it), and `bootstrap_blind_id` is derived from the EPOCH-0 rendezvous
+   * key, which a device admitted at epoch N does not hold and cannot derive.  So
+   * the record could be read only by the founder — every other member would see
+   * `not_found` for a room they are in.  Absent ⇒ a `detached` room, or one
+   * whose registration never succeeded.
+   *
+   * It is a capability over commitments and bootstrap policy, not over content:
+   * it resolves a record the member is entitled to precisely because they are in
+   * the room.
+   */
+  readonly directory?: {
+    readonly roomServerId: string;
+    readonly stubId: string;
+    readonly directoryMode: 'listed' | 'unlisted';
+    readonly bootstrapBlindId: string;
+  };
 }
 
 /** The result of `admitJoinRequest`: the verify verdict, plus (on success) the GRANT the
@@ -82,6 +103,7 @@ export function serializeJoinGrant(grant: JoinGrant): string {
     assignedDeviceId: grant.assignedDeviceId,
     bootstrapDevices: grant.bootstrapDevices,
     archive: grantBytesToB64Url(grant.archive),
+    ...(grant.directory ? { directory: grant.directory } : {}),
   });
 }
 
@@ -131,6 +153,12 @@ export function parseJoinGrant(json: string): JoinGrant | null {
     const dev = d as { deviceId: string; signingPublicKey: string };
     bootstrapDevices.push({ deviceId: dev.deviceId, signingPublicKey: dev.signingPublicKey });
   }
+  // The directory capability is OPTIONAL but not lax: a present-and-malformed
+  // one fails the whole parse. Half a capability is not a weaker capability, it
+  // is a handle that resolves nothing, and accepting it would persist a stub
+  // record whose first use is an unexplained `not_found`.
+  const directory = parseGrantDirectory(g['directory']);
+  if (directory === INVALID_DIRECTORY) return null;
   try {
     return {
       welcome: grantB64UrlToBytes(welcome),
@@ -142,10 +170,38 @@ export function parseJoinGrant(json: string): JoinGrant | null {
       assignedDeviceId,
       bootstrapDevices,
       archive: grantB64UrlToBytes(archive),
+      ...(directory ? { directory } : {}),
     };
   } catch {
     return null;
   }
+}
+
+/** Distinguishes "no directory capability" from "a malformed one". */
+const INVALID_DIRECTORY = Symbol('invalid_directory');
+
+function parseGrantDirectory(
+  value: unknown,
+): NonNullable<JoinGrant['directory']> | undefined | typeof INVALID_DIRECTORY {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object') return INVALID_DIRECTORY;
+  const d = value as Record<string, unknown>;
+  const roomServerId = d['roomServerId'];
+  const stubId = d['stubId'];
+  const directoryMode = d['directoryMode'];
+  const bootstrapBlindId = d['bootstrapBlindId'];
+  if (
+    typeof roomServerId !== 'string' ||
+    roomServerId.length === 0 ||
+    typeof stubId !== 'string' ||
+    stubId.length === 0 ||
+    (directoryMode !== 'listed' && directoryMode !== 'unlisted') ||
+    typeof bootstrapBlindId !== 'string' ||
+    bootstrapBlindId.length === 0
+  ) {
+    return INVALID_DIRECTORY;
+  }
+  return { roomServerId, stubId, directoryMode, bootstrapBlindId };
 }
 
 import { isUpdateChannelConfigured } from '../update/config.js';
@@ -713,6 +769,9 @@ export class PrivateRoomSession {
     readonly roomServerId: string;
     readonly stubId: string;
     readonly directoryMode: 'listed' | 'unlisted';
+    /** Derived from the room's EPOCH-0 rendezvous key — see the field's note on
+     *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
+    readonly bootstrapBlindId: string;
   }): Promise<void> {
     this.session = { ...this.session, directoryStub: stub };
     await putRoomSession(this.session);
@@ -1508,6 +1567,10 @@ export class PrivateRoomSession {
         .filter((d) => !d.removed)
         .map((d) => ({ deviceId: d.deviceId, signingPublicKey: d.signingPublicKey })),
       archive,
+      // Hand the directory capability ON. A member who cannot resolve the room's
+      // directory record cannot bootstrap from it, update it, or even see that
+      // it exists — and the founder is not always the one who is around later.
+      ...(this.session.directoryStub ? { directory: this.session.directoryStub } : {}),
     };
     // The admit fully succeeded — charge this join against the invite so a
     // single-use invite cannot be replayed for a second member (persisted AFTER
@@ -1595,6 +1658,7 @@ export class PrivateRoomSession {
       bootstrapDevices: grant.bootstrapDevices,
       ...(base ? { snapshotBase: base } : {}),
       createdAtBucket: coarseBucket(),
+      ...(grant.directory ? { directoryStub: grant.directory } : {}),
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);

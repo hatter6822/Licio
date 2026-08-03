@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // WS-S.1.2 — the Private P2P room DIRECTORY-STUB endpoints (PRIVATE_SPEC
-// §21.1–§21.4): `POST /v1/private-rooms`, `GET /:roomServerId/bootstrap`,
-// `PATCH /:roomServerId`, `DELETE /:roomServerId`, `POST /:roomServerId/delist`.
+// §21.1–§21.4): `POST /v1/private-rooms`, `GET /directory`,
+// `GET /:roomServerId/bootstrap`, `PATCH /:roomServerId`, `DELETE /:roomServerId`,
+// `POST /:roomServerId/delist`.
 //
 // A stub is a bootstrap POINTER, never a room.  It carries cryptographic
 // commitments, a rendezvous policy, and — for a `listed` room only — public
@@ -16,12 +17,21 @@
 // they ride the ordinary session + CSRF stack and are budgeted PER ACCOUNT
 // (§19.1's first sanctioned form; the application never reads a client address).
 // `GET /bootstrap` is deliberately unauthenticated: a member joining from an
-// invite may have no Licio account at all.
+// invite may have no Licio account at all.  `GET /directory` is unauthenticated
+// for the same reason and one more: §4.2 defines `listed` as "the room directory
+// can show the room shell", so its contents are public BY THE CREATOR'S EXPLICIT
+// CHOICE.  It enumerates `listed` rows only — an `unlisted` room's existence is
+// precisely what must never be enumerable (§15.3.1).
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { perAccountRateLimit, rateLimit } from '../lib/rate-limit.js';
 import { type AuthEnv, authMiddleware, requireUnrestricted } from '../middleware/auth.js';
-import { getPrivateRoomStubService, type StubFailure } from '../private-rooms/service.js';
+import {
+  DIRECTORY_DEFAULT_LIMIT,
+  DIRECTORY_MAX_LIMIT,
+  getPrivateRoomStubService,
+  type StubFailure,
+} from '../private-rooms/service.js';
 import {
   privateRoomCreateStubRequestSchema,
   privateRoomStubUpdateRequestSchema,
@@ -83,6 +93,13 @@ async function readJsonBounded(c: Context, maxBytes: number): Promise<unknown | 
 }
 
 const roomIdParamSchema = z.object({ roomServerId: z.uuid() });
+
+/** §4.2 directory paging. Both fields are optional; a bad value is a 400 rather
+ *  than a silent clamp, so a client never believes it read a page it did not. */
+const directoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(DIRECTORY_MAX_LIMIT).optional(),
+  cursor: z.string().min(1).max(128).optional(),
+});
 
 /** The §21.2 invite-derived blind token, supplied as `?token=`. */
 const bootstrapQuerySchema = z.object({
@@ -196,6 +213,30 @@ export function createPrivateRoomsRoutes() {
       return c.json(result.value, 201);
     },
   );
+
+  // §4.2 — the PUBLIC directory of `listed` rooms.
+  //
+  // Registered before the `/:roomServerId/...` routes so a room whose id were
+  // ever the literal string "directory" could not shadow it. It cannot be (the
+  // param is a uuid), which is the point: the ordering makes that independent
+  // of the schema staying that way.
+  app.get('/directory', rateLimit({ limit: 300, windowMs: 60_000 }), async (c) => {
+    const query = directoryQuerySchema.safeParse({
+      limit: c.req.query('limit'),
+      cursor: c.req.query('cursor'),
+    });
+    if (!query.success) {
+      return c.json(
+        { error: { code: 'invalid_request', message: 'Invalid directory query' } },
+        400,
+      );
+    }
+    const page = await getPrivateRoomStubService().listDirectory({
+      limit: query.data.limit ?? DIRECTORY_DEFAULT_LIMIT,
+      ...(query.data.cursor !== undefined ? { cursor: query.data.cursor } : {}),
+    });
+    return c.json(page, 200);
+  });
 
   // §21.2 — fetch the bootstrap record.  Listed: open.  Unlisted: the
   // invite-derived blind token, or the same 404 an unknown room returns.

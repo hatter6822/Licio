@@ -40,10 +40,31 @@ function topicsFor(topicIds: readonly string[]): CivicMapTopic[] {
   return out;
 }
 
-/** The topics two basins have in common — what a bridging comment addresses. */
-function sharedTopics(a: CivicMapTopic[], b: CivicMapTopic[]): CivicMapTopic[] {
-  const bIds = new Set(b.map((t) => t.id));
-  return a.filter((t) => bIds.has(t.id)).slice(0, 8);
+/**
+ * What a saddle is ABOUT: the topics carried by the edges that actually connect
+ * the two basins.
+ *
+ * Intersecting the two PEAK stories' topics was wrong, and quietly so — basins
+ * meet through their lower-level members, so a peak about X can join a peak
+ * about Z through an X/Y story and a Y/Z story. The join is entirely about Y,
+ * and intersecting the peaks returns nothing, hiding the one subject a bridging
+ * comment would have to address. The landscape edge already IS a shared topic
+ * (that is what makes two stories adjacent), so reading the connecting edges
+ * gives the answer directly.
+ */
+function saddleTopics(
+  edges: readonly { a: string; b: string }[],
+  topicsByStory: ReadonlyMap<string, CivicMapTopic[]>,
+): CivicMapTopic[] {
+  const out = new Map<string, CivicMapTopic>();
+  for (const edge of edges) {
+    const left = topicsByStory.get(edge.a) ?? [];
+    const rightIds = new Set((topicsByStory.get(edge.b) ?? []).map((topic) => topic.id));
+    for (const topic of left) {
+      if (rightIds.has(topic.id)) out.set(topic.id, topic);
+    }
+  }
+  return [...out.values()].slice(0, 8);
 }
 
 /**
@@ -81,12 +102,17 @@ export async function buildCivicMap(
     graph.peaks.map((peak) => peak.basin),
   );
 
-  const topicsByBasin = new Map<string, CivicMapTopic[]>();
+  // Topics for EVERY landscape node, not only the peaks: a saddle's subject
+  // usually lives on the lower-level stories that form the connecting edge.
+  const topicsByStory = new Map<string, CivicMapTopic[]>();
+  for (const node of nodes) {
+    topicsByStory.set(node.id, topicsFor(byId.get(node.id)?.topicIds ?? []));
+  }
+
   const basins: CivicMapBasin[] = [];
   for (const peak of graph.peaks) {
     const story = byId.get(peak.basin);
-    const topics = topicsFor(story?.topicIds ?? []);
-    topicsByBasin.set(peak.basin, topics);
+    const topics = topicsByStory.get(peak.basin) ?? [];
     basins.push({
       basin_id: peak.basin,
       // A story whose row vanished between assembly and enrichment (deleted,
@@ -103,8 +129,10 @@ export async function buildCivicMap(
   const toSaddle = (event: {
     basinA: string;
     basinB: string;
+    survivor: string;
     level: number;
     connectingEdges: number;
+    connectingEdgeSample: readonly { a: string; b: string }[];
     fragile: boolean;
   }): CivicMapSaddle => ({
     basin_a: event.basinA,
@@ -112,10 +140,8 @@ export async function buildCivicMap(
     level: event.level,
     connecting_edges: event.connectingEdges,
     fragile: event.fragile,
-    shared_topics: sharedTopics(
-      topicsByBasin.get(event.basinA) ?? [],
-      topicsByBasin.get(event.basinB) ?? [],
-    ),
+    survivor: event.survivor,
+    shared_topics: saddleTopics(event.connectingEdgeSample, topicsByStory),
   });
 
   const connected = new Set(edges.flatMap((e) => [e.a, e.b]));

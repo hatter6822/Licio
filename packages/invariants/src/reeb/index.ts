@@ -33,6 +33,11 @@ export interface ReebEdge {
   b: string;
 }
 
+/** How many connecting edges a merge event records by identity. A fragile
+ *  saddle has very few by definition, and an unbounded list on a dense merge
+ *  would put the whole edge set in an invariant output. */
+export const MAX_RECORDED_CONNECTING_EDGES = 8;
+
 export interface ReebMergeEvent {
   level: number;
   /** Stable basin names (peak node ids) that joined. */
@@ -42,6 +47,11 @@ export interface ReebMergeEvent {
   survivor: string;
   /** Edges connecting the two basins at the merge level. */
   connectingEdges: number;
+  /** UP TO {@link MAX_RECORDED_CONNECTING_EDGES} of those edges, by identity.
+   *  These ARE the join: a consumer describing what a saddle is about must read
+   *  them rather than intersect the two peaks, which can share nothing even
+   *  when the basins meet through a well-defined subject. */
+  connectingEdgeSample: ReebEdge[];
   fragile: boolean;
 }
 
@@ -175,12 +185,23 @@ function sweep(
       if (rootA === rootB) continue;
       const peakA = peakOf.get(rootA) ?? rootA;
       const peakB = peakOf.get(rootB) ?? rootB;
+      // The same scan that COUNTS the connecting edges now also names them.
+      // A consumer asking "what is this join actually about?" cannot answer it
+      // from the two peaks: basins frequently meet through lower-level members,
+      // so the subject that formed the saddle need not appear on either peak.
+      // The edges are the join; carrying them lets the caller say so.
       let connecting = 0;
+      const connectingEdgeList: ReebEdge[] = [];
       for (const candidate of sortedEdges) {
         if (!active.has(candidate.a) || !active.has(candidate.b)) continue;
         const ra = find(candidate.a);
         const rb = find(candidate.b);
-        if ((ra === rootA && rb === rootB) || (ra === rootB && rb === rootA)) connecting += 1;
+        if ((ra === rootA && rb === rootB) || (ra === rootB && rb === rootA)) {
+          connecting += 1;
+          if (connectingEdgeList.length < MAX_RECORDED_CONNECTING_EDGES) {
+            connectingEdgeList.push({ a: candidate.a, b: candidate.b });
+          }
+        }
       }
       const survivor = dominantPeak(peakA, peakB);
       merges.push({
@@ -189,6 +210,7 @@ function sweep(
         basinB: peakB,
         survivor,
         connectingEdges: connecting,
+        connectingEdgeSample: connectingEdgeList,
         fragile: connecting <= options.fragileEdgeThreshold,
       });
       parent.set(rootA, rootB);

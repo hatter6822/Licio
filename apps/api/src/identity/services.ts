@@ -226,6 +226,14 @@ export interface IdentityServices {
    *  `remove()` exists to erase. Removes the shell with the stub; member
    *  devices keep the room, because the server never held it. */
   purgePrivateRoomStubs?: (userId: string) => Promise<void>;
+  /** WS-S §21 private-room DIRECTORY export (GDPR Art. 15), the READ mirror of
+   *  `purgePrivateRoomStubs`: the same durable rows the purge removes reach the
+   *  archive as `private_room_directory`.  Deletion and disclosure are one
+   *  obligation seen from two sides — a record the purge can find is a record
+   *  the export must declare.  Room CONTENT is absent because the server never
+   *  held any; what is here is the bootstrap POINTER the account created
+   *  (default absent ⇒ an empty list). */
+  exportPrivateRoomStubs?: (userId: string) => Promise<unknown[]>;
   /** WS-C/WS-T client-state DSAR export (GDPR Art. 15): the SAME durable
    *  per-user rows purgeClientState removes — settings sync, notification
    *  preferences, the reply-notification inbox — included in the export
