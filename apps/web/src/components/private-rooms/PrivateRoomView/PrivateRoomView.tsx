@@ -220,8 +220,11 @@ export function PrivateRoomView({ roomId }: PrivateRoomViewProps): React.ReactEl
           {isAdmin ? <InvitePanel session={session} /> : null}
           <JoinPanel session={isAdmin ? session : undefined} />
           {/* §21.2–§21.4 — renders nothing for a room with no directory record,
-              so a detached room's manage view is unchanged. */}
-          <DirectoryRecordPanel session={session} isAdmin={isAdmin} />
+              so a detached room's manage view is unchanged.  It takes no
+              `isAdmin`: the record is owned by the ACCOUNT that created it, and
+              the panel reads that from the stored handle rather than inferring
+              it from a room role the server does not authorize against. */}
+          <DirectoryRecordPanel session={session} />
         </section>
       ) : null}
 

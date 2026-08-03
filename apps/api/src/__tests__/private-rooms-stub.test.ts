@@ -15,11 +15,7 @@
 //   • the stub surface authenticates writes (§21.1) and leaves reads open.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app.js';
-import {
-  hasBootstrapToken,
-  PrivateRoomStubService,
-  setPrivateRoomStubService,
-} from '../private-rooms/service.js';
+import { PrivateRoomStubService, setPrivateRoomStubService } from '../private-rooms/service.js';
 import {
   forbiddenSignedStubKeys,
   InMemoryPrivateRoomStubStore,
@@ -32,12 +28,12 @@ import {
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
 const OTHER_ACCOUNT = '22222222-2222-4222-8222-222222222222';
 const TOKEN = 'Ym9vdHN0cmFwLWJsaW5kLWlk';
-/** The canonical §8.2 stub body — a CLOSED set of commitment fields. */
+/** The canonical §8.2 stub body — a CLOSED set of PUBLIC commitments.
+ *  The capability is NOT in here: it is its own never-projected column. */
 const SIGNED_STUB = {
-  schema: 'licio.private.directory_stub.v1',
+  schema: 'licio.private.directory_stub.v2',
   room_public_key: 'cm9vbS1wdWJsaWMta2V5',
   manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
-  bootstrap_blind_id: TOKEN,
 } as const;
 
 /** Deterministic ids so a test can address the room it just created. */
@@ -59,11 +55,10 @@ function listedRequest(
   return {
     directory_mode: 'listed',
     display_name: 'Neighbourhood watch',
-    room_public_key: 'cm9vbS1wdWJsaWMta2V5',
-    manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
+    bootstrap_blind_id: TOKEN,
     ...over,
   };
 }
@@ -73,11 +68,10 @@ function unlistedRequest(
 ): PrivateRoomCreateStubRequest {
   return {
     directory_mode: 'unlisted',
-    room_public_key: 'cm9vbS1wdWJsaWMta2V5',
-    manifest_key_commitment: 'bWFuaWZlc3QtY29tbWl0bWVudA',
     rendezvous_policy: 'licio_blind',
     signed_stub: SIGNED_STUB,
     stub_signature: 'c3R1Yi1zaWduYXR1cmU',
+    bootstrap_blind_id: TOKEN,
     ...over,
   };
 }
@@ -137,15 +131,50 @@ describe('§21.1 create — the §8.1 boundary is enforced at the wire, not by a
     }
   });
 
-  it('refuses a signed stub missing the bootstrap capability', () => {
-    const { bootstrap_blind_id: _dropped, ...withoutToken } = SIGNED_STUB;
+  it('refuses a request with no bootstrap capability, and refuses one inside the body', () => {
+    // The capability is a REQUIRED top-level field and a NOT NULL column now,
+    // so "a stub without a token" is unrepresentable rather than caught.
+    const { bootstrap_blind_id: _dropped, ...withoutToken } = listedRequest();
+    expect(privateRoomCreateStubRequestSchema.safeParse(withoutToken).success).toBe(false);
+    // …and putting it back INSIDE the signed body — the shape that leaked it
+    // through every projection of that body — is refused by the closed set.
     expect(
-      privateRoomCreateStubRequestSchema.safeParse(rawRequest({ signed_stub: withoutToken }))
-        .success,
+      privateRoomCreateStubRequestSchema.safeParse(
+        rawRequest({ signed_stub: { ...SIGNED_STUB, bootstrap_blind_id: TOKEN } }),
+      ).success,
     ).toBe(false);
-    // …and the service's own guard still answers, for a non-HTTP caller.
-    expect(hasBootstrapToken(withoutToken)).toBe(false);
-    expect(hasBootstrapToken(SIGNED_STUB)).toBe(true);
+  });
+
+  it('DERIVES the commitment columns from the signed body, so they cannot disagree', async () => {
+    const svc = freshService();
+    const created = await svc.create(listedRequest(), ACCOUNT);
+    if (!created.ok) throw new Error('create failed');
+    const read = await svc.bootstrap(created.value.room_server_id, TOKEN);
+    if (!read.ok) throw new Error('bootstrap failed');
+    // There is no second copy to drift: the wire request has no
+    // `room_public_key`/`manifest_key_commitment` of its own.
+    expect(read.value.room_public_key).toBe(SIGNED_STUB.room_public_key);
+    expect(read.value.manifest_key_commitment).toBe(SIGNED_STUB.manifest_key_commitment);
+    expect(read.value.signed_stub).toEqual(SIGNED_STUB);
+  });
+
+  it('never projects the capability, in any mode', async () => {
+    const svc = freshService();
+    const listed = await svc.create(listedRequest(), ACCOUNT);
+    const unlisted = await svc.create(unlistedRequest(), ACCOUNT);
+    if (!listed.ok || !unlisted.ok) throw new Error('create failed');
+
+    // The open read a `listed` room serves used to hand out `bootstrap_blind_id`
+    // inside `signed_stub` — one anonymous GET per room in the §4.2 directory,
+    // and the harvested token keeps resolving the record after it is delisted.
+    const open = await svc.bootstrap(listed.value.room_server_id, undefined);
+    if (!open.ok) throw new Error('bootstrap failed');
+    expect(JSON.stringify(open.value)).not.toContain(TOKEN);
+
+    // …and neither does the capability-holding read, which has no need for it.
+    const capable = await svc.bootstrap(unlisted.value.room_server_id, TOKEN);
+    if (!capable.ok) throw new Error('bootstrap failed');
+    expect(JSON.stringify(capable.value)).not.toContain(TOKEN);
   });
 
   it('refuses display metadata on an unlisted room instead of silently dropping it', async () => {
@@ -175,6 +204,14 @@ describe('review fixes — the scan, the token invariant, and staff delisting', 
     expect(forbiddenSignedStubKeys(deep)).toEqual([SIGNED_STUB_TOO_DEEP]);
     // …and a normally-shaped stub is unaffected.
     expect(forbiddenSignedStubKeys({ a: { b: { c: 'ok' } } })).toEqual([]);
+  });
+
+  it('refuses a capability smuggled into the signed body at any depth', () => {
+    // Second lock behind the closed schema: `signed_stub` is projected wholesale
+    // to anonymous readers of a listed room, so a secret in it is public.
+    expect(forbiddenSignedStubKeys({ bootstrap_blind_id: 'x' })).toEqual(['bootstrap_blind_id']);
+    expect(forbiddenSignedStubKeys({ a: { room_blind_id: 'x' } })).toEqual(['room_blind_id']);
+    expect(forbiddenSignedStubKeys(SIGNED_STUB)).toEqual([]);
   });
 
   it('a delisted record stays resolvable for members holding its token', async () => {

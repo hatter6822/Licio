@@ -834,6 +834,13 @@
       "when": 1783728000043,
       "tag": "0119_story_hidden_state_superseded",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1783728000044,
+      "tag": "0120_private_stub_capability_column",
+      "breakpoints": true
     }
   ]
 }

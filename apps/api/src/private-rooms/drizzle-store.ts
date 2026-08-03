@@ -25,6 +25,7 @@ import type {
   PrivateRoomStubPatch,
   PrivateRoomStubStore,
   RendezvousPolicy,
+  SignedStubBody,
   StoredPrivateRoomStub,
 } from './stores.js';
 
@@ -50,8 +51,9 @@ function toStub(row: StubRow): StoredPrivateRoomStub {
     latestManifestCommitment: row.latestManifestCommitment,
     rendezvousPolicy: row.rendezvousPolicy as RendezvousPolicy,
     bootstrapHints: row.bootstrapHints as readonly BootstrapHint[],
-    signedStub: row.signedStub,
+    signedStub: row.signedStub as SignedStubBody,
     stubSignature: row.stubSignature,
+    bootstrapBlindId: row.bootstrapBlindId,
     createdByAccountId: row.createdByAccountId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -63,6 +65,14 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
 
   async create(input: PrivateRoomStubInsertInput): Promise<StoredPrivateRoomStub> {
     const { name, slug } = shellIdentity(input.roomServerId);
+    // An EXPLICIT millisecond timestamp, not the column's `defaultNow()`.
+    // Postgres stamps microseconds; `toStub` serializes through
+    // `Date.toISOString()`, which truncates to milliseconds — so a keyset cursor
+    // built from the last row of a page is EARLIER than a same-millisecond row
+    // that follows it, and that row is neither `<` nor `=` the cursor. It would
+    // be skipped permanently, not merely reordered. Writing the value the cursor
+    // will later carry removes the mismatch at the source.
+    const createdAt = new Date();
     return await this.db.transaction(async (tx) => {
       // The four §4.1 axes are set TOGETHER: the `rooms_storage_authority_coherence`,
       // `rooms_p2p_requires_directory_mode`, `rooms_p2p_visibility_private`, and
@@ -96,14 +106,19 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
           displayName: input.displayName,
           displayDescription: input.displayDescription,
           displayAvatarPublicCid: input.displayAvatarPublicCid,
-          roomPublicKey: input.roomPublicKey,
-          manifestKeyCommitment: input.manifestKeyCommitment,
+          // DERIVED from the signed body, never sent separately: two copies of
+          // one commitment is two copies that can disagree.
+          roomPublicKey: input.signedStub.room_public_key,
+          manifestKeyCommitment: input.signedStub.manifest_key_commitment,
           latestManifestCommitment: null,
           rendezvousPolicy: input.rendezvousPolicy,
           bootstrapHints: [...input.bootstrapHints],
           signedStub: input.signedStub,
           stubSignature: input.stubSignature,
+          bootstrapBlindId: input.bootstrapBlindId,
           createdByAccountId: input.createdByAccountId,
+          createdAt,
+          updatedAt: createdAt,
         })
         .returning();
       const row = inserted[0];
@@ -145,7 +160,14 @@ export class DrizzlePrivateRoomStubStore implements PrivateRoomStubStore {
         ...(patch.latestManifestCommitment !== undefined
           ? { latestManifestCommitment: patch.latestManifestCommitment }
           : {}),
-        ...(patch.signedStub !== undefined ? { signedStub: patch.signedStub } : {}),
+        ...(patch.signedStub !== undefined
+          ? {
+              signedStub: patch.signedStub,
+              // The columns move WITH the body they derive from.
+              roomPublicKey: patch.signedStub.room_public_key,
+              manifestKeyCommitment: patch.signedStub.manifest_key_commitment,
+            }
+          : {}),
         ...(patch.stubSignature !== undefined ? { stubSignature: patch.stubSignature } : {}),
         updatedAt: new Date(),
       })

@@ -45,7 +45,10 @@ function services(stories: FakeStory[], opts: { omitFromList?: string[] } = {}) 
   } as unknown as Parameters<typeof buildCivicMap>[0];
   const ingestion = {
     stories: {
-      listRecent: () =>
+      // `listRecentPublic`, not `listRecent`: the landscape reads only stories
+      // the query itself restricts to publicly-visible ones, so a `room_only`
+      // story in a private room can never reach an integrity analyst's map.
+      listRecentPublic: () =>
         Promise.resolve(
           stories
             .filter((s) => !omitted.has(s.storyId))
@@ -124,7 +127,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     const busy = {
       stories: {
         // The landscape sees the two originals…
-        listRecent: () => Promise.resolve(rows),
+        listRecentPublic: () => Promise.resolve(rows),
         // …and by enrichment time a flood of newer stories has landed. A
         // window-based re-read would miss both; an id-based one cannot.
         getByIds: (ids: readonly string[]) =>
@@ -163,7 +166,7 @@ describe('buildCivicMap (WS-H.7.4)', () => {
     } as unknown as Parameters<typeof buildCivicMap>[0];
     const deleting = {
       stories: {
-        listRecent: () => Promise.resolve(rows),
+        listRecentPublic: () => Promise.resolve(rows),
         // The row really is gone by enrichment time — the fallback now MEANS
         // deleted, because ordinary ingestion can no longer produce it.
         getByIds: (ids: readonly string[]) =>

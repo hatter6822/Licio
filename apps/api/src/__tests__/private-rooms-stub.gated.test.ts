@@ -67,12 +67,15 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
       displayName: 'Gated listed room',
       displayDescription: 'A description',
       displayAvatarPublicCid: 'bafkreiabc123',
-      roomPublicKey: COMMITMENT,
-      manifestKeyCommitment: COMMITMENT,
       rendezvousPolicy: 'licio_blind',
       bootstrapHints: [{ kind: 'manual', value: 'paste-me' }],
-      signedStub: { bootstrap_blind_id: TOKEN },
+      signedStub: {
+        schema: 'licio.private.directory_stub.v2',
+        room_public_key: COMMITMENT,
+        manifest_key_commitment: COMMITMENT,
+      },
       stubSignature: COMMITMENT,
+      bootstrapBlindId: TOKEN,
       createdByAccountId: null,
     });
   }
@@ -102,7 +105,16 @@ describe.skipIf(!DB_URL)('DrizzlePrivateRoomStubStore — live Postgres contract
     const read = await store.getByRoomId(roomId);
     expect(read?.displayName).toBe('Gated listed room');
     expect(read?.bootstrapHints).toEqual([{ kind: 'manual', value: 'paste-me' }]);
-    expect(read?.signedStub).toEqual({ bootstrap_blind_id: TOKEN });
+    expect(read?.signedStub).toEqual({
+      schema: 'licio.private.directory_stub.v2',
+      room_public_key: COMMITMENT,
+      manifest_key_commitment: COMMITMENT,
+    });
+    // The capability is its OWN column, never inside the projected body.
+    expect(read?.bootstrapBlindId).toBe(TOKEN);
+    // …and the commitment columns are DERIVED from that body, not sent beside it.
+    expect(read?.roomPublicKey).toBe(COMMITMENT);
+    expect(read?.manifestKeyCommitment).toBe(COMMITMENT);
     expect(read?.latestManifestCommitment).toBe(null);
   });
 

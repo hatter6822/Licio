@@ -42,15 +42,18 @@ function bootstrapBody(over: Record<string, unknown> = {}): Record<string, unkno
   };
 }
 
-/** A session double: the panel only reads `directoryStub` and (on push) calls
- *  `directoryStubPayload`, so the real crypto core is not needed. */
+/** A session double: the panel only reads `directoryStub`, calls
+ *  `directoryStubPayload` on push and `clearDirectoryStub` on delete, so the
+ *  real crypto core is not needed. */
 function sessionDouble(
   stub:
     | { roomServerId: string; stubId: string; directoryMode: string; bootstrapBlindId: string }
     | undefined,
+  registeredHere = true,
 ): PrivateRoomSession {
   return {
-    directoryStub: stub,
+    directoryStub: stub === undefined ? undefined : { capability: stub, registeredHere },
+    clearDirectoryStub: async () => {},
     directoryStubPayload: async () => ({
       roomPublicKey: 'cm9vbS1rZXk',
       manifestKeyCommitment: 'bmV3LW1hbmlmZXN0',
@@ -90,7 +93,7 @@ describe('DirectoryRecordPanel', () => {
       seen.push(url);
       return bootstrapBody();
     });
-    render(<DirectoryRecordPanel session={sessionDouble(STUB)} isAdmin />);
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
 
     expect(await screen.findByText('Neighbourhood watch')).toBeInTheDocument();
     // The token is what makes the read possible for a member who is not the
@@ -100,9 +103,7 @@ describe('DirectoryRecordPanel', () => {
 
   it('renders nothing for a room with no directory record', () => {
     mockApi(() => bootstrapBody());
-    const { container } = render(
-      <DirectoryRecordPanel session={sessionDouble(undefined)} isAdmin />,
-    );
+    const { container } = render(<DirectoryRecordPanel session={sessionDouble(undefined)} />);
     expect(container).toBeEmptyDOMElement();
   });
 
@@ -112,7 +113,7 @@ describe('DirectoryRecordPanel', () => {
         ? bootstrapBody({ directory_mode: 'unlisted', display_name: null })
         : bootstrapBody(),
     );
-    render(<DirectoryRecordPanel session={sessionDouble(STUB)} isAdmin />);
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
     await screen.findByText('Neighbourhood watch');
 
     await userEvent.click(screen.getByRole('button', { name: /stop listing publicly/i }));
@@ -129,7 +130,7 @@ describe('DirectoryRecordPanel', () => {
         ? { removed: true, removed_what: 'licio_directory_record', message: serverMessage }
         : bootstrapBody(),
     );
-    render(<DirectoryRecordPanel session={sessionDouble(STUB)} isAdmin />);
+    render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
     await screen.findByText('Neighbourhood watch');
 
     await userEvent.click(screen.getByRole('button', { name: /remove licio’s record/i }));
@@ -137,16 +138,36 @@ describe('DirectoryRecordPanel', () => {
     expect(screen.queryByText(/deleted the room/i)).toBeNull();
   });
 
-  it('shows a non-admin the record and none of the controls', async () => {
+  it('shows a member who does NOT own the record none of the controls', async () => {
+    // Ownership is the ACCOUNT that created the stub, which is what the
+    // §21.3/§21.4 endpoints authorize against — not the room role. A joined
+    // device holds the capability and owns nothing.
     mockApi(() => bootstrapBody());
-    render(<DirectoryRecordPanel session={sessionDouble(STUB)} isAdmin={false} />);
+    render(<DirectoryRecordPanel session={sessionDouble(STUB, false)} />);
     await screen.findByText('Neighbourhood watch');
     expect(screen.queryByRole('button')).toBeNull();
   });
 
+  it('forgets the handle once the record is deleted', async () => {
+    const cleared = vi.fn().mockResolvedValue(undefined);
+    mockApi((_url, init) =>
+      init?.method === 'DELETE'
+        ? { removed: true, removed_what: 'licio_directory_record', message: 'Removed.' }
+        : bootstrapBody(),
+    );
+    const session = sessionDouble(STUB);
+    (session as unknown as { clearDirectoryStub: unknown }).clearDirectoryStub = cleared;
+    render(<DirectoryRecordPanel session={session} />);
+    await screen.findByText('Neighbourhood watch');
+    await userEvent.click(screen.getByRole('button', { name: /remove licio’s record/i }));
+    // Kept, it would survive a reload as a pointer to nothing — and ride the
+    // next joiner's grant as a capability that 404s.
+    await waitFor(() => expect(cleared).toHaveBeenCalledTimes(1));
+  });
+
   it('has no accessibility violations', async () => {
     mockApi(() => bootstrapBody());
-    const { container } = render(<DirectoryRecordPanel session={sessionDouble(STUB)} isAdmin />);
+    const { container } = render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
     await waitFor(() => expect(screen.getByText('Neighbourhood watch')).toBeInTheDocument());
     await checkA11y(container);
   });

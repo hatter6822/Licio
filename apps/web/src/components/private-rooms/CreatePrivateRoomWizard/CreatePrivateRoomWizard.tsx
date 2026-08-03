@@ -101,11 +101,10 @@ export function CreatePrivateRoomWizard({
             // unlisted room rather than dropping it silently, so send it only
             // where it belongs.
             ...(directory === 'listed' ? { displayName: name.trim() } : {}),
-            roomPublicKey: payload.roomPublicKey,
-            manifestKeyCommitment: payload.manifestKeyCommitment,
             rendezvousPolicy: 'licio_blind',
             signedStub: payload.signedStub,
             stubSignature: payload.stubSignature,
+            bootstrapBlindId: payload.bootstrapBlindId,
           });
           // PERSIST the server-minted id. It is the only handle for every later
           // bootstrap, patch, delist and delete, and no endpoint lists an

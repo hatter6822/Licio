@@ -209,6 +209,10 @@ export function createRoomsRoutes() {
               const candidates = await forum.rooms.list({
                 ...(query.type !== undefined ? { roomType: query.type } : {}),
                 ...(query.q !== undefined ? { query: query.q } : {}),
+                // P2P shells are invisible on every room surface, so they are
+                // excluded in the query rather than dropped from the result —
+                // otherwise they spend a bound meant for rooms a caller can see.
+                storageMode: 'server',
                 limit: 1_000,
               });
               for (const room of candidates) {
@@ -255,6 +259,11 @@ export function createRoomsRoutes() {
               const batch = await forum.rooms.list({
                 ...(query.type !== undefined ? { roomType: query.type } : {}),
                 ...(query.q !== undefined ? { query: query.q } : {}),
+                // See the candidates read above: without this a run of P2P
+                // shells fills all 25 batches, `visible` stays empty, and the
+                // handler reports `nextCursor: null` over server rooms that
+                // exist beyond it.
+                storageMode: 'server',
                 after,
                 limit: BATCH,
               });

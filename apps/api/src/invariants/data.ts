@@ -848,7 +848,14 @@ export async function assembleEngagementLandscape(
   ingestion: IngestionServices,
   nowMs: number,
 ): Promise<{ nodes: ReebNode[]; edges: ReebEdge[] }> {
-  const recent = await ingestion.stories.listRecent(100);
+  // PUBLIC stories only, filtered in the query rather than here.
+  //
+  // The landscape is assembled once, globally, and the Civic Map projects it to
+  // any platform integrity steward — who may be neither a member nor a steward
+  // of the room a `room_only` story belongs to. Reading `listRecent` made the
+  // map a way to see that story's title, topics, thread id and engagement
+  // without the membership the ordinary read requires.
+  const recent = await ingestion.stories.listRecentPublic(100);
   const hourMs = 3_600_000;
   const windowStart = new Date(Math.floor(nowMs / hourMs) * hourMs - hourMs).toISOString();
   const nodes: ReebNode[] = [];

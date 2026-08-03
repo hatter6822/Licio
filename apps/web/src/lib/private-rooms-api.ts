@@ -49,6 +49,7 @@ export const bootstrapStubSchema = z.object({
   rendezvous_policy: z.string(),
   bootstrap_hints: z.array(bootstrapHintSchema),
   bootstrap_endpoints: z.array(z.string()),
+  /** PUBLIC commitments only — the §21.2 capability is never projected. */
   signed_stub: z.record(z.string(), z.unknown()),
   stub_signature: z.string(),
   created_at: z.string(),
@@ -87,15 +88,16 @@ export interface CreateStubRequest {
   readonly displayName?: string;
   readonly displayDescription?: string;
   readonly displayAvatarPublicCid?: string;
-  readonly roomPublicKey: string;
-  readonly manifestKeyCommitment: string;
   readonly rendezvousPolicy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
   readonly bootstrapHints?: ReadonlyArray<z.infer<typeof bootstrapHintSchema>>;
-  /** The room-signed stub body. An `unlisted` room MUST include
-   *  `bootstrap_blind_id` — the §21.2 capability its bootstrap read is gated
-   *  on — or no invited member could ever resolve it. */
+  /** The room-signed stub body: PUBLIC commitments only. The server derives the
+   *  `room_public_key`/`manifest_key_commitment` columns from it, so they are
+   *  not sent separately — two copies of one commitment can disagree. */
   readonly signedStub: Record<string, unknown>;
   readonly stubSignature: string;
+  /** §21.2 — the capability, sent beside the signed body rather than inside it.
+   *  The server stores it in a column it never projects. */
+  readonly bootstrapBlindId: string;
 }
 
 /** §21.1 — register the directory stub for a room this device just created. */
@@ -114,12 +116,11 @@ export async function createPrivateRoomStub(
       ...(request.displayAvatarPublicCid !== undefined
         ? { display_avatar_public_cid: request.displayAvatarPublicCid }
         : {}),
-      room_public_key: request.roomPublicKey,
-      manifest_key_commitment: request.manifestKeyCommitment,
       rendezvous_policy: request.rendezvousPolicy,
       ...(request.bootstrapHints !== undefined ? { bootstrap_hints: request.bootstrapHints } : {}),
       signed_stub: request.signedStub,
       stub_signature: request.stubSignature,
+      bootstrap_blind_id: request.bootstrapBlindId,
     }),
   });
   return await parseResponse(response, createStubResponseSchema);

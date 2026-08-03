@@ -60,10 +60,13 @@ const storedRoomSessionSchema = z
     // half-written record must be discarded, not carried as a partial handle.
     directoryStub: z
       .object({
-        roomServerId: z.string().min(1),
-        stubId: z.string().min(1),
-        directoryMode: z.enum(['listed', 'unlisted']),
-        bootstrapBlindId: z.string().min(1),
+        capability: z.object({
+          roomServerId: z.string().min(1),
+          stubId: z.string().min(1),
+          directoryMode: z.enum(['listed', 'unlisted']),
+          bootstrapBlindId: z.string().min(1),
+        }),
+        registeredHere: z.boolean(),
       })
       .optional(),
   })
@@ -112,6 +115,31 @@ function normalizeSession(raw: StoredRoomSession): StoredRoomSession {
     // there is no Uint8Array field to reconstruct after a structured-clone round
     // trip — it is carried through verbatim by the `...raw` spread above.
   };
+}
+
+/**
+ * The §21 directory handle a room holds locally.
+ *
+ * Split into the part that TRAVELS and the part that does not, because the
+ * difference is not obvious at a call site and getting it wrong is silent.
+ * `capability` is what a join grant and an invite carry — it is what any member
+ * needs to resolve the record. `registeredHere` never leaves this device: it
+ * records that THIS account created the record, which is what the §21.3/§21.4
+ * endpoints authorize against. Room role is not a substitute — a non-founder
+ * room admin gets 403 from every mutation, and a creator who is no longer a
+ * room admin is still authorized server-side — so a UI that offered controls by
+ * role offered the wrong ones in both directions.
+ */
+export interface StoredDirectoryStub {
+  readonly capability: {
+    readonly roomServerId: string;
+    readonly stubId: string;
+    readonly directoryMode: 'listed' | 'unlisted';
+    readonly bootstrapBlindId: string;
+  };
+  /** True only on the device whose account created the record. NEVER copied
+   *  into a grant or an invite: those go to somebody else's account. */
+  readonly registeredHere: boolean;
 }
 
 /** One persisted epoch's key material (mirrors the engine's `HeldEpochKeys`). */
@@ -163,12 +191,7 @@ export interface StoredRoomSession {
    * join grant, so this is the field that makes the directory record reachable
    * by anyone other than the founder.
    */
-  readonly directoryStub?: {
-    readonly roomServerId: string;
-    readonly stubId: string;
-    readonly directoryMode: 'listed' | 'unlisted';
-    readonly bootstrapBlindId: string;
-  };
+  readonly directoryStub?: StoredDirectoryStub;
 }
 
 /** Persist (insert or replace) a room session. */

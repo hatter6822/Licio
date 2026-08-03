@@ -75,16 +75,24 @@ export const MAX_BOOTSTRAP_HINTS = 16;
  * Widening it is then a deliberate, reviewable schema change rather than
  * something a client can do unilaterally.
  */
+/**
+ * The §8.2 signed body: a CLOSED set of PUBLIC commitments and nothing else.
+ *
+ * "Public" is load-bearing, not descriptive. A jsonb blob is projected wholesale
+ * or not at all, so any secret placed in here is disclosed everywhere the body
+ * is disclosed anywhere — and a `listed` room's bootstrap read is open. The
+ * §21.2 capability therefore lives in its OWN column and is never projected;
+ * putting it back here would re-open a leak no projection guard can close for
+ * an endpoint that has not been written yet.
+ */
 const signedStubSchema = z
   .object({
     /** Pins the field set this body was signed under. */
-    schema: z.literal('licio.private.directory_stub.v1'),
+    schema: z.literal('licio.private.directory_stub.v2'),
     /** The room's published verification key (base64url) — a commitment. */
     room_public_key: commitmentSchema,
     /** A commitment to the manifest key; never decrypting material. */
     manifest_key_commitment: commitmentSchema,
-    /** The §21.2 bootstrap capability (see the service's `hasBootstrapToken`). */
-    bootstrap_blind_id: commitmentSchema,
   })
   .strict();
 
@@ -121,6 +129,12 @@ export const FORBIDDEN_SIGNED_STUB_SEGMENTS: readonly string[] = [
   'title',
   'search',
   'embedding',
+  // A CAPABILITY is not content, but it is the one other thing this body must
+  // never carry: `signed_stub` is projected wholesale to anonymous readers of a
+  // `listed` room, so a secret inside it is disclosed to everyone. The closed
+  // schema already rejects the field; this is the second lock, for a caller
+  // that reaches the service without it.
+  'blind_id',
 ];
 
 /**
@@ -194,15 +208,39 @@ export const privateRoomCreateStubRequestSchema = z
     display_name: displayNameSchema.optional(),
     display_description: displayDescriptionSchema.optional(),
     display_avatar_public_cid: publicCidSchema.optional(),
-    room_public_key: commitmentSchema,
-    manifest_key_commitment: commitmentSchema,
     rendezvous_policy: rendezvousPolicySchema,
     bootstrap_hints: z.array(bootstrapHintSchema).max(MAX_BOOTSTRAP_HINTS).optional(),
     signed_stub: signedStubSchema,
     stub_signature: commitmentSchema,
+    /**
+     * §21.2 — the bootstrap capability, sent ALONGSIDE the signed body rather
+     * than inside it, and stored in its own never-projected column.
+     */
+    bootstrap_blind_id: commitmentSchema,
   })
   .strict();
+
+/*
+ * `room_public_key` and `manifest_key_commitment` are DELIBERATELY absent from
+ * the request.
+ *
+ * They used to be sent separately AND signed, so a client could publish one pair
+ * and sign another: the bootstrap response then served unsigned commitments
+ * beside a signature that verifies over different ones, and a member checking
+ * the signature would conclude the record was authentic before bootstrapping
+ * from material the room never stood behind. Comparing them at the two write
+ * sites would fix the two write sites. Deriving the columns from the signed body
+ * means there is only ever one value, so the third write site cannot get it
+ * wrong either.
+ */
 export type PrivateRoomCreateStubRequest = z.infer<typeof privateRoomCreateStubRequestSchema>;
+
+/**
+ * The signed body as a TYPE, so the two commitments the columns derive from are
+ * statically present.  `Record<string, unknown>` would have made the derivation
+ * a lookup that can miss; this makes it a field access that cannot.
+ */
+export type SignedStubBody = z.infer<typeof signedStubSchema>;
 
 /**
  * §21.3 — the ONLY mutable stub fields.  Everything §21.3 forbids (member list,
@@ -250,6 +288,8 @@ export interface StoredPrivateRoomStub {
   readonly bootstrapHints: readonly BootstrapHint[];
   readonly signedStub: Record<string, unknown>;
   readonly stubSignature: string;
+  /** §21.2 — NEVER projected; compared in constant time against `?token=`. */
+  readonly bootstrapBlindId: string;
   readonly createdByAccountId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -263,14 +303,20 @@ export interface PrivateRoomStubInsertInput {
   readonly displayName: string | null;
   readonly displayDescription: string | null;
   readonly displayAvatarPublicCid: string | null;
-  readonly roomPublicKey: string;
-  readonly manifestKeyCommitment: string;
   readonly rendezvousPolicy: RendezvousPolicy;
   readonly bootstrapHints: readonly BootstrapHint[];
-  readonly signedStub: Record<string, unknown>;
+  readonly signedStub: SignedStubBody;
   readonly stubSignature: string;
+  readonly bootstrapBlindId: string;
   readonly createdByAccountId: string | null;
 }
+
+/*
+ * No `roomPublicKey`/`manifestKeyCommitment` here either: the store DERIVES
+ * both columns from `signedStub`, which is typed to carry them. That is what
+ * makes "the columns agree with the signature" a property of the type rather
+ * than of two remembered comparisons.
+ */
 
 /** The patchable subset, already normalised to storage shape. */
 export interface PrivateRoomStubPatch {
@@ -280,7 +326,8 @@ export interface PrivateRoomStubPatch {
   readonly rendezvousPolicy?: RendezvousPolicy;
   readonly bootstrapHints?: readonly BootstrapHint[];
   readonly latestManifestCommitment?: string | null;
-  readonly signedStub?: Record<string, unknown>;
+  /** Replacing the body re-derives the commitment columns (see the insert). */
+  readonly signedStub?: SignedStubBody;
   readonly stubSignature?: string;
 }
 
@@ -367,6 +414,9 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
     const stub: StoredPrivateRoomStub = {
       ...input,
       bootstrapHints: [...input.bootstrapHints],
+      // DERIVED from the signed body — see `PrivateRoomStubInsertInput`.
+      roomPublicKey: input.signedStub.room_public_key,
+      manifestKeyCommitment: input.signedStub.manifest_key_commitment,
       latestManifestCommitment: null,
       createdAt: at,
       updatedAt: at,
@@ -396,7 +446,14 @@ export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
       ...(patch.latestManifestCommitment !== undefined
         ? { latestManifestCommitment: patch.latestManifestCommitment }
         : {}),
-      ...(patch.signedStub !== undefined ? { signedStub: patch.signedStub } : {}),
+      ...(patch.signedStub !== undefined
+        ? {
+            signedStub: patch.signedStub,
+            // The columns move WITH the body they are derived from.
+            roomPublicKey: patch.signedStub.room_public_key,
+            manifestKeyCommitment: patch.signedStub.manifest_key_commitment,
+          }
+        : {}),
       ...(patch.stubSignature !== undefined ? { stubSignature: patch.stubSignature } : {}),
       updatedAt: new Date(this.now()).toISOString(),
     };

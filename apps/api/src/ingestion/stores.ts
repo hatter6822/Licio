@@ -423,6 +423,18 @@ export interface StoryStore {
   /** Most recent stories (search corpus + admin surfaces). */
   listRecent(limit: number): Promise<StoryRecord[]>;
   /**
+   * Most recent PUBLICLY-VISIBLE, non-hidden stories.
+   *
+   * For a surface that must not disclose room-restricted content to a caller
+   * whose authorization it does not know — the WS-H.7.4 Reeb landscape is one:
+   * it is assembled once, globally, and read by any platform integrity steward,
+   * who may be neither a member nor a steward of the room a `room_only` story
+   * lives in.  Filtering afterwards is what a caller forgets; the restriction is
+   * therefore in the QUERY, so a surface that reads through this method cannot
+   * see restricted rows to leak in the first place.
+   */
+  listRecentPublic(limit: number): Promise<StoryRecord[]>;
+  /**
    * One keyset page of a user's submitted stories (DSAR export, WS-D §19.3):
    * `(created_at, story_id)` ascending, strictly after `after`. The export
    * hook loops until a short page — NO truncation cap (a prolific submitter's
@@ -956,6 +968,13 @@ export class InMemoryStoryStore implements StoryStore {
 
   async listRecent(limit: number): Promise<StoryRecord[]> {
     return [...this.#stories.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+
+  async listRecentPublic(limit: number): Promise<StoryRecord[]> {
+    return [...this.#stories.values()]
+      .filter((story) => story.visibility === 'public' && story.hiddenState === null)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
   }

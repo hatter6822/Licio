@@ -586,6 +586,18 @@ export class DrizzleStoryStore implements StoryStore {
     return rows.map((row) => this.#toRecord(row));
   }
 
+  async listRecentPublic(limit: number): Promise<StoryRecord[]> {
+    // The restriction is in the QUERY, not applied to the result: a caller that
+    // reads through this method cannot see a room-restricted row at all.
+    const rows = await this.#db
+      .select()
+      .from(storiesTable)
+      .where(and(eq(storiesTable.visibility, 'public'), isNull(storiesTable.hiddenState)))
+      .orderBy(desc(storiesTable.createdAt))
+      .limit(limit);
+    return rows.map((row) => this.#toRecord(row));
+  }
+
   async listBySubmitter(
     userId: string,
     after: { createdAt: string; storyId: string } | null,

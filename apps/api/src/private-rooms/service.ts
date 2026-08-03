@@ -75,22 +75,26 @@ export interface BootstrapResponse {
   readonly rendezvous_policy: string;
   readonly bootstrap_hints: readonly { kind: string; value: string }[];
   readonly bootstrap_endpoints: readonly string[];
-  readonly signed_stub: Record<string, unknown>;
-  readonly stub_signature: string;
+  /**
+   * The room-signed body — NULL unless the caller presented the capability.
+   *
+   * It contains `bootstrap_blind_id`, the token that gates every `unlisted`
+   * read, and a `listed` room's bootstrap read is open. So the open projection
+   * used to hand the capability to anyone who asked, for every listed room —
+   * and with the §4.2 directory enumerating listed room ids, that is a harvest
+   * of tokens that keep working after the creator delists.  Delisting is
+   * supposed to stop the room advertising itself while staying resolvable for
+   * MEMBERS; a harvested token makes it resolvable for everyone forever.
+   *
+   * Withholding it costs an open reader nothing they could act on: the body is
+   * verified against `room_public_key`, which the body itself carries, so the
+   * signature only means something to someone who already knows the room's key
+   * independently — a member, who holds the token.
+   */
+  readonly signed_stub: Record<string, unknown> | null;
+  readonly stub_signature: string | null;
   readonly created_at: string;
   readonly updated_at: string;
-}
-
-/**
- * Does this signed stub carry the §21.2 bootstrap capability?
- *
- * Exported so it can be unit-tested directly: the wire schema now REQUIRES the
- * field, so this guard is unreachable through a validated request and would
- * otherwise be untestable. It stays as defence in depth for any non-HTTP caller
- * (a future job, a migration) that reaches the service without the schema.
- */
-export function hasBootstrapToken(signedStub: Record<string, unknown>): boolean {
-  return typeof signedStub['bootstrap_blind_id'] === 'string';
 }
 
 /**
@@ -197,18 +201,13 @@ export class PrivateRoomStubService {
     if (forbiddenSignedStubKeys(request.signed_stub).length > 0) {
       return { ok: false, reason: 'forbidden_stub_field' };
     }
-    // EVERY stub commits to a bootstrap token, not just one created `unlisted`.
-    //
-    // Gating this on the create-time mode was wrong in two directions: a
-    // `listed` stub could omit the token and then be DELISTED, and an unlisted
-    // stub could PATCH `signed_stub` to drop it. Either way `bootstrap()`
-    // afterwards returns `not_found` for every token, which silently breaks the
-    // §21.4 guarantee that delisting keeps the record resolvable for existing
-    // members. A listed room can always become unlisted, so the token is a
-    // property of HAVING a stub, not of the mode it was born in.
-    if (!hasBootstrapToken(request.signed_stub)) {
-      return { ok: false, reason: 'unlisted_requires_token' };
-    }
+    // EVERY stub carries a bootstrap capability, not just one created
+    // `unlisted` — a listed room can be delisted tomorrow and must stay
+    // resolvable for its members when it is (§21.4). That is no longer a check
+    // here: `bootstrap_blind_id` is a required field of the request and a
+    // NOT NULL column, so a stub without one cannot be constructed. The same
+    // goes for the commitments, which are derived from the signed body rather
+    // than sent beside it.
 
     const stub = await this.store.create({
       stubId: this.newId(),
@@ -217,12 +216,11 @@ export class PrivateRoomStubService {
       displayName: request.display_name ?? null,
       displayDescription: request.display_description ?? null,
       displayAvatarPublicCid: request.display_avatar_public_cid ?? null,
-      roomPublicKey: request.room_public_key,
-      manifestKeyCommitment: request.manifest_key_commitment,
       rendezvousPolicy: request.rendezvous_policy,
       bootstrapHints: request.bootstrap_hints ?? [],
       signedStub: request.signed_stub,
       stubSignature: request.stub_signature,
+      bootstrapBlindId: request.bootstrap_blind_id,
       createdByAccountId: accountId,
     });
     this.#metrics.created += 1;
@@ -252,18 +250,23 @@ export class PrivateRoomStubService {
       this.#metrics.bootstrapRefusals += 1;
       return { ok: false, reason: 'not_found' };
     }
-    if (stub.directoryMode === 'unlisted') {
-      const expected = stub.signedStub['bootstrap_blind_id'];
-      if (typeof expected !== 'string' || token === undefined) {
-        this.#metrics.bootstrapRefusals += 1;
-        return { ok: false, reason: 'not_found' };
-      }
-      if (!constantTimeEquals(expected, token)) {
-        this.#metrics.bootstrapRefusals += 1;
-        return { ok: false, reason: 'not_found' };
-      }
+    const capable = token !== undefined && constantTimeEquals(stub.bootstrapBlindId, token);
+    // A token that is SUPPLIED and wrong is a 404 in BOTH modes. Serving the
+    // open projection instead would let a caller probe tokens by watching which
+    // shape comes back, and it would answer differently for a listed room than
+    // an unlisted one — the oracle §15.3.1 forbids, reintroduced through the
+    // response body rather than the status code.
+    if (token !== undefined && !capable) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
+    }
+    if (stub.directoryMode === 'unlisted' && !capable) {
+      this.#metrics.bootstrapRefusals += 1;
+      return { ok: false, reason: 'not_found' };
     }
     this.#metrics.bootstrapReads += 1;
+    // The signed body carries the capability, so it goes only to a caller who
+    // already holds it (see `BootstrapResponse.signed_stub`).
     return { ok: true, value: this.#project(stub) };
   }
 
@@ -287,13 +290,9 @@ export class PrivateRoomStubService {
     if (request.signed_stub !== undefined && forbiddenSignedStubKeys(request.signed_stub).length) {
       return { ok: false, reason: 'forbidden_stub_field' };
     }
-    // A PATCH may REPLACE the signed stub, so it may also drop the capability
-    // the bootstrap read is gated on. Refuse: a stub that loses its token
-    // answers `not_found` for every token afterwards, which is indistinguishable
-    // from deletion for every member holding an invite.
-    if (request.signed_stub !== undefined && !hasBootstrapToken(request.signed_stub)) {
-      return { ok: false, reason: 'unlisted_requires_token' };
-    }
+    // A PATCH can no longer drop the capability or desynchronise the
+    // commitments: the capability is not in the body it replaces, and the
+    // columns are re-derived from the body the store is handed.
     const next = await this.store.update(roomServerId, {
       ...(request.display_name !== undefined ? { displayName: request.display_name } : {}),
       ...(request.display_description !== undefined
@@ -452,6 +451,15 @@ export class PrivateRoomStubService {
     return { ...this.#metrics };
   }
 
+  /**
+   * Project a stub to the wire.
+   *
+   * There is no "how much may this caller see" parameter, and that is the
+   * point: the record's ONE secret is a column this method does not read, so
+   * every projection is safe by construction rather than by the caller passing
+   * the right flag. A gate here would have to be got right again by whoever
+   * writes the next endpoint.
+   */
   #project(stub: StoredPrivateRoomStub): BootstrapResponse {
     return {
       room_server_id: stub.roomServerId,

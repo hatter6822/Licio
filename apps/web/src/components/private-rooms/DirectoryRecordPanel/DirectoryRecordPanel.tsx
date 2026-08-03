@@ -38,20 +38,22 @@ import { Card } from '../../ui/Card/index.js';
 
 export interface DirectoryRecordPanelProps {
   session: PrivateRoomSession;
-  /** Only an admin sees the mutating controls (the server enforces creator-only
-   *  regardless — this keeps the UI from offering what it cannot do). */
-  isAdmin: boolean;
 }
 
 type Action = 'refresh' | 'push' | 'delist' | 'remove' | null;
 
 export function DirectoryRecordPanel({
   session,
-  isAdmin,
 }: DirectoryRecordPanelProps): React.ReactElement | null {
   const t = useT();
   const headingId = useId();
-  const stub = session.directoryStub;
+  const stub = session.directoryStub?.capability;
+  // The mutating endpoints authorize by the ACCOUNT that created the record,
+  // not by room role. Using `isAdmin` as the proxy was wrong in both
+  // directions: a non-founder room admin saw controls that always 403, and a
+  // creator who is no longer a room admin lost controls they are still
+  // authorized to use.
+  const owned = session.directoryStub?.registeredHere === true;
   const [record, setRecord] = useState<BootstrapStub | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
   const [busy, setBusy] = useState<Action>(null);
@@ -147,7 +149,7 @@ export function DirectoryRecordPanel({
               </div>
             </dl>
 
-            {isAdmin ? (
+            {owned ? (
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
@@ -207,6 +209,11 @@ export function DirectoryRecordPanel({
                   onClick={() =>
                     void run('remove', async () => {
                       const result = await deletePrivateRoomStub(stub.roomServerId);
+                      // FORGET the handle with the record. Left behind it would
+                      // survive a reload as a pointer to nothing — and the next
+                      // admit would copy it into a joiner's grant, handing a new
+                      // member a capability whose first use is an unexplained 404.
+                      await session.clearDirectoryStub();
                       // The SERVER's own wording, not ours: it is the sentence
                       // §21.4 requires, and rephrasing it here is how "removed
                       // Licio's record" quietly becomes "deleted the room".

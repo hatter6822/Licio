@@ -362,14 +362,16 @@ type PrivateRoomStub = {
     value: string;
   }>;
 
-  // The room-signed body.  A CLOSED set — see §21.1.
+  // The room-signed body.  A CLOSED set of PUBLIC commitments — see §21.1.
   signed_stub: {
-    schema: 'licio.private.directory_stub.v1';
+    schema: 'licio.private.directory_stub.v2';
     room_public_key: string;
     manifest_key_commitment: string;
-    bootstrap_blind_id: string;
   };
   stub_signature: string;
+
+  // The §21.2 capability, in its OWN column and NEVER projected.
+  bootstrap_blind_id: string;
 
   created_by_account_id?: string;
   created_at: string;
@@ -1999,14 +2001,15 @@ type PrivateRoomCreateStubRequest = {
   manifest_key_commitment: string;
   rendezvous_policy: 'licio_blind' | 'member_rendezvous' | 'manual_only';
   bootstrap_hints?: unknown[];
-  // A CLOSED set of commitments — see the validation notes below.
+  // A CLOSED set of PUBLIC commitments — see the validation notes below.
   signed_stub: {
-    schema: 'licio.private.directory_stub.v1';
+    schema: 'licio.private.directory_stub.v2';
     room_public_key: string;
     manifest_key_commitment: string;
-    bootstrap_blind_id: string;
   };
   stub_signature: string;
+  // The §21.2 capability, sent BESIDE the signed body, stored in its own column.
+  bootstrap_blind_id: string;
 };
 ```
 
@@ -2035,17 +2038,40 @@ schema is `.strict()`, so a forbidden key is rejected because no such field
 exists. The fifth is an explicit REFUSAL rather than a silent strip — an
 `unlisted` request carrying a display name is rejected, because dropping it
 quietly would leave the client believing the directory serves a name it can
-see locally. `signed_stub` gets its own treatment, in two layers. It is
+see locally. `signed_stub` gets its own treatment, in three layers. It is
 one jsonb column, so the §8.2 column allowlist cannot see inside it — and a
 free-form body behind a strict envelope is a hole in the strictness, not an
 extension point. So the body is itself a CLOSED, `.strict()` set: a schema tag
-and three commitments (`room_public_key`, `manifest_key_commitment`,
-`bootstrap_blind_id`), each a fixed-length opaque string. There is no legal
-place to put a member list, and no nesting to hide one in. Behind that, the
-§8.1 key-class scan still runs on every write — an independent guard that would
-catch a future widening of the shape before it reached the column. It scans at
-every depth and REFUSES a body that nests past the depth bound, since a scan
-that stops looking cannot report clean.
+and two PUBLIC commitments (`room_public_key`, `manifest_key_commitment`).
+There is no legal place to put a member list, and no nesting to hide one in.
+Behind that, the §8.1 key-class scan still runs on every write — an independent
+guard that would catch a future widening of the shape before it reached the
+column. It scans at every depth and REFUSES a body that nests past the depth
+bound, since a scan that stops looking cannot report clean.
+
+The third layer is what is NOT in the body. `bootstrap_blind_id` used to live
+inside it, and a jsonb blob is projected wholesale or not at all — so the §21.2
+capability rode every projection of that blob, including the OPEN read a
+`listed` room serves. With §21.2's directory enumerating listed room ids, that
+is a harvest: one anonymous GET per room yields a token that keeps resolving the
+record after its creator delists it, which is the precise state delisting
+exists to prevent. It is therefore its OWN column (migration `0120`), named in
+the §8.2 allowlist, absent from every response type, and compared in constant
+time against the `?token=` a reader presents. Signing it bought nothing —
+the signature is verified against `room_public_key`, which the signed body
+itself carries, so it means something only to a reader who already knows the
+room's key independently, i.e. a member, who holds the token. What the
+capability needs is secrecy, which a signature does not provide. Gating the
+projection would have closed the leak that was found; moving the secret out of
+the projected structure closes the ones in endpoints not yet written.
+
+`room_public_key` and `manifest_key_commitment` are absent from the REQUEST for
+the same reason in a different key: they exist as columns the server serves AND
+inside the signed body, and nothing bound the two, so a client could publish one
+pair and sign another. The bootstrap response then presented unsigned
+commitments beside a signature verifying over different ones. The columns are
+now DERIVED from the signed body on write — one value, so there is no second
+copy to disagree, at this write site or at the next one.
 
 `detached` is absent from the create enum on purpose — a detached room stores
 no stub at all, which the `private_room_stubs_not_detached` CHECK also pins.

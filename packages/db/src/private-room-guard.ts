@@ -34,6 +34,11 @@ export const PRIVATE_ROOM_STUB_ALLOWED_COLUMNS: readonly string[] = [
   'bootstrap_hints',
   'signed_stub',
   'stub_signature',
+  // §21.2 — the bootstrap capability, held as its own column precisely so it is
+  // NOT inside the projected `signed_stub` blob.  Allowed here because it is a
+  // derived blind id (an HMAC output over material the server does not hold),
+  // never key material and never content.
+  'bootstrap_blind_id',
   'created_by_account_id',
   'created_at',
   'updated_at',

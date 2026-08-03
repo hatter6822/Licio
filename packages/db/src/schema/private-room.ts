@@ -78,9 +78,27 @@ export const privateRoomStubs = pgTable(
       .notNull()
       .default([]),
 
-    /** The re-signed §8.2 stub (public fields only) + its detached signature. */
+    /**
+     * The re-signed §8.2 stub (public fields only) + its detached signature.
+     *
+     * "Public fields only" is now structural rather than aspirational: the one
+     * secret this blob used to carry — the §21.2 bootstrap capability — lives in
+     * its own column below.  A jsonb blob is projected wholesale or not at all,
+     * so anything inside it is disclosed everywhere it is disclosed anywhere.
+     */
     signedStub: jsonb('signed_stub').$type<Record<string, unknown>>().notNull(),
     stubSignature: text('stub_signature').notNull(),
+
+    /**
+     * §21.2 — the invite-derived capability that gates an `unlisted` bootstrap
+     * read.  NEVER projected: it is compared, in constant time, against the
+     * `?token=` a reader presents, and appears in no response type.
+     *
+     * NOT NULL because a stub without one is unresolvable for its members the
+     * moment it is delisted — the §21.4 guarantee that delisting keeps the
+     * record reachable is only as strong as every stub having a capability.
+     */
+    bootstrapBlindId: text('bootstrap_blind_id').notNull(),
 
     /** The Licio account that created the stub (for §27.2 rate limiting only). */
     createdByAccountId: uuid('created_by_account_id').references(() => users.userId, {

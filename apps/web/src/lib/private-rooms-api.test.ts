@@ -84,18 +84,23 @@ describe('createPrivateRoomStub (§21.1)', () => {
     await createPrivateRoomStub({
       directoryMode: 'listed',
       displayName: 'Neighbourhood watch',
-      roomPublicKey: 'cGs',
-      manifestKeyCommitment: 'bWs',
       rendezvousPolicy: 'licio_blind',
-      signedStub: { bootstrap_blind_id: 'YmxpbmQ' },
+      signedStub: {
+        schema: 'licio.private.directory_stub.v2',
+        room_public_key: 'cm9vbQ',
+        manifest_key_commitment: 'bWFu',
+      },
       stubSignature: 'c2ln',
+      bootstrapBlindId: 'Ym9vdHN0cmFw',
     });
+    // No `room_public_key`/`manifest_key_commitment`: the server DERIVES both
+    // from the signed body, so there is no second copy to disagree with it.
+    // `bootstrap_blind_id` travels BESIDE the body, never inside it.
     expect(Object.keys(lastBody()).sort()).toEqual([
+      'bootstrap_blind_id',
       'directory_mode',
       'display_name',
-      'manifest_key_commitment',
       'rendezvous_policy',
-      'room_public_key',
       'signed_stub',
       'stub_signature',
     ]);
@@ -105,11 +110,14 @@ describe('createPrivateRoomStub (§21.1)', () => {
     respondTo(CREATED, 201);
     await createPrivateRoomStub({
       directoryMode: 'unlisted',
-      roomPublicKey: 'cGs',
-      manifestKeyCommitment: 'bWs',
       rendezvousPolicy: 'licio_blind',
-      signedStub: { bootstrap_blind_id: 'YmxpbmQ' },
+      signedStub: {
+        schema: 'licio.private.directory_stub.v2',
+        room_public_key: 'cm9vbQ',
+        manifest_key_commitment: 'bWFu',
+      },
       stubSignature: 'c2ln',
+      bootstrapBlindId: 'Ym9vdHN0cmFw',
     });
     const body = lastBody();
     expect(body['display_name']).toBeUndefined();
@@ -122,11 +130,10 @@ describe('createPrivateRoomStub (§21.1)', () => {
     await expect(
       createPrivateRoomStub({
         directoryMode: 'unlisted',
-        roomPublicKey: 'cGs',
-        manifestKeyCommitment: 'bWs',
         rendezvousPolicy: 'licio_blind',
         signedStub: {},
         stubSignature: 'c2ln',
+        bootstrapBlindId: 'Ym9vdHN0cmFw',
       }),
     ).rejects.toThrow();
   });

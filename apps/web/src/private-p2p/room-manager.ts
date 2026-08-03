@@ -773,7 +773,30 @@ export class PrivateRoomSession {
      *  `StoredRoomSession`. Stored because later members cannot re-derive it. */
     readonly bootstrapBlindId: string;
   }): Promise<void> {
-    this.session = { ...this.session, directoryStub: stub };
+    // The device that REGISTERS the record is the one whose account owns it:
+    // `attachDirectoryStub` is reached only from the create path. A device that
+    // receives the handle through a grant goes through `finishJoin`, which sets
+    // `registeredHere: false` — see `StoredDirectoryStub`.
+    this.session = {
+      ...this.session,
+      directoryStub: { capability: stub, registeredHere: true },
+    };
+    await putRoomSession(this.session);
+  }
+
+  /**
+   * Forget the §21 directory record — after a successful DELETE.
+   *
+   * Without this the handle outlives the record: reloading the room reads a
+   * deleted stub, keeps offering actions against it, and — worse — the next
+   * admit copies the dead capability into a joiner's grant, so a new member
+   * inherits a handle whose first use is a 404 they cannot explain. The record
+   * is gone; the pointer to it must go with it.
+   */
+  async clearDirectoryStub(): Promise<void> {
+    if (this.session.directoryStub === undefined) return;
+    const { directoryStub: _dropped, ...rest } = this.session;
+    this.session = rest;
     await putRoomSession(this.session);
   }
 
@@ -796,7 +819,14 @@ export class PrivateRoomSession {
    * the whole reason the server keeps `signed_stub` verbatim instead of
    * interpreting it.
    *
-   * The bootstrap blind id is derived from the room's epoch-0 rendezvous key
+   * The bootstrap blind id is NOT part of the signed body.  Signing it bought
+   * nothing — the signature is verified against `room_public_key`, which the
+   * body itself carries, so it only means something to a reader who already
+   * knows the room's key independently — while placing it there put a SECRET
+   * inside the one structure the server hands to anonymous readers.  What the
+   * capability needs is secrecy, which no signature provides.
+   *
+   * It is derived from the room's epoch-0 rendezvous key
    * through a labeled HKDF, so unlike the §15.3 rendezvous blind ids it does
    * NOT rotate: an invite handed out today must still resolve the record
    * tomorrow, and after the next membership change.  The cost is that a removed
@@ -834,11 +864,14 @@ export class PrivateRoomSession {
     // schema is `.strict()`, so an extra key here is a 400 rather than a
     // silently-persisted one; that is the point, since "signed by the room" is
     // not a safety property the server can check (it holds no room key).
+    // PUBLIC commitments only. The bootstrap capability is returned ALONGSIDE
+    // this body and sent as its own field: the server keeps it in a column it
+    // never projects, because a jsonb body is disclosed wholesale wherever it is
+    // disclosed at all — and a `listed` room's bootstrap read is open to anyone.
     const signedStub = {
-      schema: 'licio.private.directory_stub.v1',
+      schema: 'licio.private.directory_stub.v2',
       room_public_key: roomPublicKey,
       manifest_key_commitment: manifestKeyCommitment,
-      bootstrap_blind_id: bootstrapBlindId,
     } as const satisfies Record<string, string>;
     const stubSignature = this.p2p.toBase64Url(
       await this.p2p.signEd25519(this.session.signingPrivateKey, this.p2p.canonical(signedStub)),
@@ -1339,7 +1372,7 @@ export class PrivateRoomSession {
     // they are about to enter — and the room-signed `room_public_key` in that
     // record is the one cross-check on the invite that does not come from the
     // person who sent it.
-    const stub = this.session.directoryStub;
+    const stub = this.session.directoryStub?.capability;
     const invite = this.p2p.createRoomInvite({
       roomPublicKey,
       grantedRole: params.grantedRole ?? 'member',
@@ -1579,7 +1612,13 @@ export class PrivateRoomSession {
       // Hand the directory capability ON. A member who cannot resolve the room's
       // directory record cannot bootstrap from it, update it, or even see that
       // it exists — and the founder is not always the one who is around later.
-      ...(this.session.directoryStub ? { directory: this.session.directoryStub } : {}),
+      // The CAPABILITY only, named field by field rather than spread: a spread
+      // would carry whatever local bookkeeping the stored handle grows next, and
+      // `registeredHere` in particular would tell the joiner it owns a record
+      // created by somebody else's account.
+      ...(this.session.directoryStub
+        ? { directory: { ...this.session.directoryStub.capability } }
+        : {}),
     };
     // The admit fully succeeded — charge this join against the invite so a
     // single-use invite cannot be replayed for a second member (persisted AFTER
@@ -1667,7 +1706,11 @@ export class PrivateRoomSession {
       bootstrapDevices: grant.bootstrapDevices,
       ...(base ? { snapshotBase: base } : {}),
       createdAtBucket: coarseBucket(),
-      ...(grant.directory ? { directoryStub: grant.directory } : {}),
+      // A joined device holds the capability and does NOT own the record: the
+      // §21.3/§21.4 endpoints authorize by the account that created it.
+      ...(grant.directory
+        ? { directoryStub: { capability: grant.directory, registeredHere: false } }
+        : {}),
     };
     await putRoomSession(session);
     return new PrivateRoomSession(p2p, engine, session, DEFAULT_COMPACT_EVERY_OPS);
