@@ -138,9 +138,14 @@ export async function fetchPrivateRoomBootstrap(
   roomServerId: string,
   token?: string,
 ): Promise<BootstrapStub> {
-  const query = token !== undefined ? `?token=${encodeURIComponent(token)}` : '';
+  // The capability rides a HEADER, never the URL. `apiFetch` logs the URL of
+  // every request in a dev build, and a URL is written down in proxy logs and
+  // browser history besides — for a token that does not rotate, one logged line
+  // keeps opening an `unlisted` record long after the invite exchange, and after
+  // a delist.
   const response = await apiFetch(
-    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/bootstrap${query}`,
+    `${API_BASE}/v1/private-rooms/${encodeURIComponent(roomServerId)}/bootstrap`,
+    token === undefined ? undefined : { headers: { 'x-licio-bootstrap-token': token } },
   );
   return await parseResponse(response, bootstrapStubSchema);
 }

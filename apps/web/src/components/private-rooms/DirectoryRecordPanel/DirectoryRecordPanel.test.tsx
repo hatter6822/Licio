@@ -133,18 +133,21 @@ afterEach(() => {
 });
 
 describe('DirectoryRecordPanel', () => {
-  it('resolves the record with the stored capability', async () => {
-    const seen: string[] = [];
-    mockApi((url) => {
-      seen.push(url);
+  it('resolves the record with the stored capability, carried in a header', async () => {
+    const seen: { url: string; token: string | null }[] = [];
+    mockApi((url, init) => {
+      seen.push({ url, token: new Headers(init?.headers).get('x-licio-bootstrap-token') });
       return bootstrapBody();
     });
     render(<DirectoryRecordPanel session={sessionDouble(STUB)} />);
 
     expect(await screen.findByText('Neighbourhood watch')).toBeInTheDocument();
     // The token is what makes the read possible for a member who is not the
-    // founder — an unlisted record answers 404 without it.
-    expect(seen.some((url) => url.includes(`token=${TOKEN}`))).toBe(true);
+    // founder — an unlisted record answers 404 without it — and it rides a
+    // HEADER, because a URL is logged in a dev build and this token does not
+    // rotate.
+    expect(seen.some((call) => call.token === TOKEN)).toBe(true);
+    expect(seen.every((call) => !call.url.includes(TOKEN))).toBe(true);
   });
 
   it('offers REGISTRATION for a room with no directory record', async () => {

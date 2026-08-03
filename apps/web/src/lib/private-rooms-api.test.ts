@@ -144,18 +144,24 @@ describe('createPrivateRoomStub (§21.1)', () => {
 });
 
 describe('fetchPrivateRoomBootstrap (§21.2)', () => {
-  it('passes the invite-derived token as a query parameter', async () => {
+  it('passes the invite-derived token as a HEADER, never in the URL', async () => {
     respondTo(STUB);
-    await fetchPrivateRoomBootstrap('room-1', 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A');
+    const token = 'PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A';
+    await fetchPrivateRoomBootstrap('room-1', token);
     const url = String(fetchMock.mock.calls.at(-1)?.[0]);
     expect(url).toContain('/v1/private-rooms/room-1/bootstrap');
-    expect(url).toContain('token=PEaenWxYddN6Q_NT1PiOYfz4EsZu7jRXRlpAsNpBU-A');
+    // A URL is written down everywhere — proxy logs, browser history, the
+    // client's own dev console — and this capability does not rotate.
+    expect(url).not.toContain(token);
+    const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+    expect(new Headers(init?.headers).get('x-licio-bootstrap-token')).toBe(token);
   });
 
-  it('sends no token parameter when none is supplied (a listed room)', async () => {
+  it('sends no token header when none is supplied (a listed room)', async () => {
     respondTo(STUB);
     await fetchPrivateRoomBootstrap('room-1');
-    expect(String(fetchMock.mock.calls.at(-1)?.[0])).not.toContain('token=');
+    const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit | undefined;
+    expect(new Headers(init?.headers).get('x-licio-bootstrap-token')).toBeNull();
   });
 
   it('surfaces a refusal as an ordinary not-found — never "exists but forbidden"', async () => {

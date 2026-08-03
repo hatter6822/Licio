@@ -313,7 +313,7 @@ import {
 } from './private-rendezvous/scheduler.js';
 import { getRendezvousService } from './private-rendezvous/service.js';
 import { DrizzlePrivateRoomStubStore } from './private-rooms/drizzle-store.js';
-import { getPrivateRoomStubService } from './private-rooms/service.js';
+import { getPrivateRoomStubService, inMemoryStubStore } from './private-rooms/service.js';
 import { loadPwattRuntimeConfig, loadTriggerThreshold } from './pwatt/config.js';
 import {
   EVENT_PIPELINE_SCHEDULER_INTERVAL_MS,
@@ -1097,6 +1097,10 @@ const moderationEnforcementWrites = moderationEnforcementWritesOver({
 });
 
 const moderationServices = createInMemoryModerationServices({
+  // §21.4's staff demotion runs inside the moderation unit, so the unit must be
+  // able to put the stub store back when its audit throws. Null under Postgres,
+  // where the transaction rolls it back.
+  extraRollbacks: [inMemoryStubStore()].filter((store) => store !== null),
   content: createProductionContentPort({
     ...moderationContentReads,
     ...moderationEnforcementWrites,

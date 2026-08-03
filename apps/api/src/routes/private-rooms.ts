@@ -126,15 +126,24 @@ const directoryQuerySchema = z.object({
   cursor: z.string().min(1).max(128).optional(),
 });
 
-/** The §21.2 invite-derived blind token, supplied as `?token=`. */
-const bootstrapQuerySchema = z.object({
-  token: z
-    .string()
-    .min(1)
-    .max(512)
-    .regex(/^[A-Za-z0-9_-]+$/)
-    .optional(),
-});
+/**
+ * The §21.2 invite-derived blind token, supplied as a HEADER.
+ *
+ * Not `?token=`. A URL is the one part of a request that is written down
+ * everywhere — proxy logs, browser history, the client's own dev console (which
+ * logs `String(input)` for every call) — and this capability does not rotate, so
+ * a single logged line keeps opening an `unlisted` record long after the invite
+ * exchange, including after a delist. A header carries it to the same place
+ * without that trail.
+ */
+const BOOTSTRAP_TOKEN_HEADER = 'x-licio-bootstrap-token';
+
+const bootstrapTokenSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9_-]+$/)
+  .optional();
 
 const notFound = {
   error: {
@@ -343,11 +352,11 @@ export function createPrivateRoomsRoutes() {
     // A malformed id is answered with the SAME 404 as an unknown one — a 400
     // here would confirm that a well-formed id is the only kind that can exist.
     if (!params.success) return c.json(notFound, 404);
-    const query = bootstrapQuerySchema.safeParse({ token: c.req.query('token') });
-    if (!query.success) return c.json(notFound, 404);
+    const token = bootstrapTokenSchema.safeParse(c.req.header(BOOTSTRAP_TOKEN_HEADER));
+    if (!token.success) return c.json(notFound, 404);
     const result = await getPrivateRoomStubService().bootstrap(
       params.data.roomServerId,
-      query.data.token,
+      token.data,
     );
     if (!result.ok) {
       const { status, body } = refuse(result.reason);
@@ -441,7 +450,15 @@ export function createPrivateRoomsRoutes() {
       // write is what establishes there was a public listing to remove: an owner
       // delisting in the same instant makes the unit match nothing, and no
       // record is written for a demotion staff did not perform.
-      if (staff) {
+      // OWNERSHIP FIRST. An owner who also holds `admin` is still delisting their
+      // OWN room — no platform power is exercised, so no record is required, and
+      // routing them through the staff arm would answer with the confirmation
+      // shape the owner client does not expect: it validates every success as a
+      // full bootstrap record, so parsing fails AFTER the demotion committed and
+      // the panel reports failure over stale listed state.
+      const owner =
+        (await getPrivateRoomStubService().ownerOf(params.data.roomServerId)) === auth.userId;
+      if (staff && !owner) {
         const mod = getModerationServices();
         const demoted = await mod.transactor.run(async (tx) => {
           if (!(await tx.delistListedRoom(params.data.roomServerId))) return false;

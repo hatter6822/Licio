@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import type { ModerationQueue } from '@licio/shared';
 import type { PwattConfigStore } from '../events/stores.js';
 import { InMemoryPwattConfigStore } from '../events/stores.js';
+import type { InMemoryRollback } from '../lib/in-memory-rollback.js';
 import { appendAudit } from './audit.js';
 import type { AuditChainDeps } from './audit-chain.js';
 import {
@@ -147,6 +148,17 @@ export interface ModerationServices {
 export interface InMemoryModerationOptions {
   /** Override the audit chain's MAC key (production passes the derived one). */
   auditChainKey?: string;
+  /**
+   * Stores from OTHER domains that a unit may write, so the in-memory rollback
+   * boundary covers them too.
+   *
+   * The private-room stub store is one: §21.4's staff demotion runs inside the
+   * unit, and a unit that restores only the moderation stores would leave a
+   * demotion standing when its audit throws. Injected rather than imported —
+   * moderation does not construct another domain's store, here or in the
+   * Postgres transactor.
+   */
+  extraRollbacks?: readonly InMemoryRollback[];
   config?: Partial<ModerationRuntimeConfig>;
   content?: ModerationContentPort;
   users?: ModerationUserPort;
@@ -208,7 +220,21 @@ export function createInMemoryModerationServices(
           (await services.delistListedRoom?.(roomServerId)) ?? false,
         audit: (input) => appendAudit(services.auditChain, input),
       },
-      [caseStore, actionStore, noticeStore, appealStore, incidentStore, auditStore],
+      // The private-room stub store is in the ROLLBACK LIST too, or the in-memory
+      // unit would restore the moderation side of a failed staff delist and
+      // leave the demotion standing — the failure the unit exists to prevent,
+      // reproduced only where nobody looks for it. It is supplied by the boot
+      // wiring alongside `delistListedRoom`, so moderation still never
+      // constructs another domain's store.
+      [
+        caseStore,
+        actionStore,
+        noticeStore,
+        appealStore,
+        incidentStore,
+        auditStore,
+        ...(options.extraRollbacks ?? []),
+      ],
     ),
     auditChain: {
       store: auditStore,

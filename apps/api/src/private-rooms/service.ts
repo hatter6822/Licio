@@ -562,6 +562,18 @@ export class PrivateRoomStubService {
   }
 
   /**
+   * The account that created this record, or null.
+   *
+   * The delist route asks BEFORE choosing an arm: an owner who also holds
+   * `admin` is delisting their own room, which exercises no platform power and
+   * needs no record — and the staff arm answers with a different response shape
+   * than the owner client expects.
+   */
+  async ownerOf(roomServerId: string): Promise<string | null> {
+    return await this.store.ownerOf(roomServerId);
+  }
+
+  /**
    * Is this room's directory record publicly LISTED?
    *
    * The one question another surface may ask about a private room without a
@@ -668,14 +680,35 @@ function buildStore(): PrivateRoomStubStore {
 }
 
 let service: PrivateRoomStubService | undefined;
+let builtStore: PrivateRoomStubStore | undefined;
 
 /** The process-wide stub service (created lazily; Postgres when configured). */
 export function getPrivateRoomStubService(): PrivateRoomStubService {
-  if (!service) service = new PrivateRoomStubService(buildStore());
+  if (!service) {
+    builtStore = buildStore();
+    service = new PrivateRoomStubService(builtStore);
+  }
   return service;
+}
+
+/**
+ * The in-memory stub store this process is using, when it is using one.
+ *
+ * Exposed so the composition root can put it inside the moderation unit's
+ * ROLLBACK boundary: §21.4's staff demotion runs in that unit, and a unit that
+ * cannot restore this store would leave a demotion standing when its audit
+ * throws — the failure the unit exists to prevent, present only where there is
+ * no transaction to do the job. Null under Postgres, where there is one.
+ */
+export function inMemoryStubStore(): InMemoryPrivateRoomStubStore | null {
+  getPrivateRoomStubService();
+  return builtStore instanceof InMemoryPrivateRoomStubStore ? builtStore : null;
 }
 
 /** Replace the singleton (tests / an explicit binding). */
 export function setPrivateRoomStubService(next: PrivateRoomStubService): void {
   service = next;
+  // The cached store belonged to the REPLACED service; keeping it would hand
+  // the rollback boundary a store nothing writes to.
+  builtStore = undefined;
 }

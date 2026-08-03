@@ -2115,9 +2115,16 @@ The token is a **capability the room derives and the server merely stores**, so
 the server can check it while holding no room key: at create time the client
 sends `bootstrap_blind_id` — derived from the room's rendezvous key, exactly as
 the §15.3 blind ids are — as its own top-level field, the server keeps it in its
-own column, and the reader presents the same value as `?token=`. The server
+own column, and the reader presents the same value in the
+`X-Licio-Bootstrap-Token` HEADER. The server
 compares the two in constant time. It learns nothing from either: the value is
 an HMAC output over material it does not hold.
+
+A header rather than a query parameter, because a URL is the one part of a
+request that is written down everywhere — proxy logs, browser history, the
+client's own dev console — and this capability does not rotate: one logged line
+keeps opening an `unlisted` record long after the invite exchange, and after a
+delist.
 
 It is deliberately NOT inside `signed_stub`. That body is projected wholesale to
 anonymous readers of a `listed` room, so a secret placed in it is published to

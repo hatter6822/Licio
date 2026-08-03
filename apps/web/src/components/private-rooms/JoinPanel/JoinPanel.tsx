@@ -88,7 +88,11 @@ function JoinerSection({
   const [displayName, setDisplayName] = useState('');
   const [recipientKey, setRecipientKey] = useState<string | null>(null);
   const [sealedInvite, setSealedInvite] = useState('');
-  const [requestJson, setRequestJson] = useState<string | null>(null);
+  /** The join request, KEYED to the invite it was built from — same reason as
+   *  the directory verdict below: the crypto is async, so a slow `complete` can
+   *  resolve after the field has moved on, and a request for the previous room
+   *  beside a replacement link leads to completing the wrong join. */
+  const [request, setRequest] = useState<{ fragment: string; json: string } | null>(null);
   const [grantJson, setGrantJson] = useState('');
   const [joined, setJoined] = useState(false);
   /**
@@ -116,7 +120,7 @@ function JoinerSection({
     if (displayName.trim().length === 0 || busy) return;
     setBusy(true);
     setError(null);
-    setRequestJson(null);
+    setRequest(null);
     try {
       const prep = await PrivateRoomSession.prepareJoinRequest({
         proposedDisplayName: displayName.trim(),
@@ -136,8 +140,8 @@ function JoinerSection({
     setError(null);
     try {
       const fragment = extractInviteFragment(sealedInvite.trim());
-      const { invite, request } = await pending.complete(fragment);
-      setRequestJson(JSON.stringify(request));
+      const { invite, request: built } = await pending.complete(fragment);
+      setRequest({ fragment, json: JSON.stringify(built) });
       // Resolve Licio's record for the room, using the §21.2 capability the
       // invite carries — the reason it rides the SEALED invite rather than the
       // post-admission grant. See `lookUpDirectory` for what this does and does
@@ -154,6 +158,12 @@ function JoinerSection({
       setBusy(false);
     }
   }
+
+  /** What the field holds right now — the key both async results must match. */
+  const currentFragment = extractInviteFragment(sealedInvite.trim());
+  /** The request, only while it still describes that fragment. */
+  const requestJson =
+    request !== null && request.fragment === currentFragment ? request.json : null;
 
   async function finishJoin(): Promise<void> {
     if (!pending || grantJson.trim().length === 0 || busy) return;
@@ -224,7 +234,7 @@ function JoinerSection({
               // derived from the old invite and the verdict describes the old
               // room; leaving either beside a changed link is how stale
               // evidence gets read as a check of what is on screen.
-              setRequestJson(null);
+              setRequest(null);
               setRecordCheck(null);
               setError(null);
             }}
@@ -249,8 +259,7 @@ function JoinerSection({
 
       {/* …and shown only while it still describes the link in the field, so a
           lookup that resolves after the input changed cannot surface. */}
-      {recordCheck !== null &&
-      recordCheck.fragment === extractInviteFragment(sealedInvite.trim()) ? (
+      {recordCheck !== null && recordCheck.fragment === currentFragment ? (
         <p
           className={
             recordCheck.lookup.kind === 'unresolved'

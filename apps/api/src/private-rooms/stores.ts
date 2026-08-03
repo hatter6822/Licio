@@ -18,6 +18,7 @@
 // `stub_signature` VERBATIM so members can verify authorship themselves — the
 // server is a courier for them, never a validator of them.
 import { z } from 'zod';
+import { type InMemoryRollback, mapRollback } from '../lib/in-memory-rollback.js';
 
 /**
  * A base64url value of an EXACT byte length — the shape a specific primitive
@@ -523,8 +524,24 @@ export interface PrivateRoomStubStore {
 }
 
 /** The in-memory stub store (local/dev default, and the unit-test substrate). */
-export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore {
+export class InMemoryPrivateRoomStubStore implements PrivateRoomStubStore, InMemoryRollback {
   readonly #stubs = new Map<string, StoredPrivateRoomStub>();
+
+  /**
+   * Join a unit of work's rollback boundary.
+   *
+   * §21.4's staff demotion runs inside the WS-J.2.3 moderation unit so that the
+   * audit append and the demotion commit together. In memory that is only true
+   * if this store can be put back — otherwise a unit whose `audit` throws leaves
+   * the listing demoted with no record, which is the exact failure the unit was
+   * added to prevent, present in dev and test and absent in production.
+   *
+   * `mapRollback` is sound here because every write REPLACES the row
+   * (`{ ...current, ...patch }` then `set`) rather than editing it in place.
+   */
+  beginRollback(): () => void {
+    return mapRollback(this.#stubs);
+  }
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
