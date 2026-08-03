@@ -319,6 +319,32 @@ describe('DirectoryRecordPanel', () => {
     expect(cleared).not.toHaveBeenCalled();
   });
 
+  it('keeps REGISTRATION reachable right after a removal', async () => {
+    // The confirmation used to replace the panel body, so an owner who removed
+    // a record by mistake — or removed it in order to replace it — could not
+    // register another without a full remount. That is the moment they are most
+    // likely to want the control this panel exists to offer.
+    mockApi((_url, init) =>
+      init?.method === 'DELETE'
+        ? {
+            removed: true,
+            removed_what: 'licio_directory_record',
+            message: 'Licio’s record for this room was removed. The room itself is untouched.',
+          }
+        : bootstrapBody(),
+    );
+    const session = sessionDouble(STUB);
+    render(<DirectoryRecordPanel session={session} />);
+    await screen.findByText('Neighbourhood watch');
+    await userEvent.click(screen.getByRole('button', { name: /Remove Licio/i }));
+
+    expect(await screen.findByText(/was removed/i)).toBeInTheDocument();
+    // …BESIDE the panel body rather than instead of it. The confirmation used to
+    // win over every other branch, so once the handle was cleared the owner saw
+    // the sentence and nothing else — no re-registration until a full remount.
+    expect(screen.getByText('Neighbourhood watch')).toBeInTheDocument();
+  });
+
   it('lets the holder FORGET an unreadable record explicitly, and then register', async () => {
     // The read cannot tell "removed" from "belongs to another account", so it
     // must not guess — but the owner whose record another device removed would

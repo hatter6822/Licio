@@ -278,11 +278,20 @@ export function DirectoryRecordPanel({
           )}
         </p>
 
+        {/* BESIDE the state, not instead of it.
+            A removal confirmation that REPLACED the panel body left the owner
+            looking at "Licio's record was removed" and nothing else — the
+            re-registration this panel exists to offer was unreachable until a
+            full remount, which is the one moment they are most likely to want
+            it (a record removed by mistake, or removed in order to replace it).
+            The handle is cleared, so the state underneath is `absent`, which
+            renders the register control. */}
         {removed !== null ? (
           <p className="text-ink-muted text-sm" role="status">
             {removed}
           </p>
-        ) : state.kind === 'unverified' ? (
+        ) : null}
+        {state.kind === 'unverified' ? (
           <p className="text-error-on-soft text-sm" role="alert">
             {t(
               'privateRoom.record.unverified',
